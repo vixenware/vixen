@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}vixen - Rust Build Engine{% endblock title %}
+{% block body_class %}home{% endblock body_class %}
+
+{% block body %}
+<div class="hero">
+    <div class="hero-content">
+        <h1 class="hero-title">vixen</h1>
+        <p class="hero-tagline">A Rust build engine with correct caching.</p>
+        <p class="hero-sub">Hermetic toolchains. Content-addressed storage. Instant rebuilds.</p>
+        <div class="hero-actions">
+            <a href="/spec/" class="btn btn-primary">Read the Spec</a>
+            <a href="https://github.com/bearcove/vixen" class="btn btn-secondary">View on GitHub</a>
+        </div>
+    </div>
+</div>
+
+<main class="content">
+    <article>
+        {{ section.content | safe }}
+    </article>
+</main>
+{% endblock body %}

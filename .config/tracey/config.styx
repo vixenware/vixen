@@ -1,0 +1,16 @@
+// Tracey configuration for vixen
+
+specs (
+    {
+        name vixen
+        prefix r
+        include (docs/content/spec.md)
+        impls (
+            {
+                name rust
+                include (crates/**/*.rs)
+                exclude (target/**)
+            }
+        )
+    }
+)
