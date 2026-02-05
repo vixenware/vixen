@@ -7,7 +7,7 @@ edition.workspace = true
 facet = { workspace = true }
 facet-cargo-toml = { workspace = true }
 camino = { workspace = true }
-miette = { version = "7.6.0", default-features = false, features = ["derive", "fancy-no-backtrace"] }
+ariadne = "0.6"
 
 [dev-dependencies]
 tempfile.workspace = true

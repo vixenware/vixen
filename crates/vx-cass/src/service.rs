@@ -1,9 +1,9 @@
 use jiff::Timestamp;
 use vx_cass_proto::Cass;
 use vx_cass_proto::{
-    Blake3Hash, BlobHash, CacheKey, EnsureRegistryCrateResult, EnsureStatus, EnsureToolchainResult,
-    IngestTreeRequest, IngestTreeResult, ManifestHash, MaterializationPlan, MaterializeStep,
-    NodeManifest, CASS_PROTOCOL_VERSION, PublishResult, RegistryCrateManifest, RegistrySpec,
+    Blake3Hash, BlobHash, CASS_PROTOCOL_VERSION, CacheKey, EnsureRegistryCrateResult, EnsureStatus,
+    EnsureToolchainResult, IngestTreeRequest, IngestTreeResult, ManifestHash, MaterializationPlan,
+    MaterializeStep, NodeManifest, PublishResult, RegistryCrateManifest, RegistrySpec,
     RegistrySpecKey, RustToolchainSpec, ServiceVersion, TREE_MANIFEST_SCHEMA_VERSION,
     ToolchainKind, ToolchainManifest, ToolchainSpecKey, TreeManifest, ZigToolchainSpec,
 };
@@ -17,7 +17,7 @@ const REGISTRY_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const MATERIALIZATION_LAYOUT_VERSION: u32 = 1;
 
 impl Cass for CassService {
-    async fn version(&self) -> ServiceVersion {
+    async fn version(&self, _cx: &roam::Context) -> ServiceVersion {
         ServiceVersion {
             service: "vx-cass".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -25,13 +25,18 @@ impl Cass for CassService {
         }
     }
 
-    async fn lookup(&self, cache_key: CacheKey) -> Option<ManifestHash> {
+    async fn lookup(&self, _cx: &roam::Context, cache_key: CacheKey) -> Option<ManifestHash> {
         let path = self.cache_path(&cache_key);
         let content = tokio::fs::read_to_string(&path).await.ok()?;
         ManifestHash::from_hex(content.trim())
     }
 
-    async fn publish(&self, cache_key: CacheKey, manifest_hash: ManifestHash) -> PublishResult {
+    async fn publish(
+        &self,
+        _cx: &roam::Context,
+        cache_key: CacheKey,
+        manifest_hash: ManifestHash,
+    ) -> PublishResult {
         let manifest_path = self.manifest_path(&manifest_hash);
         let dest = self.cache_path(&cache_key);
 
@@ -59,8 +64,9 @@ impl Cass for CassService {
         }
     }
 
-    async fn put_manifest(&self, manifest: NodeManifest) -> ManifestHash {
-        let json = facet_json::to_string(&manifest);
+    async fn put_manifest(&self, _cx: &roam::Context, manifest: NodeManifest) -> ManifestHash {
+        let json =
+            facet_json::to_string(&manifest).expect("node manifest serialization must succeed");
         let hash = ManifestHash::from_bytes(json.as_bytes());
         let dest = self.manifest_path(&hash);
 
@@ -71,13 +77,37 @@ impl Cass for CassService {
         hash
     }
 
-    async fn get_manifest(&self, hash: ManifestHash) -> Option<NodeManifest> {
-        let path = self.manifest_path(&hash);
-        let json = tokio::fs::read_to_string(&path).await.ok()?;
-        facet_json::from_str(&json).ok()
+    async fn get_manifest(&self, _cx: &roam::Context, hash: ManifestHash) -> Option<NodeManifest> {
+        // Node manifests (source/object) are stored as blobs, not in the manifests directory
+        let path = self.blob_path(&hash);
+        tracing::debug!(
+            manifest_hash = %hash,
+            path = %path,
+            "get_manifest: attempting to read from blob storage"
+        );
+
+        match tokio::fs::read_to_string(&path).await {
+            Ok(json) => {
+                tracing::debug!(manifest_hash = %hash, "get_manifest: blob read successfully");
+                match facet_json::from_str(&json) {
+                    Ok(manifest) => {
+                        tracing::debug!(manifest_hash = %hash, "get_manifest: parsed successfully");
+                        Some(manifest)
+                    }
+                    Err(e) => {
+                        tracing::warn!(manifest_hash = %hash, error = ?e, "get_manifest: failed to parse JSON");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(manifest_hash = %hash, path = %path, error = ?e, "get_manifest: blob not found or read error");
+                None
+            }
+        }
     }
 
-    async fn put_blob(&self, data: Vec<u8>) -> BlobHash {
+    async fn put_blob(&self, _cx: &roam::Context, data: Vec<u8>) -> BlobHash {
         let hash = BlobHash::from_bytes(&data);
         let dest = self.blob_path(&hash);
 
@@ -88,18 +118,22 @@ impl Cass for CassService {
         hash
     }
 
-    async fn get_blob(&self, hash: BlobHash) -> Option<Vec<u8>> {
+    async fn get_blob(&self, _cx: &roam::Context, hash: BlobHash) -> Option<Vec<u8>> {
         let path = self.blob_path(&hash);
         tokio::fs::read(&path).await.ok()
     }
 
-    async fn has_blob(&self, hash: BlobHash) -> bool {
+    async fn has_blob(&self, _cx: &roam::Context, hash: BlobHash) -> bool {
         let path = self.blob_path(&hash);
         tokio::fs::try_exists(&path).await.unwrap_or(false)
     }
 
     #[tracing::instrument(skip(self), fields(name = %spec.name, version = %spec.version))]
-    async fn ensure_registry_crate(&self, spec: RegistrySpec) -> EnsureRegistryCrateResult {
+    async fn ensure_registry_crate(
+        &self,
+        _cx: &roam::Context,
+        spec: RegistrySpec,
+    ) -> EnsureRegistryCrateResult {
         // Validate spec and compute spec_key
         let spec_key = match spec.spec_key() {
             Ok(k) => k,
@@ -156,7 +190,7 @@ impl Cass for CassService {
                         schema_version: REGISTRY_MANIFEST_SCHEMA_VERSION,
                         spec: spec.clone(),
                         crate_tarball_blob: tarball_blob,
-                        created_at: Timestamp::now().in_tz("UTC").unwrap().datetime(),
+                        created_at: Timestamp::now().in_tz("UTC").unwrap().to_string(),
                     };
 
                     // Store manifest
@@ -169,7 +203,7 @@ impl Cass for CassService {
                     {
                         tracing::warn!(
                             "failed to publish registry spec mapping for {}: {}",
-                            spec_key.short_hex(),
+                            spec_key,
                             e
                         );
                     }
@@ -177,8 +211,8 @@ impl Cass for CassService {
                     tracing::info!(
                         name = %spec.name,
                         version = %spec.version,
-                        spec_key = %spec_key.short_hex(),
-                        manifest_hash = %manifest_hash.short_hex(),
+                        spec_key = %spec_key,
+                        manifest_hash = %manifest_hash,
                         "stored registry crate in CAS"
                     );
 
@@ -195,41 +229,85 @@ impl Cass for CassService {
 
     async fn get_registry_manifest(
         &self,
+        _cx: &roam::Context,
         manifest_hash: Blake3Hash,
     ) -> Option<RegistryCrateManifest> {
         self.get_registry_crate_manifest(&manifest_hash).await
     }
 
-    async fn lookup_registry_spec(&self, spec_key: RegistrySpecKey) -> Option<Blake3Hash> {
+    async fn lookup_registry_spec(
+        &self,
+        _cx: &roam::Context,
+        spec_key: RegistrySpecKey,
+    ) -> Option<Blake3Hash> {
         self.lookup_registry_spec_local(&spec_key).await
     }
 
-    async fn ensure_rust_toolchain(&self, spec: RustToolchainSpec) -> EnsureToolchainResult {
+    async fn ensure_rust_toolchain(
+        &self,
+        _cx: &roam::Context,
+        spec: RustToolchainSpec,
+    ) -> EnsureToolchainResult {
         // Delegate to the inherent method which handles deduplication via ToolchainManager
         CassService::ensure_rust_toolchain(self, spec).await
     }
 
-    async fn ensure_zig_toolchain(&self, spec: ZigToolchainSpec) -> EnsureToolchainResult {
+    async fn ensure_zig_toolchain(
+        &self,
+        _cx: &roam::Context,
+        spec: ZigToolchainSpec,
+    ) -> EnsureToolchainResult {
         // Delegate to the inherent method
         CassService::ensure_zig_toolchain(self, spec).await
     }
 
-    async fn lookup_toolchain_spec(&self, spec_key: ToolchainSpecKey) -> Option<Blake3Hash> {
+    async fn lookup_toolchain_spec(
+        &self,
+        _cx: &roam::Context,
+        spec_key: ToolchainSpecKey,
+    ) -> Option<Blake3Hash> {
         // Delegate to the inherent method
         self.lookup_spec(&spec_key).await
     }
 
-    async fn get_toolchain_manifest(&self, manifest_hash: Blake3Hash) -> Option<ToolchainManifest> {
+    async fn get_toolchain_manifest(
+        &self,
+        _cx: &roam::Context,
+        manifest_hash: Blake3Hash,
+    ) -> Option<ToolchainManifest> {
         let path = self.manifest_path(&manifest_hash);
-        let json = tokio::fs::read_to_string(&path).await.ok()?;
-        facet_json::from_str(&json).ok()
+        tracing::debug!(
+            manifest_hash = %manifest_hash,
+            path = %path,
+            "get_toolchain_manifest: attempting to read"
+        );
+        match tokio::fs::read_to_string(&path).await {
+            Ok(json) => {
+                tracing::debug!(manifest_hash = %manifest_hash, "get_toolchain_manifest: file read successfully");
+                match facet_json::from_str(&json) {
+                    Ok(manifest) => {
+                        tracing::debug!(manifest_hash = %manifest_hash, "get_toolchain_manifest: parsed successfully");
+                        Some(manifest)
+                    }
+                    Err(e) => {
+                        tracing::warn!(manifest_hash = %manifest_hash, error = ?e, "get_toolchain_manifest: failed to parse JSON");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(manifest_hash = %manifest_hash, path = %path, error = ?e, "get_toolchain_manifest: file not found or read error");
+                None
+            }
+        }
     }
 
     async fn get_materialization_plan(
         &self,
+        _cx: &roam::Context,
         manifest_hash: Blake3Hash,
     ) -> Option<MaterializationPlan> {
-        let manifest = self.get_toolchain_manifest(manifest_hash).await?;
+        let manifest = Cass::get_toolchain_manifest(self, _cx, manifest_hash).await?;
 
         // Pure function: manifest → plan (no heuristics, bit-for-bit stable)
         let steps = match manifest.kind {
@@ -271,7 +349,11 @@ impl Cass for CassService {
     }
 
     #[tracing::instrument(skip(self, request), fields(file_count = request.files.len()))]
-    async fn ingest_tree(&self, request: IngestTreeRequest) -> IngestTreeResult {
+    async fn ingest_tree(
+        &self,
+        _cx: &roam::Context,
+        request: IngestTreeRequest,
+    ) -> IngestTreeResult {
         let mut manifest = TreeManifest {
             schema_version: TREE_MANIFEST_SCHEMA_VERSION,
             entries: Vec::with_capacity(request.files.len()),
@@ -314,7 +396,8 @@ impl Cass for CassService {
         manifest.finalize();
 
         // Serialize manifest to JSON
-        let manifest_json = facet_json::to_string(&manifest);
+        let manifest_json =
+            facet_json::to_string(&manifest).expect("tree manifest serialization must succeed");
         let manifest_hash = ManifestHash::from_bytes(manifest_json.as_bytes());
 
         // Store as blob (for rhea's materialize_tree_from_cas which calls get_blob)
@@ -344,7 +427,7 @@ impl Cass for CassService {
         }
 
         tracing::info!(
-            manifest_hash = %manifest_hash.short_hex(),
+            manifest_hash = %manifest_hash,
             file_count = request.files.len(),
             total_bytes,
             new_blobs,
@@ -362,56 +445,68 @@ impl Cass for CassService {
         }
     }
 
-    async fn get_tree_manifest(&self, hash: ManifestHash) -> Option<TreeManifest> {
-        let path = self.tree_manifest_path(&hash);
-        let json = tokio::fs::read_to_string(&path).await.ok()?;
-        facet_json::from_str(&json).ok()
-    }
+    async fn get_tree_manifest(
+        &self,
+        _cx: &roam::Context,
+        hash: ManifestHash,
+    ) -> Option<TreeManifest> {
+        // Tree manifests are stored as blobs, not in the tree_manifests directory
+        let path = self.blob_path(&hash);
+        tracing::info!(
+            manifest_hash = %hash,
+            path = %path,
+            "get_tree_manifest: attempting to read from blob storage"
+        );
 
-    async fn stream_blob(&self, blob: Blake3Hash) -> rapace::Streaming<Vec<u8>> {
-        use tokio::sync::mpsc;
-        use tokio_stream::wrappers::ReceiverStream;
-
-        let (tx, rx) = mpsc::channel(16);
-        let blob_path = self.blob_path(&blob);
-
-        tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-
-            let Ok(file) = tokio::fs::File::open(&blob_path).await else {
-                let _ = tx
-                    .send(Err(rapace::RpcError::Status {
-                        code: rapace::ErrorCode::NotFound,
-                        message: "blob not found".to_string(),
-                    }))
-                    .await;
-                return;
-            };
-
-            let mut reader = tokio::io::BufReader::new(file);
-            let mut buf = vec![0u8; 16 * 1024 * 1024]; // 16MB chunks
-
-            loop {
-                match reader.read(&mut buf).await {
-                    Ok(0) => break, // EOF
-                    Ok(n) => {
-                        if tx.send(Ok(buf[..n].to_vec())).await.is_err() {
-                            break; // Receiver dropped
-                        }
+        match tokio::fs::read_to_string(&path).await {
+            Ok(json) => {
+                tracing::info!(manifest_hash = %hash, "get_tree_manifest: blob read successfully");
+                match facet_json::from_str(&json) {
+                    Ok(manifest) => {
+                        tracing::info!(manifest_hash = %hash, "get_tree_manifest: parsed successfully");
+                        Some(manifest)
                     }
                     Err(e) => {
-                        let _ = tx
-                            .send(Err(rapace::RpcError::Status {
-                                code: rapace::ErrorCode::Internal,
-                                message: format!("read error: {}", e),
-                            }))
-                            .await;
-                        break;
+                        tracing::error!(manifest_hash = %hash, error = ?e, "get_tree_manifest: failed to parse JSON");
+                        None
                     }
                 }
             }
-        });
+            Err(e) => {
+                tracing::error!(manifest_hash = %hash, path = %path, error = ?e, "get_tree_manifest: blob not found or read error");
+                None
+            }
+        }
+    }
 
-        Box::pin(ReceiverStream::new(rx))
+    async fn stream_blob(
+        &self,
+        _cx: &roam::Context,
+        blob: Blake3Hash,
+        output: roam::Tx<Vec<u8>>,
+    ) -> Result<(), String> {
+        let blob_path = self.blob_path(&blob);
+        use tokio::io::AsyncReadExt;
+
+        let file = tokio::fs::File::open(&blob_path)
+            .await
+            .map_err(|e| format!("blob not found: {e}"))?;
+
+        let mut reader = tokio::io::BufReader::new(file);
+        let mut buf = vec![0u8; 16 * 1024 * 1024]; // 16MB chunks
+
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    if output.send(&buf[..n].to_vec()).await.is_err() {
+                        break; // Receiver dropped
+                    }
+                }
+                Err(e) => return Err(format!("read error: {e}")),
+            }
+        }
+
+        Ok(())
     }
 }

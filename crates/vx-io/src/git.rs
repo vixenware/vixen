@@ -63,16 +63,21 @@ pub async fn ensure_vx_gitignored(workspace_root: &Utf8Path) -> Result<bool, std
     let gitignore_path = git_root.join(".gitignore");
 
     // Check if already ignored
-    if tokio::fs::try_exists(&gitignore_path).await.unwrap_or(false) {
-        if gitignore_contains_vx(&gitignore_path).await {
-            return Ok(false);
-        }
+    if tokio::fs::try_exists(&gitignore_path)
+        .await
+        .unwrap_or(false)
+        && gitignore_contains_vx(&gitignore_path).await
+    {
+        return Ok(false);
     }
 
     // Append entry to .gitignore
     let entry = "\n# vx build system cache (auto-added by vx)\n/.vx\n";
 
-    if tokio::fs::try_exists(&gitignore_path).await.unwrap_or(false) {
+    if tokio::fs::try_exists(&gitignore_path)
+        .await
+        .unwrap_or(false)
+    {
         // File exists, append
         let mut content = tokio::fs::read_to_string(&gitignore_path).await?;
         // Ensure there's a trailing newline before our entry

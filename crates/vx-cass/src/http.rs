@@ -61,9 +61,7 @@ pub async fn get(url: &str) -> Result<Response<Incoming>, HttpError> {
     let mut current_url = url.to_string();
 
     for _ in 0..MAX_REDIRECTS {
-        let req = Request::builder()
-            .uri(&current_url)
-            .body(String::new())?;
+        let req = Request::builder().uri(&current_url).body(String::new())?;
 
         let response = client().request(req).await?;
         let status = response.status();

@@ -32,7 +32,7 @@ async fn test_cache_key_cc_compile_deterministic() {
     let source_hash = Blake3Hash::from_bytes(b"int main() { return 0; }");
 
     // Create source file input
-    let source = CSourceFile::new(&db, "src/main.c".to_string(), source_hash.clone()).unwrap();
+    let source = CSourceFile::new(&db, "src/main.c".to_string(), source_hash).unwrap();
 
     // Compute cache key twice
     let key1 = cache_key_cc_compile(&db, source, config).await.unwrap();
@@ -81,17 +81,7 @@ async fn test_cache_key_cc_compile_changes_with_profile() {
 
     // Debug profile
     let build_key_debug = BuildConfig::compute_key("debug", "x86_64-linux-musl", "/test/workspace");
-    BuildConfig::new(
-        &db,
-        build_key_debug,
-        "debug".to_string(),
-        "x86_64-linux-musl".to_string(),
-        "/test/workspace".to_string(),
-    )
-    .unwrap();
-
-    let source_debug =
-        CSourceFile::new(&db, "src/main.c".to_string(), source_hash.clone()).unwrap();
+    let source_debug = CSourceFile::new(&db, "src/main.c".to_string(), source_hash).unwrap();
     let config_debug = BuildConfig::new(
         &db,
         build_key_debug,
@@ -100,10 +90,13 @@ async fn test_cache_key_cc_compile_changes_with_profile() {
         "/test/workspace".to_string(),
     )
     .unwrap();
-    let key_debug = cache_key_cc_compile(&db, source_debug, config_debug).await.unwrap();
+    let key_debug = cache_key_cc_compile(&db, source_debug, config_debug)
+        .await
+        .unwrap();
 
     // Release profile
-    let build_key_release = BuildConfig::compute_key("release", "x86_64-linux-musl", "/test/workspace");
+    let build_key_release =
+        BuildConfig::compute_key("release", "x86_64-linux-musl", "/test/workspace");
     let config_release = BuildConfig::new(
         &db,
         build_key_release,
@@ -114,100 +107,12 @@ async fn test_cache_key_cc_compile_changes_with_profile() {
     .unwrap();
 
     let source_release = CSourceFile::new(&db, "src/main.c".to_string(), source_hash).unwrap();
-    let key_release = cache_key_cc_compile(&db, source_release, config_release).await.unwrap();
+    let key_release = cache_key_cc_compile(&db, source_release, config_release)
+        .await
+        .unwrap();
 
     // Keys should be different
     assert_ne!(key_debug, key_release);
-}
-
-#[vx_test]
-async fn test_plan_cc_compile_generates_correct_args() {
-    let db = test_db();
-    setup_cc_config(&db);
-
-    let source = CSourceFile::new(
-        &db,
-        "src/main.c".to_string(),
-        Blake3Hash::from_bytes(b"int main() { return 0; }"),
-    )
-    .unwrap();
-
-    let invocation = plan_cc_compile(&db, source).await.unwrap();
-
-    // Should have "cc" as first arg
-    assert_eq!(invocation.args[0], "cc");
-
-    // Should have -target
-    assert!(invocation.args.contains(&"-target".to_string()));
-    assert!(invocation.args.contains(&"x86_64-linux-musl".to_string()));
-
-    // Should have -c for compile-only
-    assert!(invocation.args.contains(&"-c".to_string()));
-
-    // Should have source file
-    assert!(invocation.args.contains(&"src/main.c".to_string()));
-
-    // Should have -o with .o output
-    assert!(invocation.args.contains(&"-o".to_string()));
-    let o_idx = invocation.args.iter().position(|a| a == "-o").unwrap();
-    assert!(invocation.args[o_idx + 1].ends_with(".o"));
-
-    // Should have -MMD -MF for depfile generation
-    assert!(invocation.args.contains(&"-MMD".to_string()));
-    assert!(invocation.args.contains(&"-MF".to_string()));
-
-    // Debug profile should have -O0 and -g
-    assert!(invocation.args.contains(&"-O0".to_string()));
-    assert!(invocation.args.contains(&"-g".to_string()));
-
-    // Should expect object and depfile outputs
-    assert_eq!(invocation.expected_outputs.len(), 2);
-    assert!(
-        invocation
-            .expected_outputs
-            .iter()
-            .any(|o| o.logical == "obj")
-    );
-    assert!(
-        invocation
-            .expected_outputs
-            .iter()
-            .any(|o| o.logical == "depfile")
-    );
-}
-
-#[vx_test]
-async fn test_plan_cc_compile_release_flags() {
-    let db = test_db();
-
-    ZigToolchainConfig::set(&db, "0.13.0".to_string(), "zig:abc123def456".to_string()).unwrap();
-
-    // Release profile
-    let build_key = BuildConfig::compute_key("release", "x86_64-linux-musl", "/test/workspace");
-    BuildConfig::new(
-        &db,
-        build_key,
-        "release".to_string(),
-        "x86_64-linux-musl".to_string(),
-        "/test/workspace".to_string(),
-    )
-    .unwrap();
-
-    let source = CSourceFile::new(
-        &db,
-        "src/main.c".to_string(),
-        Blake3Hash::from_bytes(b"int main() { return 0; }"),
-    )
-    .unwrap();
-
-    let invocation = plan_cc_compile(&db, source).await.unwrap();
-
-    // Release should have -O2, not -O0
-    assert!(invocation.args.contains(&"-O2".to_string()));
-    assert!(!invocation.args.contains(&"-O0".to_string()));
-
-    // Release should NOT have -g
-    assert!(!invocation.args.contains(&"-g".to_string()));
 }
 
 #[vx_test]
@@ -234,7 +139,7 @@ async fn test_node_id_cc_compile_format() {
 #[vx_test]
 async fn test_cache_key_cc_link_deterministic() {
     let db = test_db();
-    setup_cc_config(&db);
+    let config = setup_cc_config(&db);
 
     let obj_hashes = vec![
         Blake3Hash::from_bytes(b"main.o contents"),
@@ -249,8 +154,8 @@ async fn test_cache_key_cc_link_deterministic() {
     )
     .unwrap();
 
-    let key1 = cache_key_cc_link(&db, target).await.unwrap();
-    let key2 = cache_key_cc_link(&db, target).await.unwrap();
+    let key1 = cache_key_cc_link(&db, target, config).await.unwrap();
+    let key2 = cache_key_cc_link(&db, target, config).await.unwrap();
 
     assert_eq!(key1, key2);
 }
@@ -258,7 +163,7 @@ async fn test_cache_key_cc_link_deterministic() {
 #[vx_test]
 async fn test_cache_key_cc_link_changes_with_objects() {
     let db = test_db();
-    setup_cc_config(&db);
+    let config = setup_cc_config(&db);
 
     // First set of objects
     let target1 = CTarget::new(
@@ -269,7 +174,7 @@ async fn test_cache_key_cc_link_changes_with_objects() {
     )
     .unwrap();
 
-    let key1 = cache_key_cc_link(&db, target1).await.unwrap();
+    let key1 = cache_key_cc_link(&db, target1, config).await.unwrap();
 
     // Different object contents
     let target2 = CTarget::new(
@@ -280,83 +185,9 @@ async fn test_cache_key_cc_link_changes_with_objects() {
     )
     .unwrap();
 
-    let key2 = cache_key_cc_link(&db, target2).await.unwrap();
+    let key2 = cache_key_cc_link(&db, target2, config).await.unwrap();
 
     assert_ne!(key1, key2);
-}
-
-#[vx_test]
-async fn test_plan_cc_link_generates_correct_args() {
-    let db = test_db();
-    setup_cc_config(&db);
-
-    let target = CTarget::new(
-        &db,
-        "hello".to_string(),
-        vec![
-            Blake3Hash::from_bytes(b"main.o"),
-            Blake3Hash::from_bytes(b"util.o"),
-        ],
-        vec!["src/main.c".to_string(), "src/util.c".to_string()],
-    )
-    .unwrap();
-
-    let invocation = plan_cc_link(&db, target).await.unwrap();
-
-    // Should have "cc" as first arg
-    assert_eq!(invocation.args[0], "cc");
-
-    // Should have -target
-    assert!(invocation.args.contains(&"-target".to_string()));
-    assert!(invocation.args.contains(&"x86_64-linux-musl".to_string()));
-
-    // Should have object files
-    assert!(invocation.args.iter().any(|a| a.ends_with("main.o")));
-    assert!(invocation.args.iter().any(|a| a.ends_with("util.o")));
-
-    // Should have -o with exe output
-    assert!(invocation.args.contains(&"-o".to_string()));
-    let o_idx = invocation.args.iter().position(|a| a == "-o").unwrap();
-    assert!(invocation.args[o_idx + 1].ends_with("hello"));
-
-    // Debug profile should NOT have -s (strip)
-    assert!(!invocation.args.contains(&"-s".to_string()));
-
-    // Should expect executable output
-    assert_eq!(invocation.expected_outputs.len(), 1);
-    assert_eq!(invocation.expected_outputs[0].logical, "exe");
-    assert!(invocation.expected_outputs[0].executable);
-}
-
-#[vx_test]
-async fn test_plan_cc_link_release_strips() {
-    let db = test_db();
-
-    ZigToolchainConfig::set(&db, "0.13.0".to_string(), "zig:abc123def456".to_string()).unwrap();
-
-    // Release profile
-    let build_key = BuildConfig::compute_key("release", "x86_64-linux-musl", "/test/workspace");
-    BuildConfig::new(
-        &db,
-        build_key,
-        "release".to_string(),
-        "x86_64-linux-musl".to_string(),
-        "/test/workspace".to_string(),
-    )
-    .unwrap();
-
-    let target = CTarget::new(
-        &db,
-        "hello".to_string(),
-        vec![Blake3Hash::from_bytes(b"main.o")],
-        vec!["src/main.c".to_string()],
-    )
-    .unwrap();
-
-    let invocation = plan_cc_link(&db, target).await.unwrap();
-
-    // Release should have -s for stripping
-    assert!(invocation.args.contains(&"-s".to_string()));
 }
 
 #[vx_test]
@@ -389,7 +220,7 @@ async fn test_discovered_deps_affects_cache_key() {
     let source_hash = Blake3Hash::from_bytes(b"#include \"header.h\"\nint main() {}");
 
     // First compile: no discovered deps yet
-    let source1 = CSourceFile::new(&db, "src/main.c".to_string(), source_hash.clone()).unwrap();
+    let source1 = CSourceFile::new(&db, "src/main.c".to_string(), source_hash).unwrap();
     let key1 = cache_key_cc_compile(&db, source1, config).await.unwrap();
 
     // After first compile, we discover header.h dependency

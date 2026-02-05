@@ -23,10 +23,11 @@ mod tests;
 
 use camino::Utf8PathBuf;
 use eyre::Result;
+use roam_stream::{CobsFramed, HandshakeConfig, NoDispatcher, accept, initiate_framed};
 use std::process::Child;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use vx_aether_proto::AetherServer;
+use vx_aether_proto::AetherDispatcher;
 use vx_cass_proto::CassClient;
 use vx_io::net::{Endpoint, Listener};
 use vx_rhea_proto::RheaClient;
@@ -36,7 +37,7 @@ pub use inputs::*;
 pub use queries::*;
 pub use service::AetherService;
 
-// No longer needed! The #[rapace::service] macro on the Aether trait
+// No longer needed! The #[roam::service] macro on the Aether trait
 // generates a blanket impl for Arc<T>, solving the orphan rule issue.
 // We can now use Arc<AetherService> directly.
 
@@ -220,7 +221,10 @@ async fn ensure_services(args: &Args, spawn_tracker: &Arc<Mutex<SpawnTracker>>) 
     }
 
     // Check Rhea (worker)
-    if vx_io::net::try_connect(&args.exec_endpoint).await?.is_none() {
+    if vx_io::net::try_connect(&args.exec_endpoint)
+        .await?
+        .is_none()
+    {
         if !args.exec_endpoint.is_local() {
             eyre::bail!(
                 "Rhea is not reachable at {}. Auto-spawn is only supported for local endpoints.\n\
@@ -250,7 +254,10 @@ async fn ensure_services(args: &Args, spawn_tracker: &Arc<Mutex<SpawnTracker>>) 
 
         for (attempt, delay) in backoff_ms.iter().enumerate() {
             tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
-            if vx_io::net::try_connect(&args.exec_endpoint).await?.is_some() {
+            if vx_io::net::try_connect(&args.exec_endpoint)
+                .await?
+                .is_some()
+            {
                 tracing::info!("Connected to Rhea after {} attempts", attempt + 1);
                 break;
             }
@@ -320,30 +327,30 @@ async fn async_main() -> Result<()> {
         }
     };
 
-    // Create rapace clients for CAS and Exec
+    // Create Roam clients for CAS and Exec.
     tracing::info!("Connecting to CAS at {}", args.cas_endpoint);
     let cas_stream = vx_io::net::connect(&args.cas_endpoint).await?;
-    let cas_transport = rapace::Transport::stream(cas_stream);
-    let cas_session = Arc::new(rapace::RpcSession::new(cas_transport));
-    let cas_client = Arc::new(CassClient::new(cas_session.clone()));
+    let cas_framed = CobsFramed::new(cas_stream);
+    let (cas_handle, _cas_incoming, cas_driver) =
+        initiate_framed(cas_framed, HandshakeConfig::default(), NoDispatcher).await?;
+    let cas_client = Arc::new(CassClient::new(cas_handle));
 
     tracing::info!("Connecting to Exec at {}", args.exec_endpoint);
     let exec_stream = vx_io::net::connect(&args.exec_endpoint).await?;
-    let exec_transport = rapace::Transport::stream(exec_stream);
-    let exec_session = Arc::new(rapace::RpcSession::new(exec_transport));
-    let exec_client = Arc::new(RheaClient::new(exec_session.clone()));
+    let exec_framed = CobsFramed::new(exec_stream);
+    let (exec_handle, _exec_incoming, exec_driver) =
+        initiate_framed(exec_framed, HandshakeConfig::default(), NoDispatcher).await?;
+    let exec_client = Arc::new(RheaClient::new(exec_handle));
 
-    // Spawn session runners
-    let cas_session_runner = cas_session.clone();
+    // Spawn drivers.
     tokio::spawn(async move {
-        if let Err(e) = cas_session_runner.run().await {
+        if let Err(e) = cas_driver.run().await {
             tracing::error!("CAS session error: {}", e);
         }
     });
 
-    let exec_session_runner = exec_session.clone();
     tokio::spawn(async move {
-        if let Err(e) = exec_session_runner.run().await {
+        if let Err(e) = exec_driver.run().await {
             tracing::error!("Exec session error: {}", e);
         }
     });
@@ -372,30 +379,21 @@ async fn async_main() -> Result<()> {
         tokio::spawn(async move {
             tracing::debug!("New connection from {}", peer_addr);
 
-            let transport = rapace::Transport::stream(stream);
+            let dispatcher = AetherDispatcher::new(aether.as_ref().clone());
+            let Ok((handle, _incoming, driver)) =
+                accept(stream, HandshakeConfig::default(), dispatcher).await
+            else {
+                tracing::warn!("Handshake error from {}", peer_addr);
+                return;
+            };
 
-            // Create RPC session with even channel IDs (server uses 0, 2, 4, ...)
-            let session = Arc::new(rapace::RpcSession::with_channel_start(transport, 0));
-
-            // Create ProgressListenerClient from this session
-            let progress_listener = Arc::new(vx_aether_proto::ProgressListenerClient::new(session.clone()));
+            let progress_listener =
+                Arc::new(vx_aether_proto::ProgressListenerClient::new(handle.clone()));
 
             // Set progress listener for this connection
             aether.set_progress_listener(Some(progress_listener)).await;
 
-            // Set up dispatcher for Aether service
-            let server = Arc::new(AetherServer::new(aether.clone()));
-            let buffer_pool = session.buffer_pool().clone();
-            session.set_dispatcher(move |request| {
-                let server = server.clone();
-                let buffer_pool = buffer_pool.clone();
-                Box::pin(async move {
-                    server.dispatch(request.desc.method_id, &request, &buffer_pool).await
-                })
-            });
-
-            // Run the session
-            if let Err(e) = session.run().await {
+            if let Err(e) = driver.run().await {
                 tracing::warn!("Session error from {}: {}", peer_addr, e);
             }
 

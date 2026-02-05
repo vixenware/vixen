@@ -7,11 +7,12 @@ mod tui;
 use camino::Utf8PathBuf;
 use eyre::{Result, bail};
 use facet::Facet;
-use facet_args as args;
+use figue as args;
 use owo_colors::OwoColorize;
+use roam_stream::{CobsFramed, HandshakeConfig, initiate_framed};
 use tracing_subscriber::EnvFilter;
 
-use vx_aether_proto::{AetherClient, BuildRequest, ProgressListener, ActionType};
+use vx_aether_proto::{ActionType, AetherClient, BuildRequest, ProgressListener};
 use vx_report::{CacheOutcome, ReportStore, RunDiff};
 
 /// vx - Build execution engine with deterministic caching
@@ -36,6 +37,10 @@ struct BuildArgs {
     /// Don't auto-spawn daemon if not running (for tests)
     #[facet(args::named)]
     no_spawn: bool,
+
+    /// Disable TUI and use plain log output
+    #[facet(args::named)]
+    no_tui: bool,
 }
 
 /// Arguments for the `kill` subcommand
@@ -151,10 +156,7 @@ fn main() -> Result<()> {
 async fn async_main() -> Result<()> {
     let _ = miette_arborium::install_global();
 
-    let cli: Cli = args::from_std_args().unwrap_or_else(|e| {
-        eprintln!("{:?}", miette::Report::new(e));
-        std::process::exit(1);
-    });
+    let cli: Cli = args::from_std_args().unwrap();
 
     if cli.version {
         println!("vx {}", env!("CARGO_PKG_VERSION"));
@@ -189,62 +191,79 @@ fn short_hex(hash: &str, verbose: bool) -> String {
     }
 }
 
-/// Progress listener that drives the TUI
+/// Progress listener that drives the TUI (or logs to console if TUI is disabled)
 struct ProgressListenerImpl {
-    tui: tui::TuiHandle,
+    tui: Option<tui::TuiHandle>,
+    next_action_id: std::sync::atomic::AtomicU64,
+}
+
+impl Clone for ProgressListenerImpl {
+    fn clone(&self) -> Self {
+        Self {
+            tui: self.tui.clone(),
+            next_action_id: std::sync::atomic::AtomicU64::new(
+                self.next_action_id
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            ),
+        }
+    }
 }
 
 impl ProgressListenerImpl {
-    fn new(tui: tui::TuiHandle) -> Self {
-        Self { tui }
+    fn new(tui: Option<tui::TuiHandle>) -> Self {
+        Self {
+            tui,
+            next_action_id: std::sync::atomic::AtomicU64::new(1),
+        }
     }
 }
 
 impl ProgressListener for ProgressListenerImpl {
-    async fn set_total(&self, total: u64) {
-        self.tui.set_total(total as usize).await;
+    async fn set_total(&self, _cx: &roam::Context, total: u64) {
+        if let Some(tui) = &self.tui {
+            tui.set_total(total as usize).await;
+        } else {
+            tracing::info!("Build: {} actions total", total);
+        }
     }
 
-    async fn start_action(&self, action_type: ActionType) -> u64 {
-        self.tui.start_action(action_type).await
+    async fn start_action(&self, _cx: &roam::Context, action_type: ActionType) -> u64 {
+        if let Some(tui) = &self.tui {
+            tui.start_action(action_type).await
+        } else {
+            let id = self
+                .next_action_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tracing::info!("[{}] Starting: {:?}", id, action_type);
+            id
+        }
     }
 
-    async fn complete_action(&self, action_id: u64) {
-        self.tui.complete_action(action_id).await;
+    async fn complete_action(&self, _cx: &roam::Context, action_id: u64) {
+        if let Some(tui) = &self.tui {
+            tui.complete_action(action_id).await;
+        } else {
+            tracing::info!("[{}] Complete", action_id);
+        }
     }
 
-    async fn log_message(&self, message: String) {
-        self.tui.log_message(message).await;
-    }
-}
-
-/// Create a dispatcher for ProgressListener service
-fn create_progress_listener_dispatcher(
-    progress_listener: std::sync::Arc<ProgressListenerImpl>,
-    buffer_pool: rapace::BufferPool,
-) -> impl Fn(
-    rapace::Frame,
-) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<rapace::Frame, rapace::RpcError>> + Send>,
-> + Send
-       + Sync
-       + 'static {
-    use vx_aether_proto::ProgressListenerServer;
-
-    move |request| {
-        let buffer_pool = buffer_pool.clone();
-        let progress_listener = progress_listener.clone();
-        Box::pin(async move {
-            let server = ProgressListenerServer::new(progress_listener);
-            server
-                .dispatch(request.desc.method_id, &request, &buffer_pool)
-                .await
-        })
+    async fn log_message(&self, _cx: &roam::Context, message: String) {
+        if let Some(tui) = &self.tui {
+            tui.log_message(message).await;
+        } else {
+            tracing::info!("{}", message);
+        }
     }
 }
 
 /// Connect to the aether, spawning it if necessary
-async fn get_or_spawn_aether(no_spawn: bool) -> Result<(AetherClient, tui::TuiHandle)> {
+async fn get_or_spawn_aether(
+    no_spawn: bool,
+    no_tui: bool,
+) -> Result<(
+    AetherClient<roam_stream::ConnectionHandle>,
+    Option<tui::TuiHandle>,
+)> {
     use vx_io::net::Endpoint;
 
     let vx_home = std::env::var("VX_HOME")
@@ -269,7 +288,7 @@ async fn get_or_spawn_aether(no_spawn: bool) -> Result<(AetherClient, tui::TuiHa
     let backoff_ms = [10, 50, 100, 500, 1000];
 
     // Try to connect first
-    match try_connect_daemon(&endpoint).await {
+    match try_connect_daemon(&endpoint, no_tui).await {
         Ok(result) => Ok(result),
         Err(e) => {
             // If no_spawn is set, don't try to spawn - just fail
@@ -319,45 +338,46 @@ async fn get_or_spawn_aether(no_spawn: bool) -> Result<(AetherClient, tui::TuiHa
             // Retry with backoff
             for (attempt, delay) in backoff_ms.iter().enumerate() {
                 tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
-                if let Ok(result) = try_connect_daemon(&endpoint).await {
+                if let Ok(result) = try_connect_daemon(&endpoint, no_tui).await {
                     tracing::info!("Connected to daemon after {} attempts", attempt + 1);
                     return Ok(result);
                 }
             }
 
             // Final attempt
-            try_connect_daemon(&endpoint).await
+            try_connect_daemon(&endpoint, no_tui).await
         }
     }
 }
 
 async fn try_connect_daemon(
     endpoint: &vx_io::net::Endpoint,
-) -> Result<(AetherClient, tui::TuiHandle)> {
-    use std::sync::Arc;
-
+    no_tui: bool,
+) -> Result<(
+    AetherClient<roam_stream::ConnectionHandle>,
+    Option<tui::TuiHandle>,
+)> {
     let stream = vx_io::net::connect(endpoint).await?;
-    let transport = rapace::Transport::stream(stream);
+    let framed = CobsFramed::new(stream);
 
-    // Create RPC session with odd channel IDs (client uses 1, 3, 5, ...)
-    let session = Arc::new(rapace::RpcSession::with_channel_start(transport, 1));
+    // Create TUI and progress listener (only if TUI is enabled)
+    let tui = if no_tui {
+        None
+    } else {
+        Some(tui::TuiHandle::new())
+    };
+    let progress_listener = ProgressListenerImpl::new(tui.clone());
+    let dispatcher = vx_aether_proto::ProgressListenerDispatcher::new(progress_listener);
 
-    // Create TUI and progress listener
-    let tui = tui::TuiHandle::new();
-    let progress_listener = Arc::new(ProgressListenerImpl::new(tui.clone()));
-
-    // Set up bidirectional RPC: vx serves ProgressListener, aether serves Aether
-    session.set_dispatcher(create_progress_listener_dispatcher(
-        progress_listener,
-        session.buffer_pool().clone(),
-    ));
+    let (handle, _incoming, driver) =
+        initiate_framed(framed, HandshakeConfig::default(), dispatcher).await?;
 
     // Create aether client
-    let client = AetherClient::new(session.clone());
+    let client = AetherClient::new(handle);
 
-    // CRITICAL: spawn session.run() in background (rapace requires explicit receive loop)
+    // Keep the connection driver running in the background.
     tokio::spawn(async move {
-        if let Err(e) = session.run().await {
+        if let Err(e) = driver.run().await {
             tracing::error!("Daemon session error: {}", e);
         }
     });
@@ -369,10 +389,14 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
     let cwd = Utf8PathBuf::try_from(std::env::current_dir()?)?;
 
     // Connect to daemon (spawning if necessary) and set up TUI
-    let (daemon, tui) = get_or_spawn_aether(args.no_spawn).await?;
+    let (daemon, tui) = get_or_spawn_aether(args.no_spawn, args.no_tui).await?;
 
-    // Initialize tracing with TUI layer
-    init_tracing_with_tui(tui.clone());
+    // Initialize tracing - with TUI layer or plain output to stderr
+    if let Some(ref tui) = tui {
+        init_tracing_with_tui(tui.clone());
+    } else {
+        init_tracing_stderr();
+    }
 
     let request = BuildRequest {
         project_path: cwd.clone(),
@@ -381,8 +405,10 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
 
     let result = daemon.build(request).await?;
 
-    // Shutdown the TUI and wait for cleanup
-    tui.shutdown().await;
+    // Shutdown the TUI and wait for cleanup (if TUI was enabled)
+    if let Some(tui) = tui {
+        tui.shutdown().await;
+    }
 
     if result.success {
         // Print nice summary box (TUI has already cleaned up)
@@ -391,7 +417,11 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         println!("─────────────────────────────────────────────────────────────");
 
         if result.cached {
-            println!("{} {}", "Status:".dimmed(), "Cached (no rebuild needed)".cyan());
+            println!(
+                "{} {}",
+                "Status:".dimmed(),
+                "Cached (no rebuild needed)".cyan()
+            );
         } else {
             println!("{} {}", "Status:".dimmed(), "Success".green());
         }
@@ -406,7 +436,8 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
 
         // Show action stats
         let executed = result.total_actions.saturating_sub(result.cache_hits);
-        println!("{} {} total, {} cached, {} executed",
+        println!(
+            "{} {} total, {} cached, {} executed",
             "Actions:".dimmed(),
             result.total_actions.to_string().yellow(),
             result.cache_hits.to_string().cyan(),
@@ -458,8 +489,8 @@ async fn cmd_kill(_args: KillArgs) -> Result<()> {
         }
     };
 
-    // Try to connect to daemon
-    match try_connect_daemon(&endpoint).await {
+    // Try to connect to daemon (no TUI needed for kill command)
+    match try_connect_daemon(&endpoint, true).await {
         Ok((daemon, _tui)) => {
             println!("{} daemon at {}", "Stopping".green().bold(), endpoint);
             if let Err(e) = daemon.shutdown().await {
@@ -511,7 +542,8 @@ async fn cmd_clean(args: CleanArgs) -> Result<()> {
     };
 
     if let Some(endpoint) = endpoint {
-        if let Ok((daemon, _tui)) = try_connect_daemon(&endpoint).await {
+        // No TUI needed for clean command
+        if let Ok((daemon, _tui)) = try_connect_daemon(&endpoint, true).await {
             tracing::debug!("Killing daemon before clean");
             let _ = daemon.shutdown().await;
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -1111,10 +1143,25 @@ mod explain_json {
     #[derive(Facet)]
     #[repr(u8)]
     pub enum DepChangeKindJson {
-        Added { rlib_hash: String, manifest_hash: String },
-        Removed { rlib_hash: String, manifest_hash: String },
-        RlibChanged { old_rlib: String, new_rlib: String, old_manifest: String, new_manifest: String },
-        ManifestChanged { rlib_hash: String, old_manifest: String, new_manifest: String },
+        Added {
+            rlib_hash: String,
+            manifest_hash: String,
+        },
+        Removed {
+            rlib_hash: String,
+            manifest_hash: String,
+        },
+        RlibChanged {
+            old_rlib: String,
+            new_rlib: String,
+            old_manifest: String,
+            new_manifest: String,
+        },
+        ManifestChanged {
+            rlib_hash: String,
+            old_manifest: String,
+            new_manifest: String,
+        },
     }
 }
 
@@ -1163,53 +1210,66 @@ fn cmd_explain_json(
         let explanation = NodeRebuildExplanation::compute(node, prev_node);
 
         if let Some(expl) = explanation {
-            let input_changes: Vec<InputChangeJson> = expl.input_changes.iter().map(|change| {
-                InputChangeJson {
+            let input_changes: Vec<InputChangeJson> = expl
+                .input_changes
+                .iter()
+                .map(|change| InputChangeJson {
                     label: change.label.clone(),
                     old_value: change.old_value.clone(),
                     new_value: change.new_value.clone(),
-                }
-            }).collect();
+                })
+                .collect();
 
-            let dep_changes: Vec<DepChangeJson> = expl.dep_changes.iter().map(|change| {
-                use vx_report::DepChangeKind;
+            let dep_changes: Vec<DepChangeJson> = expl
+                .dep_changes
+                .iter()
+                .map(|change| {
+                    use vx_report::DepChangeKind;
 
-                let change_kind = match &change.change {
-                    DepChangeKind::Added { rlib_hash, manifest_hash } => {
-                        DepChangeKindJson::Added {
+                    let change_kind = match &change.change {
+                        DepChangeKind::Added {
+                            rlib_hash,
+                            manifest_hash,
+                        } => DepChangeKindJson::Added {
                             rlib_hash: rlib_hash.clone(),
                             manifest_hash: manifest_hash.clone(),
-                        }
-                    }
-                    DepChangeKind::Removed { rlib_hash, manifest_hash } => {
-                        DepChangeKindJson::Removed {
+                        },
+                        DepChangeKind::Removed {
+                            rlib_hash,
+                            manifest_hash,
+                        } => DepChangeKindJson::Removed {
                             rlib_hash: rlib_hash.clone(),
                             manifest_hash: manifest_hash.clone(),
-                        }
-                    }
-                    DepChangeKind::RlibChanged { old_rlib, new_rlib, old_manifest, new_manifest } => {
-                        DepChangeKindJson::RlibChanged {
+                        },
+                        DepChangeKind::RlibChanged {
+                            old_rlib,
+                            new_rlib,
+                            old_manifest,
+                            new_manifest,
+                        } => DepChangeKindJson::RlibChanged {
                             old_rlib: old_rlib.clone(),
                             new_rlib: new_rlib.clone(),
                             old_manifest: old_manifest.clone(),
                             new_manifest: new_manifest.clone(),
-                        }
-                    }
-                    DepChangeKind::ManifestChanged { rlib_hash, old_manifest, new_manifest } => {
-                        DepChangeKindJson::ManifestChanged {
+                        },
+                        DepChangeKind::ManifestChanged {
+                            rlib_hash,
+                            old_manifest,
+                            new_manifest,
+                        } => DepChangeKindJson::ManifestChanged {
                             rlib_hash: rlib_hash.clone(),
                             old_manifest: old_manifest.clone(),
                             new_manifest: new_manifest.clone(),
-                        }
-                    }
-                };
+                        },
+                    };
 
-                DepChangeJson {
-                    extern_name: change.extern_name.clone(),
-                    crate_id: change.crate_id.clone(),
-                    change: change_kind,
-                }
-            }).collect();
+                    DepChangeJson {
+                        extern_name: change.extern_name.clone(),
+                        crate_id: change.crate_id.clone(),
+                        change: change_kind,
+                    }
+                })
+                .collect();
 
             nodes_json.push(NodeJson {
                 node_id: expl.node_id.clone(),
@@ -1239,6 +1299,10 @@ fn cmd_explain_json(
         fanout: fanout.fanout_map.clone(),
     };
 
-    println!("{}", facet_json::to_string_pretty(&output));
+    println!(
+        "{}",
+        facet_json::to_string_pretty(&output)
+            .map_err(|e| eyre::eyre!("failed to serialize explain output: {e}"))?
+    );
     Ok(())
 }

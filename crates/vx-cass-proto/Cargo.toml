@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 facet = { workspace = true }
-rapace = { workspace = true }
+roam = { workspace = true }
 facet-postcard = { workspace = true, features = ["camino"] }
 blake3 = { workspace = true }
 camino = { workspace = true }

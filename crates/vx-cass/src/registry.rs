@@ -173,7 +173,7 @@ async fn download_crate_attempt(
         response
             .into_body()
             .into_data_stream()
-            .map(|result| result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))),
+            .map(|result| result.map_err(std::io::Error::other)),
     );
 
     let mut verifying_reader =
@@ -243,10 +243,10 @@ impl CassService {
                 Ok(mut file) => {
                     file.write_all(manifest_hex.as_bytes())?;
                     file.sync_all()?;
-                    if let Ok(dir) = File::open(&parent) {
-                        if let Err(e) = dir.sync_all() {
-                            tracing::warn!("failed to sync directory {}: {}", parent, e);
-                        }
+                    if let Ok(dir) = File::open(&parent)
+                        && let Err(e) = dir.sync_all()
+                    {
+                        tracing::warn!("failed to sync directory {}: {}", parent, e);
                     }
                     Ok(true)
                 }
@@ -273,14 +273,15 @@ impl CassService {
         &self,
         manifest: &RegistryCrateManifest,
     ) -> Blake3Hash {
-        let json = facet_json::to_string(manifest);
+        let json =
+            facet_json::to_string(manifest).expect("registry manifest serialization must succeed");
         let hash = Blake3Hash::from_bytes(json.as_bytes());
         let path = self.manifest_path(&hash);
 
-        if !path.exists() {
-            if let Err(e) = atomic_write(&path, json.as_bytes()).await {
-                tracing::warn!("failed to write registry manifest to {}: {}", path, e);
-            }
+        if !path.exists()
+            && let Err(e) = atomic_write(&path, json.as_bytes()).await
+        {
+            tracing::warn!("failed to write registry manifest to {}: {}", path, e);
         }
 
         hash

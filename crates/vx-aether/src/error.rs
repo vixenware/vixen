@@ -11,10 +11,10 @@ use vx_cass_proto::Blake3Hash;
 pub enum AetherError {
     // === RPC Errors ===
     #[error("CAS RPC error: {0}")]
-    CasRpc(std::sync::Arc<rapace::RpcError>),
+    CasRpc(String),
 
     #[error("Exec RPC error: {0}")]
-    ExecRpc(std::sync::Arc<rapace::RpcError>),
+    ExecRpc(String),
 
     // === Toolchain Errors ===
     #[error("toolchain acquisition failed: {0}")]
@@ -43,6 +43,9 @@ pub enum AetherError {
     // === Graph/Module Errors ===
     #[error("failed to build crate graph: {0}")]
     CrateGraph(String),
+
+    #[error("invalid manifest: {0}")]
+    InvalidManifest(String),
 
     #[error("failed to compute source closure for {crate_name}: {message}")]
     SourceClosure { crate_name: String, message: String },

@@ -1,5 +1,4 @@
 use camino::Utf8Path;
-use futures_util::StreamExt;
 use tracing::debug;
 use vx_cass_proto::{Blake3Hash, TreeManifest};
 
@@ -20,7 +19,7 @@ impl RheaService {
             .cas
             .get_blob(tree_manifest_hash)
             .await
-            .map_err(|e| RheaError::CasRpc(std::sync::Arc::new(e)))?
+            .map_err(|e| RheaError::CasRpc(e.to_string()))?
             .ok_or(RheaError::ToolchainBlobNotFound {
                 hash: tree_manifest_hash,
                 path: "tree manifest".to_string(),
@@ -48,15 +47,13 @@ impl RheaService {
         // Materialize using vx_tarball::materialize_tree
         let cas = self.cas.clone();
         vx_tarball::materialize_tree(&tree, dest, async move |blob_hash| {
-            // Fetch blob from CAS
-            let mut stream = cas
-                .stream_blob(blob_hash)
+            let (tx, mut rx) = roam::channel::<Vec<u8>>();
+            cas.stream_blob(blob_hash, tx)
                 .await
-                .map_err(|e| format!("failed to start blob stream: {:?}", e))?;
+                .map_err(|e| format!("failed to start blob stream: {e:?}"))?;
 
             let mut data = Vec::new();
-            while let Some(chunk_result) = stream.next().await {
-                let chunk = chunk_result.map_err(|e| format!("failed to stream blob: {:?}", e))?;
+            while let Ok(Some(chunk)) = rx.recv().await {
                 data.extend_from_slice(&chunk);
             }
 

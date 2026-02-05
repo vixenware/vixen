@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use futures_util::StreamExt;
 use tracing::{debug, info, warn};
 use vx_cass_proto::{Blake3Hash, CassClient};
 use vx_cass_proto::{RegistryCrateManifest, RegistryMaterializationResult};
@@ -20,7 +19,7 @@ use crate::error::{Result, RheaError};
 ///
 /// Handles global cache extraction and workspace-local copying.
 pub struct RegistryMaterializer {
-    cas: Arc<CassClient>,
+    cas: Arc<CassClient<roam_stream::ConnectionHandle>>,
 
     /// Global cache directory (~/.vx/registry)
     global_cache_dir: Utf8PathBuf,
@@ -30,7 +29,10 @@ pub struct RegistryMaterializer {
 }
 
 impl RegistryMaterializer {
-    pub fn new(cas: Arc<CassClient>, global_cache_dir: Utf8PathBuf) -> Self {
+    pub fn new(
+        cas: Arc<CassClient<roam_stream::ConnectionHandle>>,
+        global_cache_dir: Utf8PathBuf,
+    ) -> Self {
         Self {
             cas,
             global_cache_dir,
@@ -53,7 +55,7 @@ impl RegistryMaterializer {
             .cas
             .get_registry_manifest(manifest_hash)
             .await
-            .map_err(|e| RheaError::CasRpc(std::sync::Arc::new(e)))?
+            .map_err(|e| RheaError::CasRpc(e.to_string()))?
             .ok_or(RheaError::RegistryCrateManifestNotFound(manifest_hash))?;
 
         let spec = &manifest.spec;
@@ -267,21 +269,19 @@ impl RegistryMaterializer {
 /// Uses strip_components=1 to remove the top-level <name>-<version>/ directory.
 #[allow(dead_code)]
 async fn extract_crate_tarball(
-    cas: &CassClient,
+    cas: &CassClient<roam_stream::ConnectionHandle>,
     blob_hash: Blake3Hash,
     dest: &Utf8Path,
 ) -> Result<()> {
     debug!(blob = %blob_hash, dest = %dest, "extracting .crate tarball");
 
-    // Stream blob from CAS
-    let mut stream = cas
-        .stream_blob(blob_hash)
+    let (tx, mut rx) = roam::channel::<Vec<u8>>();
+    cas.stream_blob(blob_hash, tx)
         .await
-        .map_err(|e| RheaError::CasRpc(std::sync::Arc::new(e)))?;
+        .map_err(|e| RheaError::RegistryCrateExtraction(format!("stream_blob failed: {e}")))?;
     let mut compressed_data = Vec::new();
 
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| RheaError::CasRpc(std::sync::Arc::new(e)))?;
+    while let Ok(Some(chunk)) = rx.recv().await {
         compressed_data.extend_from_slice(&chunk);
     }
 

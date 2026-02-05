@@ -37,7 +37,10 @@ pub enum RheaError {
 
     // === CAS/RPC Errors ===
     #[error("CAS RPC error: {0}")]
-    CasRpc(std::sync::Arc<rapace::RpcError>),
+    CasRpc(String),
+
+    #[error("CAS fetch error: {0}")]
+    CasFetch(String),
 
     // === IO Errors ===
     #[error("failed to create directory {path}: {message}")]

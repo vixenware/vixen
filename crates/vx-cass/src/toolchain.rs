@@ -1,6 +1,6 @@
 //! Toolchain Manager (Inflight Deduplication)
 
-use futures_util::{future::join, StreamExt};
+use futures_util::{StreamExt, future::join};
 use jiff::Timestamp;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -58,10 +58,7 @@ async fn download_component(
     if !status.is_success() {
         return Err(vx_toolchain::ToolchainError::FetchError {
             url: url.to_string(),
-            source: Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("HTTP {}", status),
-            )),
+            source: Box::new(std::io::Error::other(format!("HTTP {}", status))),
         });
     }
 
@@ -70,7 +67,7 @@ async fn download_component(
         response
             .into_body()
             .into_data_stream()
-            .map(|result| result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))),
+            .map(|result| result.map_err(std::io::Error::other)),
     );
 
     let mut verifying_reader =
@@ -162,7 +159,7 @@ impl CassService {
         // Validate and compute spec_key first
         let spec_key = match spec.spec_key() {
             Ok(k) => {
-                tracing::Span::current().record("spec_key", k.short_hex());
+                tracing::Span::current().record("spec_key", k.to_string());
                 k
             }
             Err(e) => {
@@ -263,8 +260,9 @@ impl CassService {
             async {
                 let _permit = sem.acquire().await.unwrap();
                 download_component(&rust_std_url, &rust_std_hash).await
-            }
-        ).await;
+            },
+        )
+        .await;
 
         let rustc_tarball = match rustc_result {
             Ok(bytes) => bytes,
@@ -318,11 +316,12 @@ impl CassService {
         };
 
         // Store rustc tree manifest
-        let rustc_tree_json = facet_json::to_string(&rustc_tree);
+        let rustc_tree_json =
+            facet_json::to_string(&rustc_tree).expect("rustc tree serialization must succeed");
         let rustc_tree_hash = self.put_blob(rustc_tree_json.into_bytes()).await;
 
         tracing::info!(
-            rustc_tree = %rustc_tree_hash.short_hex(),
+            rustc_tree = %rustc_tree_hash,
             files = rustc_tree.entries.len(),
             unique_blobs = rustc_tree.unique_blobs,
             total_bytes = rustc_tree.total_size_bytes,
@@ -355,11 +354,12 @@ impl CassService {
         };
 
         // Store rust-std tree manifest
-        let rust_std_tree_json = facet_json::to_string(&rust_std_tree);
+        let rust_std_tree_json = facet_json::to_string(&rust_std_tree)
+            .expect("rust-std tree serialization must succeed");
         let rust_std_tree_hash = self.put_blob(rust_std_tree_json.into_bytes()).await;
 
         tracing::info!(
-            rust_std_tree = %rust_std_tree_hash.short_hex(),
+            rust_std_tree = %rust_std_tree_hash,
             files = rust_std_tree.entries.len(),
             unique_blobs = rust_std_tree.unique_blobs,
             total_bytes = rust_std_tree.total_size_bytes,
@@ -372,7 +372,7 @@ impl CassService {
             kind: ToolchainKind::Rust,
             spec_key,
             toolchain_id: toolchain_id.0,
-            created_at: Timestamp::now().in_tz("UTC").unwrap().datetime(),
+            created_at: Timestamp::now().in_tz("UTC").unwrap().to_string(),
             rust_manifest_date: Some(manifest.date.clone()),
             rust_version: Some(manifest.rustc.version.clone()),
             zig_version: None,
@@ -403,17 +403,13 @@ impl CassService {
 
         // Publish spec → manifest_hash mapping
         if let Err(e) = self.publish_spec_mapping(&spec_key, &manifest_hash).await {
-            tracing::warn!(
-                "failed to publish spec mapping for {}: {}",
-                spec_key.short_hex(),
-                e
-            );
+            tracing::warn!("failed to publish spec mapping for {}: {}", spec_key, e);
         }
 
         tracing::info!(
-            spec_key = %spec_key.short_hex(),
-            toolchain_id = %toolchain_id.short_hex(),
-            manifest_hash = %manifest_hash.short_hex(),
+            spec_key = %spec_key,
+            toolchain_id = %toolchain_id,
+            manifest_hash = %manifest_hash,
             "stored Rust toolchain in CAS"
         );
 
@@ -427,14 +423,229 @@ impl CassService {
     }
 
     /// Ensure a Zig toolchain exists in CAS (internal helper, not an RPC method).
-    pub async fn ensure_zig_toolchain(&self, _spec: ZigToolchainSpec) -> EnsureToolchainResult {
-        // TODO: Implement Zig toolchain acquisition
+    #[tracing::instrument(skip(self), fields(spec_key = tracing::field::Empty))]
+    pub async fn ensure_zig_toolchain(&self, spec: ZigToolchainSpec) -> EnsureToolchainResult {
+        // Compute spec_key
+        let spec_key = match spec.spec_key() {
+            Ok(k) => {
+                tracing::Span::current().record("spec_key", k.to_string());
+                k
+            }
+            Err(e) => {
+                return EnsureToolchainResult {
+                    spec_key: None,
+                    toolchain_id: None,
+                    manifest_hash: None,
+                    status: ToolchainEnsureStatus::Failed,
+                    error: Some(format!("invalid spec: {}", e)),
+                };
+            }
+        };
+
+        let this = self.clone();
+        let this2 = self.clone();
+
+        self.toolchain_manager
+            .ensure(
+                spec_key,
+                async move || this.lookup_spec(&spec_key).await,
+                async move || this2.acquire_zig_toolchain_impl(spec_key, &spec).await,
+            )
+            .await
+    }
+
+    async fn acquire_zig_toolchain_impl(
+        &self,
+        spec_key: ToolchainSpecKey,
+        spec: &ZigToolchainSpec,
+    ) -> EnsureToolchainResult {
+        // Convert spec to vx_toolchain types
+        let version = vx_toolchain::zig::ZigVersion::new(&spec.version);
+        let platform = vx_toolchain::zig::HostPlatform {
+            os: if spec.host_platform.contains("macos") {
+                "macos"
+            } else if spec.host_platform.contains("linux") {
+                "linux"
+            } else if spec.host_platform.contains("windows") {
+                "windows"
+            } else {
+                return EnsureToolchainResult {
+                    spec_key: Some(spec_key),
+                    toolchain_id: None,
+                    manifest_hash: None,
+                    status: ToolchainEnsureStatus::Failed,
+                    error: Some(format!("unsupported platform: {}", spec.host_platform)),
+                };
+            }
+            .to_string(),
+            arch: if spec.host_platform.contains("x86_64") {
+                "x86_64"
+            } else if spec.host_platform.contains("aarch64") {
+                "aarch64"
+            } else {
+                return EnsureToolchainResult {
+                    spec_key: Some(spec_key),
+                    toolchain_id: None,
+                    manifest_hash: None,
+                    status: ToolchainEnsureStatus::Failed,
+                    error: Some(format!("unsupported platform: {}", spec.host_platform)),
+                };
+            }
+            .to_string(),
+        };
+
+        // Download and extract Zig toolchain
+        let acquired =
+            match vx_toolchain::zig::acquire_zig_toolchain(version.clone(), platform.clone()).await
+            {
+                Ok(a) => a,
+                Err(e) => {
+                    return EnsureToolchainResult {
+                        spec_key: Some(spec_key),
+                        toolchain_id: None,
+                        manifest_hash: None,
+                        status: ToolchainEnsureStatus::Failed,
+                        error: Some(format!("failed to acquire Zig toolchain: {}", e)),
+                    };
+                }
+            };
+
+        // Store zig executable as tree manifest (single-file tree)
+        let zig_exe_blob_hash = self.put_blob(acquired.zig_exe_contents.clone()).await;
+        let mut zig_exe_tree = vx_cass_proto::TreeManifest::new();
+        zig_exe_tree.add_file(
+            "zig".to_string(),
+            zig_exe_blob_hash,
+            acquired.zig_exe_contents.len() as u64,
+            true, // executable
+        );
+        zig_exe_tree.finalize();
+        let zig_exe_tree_json = facet_json::to_string(&zig_exe_tree)
+            .expect("zig executable tree serialization must succeed");
+        let zig_exe_hash = self.put_blob(zig_exe_tree_json.into_bytes()).await;
+
+        // Extract lib tarball to tree manually
+        // First collect all entries synchronously (tar::Archive is not Send)
+        // Note: Paths in the tarball are relative (e.g. "std/std.zig"), but Zig expects them under "lib/"
+        let mut lib_files: Vec<(String, Vec<u8>)> = Vec::new();
+        {
+            let mut archive = tar::Archive::new(std::io::Cursor::new(&acquired.lib_tarball));
+
+            for entry_result in archive
+                .entries()
+                .map_err(|e| format!("tar entries: {}", e))
+                .unwrap()
+            {
+                let mut entry = entry_result
+                    .map_err(|e| format!("tar entry: {}", e))
+                    .unwrap();
+                let path = entry
+                    .path()
+                    .map_err(|e| format!("entry path: {}", e))
+                    .unwrap();
+                let path_str = path.to_string_lossy().to_string();
+
+                // Prepend "lib/" to all paths since Zig expects lib directory
+                let full_path = format!("lib/{}", path_str);
+
+                // Read entry data
+                let mut data = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut data)
+                    .map_err(|e| format!("read entry: {}", e))
+                    .unwrap();
+
+                if !data.is_empty() {
+                    lib_files.push((full_path, data));
+                }
+            }
+        } // archive dropped here
+
+        // Now upload blobs asynchronously and build tree
+        let mut lib_tree = vx_cass_proto::TreeManifest::new();
+        for (path_str, data) in lib_files {
+            let blob_hash = self.put_blob(data.clone()).await;
+            lib_tree.add_file(
+                path_str,
+                blob_hash,
+                data.len() as u64,
+                false, // lib files are not executable
+            );
+        }
+
+        lib_tree.finalize();
+
+        // Store lib tree manifest
+        let lib_tree_json =
+            facet_json::to_string(&lib_tree).expect("zig lib tree serialization must succeed");
+        let lib_hash = self.put_blob(lib_tree_json.into_bytes()).await;
+
+        // Cleanup extraction directory
+        if let Err(e) = acquired.cleanup() {
+            tracing::warn!("failed to cleanup Zig extraction directory: {}", e);
+        }
+
+        let toolchain_id = acquired.id.0;
+
+        tracing::info!(
+            zig_exe = %zig_exe_hash,
+            lib = %lib_hash,
+            toolchain_id = %toolchain_id,
+            "stored Zig toolchain blobs in CAS"
+        );
+
+        // Create toolchain manifest
+        let toolchain_manifest = ToolchainManifest {
+            schema_version: TOOLCHAIN_MANIFEST_SCHEMA_VERSION,
+            kind: ToolchainKind::Zig,
+            spec_key,
+            toolchain_id,
+            created_at: Timestamp::now().in_tz("UTC").unwrap().to_string(),
+            rust_manifest_date: None,
+            rust_version: None,
+            zig_version: Some(version.version.clone()),
+            components: vec![
+                ToolchainComponentTree {
+                    name: "zig-exe".to_string(),
+                    target: Some(platform.to_string()),
+                    tree_manifest: zig_exe_hash,
+                    sha256: String::new(), // Zig doesn't provide checksums
+                    total_size_bytes: acquired.zig_exe_contents.len() as u64,
+                    file_count: 1,
+                    unique_blobs: 1,
+                },
+                ToolchainComponentTree {
+                    name: "zig-lib".to_string(),
+                    target: Some(platform.to_string()),
+                    tree_manifest: lib_hash,
+                    sha256: String::new(),
+                    total_size_bytes: acquired.lib_tarball.len() as u64,
+                    file_count: 1, // It's a tarball, many files inside
+                    unique_blobs: 1,
+                },
+            ],
+        };
+
+        // Store manifest
+        let manifest_hash = self.put_toolchain_manifest(&toolchain_manifest).await;
+
+        // Publish spec → manifest_hash mapping
+        if let Err(e) = self.publish_spec_mapping(&spec_key, &manifest_hash).await {
+            tracing::warn!("failed to publish spec mapping for {}: {}", spec_key, e);
+        }
+
+        tracing::info!(
+            spec_key = %spec_key,
+            toolchain_id = %toolchain_id,
+            manifest_hash = %manifest_hash,
+            "stored Zig toolchain in CAS"
+        );
+
         EnsureToolchainResult {
-            spec_key: None,
-            toolchain_id: None,
-            manifest_hash: None,
-            status: ToolchainEnsureStatus::Failed,
-            error: Some("Zig toolchain acquisition not yet implemented".to_string()),
+            spec_key: Some(spec_key),
+            toolchain_id: Some(toolchain_id),
+            manifest_hash: Some(manifest_hash),
+            status: ToolchainEnsureStatus::Downloaded,
+            error: None,
         }
     }
 }

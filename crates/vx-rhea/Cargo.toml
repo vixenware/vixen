@@ -4,12 +4,16 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+# fs-kitty VFS protocol
+fs-kitty-proto = { path = "../../../fs-kitty/crates/fs-kitty-proto" }
+
 tracing-subscriber = { workspace = true }
 facet = { workspace = true }
 thiserror = { workspace = true }
 facet-json = { workspace = true }
 facet-cargo-toml = { workspace = true }
-rapace = { workspace = true }
+roam = { workspace = true }
+roam-stream = { workspace = true }
 tokio = { workspace = true }
 camino = { workspace = true }
 eyre = { workspace = true }

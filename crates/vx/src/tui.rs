@@ -9,7 +9,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{RwLock, oneshot};
 use tracing_subscriber::Layer;
 use vx_aether_proto::ActionType;
 
@@ -55,7 +55,9 @@ impl TuiState {
     }
 
     fn pending(&self) -> usize {
-        self.total.saturating_sub(self.completed).saturating_sub(self.active.len())
+        self.total
+            .saturating_sub(self.completed)
+            .saturating_sub(self.active.len())
     }
 }
 
@@ -165,8 +167,7 @@ impl TuiHandle {
             .expect("valid template")
             .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ");
 
-        let empty_style = ProgressStyle::with_template("")
-            .expect("valid template");
+        let empty_style = ProgressStyle::with_template("").expect("valid template");
 
         let action_bars: Vec<_> = (0..3)
             .map(|_| {
@@ -178,8 +179,7 @@ impl TuiHandle {
             .collect();
 
         // Log display bars (10 for scrolling buffer)
-        let log_style = ProgressStyle::with_template("  {msg}")
-            .expect("valid template");
+        let log_style = ProgressStyle::with_template("  {msg}").expect("valid template");
 
         let log_bars: Vec<_> = (0..10)
             .map(|_| {

@@ -322,10 +322,7 @@ pub async fn cache_key_cc_compile<DB: Db>(
     let profile = config.profile(db)?;
 
     // Build TU key for looking up discovered deps
-    let tu_key = format!(
-        "cc:{}:{}:{}",
-        &*source_path, &*profile, &*target_triple
-    );
+    let tu_key = format!("cc:{}:{}:{}", &*source_path, &*profile, &*target_triple);
 
     // Get discovered deps (may not exist on first compile)
     let deps_hash = match db.discovered_deps_keys().intern(tu_key.clone()) {

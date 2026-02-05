@@ -1,6 +1,6 @@
 //! vx-cass - Content-Addressed Storage daemon
 //!
-//! Provides CAS, toolchain, and registry services over TCP or Unix sockets using rapace.
+//! Provides CAS, toolchain, and registry services over TCP or Unix sockets using Roam.
 
 pub(crate) mod hash_reader;
 pub(crate) mod http;
@@ -14,8 +14,9 @@ use crate::toolchain::ToolchainManager;
 use crate::types::{CassService, CassServiceInner};
 use camino::Utf8PathBuf;
 use eyre::Result;
+use roam_stream::{HandshakeConfig, accept};
 use std::sync::Arc;
-use vx_cass_proto::CassServer;
+use vx_cass_proto::CassDispatcher;
 use vx_cass_proto::{
     Blake3Hash, BlobHash, CacheKey, ManifestHash, ToolchainManifest, ToolchainSpecKey,
 };
@@ -108,14 +109,14 @@ async fn async_main() -> Result<()> {
         tokio::spawn(async move {
             tracing::debug!("New connection from {}", peer_addr);
 
-            // Create transport from stream
-            let transport = rapace::Transport::stream(stream);
-
-            // Serve the oort service
-            // Note: CassService implements the CAS trait, which is the only rapace service
-            // Toolchain and registry are internal implementation details, not separate services
-            let server = CassServer::new(cass);
-            if let Err(e) = server.serve(transport).await {
+            let dispatcher = CassDispatcher::new(cass);
+            let Ok((_handle, _incoming, driver)) =
+                accept(stream, HandshakeConfig::default(), dispatcher).await
+            else {
+                tracing::warn!("Handshake failed for {}", peer_addr);
+                return;
+            };
+            if let Err(e) = driver.run().await {
                 tracing::warn!("Connection error from {}: {}", peer_addr, e);
             }
 
@@ -156,6 +157,18 @@ impl CassService {
     fn blob_path(&self, hash: &BlobHash) -> Utf8PathBuf {
         let hex = hash.to_hex();
         self.blobs_dir().join(&hex[..2]).join(&hex)
+    }
+
+    /// Internal blob write helper for non-RPC code paths.
+    pub(crate) async fn put_blob(&self, data: Vec<u8>) -> BlobHash {
+        let hash = BlobHash::from_bytes(&data);
+        let dest = self.blob_path(&hash);
+
+        if let Err(e) = atomic_write(&dest, &data).await {
+            tracing::warn!("failed to write blob to {}: {}", dest, e);
+        }
+
+        hash
     }
 
     fn manifest_path(&self, hash: &ManifestHash) -> Utf8PathBuf {
@@ -238,14 +251,34 @@ impl CassService {
 
     /// Store a ToolchainManifest using the manifest storage path.
     async fn put_toolchain_manifest(&self, manifest: &ToolchainManifest) -> Blake3Hash {
-        let json = facet_json::to_string(manifest);
+        let json =
+            facet_json::to_string(manifest).expect("toolchain manifest serialization must succeed");
         let hash = Blake3Hash::from_bytes(json.as_bytes());
         let path = self.manifest_path(&hash);
+
+        tracing::debug!(
+            manifest_hash = %hash,
+            path = %path,
+            exists = path.exists(),
+            "put_toolchain_manifest: preparing to write"
+        );
 
         if !path.exists() {
             if let Err(e) = atomic_write(&path, json.as_bytes()).await {
                 tracing::warn!("failed to write toolchain manifest to {}: {}", path, e);
+            } else {
+                tracing::debug!(
+                    manifest_hash = %hash,
+                    path = %path,
+                    "put_toolchain_manifest: wrote successfully"
+                );
             }
+        } else {
+            tracing::debug!(
+                manifest_hash = %hash,
+                path = %path,
+                "put_toolchain_manifest: already exists, skipping write"
+            );
         }
 
         hash

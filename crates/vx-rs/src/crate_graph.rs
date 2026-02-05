@@ -13,6 +13,7 @@
 //! 2. **CrateId uses source-aware identity**:
 //!    - Path crates: hash of `(workspace_rel, package_name)`
 //!    - Registry crates: hash of `(name, version, checksum)`
+//!
 //!    This ensures stable cache keys regardless of checkout location.
 //!
 //! 3. **All paths are workspace-relative**: No absolute paths leak into cache keys
@@ -23,9 +24,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use camino::{Utf8Path, Utf8PathBuf};
 use miette::Diagnostic;
 use thiserror::Error;
+use vx_cass_proto::Blake3Hash;
 use vx_manifest::lockfile::{CargoLock, CargoLockExt, LockfileError, ReachablePackages};
 use vx_manifest::{Edition, Manifest, ManifestError};
-use vx_cass_proto::Blake3Hash;
 
 /// Errors during crate graph construction
 #[derive(Debug, Error)]
@@ -235,7 +236,7 @@ impl CrateId {
 
 impl std::fmt::Display for CrateId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.short_hex())
+        write!(f, "{}", self.0)
     }
 }
 
@@ -356,7 +357,7 @@ impl CrateGraph {
 
             // Queue dependencies
             for dep in &manifest.deps {
-                let dep_dir = crate_dir.join(&**dep.path);
+                let dep_dir = crate_dir.join(&dep.path.value);
                 let dep_dir = dep_dir.canonicalize_utf8().map_err(|e| {
                     CrateGraphError::CanonicalizationError {
                         path: dep_dir.clone(),
@@ -401,7 +402,7 @@ impl CrateGraph {
             let source = CrateSource::Path {
                 workspace_rel: workspace_rel.clone(),
             };
-            let id = CrateId::for_path(&workspace_rel, &&**manifest.name);
+            let id = CrateId::for_path(&workspace_rel, &manifest.name.value);
 
             let node = CrateNode {
                 id,
@@ -428,12 +429,13 @@ impl CrateGraph {
             let mut deps: Vec<DepEdge> = Vec::new();
 
             for dep in &manifest.deps {
-                let dep_dir = crate_dir.join(&**dep.path).canonicalize_utf8().map_err(|e| {
-                    CrateGraphError::CanonicalizationError {
-                        path: crate_dir.join(&**dep.path),
+                let dep_dir = crate_dir
+                    .join(&dep.path.value)
+                    .canonicalize_utf8()
+                    .map_err(|e| CrateGraphError::CanonicalizationError {
+                        path: crate_dir.join(&dep.path.value),
                         source: e,
-                    }
-                })?;
+                    })?;
 
                 let dep_id =
                     dir_to_id
@@ -547,7 +549,7 @@ impl CrateGraph {
 
             // Queue path dependencies
             for dep in &manifest.deps {
-                let dep_dir = crate_dir.join(&**dep.path);
+                let dep_dir = crate_dir.join(&dep.path.value);
                 let dep_dir = dep_dir.canonicalize_utf8().map_err(|e| {
                     CrateGraphError::CanonicalizationError {
                         path: dep_dir.clone(),
@@ -582,7 +584,7 @@ impl CrateGraph {
             };
 
             let lockfile = CargoLock::from_path(&lockfile_path)?;
-            let root_name = manifests[&invocation_dir].name.as_str();
+            let root_name = manifests[&invocation_dir].name.value.as_str();
             let reachable = lockfile.compute_reachable(root_name)?;
 
             // Build list of registry crates to materialize
@@ -626,7 +628,7 @@ impl CrateGraph {
             let source = CrateSource::Path {
                 workspace_rel: workspace_rel.clone(),
             };
-            let id = CrateId::for_path(&workspace_rel, &&**manifest.name);
+            let id = CrateId::for_path(&workspace_rel, &manifest.name.value);
 
             let node = CrateNode {
                 id,
@@ -693,15 +695,15 @@ impl CrateGraph {
                 let mut deps: Vec<DepEdge> = Vec::new();
                 for dep_spec in &pkg.dependencies {
                     let dep_name = dep_spec.split_whitespace().next().unwrap_or(dep_spec);
-                    if let Some(dep_pkg) = reachable.find_dependency(dep_spec) {
-                        if dep_pkg.is_registry() {
-                            let dep_key = (dep_pkg.name.clone(), dep_pkg.version.clone());
-                            if let Some(&dep_id) = registry_id_map.get(&dep_key) {
-                                deps.push(DepEdge {
-                                    extern_name: dep_name.replace('-', "_"),
-                                    crate_id: dep_id,
-                                });
-                            }
+                    if let Some(dep_pkg) = reachable.find_dependency(dep_spec)
+                        && dep_pkg.is_registry()
+                    {
+                        let dep_key = (dep_pkg.name.clone(), dep_pkg.version.clone());
+                        if let Some(&dep_id) = registry_id_map.get(&dep_key) {
+                            deps.push(DepEdge {
+                                extern_name: dep_name.replace('-', "_"),
+                                crate_id: dep_id,
+                            });
                         }
                     }
                 }
@@ -717,12 +719,13 @@ impl CrateGraph {
 
             // Path deps (local crates)
             for dep in &manifest.deps {
-                let dep_dir = crate_dir.join(&**dep.path).canonicalize_utf8().map_err(|e| {
-                    CrateGraphError::CanonicalizationError {
-                        path: crate_dir.join(&**dep.path),
+                let dep_dir = crate_dir
+                    .join(&dep.path.value)
+                    .canonicalize_utf8()
+                    .map_err(|e| CrateGraphError::CanonicalizationError {
+                        path: crate_dir.join(&dep.path.value),
                         source: e,
-                    }
-                })?;
+                    })?;
 
                 let dep_id =
                     dir_to_id
@@ -746,27 +749,26 @@ impl CrateGraph {
             }
 
             // Version deps (registry crates) - resolve via lockfile
-            if let Some(ref reachable) = reachable_packages {
-                if let Some(path_pkg) = reachable.find_path_package(&&**manifest.name) {
-                    for version_dep in &manifest.version_deps {
-                        // Find this dep in the lockfile's dependency list for this package
-                        for dep_spec in &path_pkg.dependencies {
-                            let dep_name = dep_spec.split_whitespace().next().unwrap_or(dep_spec);
-                            if dep_name == &**version_dep.name {
-                                if let Some(dep_pkg) = reachable.find_dependency(dep_spec) {
-                                    if dep_pkg.is_registry() {
-                                        let dep_key =
-                                            (dep_pkg.name.clone(), dep_pkg.version.clone());
-                                        if let Some(&dep_id) = registry_id_map.get(&dep_key) {
-                                            deps.push(DepEdge {
-                                                extern_name: version_dep.name.value.replace('-', "_"),
-                                                crate_id: dep_id,
-                                            });
-                                        }
-                                    }
+            if let Some(ref reachable) = reachable_packages
+                && let Some(path_pkg) = reachable.find_path_package(&manifest.name.value)
+            {
+                for version_dep in &manifest.version_deps {
+                    // Find this dep in the lockfile's dependency list for this package
+                    for dep_spec in &path_pkg.dependencies {
+                        let dep_name = dep_spec.split_whitespace().next().unwrap_or(dep_spec);
+                        if dep_name == version_dep.name.value {
+                            if let Some(dep_pkg) = reachable.find_dependency(dep_spec)
+                                && dep_pkg.is_registry()
+                            {
+                                let dep_key = (dep_pkg.name.clone(), dep_pkg.version.clone());
+                                if let Some(&dep_id) = registry_id_map.get(&dep_key) {
+                                    deps.push(DepEdge {
+                                        extern_name: version_dep.name.value.replace('-', "_"),
+                                        crate_id: dep_id,
+                                    });
                                 }
-                                break;
                             }
+                            break;
                         }
                     }
                 }
@@ -844,7 +846,7 @@ impl CrateGraph {
             // Determine lib path
             let lib_path = if let Some(ref lib) = manifest.lib {
                 if let Some(ref path) = lib.path {
-                    crate_dir.join(&**path)
+                    crate_dir.join(&path.value)
                 } else {
                     crate_dir.join("src/lib.rs")
                 }
@@ -854,14 +856,13 @@ impl CrateGraph {
             let crate_root_rel = normalize_path(&lib_path, &self.workspace_root)?;
 
             // Extract package name
-            let package_name = package
-                .name
-                .clone()
-                .ok_or({ CrateGraphError::ManifestError(ManifestError::MissingField("name")) })?;
+            let package_name = package.name.clone().ok_or(CrateGraphError::ManifestError(
+                ManifestError::MissingField("name"),
+            ))?;
 
             // Extract edition, converting from facet_cargo_toml::Edition to vx_manifest::Edition
             let edition = match &package.edition {
-                Some(facet_cargo_toml::EditionOrWorkspace::Edition(e)) => match **e {
+                Some(facet_cargo_toml::EditionOrWorkspace::Edition(e)) => match e.value {
                     facet_cargo_toml::Edition::E2015 => Edition::E2015,
                     facet_cargo_toml::Edition::E2018 => Edition::E2018,
                     facet_cargo_toml::Edition::E2021 => Edition::E2021,
@@ -963,14 +964,14 @@ impl CrateGraph {
                     // Find this path crate in the lockfile to get its dependency list.
                     // Use find_path_package to ensure we get the path entry, not a registry
                     // crate with the same name.
-                    if let Some(path_pkg) = reachable.find_path_package(&&**manifest.name) {
+                    if let Some(path_pkg) = reachable.find_path_package(&manifest.name.value) {
                         for version_dep in &manifest.version_deps {
                             // Search in the path crate's lockfile dependencies for the correct version
                             for dep_spec in &path_pkg.dependencies {
                                 // dep_spec format: "name", "name version", or "name version (source)"
                                 let dep_name =
                                     dep_spec.split_whitespace().next().unwrap_or(dep_spec);
-                                if dep_name == &**version_dep.name {
+                                if dep_name == version_dep.name.value {
                                     // Found the matching dep - resolve it via the lockfile
                                     if let Some(dep_pkg) = reachable.find_dependency(dep_spec)
                                         && dep_pkg.is_registry()
@@ -979,7 +980,10 @@ impl CrateGraph {
                                             (dep_pkg.name.clone(), dep_pkg.version.clone());
                                         if let Some(&dep_id) = registry_id_map.get(&dep_key) {
                                             node.deps.push(DepEdge {
-                                                extern_name: version_dep.name.value.replace('-', "_"),
+                                                extern_name: version_dep
+                                                    .name
+                                                    .value
+                                                    .replace('-', "_"),
                                                 crate_id: dep_id,
                                             });
                                         }

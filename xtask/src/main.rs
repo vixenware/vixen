@@ -22,12 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn install_all() -> Result<(), Box<dyn std::error::Error>> {
-    let binaries = vec![
-        "vx",
-        "vx-cass",
-        "vx-rhea",
-        "vx-aether",
-    ];
+    let binaries = vec!["vx", "vx-cass", "vx-rhea", "vx-aether"];
 
     println!("Building all vixen binaries in release mode...\n");
 

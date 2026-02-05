@@ -1,7 +1,7 @@
 //! Simple test client to verify vx-cass TCP connectivity
 
 use eyre::Result;
-use std::sync::Arc;
+use roam_stream::{CobsFramed, HandshakeConfig, NoDispatcher, initiate_framed};
 use tokio::net::TcpStream;
 use vx_cass_proto::CassClient;
 
@@ -24,19 +24,18 @@ async fn async_main() -> Result<()> {
     let stream = TcpStream::connect(addr).await?;
     tracing::info!("Connected!");
 
-    // Create rapace transport and session
-    let session = Arc::new(rapace::RpcSession::new(rapace::Transport::stream(stream)));
+    let framed = CobsFramed::new(stream);
+    let (handle, _incoming, driver) =
+        initiate_framed(framed, HandshakeConfig::default(), NoDispatcher).await?;
 
-    // Spawn session runner to handle incoming frames
-    let session_runner = session.clone();
     tokio::spawn(async move {
-        if let Err(e) = session_runner.run().await {
+        if let Err(e) = driver.run().await {
             tracing::error!("Session error: {}", e);
         }
     });
 
     // Create CAS client
-    let client = CassClient::new(session.clone());
+    let client = CassClient::new(handle.clone());
 
     // Test: put a blob
     tracing::info!("Testing put_blob...");
@@ -63,8 +62,8 @@ async fn async_main() -> Result<()> {
     let exists = client.has_blob(blob_hash).await?;
     tracing::info!("Blob exists: {}", exists);
 
-    // Close connection
-    session.close();
+    // Close connection by dropping the handle
+    drop(handle);
     tracing::info!("Done!");
 
     Ok(())

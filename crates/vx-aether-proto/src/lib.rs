@@ -53,10 +53,16 @@ pub struct BuildResult {
 pub enum ActionType {
     /// Compiling a Rust crate
     CompileRust(String),
-    /// Acquiring toolchain
+    /// Acquiring Rust toolchain
     AcquireToolchain,
+    /// Acquiring Zig toolchain
+    AcquireZigToolchain(String), // version
     /// Acquiring registry crate
     AcquireRegistryCrate(String, String), // name, version
+    /// Compiling a C source file
+    CompileC(String), // source path
+    /// Linking C binary
+    LinkC(String), // binary name
     /// Ingesting source tree to CAS
     IngestSource(String),
 }
@@ -67,16 +73,19 @@ impl ActionType {
         match self {
             ActionType::CompileRust(name) => format!("compile {}", name),
             ActionType::AcquireToolchain => "acquire toolchain".to_string(),
+            ActionType::AcquireZigToolchain(version) => format!("acquire zig {}", version),
             ActionType::AcquireRegistryCrate(name, version) => {
                 format!("acquire {}@{}", name, version)
             }
+            ActionType::CompileC(source) => format!("compile {}", source),
+            ActionType::LinkC(name) => format!("link {}", name),
             ActionType::IngestSource(name) => format!("ingest {}", name),
         }
     }
 }
 
 /// The daemon service trait
-#[rapace::service]
+#[roam::service]
 pub trait Aether {
     /// Get service version information (for health checks and compatibility)
     async fn version(&self) -> vx_cass_proto::ServiceVersion;
@@ -89,7 +98,7 @@ pub trait Aether {
 }
 
 /// Progress reporting service (implemented by vx CLI, called by aether)
-#[rapace::service]
+#[roam::service]
 pub trait ProgressListener {
     /// Set the total number of actions
     async fn set_total(&self, total: u64);
@@ -107,7 +116,7 @@ pub trait ProgressListener {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapace::facet_format_postcard::{from_slice, to_vec};
+    use facet_postcard::{from_slice, to_vec};
 
     #[test]
     fn test_build_result_roundtrip() {
@@ -197,7 +206,7 @@ mod tests {
         message: String,
         cached: bool,
         duration_ms: u64,
-        output_path: Option<Utf8PathBuf>,  // Field 5 of 9
+        output_path: Option<Utf8PathBuf>, // Field 5 of 9
         error: Option<String>,
         total_actions: u64,
         cache_hits: u64,
@@ -211,7 +220,7 @@ mod tests {
         message: String,
         cached: bool,
         duration_ms: u64,
-        output_path: Option<Utf8PathBuf>,  // Field 5 of 9
+        output_path: Option<Utf8PathBuf>, // Field 5 of 9
         error: Option<String>,
         total_actions: usize,
         cache_hits: usize,

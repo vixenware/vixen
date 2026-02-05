@@ -3,8 +3,8 @@
 //! This module implements the execution engine that schedules and runs actions
 //! from the action graph with optimal parallelism while respecting dependencies.
 
-use petgraph::graph::NodeIndex;
 use petgraph::Direction::Incoming;
+use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
@@ -12,7 +12,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::action_graph::{Action, ActionGraph};
 use crate::error::AetherError;
-use vx_aether_proto::{ProgressListenerClient, ActionType};
+use vx_aether_proto::{ActionType, ProgressListenerClient};
 use vx_cass_proto::{Blake3Hash, CassClient};
 use vx_rhea_proto::RheaClient;
 use vx_rs::CrateId;
@@ -59,6 +59,34 @@ pub enum ActionResult {
         output_manifest: Blake3Hash,
         /// Path to materialized bin (if this was a bin crate)
         bin_output: Option<camino::Utf8PathBuf>,
+        /// Whether this was a cache hit
+        was_cached: bool,
+    },
+
+    /// Zig toolchain acquired successfully
+    ZigToolchainAcquired {
+        /// Toolchain ID
+        toolchain_id: Blake3Hash,
+        /// Toolchain manifest hash
+        manifest_hash: Blake3Hash,
+        /// Whether this was a cache hit
+        was_cached: bool,
+    },
+
+    /// C object file compiled successfully
+    CObjectCompiled {
+        /// Output object file hash
+        object_hash: Blake3Hash,
+        /// Whether this was a cache hit
+        was_cached: bool,
+    },
+
+    /// C binary linked successfully
+    CBinaryLinked {
+        /// Output binary hash
+        binary_hash: Blake3Hash,
+        /// Path to materialized binary
+        binary_path: camino::Utf8PathBuf,
         /// Whether this was a cache hit
         was_cached: bool,
     },
@@ -110,13 +138,13 @@ pub struct Executor {
     message_rx: tokio::sync::mpsc::UnboundedReceiver<ExecutorMessage>,
 
     /// Progress listener client (for reporting progress to vx CLI)
-    progress_listener: Option<Arc<ProgressListenerClient>>,
+    progress_listener: Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>,
 
     /// CAS client (CAS)
-    cas: Arc<CassClient>,
+    cas: Arc<CassClient<roam_stream::ConnectionHandle>>,
 
     /// Rhea client for execution
-    exec: Arc<RheaClient>,
+    exec: Arc<RheaClient<roam_stream::ConnectionHandle>>,
 
     /// Picante database (Arc-shareable with internal synchronization)
     db: Arc<crate::db::Database>,
@@ -141,9 +169,9 @@ impl Executor {
     /// Create a new executor
     pub fn new(
         graph: ActionGraph,
-        progress_listener: Option<Arc<ProgressListenerClient>>,
-        cas: Arc<CassClient>,
-        exec: Arc<RheaClient>,
+        progress_listener: Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>,
+        cas: Arc<CassClient<roam_stream::ConnectionHandle>>,
+        exec: Arc<RheaClient<roam_stream::ConnectionHandle>>,
         db: Arc<crate::db::Database>,
         workspace_root: camino::Utf8PathBuf,
         target_triple: String,
@@ -164,7 +192,9 @@ impl Executor {
             let action = &graph.graph[node_idx].action;
             trace!(
                 "EXECUTOR NEW: node {:?} action={} dep_count={}",
-                node_idx, action.display_name(), dep_count
+                node_idx,
+                action.display_name(),
+                dep_count
             );
             remaining_deps.insert(node_idx, dep_count);
 
@@ -172,7 +202,8 @@ impl Executor {
             if dep_count == 0 {
                 info!(
                     "EXECUTOR NEW: READY node {:?} action={}",
-                    node_idx, action.display_name()
+                    node_idx,
+                    action.display_name()
                 );
                 ready_queue.push_back(node_idx);
             }
@@ -189,7 +220,9 @@ impl Executor {
             let action = &graph.graph[node_idx].action;
             info!(
                 "EXECUTOR NEW: ready[{}] = {:?} {}",
-                i, node_idx, action.display_name()
+                i,
+                node_idx,
+                action.display_name()
             );
         }
 
@@ -236,13 +269,22 @@ impl Executor {
             while let Some(node_idx) = self.ready_queue.pop_front() {
                 info!("EXECUTE: spawning action for node {:?}", node_idx);
                 self.states.insert(node_idx, ActionState::Running);
-                let permit = self.concurrency_limit.clone().acquire_owned().await.unwrap();
+                let permit = self
+                    .concurrency_limit
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .unwrap();
                 self.spawn_action(node_idx, permit);
             }
 
             // Check if we're done
             let total = self.graph.graph.node_count();
-            let completed = self.states.values().filter(|&&s| s == ActionState::Completed).count();
+            let completed = self
+                .states
+                .values()
+                .filter(|&&s| s == ActionState::Completed)
+                .count();
             if completed == total && total > 0 {
                 info!("EXECUTE: all {} actions completed", total);
                 break;
@@ -258,7 +300,9 @@ impl Executor {
                             self.results.write().await.insert(node_idx, action_result);
 
                             // Decrement dependency counts and add newly ready actions to queue
-                            for dependent_idx in self.graph.graph.neighbors_directed(node_idx, Incoming) {
+                            for dependent_idx in
+                                self.graph.graph.neighbors_directed(node_idx, Incoming)
+                            {
                                 let count = self.remaining_deps.get_mut(&dependent_idx).unwrap();
                                 *count -= 1;
                                 if *count == 0 {
@@ -292,7 +336,11 @@ impl Executor {
             let action = &self.graph.graph[*node_idx].action;
 
             match result {
-                ActionResult::ToolchainAcquired { was_cached, manifest_hash, .. } => {
+                ActionResult::ToolchainAcquired {
+                    was_cached,
+                    manifest_hash,
+                    ..
+                } => {
                     if *was_cached {
                         cache_hits += 1;
                     } else {
@@ -326,7 +374,12 @@ impl Executor {
                         diagnostics: vx_report::DiagnosticsRecord::default(),
                     });
                 }
-                ActionResult::RegistryCrateAcquired { name, version, manifest_hash, was_cached } => {
+                ActionResult::RegistryCrateAcquired {
+                    name,
+                    version,
+                    manifest_hash,
+                    was_cached,
+                } => {
                     if *was_cached {
                         cache_hits += 1;
                     } else {
@@ -348,12 +401,10 @@ impl Executor {
                             }
                         },
                         timing: vx_report::NodeTiming::default(),
-                        inputs: vec![
-                            vx_report::InputRecord {
-                                label: "crate".to_string(),
-                                value: format!("{}:{}", name, version),
-                            },
-                        ],
+                        inputs: vec![vx_report::InputRecord {
+                            label: "crate".to_string(),
+                            value: format!("{}:{}", name, version),
+                        }],
                         deps: vec![],
                         outputs: vec![vx_report::OutputRecord {
                             logical: "source".to_string(),
@@ -397,7 +448,11 @@ impl Executor {
 
                     // Generate node report for crate compilation
                     node_reports.push(vx_report::NodeReport {
-                        node_id: format!("compile-{}:{}", crate_type_str, action.display_name().replace("compile ", "")),
+                        node_id: format!(
+                            "compile-{}:{}",
+                            crate_type_str,
+                            action.display_name().replace("compile ", "")
+                        ),
                         kind,
                         cache_key: crate_id.to_string(),
                         cache: if *was_cached {
@@ -410,18 +465,131 @@ impl Executor {
                             }
                         },
                         timing: vx_report::NodeTiming::default(),
-                        inputs: vec![
-                            vx_report::InputRecord {
-                                label: "source_closure".to_string(),
-                                value: crate_id.to_string(),
-                            },
-                        ],
+                        inputs: vec![vx_report::InputRecord {
+                            label: "source_closure".to_string(),
+                            value: crate_id.to_string(),
+                        }],
                         deps: vec![],
                         outputs: vec![vx_report::OutputRecord {
                             logical: crate_type_str,
                             manifest: Some(output_manifest.to_hex()),
                             blob: None,
                             path: bin_path.as_ref().map(|p| p.to_string()),
+                        }],
+                        invocation: None,
+                        diagnostics: vx_report::DiagnosticsRecord::default(),
+                    });
+                }
+                ActionResult::ZigToolchainAcquired {
+                    toolchain_id,
+                    manifest_hash: _,
+                    was_cached,
+                } => {
+                    if *was_cached {
+                        cache_hits += 1;
+                    } else {
+                        rebuilt += 1;
+                    }
+
+                    // Generate node report for Zig toolchain acquisition
+                    node_reports.push(vx_report::NodeReport {
+                        node_id: action.display_name(),
+                        kind: "zig.toolchain.acquire".to_string(),
+                        cache_key: toolchain_id.to_hex(),
+                        cache: if *was_cached {
+                            vx_report::CacheOutcome::Hit {
+                                manifest: toolchain_id.to_hex(),
+                            }
+                        } else {
+                            vx_report::CacheOutcome::Miss {
+                                reason: vx_report::MissReason::FirstBuild,
+                            }
+                        },
+                        timing: vx_report::NodeTiming::default(),
+                        inputs: vec![],
+                        deps: vec![],
+                        outputs: vec![vx_report::OutputRecord {
+                            logical: "zig_toolchain".to_string(),
+                            manifest: Some(toolchain_id.to_hex()),
+                            blob: None,
+                            path: None,
+                        }],
+                        invocation: None,
+                        diagnostics: vx_report::DiagnosticsRecord::default(),
+                    });
+                }
+                ActionResult::CObjectCompiled {
+                    object_hash,
+                    was_cached,
+                } => {
+                    if *was_cached {
+                        cache_hits += 1;
+                    } else {
+                        rebuilt += 1;
+                    }
+
+                    // Generate node report for C object compilation
+                    node_reports.push(vx_report::NodeReport {
+                        node_id: action.display_name(),
+                        kind: "c.compile_obj".to_string(),
+                        cache_key: object_hash.to_hex(),
+                        cache: if *was_cached {
+                            vx_report::CacheOutcome::Hit {
+                                manifest: object_hash.to_hex(),
+                            }
+                        } else {
+                            vx_report::CacheOutcome::Miss {
+                                reason: vx_report::MissReason::KeyNotFound,
+                            }
+                        },
+                        timing: vx_report::NodeTiming::default(),
+                        inputs: vec![],
+                        deps: vec![],
+                        outputs: vec![vx_report::OutputRecord {
+                            logical: "object".to_string(),
+                            manifest: Some(object_hash.to_hex()),
+                            blob: None,
+                            path: None,
+                        }],
+                        invocation: None,
+                        diagnostics: vx_report::DiagnosticsRecord::default(),
+                    });
+                }
+                ActionResult::CBinaryLinked {
+                    binary_hash,
+                    binary_path,
+                    was_cached,
+                } => {
+                    if *was_cached {
+                        cache_hits += 1;
+                    } else {
+                        rebuilt += 1;
+                    }
+                    // Track the bin output
+                    bin_output = Some(binary_path.clone());
+
+                    // Generate node report for C binary linking
+                    node_reports.push(vx_report::NodeReport {
+                        node_id: action.display_name(),
+                        kind: "c.link_bin".to_string(),
+                        cache_key: binary_hash.to_hex(),
+                        cache: if *was_cached {
+                            vx_report::CacheOutcome::Hit {
+                                manifest: binary_hash.to_hex(),
+                            }
+                        } else {
+                            vx_report::CacheOutcome::Miss {
+                                reason: vx_report::MissReason::KeyNotFound,
+                            }
+                        },
+                        timing: vx_report::NodeTiming::default(),
+                        inputs: vec![],
+                        deps: vec![],
+                        outputs: vec![vx_report::OutputRecord {
+                            logical: "binary".to_string(),
+                            manifest: Some(binary_hash.to_hex()),
+                            blob: None,
+                            path: Some(binary_path.to_string()),
                         }],
                         invocation: None,
                         diagnostics: vx_report::DiagnosticsRecord::default(),
@@ -465,7 +633,10 @@ impl Executor {
                 None
             };
 
-            info!("SPAWN_ACTION task: calling execute_action for {:?}", node_idx);
+            info!(
+                "SPAWN_ACTION task: calling execute_action for {:?}",
+                node_idx
+            );
             // Execute action - pass results as immutable ref
             let result = execute_action(
                 action,
@@ -480,14 +651,21 @@ impl Executor {
             )
             .await;
 
-            info!("SPAWN_ACTION task: execute_action returned for {:?}: {:?}", node_idx, result.is_ok());
+            info!(
+                "SPAWN_ACTION task: execute_action returned for {:?}: {:?}",
+                node_idx,
+                result.is_ok()
+            );
 
             // Complete progress tracking
             if let (Some(listener), Some(id)) = (&progress_listener, action_id) {
                 let _ = listener.complete_action(id).await;
             }
 
-            info!("SPAWN_ACTION task: sending completion message for {:?}", node_idx);
+            info!(
+                "SPAWN_ACTION task: sending completion message for {:?}",
+                node_idx
+            );
             // Send result back to executor
             let _ = message_tx.send(ExecutorMessage::ActionCompleted { node_idx, result });
 
@@ -495,14 +673,13 @@ impl Executor {
             // Permit dropped here, allowing next action to run
         });
     }
-
 }
 
 /// Execute a single action
 async fn execute_action(
     action: Action,
-    cas: &Arc<CassClient>,
-    exec: &Arc<RheaClient>,
+    cas: &Arc<CassClient<roam_stream::ConnectionHandle>>,
+    exec: &Arc<RheaClient<roam_stream::ConnectionHandle>>,
     db: &Arc<crate::db::Database>,
     results: &Arc<RwLock<HashMap<NodeIndex, ActionResult>>>,
     workspace_root: &camino::Utf8PathBuf,
@@ -510,17 +687,23 @@ async fn execute_action(
     profile: &str,
     toolchain_node_idx: Option<NodeIndex>,
 ) -> Result<ActionResult, AetherError> {
-    use camino::Utf8PathBuf;
-    use vx_rhea_proto::{RustCompileRequest, RustDep};
-    use vx_cass_proto::{TreeFile, IngestTreeRequest};
-    use vx_rs::crate_graph::CrateSource;
     use crate::queries::*;
+    use camino::Utf8PathBuf;
+    use vx_cass_proto::{IngestTreeRequest, TreeFile};
+    use vx_rhea_proto::{RustCompileRequest, RustDep};
+    use vx_rs::crate_graph::CrateSource;
 
-    info!("EXECUTE_ACTION: processing action {}", action.display_name());
+    info!(
+        "EXECUTE_ACTION: processing action {}",
+        action.display_name()
+    );
 
     match action {
-        Action::AcquireToolchain { channel, target_triple } => {
-            use vx_cass_proto::{RustToolchainSpec, RustComponent, EnsureStatus};
+        Action::AcquireToolchain {
+            channel,
+            target_triple,
+        } => {
+            use vx_cass_proto::{EnsureStatus, RustComponent, RustToolchainSpec};
 
             let spec = RustToolchainSpec {
                 channel,
@@ -532,7 +715,7 @@ async fn execute_action(
             let result = cas
                 .ensure_rust_toolchain(spec)
                 .await
-                .map_err(|e| AetherError::CasRpc(std::sync::Arc::new(e)))?;
+                .map_err(|e| AetherError::CasRpc(e.to_string()))?;
 
             if result.status == EnsureStatus::Failed {
                 return Err(AetherError::ToolchainAcquisition(
@@ -546,15 +729,15 @@ async fn execute_action(
             let manifest = cas
                 .get_toolchain_manifest(manifest_hash)
                 .await
-                .map_err(|e| AetherError::CasRpc(std::sync::Arc::new(e)))?
+                .map_err(|e| AetherError::CasRpc(e.to_string()))?
                 .ok_or(AetherError::ToolchainManifestNotFound(manifest_hash))?;
 
             // On cache hit, toolchain_id comes from manifest; on download, it's in the result
             let toolchain_id = result.toolchain_id.unwrap_or(manifest.toolchain_id);
 
             info!(
-                toolchain_id = %toolchain_id.short_hex(),
-                manifest_hash = %manifest_hash.short_hex(),
+                toolchain_id = %toolchain_id,
+                manifest_hash = %manifest_hash,
                 version = ?manifest.rust_version,
                 "toolchain acquired"
             );
@@ -566,8 +749,12 @@ async fn execute_action(
             })
         }
 
-        Action::AcquireRegistryCrate { name, version, checksum } => {
-            use vx_cass_proto::{RegistrySpec, EnsureStatus};
+        Action::AcquireRegistryCrate {
+            name,
+            version,
+            checksum,
+        } => {
+            use vx_cass_proto::{EnsureStatus, RegistrySpec};
 
             let spec = RegistrySpec {
                 registry_url: "https://crates.io".to_string(),
@@ -581,24 +768,23 @@ async fn execute_action(
             let result = cas
                 .ensure_registry_crate(spec)
                 .await
-                .map_err(|e| AetherError::CasRpc(std::sync::Arc::new(e)))?;
+                .map_err(|e| AetherError::CasRpc(e.to_string()))?;
 
             match result.status {
                 EnsureStatus::Hit | EnsureStatus::Downloaded => {
-                    let manifest_hash =
-                        result
-                            .manifest_hash
-                            .ok_or_else(|| AetherError::RegistryCrateNoManifest {
-                                name: name.clone(),
-                                version: version.clone(),
-                            })?;
+                    let manifest_hash = result.manifest_hash.ok_or_else(|| {
+                        AetherError::RegistryCrateNoManifest {
+                            name: name.clone(),
+                            version: version.clone(),
+                        }
+                    })?;
 
                     let was_cached = result.status == EnsureStatus::Hit;
 
                     debug!(
                         name = %name,
                         version = %version,
-                        manifest_hash = %manifest_hash.short_hex(),
+                        manifest_hash = %manifest_hash,
                         was_cached = was_cached,
                         "acquired registry crate"
                     );
@@ -639,12 +825,19 @@ async fn execute_action(
             let workspace_root = Utf8PathBuf::from(&workspace_root_str);
 
             // Look up the toolchain result to get the real manifest hash and toolchain ID
-            let (toolchain_manifest, toolchain_id) = if let Some(toolchain_idx) = toolchain_node_idx {
+            let (toolchain_manifest, toolchain_id) = if let Some(toolchain_idx) = toolchain_node_idx
+            {
                 let results_lock = results.read().await;
                 match results_lock.get(&toolchain_idx) {
-                    Some(ActionResult::ToolchainAcquired { toolchain_id, manifest_hash, .. }) => {
-                        info!("COMPILE: using acquired toolchain manifest_hash={} toolchain_id={}",
-                              manifest_hash.short_hex(), toolchain_id.short_hex());
+                    Some(ActionResult::ToolchainAcquired {
+                        toolchain_id,
+                        manifest_hash,
+                        ..
+                    }) => {
+                        info!(
+                            "COMPILE: using acquired toolchain manifest_hash={} toolchain_id={}",
+                            manifest_hash, toolchain_id
+                        );
                         (*manifest_hash, *toolchain_id)
                     }
                     _ => {
@@ -671,8 +864,12 @@ async fn execute_action(
                 &**db,
                 toolchain_id,
                 toolchain_manifest,
-                toolchain.host(&**db).map_err(|e| AetherError::Picante(e.to_string()))?,
-                toolchain.target(&**db).map_err(|e| AetherError::Picante(e.to_string()))?,
+                toolchain
+                    .host(&**db)
+                    .map_err(|e| AetherError::Picante(e.to_string()))?,
+                toolchain
+                    .target(&**db)
+                    .map_err(|e| AetherError::Picante(e.to_string()))?,
             )
             .map_err(|e| AetherError::Picante(e.to_string()))?;
 
@@ -698,12 +895,15 @@ async fn execute_action(
                 }
             };
 
-            info!("COMPILE: source closure computed for {}, updating picante", crate_name);
+            info!(
+                "COMPILE: source closure computed for {}, updating picante",
+                crate_name
+            );
             // Update RustCrate with actual closure hash
-            let crate_id_hex = crate_id.short_hex();
+            let crate_id_hex = crate_id;
             rust_crate = crate::inputs::RustCrate::new(
                 &**db,
-                crate_id_hex,
+                crate_id_hex.to_string(),
                 crate_name.clone(),
                 edition.clone(),
                 crate_type.as_str().to_string(),
@@ -713,37 +913,36 @@ async fn execute_action(
             .map_err(|e| AetherError::Picante(e.to_string()))?;
 
             // Collect dependency results from completed actions
-            let (deps, registry_crate_manifests): (Vec<RustDep>, HashMap<(String, String), Blake3Hash>) = {
+            let (deps, registry_crate_manifests): (
+                Vec<RustDep>,
+                HashMap<(String, String), Blake3Hash>,
+            ) = {
                 let results_lock = results.read().await;
 
                 // Build map of CrateId -> output_manifest from completed compilation actions
                 let completed_manifests: HashMap<CrateId, Blake3Hash> = results_lock
                     .iter()
-                    .filter_map(|(_, result)| {
-                        match result {
-                            ActionResult::CrateCompiled {
-                                crate_id,
-                                output_manifest,
-                                ..
-                            } => Some((*crate_id, *output_manifest)),
-                            _ => None,
-                        }
+                    .filter_map(|(_, result)| match result {
+                        ActionResult::CrateCompiled {
+                            crate_id,
+                            output_manifest,
+                            ..
+                        } => Some((*crate_id, *output_manifest)),
+                        _ => None,
                     })
                     .collect();
 
                 // Build map of (name, version) -> manifest_hash from registry acquisition actions
                 let registry_crate_manifests: HashMap<(String, String), Blake3Hash> = results_lock
                     .iter()
-                    .filter_map(|(_, result)| {
-                        match result {
-                            ActionResult::RegistryCrateAcquired {
-                                name,
-                                version,
-                                manifest_hash,
-                                ..
-                            } => Some(((name.clone(), version.clone()), *manifest_hash)),
-                            _ => None,
-                        }
+                    .filter_map(|(_, result)| match result {
+                        ActionResult::RegistryCrateAcquired {
+                            name,
+                            version,
+                            manifest_hash,
+                            ..
+                        } => Some(((name.clone(), version.clone()), *manifest_hash)),
+                        _ => None,
                     })
                     .collect();
 
@@ -760,9 +959,9 @@ async fn execute_action(
 
                         // Determine registry_crate_manifest based on source (from ActionResults)
                         let registry_crate_manifest = match &action_dep.source {
-                            CrateSource::Registry { name, version, .. } => {
-                                registry_crate_manifests.get(&(name.clone(), version.clone())).copied()
-                            }
+                            CrateSource::Registry { name, version, .. } => registry_crate_manifests
+                                .get(&(name.clone(), version.clone()))
+                                .copied(),
                             CrateSource::Path { .. } => None,
                         };
 
@@ -791,16 +990,26 @@ async fn execute_action(
                                 .await
                                 .map_err(|e| AetherError::CacheKey(e.to_string()))?
                         } else {
-                            cache_key_compile_rlib_with_deps(&**db, rust_crate, toolchain, config, dep_rlib_hashes.clone())
-                                .await
-                                .map_err(|e| AetherError::CacheKey(e.to_string()))?
-                        }
-                    }
-                    vx_rs::CrateType::Bin => {
-                        cache_key_compile_bin_with_deps(&**db, rust_crate, toolchain, config, dep_rlib_hashes.clone())
+                            cache_key_compile_rlib_with_deps(
+                                &**db,
+                                rust_crate,
+                                toolchain,
+                                config,
+                                dep_rlib_hashes.clone(),
+                            )
                             .await
                             .map_err(|e| AetherError::CacheKey(e.to_string()))?
+                        }
                     }
+                    vx_rs::CrateType::Bin => cache_key_compile_bin_with_deps(
+                        &**db,
+                        rust_crate,
+                        toolchain,
+                        config,
+                        dep_rlib_hashes.clone(),
+                    )
+                    .await
+                    .map_err(|e| AetherError::CacheKey(e.to_string()))?,
                 }
             };
 
@@ -808,11 +1017,11 @@ async fn execute_action(
             let (output_manifest, was_cached) = if let Some(cached) = cas
                 .lookup(cache_key)
                 .await
-                .map_err(|e| AetherError::CasRpc(std::sync::Arc::new(e)))?
+                .map_err(|e| AetherError::CasRpc(e.to_string()))?
             {
                 info!(
                     crate_name = %crate_name,
-                    manifest = %cached.short_hex(),
+                    manifest = %cached,
                     "cache hit"
                 );
                 // Track cache hit
@@ -832,12 +1041,12 @@ async fn execute_action(
 
                         for rel_path in &closure_paths {
                             let abs_path = workspace_root.join(rel_path);
-                            let contents = tokio::fs::read(&abs_path)
-                                .await
-                                .map_err(|e| AetherError::FileRead {
+                            let contents = tokio::fs::read(&abs_path).await.map_err(|e| {
+                                AetherError::FileRead {
                                     path: abs_path.clone(),
                                     message: e.to_string(),
-                                })?;
+                                }
+                            })?;
 
                             files.push(TreeFile {
                                 path: rel_path.to_string(),
@@ -850,7 +1059,7 @@ async fn execute_action(
                         let ingest_result = cas
                             .ingest_tree(ingest_req)
                             .await
-                            .map_err(|e| AetherError::CasRpc(std::sync::Arc::new(e)))?;
+                            .map_err(|e| AetherError::CasRpc(e.to_string()))?;
 
                         if !ingest_result.success {
                             return Err(AetherError::TreeIngestion(
@@ -905,7 +1114,7 @@ async fn execute_action(
                 let result = exec
                     .compile_rust(compile_request)
                     .await
-                    .map_err(|e| AetherError::ExecRpc(std::sync::Arc::new(e)))?;
+                    .map_err(|e| AetherError::ExecRpc(e.to_string()))?;
 
                 if !result.success {
                     return Err(AetherError::Compilation {
@@ -922,10 +1131,9 @@ async fn execute_action(
                         })?;
 
                 // Publish to cache
-                cas
-                    .publish(cache_key, output_manifest)
+                cas.publish(cache_key, output_manifest)
                     .await
-                    .map_err(|e| AetherError::CasRpc(std::sync::Arc::new(e)))?;
+                    .map_err(|e| AetherError::CasRpc(e.to_string()))?;
 
                 // Track rebuild
 
@@ -965,7 +1173,7 @@ async fn execute_action(
                 let manifest = cas
                     .get_manifest(output_manifest)
                     .await
-                    .map_err(|e| AetherError::CasRpc(std::sync::Arc::new(e)))?
+                    .map_err(|e| AetherError::CasRpc(e.to_string()))?
                     .ok_or(AetherError::OutputManifestNotFound(output_manifest))?;
 
                 let mut materialized = false;
@@ -974,7 +1182,7 @@ async fn execute_action(
                         let blob_data = cas
                             .get_blob(output.blob)
                             .await
-                            .map_err(|e| AetherError::CasRpc(std::sync::Arc::new(e)))?
+                            .map_err(|e| AetherError::CasRpc(e.to_string()))?
                             .ok_or(AetherError::BlobNotFound(output.blob))?;
 
                         vx_io::sync::atomic_write_executable(&output_path, &blob_data, true)
@@ -1002,6 +1210,313 @@ async fn execute_action(
                 output_manifest,
                 bin_output,
                 was_cached,
+            })
+        }
+
+        Action::AcquireZigToolchain { version } => {
+            use vx_cass_proto::{EnsureStatus, ZigToolchainSpec};
+            use vx_toolchain::zig::HostPlatform;
+
+            let host = HostPlatform::detect()
+                .map_err(|e| AetherError::ToolchainAcquisition(e.to_string()))?;
+
+            let spec = ZigToolchainSpec {
+                version: version.clone(),
+                host_platform: host.to_string(),
+            };
+
+            let result = cas
+                .ensure_zig_toolchain(spec)
+                .await
+                .map_err(|e| AetherError::CasRpc(e.to_string()))?;
+
+            if result.status == EnsureStatus::Failed {
+                return Err(AetherError::ToolchainAcquisition(
+                    result.error.unwrap_or_else(|| "unknown error".to_string()),
+                ));
+            }
+
+            let manifest_hash = result.manifest_hash.ok_or(AetherError::Compilation {
+                crate_name: format!("zig-{}", version),
+                message: "No manifest hash returned from CAS".to_string(),
+            })?;
+
+            // Get toolchain_id from result if available (download case),
+            // otherwise fetch from manifest (cache hit case)
+            let toolchain_id = if let Some(id) = result.toolchain_id {
+                id
+            } else {
+                // Cache hit - fetch toolchain_id from manifest
+                let manifest = cas
+                    .get_toolchain_manifest(manifest_hash)
+                    .await
+                    .map_err(|e| AetherError::Compilation {
+                        crate_name: format!("zig-{}", version),
+                        message: format!("Failed to fetch toolchain manifest: {}", e),
+                    })?
+                    .ok_or(AetherError::ToolchainManifestNotFound(manifest_hash))?;
+                manifest.toolchain_id
+            };
+
+            info!(
+                toolchain_id = %toolchain_id,
+                manifest_hash = %manifest_hash,
+                version = %version,
+                host = %host,
+                "Zig toolchain acquired"
+            );
+
+            Ok(ActionResult::ZigToolchainAcquired {
+                toolchain_id,
+                manifest_hash,
+                was_cached: result.status == EnsureStatus::Hit,
+            })
+        }
+
+        Action::CompileCObject {
+            source,
+            output,
+            source_manifest,
+            target_triple,
+            profile,
+        } => {
+            use vx_rhea_proto::CcCompileRequest;
+
+            // Find Zig toolchain from results (must be acquired first)
+            let zig_toolchain_manifest = {
+                let results_lock = results.read().await;
+                results_lock
+                    .values()
+                    .find_map(|result| match result {
+                        ActionResult::ZigToolchainAcquired { manifest_hash, .. } => {
+                            Some(*manifest_hash)
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| AetherError::Compilation {
+                        crate_name: source.clone(),
+                        message: "Zig toolchain not acquired before C compilation".to_string(),
+                    })?
+            };
+
+            let request = CcCompileRequest {
+                toolchain_manifest: zig_toolchain_manifest,
+                source_manifest,
+                source_path: source.clone(),
+                target_triple: target_triple.clone(),
+                profile: profile.clone(),
+                include_paths: vec![],
+                defines: vec![],
+            };
+
+            let result = exec
+                .compile_cc(request)
+                .await
+                .map_err(|e| AetherError::ExecRpc(e.to_string()))?;
+
+            if !result.success {
+                return Err(AetherError::Compilation {
+                    crate_name: source.clone(),
+                    message: format!(
+                        "C compilation failed:\nstdout: {}\nstderr: {}",
+                        result.stdout, result.stderr
+                    ),
+                });
+            }
+
+            let object_hash =
+                result
+                    .output_manifest
+                    .ok_or_else(|| AetherError::NoOutputManifest {
+                        crate_name: source.clone(),
+                    })?;
+
+            info!(
+                source = %source,
+                output = %output,
+                object_hash = %object_hash,
+                "C object compiled"
+            );
+
+            Ok(ActionResult::CObjectCompiled {
+                object_hash,
+                was_cached: false, // TODO: Check cache
+            })
+        }
+
+        Action::LinkCBinary {
+            name,
+            objects,
+            output,
+            target_triple,
+        } => {
+            use vx_rhea_proto::CcLinkRequest;
+
+            // Find Zig toolchain and all compiled object files from results
+            let (zig_toolchain_manifest, object_manifests) = {
+                let results_lock = results.read().await;
+
+                let zig_toolchain_manifest = results_lock
+                    .values()
+                    .find_map(|result| match result {
+                        ActionResult::ZigToolchainAcquired { manifest_hash, .. } => {
+                            Some(*manifest_hash)
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| AetherError::Compilation {
+                        crate_name: name.clone(),
+                        message: "Zig toolchain not acquired before C linking".to_string(),
+                    })?;
+
+                // Collect all compiled object files
+                let object_manifests: Vec<_> = results_lock
+                    .values()
+                    .filter_map(|result| match result {
+                        ActionResult::CObjectCompiled { object_hash, .. } => Some(*object_hash),
+                        _ => None,
+                    })
+                    .collect();
+
+                if object_manifests.is_empty() {
+                    return Err(AetherError::Compilation {
+                        crate_name: name.clone(),
+                        message: "no object files compiled before linking".to_string(),
+                    });
+                }
+
+                (zig_toolchain_manifest, object_manifests)
+            };
+
+            let request = CcLinkRequest {
+                toolchain_manifest: zig_toolchain_manifest,
+                object_manifests,
+                binary_name: name.clone(),
+                target_triple: target_triple.clone(),
+                libs: vec![], // Zig automatically links libc when using printf etc.
+            };
+
+            let result = exec
+                .link_cc(request)
+                .await
+                .map_err(|e| AetherError::ExecRpc(e.to_string()))?;
+
+            if !result.success {
+                return Err(AetherError::Compilation {
+                    crate_name: name.clone(),
+                    message: format!(
+                        "C linking failed:\nstdout: {}\nstderr: {}",
+                        result.stdout, result.stderr
+                    ),
+                });
+            }
+
+            let binary_hash =
+                result
+                    .output_manifest
+                    .ok_or_else(|| AetherError::NoOutputManifest {
+                        crate_name: name.clone(),
+                    })?;
+
+            info!(
+                name = %name,
+                output = %output,
+                binary_hash = %binary_hash,
+                "C binary linked"
+            );
+
+            // Materialize binary to workspace
+            let binary_path = workspace_root.join(output);
+            let binary_parent = binary_path
+                .parent()
+                .ok_or_else(|| AetherError::Compilation {
+                    crate_name: name.clone(),
+                    message: format!("Invalid binary output path: {}", binary_path),
+                })?;
+
+            // Create output directory
+            tokio::fs::create_dir_all(binary_parent)
+                .await
+                .map_err(|e| AetherError::Compilation {
+                    crate_name: name.clone(),
+                    message: format!("Failed to create binary output directory: {}", e),
+                })?;
+
+            // Fetch manifest to get the binary blob hash
+            let manifest = cas
+                .get_manifest(binary_hash)
+                .await
+                .map_err(|e| AetherError::Compilation {
+                    crate_name: name.clone(),
+                    message: format!("Failed to fetch binary manifest from CAS: {}", e),
+                })?
+                .ok_or_else(|| AetherError::Compilation {
+                    crate_name: name.clone(),
+                    message: format!("Binary manifest not found in CAS: {}", binary_hash.to_hex()),
+                })?;
+
+            // Find the binary output entry
+            let binary_entry = manifest
+                .outputs
+                .iter()
+                .find(|o| o.logical == "binary")
+                .ok_or_else(|| AetherError::Compilation {
+                    crate_name: name.clone(),
+                    message: "Binary output not found in manifest".to_string(),
+                })?;
+
+            // Fetch binary blob from CAS and write to file
+            let binary_data = cas
+                .get_blob(binary_entry.blob)
+                .await
+                .map_err(|e| AetherError::Compilation {
+                    crate_name: name.clone(),
+                    message: format!("Failed to fetch binary blob from CAS: {}", e),
+                })?
+                .ok_or_else(|| AetherError::Compilation {
+                    crate_name: name.clone(),
+                    message: format!(
+                        "Binary blob not found in CAS: {}",
+                        binary_entry.blob.to_hex()
+                    ),
+                })?;
+
+            tokio::fs::write(&binary_path, &binary_data)
+                .await
+                .map_err(|e| AetherError::Compilation {
+                    crate_name: name.clone(),
+                    message: format!("Failed to write binary to {}: {}", binary_path, e),
+                })?;
+
+            // Make binary executable
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = tokio::fs::metadata(&binary_path)
+                    .await
+                    .map_err(|e| AetherError::Compilation {
+                        crate_name: name.clone(),
+                        message: format!("Failed to get binary metadata: {}", e),
+                    })?
+                    .permissions();
+                perms.set_mode(0o755);
+                tokio::fs::set_permissions(&binary_path, perms)
+                    .await
+                    .map_err(|e| AetherError::Compilation {
+                        crate_name: name.clone(),
+                        message: format!("Failed to set binary permissions: {}", e),
+                    })?;
+            }
+
+            info!(
+                path = %binary_path,
+                "C binary materialized to workspace"
+            );
+
+            Ok(ActionResult::CBinaryLinked {
+                binary_hash,
+                binary_path,
+                was_cached: false, // TODO: Check cache
             })
         }
     }

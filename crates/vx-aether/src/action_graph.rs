@@ -33,6 +33,12 @@ pub enum Action {
         target_triple: String,
     },
 
+    /// Acquire Zig toolchain for C/C++ compilation
+    AcquireZigToolchain {
+        /// Zig version (e.g., "0.13.0")
+        version: String,
+    },
+
     /// Acquire registry crate from crates.io
     AcquireRegistryCrate {
         /// Crate name
@@ -69,6 +75,32 @@ pub enum Action {
         /// Build configuration (for cache key computation)
         config: BuildConfig,
     },
+
+    /// Compile a C source file to an object file
+    CompileCObject {
+        /// Source file path (workspace-relative)
+        source: String,
+        /// Output object file path (workspace-relative, usually .vx/obj/...)
+        output: String,
+        /// Source tree manifest hash in CAS
+        source_manifest: Blake3Hash,
+        /// Target triple
+        target_triple: String,
+        /// Build profile (debug/release)
+        profile: String,
+    },
+
+    /// Link C object files into a binary
+    LinkCBinary {
+        /// Binary name
+        name: String,
+        /// Object files to link (workspace-relative)
+        objects: Vec<String>,
+        /// Output binary path (workspace-relative)
+        output: String,
+        /// Target triple
+        target_triple: String,
+    },
 }
 
 impl Action {
@@ -78,11 +110,20 @@ impl Action {
             Action::AcquireToolchain { channel, .. } => {
                 format!("acquire toolchain {:?}", channel)
             }
+            Action::AcquireZigToolchain { version } => {
+                format!("acquire zig {}", version)
+            }
             Action::AcquireRegistryCrate { name, version, .. } => {
                 format!("acquire {}@{}", name, version)
             }
             Action::CompileRustCrate { crate_name, .. } => {
                 format!("compile {}", crate_name)
+            }
+            Action::CompileCObject { source, .. } => {
+                format!("compile {}", source)
+            }
+            Action::LinkCBinary { name, .. } => {
+                format!("link {}", name)
             }
         }
     }
@@ -90,8 +131,9 @@ impl Action {
     /// Convert to Progress ActionType
     pub fn to_progress_action_type(&self) -> vx_aether_proto::ActionType {
         match self {
-            Action::AcquireToolchain { .. } => {
-                vx_aether_proto::ActionType::AcquireToolchain
+            Action::AcquireToolchain { .. } => vx_aether_proto::ActionType::AcquireToolchain,
+            Action::AcquireZigToolchain { version } => {
+                vx_aether_proto::ActionType::AcquireZigToolchain(version.clone())
             }
             Action::AcquireRegistryCrate { name, version, .. } => {
                 vx_aether_proto::ActionType::AcquireRegistryCrate(name.clone(), version.clone())
@@ -99,6 +141,10 @@ impl Action {
             Action::CompileRustCrate { crate_name, .. } => {
                 vx_aether_proto::ActionType::CompileRust(crate_name.clone())
             }
+            Action::CompileCObject { source, .. } => {
+                vx_aether_proto::ActionType::CompileC(source.clone())
+            }
+            Action::LinkCBinary { name, .. } => vx_aether_proto::ActionType::LinkC(name.clone()),
         }
     }
 }
@@ -127,6 +173,27 @@ pub struct ActionGraph {
 }
 
 impl ActionGraph {
+    /// Create an empty action graph (for manual construction, e.g., C projects)
+    pub fn new() -> Self {
+        Self {
+            graph: DiGraph::new(),
+            crate_to_node: HashMap::new(),
+            toolchain_node: None,
+            registry_nodes: HashMap::new(),
+        }
+    }
+
+    /// Add an action to the graph and return its node index
+    pub fn add_action(&mut self, action: Action) -> NodeIndex {
+        self.graph.add_node(ActionNode { action })
+    }
+
+    /// Add a dependency edge from dependent to dependency
+    /// (i.e., dependent depends on dependency, so dependency must execute first)
+    pub fn add_edge(&mut self, dependency: NodeIndex, dependent: NodeIndex) {
+        self.graph.add_edge(dependent, dependency, ());
+    }
+
     /// Build action graph from a CrateGraph
     ///
     /// This creates AcquireToolchain, AcquireRegistryCrate, and CompileRustCrate
@@ -157,7 +224,10 @@ impl ActionGraph {
         debug!(node = ?toolchain_node, "Toolchain node created");
 
         // 2. Create registry crate acquisition actions
-        debug!(registry_count = crate_graph.iter_registry_crates().count(), "Creating registry acquisition actions");
+        debug!(
+            registry_count = crate_graph.iter_registry_crates().count(),
+            "Creating registry acquisition actions"
+        );
         for (i, registry_crate) in crate_graph.iter_registry_crates().enumerate() {
             let registry_action = graph.add_node(ActionNode {
                 action: Action::AcquireRegistryCrate {
@@ -177,13 +247,16 @@ impl ActionGraph {
         debug!(total = registry_nodes.len(), "All registry nodes created");
 
         // 3. Create compilation action nodes for all crates
-        debug!(crate_count = crate_graph.nodes.len(), "Creating compilation actions");
+        debug!(
+            crate_count = crate_graph.nodes.len(),
+            "Creating compilation actions"
+        );
         for (i, crate_node) in crate_graph.nodes.values().enumerate() {
             // Create RustCrate input
-            let crate_id_hex = crate_node.id.short_hex();
+            let crate_id_hex = crate_node.id;
             let rust_crate = RustCrate::new(
                 db,
-                crate_id_hex.clone(),
+                crate_id_hex.to_string(),
                 crate_node.crate_name.clone(),
                 crate_node.edition.as_str().to_string(),
                 crate_node.crate_type.as_str().to_string(),
@@ -206,8 +279,12 @@ impl ActionGraph {
                 })
                 .collect();
 
-            let target_triple_str = toolchain.target(db).map_err(|e| crate::error::AetherError::Picante(e.to_string()))?;
-            let profile_str = config.profile(db).map_err(|e| crate::error::AetherError::Picante(e.to_string()))?;
+            let target_triple_str = toolchain
+                .target(db)
+                .map_err(|e| crate::error::AetherError::Picante(e.to_string()))?;
+            let profile_str = config
+                .profile(db)
+                .map_err(|e| crate::error::AetherError::Picante(e.to_string()))?;
 
             let action = Action::CompileRustCrate {
                 crate_id: crate_node.id,
@@ -244,10 +321,10 @@ impl ActionGraph {
             graph.add_edge(compile_idx, toolchain_node, ());
 
             // Registry crates also depend on their registry acquisition
-            if let CrateSource::Registry { name, version, .. } = &crate_node.source {
-                if let Some(&registry_idx) = registry_nodes.get(&(name.clone(), version.clone())) {
-                    graph.add_edge(compile_idx, registry_idx, ());
-                }
+            if let CrateSource::Registry { name, version, .. } = &crate_node.source
+                && let Some(&registry_idx) = registry_nodes.get(&(name.clone(), version.clone()))
+            {
+                graph.add_edge(compile_idx, registry_idx, ());
             }
 
             // Add edges to crate dependencies
@@ -283,12 +360,16 @@ impl ActionGraph {
         use tracing::info;
 
         // Collect nodes with their dependency counts
-        let mut nodes_info: Vec<_> = self.graph.node_indices().map(|idx| {
-            let node = &self.graph[idx];
-            let outgoing = self.graph.neighbors(idx).count();
-            let incoming = self.graph.neighbors_directed(idx, Incoming).count();
-            (idx, node, outgoing, incoming)
-        }).collect();
+        let mut nodes_info: Vec<_> = self
+            .graph
+            .node_indices()
+            .map(|idx| {
+                let node = &self.graph[idx];
+                let outgoing = self.graph.neighbors(idx).count();
+                let incoming = self.graph.neighbors_directed(idx, Incoming).count();
+                (idx, node, outgoing, incoming)
+            })
+            .collect();
 
         // Count ready nodes
         let ready_count = nodes_info.iter().filter(|(_, _, out, _)| *out == 0).count();
@@ -301,7 +382,8 @@ impl ActionGraph {
         );
 
         // Show first few ready nodes as examples
-        let ready_examples: Vec<_> = nodes_info.iter()
+        let ready_examples: Vec<_> = nodes_info
+            .iter()
             .filter(|(_, _, out, _)| *out == 0)
             .take(3)
             .collect();
@@ -316,13 +398,16 @@ impl ActionGraph {
         }
 
         // Show first few non-ready nodes with their deps
-        let blocked_examples: Vec<_> = nodes_info.iter()
+        let blocked_examples: Vec<_> = nodes_info
+            .iter()
             .filter(|(_, _, out, _)| *out > 0)
             .take(2)
             .collect();
 
         for (idx, node, outgoing, _incoming) in blocked_examples {
-            let deps: Vec<_> = self.graph.neighbors(*idx)
+            let deps: Vec<_> = self
+                .graph
+                .neighbors(*idx)
                 .take(3)
                 .map(|dep_idx| self.graph[dep_idx].action.display_name())
                 .collect();

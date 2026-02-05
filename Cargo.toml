@@ -15,6 +15,7 @@ vx-cass-proto = { path = "crates/vx-cass-proto" }
 vx-cc = { path = "crates/vx-cc" }
 vx-rhea-proto = { path = "crates/vx-rhea-proto" }
 vx-manifest = { path = "crates/vx-manifest" }
+vx-project = { path = "crates/vx-project" }
 vx-aether-proto = { path = "crates/vx-aether-proto" }
 vx-report = { path = "crates/vx-report" }
 vx-io = { path = "crates/vx-io" }
@@ -23,8 +24,9 @@ vx-toolchain = { path = "crates/vx-toolchain" }
 
 # facet ecosystem
 facet = { git = "https://github.com/facet-rs/facet", branch = "main", features = ["jiff02", "camino"] }
-facet-args = { git = "https://github.com/facet-rs/facet", branch = "main" }
+figue = { git = "https://github.com/bearcove/figue", branch = "main" }
 facet-json = { git = "https://github.com/facet-rs/facet", branch = "main" }
+facet-styx = { git = "https://github.com/bearcove/styx", branch = "main" }
 facet-toml = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-value = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-postcard = { git = "https://github.com/facet-rs/facet", branch = "main", features = ["jiff02", "camino"] }
@@ -34,10 +36,11 @@ facet-cargo-toml = { git = "https://github.com/bearcove/facet-cargo-toml", branc
 picante = { git = "https://github.com/bearcove/picante", branch = "main", features = ["macros"] }
 
 # RPC
-rapace = { git = "https://github.com/bearcove/rapace", branch = "main" }
+roam = { git = "https://github.com/bearcove/roam", branch = "main" }
+roam-stream = { git = "https://github.com/bearcove/roam", branch = "main" }
 
 # process management
-ur-taking-me-with-you = { git = "https://github.com/bearcove/rapace", branch = "main" }
+ur-taking-me-with-you = { git = "https://github.com/bearcove/rapace", tag = "v0.5.0" }
 
 # hashing
 blake3 = "1"
@@ -85,9 +88,7 @@ facet-macro-types = { git = "https://github.com/facet-rs/facet", branch = "main"
 facet-reflect = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-json = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-toml = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-args = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-postcard = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-value = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-format = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-format-postcard = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }

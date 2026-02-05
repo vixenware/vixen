@@ -65,10 +65,7 @@ pub enum DepfileError {
 ///
 /// The workspace-relative path if the dep was under the workspace,
 /// otherwise returns the original path unchanged (for toolchain files, etc.)
-pub fn normalize_dep_path(
-    dep_path: &Utf8Path,
-    remote_workspace_root: &Utf8Path,
-) -> Utf8PathBuf {
+pub fn normalize_dep_path(dep_path: &Utf8Path, remote_workspace_root: &Utf8Path) -> Utf8PathBuf {
     dep_path
         .strip_prefix(remote_workspace_root)
         .map(|p| p.to_owned())
@@ -87,10 +84,9 @@ pub fn parse_depfile(path: &Utf8Path) -> Result<Vec<Utf8PathBuf>, DepfileError> 
         source,
     })?;
 
-    let content_str =
-        std::str::from_utf8(&content).map_err(|_| DepfileError::InvalidUtf8 {
-            path: path.to_owned(),
-        })?;
+    let content_str = std::str::from_utf8(&content).map_err(|_| DepfileError::InvalidUtf8 {
+        path: path.to_owned(),
+    })?;
 
     Ok(parse_depfile_content(content_str))
 }

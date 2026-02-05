@@ -13,19 +13,21 @@ use crate::executor::Executor;
 use crate::inputs::*;
 use crate::queries::*;
 use camino::Utf8PathBuf;
-use picante::wal::WalWriter;
 use picante::HasRuntime;
+use picante::wal::WalWriter;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
-use vx_aether_proto::{Aether, AETHER_PROTOCOL_VERSION, BuildRequest, BuildResult, ProgressListenerClient, ActionType};
+use vx_aether_proto::{
+    AETHER_PROTOCOL_VERSION, ActionType, Aether, BuildRequest, BuildResult, ProgressListenerClient,
+};
 use vx_cass_proto::{
-    Blake3Hash, EnsureStatus, IngestTreeRequest, CassClient, RegistrySpec, RustChannel,
+    Blake3Hash, CassClient, EnsureStatus, IngestTreeRequest, RegistrySpec, RustChannel,
     RustComponent, RustToolchainSpec, ServiceVersion, TreeFile,
 };
-use vx_rhea_proto::{RheaClient, RustCompileRequest, RustDep};
 use vx_report::{BuildReport, ReportStore};
+use vx_rhea_proto::{RheaClient, RustCompileRequest, RustDep};
 use vx_rs::crate_graph::CrateSource;
 use vx_rs::{CrateGraph, CrateId, CrateType};
 
@@ -54,10 +56,10 @@ pub struct AcquiredToolchains {
 #[derive(Clone)]
 pub struct AetherService {
     /// CAS client for content-addressed storage
-    cas: Arc<CassClient>,
+    cas: Arc<CassClient<roam_stream::ConnectionHandle>>,
 
     /// Exec client for compilation
-    exec: Arc<RheaClient>,
+    exec: Arc<RheaClient<roam_stream::ConnectionHandle>>,
 
     /// The host triple of the execd machine (used for toolchain selection + cache keys).
     exec_host_triple: String,
@@ -82,7 +84,8 @@ pub struct AetherService {
 
     /// Progress listener client (for reporting progress to vx CLI)
     /// Uses RwLock for interior mutability so it can be updated per-connection
-    progress_listener: Arc<RwLock<Option<Arc<ProgressListenerClient>>>>,
+    progress_listener:
+        Arc<RwLock<Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>>>,
 }
 
 impl AetherService {
@@ -112,8 +115,8 @@ impl AetherService {
 
     /// Create a new daemon service
     pub async fn new(
-        cas: Arc<CassClient>,
-        exec: Arc<RheaClient>,
+        cas: Arc<CassClient<roam_stream::ConnectionHandle>>,
+        exec: Arc<RheaClient<roam_stream::ConnectionHandle>>,
         vx_home: Utf8PathBuf,
         exec_host_triple: String,
         spawn_tracker: Arc<Mutex<SpawnTracker>>,
@@ -185,7 +188,10 @@ impl AetherService {
     }
 
     /// Update the progress listener for the current connection
-    pub async fn set_progress_listener(&self, listener: Option<Arc<ProgressListenerClient>>) {
+    pub async fn set_progress_listener(
+        &self,
+        listener: Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>,
+    ) {
         *self.progress_listener.write().await = listener;
     }
 
@@ -214,16 +220,12 @@ impl AetherService {
             components: vec![RustComponent::Rustc, RustComponent::RustStd],
         };
 
-        let result = self
-            .cas
-            .ensure_rust_toolchain(spec)
-            .await
-            .map_err(|e| {
-                // Complete action on error
-                let this = self.clone();
-                tokio::spawn(async move { this.report_complete_action(action_id).await });
-                AetherError::CasRpc(std::sync::Arc::new(e))
-            })?;
+        let result = self.cas.ensure_rust_toolchain(spec).await.map_err(|e| {
+            // Complete action on error
+            let this = self.clone();
+            tokio::spawn(async move { this.report_complete_action(action_id).await });
+            AetherError::CasRpc(e.to_string())
+        })?;
 
         if result.status == EnsureStatus::Failed {
             self.report_complete_action(action_id).await;
@@ -246,7 +248,7 @@ impl AetherService {
             .map_err(|e| {
                 let this = self.clone();
                 tokio::spawn(async move { this.report_complete_action(action_id).await });
-                AetherError::CasRpc(std::sync::Arc::new(e))
+                AetherError::CasRpc(e.to_string())
             })?
             .ok_or_else(|| {
                 let this = self.clone();
@@ -286,142 +288,196 @@ impl AetherService {
         self.spawn_tracker.lock().await.kill_all();
     }
 
-    /// Ingest source files into CAS and return the tree manifest hash.
-    async fn ingest_source_tree(
+    /// Build from vx.styx manifest (C, Rust, or mixed projects)
+    async fn build_from_vx_styx(
         &self,
-        paths: &[Utf8PathBuf],
-        workspace_root: &camino::Utf8Path,
-    ) -> Result<Blake3Hash> {
-        let mut files = Vec::with_capacity(paths.len());
+        _request: BuildRequest,
+        vx_styx_path: camino::Utf8PathBuf,
+    ) -> Result<BuildResult> {
+        use vx_project::{Language, VxManifest};
 
-        for rel_path in paths {
-            let abs_path = workspace_root.join(rel_path);
-            let contents = tokio::fs::read(&abs_path)
-                .await
-                .map_err(|e| AetherError::FileRead {
-                    path: abs_path.clone(),
-                    message: e.to_string(),
-                })?;
+        // Parse vx.styx
+        let manifest = VxManifest::from_path(&vx_styx_path)
+            .map_err(|e| AetherError::InvalidManifest(format!("Failed to parse vx.styx: {}", e)))?;
 
-            files.push(TreeFile {
-                path: rel_path.to_string(),
-                contents,
-                executable: false, // Source files are not executable
-            });
-        }
+        manifest
+            .validate()
+            .map_err(|e| AetherError::InvalidManifest(format!("Invalid vx.styx: {}", e)))?;
 
-        let request = IngestTreeRequest { files };
-        let result = self
-            .cas
-            .ingest_tree(request)
-            .await
-            .map_err(|e| AetherError::CasRpc(std::sync::Arc::new(e)))?;
+        // Determine project language
+        let language = manifest.project.language().ok_or_else(|| {
+            AetherError::InvalidManifest(format!("Unknown language: {}", manifest.project.lang))
+        })?;
 
-        if !result.success {
-            return Err(AetherError::TreeIngestion(
-                result
-                    .error
-                    .unwrap_or_else(|| "tree ingestion failed".to_string()),
-            ));
-        }
-
-        let manifest_hash = result.manifest_hash.ok_or(AetherError::NoManifestHash)?;
-
-        debug!(
-            manifest_hash = %manifest_hash.short_hex(),
-            file_count = result.file_count,
-            total_bytes = result.total_bytes,
-            new_blobs = result.new_blobs,
-            "ingested source tree"
-        );
-
-        Ok(manifest_hash)
-    }
-
-    /// Acquire a single registry crate
-    async fn acquire_single_registry_crate(
-        cas: Arc<CassClient>,
-        name: String,
-        version: String,
-        checksum: String,
-    ) -> Result<((String, String), Blake3Hash)> {
-        let spec = RegistrySpec {
-            registry_url: "https://crates.io".to_string(),
-            name: name.clone(),
-            version: version.clone(),
-            checksum,
-        };
-
-        debug!(name = %name, version = %version, "ensuring registry crate");
-
-        let result = cas
-            .ensure_registry_crate(spec)
-            .await
-            .map_err(|e| AetherError::CasRpc(std::sync::Arc::new(e)))?;
-
-        match result.status {
-            EnsureStatus::Hit | EnsureStatus::Downloaded => {
-                let manifest_hash =
-                    result
-                        .manifest_hash
-                        .ok_or_else(|| AetherError::RegistryCrateNoManifest {
-                            name: name.clone(),
-                            version: version.clone(),
-                        })?;
-
-                debug!(
-                    name = %name,
-                    version = %version,
-                    manifest_hash = %manifest_hash.short_hex(),
-                    "acquired registry crate"
+        match language {
+            Language::C => {
+                info!(
+                    project = %manifest.project.name,
+                    bins = manifest.bins.len(),
+                    "C project detected"
                 );
 
-                Ok(((name, version), manifest_hash))
-            }
-            EnsureStatus::Failed => Err(AetherError::RegistryCrateAcquisition {
-                name,
-                version,
-                reason: result
-                    .error
-                    .unwrap_or_else(|| "acquisition failed".to_string()),
-            }),
-        }
-    }
+                // Get target triple from request or use default
+                let rust_target_triple = self.exec_host_triple.clone();
 
-    /// Acquire registry crates in parallel and return mapping of (name, version) -> manifest_hash
-    async fn acquire_registry_crates(
-        &self,
-        graph: &CrateGraph,
-    ) -> Result<HashMap<(String, String), Blake3Hash>> {
-        if !graph.has_registry_deps() {
-            return Ok(HashMap::new());
-        }
+                // Convert Rust target triple to Zig target format
+                let target_triple = rust_target_triple
+                    .replace("apple-darwin", "macos")
+                    .replace("unknown-linux-gnu", "linux-gnu")
+                    .replace("pc-windows-msvc", "windows");
+                let profile = if _request.release { "release" } else { "debug" };
 
-        info!(
-            registry_crate_count = graph.iter_registry_crates().count(),
-            "acquiring registry crates"
-        );
+                // Ingest source tree to CAS
+                // For C projects, we need to collect all source files and ingest them
+                let project_dir = vx_styx_path.parent().unwrap();
 
-        let futures: Vec<_> = graph
-            .iter_registry_crates()
-            .map(|registry_crate| {
-                Self::acquire_single_registry_crate(
+                // Collect all .c and .h files (simple approach for MVP)
+                let mut files = Vec::new();
+                for bin in &manifest.bins {
+                    let source_path = project_dir.join(&bin.sources);
+                    if source_path.exists() {
+                        let contents = tokio::fs::read(&source_path).await.map_err(|e| {
+                            AetherError::FileRead {
+                                path: source_path.clone(),
+                                message: e.to_string(),
+                            }
+                        })?;
+                        files.push(TreeFile {
+                            path: bin.sources.clone(),
+                            contents,
+                            executable: false,
+                        });
+                    }
+                }
+
+                let source_manifest = self
+                    .cas
+                    .ingest_tree(vx_cass_proto::IngestTreeRequest { files })
+                    .await
+                    .map_err(|e| AetherError::CasRpc(e.to_string()))?
+                    .manifest_hash
+                    .ok_or_else(|| {
+                        AetherError::TreeIngestion("no manifest hash returned".to_string())
+                    })?;
+
+                info!(
+                    source_manifest = %source_manifest,
+                    "Source tree ingested"
+                );
+
+                // Create action graph for C project
+                use crate::action_graph::{Action, ActionGraph};
+                let mut graph = ActionGraph::new();
+
+                // Add AcquireZigToolchain action (root node)
+                let zig_version = "0.15.2".to_string();
+                let zig_node = graph.add_action(Action::AcquireZigToolchain {
+                    version: zig_version.clone(),
+                });
+
+                // Process each binary target
+                for bin in &manifest.bins {
+                    // Parse source files (simple glob for now - just one file)
+                    let sources = vec![bin.sources.clone()];
+
+                    // Add CompileCObject actions for each source file
+                    let mut object_nodes = Vec::new();
+                    for source in &sources {
+                        let output =
+                            format!(".vx/obj/{}.o", source.replace('/', "_").replace(".c", ""));
+                        let compile_node = graph.add_action(Action::CompileCObject {
+                            source: source.clone(),
+                            output: output.clone(),
+                            source_manifest,
+                            target_triple: target_triple.clone(),
+                            profile: profile.to_string(),
+                        });
+
+                        // CompileCObject depends on Zig toolchain
+                        graph.add_edge(zig_node, compile_node);
+                        object_nodes.push(compile_node);
+                    }
+
+                    // Add LinkCBinary action
+                    let binary_output = format!("bin/{}", bin.name);
+                    let link_node = graph.add_action(Action::LinkCBinary {
+                        name: bin.name.clone(),
+                        objects: sources
+                            .iter()
+                            .map(|s| format!(".vx/obj/{}.o", s.replace('/', "_").replace(".c", "")))
+                            .collect(),
+                        output: binary_output.clone(),
+                        target_triple: target_triple.clone(),
+                    });
+
+                    // LinkCBinary depends on all object files and Zig toolchain
+                    graph.add_edge(zig_node, link_node);
+                    for obj_node in object_nodes {
+                        graph.add_edge(obj_node, link_node);
+                    }
+                }
+
+                // Dump graph for debugging
+                graph.dump_graph();
+
+                // Set total number of actions for progress tracking
+                let total_actions = graph.node_count();
+                self.report_set_total(total_actions as u64).await;
+
+                // Execute action graph
+                let max_concurrency = std::thread::available_parallelism()
+                    .map(|n| n.get() * 2)
+                    .unwrap_or(16);
+
+                let progress_listener = self.progress_listener.read().await.clone();
+
+                let mut executor = crate::executor::Executor::new(
+                    graph,
+                    progress_listener,
                     self.cas.clone(),
-                    registry_crate.name.clone(),
-                    registry_crate.version.clone(),
-                    registry_crate.checksum.clone(),
-                )
-            })
-            .collect();
+                    self.exec.clone(),
+                    self.db.clone(),
+                    project_dir.to_path_buf(),
+                    target_triple.clone(),
+                    profile.to_string(),
+                    max_concurrency,
+                );
 
-        let results = futures_util::future::try_join_all(futures).await?;
+                let build_start = std::time::Instant::now();
+                executor.execute().await?;
+                let duration = build_start.elapsed();
 
-        info!(
-            acquired_count = results.len(),
-            "all registry crates acquired"
-        );
+                // Get execution statistics
+                let exec_stats = executor.get_stats();
 
-        Ok(results.into_iter().collect())
+                info!(
+                    duration_ms = duration.as_millis(),
+                    cache_hits = exec_stats.cache_hits,
+                    rebuilt = exec_stats.rebuilt,
+                    "C build completed successfully"
+                );
+
+                Ok(BuildResult {
+                    success: true,
+                    message: format!("Built {} C binary targets", manifest.bins.len()),
+                    cached: exec_stats.cache_hits == total_actions,
+                    duration_ms: duration.as_millis() as u64,
+                    output_path: exec_stats.bin_output,
+                    error: None,
+                    total_actions,
+                    cache_hits: exec_stats.cache_hits,
+                    rebuilt: exec_stats.rebuilt,
+                })
+            }
+            Language::Rust => {
+                // TODO: Convert vx.styx Rust project to Cargo.toml path
+                // For now, fail with helpful message
+                Err(AetherError::InvalidManifest(
+                    "Rust projects via vx.styx not yet supported - use Cargo.toml for now"
+                        .to_string(),
+                ))
+            }
+        }
     }
 
     /// Build a project.
@@ -431,6 +487,14 @@ impl AetherService {
 
         let target_triple = self.exec_host_triple.clone();
 
+        // Check for vx.styx first (unified project manifest)
+        let vx_styx_path = project_path.join("vx.styx");
+        if vx_styx_path.exists() {
+            info!("Found vx.styx, using unified project manifest");
+            return self.build_from_vx_styx(request, vx_styx_path).await;
+        }
+
+        // Fall back to Cargo.toml (Rust-only projects)
         // Build the crate graph with lockfile support
         let graph = CrateGraph::build_with_lockfile(project_path)
             .map_err(|e| AetherError::CrateGraph(format!("{:?}", miette::Report::new(e))))?;
@@ -461,11 +525,8 @@ impl AetherService {
         RustToolchainManifest::set(&*self.db, placeholder_hash)
             .map_err(|e| AetherError::Picante(e.to_string()))?;
 
-        let build_key = BuildConfig::compute_key(
-            &profile,
-            &target_triple,
-            &graph.workspace_root.to_string(),
-        );
+        let build_key =
+            BuildConfig::compute_key(profile, &target_triple, graph.workspace_root.as_ref());
         let config = BuildConfig::new(
             &*self.db,
             build_key,
@@ -485,7 +546,7 @@ impl AetherService {
             target_triple.clone(),
             toolchain,
             config,
-            &*self.db,
+            &self.db,
         )?;
 
         // Dump graph for debugging
@@ -499,7 +560,10 @@ impl AetherService {
         let max_concurrency = std::thread::available_parallelism()
             .map(|n| n.get() * 2)
             .unwrap_or(16);
-        tracing::info!("SERVICE: creating executor with max_concurrency={}", max_concurrency);
+        tracing::info!(
+            "SERVICE: creating executor with max_concurrency={}",
+            max_concurrency
+        );
 
         // Get current progress listener (clones the Option<Arc<...>> inside the RwLock)
         let progress_listener = self.progress_listener.read().await.clone();
@@ -582,9 +646,8 @@ impl AetherService {
     }
 }
 
-
 impl Aether for AetherService {
-    async fn build(&self, request: BuildRequest) -> BuildResult {
+    async fn build(&self, _cx: &roam::Context, request: BuildRequest) -> BuildResult {
         match self.do_build(request).await {
             Ok(result) => result,
             Err(e) => BuildResult {
@@ -602,7 +665,7 @@ impl Aether for AetherService {
         }
     }
 
-    async fn shutdown(&self) {
+    async fn shutdown(&self, _cx: &roam::Context) {
         tracing::info!("Shutdown requested");
 
         // Compact WAL before shutdown to create a clean snapshot
@@ -629,7 +692,7 @@ impl Aether for AetherService {
         std::process::exit(0);
     }
 
-    async fn version(&self) -> ServiceVersion {
+    async fn version(&self, _cx: &roam::Context) -> ServiceVersion {
         ServiceVersion {
             service: "vx-aether".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),

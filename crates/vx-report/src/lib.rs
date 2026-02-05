@@ -39,19 +39,23 @@ impl RunId {
     pub fn new() -> Self {
         Self(ulid::Ulid::new().to_string())
     }
+}
+
+impl std::str::FromStr for RunId {
+    type Err = &'static str;
 
     /// Parse a RunId from a string.
-    pub fn from_str(s: &str) -> Option<Self> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         // Basic validation: 26 characters, all valid Crockford base32
         if s.len() != 26 {
-            return None;
+            return Err("RunId must be 26 characters");
         }
         for c in s.chars() {
             if !matches!(c, '0'..='9' | 'A'..='H' | 'J' | 'K' | 'M' | 'N' | 'P'..='T' | 'V'..='Z') {
-                return None;
+                return Err("RunId contains invalid characters");
             }
         }
-        Some(Self(s.to_string()))
+        Ok(Self(s.to_string()))
     }
 }
 
@@ -461,7 +465,8 @@ impl ReportStore {
     pub fn save(&self, report: &BuildReport) -> std::io::Result<()> {
         self.init()?;
 
-        let json = facet_json::to_string(report);
+        let json = facet_json::to_string(report)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         let path = self.runs_dir.join(format!("{}.json", report.run_id));
 
         // Atomic write via temp file
@@ -503,7 +508,7 @@ impl ReportStore {
         }
 
         let id_str = std::fs::read_to_string(&latest_path)?;
-        Ok(RunId::from_str(id_str.trim()))
+        Ok(id_str.trim().parse().ok())
     }
 
     /// Load the latest build report.
@@ -527,10 +532,11 @@ impl ReportStore {
             let path = entry.path();
             if let Some(ext) = path.extension()
                 && ext == "json"
-                    && let Some(stem) = path.file_stem()
-                        && let Some(run_id) = RunId::from_str(&stem.to_string_lossy()) {
-                            runs.push(run_id);
-                        }
+                && let Some(stem) = path.file_stem()
+                && let Ok(run_id) = stem.to_string_lossy().parse::<RunId>()
+            {
+                runs.push(run_id);
+            }
         }
 
         // Sort lexicographically (ULIDs are time-ordered, so this gives chronological order)
@@ -643,22 +649,24 @@ impl RunDiff {
         // Check toolchain changes
         if let (Some(before_rust), Some(after_rust)) =
             (&before.toolchains.rust, &after.toolchains.rust)
-            && before_rust.id != after_rust.id {
-                diff.toolchain_changes.push(ToolchainChange {
-                    name: "rust".to_string(),
-                    old: before_rust.version.clone(),
-                    new: after_rust.version.clone(),
-                });
-            }
+            && before_rust.id != after_rust.id
+        {
+            diff.toolchain_changes.push(ToolchainChange {
+                name: "rust".to_string(),
+                old: before_rust.version.clone(),
+                new: after_rust.version.clone(),
+            });
+        }
 
         if let (Some(before_zig), Some(after_zig)) = (&before.toolchains.zig, &after.toolchains.zig)
-            && before_zig.id != after_zig.id {
-                diff.toolchain_changes.push(ToolchainChange {
-                    name: "zig".to_string(),
-                    old: before_zig.version.clone(),
-                    new: after_zig.version.clone(),
-                });
-            }
+            && before_zig.id != after_zig.id
+        {
+            diff.toolchain_changes.push(ToolchainChange {
+                name: "zig".to_string(),
+                old: before_zig.version.clone(),
+                new: after_zig.version.clone(),
+            });
+        }
 
         diff
     }
@@ -967,7 +975,7 @@ mod tests {
         assert_eq!(id2.0.len(), 26);
 
         // Should parse back
-        assert!(RunId::from_str(&id1.0).is_some());
+        assert!(id1.0.parse::<RunId>().is_ok());
     }
 
     #[test]

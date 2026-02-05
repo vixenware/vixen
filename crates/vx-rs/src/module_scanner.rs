@@ -493,18 +493,19 @@ pub fn scan_include_macros(source: &str) -> Vec<IncludeMacro> {
                 }
             }
             TokenKind::Literal { kind, .. } => {
-                if let Some((macro_kind, line)) = last_ident {
-                    if seen_bang && seen_open_paren {
-                        // This should be a string literal
-                        if matches!(kind, ra_ap_rustc_lexer::LiteralKind::Str { .. }) {
-                            // Extract the string contents (strip quotes)
-                            let path = extract_string_literal(text);
-                            out.push(IncludeMacro {
-                                path,
-                                line,
-                                kind: macro_kind,
-                            });
-                        }
+                if let Some((macro_kind, line)) = last_ident
+                    && seen_bang
+                    && seen_open_paren
+                {
+                    // This should be a string literal
+                    if matches!(kind, ra_ap_rustc_lexer::LiteralKind::Str { .. }) {
+                        // Extract the string contents (strip quotes)
+                        let path = extract_string_literal(text);
+                        out.push(IncludeMacro {
+                            path,
+                            line,
+                            kind: macro_kind,
+                        });
                     }
                 }
                 // Reset after seeing literal
@@ -512,7 +513,9 @@ pub fn scan_include_macros(source: &str) -> Vec<IncludeMacro> {
                 seen_bang = false;
                 seen_open_paren = false;
             }
-            TokenKind::Whitespace | TokenKind::LineComment { .. } | TokenKind::BlockComment { .. } => {
+            TokenKind::Whitespace
+            | TokenKind::LineComment { .. }
+            | TokenKind::BlockComment { .. } => {
                 // Ignore whitespace and comments, don't reset state
             }
             _ => {
@@ -535,8 +538,8 @@ pub fn scan_include_macros(source: &str) -> Vec<IncludeMacro> {
 /// you'd want to handle escape sequences properly.
 fn extract_string_literal(s: &str) -> String {
     // Handle raw strings: r"...", r#"..."#, etc.
-    if s.starts_with("r") {
-        let pound_count = s[1..].chars().take_while(|&c| c == '#').count();
+    if let Some(stripped) = s.strip_prefix("r") {
+        let pound_count = stripped.chars().take_while(|&c| c == '#').count();
         let start = 1 + pound_count + 1; // r + ### + "
         let end = s.len() - 1 - pound_count; // " + ###
         return s[start..end].to_string();
@@ -1470,7 +1473,10 @@ const DATA: &str = include_str!("../../docs/example.md");
     #[test]
     fn test_source_closure_with_include_str() {
         let (_dir, base) = setup_test_crate(&[
-            ("src/lib.rs", r#"const README: &str = include_str!("../README.md");"#),
+            (
+                "src/lib.rs",
+                r#"const README: &str = include_str!("../README.md");"#,
+            ),
             ("README.md", "# My Crate"),
         ]);
 
@@ -1484,7 +1490,10 @@ const DATA: &str = include_str!("../../docs/example.md");
     #[test]
     fn test_source_closure_with_include_bytes() {
         let (_dir, base) = setup_test_crate(&[
-            ("src/lib.rs", r#"const DATA: &[u8] = include_bytes!("data.bin");"#),
+            (
+                "src/lib.rs",
+                r#"const DATA: &[u8] = include_bytes!("data.bin");"#,
+            ),
             ("src/data.bin", "binary data"),
         ]);
 
@@ -1529,7 +1538,10 @@ const DATA: &str = include_str!("../../docs/example.md");
     #[test]
     fn test_extract_string_literal() {
         assert_eq!(extract_string_literal(r#""hello""#), "hello");
-        assert_eq!(extract_string_literal(r#""path/to/file.txt""#), "path/to/file.txt");
+        assert_eq!(
+            extract_string_literal(r#""path/to/file.txt""#),
+            "path/to/file.txt"
+        );
         assert_eq!(extract_string_literal(r#"r"raw string""#), "raw string");
         // Test raw string with one pound: r#"..."#
         assert_eq!(extract_string_literal("r#\"test\"#"), "test");
@@ -1537,4 +1549,3 @@ const DATA: &str = include_str!("../../docs/example.md");
         assert_eq!(extract_string_literal("r##\"test\"##"), "test");
     }
 }
-

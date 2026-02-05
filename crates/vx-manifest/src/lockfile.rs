@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 // Re-export from facet-cargo-toml
-pub use facet_cargo_toml::{CargoLock, LockPackage, CRATES_IO_SOURCE};
+pub use facet_cargo_toml::{CRATES_IO_SOURCE, CargoLock, LockPackage};
 
 /// Errors that can occur during lockfile reachability analysis
 #[derive(Debug)]
@@ -26,11 +26,20 @@ pub enum LockfileError {
 impl std::fmt::Display for LockfileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnsupportedVersion(v) => write!(f, "unsupported lockfile version: {v} (supported: 3, 4)"),
-            Self::UnsupportedSource { name, source_url } => write!(f, "package '{name}' has unsupported source: {source_url}"),
-            Self::MissingChecksum { name, version } => write!(f, "registry package '{name} {version}' is missing checksum"),
+            Self::UnsupportedVersion(v) => {
+                write!(f, "unsupported lockfile version: {v} (supported: 3, 4)")
+            }
+            Self::UnsupportedSource { name, source_url } => {
+                write!(f, "package '{name}' has unsupported source: {source_url}")
+            }
+            Self::MissingChecksum { name, version } => {
+                write!(f, "registry package '{name} {version}' is missing checksum")
+            }
             Self::RootNotFound { name } => write!(f, "root package '{name}' not found in lockfile"),
-            Self::DependencyNotFound { package, dep } => write!(f, "dependency '{dep}' of package '{package}' not found in lockfile"),
+            Self::DependencyNotFound { package, dep } => write!(
+                f,
+                "dependency '{dep}' of package '{package}' not found in lockfile"
+            ),
         }
     }
 }

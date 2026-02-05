@@ -7,7 +7,8 @@ edition.workspace = true
 tracing-subscriber = { workspace = true }
 facet = { workspace = true }
 picante = { workspace = true }
-rapace = { workspace = true }
+roam = { workspace = true }
+roam-stream = { workspace = true }
 tokio = { workspace = true }
 blake3 = { workspace = true }
 camino = { workspace = true }
@@ -19,8 +20,8 @@ tracing = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
 miette = { version = "7.6.0", default-features = false, features = ["fancy-no-backtrace"] }
 miette-arborium = { version = "2.4.5", features = ["lang-toml", "lang-rust"] }
-indicatif = "0.17"
-petgraph = "0.6"
+indicatif = "0.18"
+petgraph = "0.8"
 
 vx-cass-proto = { workspace = true }
 vx-cc = { path = "../vx-cc" }
@@ -28,6 +29,7 @@ vx-rhea-proto = { workspace = true }
 vx-aether-proto = { workspace = true }
 vx-io = { workspace = true }
 vx-manifest = { workspace = true }
+vx-project = { workspace = true }
 vx-report = { workspace = true }
 vx-rs = { path = "../vx-rs" }
 vx-toolchain = { path = "../vx-toolchain" }
