@@ -42,3 +42,9 @@ vixen explicitly rejects (with clear errors):
 ```bash
 RUST_LOG=vx_daemon=debug vx build
 ```
+
+## License
+
+Vixen is licensed under [AGPL-3.0-or-later](LICENSE).
+
+For commercial licensing inquiries, contact: amos@bearcove.eu
