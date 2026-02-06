@@ -37,11 +37,11 @@ impl Cass for CassService {
         cache_key: CacheKey,
         manifest_hash: ManifestHash,
     ) -> PublishResult {
-        let manifest_path = self.manifest_path(&manifest_hash);
+        let blob_path = self.blob_path(&manifest_hash);
         let dest = self.cache_path(&cache_key);
 
-        // Validate manifest exists
-        if !tokio::fs::try_exists(&manifest_path).await.unwrap_or(false) {
+        // Validate manifest blob exists
+        if !tokio::fs::try_exists(&blob_path).await.unwrap_or(false) {
             return PublishResult {
                 success: false,
                 error: Some(format!(
@@ -64,11 +64,12 @@ impl Cass for CassService {
         }
     }
 
+    // [impl axiom.cas-unified-blobs] Node manifests are stored as blobs
     async fn put_manifest(&self, _cx: &roam::Context, manifest: NodeManifest) -> ManifestHash {
         let json =
             facet_json::to_string(&manifest).expect("node manifest serialization must succeed");
         let hash = ManifestHash::from_bytes(json.as_bytes());
-        let dest = self.manifest_path(&hash);
+        let dest = self.blob_path(&hash);
 
         if let Err(e) = atomic_write(&dest, json.as_bytes()).await {
             tracing::warn!("failed to write node manifest to {}: {}", dest, e);
@@ -77,13 +78,13 @@ impl Cass for CassService {
         hash
     }
 
+    // [impl axiom.cas-unified-blobs] Node manifests are read from blob store
     async fn get_manifest(&self, _cx: &roam::Context, hash: ManifestHash) -> Option<NodeManifest> {
-        // Node manifests (source/object) are stored as blobs, not in the manifests directory
         let path = self.blob_path(&hash);
         tracing::debug!(
             manifest_hash = %hash,
             path = %path,
-            "get_manifest: attempting to read from blob storage"
+            "get_manifest: reading from blob store"
         );
 
         match tokio::fs::read_to_string(&path).await {
