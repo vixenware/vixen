@@ -166,9 +166,6 @@ impl Vfs for SharedVfs {
         self.0.ping(cx).await
     }
 
-    async fn server_info(&self, cx: &roam::Context) -> fs_kitty_proto::ServerInfo {
-        self.0.server_info(cx).await
-    }
 }
 
 impl Args {
