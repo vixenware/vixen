@@ -2739,11 +2739,14 @@ dependencies = [
 name = "vx-http"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "http-body-util",
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "libc",
  "thiserror",
+ "tokio",
  "tracing",
 ]
 

@@ -144,6 +144,7 @@ impl TestEnv {
         cmd.env("VX_HOME", vx_home);
         cmd.env("RUST_LOG", &rust_log);
         cmd.env("VX_INHERIT_STDIO", "1");
+        cmd.env("VX_HTTP_CACHE_DIR", http_cache_dir());
         cmd.stdout(Stdio::inherit());
         cmd.stderr(Stdio::inherit());
 
@@ -361,6 +362,32 @@ impl From<Output> for VxOutput {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         }
+    }
+}
+
+/// Persistent cache directory for HTTP responses across test runs.
+///
+/// All test daemons share this directory so toolchain downloads are fetched
+/// once and reused. The directory survives across test runs.
+fn http_cache_dir() -> PathBuf {
+    let dir = dirs_next().join("vx-test-http-cache");
+    std::fs::create_dir_all(&dir).expect("failed to create HTTP cache dir");
+    dir
+}
+
+/// Platform-appropriate cache base directory.
+fn dirs_next() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
+        return PathBuf::from(xdg);
+    }
+    let home = std::env::var("HOME").expect("HOME not set");
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from(&home).join("Library/Caches")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        PathBuf::from(&home).join(".cache")
     }
 }
 
