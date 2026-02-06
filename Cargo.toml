@@ -11,8 +11,7 @@ repository = "https://github.com/bearcove/vx"
 [workspace.dependencies]
 # internal crates
 vx-cache = { path = "crates/vx-cache" }
-vx-df = { path = "crates/vx-df" }
-vx-fskit = { path = "crates/vx-fskit" }
+fs-kitty-proto = { git = "https://github.com/bearcove/fs-kitty", branch = "main" }
 vx-cass-proto = { path = "crates/vx-cass-proto" }
 vx-cc = { path = "crates/vx-cc" }
 vx-rhea-proto = { path = "crates/vx-rhea-proto" }
@@ -25,12 +24,14 @@ vx-tarball = { path = "crates/vx-tarball" }
 vx-toolchain = { path = "crates/vx-toolchain" }
 vx-tracing = { path = "crates/vx-tracing" }
 vx-rs = { path = "crates/vx-rs" }
+vx-vfs = { path = "crates/vx-vfs" }
 
 # facet ecosystem
 facet = { git = "https://github.com/facet-rs/facet", branch = "main", features = [
   "jiff02",
   "camino",
 ] }
+facet-error = { git = "https://github.com/facet-rs/facet", branch = "main" }
 figue = { git = "https://github.com/bearcove/figue", branch = "main" }
 facet-json = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-styx = { git = "https://github.com/bearcove/styx", branch = "main" }

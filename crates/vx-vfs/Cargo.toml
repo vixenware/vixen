@@ -1,0 +1,17 @@
+[package]
+name = "vx-vfs"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+camino = { workspace = true }
+facet = { workspace = true }
+facet-error = { workspace = true }
+tokio = { workspace = true }
+fs-kitty-proto = { workspace = true }
+cfg-if = "1"
+tracing = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+vx-io = { workspace = true }
+roam-stream = { workspace = true }

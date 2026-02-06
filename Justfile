@@ -27,7 +27,6 @@ aether *args:
 test name:
     VX_TEST_EXTERNAL_DAEMON=1 VX_TEST_VX_HOME={{ debug_home }} cargo nextest run {{ name }} --nocapture
 
-# Clean up debug state (sockets, mount, etc.)
+# Clean up debug state (sockets, etc.)
 debug-clean:
-    -diskutil unmount force {{ debug_home }}/fskitty/rhea 2>/dev/null
     rm -rf {{ debug_home }}

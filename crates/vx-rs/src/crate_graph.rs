@@ -19,6 +19,7 @@
 //! 3. **All paths are workspace-relative**: No absolute paths leak into cache keys
 //!    or rustc invocations. Registry crates are materialized to `.vx/registry/...`.
 
+use core::fmt;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -28,7 +29,7 @@ use vx_manifest::lockfile::{CargoLock, CargoLockExt, LockfileError, ReachablePac
 use vx_manifest::{Edition, Manifest, ManifestError};
 
 /// Errors during crate graph construction
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum CrateGraphError {
     #[error("failed to parse manifest")]
     ManifestError(#[from] ManifestError),
@@ -93,6 +94,12 @@ pub enum CrateGraphError {
         version: String,
         dep_name: String,
     },
+}
+
+impl fmt::Debug for CrateGraphError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
 }
 
 /// Type of crate target

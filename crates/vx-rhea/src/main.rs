@@ -21,11 +21,11 @@ pub(crate) mod vfs;
 
 use error::{Result as RheaResult, RheaError};
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8PathBuf;
 use eyre::Result;
 use fs_kitty_proto::{
     CreateResult, GetAttributesResult, ItemId, ItemType, LookupResult, ReadDirResult, ReadResult,
-    SetAttributesParams, Vfs, VfsDispatcher, VfsResult, WriteResult,
+    SetAttributesParams, Vfs, VfsResult, WriteResult,
 };
 use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::collections::HashMap;
@@ -33,6 +33,7 @@ use std::sync::Arc;
 use vx_cass_proto::{Blake3Hash, CassClient};
 use vx_io::net::{Endpoint, Listener};
 use vx_rhea_proto::RheaDispatcher;
+use vx_vfs::{VfsConfig, VfsStart};
 
 use crate::registry::RegistryMaterializer;
 use crate::vfs::CasVfs;
@@ -44,30 +45,6 @@ type InflightMaterializations = Arc<
     tokio::sync::Mutex<HashMap<Blake3Hash, Arc<tokio::sync::OnceCell<RheaResult<Utf8PathBuf>>>>>,
 >;
 
-#[cfg(target_os = "macos")]
-fn run_command_with_timeout(
-    program: &str,
-    args: &[&str],
-    timeout: std::time::Duration,
-) -> std::io::Result<Option<std::process::Output>> {
-    use std::process::Command;
-    use std::time::Instant;
-
-    let mut child = Command::new(program).args(args).spawn()?;
-    let start = Instant::now();
-    loop {
-        if let Some(_status) = child.try_wait()? {
-            return child.wait_with_output().map(Some);
-        }
-        if start.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(None);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-}
-
 pub(crate) fn rhea_mount_base() -> Utf8PathBuf {
     if let Ok(path) = std::env::var("VX_RHEA_MOUNT") {
         return Utf8PathBuf::from(path);
@@ -76,7 +53,10 @@ pub(crate) fn rhea_mount_base() -> Utf8PathBuf {
         return Utf8PathBuf::from(vx_home).join("fskitty").join("rhea");
     }
     if let Ok(home) = std::env::var("HOME") {
-        return Utf8PathBuf::from(home).join(".vx").join("fskitty").join("rhea");
+        return Utf8PathBuf::from(home)
+            .join(".vx")
+            .join("fskitty")
+            .join("rhea");
     }
     Utf8PathBuf::from("/tmp/vx/fskitty/rhea")
 }
@@ -94,9 +74,6 @@ struct Args {
 
     /// Bind endpoint for Rhea RPC service
     bind: Endpoint,
-
-    /// Bind endpoint for VFS server (fs-kitty)
-    vfs_bind: Endpoint,
 }
 
 #[derive(Clone)]
@@ -165,7 +142,6 @@ impl Vfs for SharedVfs {
     async fn ping(&self, cx: &roam::Context) -> String {
         self.0.ping(cx).await
     }
-
 }
 
 impl Args {
@@ -209,42 +185,17 @@ impl Args {
             }
         };
 
-        // Parse VFS endpoint
-        // On macOS, default to TCP for fs-kitty URL mounting (fskitty://host:port)
-        // On other platforms, default to Unix socket
-        let vfs_bind = match std::env::var("VX_RHEA_VFS") {
-            Ok(v) => Endpoint::parse(&v)?,
-            Err(_) => {
-                #[cfg(target_os = "macos")]
-                {
-                    // Use port 0 to let OS pick an available port
-                    Endpoint::parse("127.0.0.1:0")?
-                }
-                #[cfg(all(unix, not(target_os = "macos")))]
-                {
-                    vx_io::net::default_unix_endpoint(&vx_home, "rhea-vfs")
-                }
-                #[cfg(not(unix))]
-                {
-                    Endpoint::parse("127.0.0.1:9004")?
-                }
-            }
-        };
-
         Ok(Args {
             toolchains_dir,
             registry_cache_dir,
             cas_endpoint,
             bind,
-            vfs_bind,
         })
     }
 }
 
 /// Connect to CAS and return a client handle
-async fn connect_to_cas(
-    endpoint: &Endpoint,
-) -> Result<vx_cass_proto::CassClient<CasCaller>> {
+async fn connect_to_cas(endpoint: &Endpoint) -> Result<vx_cass_proto::CassClient<CasCaller>> {
     let caller = vx_io::net::reconnecting_client(endpoint.clone(), NoDispatcher);
     caller
         .handle()
@@ -261,180 +212,6 @@ async fn is_socket_in_use(path: &Utf8PathBuf) -> bool {
     UnixStream::connect(path.as_std_path()).await.is_ok()
 }
 
-/// Check if fs-kitty extension is installed
-#[cfg(target_os = "macos")]
-fn check_fskitty_extension() -> Result<(), String> {
-    use std::process::Command;
-
-    // Fast path: check if the app bundle exists
-    let app_path = std::path::Path::new("/Applications/FsKitty.app");
-    if !app_path.exists() {
-        return Err(
-            "FsKitty.app not found in /Applications.\n\
-             To install:\n  \
-               1. Download FsKitty.app and move it to /Applications\n  \
-               2. Open the app once to register the extension\n  \
-               3. Enable in: System Settings → General → Login Items & Extensions → File System Extensions"
-                .to_string(),
-        );
-    }
-
-    // Verify the extension is registered with the system
-    let output = Command::new("pluginkit")
-        .args(["-m", "-p", "com.apple.fskit.fsmodule"])
-        .output()
-        .map_err(|e| format!("failed to run pluginkit: {}", e))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    if stdout.contains("me.amos.fs-kitty") || stdout.contains("fskitty") {
-        Ok(())
-    } else {
-        Err(
-            "FsKitty.app is installed but the extension is not registered.\n\
-             To fix:\n  \
-               1. Open FsKitty.app to register the extension\n  \
-               2. Enable in: System Settings → General → Login Items & Extensions → File System Extensions"
-                .to_string(),
-        )
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn check_fskitty_extension() -> Result<(), String> {
-    // On Linux, we'll use FUSE instead - for now just pass
-    Ok(())
-}
-
-/// Check if there's a stale mount at the rhea mount point
-#[cfg(target_os = "macos")]
-fn check_stale_mount(mount_base: &Utf8PathBuf) -> Option<String> {
-    // Check if mount_base is a mount point.
-    // Bound this call: in bad FSKit states, shell tools can hang.
-    let output = run_command_with_timeout("mount", &[], std::time::Duration::from_secs(2))
-        .ok()??;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    for line in stdout.lines() {
-        if line.contains(mount_base.as_str()) && line.contains("fskitty") {
-            return Some(format!(
-                "Stale fs-kitty mount detected at {}\n\
-                 To clean up, run: diskutil unmount force {}",
-                mount_base, mount_base
-            ));
-        }
-    }
-    None
-}
-
-/// Mount the VFS at the rhea mount base using fs-kitty
-#[cfg(target_os = "macos")]
-fn mount_fskitty(mount_point: &Utf8Path, host: &str, port: u16) -> Result<(), String> {
-    // Ensure mount point exists
-    if let Err(e) = std::fs::create_dir_all(mount_point) {
-        return Err(format!(
-            "Failed to create mount point {}: {}",
-            mount_point, e
-        ));
-    }
-
-    // Mount using: mount -t fskitty fskitty://host:port /mount/point
-    let url = format!("fskitty://{}:{}", host, port);
-    tracing::info!("Mounting fs-kitty at {} ({})", mount_point, url);
-
-    let output = match run_command_with_timeout(
-        "mount",
-        &["-t", "fskitty", &url, mount_point.as_str()],
-        std::time::Duration::from_secs(10),
-    ) {
-        Ok(Some(output)) => output,
-        Ok(None) => {
-            return Err(format!(
-                "Mount timed out after 10s for {} (url: {}). \
-                 fs-kitty extension may be stuck; try cleanup before retrying.",
-                mount_point, url
-            ));
-        }
-        Err(e) => return Err(format!("Failed to execute mount: {}", e)),
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    tracing::info!(
-        exit_code = ?output.status.code(),
-        stdout = %stdout.trim(),
-        stderr = %stderr.trim(),
-        "mount command completed"
-    );
-
-    if !output.status.success() {
-        return Err(format!("Mount failed: {}", stderr.trim()));
-    }
-
-    // Verify mount via `df` (subprocess with timeout to avoid hanging on stuck FSKit).
-    // Check that our specific fskitty://host:port is mounted at the expected path.
-    let mut verified = false;
-    for _ in 0..10 {
-        if let Ok(Some(output)) = run_command_with_timeout(
-            "df",
-            &[],
-            std::time::Duration::from_secs(2),
-        ) {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if vx_df::find_fskitty_mount(&stdout, mount_point.as_str(), host, port) {
-                    verified = true;
-                    break;
-                }
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    if verified {
-        tracing::info!("VFS mounted at {} (verified via df)", mount_point);
-    } else {
-        tracing::warn!(
-            "Mount command succeeded but df does not show fskitty://{}:{} at {}",
-            host, port, mount_point
-        );
-    }
-
-    Ok(())
-}
-
-/// Unmount the VFS
-#[cfg(target_os = "macos")]
-fn unmount_fskitty(mount_point: &Utf8Path) {
-    use std::time::Duration;
-
-    tracing::info!("Unmounting fs-kitty at {}", mount_point);
-
-    match run_command_with_timeout(
-        "diskutil",
-        &["unmount", "force", mount_point.as_str()],
-        Duration::from_secs(5),
-    ) {
-        Ok(Some(o)) if o.status.success() => {
-            tracing::info!("VFS unmounted successfully");
-        }
-        Ok(Some(o)) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            tracing::warn!("diskutil unmount force failed: {}", stderr.trim());
-        }
-        Ok(None) => {
-            tracing::warn!("diskutil unmount force timed out after 5s");
-        }
-        Err(e) => {
-            tracing::warn!("Failed to execute diskutil: {}", e);
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn check_stale_mount(_rhea_home: &Utf8PathBuf) -> Option<String> {
-    None // Only macOS uses FSKit for now
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     // If spawned by parent, die when parent dies
@@ -444,18 +221,6 @@ async fn main() -> Result<()> {
     vx_tracing::init_service("vx_rhea=info");
 
     let args = Args::from_env()?;
-
-    // Check fs-kitty extension is installed (macOS)
-    if let Err(e) = check_fskitty_extension() {
-        tracing::warn!("{}", e);
-        // Don't fail - extension might be installed but not detected
-    }
-
-    // Check for stale mounts
-    let mount_base = rhea_mount_base();
-    if let Some(warning) = check_stale_mount(&mount_base) {
-        tracing::warn!("{}", warning);
-    }
 
     // Check if another rhea instance is already running
     #[cfg(unix)]
@@ -467,16 +232,6 @@ async fn main() -> Result<()> {
             return Err(eyre::eyre!(
                 "Another vx-rhea instance is already running (socket {} is in use).\n\
                  Kill the existing instance or use a different VX_RHEA endpoint.",
-                path
-            ));
-        }
-        if let Endpoint::Local(ref path) = args.vfs_bind
-            && path.exists()
-            && is_socket_in_use(path).await
-        {
-            return Err(eyre::eyre!(
-                "VFS socket {} is already in use.\n\
-                 Kill the existing instance or use a different VX_RHEA_VFS endpoint.",
                 path
             ));
         }
@@ -526,168 +281,53 @@ async fn main() -> Result<()> {
         args.bind
     );
 
-    // Start VFS server (fs-kitty)
-    let vfs_listener = match Listener::bind(&args.vfs_bind).await {
-        Ok(l) => l,
-        Err(e) => {
-            return Err(eyre::eyre!(
-                "Failed to bind VFS socket at {}: {}\n\
-                 Another instance may be running, or the socket file is stale.",
-                args.vfs_bind,
-                e
-            ));
+    // Mount VFS via vx-vfs (includes platform-specific behavior).
+    match vx_vfs::mount(
+        VfsConfig {
+            mount_path: rhea_mount_base(),
+        },
+        SharedVfs(vfs.clone()),
+    )
+    .await
+    {
+        Ok(VfsStart::Mounted { mount_path }) => {
+            tracing::info!("VFS mounted at {}", mount_path);
         }
-    };
-
-    // Get the actual bound address (important when using port 0)
-    let vfs_local_addr = vfs_listener.local_addr()?;
-    tracing::info!("VFS (fs-kitty) listening on {}", vfs_local_addr);
-
-    // IMPORTANT: Start accepting VFS connections BEFORE mounting!
-    // The mount command triggers fs-kitty to connect to our VFS server.
-    // If we're not accepting yet, fs-kitty times out and the mount fails.
-    let vfs_for_server = vfs.clone();
-    tokio::spawn(async move {
-        loop {
-            match vfs_listener.accept().await {
-                Ok((stream, peer_addr)) => {
-                    let vfs = Arc::clone(&vfs_for_server);
-                    tokio::spawn(async move {
-                        tracing::info!(
-                            "🔌 VFS connection from {} - fs-kitty connected!",
-                            peer_addr
-                        );
-
-                        let dispatcher = VfsDispatcher::new(SharedVfs(vfs));
-                        let Ok((_handle, _incoming, driver)) =
-                            accept(stream, HandshakeConfig::default(), dispatcher).await
-                        else {
-                            tracing::warn!("VFS handshake error from {}", peer_addr);
-                            return;
-                        };
-
-                        tracing::info!("🔌 VFS session starting for {}", peer_addr);
-                        if let Err(e) = driver.run().await {
-                            tracing::warn!("VFS connection error from {}: {}", peer_addr, e);
-                        }
-
-                        tracing::info!("🔌 VFS connection from {} closed", peer_addr);
-                    });
-                }
-                Err(e) => {
-                    tracing::error!("VFS accept error: {}", e);
-                }
-            }
+        Ok(VfsStart::Unsupported { platform }) => {
+            tracing::warn!("VFS not supported on platform {}", platform);
         }
-    });
-
-    // Small delay to ensure the accept loop is running
-    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-    // NOW mount the VFS (fs-kitty will connect to our already-running server)
-    // Use spawn_blocking since mount is a blocking operation
-    #[cfg(target_os = "macos")]
-    let mount_point: Option<Utf8PathBuf> = {
-        tracing::info!("🗂️  Attempting to mount VFS...");
-        // Extract host and port from the bound address (format: "host:port")
-        if let Endpoint::Tcp(addr_str) = &vfs_local_addr {
-            // Parse "host:port" string
-            let (host, port) = match addr_str.rsplit_once(':') {
-                Some((h, p)) => (h, p.parse::<u16>().ok()),
-                None => (addr_str.as_str(), None),
-            };
-
-            if let Some(port) = port {
-                let mount_path = rhea_mount_base();
-
-                // Unmount any stale mount first (blocking)
-                let mp_clone = mount_path.clone();
-                tokio::task::spawn_blocking(move || {
-                    unmount_fskitty(&mp_clone);
-                })
-                .await
-                .ok();
-
-                // Mount (blocking) - use spawn_blocking to not block the executor
-                let mp_clone = mount_path.clone();
-                let host = host.to_string();
-                let mount_result =
-                    tokio::task::spawn_blocking(move || mount_fskitty(&mp_clone, &host, port))
-                        .await;
-
-                match mount_result {
-                    Ok(Ok(())) => {
-                        tracing::info!("🎉 VFS mount completed, ready to serve files");
-                        Some(mount_path)
-                    }
-                    Ok(Err(e)) => {
-                        tracing::error!("❌ Failed to mount VFS: {}", e);
-                        tracing::error!("Cannot start rhea without VFS");
-                        std::process::exit(1);
-                    }
-                    Err(e) => {
-                        tracing::error!("❌ Mount task panicked: {}", e);
-                        std::process::exit(1);
-                    }
-                }
-            } else {
-                tracing::warn!("Failed to parse port from VFS address: {}", addr_str);
-                None
-            }
-        } else {
-            tracing::warn!("VFS endpoint is not TCP, cannot mount fs-kitty");
-            None
+        Err(error) => {
+            tracing::error!("Failed to mount VFS: {}", error);
+            tracing::error!("Cannot start rhea without VFS");
+            std::process::exit(1);
         }
-    };
+    }
 
     // NOW start accepting Rhea RPC connections (VFS is ready)
     tracing::info!("Starting Rhea RPC server (VFS is ready)");
-    let exec_for_rhea = exec.clone();
-    tokio::spawn(async move {
-        loop {
-            match rhea_listener.accept().await {
-                Ok((stream, peer_addr)) => {
-                    let exec = exec_for_rhea.clone();
-                    tokio::spawn(async move {
-                        tracing::debug!("Rhea connection from {}", peer_addr);
-                        let dispatcher = RheaDispatcher::new(exec);
-                        let Ok((_handle, _incoming, driver)) =
-                            accept(stream, HandshakeConfig::default(), dispatcher).await
-                        else {
-                            tracing::warn!("Rhea handshake error from {}", peer_addr);
-                            return;
-                        };
-                        if let Err(e) = driver.run().await {
-                            tracing::warn!("Rhea connection error from {}: {}", peer_addr, e);
-                        }
-                        tracing::debug!("Rhea connection from {} closed", peer_addr);
-                    });
-                }
-                Err(e) => {
-                    tracing::error!("Rhea accept error: {}", e);
-                }
-            }
-        }
-    });
-
-    // Set up shutdown handler to unmount
-    #[cfg(target_os = "macos")]
-    let mount_point_for_shutdown = mount_point.clone();
-
-    #[cfg(target_os = "macos")]
-    tokio::spawn(async move {
-        // Wait for ctrl-c
-        if let Ok(()) = tokio::signal::ctrl_c().await {
-            if let Some(mp) = mount_point_for_shutdown {
-                unmount_fskitty(&mp);
-            }
-            std::process::exit(0);
-        }
-    });
-
-    // Keep the main task alive
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+        match rhea_listener.accept().await {
+            Ok((stream, peer_addr)) => {
+                let exec = exec.clone();
+                tokio::spawn(async move {
+                    tracing::debug!("Rhea connection from {}", peer_addr);
+                    let dispatcher = RheaDispatcher::new(exec);
+                    let Ok((_handle, _incoming, driver)) =
+                        accept(stream, HandshakeConfig::default(), dispatcher).await
+                    else {
+                        tracing::warn!("Rhea handshake error from {}", peer_addr);
+                        return;
+                    };
+                    if let Err(e) = driver.run().await {
+                        tracing::warn!("Rhea connection error from {}: {}", peer_addr, e);
+                    }
+                    tracing::debug!("Rhea connection from {} closed", peer_addr);
+                });
+            }
+            Err(e) => {
+                tracing::error!("Rhea accept error: {}", e);
+            }
+        }
     }
 }
 

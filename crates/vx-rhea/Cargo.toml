@@ -25,12 +25,12 @@ blake3 = { workspace = true }
 futures-util = { workspace = true }
 
 vx-cache = { workspace = true }
-vx-df = { workspace = true }
 vx-cass-proto = { workspace = true }
 vx-cc = { workspace = true }
 vx-rhea-proto = { workspace = true }
 vx-io = { workspace = true }
 vx-tarball = { workspace = true }
+vx-vfs = { workspace = true }
 
 
 # For copy-on-write/reflink file copying
