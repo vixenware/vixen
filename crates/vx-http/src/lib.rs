@@ -1,4 +1,4 @@
-//! Simple HTTP client using hyper
+//! Shared HTTP client for vixen, built on hyper + rustls.
 
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};

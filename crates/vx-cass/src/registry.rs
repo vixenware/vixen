@@ -29,7 +29,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(10);
 #[derive(Debug, Error)]
 pub(crate) enum DownloadError {
     #[error("HTTP request failed: {0}")]
-    Http(#[from] crate::http::HttpError),
+    Http(#[from] vx_http::HttpError),
 
     #[error("rate limited (429)")]
     RateLimited,
@@ -150,7 +150,7 @@ async fn download_crate_attempt(
 
     tracing::info!(url = %url, "downloading crate");
 
-    let response = crate::http::get(url).await?;
+    let response = vx_http::get(url).await?;
     let status = response.status();
 
     // Check for rate limiting

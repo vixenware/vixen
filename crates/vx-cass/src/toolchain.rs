@@ -26,7 +26,7 @@ async fn fetch_channel_manifest(
 
     tracing::debug!(url = %url, "fetching channel manifest");
 
-    let body = crate::http::get_text(&url).await.map_err(|e| {
+    let body = vx_http::get_text(&url).await.map_err(|e| {
         vx_toolchain::ToolchainError::FetchError {
             url: url.clone(),
             source: Box::new(e),
@@ -47,7 +47,7 @@ async fn download_component(
     tracing::debug!(url = %url, "downloading component");
 
     let response =
-        crate::http::get(url)
+        vx_http::get(url)
             .await
             .map_err(|e| vx_toolchain::ToolchainError::FetchError {
                 url: url.to_string(),

@@ -503,19 +503,7 @@ pub async fn acquire_zig_toolchain(
     let url = zig_download_url(&version, &platform);
 
     // Download the tarball
-    let response = reqwest::get(&url).await.map_err(|e| ZigError::FetchError {
-        url: url.clone(),
-        source: Box::new(e),
-    })?;
-
-    if !response.status().is_success() {
-        return Err(ZigError::FetchError {
-            url: url.clone(),
-            source: format!("HTTP {}", response.status()).into(),
-        });
-    }
-
-    let tarball = response.bytes().await.map_err(|e| ZigError::FetchError {
+    let tarball = vx_http::get_bytes(&url).await.map_err(|e| ZigError::FetchError {
         url: url.clone(),
         source: Box::new(e),
     })?;

@@ -21,10 +21,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 vx-cass-proto = { workspace = true }
 walkdir = "2.5"
-# pin idna_adapter to 1.0.0 to avoid pulling in ICU for Unicode IDNA processing
-# (we only fetch from known ASCII hosts like GitHub)
-idna_adapter = "=1.0.0"
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+vx-http = { workspace = true }
 uuid = { version = "1.19.0", features = ["v4"] }
 
 [dev-dependencies]
