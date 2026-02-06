@@ -130,24 +130,22 @@ impl TestEnv {
     /// Spawn vx-aether daemon for a given VX_HOME directory
     ///
     /// This is public so tests can spawn a daemon at a custom path (e.g., shared_home).
+    ///
+    /// All daemons (aether, cass, rhea) inherit stdout/stderr so their logs appear
+    /// inline in test output. This is done via `VX_INHERIT_STDIO` which propagates
+    /// to child daemons spawned by aether.
     pub fn spawn_daemon(vx_home: &Path) -> DaemonGuard {
-        let log_path = vx_home.join("aether.log");
         let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "trace".to_string());
 
         // Ensure VX_HOME directory exists
         std::fs::create_dir_all(vx_home).expect("failed to create VX_HOME");
 
-        let log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .expect("failed to open aether.log");
-
         let mut cmd = Command::new(Self::aether_binary());
         cmd.env("VX_HOME", vx_home);
         cmd.env("RUST_LOG", &rust_log);
-        cmd.stdout(Stdio::from(log_file.try_clone().unwrap()));
-        cmd.stderr(Stdio::from(log_file));
+        cmd.env("VX_INHERIT_STDIO", "1");
+        cmd.stdout(Stdio::inherit());
+        cmd.stderr(Stdio::inherit());
 
         let child =
             ur_taking_me_with_you::spawn_dying_with_parent(cmd).expect("failed to spawn vx-aether");

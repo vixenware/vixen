@@ -145,24 +145,17 @@ impl SpawnTracker {
 }
 
 /// Spawn a service binary and return the child process
+///
+/// When `VX_INHERIT_STDIO` is set, stdout/stderr are inherited from the parent
+/// (so daemon logs appear inline in test output). Otherwise they go to `log_path`.
 fn spawn_service(
     binary_name: &str,
     env_vars: &[(&str, String)],
     log_path: &camino::Utf8Path,
 ) -> Result<Child> {
-    use std::fs::OpenOptions;
     use std::process::Stdio;
 
-    // Ensure parent directory exists for log file
-    if let Some(parent) = log_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    // Open log file for appending
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)?;
+    let inherit_stdio = std::env::var("VX_INHERIT_STDIO").is_ok();
 
     // Prefer spawning sibling binaries next to the currently running vx-aether.
     // This keeps test runs using the same target/debug artifacts instead of any
@@ -180,9 +173,25 @@ fn spawn_service(
         cmd.env(key, value);
     }
 
-    // Redirect stdout and stderr to log file
-    cmd.stdout(Stdio::from(log_file.try_clone()?));
-    cmd.stderr(Stdio::from(log_file));
+    if inherit_stdio {
+        cmd.stdout(Stdio::inherit());
+        cmd.stderr(Stdio::inherit());
+    } else {
+        use std::fs::OpenOptions;
+
+        // Ensure parent directory exists for log file
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)?;
+
+        cmd.stdout(Stdio::from(log_file.try_clone()?));
+        cmd.stderr(Stdio::from(log_file));
+    }
 
     ur_taking_me_with_you::spawn_dying_with_parent(cmd).map_err(Into::into)
 }
