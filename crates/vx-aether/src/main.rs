@@ -302,16 +302,8 @@ fn main() -> Result<()> {
 }
 
 async fn async_main() -> Result<()> {
-    // Install tracing to stderr (logs will go to ~/.vx/aether.log via spawn_service redirection)
-    use tracing_subscriber::prelude::*;
-
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("vx_aether=debug")),
-        )
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .init();
+    // Initialize tracing (logs will go to ~/.vx/aether.log via spawn_service redirection)
+    vx_tracing::init_service("vx_aether=debug");
 
     // Now safe to call things that might log
     ur_taking_me_with_you::die_with_parent();

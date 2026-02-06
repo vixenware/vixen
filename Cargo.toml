@@ -22,6 +22,7 @@ vx-report = { path = "crates/vx-report" }
 vx-io = { path = "crates/vx-io" }
 vx-tarball = { path = "crates/vx-tarball" }
 vx-toolchain = { path = "crates/vx-toolchain" }
+vx-tracing = { path = "crates/vx-tracing" }
 vx-rs = { path = "crates/vx-rs" }
 
 # facet ecosystem

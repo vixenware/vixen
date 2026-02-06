@@ -84,12 +84,7 @@ async fn async_main() -> Result<()> {
     ur_taking_me_with_you::die_with_parent();
 
     // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("vx_cass=info")),
-        )
-        .init();
+    vx_tracing::init_service("vx_cass=info");
 
     let args = Args::from_env()?;
 

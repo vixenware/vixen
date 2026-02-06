@@ -203,7 +203,7 @@ impl CasVfs {
         size: u64,
         executable: bool,
     ) -> Option<ItemId> {
-        tracing::info!(
+        tracing::debug!(
             prefix_id = %prefix_id,
             path = %path,
             hash = %cas_hash,
@@ -231,7 +231,7 @@ impl CasVfs {
             )
             .await;
 
-        tracing::info!(
+        tracing::debug!(
             prefix_id = %prefix_id,
             path = %path,
             item_id = ?result,
@@ -400,12 +400,12 @@ impl CasVfs {
 
 impl Vfs for CasVfs {
     async fn lookup(&self, _cx: &roam::Context, parent_id: ItemId, name: String) -> LookupResult {
-        tracing::info!(parent_id, name = %name, "VFS lookup");
+        tracing::debug!(parent_id, name = %name, "VFS lookup");
 
         let items = self.items.read().await;
         for item in items.values() {
             if item.parent_id == parent_id && item.name == name {
-                tracing::info!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found");
+                tracing::debug!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found");
                 return LookupResult {
                     item_id: item.id,
                     item_type: item.item_type,
@@ -429,7 +429,7 @@ impl Vfs for CasVfs {
     }
 
     async fn get_attributes(&self, _cx: &roam::Context, item_id: ItemId) -> GetAttributesResult {
-        tracing::info!(item_id, "VFS get_attributes");
+        tracing::debug!(item_id, "VFS get_attributes");
 
         let items = self.items.read().await;
         match items.get(&item_id) {
@@ -459,7 +459,7 @@ impl Vfs for CasVfs {
     }
 
     async fn read_dir(&self, _cx: &roam::Context, item_id: ItemId, cursor: u64) -> ReadDirResult {
-        tracing::info!(item_id, cursor, "VFS read_dir");
+        tracing::debug!(item_id, cursor, "VFS read_dir");
 
         let items = self.items.read().await;
         match items.get(&item_id) {
@@ -510,7 +510,7 @@ impl Vfs for CasVfs {
         offset: u64,
         len: u64,
     ) -> ReadResult {
-        tracing::info!(item_id, offset, len, "VFS read");
+        tracing::debug!(item_id, offset, len, "VFS read");
 
         // Get item info
         let (item_type, cas_hash) = {

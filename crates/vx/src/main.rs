@@ -9,8 +9,6 @@ use eyre::{Result, bail};
 use facet::Facet;
 use figue as args;
 use owo_colors::OwoColorize;
-use tracing_subscriber::EnvFilter;
-
 use vx_aether_proto::{ActionType, AetherClient, BuildRequest, ProgressListener};
 use vx_report::{CacheOutcome, ReportStore, RunDiff};
 
@@ -119,31 +117,9 @@ enum CliCommand {
 fn init_tracing_with_tui(tui: tui::TuiHandle) {
     use tracing_subscriber::prelude::*;
 
-    // Default to info for vx crates, warn for everything else.
-    // RUST_LOG overrides this entirely when set.
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("warn,vx=info,vx_aether=info,vx_cass=info,vx_toolchain=info,vx_rhea=info")
-    });
-
     tracing_subscriber::registry()
-        .with(filter)
+        .with(vx_tracing::cli_env_filter())
         .with(tui::TuiLayer::new(tui))
-        .init();
-}
-
-/// Initialize basic tracing to stderr (for non-build commands)
-fn init_tracing_stderr() {
-    // Default to info for vx crates, warn for everything else.
-    // RUST_LOG overrides this entirely when set.
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("warn,vx=info,vx_aether=info,vx_cass=info,vx_toolchain=info,vx_rhea=info")
-    });
-
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .with_target(true)
-        .with_thread_ids(false)
         .init();
 }
 
@@ -167,15 +143,15 @@ async fn async_main() -> Result<()> {
         CliCommand::Build(args) => cmd_build(args).await,
         // Other commands use stderr tracing
         CliCommand::Kill(args) => {
-            init_tracing_stderr();
+            vx_tracing::init_cli_stderr();
             cmd_kill(args).await
         }
         CliCommand::Clean(args) => {
-            init_tracing_stderr();
+            vx_tracing::init_cli_stderr();
             cmd_clean(args).await
         }
         CliCommand::Explain(args) => {
-            init_tracing_stderr();
+            vx_tracing::init_cli_stderr();
             cmd_explain(args)
         }
     }
@@ -392,7 +368,7 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
     if let Some(ref tui) = tui {
         init_tracing_with_tui(tui.clone());
     } else {
-        init_tracing_stderr();
+        vx_tracing::init_cli_stderr();
     }
 
     let request = BuildRequest {

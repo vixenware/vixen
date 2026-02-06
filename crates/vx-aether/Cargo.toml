@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+vx-tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 facet = { workspace = true }
 picante = { workspace = true }

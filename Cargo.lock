@@ -2989,6 +2989,7 @@ dependencies = [
  "vx-aether-proto",
  "vx-io",
  "vx-report",
+ "vx-tracing",
 ]
 
 [[package]]
@@ -3022,6 +3023,7 @@ dependencies = [
  "vx-rhea-proto",
  "vx-rs",
  "vx-toolchain",
+ "vx-tracing",
 ]
 
 [[package]]
@@ -3078,6 +3080,7 @@ dependencies = [
  "vx-io",
  "vx-tarball",
  "vx-toolchain",
+ "vx-tracing",
 ]
 
 [[package]]
@@ -3179,6 +3182,7 @@ dependencies = [
  "vx-io",
  "vx-rhea-proto",
  "vx-tarball",
+ "vx-tracing",
 ]
 
 [[package]]
@@ -3246,6 +3250,14 @@ dependencies = [
  "uuid",
  "vx-cass-proto",
  "walkdir",
+]
+
+[[package]]
+name = "vx-tracing"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -440,12 +440,7 @@ async fn main() -> Result<()> {
     ur_taking_me_with_you::die_with_parent();
 
     // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("vx_rhea=info")),
-        )
-        .init();
+    vx_tracing::init_service("vx_rhea=info");
 
     let args = Args::from_env()?;
 
