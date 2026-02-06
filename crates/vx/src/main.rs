@@ -52,6 +52,36 @@ struct CleanArgs {
     nuke: bool,
 }
 
+/// Arguments for the `doctor` subcommand
+#[derive(Facet, Debug)]
+struct DoctorArgs {}
+
+/// Arguments for the `fskit` subcommand
+#[derive(Facet, Debug)]
+struct FskitArgs {
+    /// Fskit subcommand
+    #[facet(args::subcommand)]
+    command: FskitCommand,
+}
+
+#[derive(Facet, Debug)]
+#[repr(u8)]
+enum FskitCommand {
+    /// Show detailed fs-kitty status
+    Status(FskitStatusArgs),
+
+    /// Force-unmount all fs-kitty mounts
+    Reset(FskitResetArgs),
+}
+
+/// Arguments for `vx fskit status`
+#[derive(Facet, Debug)]
+struct FskitStatusArgs {}
+
+/// Arguments for `vx fskit reset`
+#[derive(Facet, Debug)]
+struct FskitResetArgs {}
+
 /// Arguments for the `explain` subcommand
 #[derive(Facet, Debug)]
 struct ExplainArgs {
@@ -111,6 +141,12 @@ enum CliCommand {
 
     /// Explain the last build
     Explain(ExplainArgs),
+
+    /// Quick health check
+    Doctor(DoctorArgs),
+
+    /// Manage fs-kitty mounts
+    Fskit(FskitArgs),
 }
 
 /// Initialize tracing with TUI layer
@@ -153,6 +189,14 @@ async fn async_main() -> Result<()> {
         CliCommand::Explain(args) => {
             vx_tracing::init_cli_stderr();
             cmd_explain(args)
+        }
+        CliCommand::Doctor(_args) => {
+            vx_tracing::init_cli_stderr();
+            cmd_doctor().await
+        }
+        CliCommand::Fskit(args) => {
+            vx_tracing::init_cli_stderr();
+            cmd_fskit(args).await
         }
     }
 }
@@ -532,6 +576,187 @@ async fn cmd_clean(args: CleanArgs) -> Result<()> {
     } else {
         println!("{} {} does not exist", "Note:".yellow().bold(), vx_dir);
     }
+
+    Ok(())
+}
+
+async fn cmd_doctor() -> Result<()> {
+    use vx_fskit::MountState;
+
+    let health = vx_fskit::check_health().await;
+
+    // fs-kitty status
+    if health.app_installed && health.plugin_registered {
+        println!("{} ok (installed, plugin registered)", "fs-kitty:".bold());
+    } else if health.app_installed {
+        println!(
+            "{} {} (installed, plugin {})",
+            "fs-kitty:".bold(),
+            "warning".yellow(),
+            "not registered".yellow()
+        );
+    } else {
+        println!(
+            "{} {} (not installed)",
+            "fs-kitty:".bold(),
+            "not found".yellow()
+        );
+    }
+
+    // Ghost mount warnings
+    let ghost_count = health.ghost_count();
+    if ghost_count > 0 {
+        println!(
+            "{} {} ghost mount{} detected (run {} to clean up)",
+            "fs-kitty:".bold(),
+            ghost_count.to_string().yellow(),
+            if ghost_count == 1 { "" } else { "s" },
+            "vx fskit reset".cyan(),
+        );
+    }
+
+    // Alive mounts (informational)
+    let alive_count = health
+        .mounts
+        .iter()
+        .filter(|m| matches!(m.state, MountState::Alive { .. }))
+        .count();
+    if alive_count > 0 {
+        println!(
+            "{} {} active mount{}",
+            "fs-kitty:".bold(),
+            alive_count.to_string().green(),
+            if alive_count == 1 { "" } else { "s" },
+        );
+    }
+
+    // Daemon status — check if aether socket exists
+    let vx_home = std::env::var("VX_HOME")
+        .unwrap_or_else(|_| format!("{}/.vx", std::env::var("HOME").expect("HOME not set")));
+    let aether_sock = std::path::PathBuf::from(&vx_home).join("aether.sock");
+    if aether_sock.exists() {
+        println!(
+            "{} {} (socket exists at {})",
+            "daemon:".bold(),
+            "likely running".green(),
+            aether_sock.display(),
+        );
+    } else {
+        println!(
+            "{} {} (will auto-spawn on next build)",
+            "daemon:".bold(),
+            "not running".dimmed(),
+        );
+    }
+
+    Ok(())
+}
+
+async fn cmd_fskit(args: FskitArgs) -> Result<()> {
+    match args.command {
+        FskitCommand::Status(_) => cmd_fskit_status().await,
+        FskitCommand::Reset(_) => cmd_fskit_reset().await,
+    }
+}
+
+async fn cmd_fskit_status() -> Result<()> {
+    use vx_fskit::MountState;
+
+    let health = vx_fskit::check_health().await;
+
+    // Extension status
+    if health.app_installed {
+        println!(
+            "{} installed ({})",
+            "fs-kitty extension:".bold(),
+            "/Applications/FsKitty.app"
+        );
+    } else {
+        println!(
+            "{} {}",
+            "fs-kitty extension:".bold(),
+            "not found".red()
+        );
+    }
+
+    // Plugin status
+    if health.plugin_registered {
+        println!("{} registered", "Plugin:".bold());
+    } else if health.app_installed {
+        println!(
+            "{} {}",
+            "Plugin:".bold(),
+            "not registered".red()
+        );
+    }
+
+    // Mounts
+    if health.mounts.is_empty() {
+        println!("\n{} none", "Mounts:".bold());
+    } else {
+        println!("\n{}:", "Mounts".bold());
+        for mount in &health.mounts {
+            let state_str = match &mount.state {
+                MountState::Alive { pid, process_name } => {
+                    if *pid > 0 {
+                        format!("{} ({}, pid {})", "alive".green(), process_name, pid)
+                    } else {
+                        format!("{}", "alive".green())
+                    }
+                }
+                MountState::Ghost => format!("{}", "ghost".yellow()),
+            };
+            println!(
+                "  {}  {}:{}  {}",
+                mount.mount_point,
+                mount.host,
+                mount.port,
+                state_str,
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_fskit_reset() -> Result<()> {
+    use vx_fskit::MountState;
+
+    let health = vx_fskit::check_health().await;
+
+    if health.mounts.is_empty() {
+        println!("No fs-kitty mounts to reset.");
+        return Ok(());
+    }
+
+    let mut success_count = 0u32;
+    let total = health.mounts.len();
+
+    for mount in &health.mounts {
+        let state_label = match &mount.state {
+            MountState::Alive { pid, .. } => format!("alive, pid {}", pid),
+            MountState::Ghost => "ghost".to_string(),
+        };
+
+        print!("{} ({}): ", mount.mount_point, state_label);
+
+        match vx_fskit::unmount(mount).await {
+            Ok(()) => {
+                println!("{}", "unmounted".green());
+                success_count += 1;
+            }
+            Err(e) => {
+                println!("{}: {}", "failed".red(), e);
+            }
+        }
+    }
+
+    println!(
+        "Reset {} of {} fs-kitty mount{}",
+        success_count,
+        total,
+        if total == 1 { "" } else { "s" },
+    );
 
     Ok(())
 }

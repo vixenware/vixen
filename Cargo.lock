@@ -2987,6 +2987,7 @@ dependencies = [
  "tracing-subscriber",
  "ur-taking-me-with-you",
  "vx-aether-proto",
+ "vx-fskit",
  "vx-io",
  "vx-report",
  "vx-tracing",
@@ -3109,6 +3110,17 @@ dependencies = [
 [[package]]
 name = "vx-df"
 version = "0.1.0"
+
+[[package]]
+name = "vx-fskit"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "owo-colors",
+ "tokio",
+ "tracing",
+ "vx-df",
+]
 
 [[package]]
 name = "vx-io"

@@ -12,6 +12,7 @@ repository = "https://github.com/bearcove/vx"
 # internal crates
 vx-cache = { path = "crates/vx-cache" }
 vx-df = { path = "crates/vx-df" }
+vx-fskit = { path = "crates/vx-fskit" }
 vx-cass-proto = { path = "crates/vx-cass-proto" }
 vx-cc = { path = "crates/vx-cc" }
 vx-rhea-proto = { path = "crates/vx-rhea-proto" }

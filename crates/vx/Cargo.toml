@@ -20,6 +20,7 @@ ur-taking-me-with-you = { workspace = true }
 indicatif = { workspace = true }
 
 vx-aether-proto = { workspace = true }
+vx-fskit = { workspace = true }
 vx-io = { workspace = true }
 vx-report = { workspace = true }
 

@@ -1,0 +1,11 @@
+[package]
+name = "vx-fskit"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+vx-df = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+eyre = { workspace = true }
+owo-colors = { workspace = true }
