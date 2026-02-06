@@ -12,6 +12,6 @@ tracing = { workspace = true }
 vx-cass-proto = { workspace = true }
 
 async-compression = { version = "0.4.36", default-features = false, features = ["tokio", "gzip", "xz"] }
-pin-project-lite = "0.2"
+pin-project-lite = { workspace = true }
 tokio-tar = "0.3"
-tokio-util = { version = "0.7", features = ["compat", "io"] }
+tokio-util = { workspace = true, features = ["compat", "io"] }

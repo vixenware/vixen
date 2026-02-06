@@ -21,6 +21,7 @@ vx-report = { path = "crates/vx-report" }
 vx-io = { path = "crates/vx-io" }
 vx-tarball = { path = "crates/vx-tarball" }
 vx-toolchain = { path = "crates/vx-toolchain" }
+vx-rs = { path = "crates/vx-rs" }
 
 # facet ecosystem
 facet = { git = "https://github.com/facet-rs/facet", branch = "main", features = ["jiff02", "camino"] }
@@ -57,6 +58,13 @@ futures-util = "0.3"
 
 # terminal
 owo-colors = "4"
+indicatif = "0.18"
+
+# build utilities
+petgraph = "0.8"
+tar = "0.4"
+tokio-util = { version = "0.7" }
+pin-project-lite = "0.2"
 
 # time
 jiff = "0.2"

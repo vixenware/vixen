@@ -6,19 +6,19 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-blake3 = "1.8.2"
-camino = "1.2.2"
+blake3 = { workspace = true }
+camino = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
-eyre = "0.6.12"
+eyre = { workspace = true }
 facet = { workspace = true }
 facet-json = { workspace = true }
 facet-toml = { workspace = true }
 facet-value = { workspace = true }
 lzma-rs = "0.3"
-tar = "0.4"
-thiserror = "2.0.17"
-tokio = { version = "1.48.0", features = ["fs", "process"] }
-tracing = "0.1.44"
+tar = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 vx-cass-proto = { workspace = true }
 walkdir = "2.5"
 # pin idna_adapter to 1.0.0 to avoid pulling in ICU for Unicode IDNA processing
@@ -28,4 +28,4 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 uuid = { version = "1.19.0", features = ["v4"] }
 
 [dev-dependencies]
-tokio = { version = "1.48.0", features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
