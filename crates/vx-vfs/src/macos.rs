@@ -16,11 +16,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use vx_io::net::{Endpoint, Listener};
 
 const FSKITTY_APP_IDENTIFIER: &str = "me.amos.fs-kitty";
 const FSKITTY_APP_PATH: &str = "/Applications/FsKitty.app";
+const FSKITTY_MOUNT_HELPER_PATH: &str = "/Applications/FsKitty.app/Contents/Helpers/fskittymount";
 const LOG_STREAM_TIMEOUT: Duration = Duration::from_secs(2);
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_LOG_CAPTURE_LINES: usize = 200;
@@ -45,7 +46,7 @@ where
         })?;
     tracing::debug!(mount_path = %config.mount_path, "ensured mount directory exists");
 
-    let listener = Listener::bind(&Endpoint::Tcp("127.0.0.1:0".to_string()))
+    let listener = Listener::bind(&Endpoint::tcp("127.0.0.1", 0))
         .await
         .map_err(|error| VfsError::CommandFailed {
             program: "mount",
@@ -59,98 +60,92 @@ where
         })?;
     tracing::debug!(%local_addr, "bound internal VFS listener");
 
-    spawn_accept_loop(listener, vfs);
+    let (mount_ready_tx, mut mount_ready_rx) = mpsc::channel::<()>(1);
+    spawn_accept_loop(listener, vfs, mount_ready_tx);
 
-    let Endpoint::Tcp(addr) = local_addr else {
+    let Endpoint::Tcp { port, .. } = local_addr else {
         let log_output = log_stream.snapshot().await;
         log_stream.stop().await;
         return Err(VfsError::CommandFailed {
-            program: "mount",
+            program: "fskittymount",
             message: format!(
-                "internal listener did not bind to TCP; cannot build fskitty:// URL\nlog stream output:\n{}",
+                "internal listener did not bind to TCP; cannot extract TCP port for fskittymount\nlog stream output:\n{}",
                 log_output
             ),
         });
     };
 
-    let url = format!("fskitty://{}", addr);
-    tracing::debug!(%url, mount_path = %config.mount_path, "running mount command");
+    tracing::debug!(%port, mount_path = %config.mount_path, "starting fskittymount helper");
 
-    let mount_output = {
-        let mut command = Command::new("mount");
-        command
-            .arg("-t")
-            .arg("fskitty")
-            .arg(&url)
-            .arg(config.mount_path.as_str());
+    let helper_output = Arc::new(Mutex::new(VecDeque::new()));
+    let mut helper_command = Command::new(FSKITTY_MOUNT_HELPER_PATH);
+    helper_command
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--mount-point")
+        .arg(config.mount_path.as_str())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(false);
 
-        match tokio::time::timeout(MOUNT_TIMEOUT, command.output()).await {
-            Ok(Ok(output)) => Ok(output),
-            Ok(Err(error)) => Err(VfsError::CommandFailed {
-                program: "mount",
-                message: error.to_string(),
-            }),
-            Err(_) => Err(VfsError::CommandTimedOut {
-                program: "mount",
-                timeout: MOUNT_TIMEOUT,
-            }),
-        }
-    };
-    let mount_result = match mount_output {
-        Ok(output) => output,
-        Err(VfsError::CommandTimedOut { .. }) => {
+    let mut helper = match helper_command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let diagnostics = collect_mount_failure_diagnostics().await;
             let log_output = log_stream.snapshot().await;
             log_stream.stop().await;
             return Err(VfsError::CommandFailed {
-                program: "mount",
+                program: "fskittymount",
                 message: format!(
-                    "mount command timed out after {:?}\nlog stream output:\n{}",
-                    MOUNT_TIMEOUT, log_output
+                    "failed to spawn {}: {}\n{}\nlog stream output:\n{}",
+                    FSKITTY_MOUNT_HELPER_PATH, error, diagnostics, log_output
                 ),
             });
         }
-        Err(other) => {
-            let log_output = log_stream.snapshot().await;
-            log_stream.stop().await;
-            return Err(VfsError::CommandFailed {
-                program: "mount",
-                message: format!("{}\nlog stream output:\n{}", other, log_output),
-            });
-        }
     };
 
-    if mount_result.status.success() {
-        tracing::debug!(mount_path = %config.mount_path, "mount command succeeded");
-        log_stream.stop().await;
-        return Ok(VfsStart::Mounted {
-            mount_path: config.mount_path,
-        });
+    if let Some(stdout) = helper.stdout.take() {
+        tokio::spawn(capture_log_stream(
+            "fskittymount stdout",
+            stdout,
+            Arc::clone(&helper_output),
+        ));
+    }
+    if let Some(stderr) = helper.stderr.take() {
+        tokio::spawn(capture_log_stream(
+            "fskittymount stderr",
+            stderr,
+            Arc::clone(&helper_output),
+        ));
     }
 
-    let stderr = String::from_utf8_lossy(&mount_result.stderr)
-        .trim()
-        .to_string();
-    let stdout = String::from_utf8_lossy(&mount_result.stdout)
-        .trim()
-        .to_string();
-    let diagnostics = collect_mount_failure_diagnostics().await;
-    let log_output = log_stream.snapshot().await;
-    log_stream.stop().await;
-
-    Err(VfsError::CommandFailed {
-        program: "mount",
-        message: format!(
-            "mount exited with status {:?}\nstdout: {}\nstderr: {}\n{}\nlog stream output:\n{}",
-            mount_result.status.code(),
-            stdout,
-            stderr,
-            diagnostics,
-            log_output
-        ),
-    })
+    match wait_for_mount_ready(&mut helper, &mut mount_ready_rx, MOUNT_TIMEOUT).await {
+        Ok(()) => {
+            tracing::debug!(mount_path = %config.mount_path, "fskittymount became ready");
+            log_stream.stop().await;
+            Ok(VfsStart::Mounted {
+                mount_path: config.mount_path,
+            })
+        }
+        Err(readiness_error) => {
+            let diagnostics = collect_mount_failure_diagnostics().await;
+            let helper_output = snapshot_lines(&helper_output).await;
+            let log_output = log_stream.snapshot().await;
+            let _ = helper.kill().await;
+            let _ = helper.wait().await;
+            log_stream.stop().await;
+            Err(VfsError::CommandFailed {
+                program: "fskittymount",
+                message: format!(
+                    "{}\n{}\nhelper output:\n{}\nlog stream output:\n{}",
+                    readiness_error, diagnostics, helper_output, log_output
+                ),
+            })
+        }
+    }
 }
 
-fn spawn_accept_loop<T>(listener: Listener, vfs: T)
+fn spawn_accept_loop<T>(listener: Listener, vfs: T, mount_ready_tx: mpsc::Sender<()>)
 where
     T: Vfs + Clone + Send + Sync + 'static,
 {
@@ -158,6 +153,7 @@ where
         loop {
             match listener.accept().await {
                 Ok((stream, peer_addr)) => {
+                    let _ = mount_ready_tx.try_send(());
                     let vfs = vfs.clone();
                     tokio::spawn(async move {
                         tracing::debug!(%peer_addr, "accepted fs-kitty VFS connection");
@@ -180,6 +176,35 @@ where
             }
         }
     });
+}
+
+async fn wait_for_mount_ready(
+    helper: &mut Child,
+    mount_ready_rx: &mut mpsc::Receiver<()>,
+    timeout: Duration,
+) -> Result<(), String> {
+    let start = tokio::time::Instant::now();
+    loop {
+        if let Some(status) = helper
+            .try_wait()
+            .map_err(|e| format!("failed to poll fskittymount process: {e}"))?
+        {
+            return Err(format!(
+                "fskittymount exited before mount became ready (status={:?})",
+                status.code()
+            ));
+        }
+        if mount_ready_rx.try_recv().is_ok() {
+            return Ok(());
+        }
+        if start.elapsed() >= timeout {
+            return Err(format!(
+                "timed out waiting for mount readiness after {:?}",
+                timeout
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 async fn collect_mount_failure_diagnostics() -> String {
@@ -226,13 +251,7 @@ struct LogStreamCapture {
 
 impl LogStreamCapture {
     async fn snapshot(&self) -> String {
-        self.lines
-            .lock()
-            .await
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n")
+        snapshot_lines(&self.lines).await
     }
 
     async fn stop(&mut self) {
@@ -270,6 +289,16 @@ async fn start_log_stream() -> Result<LogStreamCapture, VfsError> {
     tracing::debug!("started log stream capture");
 
     Ok(LogStreamCapture { child, lines })
+}
+
+async fn snapshot_lines(lines: &Arc<Mutex<VecDeque<String>>>) -> String {
+    lines
+        .lock()
+        .await
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn capture_log_stream<R>(source: &str, reader: R, lines: Arc<Mutex<VecDeque<String>>>)

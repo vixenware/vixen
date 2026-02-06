@@ -8,13 +8,21 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 /// A network endpoint - either TCP or local IPC.
 #[derive(Debug, Clone)]
 pub enum Endpoint {
-    /// TCP endpoint (host:port)
-    Tcp(String),
+    /// TCP endpoint (host + port)
+    Tcp { host: String, port: u16 },
     /// Local IPC endpoint (Unix socket path on Unix, named pipe path on Windows)
     Local(camino::Utf8PathBuf),
 }
 
 impl Endpoint {
+    /// Construct a TCP endpoint.
+    pub fn tcp(host: impl Into<String>, port: u16) -> Self {
+        Endpoint::Tcp {
+            host: host.into(),
+            port,
+        }
+    }
+
     /// Parse an endpoint string.
     ///
     /// Accepts:
@@ -37,7 +45,8 @@ impl Endpoint {
 
         // TCP: tcp://host:port or host:port
         if let Some(rest) = endpoint.strip_prefix("tcp://") {
-            return Ok(Endpoint::Tcp(rest.to_string()));
+            let (host, port) = parse_tcp_host_port(rest)?;
+            return Ok(Endpoint::tcp(host, port));
         }
 
         // Reject unknown schemes
@@ -48,13 +57,14 @@ impl Endpoint {
             );
         }
 
-        Ok(Endpoint::Tcp(endpoint.to_string()))
+        let (host, port) = parse_tcp_host_port(endpoint)?;
+        Ok(Endpoint::tcp(host, port))
     }
 
     /// Check if this endpoint is local (loopback or local IPC).
     pub fn is_local(&self) -> bool {
         match self {
-            Endpoint::Tcp(addr) => is_loopback_tcp(addr),
+            Endpoint::Tcp { host, .. } => is_loopback_tcp_host(host),
             Endpoint::Local(_) => true,
         }
     }
@@ -62,7 +72,7 @@ impl Endpoint {
     /// Get a display string for this endpoint.
     pub fn display(&self) -> String {
         match self {
-            Endpoint::Tcp(addr) => addr.clone(),
+            Endpoint::Tcp { host, port } => format!("{host}:{port}"),
             Endpoint::Local(path) => format!("unix:{}", path),
         }
     }
@@ -71,7 +81,7 @@ impl Endpoint {
     pub fn local_path(&self) -> Option<&camino::Utf8Path> {
         match self {
             Endpoint::Local(path) => Some(path),
-            Endpoint::Tcp(_) => None,
+            Endpoint::Tcp { .. } => None,
         }
     }
 }
@@ -130,7 +140,8 @@ impl AsyncWrite for Stream {
 
 async fn connect_io(endpoint: &Endpoint) -> io::Result<Stream> {
     match endpoint {
-        Endpoint::Tcp(addr) => {
+        Endpoint::Tcp { host, port } => {
+            let addr = format!("{host}:{port}");
             let stream = tokio::net::TcpStream::connect(addr).await?;
             Ok(Stream::Tcp(stream))
         }
@@ -180,7 +191,8 @@ impl Listener {
     /// Bind to an endpoint.
     pub async fn bind(endpoint: &Endpoint) -> Result<Self> {
         match endpoint {
-            Endpoint::Tcp(addr) => {
+            Endpoint::Tcp { host, port } => {
+                let addr = format!("{host}:{port}");
                 let listener = tokio::net::TcpListener::bind(addr).await?;
                 Ok(Listener::Tcp(listener))
             }
@@ -230,7 +242,7 @@ impl Listener {
         match self {
             Listener::Tcp(listener) => {
                 let addr = listener.local_addr()?;
-                Ok(Endpoint::Tcp(addr.to_string()))
+                Ok(Endpoint::tcp(addr.ip().to_string(), addr.port()))
             }
             Listener::Local { endpoint, .. } => Ok(Endpoint::Local(endpoint.clone())),
         }
@@ -318,18 +330,49 @@ pub fn is_loopback_endpoint(endpoint: &str) -> bool {
         return false;
     };
 
-    is_loopback_tcp(&endpoint)
+    let Ok((host, _port)) = parse_tcp_host_port(&endpoint) else {
+        return false;
+    };
+
+    is_loopback_tcp_host(&host)
 }
 
-/// Check if a TCP address is loopback.
-fn is_loopback_tcp(addr: &str) -> bool {
-    if addr.starts_with("localhost:") {
+/// Check if a TCP host is loopback.
+fn is_loopback_tcp_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
         return true;
     }
 
-    if let Ok(addr) = addr.parse::<std::net::SocketAddr>() {
-        return addr.ip().is_loopback();
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
     }
 
     false
+}
+
+fn parse_tcp_host_port(endpoint: &str) -> Result<(String, u16)> {
+    if let Ok(addr) = endpoint.parse::<std::net::SocketAddr>() {
+        return Ok((addr.ip().to_string(), addr.port()));
+    }
+
+    let Some((raw_host, raw_port)) = endpoint.rsplit_once(':') else {
+        eyre::bail!("missing TCP port in endpoint: {}", endpoint);
+    };
+
+    let host = raw_host
+        .trim()
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(raw_host)
+        .trim();
+
+    if host.is_empty() {
+        eyre::bail!("missing TCP host in endpoint: {}", endpoint);
+    }
+
+    let port: u16 = raw_port
+        .parse()
+        .map_err(|_| eyre::eyre!("invalid TCP port in endpoint: {}", endpoint))?;
+
+    Ok((host.to_string(), port))
 }
