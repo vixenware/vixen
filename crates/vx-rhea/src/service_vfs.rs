@@ -1,7 +1,7 @@
 //! VFS-based action execution
 //!
 //! This module implements compilation using the VFS instead of disk materialization.
-//! Files are served lazily from CAS via the fs-kitty mount.
+//! Files are served lazily from CAS via the Vixen mount.
 
 use jiff::Zoned;
 use std::time::Instant;

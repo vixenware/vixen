@@ -23,7 +23,7 @@ use error::{Result as RheaResult, RheaError};
 
 use camino::Utf8PathBuf;
 use eyre::Result;
-use fs_kitty_proto::{
+use vixenfs_proto::{
     CreateResult, GetAttributesResult, ItemId, ItemType, LookupResult, ReadDirResult, ReadResult,
     SetAttributesParams, Vfs, VfsResult, WriteResult,
 };
@@ -50,15 +50,15 @@ pub(crate) fn rhea_mount_base() -> Utf8PathBuf {
         return Utf8PathBuf::from(path);
     }
     if let Ok(vx_home) = std::env::var("VX_HOME") {
-        return Utf8PathBuf::from(vx_home).join("fskitty").join("rhea");
+        return Utf8PathBuf::from(vx_home).join("vixen").join("rhea");
     }
     if let Ok(home) = std::env::var("HOME") {
         return Utf8PathBuf::from(home)
             .join(".vx")
-            .join("fskitty")
+            .join("vixen")
             .join("rhea");
     }
-    Utf8PathBuf::from("/tmp/vx/fskitty/rhea")
+    Utf8PathBuf::from("/tmp/vx/vixen/rhea")
 }
 
 #[derive(Debug)]
@@ -647,7 +647,7 @@ impl RheaService {
     /// Get the VFS mount path for an action prefix
     ///
     /// This is the path that should be passed to sandboxed processes.
-    /// Format: <mount-base>/<prefix_id>/ where mount-base defaults to ~/.vx/fskitty/rhea.
+    /// Format: <mount-base>/<prefix_id>/ where mount-base defaults to ~/.vx/vixen/rhea.
     #[allow(dead_code)] // Will be used for sandbox integration
     pub(crate) fn get_prefix_mount_path(&self, prefix_id: &str) -> Utf8PathBuf {
         rhea_mount_base().join(prefix_id)

@@ -850,15 +850,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
-name = "fs-kitty-proto"
-version = "0.1.0"
-source = "git+https://github.com/bearcove/fs-kitty?branch=main#cbcac9baf8756b261130755ba442495f9009fdf4"
-dependencies = [
- "facet",
- "roam",
-]
-
-[[package]]
 name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2591,6 +2582,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "vixenfs-proto"
+version = "0.1.0"
+dependencies = [
+ "facet",
+ "roam",
+]
+
+[[package]]
 name = "vte"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2804,7 +2803,6 @@ dependencies = [
  "facet",
  "facet-cargo-toml",
  "facet-json",
- "fs-kitty-proto",
  "futures-util",
  "jiff",
  "roam",
@@ -2814,6 +2812,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ur-taking-me-with-you",
+ "vixenfs-proto",
  "vx-cache",
  "vx-cass-proto",
  "vx-cc",
@@ -2906,10 +2905,10 @@ dependencies = [
  "cfg-if",
  "facet",
  "facet-error",
- "fs-kitty-proto",
  "roam-stream",
  "tokio",
  "tracing",
+ "vixenfs-proto",
  "vx-io",
 ]
 

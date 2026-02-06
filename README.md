@@ -25,6 +25,14 @@ vixen uses content-addressed storage and picante (incremental queries) to cache 
 
 Global cache lives at `~/.vx/` (or `$VX_HOME`).
 
+## macOS FSKit host
+
+The FSKit extension host lives in `apps/mac` as `Vixen.app`.
+
+- App bundle id: `eu.bearcove.vixen`
+- Extension bundle id: `eu.bearcove.vixenfs`
+- Mount helper expected by `vx-vfs`: `/Applications/Vixen.app/Contents/Helpers/vixenfs-mount`
+
 ## Limitations (v0)
 
 vixen explicitly rejects (with clear errors):

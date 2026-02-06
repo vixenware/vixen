@@ -106,3 +106,12 @@ can give it submodules as
  - `crate/src/tests/category1.rs`
  - `crate/src/tests/category2.rs`
 ..etc
+
+## macOS App Workflow
+
+`apps/mac` contains the `Vixen.app` FSKit host used by `vx-vfs`.
+
+1. Install `xcodegen` (`brew install xcodegen`)
+2. Generate project from `/Users/amos/.codex/worktrees/19d8/vixen/apps/mac/xcode` with `xcodegen generate`
+3. Build the `Vixen` scheme in Xcode
+4. Copy `/Applications/Vixen.app` and enable the extension in System Settings

@@ -1,0 +1,105 @@
+name: Vixen
+options:
+  bundleIdPrefix: eu.bearcove
+  deploymentTarget:
+    macOS: "26.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+    DEVELOPMENT_TEAM: B2N6FSRTPV
+    CODE_SIGN_STYLE: Automatic
+
+packages:
+  roam:
+    url: https://github.com/bearcove/roam.git
+    branch: main
+
+targets:
+  Vixen:
+    type: application
+    platform: macOS
+    sources:
+      - path: Vixen
+        excludes:
+          - "*.entitlements"
+          - Info.plist
+    entitlements:
+      path: Vixen/Vixen.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: eu.bearcove.vixen
+        INFOPLIST_FILE: Vixen/Info.plist
+        GENERATE_INFOPLIST_FILE: false
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    dependencies:
+      - target: VixenFS Extension
+        embed: true
+        codeSign: true
+      - target: vixenfs-mount
+    postBuildScripts:
+      - name: Embed vixenfs-mount
+        inputFiles:
+          - $(BUILT_PRODUCTS_DIR)/vixenfs-mount
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(FULL_PRODUCT_NAME)/Contents/Helpers/vixenfs-mount
+        script: |
+          set -euo pipefail
+          HELPER_SRC="${BUILT_PRODUCTS_DIR}/vixenfs-mount"
+          HELPER_DST_DIR="${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}/Contents/Helpers"
+          HELPER_DST="${HELPER_DST_DIR}/vixenfs-mount"
+
+          if [ ! -f "${HELPER_SRC}" ]; then
+            echo "vixenfs-mount binary not found at ${HELPER_SRC}"
+            exit 1
+          fi
+
+          mkdir -p "${HELPER_DST_DIR}"
+          ditto "${HELPER_SRC}" "${HELPER_DST}"
+          chmod +x "${HELPER_DST}"
+
+          if [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
+            codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --timestamp=none "${HELPER_DST}"
+          fi
+
+  "VixenFS Extension":
+    type: extensionkit-extension
+    platform: macOS
+    sources:
+      - path: VixenFSExtension
+        excludes:
+          - "*.entitlements"
+          - Info.plist
+    entitlements:
+      path: VixenFSExtension/VixenFSExtension.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.developer.fskit.fsmodule: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: eu.bearcove.vixenfs
+        PRODUCT_NAME: VixenFS Extension
+        INFOPLIST_FILE: VixenFSExtension/Info.plist
+        GENERATE_INFOPLIST_FILE: false
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    dependencies:
+      - package: roam
+        product: RoamRuntime
+
+  vixenfs-mount:
+    type: tool
+    platform: macOS
+    sources:
+      - path: VixenFSMount
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: eu.bearcove.vixenfs.mount
+        PRODUCT_NAME: vixenfs-mount
+        CODE_SIGN_STYLE: Automatic
+        SKIP_INSTALL: true

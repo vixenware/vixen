@@ -1,0 +1,11 @@
+[package]
+name = "vixenfs-proto"
+version.workspace = true
+edition.workspace = true
+description = "VFS protocol for VixenFS - implement the Vfs trait to create your own backend"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+roam.workspace = true
+facet.workspace = true

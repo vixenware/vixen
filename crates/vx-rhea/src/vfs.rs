@@ -1,6 +1,6 @@
 //! VFS implementation backed by CAS
 //!
-//! This module implements the fs-kitty VFS trait, providing a virtual filesystem
+//! This module implements the Vixen VFS trait, providing a virtual filesystem
 //! that serves content from the Content-Addressed Storage (CAS).
 //!
 //! # Architecture
@@ -28,7 +28,7 @@
 //! - ID 1: Root directory (`/`)
 //! - ID 2+: Dynamically allocated for prefixes and their contents
 
-use fs_kitty_proto::{
+use vixenfs_proto::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
     ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
 };
