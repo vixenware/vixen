@@ -89,6 +89,10 @@ pub struct CasVfs {
     prefixes: RwLock<HashMap<String, ActionPrefix>>,
     /// Next available ItemId
     next_id: AtomicU64,
+    /// Blob cache: blobs are immutable (content-addressed), so caching is unconditionally safe.
+    /// Uses OnceCell per blob for single-flight fetching — concurrent reads of the same blob
+    /// wait on the OnceCell, not the mutex. Different blobs proceed independently.
+    blob_cache: tokio::sync::Mutex<HashMap<Blake3Hash, Arc<tokio::sync::OnceCell<Arc<[u8]>>>>>,
 }
 
 impl CasVfs {
@@ -116,12 +120,35 @@ impl CasVfs {
             items: RwLock::new(items),
             prefixes: RwLock::new(HashMap::new()),
             next_id: AtomicU64::new(2), // 1 is root
+            blob_cache: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
 
     /// Allocate a new ItemId
     fn alloc_id(&self) -> ItemId {
         self.next_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Fetch a blob from CAS, caching the result. Blobs are immutable (content-addressed),
+    /// so caching is unconditionally safe. Concurrent reads of the same blob coalesce via
+    /// OnceCell — only one RPC is issued.
+    async fn get_or_fetch_blob(&self, hash: Blake3Hash) -> Result<Arc<[u8]>, String> {
+        let cell = {
+            let mut cache = self.blob_cache.lock().await;
+            cache
+                .entry(hash)
+                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
+                .clone()
+        };
+        cell.get_or_try_init(|| async {
+            match self.cas.get_blob(hash).await {
+                Ok(Some(data)) => Ok(Arc::from(data)),
+                Ok(None) => Err(format!("blob {hash} not found in CAS")),
+                Err(e) => Err(format!("CAS fetch error: {e}")),
+            }
+        })
+        .await
+        .map(Arc::clone)
     }
 
     /// Create a new action prefix
@@ -515,21 +542,14 @@ impl Vfs for CasVfs {
             };
         };
 
-        // Fetch blob from CAS
-        match self.cas.get_blob(hash).await {
-            Ok(Some(data)) => {
+        // Fetch blob from CAS (cached — blobs are immutable)
+        match self.get_or_fetch_blob(hash).await {
+            Ok(data) => {
                 let start = (offset as usize).min(data.len());
                 let end = ((offset + len) as usize).min(data.len());
                 ReadResult {
                     data: data[start..end].to_vec(),
                     error: errno::OK,
-                }
-            }
-            Ok(None) => {
-                tracing::warn!(hash = %hash, "blob not found in CAS");
-                ReadResult {
-                    data: Vec::new(),
-                    error: errno::EIO,
                 }
             }
             Err(e) => {
