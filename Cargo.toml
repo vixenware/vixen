@@ -52,7 +52,7 @@ thiserror = "2"
 
 # async
 tokio = { version = "1", features = ["rt-multi-thread", "io-util", "net", "time", "fs", "process", "sync", "signal"] }
-tokio-test-lite = "1"
+tokio-test-lite = "0.2"
 futures-util = "0.3"
 
 # terminal

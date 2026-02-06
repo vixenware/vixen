@@ -31,4 +31,4 @@ vx-project = { workspace = true }
 vx-report = { workspace = true }
 vx-rs = { path = "../vx-rs" }
 vx-toolchain = { path = "../vx-toolchain" }
-tokio-test-lite = "0.1"
+tokio-test-lite = { workspace = true }

@@ -1837,13 +1837,13 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
 name = "ra-ap-rustc_lexer"
-version = "0.144.0"
+version = "0.150.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53c877424542b4da5357818ec7d7a954de2dc753c060af784a1d5ba7c22430ab"
+checksum = "798846b5bb9cf4e514e5edc27fa897d5f1c839716fe216bd6c2ca172d678c4d0"
 dependencies = [
  "memchr",
+ "unicode-ident",
  "unicode-properties",
- "unicode-xid",
 ]
 
 [[package]]
@@ -2720,9 +2720,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-test-lite"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4383be2c6038bed3c14e98dd0b47c8cd58607d29c3d8ec94182531e211bade5b"
+checksum = "43d510187ff54d4baba7a36d605a79a666ed9a1f07e2cff088bbfd87354d5227"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2882,12 +2882,6 @@ name = "unicode-width"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
-
-[[package]]
-name = "unicode-xid"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "unit-prefix"
