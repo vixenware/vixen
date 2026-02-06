@@ -5,10 +5,12 @@
 pub(crate) mod hash_reader;
 pub(crate) mod registry;
 pub(crate) mod service;
+pub(crate) mod storage;
 pub(crate) mod toolchain;
 pub(crate) mod types;
 
 use crate::registry::RegistryManager;
+use crate::storage::{CasStore, FsStorage};
 use crate::toolchain::ToolchainManager;
 use crate::types::{CassService, CassServiceInner};
 use camino::Utf8PathBuf;
@@ -16,10 +18,6 @@ use eyre::Result;
 use roam_stream::{HandshakeConfig, accept};
 use std::sync::Arc;
 use vx_cass_proto::CassDispatcher;
-use vx_cass_proto::{
-    Blake3Hash, BlobHash, CacheKey, ManifestHash, ToolchainManifest, ToolchainSpecKey,
-};
-use vx_io::atomic_write;
 use vx_io::net::{Endpoint, Listener};
 
 #[derive(Debug)]
@@ -87,10 +85,21 @@ async fn async_main() -> Result<()> {
 
     let args = Args::from_env()?;
 
-    // Initialize cass service
+    // Build storage backend
+    let storage = match std::env::var("VX_CAS_BASE") {
+        Ok(base) => CasStore::with_base(
+            FsStorage::new(args.root.clone()),
+            FsStorage::new(Utf8PathBuf::from(base)),
+        ),
+        Err(_) => CasStore::new(FsStorage::new(args.root.clone())),
+    };
+
+    // Initialize storage directories
     tracing::info!("Initializing cass at {}", args.root);
-    let cass = CassService::new(args.root, args.vx_home);
-    cass.init().await?;
+    storage.init().await?;
+
+    // Initialize cass service
+    let cass = CassService::new(storage, args.vx_home);
 
     // Start server (TCP or Unix socket)
     let listener = Listener::bind(&args.bind).await?;
@@ -120,161 +129,15 @@ async fn async_main() -> Result<()> {
 }
 
 impl CassService {
-    fn new(root: Utf8PathBuf, vx_home: Utf8PathBuf) -> Self {
+    fn new(storage: CasStore, vx_home: Utf8PathBuf) -> Self {
         Self {
             inner: Arc::new(CassServiceInner {
-                root,
+                storage,
                 vx_home,
                 toolchain_manager: ToolchainManager::new(),
                 registry_manager: RegistryManager::new(),
                 download_semaphore: Arc::new(tokio::sync::Semaphore::new(32)),
             }),
         }
-    }
-
-    fn blobs_dir(&self) -> Utf8PathBuf {
-        self.root.join("blobs/blake3")
-    }
-
-    fn manifests_dir(&self) -> Utf8PathBuf {
-        self.root.join("manifests/blake3")
-    }
-
-    fn cache_dir(&self) -> Utf8PathBuf {
-        self.root.join("cache/blake3")
-    }
-
-    fn tmp_dir(&self) -> Utf8PathBuf {
-        self.root.join("tmp")
-    }
-
-    fn blob_path(&self, hash: &BlobHash) -> Utf8PathBuf {
-        let hex = hash.to_hex();
-        self.blobs_dir().join(&hex[..2]).join(&hex)
-    }
-
-    /// Internal blob write helper for non-RPC code paths.
-    pub(crate) async fn put_blob(&self, data: Vec<u8>) -> BlobHash {
-        let hash = BlobHash::from_bytes(&data);
-        let dest = self.blob_path(&hash);
-
-        if let Err(e) = atomic_write(&dest, &data).await {
-            tracing::warn!("failed to write blob to {}: {}", dest, e);
-        }
-
-        hash
-    }
-
-    fn manifest_path(&self, hash: &ManifestHash) -> Utf8PathBuf {
-        let hex = hash.to_hex();
-        self.manifests_dir()
-            .join(&hex[..2])
-            .join(format!("{}.json", hex))
-    }
-
-    fn tree_manifests_dir(&self) -> Utf8PathBuf {
-        self.root.join("trees/blake3")
-    }
-
-    fn tree_manifest_path(&self, hash: &ManifestHash) -> Utf8PathBuf {
-        let hex = hash.to_hex();
-        self.tree_manifests_dir()
-            .join(&hex[..2])
-            .join(format!("{}.json", hex))
-    }
-
-    fn cache_path(&self, key: &CacheKey) -> Utf8PathBuf {
-        let hex = key.to_hex();
-        self.cache_dir().join(&hex[..2]).join(&hex)
-    }
-
-    fn toolchains_spec_dir(&self) -> Utf8PathBuf {
-        self.root.join("toolchains")
-    }
-
-    fn spec_path(&self, spec_key: &ToolchainSpecKey) -> Utf8PathBuf {
-        let hex = spec_key.to_hex();
-        self.toolchains_spec_dir().join(&hex[..2]).join(&hex)
-    }
-
-    /// Publish spec → manifest_hash mapping atomically (first-writer-wins).
-    /// Returns Ok(true) if we published, Ok(false) if already exists.
-    ///
-    /// DURABILITY: Uses O_EXCL + fsync + directory sync for crash safety.
-    async fn publish_spec_mapping(
-        &self,
-        spec_key: &ToolchainSpecKey,
-        manifest_hash: &Blake3Hash,
-    ) -> std::io::Result<bool> {
-        let path = self.spec_path(spec_key);
-
-        // Check if file already exists first
-        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return Ok(false);
-        }
-
-        // Use atomic_write which handles tmp + rename
-        match atomic_write(&path, manifest_hash.to_hex().as_bytes()).await {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                Ok(false) // Another writer won during the race
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Lookup manifest_hash by spec_key.
-    ///
-    /// If the mapping file exists but is unreadable/corrupt, we treat it as
-    /// a cache miss (re-acquire will fix it via first-writer-wins).
-    async fn lookup_spec(&self, spec_key: &ToolchainSpecKey) -> Option<Blake3Hash> {
-        let path = self.spec_path(spec_key);
-        let content = tokio::fs::read_to_string(&path).await.ok()?;
-        Blake3Hash::from_hex(content.trim())
-    }
-
-    /// Initialize directory structure
-    async fn init(&self) -> std::io::Result<()> {
-        tokio::fs::create_dir_all(self.blobs_dir()).await?;
-        tokio::fs::create_dir_all(self.manifests_dir()).await?;
-        tokio::fs::create_dir_all(self.cache_dir()).await?;
-        tokio::fs::create_dir_all(self.tmp_dir()).await?;
-        tokio::fs::create_dir_all(self.toolchains_spec_dir()).await?;
-        Ok(())
-    }
-
-    /// Store a ToolchainManifest using the manifest storage path.
-    async fn put_toolchain_manifest(&self, manifest: &ToolchainManifest) -> Blake3Hash {
-        let json =
-            facet_json::to_string(manifest).expect("toolchain manifest serialization must succeed");
-        let hash = Blake3Hash::from_bytes(json.as_bytes());
-        let path = self.manifest_path(&hash);
-
-        tracing::debug!(
-            manifest_hash = %hash,
-            path = %path,
-            exists = path.exists(),
-            "put_toolchain_manifest: preparing to write"
-        );
-
-        if !path.exists() {
-            if let Err(e) = atomic_write(&path, json.as_bytes()).await {
-                tracing::warn!("failed to write toolchain manifest to {}: {}", path, e);
-            } else {
-                tracing::debug!(
-                    manifest_hash = %hash,
-                    path = %path,
-                    "put_toolchain_manifest: wrote successfully"
-                );
-            }
-        } else {
-            tracing::debug!(
-                manifest_hash = %hash,
-                path = %path,
-                "put_toolchain_manifest: already exists, skipping write"
-            );
-        }
-
-        hash
     }
 }

@@ -10,12 +10,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use thiserror::Error;
 use vx_cass_proto::Blake3Hash;
-use vx_cass_proto::{
-    EnsureRegistryCrateResult, EnsureStatus, RegistryCrateManifest, RegistrySpecKey,
-};
-
-use crate::CassService;
-use vx_io::atomic_write;
+use vx_cass_proto::{EnsureRegistryCrateResult, EnsureStatus, RegistrySpecKey};
 
 /// Maximum retry attempts for transient failures
 const MAX_RETRIES: u32 = 3;
@@ -206,94 +201,3 @@ fn is_retryable_error(error: &DownloadError) -> bool {
     )
 }
 
-// =============================================================================
-// CassRegistry Implementation
-// =============================================================================
-
-impl CassService {
-    /// Get the registry spec directory
-    fn registry_spec_dir(&self) -> camino::Utf8PathBuf {
-        self.root.join("registry/spec")
-    }
-
-    /// Get the path for a registry spec mapping
-    fn registry_spec_path(&self, spec_key: &RegistrySpecKey) -> camino::Utf8PathBuf {
-        let hex = spec_key.to_hex();
-        self.registry_spec_dir().join(&hex[..2]).join(&hex)
-    }
-
-    /// Publish registry spec → manifest_hash mapping atomically (first-writer-wins).
-    /// Publish registry spec → manifest_hash mapping atomically (first-writer-wins).
-    pub(crate) async fn publish_registry_spec_mapping(
-        &self,
-        spec_key: &RegistrySpecKey,
-        manifest_hash: &Blake3Hash,
-    ) -> std::io::Result<bool> {
-        let path = self.registry_spec_path(spec_key);
-        let parent = path.parent().expect("spec path has parent").to_path_buf();
-        let manifest_hex = manifest_hash.to_hex();
-
-        tokio::task::spawn_blocking(move || {
-            use std::fs::{File, OpenOptions};
-            use std::io::Write;
-
-            std::fs::create_dir_all(&parent)?;
-
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut file) => {
-                    file.write_all(manifest_hex.as_bytes())?;
-                    file.sync_all()?;
-                    if let Ok(dir) = File::open(&parent)
-                        && let Err(e) = dir.sync_all()
-                    {
-                        tracing::warn!("failed to sync directory {}: {}", parent, e);
-                    }
-                    Ok(true)
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-                Err(e) => Err(e),
-            }
-        })
-        .await
-        .expect("spawn_blocking join failed")
-    }
-
-    /// Lookup manifest_hash by registry spec_key (internal helper).
-    pub(crate) async fn lookup_registry_spec_local(
-        &self,
-        spec_key: &RegistrySpecKey,
-    ) -> Option<Blake3Hash> {
-        let path = self.registry_spec_path(spec_key);
-        let content = tokio::fs::read_to_string(&path).await.ok()?;
-        Blake3Hash::from_hex(content.trim())
-    }
-
-    /// Store a RegistryCrateManifest and return its hash.
-    pub(crate) async fn put_registry_manifest(
-        &self,
-        manifest: &RegistryCrateManifest,
-    ) -> Blake3Hash {
-        let json =
-            facet_json::to_string(manifest).expect("registry manifest serialization must succeed");
-        let hash = Blake3Hash::from_bytes(json.as_bytes());
-        let path = self.manifest_path(&hash);
-
-        if !path.exists()
-            && let Err(e) = atomic_write(&path, json.as_bytes()).await
-        {
-            tracing::warn!("failed to write registry manifest to {}: {}", path, e);
-        }
-
-        hash
-    }
-
-    /// Get a RegistryCrateManifest by hash.
-    pub async fn get_registry_crate_manifest(
-        &self,
-        manifest_hash: &Blake3Hash,
-    ) -> Option<RegistryCrateManifest> {
-        let path = self.manifest_path(manifest_hash);
-        let json = tokio::fs::read_to_string(&path).await.ok()?;
-        facet_json::from_str(&json).ok()
-    }
-}

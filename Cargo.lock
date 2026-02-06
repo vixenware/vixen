@@ -2717,10 +2717,9 @@ name = "vx-cass-proto"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "camino",
  "facet",
+ "facet-json",
  "facet-postcard",
- "jiff",
  "roam",
 ]
 

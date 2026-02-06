@@ -22,8 +22,8 @@ impl std::ops::Deref for CassService {
 
 /// CAS service implementation
 pub(crate) struct CassServiceInner {
-    /// Root directory for CAS storage (typically .vx/cass)
-    pub(crate) root: Utf8PathBuf,
+    /// Storage backend (filesystem, optionally layered with read-only base)
+    pub(crate) storage: crate::storage::CasStore,
 
     /// VX home directory (typically .vx) - parent of root, used for toolchain spec mappings
     pub(crate) vx_home: Utf8PathBuf,

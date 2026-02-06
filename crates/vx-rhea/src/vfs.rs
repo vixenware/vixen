@@ -459,7 +459,7 @@ impl Vfs for CasVfs {
     }
 
     async fn read_dir(&self, _cx: &roam::Context, item_id: ItemId, cursor: u64) -> ReadDirResult {
-        tracing::debug!(item_id, cursor, "VFS read_dir");
+        tracing::trace!(item_id, cursor, "VFS read_dir");
 
         let items = self.items.read().await;
         match items.get(&item_id) {
@@ -510,7 +510,7 @@ impl Vfs for CasVfs {
         offset: u64,
         len: u64,
     ) -> ReadResult {
-        tracing::debug!(item_id, offset, len, "VFS read");
+        tracing::trace!(item_id, offset, len, "VFS read");
 
         // Get item info
         let (item_type, cas_hash) = {
@@ -790,7 +790,6 @@ impl Vfs for CasVfs {
     async fn ping(&self, _cx: &roam::Context) -> String {
         "pong from vx-rhea CAS VFS".to_string()
     }
-
 }
 
 /// Flush a file's write buffer to CAS and return the blob hash

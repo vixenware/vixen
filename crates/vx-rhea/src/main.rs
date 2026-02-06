@@ -201,7 +201,7 @@ async fn connect_to_cas(endpoint: &Endpoint) -> Result<vx_cass_proto::CassClient
         .handle()
         .await
         .map_err(|e| eyre::eyre!("failed to connect to CAS at {}: {}", endpoint, e))?;
-    Ok(CassClient::new(caller))
+    Ok(vx_cass_proto::CassClient::new(caller))
 }
 
 /// Check if a socket endpoint is already in use by trying to connect

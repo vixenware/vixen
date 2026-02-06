@@ -8,8 +8,7 @@ use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use tracing::{debug, info, warn};
-use vx_cass_proto::{Blake3Hash, CassClient};
-use vx_cass_proto::{RegistryCrateManifest, RegistryMaterializationResult};
+use vx_cass_proto::{Blake3Hash, CassClient, RegistryCrateManifest, RegistryMaterializationResult};
 use vx_tarball::Compression;
 
 use crate::InflightMaterializations;

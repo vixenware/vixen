@@ -10,7 +10,6 @@ use vx_cass_proto::{
 
 use crate::registry::download_crate;
 use crate::types::CassService;
-use vx_io::atomic_write;
 
 const CRATES_IO_REGISTRY: &str = "https://crates.io";
 const REGISTRY_MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -26,9 +25,7 @@ impl Cass for CassService {
     }
 
     async fn lookup(&self, _cx: &roam::Context, cache_key: CacheKey) -> Option<ManifestHash> {
-        let path = self.cache_path(&cache_key);
-        let content = tokio::fs::read_to_string(&path).await.ok()?;
-        ManifestHash::from_hex(content.trim())
+        self.storage.get_cache(&cache_key).await.ok().flatten()
     }
 
     async fn publish(
@@ -37,11 +34,8 @@ impl Cass for CassService {
         cache_key: CacheKey,
         manifest_hash: ManifestHash,
     ) -> PublishResult {
-        let blob_path = self.blob_path(&manifest_hash);
-        let dest = self.cache_path(&cache_key);
-
         // Validate manifest blob exists
-        if !tokio::fs::try_exists(&blob_path).await.unwrap_or(false) {
+        if !self.storage.has_blob(&manifest_hash).await.unwrap_or(false) {
             return PublishResult {
                 success: false,
                 error: Some(format!(
@@ -51,8 +45,12 @@ impl Cass for CassService {
             };
         }
 
-        // Atomically write the cache mapping
-        match atomic_write(&dest, manifest_hash.to_hex().as_bytes()).await {
+        // Write the cache mapping
+        match self
+            .storage
+            .put_cache(&cache_key, &manifest_hash)
+            .await
+        {
             Ok(()) => PublishResult {
                 success: true,
                 error: None,
@@ -69,10 +67,9 @@ impl Cass for CassService {
         let json =
             facet_json::to_string(&manifest).expect("node manifest serialization must succeed");
         let hash = ManifestHash::from_bytes(json.as_bytes());
-        let dest = self.blob_path(&hash);
 
-        if let Err(e) = atomic_write(&dest, json.as_bytes()).await {
-            tracing::warn!("failed to write node manifest to {}: {}", dest, e);
+        if let Err(e) = self.storage.put_blob(&hash, json.as_bytes()).await {
+            tracing::warn!(manifest_hash = %hash, error = %e, "failed to write node manifest blob");
         }
 
         hash
@@ -80,29 +77,19 @@ impl Cass for CassService {
 
     // [impl axiom.cas-unified-blobs] Node manifests are read from blob store
     async fn get_manifest(&self, _cx: &roam::Context, hash: ManifestHash) -> Option<NodeManifest> {
-        let path = self.blob_path(&hash);
-        tracing::debug!(
-            manifest_hash = %hash,
-            path = %path,
-            "get_manifest: reading from blob store"
-        );
+        tracing::debug!(manifest_hash = %hash, "get_manifest: reading from blob store");
 
-        match tokio::fs::read_to_string(&path).await {
-            Ok(json) => {
-                tracing::debug!(manifest_hash = %hash, "get_manifest: blob read successfully");
-                match facet_json::from_str(&json) {
-                    Ok(manifest) => {
-                        tracing::debug!(manifest_hash = %hash, "get_manifest: parsed successfully");
-                        Some(manifest)
-                    }
-                    Err(e) => {
-                        tracing::warn!(manifest_hash = %hash, error = ?e, "get_manifest: failed to parse JSON");
-                        None
-                    }
-                }
+        let data = self.storage.get_blob(&hash).await.ok().flatten()?;
+        let json = String::from_utf8(data).ok()?;
+
+        tracing::debug!(manifest_hash = %hash, "get_manifest: blob read successfully");
+        match facet_json::from_str(&json) {
+            Ok(manifest) => {
+                tracing::debug!(manifest_hash = %hash, "get_manifest: parsed successfully");
+                Some(manifest)
             }
             Err(e) => {
-                tracing::warn!(manifest_hash = %hash, path = %path, error = ?e, "get_manifest: blob not found or read error");
+                tracing::warn!(manifest_hash = %hash, error = ?e, "get_manifest: failed to parse JSON");
                 None
             }
         }
@@ -110,23 +97,20 @@ impl Cass for CassService {
 
     async fn put_blob(&self, _cx: &roam::Context, data: Vec<u8>) -> BlobHash {
         let hash = BlobHash::from_bytes(&data);
-        let dest = self.blob_path(&hash);
 
-        if let Err(e) = atomic_write(&dest, &data).await {
-            tracing::warn!("failed to write blob to {}: {}", dest, e);
+        if let Err(e) = self.storage.put_blob(&hash, &data).await {
+            tracing::warn!(blob_hash = %hash, error = %e, "failed to write blob");
         }
 
         hash
     }
 
     async fn get_blob(&self, _cx: &roam::Context, hash: BlobHash) -> Option<Vec<u8>> {
-        let path = self.blob_path(&hash);
-        tokio::fs::read(&path).await.ok()
+        self.storage.get_blob(&hash).await.ok().flatten()
     }
 
     async fn has_blob(&self, _cx: &roam::Context, hash: BlobHash) -> bool {
-        let path = self.blob_path(&hash);
-        tokio::fs::try_exists(&path).await.unwrap_or(false)
+        self.storage.has_blob(&hash).await.unwrap_or(false)
     }
 
     #[tracing::instrument(skip(self), fields(name = %spec.name, version = %spec.version))]
@@ -167,7 +151,7 @@ impl Cass for CassService {
         self.registry_manager
             .ensure(
                 spec_key,
-                async move || this.lookup_registry_spec_local(&spec_key).await,
+                async move || this.storage.get_registry_spec(&spec_key).await.ok().flatten(),
                 async move || {
                     // Download tarball
                     let tarball_bytes =
@@ -184,7 +168,14 @@ impl Cass for CassService {
                         };
 
                     // Store tarball as blob
-                    let tarball_blob = this2.put_blob(tarball_bytes).await;
+                    let tarball_blob = BlobHash::from_bytes(&tarball_bytes);
+                    if let Err(e) = this2
+                        .storage
+                        .put_blob(&tarball_blob, &tarball_bytes)
+                        .await
+                    {
+                        tracing::warn!(blob_hash = %tarball_blob, error = %e, "failed to write tarball blob");
+                    }
 
                     // Create manifest
                     let manifest = RegistryCrateManifest {
@@ -195,11 +186,21 @@ impl Cass for CassService {
                     };
 
                     // Store manifest
-                    let manifest_hash = this2.put_registry_manifest(&manifest).await;
+                    let manifest_json = facet_json::to_string(&manifest)
+                        .expect("registry manifest serialization must succeed");
+                    let manifest_hash = Blake3Hash::from_bytes(manifest_json.as_bytes());
+                    if let Err(e) = this2
+                        .storage
+                        .put_manifest(&manifest_hash, manifest_json.as_bytes())
+                        .await
+                    {
+                        tracing::warn!(manifest_hash = %manifest_hash, error = %e, "failed to write registry manifest");
+                    }
 
                     // Publish spec → manifest_hash mapping
                     if let Err(e) = this2
-                        .publish_registry_spec_mapping(&spec_key, &manifest_hash)
+                        .storage
+                        .put_registry_spec(&spec_key, &manifest_hash)
                         .await
                     {
                         tracing::warn!(
@@ -233,7 +234,21 @@ impl Cass for CassService {
         _cx: &roam::Context,
         manifest_hash: Blake3Hash,
     ) -> Option<RegistryCrateManifest> {
-        self.get_registry_crate_manifest(&manifest_hash).await
+        let json = match self.storage.get_manifest(&manifest_hash).await {
+            Ok(Some(json)) => json,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::warn!(manifest_hash = %manifest_hash, error = %e, "get_registry_manifest: read error");
+                return None;
+            }
+        };
+        match facet_json::from_str(&json) {
+            Ok(manifest) => Some(manifest),
+            Err(e) => {
+                tracing::warn!(manifest_hash = %manifest_hash, error = ?e, "get_registry_manifest: failed to parse JSON");
+                None
+            }
+        }
     }
 
     async fn lookup_registry_spec(
@@ -241,7 +256,7 @@ impl Cass for CassService {
         _cx: &roam::Context,
         spec_key: RegistrySpecKey,
     ) -> Option<Blake3Hash> {
-        self.lookup_registry_spec_local(&spec_key).await
+        self.storage.get_registry_spec(&spec_key).await.ok().flatten()
     }
 
     async fn ensure_rust_toolchain(
@@ -268,7 +283,7 @@ impl Cass for CassService {
         spec_key: ToolchainSpecKey,
     ) -> Option<Blake3Hash> {
         // Delegate to the inherent method
-        self.lookup_spec(&spec_key).await
+        self.storage.get_toolchain_spec(&spec_key).await.ok().flatten()
     }
 
     async fn get_toolchain_manifest(
@@ -276,28 +291,28 @@ impl Cass for CassService {
         _cx: &roam::Context,
         manifest_hash: Blake3Hash,
     ) -> Option<ToolchainManifest> {
-        let path = self.manifest_path(&manifest_hash);
-        tracing::debug!(
-            manifest_hash = %manifest_hash,
-            path = %path,
-            "get_toolchain_manifest: attempting to read"
-        );
-        match tokio::fs::read_to_string(&path).await {
-            Ok(json) => {
-                tracing::debug!(manifest_hash = %manifest_hash, "get_toolchain_manifest: file read successfully");
-                match facet_json::from_str(&json) {
-                    Ok(manifest) => {
-                        tracing::debug!(manifest_hash = %manifest_hash, "get_toolchain_manifest: parsed successfully");
-                        Some(manifest)
-                    }
-                    Err(e) => {
-                        tracing::warn!(manifest_hash = %manifest_hash, error = ?e, "get_toolchain_manifest: failed to parse JSON");
-                        None
-                    }
-                }
+        tracing::debug!(manifest_hash = %manifest_hash, "get_toolchain_manifest: attempting to read");
+
+        let json = match self.storage.get_manifest(&manifest_hash).await {
+            Ok(Some(json)) => json,
+            Ok(None) => {
+                tracing::warn!(manifest_hash = %manifest_hash, "get_toolchain_manifest: not found");
+                return None;
             }
             Err(e) => {
-                tracing::warn!(manifest_hash = %manifest_hash, path = %path, error = ?e, "get_toolchain_manifest: file not found or read error");
+                tracing::warn!(manifest_hash = %manifest_hash, error = %e, "get_toolchain_manifest: read error");
+                return None;
+            }
+        };
+
+        tracing::debug!(manifest_hash = %manifest_hash, "get_toolchain_manifest: read successfully");
+        match facet_json::from_str(&json) {
+            Ok(manifest) => {
+                tracing::debug!(manifest_hash = %manifest_hash, "get_toolchain_manifest: parsed successfully");
+                Some(manifest)
+            }
+            Err(e) => {
+                tracing::warn!(manifest_hash = %manifest_hash, error = ?e, "get_toolchain_manifest: failed to parse JSON");
                 None
             }
         }
@@ -371,12 +386,11 @@ impl Cass for CassService {
 
             // Store the blob
             let blob_hash = BlobHash::from_bytes(&file.contents);
-            let blob_path = self.blob_path(&blob_hash);
 
             // Check if blob already exists (for dedup stats)
-            let exists = tokio::fs::try_exists(&blob_path).await.unwrap_or(false);
+            let exists = self.storage.has_blob(&blob_hash).await.unwrap_or(false);
             if !exists {
-                if let Err(e) = vx_io::atomic_write(&blob_path, &file.contents).await {
+                if let Err(e) = self.storage.put_blob(&blob_hash, &file.contents).await {
                     return IngestTreeResult {
                         success: false,
                         manifest_hash: None,
@@ -402,8 +416,11 @@ impl Cass for CassService {
         let manifest_hash = ManifestHash::from_bytes(manifest_json.as_bytes());
 
         // Store as blob (for rhea's materialize_tree_from_cas which calls get_blob)
-        let blob_path = self.blob_path(&manifest_hash);
-        if let Err(e) = vx_io::atomic_write(&blob_path, manifest_json.as_bytes()).await {
+        if let Err(e) = self
+            .storage
+            .put_blob(&manifest_hash, manifest_json.as_bytes())
+            .await
+        {
             return IngestTreeResult {
                 success: false,
                 manifest_hash: None,
@@ -415,8 +432,11 @@ impl Cass for CassService {
         }
 
         // Also store in tree_manifests (for get_tree_manifest API)
-        let manifest_path = self.tree_manifest_path(&manifest_hash);
-        if let Err(e) = vx_io::atomic_write(&manifest_path, manifest_json.as_bytes()).await {
+        if let Err(e) = self
+            .storage
+            .put_tree_manifest(&manifest_hash, manifest_json.as_bytes())
+            .await
+        {
             return IngestTreeResult {
                 success: false,
                 manifest_hash: None,
@@ -451,30 +471,25 @@ impl Cass for CassService {
         _cx: &roam::Context,
         hash: ManifestHash,
     ) -> Option<TreeManifest> {
-        // Tree manifests are stored as blobs, not in the tree_manifests directory
-        let path = self.blob_path(&hash);
-        tracing::info!(
-            manifest_hash = %hash,
-            path = %path,
-            "get_tree_manifest: attempting to read from blob storage"
-        );
+        tracing::info!(manifest_hash = %hash, "get_tree_manifest: reading from blob storage");
 
-        match tokio::fs::read_to_string(&path).await {
-            Ok(json) => {
-                tracing::info!(manifest_hash = %hash, "get_tree_manifest: blob read successfully");
-                match facet_json::from_str(&json) {
-                    Ok(manifest) => {
-                        tracing::info!(manifest_hash = %hash, "get_tree_manifest: parsed successfully");
-                        Some(manifest)
-                    }
-                    Err(e) => {
-                        tracing::error!(manifest_hash = %hash, error = ?e, "get_tree_manifest: failed to parse JSON");
-                        None
-                    }
-                }
+        let data = self.storage.get_blob(&hash).await.ok().flatten()?;
+        let json = match String::from_utf8(data) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::error!(manifest_hash = %hash, error = %e, "get_tree_manifest: invalid UTF-8");
+                return None;
+            }
+        };
+
+        tracing::info!(manifest_hash = %hash, "get_tree_manifest: blob read successfully");
+        match facet_json::from_str(&json) {
+            Ok(manifest) => {
+                tracing::info!(manifest_hash = %hash, "get_tree_manifest: parsed successfully");
+                Some(manifest)
             }
             Err(e) => {
-                tracing::error!(manifest_hash = %hash, path = %path, error = ?e, "get_tree_manifest: blob not found or read error");
+                tracing::error!(manifest_hash = %hash, error = ?e, "get_tree_manifest: failed to parse JSON");
                 None
             }
         }
@@ -486,12 +501,18 @@ impl Cass for CassService {
         blob: Blake3Hash,
         output: roam::Tx<Vec<u8>>,
     ) -> Result<(), String> {
-        let blob_path = self.blob_path(&blob);
+        let blob_path = self
+            .storage
+            .blob_path(&blob)
+            .await
+            .map_err(|e| format!("blob lookup error: {e}"))?
+            .ok_or_else(|| "blob not found".to_string())?;
+
         use tokio::io::AsyncReadExt;
 
         let file = tokio::fs::File::open(&blob_path)
             .await
-            .map_err(|e| format!("blob not found: {e}"))?;
+            .map_err(|e| format!("failed to open blob: {e}"))?;
 
         let mut reader = tokio::io::BufReader::new(file);
         let mut buf = vec![0u8; 16 * 1024 * 1024]; // 16MB chunks

@@ -4,11 +4,10 @@ use futures_util::{StreamExt, future::join};
 use jiff::Timestamp;
 use std::collections::HashMap;
 use std::sync::Arc;
-use vx_cass_proto::*;
 use vx_cass_proto::{
-    EnsureStatus as ToolchainEnsureStatus, EnsureToolchainResult, RustChannel, RustToolchainSpec,
-    TOOLCHAIN_MANIFEST_SCHEMA_VERSION, ToolchainComponentTree, ToolchainKind, ToolchainManifest,
-    ToolchainSpecKey, ZigToolchainSpec,
+    Blake3Hash, BlobHash, EnsureStatus as ToolchainEnsureStatus, EnsureToolchainResult,
+    RustChannel, RustToolchainSpec, TOOLCHAIN_MANIFEST_SCHEMA_VERSION, ToolchainComponentTree,
+    ToolchainKind, ToolchainManifest, ToolchainSpecKey, ZigToolchainSpec,
 };
 use vx_tarball::Compression;
 
@@ -179,7 +178,7 @@ impl CassService {
         self.toolchain_manager
             .ensure(
                 spec_key,
-                async move || this.lookup_spec(&spec_key).await,
+                async move || this.storage.get_toolchain_spec(&spec_key).await.ok().flatten(),
                 async move || this2.acquire_rust_toolchain_impl(spec_key, &spec).await,
             )
             .await
@@ -296,8 +295,11 @@ impl CassService {
             std::io::Cursor::new(rustc_tarball),
             Compression::Xz,
             2, // strip rustc-VERSION/ and rustc/ components
-            async move |data| {
-                let hash = this.put_blob(data).await;
+            async move |data: Vec<u8>| {
+                let hash = BlobHash::from_bytes(&data);
+                if let Err(e) = this.storage.put_blob(&hash, &data).await {
+                    tracing::warn!("failed to write blob: {}", e);
+                }
                 Ok(hash)
             },
         )
@@ -318,7 +320,14 @@ impl CassService {
         // Store rustc tree manifest
         let rustc_tree_json =
             facet_json::to_string(&rustc_tree).expect("rustc tree serialization must succeed");
-        let rustc_tree_hash = self.put_blob(rustc_tree_json.into_bytes()).await;
+        let rustc_tree_hash = BlobHash::from_bytes(rustc_tree_json.as_bytes());
+        if let Err(e) = self
+            .storage
+            .put_blob(&rustc_tree_hash, rustc_tree_json.as_bytes())
+            .await
+        {
+            tracing::warn!("failed to write rustc tree blob: {}", e);
+        }
 
         tracing::info!(
             rustc_tree = %rustc_tree_hash,
@@ -334,8 +343,11 @@ impl CassService {
             std::io::Cursor::new(rust_std_tarball),
             Compression::Xz,
             2, // strip rust-std-VERSION/ and rust-std-TARGET/ components
-            async move |data| {
-                let hash = this.put_blob(data).await;
+            async move |data: Vec<u8>| {
+                let hash = BlobHash::from_bytes(&data);
+                if let Err(e) = this.storage.put_blob(&hash, &data).await {
+                    tracing::warn!("failed to write blob: {}", e);
+                }
                 Ok(hash)
             },
         )
@@ -356,7 +368,14 @@ impl CassService {
         // Store rust-std tree manifest
         let rust_std_tree_json = facet_json::to_string(&rust_std_tree)
             .expect("rust-std tree serialization must succeed");
-        let rust_std_tree_hash = self.put_blob(rust_std_tree_json.into_bytes()).await;
+        let rust_std_tree_hash = BlobHash::from_bytes(rust_std_tree_json.as_bytes());
+        if let Err(e) = self
+            .storage
+            .put_blob(&rust_std_tree_hash, rust_std_tree_json.as_bytes())
+            .await
+        {
+            tracing::warn!("failed to write rust-std tree blob: {}", e);
+        }
 
         tracing::info!(
             rust_std_tree = %rust_std_tree_hash,
@@ -399,10 +418,23 @@ impl CassService {
         };
 
         // Store manifest
-        let manifest_hash = self.put_toolchain_manifest(&toolchain_manifest).await;
+        let manifest_json = facet_json::to_string(&toolchain_manifest)
+            .expect("toolchain manifest serialization must succeed");
+        let manifest_hash = Blake3Hash::from_bytes(manifest_json.as_bytes());
+        if let Err(e) = self
+            .storage
+            .put_manifest(&manifest_hash, manifest_json.as_bytes())
+            .await
+        {
+            tracing::warn!("failed to write toolchain manifest: {}", e);
+        }
 
         // Publish spec → manifest_hash mapping
-        if let Err(e) = self.publish_spec_mapping(&spec_key, &manifest_hash).await {
+        if let Err(e) = self
+            .storage
+            .put_toolchain_spec(&spec_key, &manifest_hash)
+            .await
+        {
             tracing::warn!("failed to publish spec mapping for {}: {}", spec_key, e);
         }
 
@@ -448,7 +480,7 @@ impl CassService {
         self.toolchain_manager
             .ensure(
                 spec_key,
-                async move || this.lookup_spec(&spec_key).await,
+                async move || this.storage.get_toolchain_spec(&spec_key).await.ok().flatten(),
                 async move || this2.acquire_zig_toolchain_impl(spec_key, &spec).await,
             )
             .await
@@ -511,7 +543,14 @@ impl CassService {
             };
 
         // Store zig executable as tree manifest (single-file tree)
-        let zig_exe_blob_hash = self.put_blob(acquired.zig_exe_contents.clone()).await;
+        let zig_exe_blob_hash = BlobHash::from_bytes(&acquired.zig_exe_contents);
+        if let Err(e) = self
+            .storage
+            .put_blob(&zig_exe_blob_hash, &acquired.zig_exe_contents)
+            .await
+        {
+            tracing::warn!("failed to write zig exe blob: {}", e);
+        }
         let mut zig_exe_tree = vx_cass_proto::TreeManifest::new();
         zig_exe_tree.add_file(
             "zig".to_string(),
@@ -522,7 +561,14 @@ impl CassService {
         zig_exe_tree.finalize();
         let zig_exe_tree_json = facet_json::to_string(&zig_exe_tree)
             .expect("zig executable tree serialization must succeed");
-        let zig_exe_hash = self.put_blob(zig_exe_tree_json.into_bytes()).await;
+        let zig_exe_hash = BlobHash::from_bytes(zig_exe_tree_json.as_bytes());
+        if let Err(e) = self
+            .storage
+            .put_blob(&zig_exe_hash, zig_exe_tree_json.as_bytes())
+            .await
+        {
+            tracing::warn!("failed to write zig exe tree blob: {}", e);
+        }
 
         // Extract lib tarball to tree manually
         // First collect all entries synchronously (tar::Archive is not Send)
@@ -563,7 +609,10 @@ impl CassService {
         // Now upload blobs asynchronously and build tree
         let mut lib_tree = vx_cass_proto::TreeManifest::new();
         for (path_str, data) in lib_files {
-            let blob_hash = self.put_blob(data.clone()).await;
+            let blob_hash = BlobHash::from_bytes(&data);
+            if let Err(e) = self.storage.put_blob(&blob_hash, &data).await {
+                tracing::warn!("failed to write zig lib blob: {}", e);
+            }
             lib_tree.add_file(
                 path_str,
                 blob_hash,
@@ -577,7 +626,14 @@ impl CassService {
         // Store lib tree manifest
         let lib_tree_json =
             facet_json::to_string(&lib_tree).expect("zig lib tree serialization must succeed");
-        let lib_hash = self.put_blob(lib_tree_json.into_bytes()).await;
+        let lib_hash = BlobHash::from_bytes(lib_tree_json.as_bytes());
+        if let Err(e) = self
+            .storage
+            .put_blob(&lib_hash, lib_tree_json.as_bytes())
+            .await
+        {
+            tracing::warn!("failed to write zig lib tree blob: {}", e);
+        }
 
         // Cleanup extraction directory
         if let Err(e) = acquired.cleanup() {
@@ -626,10 +682,23 @@ impl CassService {
         };
 
         // Store manifest
-        let manifest_hash = self.put_toolchain_manifest(&toolchain_manifest).await;
+        let manifest_json = facet_json::to_string(&toolchain_manifest)
+            .expect("toolchain manifest serialization must succeed");
+        let manifest_hash = Blake3Hash::from_bytes(manifest_json.as_bytes());
+        if let Err(e) = self
+            .storage
+            .put_manifest(&manifest_hash, manifest_json.as_bytes())
+            .await
+        {
+            tracing::warn!("failed to write toolchain manifest: {}", e);
+        }
 
         // Publish spec → manifest_hash mapping
-        if let Err(e) = self.publish_spec_mapping(&spec_key, &manifest_hash).await {
+        if let Err(e) = self
+            .storage
+            .put_toolchain_spec(&spec_key, &manifest_hash)
+            .await
+        {
             tracing::warn!("failed to publish spec mapping for {}: {}", spec_key, e);
         }
 
