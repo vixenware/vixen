@@ -42,7 +42,7 @@ impl Args {
             format!("{}/.vx", home)
         });
         let vx_home = Utf8PathBuf::from(&vx_home);
-        let root = vx_home.join("oort");
+        let root = vx_home.join("cass");
 
         // VX_CASS can be:
         // - host:port (TCP)
@@ -93,8 +93,8 @@ async fn async_main() -> Result<()> {
 
     let args = Args::from_env()?;
 
-    // Initialize oort service
-    tracing::info!("Initializing oort at {}", args.root);
+    // Initialize cass service
+    tracing::info!("Initializing cass at {}", args.root);
     let cass = CassService::new(args.root, args.vx_home);
     cass.init().await?;
 

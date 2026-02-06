@@ -264,10 +264,7 @@ impl ProgressListener for ProgressListenerImpl {
 async fn get_or_spawn_aether(
     no_spawn: bool,
     no_tui: bool,
-) -> Result<(
-    AetherClient<AetherCaller>,
-    Option<tui::TuiHandle>,
-)> {
+) -> Result<(AetherClient<AetherCaller>, Option<tui::TuiHandle>)> {
     use vx_io::net::Endpoint;
 
     let vx_home = std::env::var("VX_HOME")
@@ -365,10 +362,7 @@ async fn get_or_spawn_aether(
 async fn try_connect_daemon(
     endpoint: &vx_io::net::Endpoint,
     no_tui: bool,
-) -> Result<(
-    AetherClient<AetherCaller>,
-    Option<tui::TuiHandle>,
-)> {
+) -> Result<(AetherClient<AetherCaller>, Option<tui::TuiHandle>)> {
     // Create TUI and progress listener (only if TUI is enabled)
     let tui = if no_tui {
         None

@@ -207,7 +207,7 @@ fn is_retryable_error(error: &DownloadError) -> bool {
 }
 
 // =============================================================================
-// OortRegistry Implementation
+// CassRegistry Implementation
 // =============================================================================
 
 impl CassService {
