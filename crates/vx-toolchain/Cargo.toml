@@ -19,7 +19,7 @@ tar = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-vx-cass-proto = { workspace = true }
+vx-store-proto = { workspace = true }
 walkdir = "2.5"
 vx-http = { workspace = true }
 uuid = { version = "1.19.0", features = ["v4"] }

@@ -11,7 +11,7 @@ pub mod zig;
 
 use thiserror::Error;
 
-use vx_cass_proto::RustChannel;
+use vx_store_proto::RustChannel;
 
 // Re-export Rust toolchain functions
 pub use rust::{
@@ -21,7 +21,7 @@ pub use rust::{
 
 // Re-export types used in tests
 #[cfg(test)]
-pub use vx_cass_proto::{RustComponent, RustToolchainSpec};
+pub use vx_store_proto::{RustComponent, RustToolchainSpec};
 
 // Type alias for backward compatibility
 pub type Channel = RustChannel;

@@ -1,0 +1,35 @@
+[package]
+name = "vxd"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+vx-tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+facet = { workspace = true }
+picante = { workspace = true }
+roam = { workspace = true }
+roam-stream = { workspace = true }
+tokio = { workspace = true }
+blake3 = { workspace = true }
+camino = { workspace = true }
+eyre = { workspace = true }
+thiserror = { workspace = true }
+futures-util = { workspace = true }
+jiff = { workspace = true }
+tracing = { workspace = true }
+ur-taking-me-with-you = { workspace = true }
+indicatif = { workspace = true }
+petgraph = { workspace = true }
+
+vx-store-proto = { workspace = true }
+vx-cc = { workspace = true }
+vx-runner-proto = { workspace = true }
+vxd-proto = { workspace = true }
+vx-io = { workspace = true }
+vx-manifest = { workspace = true }
+vx-project = { workspace = true }
+vx-report = { workspace = true }
+vx-rs = { workspace = true }
+vx-toolchain = { workspace = true }
+tokio-test-lite = { workspace = true }

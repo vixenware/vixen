@@ -6,7 +6,7 @@
 //! Each test uses Unix sockets in its unique VX_HOME directory, avoiding any port
 //! conflicts when tests run in parallel.
 //!
-//! The daemon (vx-aether) is spawned by the test harness and lives for the duration
+//! The daemon (vxd) is spawned by the test harness and lives for the duration
 //! of the test. Multiple `vx` invocations share the same daemon.
 
 // Each integration test file compiles this module separately, so functions
@@ -67,7 +67,7 @@ impl Drop for DaemonGuard {
 impl TestEnv {
     /// Create a new isolated test environment
     ///
-    /// Spawns vx-aether daemon which lives for the duration of the test.
+    /// Spawns vxd daemon which lives for the duration of the test.
     /// Multiple `vx` commands will share this daemon.
     ///
     /// # External daemon mode
@@ -77,9 +77,9 @@ impl TestEnv {
     ///
     /// Example for debugging under lldb:
     /// ```bash
-    /// # Terminal 1: Run aether under lldb
+    /// # Terminal 1: Run daemon under lldb
     /// mkdir -p /tmp/test-vx-debug
-    /// VX_HOME=/tmp/test-vx-debug lldb target/debug/vx-aether
+    /// VX_HOME=/tmp/test-vx-debug lldb target/debug/vxd
     /// # (lldb) run
     ///
     /// # Terminal 2: Run test connecting to that daemon
@@ -127,20 +127,20 @@ impl TestEnv {
         }
     }
 
-    /// Spawn vx-aether daemon for a given VX_HOME directory
+    /// Spawn vxd daemon for a given VX_HOME directory
     ///
     /// This is public so tests can spawn a daemon at a custom path (e.g., shared_home).
     ///
-    /// All daemons (aether, cass, rhea) inherit stdout/stderr so their logs appear
+    /// All daemons (vxd, store, runner) inherit stdout/stderr so their logs appear
     /// inline in test output. This is done via `VX_INHERIT_STDIO` which propagates
-    /// to child daemons spawned by aether.
+    /// to child daemons spawned by vxd.
     pub fn spawn_daemon(vx_home: &Path) -> DaemonGuard {
         let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "trace".to_string());
 
         // Ensure VX_HOME directory exists
         std::fs::create_dir_all(vx_home).expect("failed to create VX_HOME");
 
-        let mut cmd = Command::new(Self::aether_binary());
+        let mut cmd = Command::new(Self::daemon_binary());
         cmd.env("VX_HOME", vx_home);
         cmd.env("RUST_LOG", &rust_log);
         cmd.env("VX_INHERIT_STDIO", "1");
@@ -149,10 +149,10 @@ impl TestEnv {
         cmd.stderr(Stdio::inherit());
 
         let child =
-            ur_taking_me_with_you::spawn_dying_with_parent(cmd).expect("failed to spawn vx-aether");
+            ur_taking_me_with_you::spawn_dying_with_parent(cmd).expect("failed to spawn vxd");
 
         // Give daemon time to start listening
-        // The daemon needs to initialize picante DB, spawn cass/rhea, etc.
+        // The daemon needs to initialize picante DB, spawn store/runner, etc.
         thread::sleep(Duration::from_millis(500));
 
         DaemonGuard::new(child)
@@ -169,14 +169,14 @@ impl TestEnv {
         path
     }
 
-    /// Path to the vx-aether binary (built by cargo)
-    fn aether_binary() -> PathBuf {
+    /// Path to the vxd binary (built by cargo)
+    fn daemon_binary() -> PathBuf {
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         path.pop(); // crates/
         path.pop(); // vx/
         path.push("target");
         path.push("debug");
-        path.push("vx-aether");
+        path.push("vxd");
         path
     }
 
@@ -191,7 +191,7 @@ impl TestEnv {
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "trace".to_string()),
         );
-        // Don't set VX_AETHER/VX_CASS/VX_RHEA - let them default to Unix sockets
+        // Don't set VXD/VX_STORE/VX_RUNNER - let them default to Unix sockets
     }
 
     /// Run `vx build` in this environment

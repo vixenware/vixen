@@ -1,0 +1,11 @@
+[package]
+name = "vxd-proto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+facet = { workspace = true }
+roam = { workspace = true }
+facet-postcard = { workspace = true, features = ["camino"] }
+camino = { workspace = true }
+vx-store-proto = { workspace = true }

@@ -2616,55 +2616,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ur-taking-me-with-you",
- "vx-aether-proto",
  "vx-io",
  "vx-report",
  "vx-tracing",
-]
-
-[[package]]
-name = "vx-aether"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "camino",
- "eyre",
- "facet",
- "futures-util",
- "indicatif",
- "jiff",
- "petgraph",
- "picante",
- "roam",
- "roam-stream",
- "thiserror",
- "tokio",
- "tokio-test-lite",
- "tracing",
- "tracing-subscriber",
- "ur-taking-me-with-you",
- "vx-aether-proto",
- "vx-cass-proto",
- "vx-cc",
- "vx-io",
- "vx-manifest",
- "vx-project",
- "vx-report",
- "vx-rhea-proto",
- "vx-rs",
- "vx-toolchain",
- "vx-tracing",
-]
-
-[[package]]
-name = "vx-aether-proto"
-version = "0.1.0"
-dependencies = [
- "camino",
- "facet",
- "facet-postcard",
- "roam",
- "vx-cass-proto",
+ "vxd-proto",
 ]
 
 [[package]]
@@ -2672,54 +2627,8 @@ name = "vx-cache"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "vx-cass-proto",
- "vx-rhea-proto",
-]
-
-[[package]]
-name = "vx-cass"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "camino",
- "eyre",
- "facet",
- "facet-json",
- "flate2",
- "futures-util",
- "hex",
- "http-body-util",
- "jiff",
- "pin-project-lite",
- "roam",
- "roam-stream",
- "sha2",
- "tar",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "ur-taking-me-with-you",
- "vx-cass-proto",
- "vx-http",
- "vx-io",
- "vx-tarball",
- "vx-toolchain",
- "vx-tracing",
-]
-
-[[package]]
-name = "vx-cass-proto"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "facet",
- "facet-json",
- "facet-postcard",
- "roam",
+ "vx-runner-proto",
+ "vx-store-proto",
 ]
 
 [[package]]
@@ -2730,7 +2639,7 @@ dependencies = [
  "camino",
  "facet",
  "thiserror",
- "vx-cass-proto",
+ "vx-store-proto",
 ]
 
 [[package]]
@@ -2789,11 +2698,28 @@ dependencies = [
  "facet",
  "facet-json",
  "ulid",
- "vx-cass-proto",
+ "vx-store-proto",
 ]
 
 [[package]]
-name = "vx-rhea"
+name = "vx-rs"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "camino",
+ "facet",
+ "facet-cargo-toml",
+ "hex",
+ "ra-ap-rustc_lexer",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "vx-manifest",
+ "vx-store-proto",
+]
+
+[[package]]
+name = "vx-runner"
 version = "0.1.0"
 dependencies = [
  "blake3",
@@ -2814,40 +2740,69 @@ dependencies = [
  "ur-taking-me-with-you",
  "vixenfs-proto",
  "vx-cache",
- "vx-cass-proto",
  "vx-cc",
  "vx-io",
- "vx-rhea-proto",
+ "vx-runner-proto",
+ "vx-store-proto",
  "vx-tarball",
  "vx-tracing",
  "vx-vfs",
 ]
 
 [[package]]
-name = "vx-rhea-proto"
+name = "vx-runner-proto"
 version = "0.1.0"
 dependencies = [
  "facet",
  "facet-postcard",
  "roam",
- "vx-cass-proto",
+ "vx-store-proto",
 ]
 
 [[package]]
-name = "vx-rs"
+name = "vx-store"
 version = "0.1.0"
 dependencies = [
  "blake3",
  "camino",
+ "eyre",
  "facet",
- "facet-cargo-toml",
+ "facet-json",
+ "flate2",
+ "futures-util",
  "hex",
- "ra-ap-rustc_lexer",
+ "http-body-util",
+ "jiff",
+ "pin-project-lite",
+ "roam",
+ "roam-stream",
+ "sha2",
+ "tar",
  "tempfile",
  "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
  "tracing",
- "vx-cass-proto",
- "vx-manifest",
+ "tracing-subscriber",
+ "ur-taking-me-with-you",
+ "vx-http",
+ "vx-io",
+ "vx-store-proto",
+ "vx-tarball",
+ "vx-toolchain",
+ "vx-tracing",
+]
+
+[[package]]
+name = "vx-store-proto"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "facet",
+ "facet-json",
+ "facet-postcard",
+ "roam",
 ]
 
 [[package]]
@@ -2863,7 +2818,7 @@ dependencies = [
  "tokio-tar",
  "tokio-util",
  "tracing",
- "vx-cass-proto",
+ "vx-store-proto",
 ]
 
 [[package]]
@@ -2884,8 +2839,8 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "vx-cass-proto",
  "vx-http",
+ "vx-store-proto",
  "walkdir",
 ]
 
@@ -2910,6 +2865,51 @@ dependencies = [
  "tracing",
  "vixenfs-proto",
  "vx-io",
+]
+
+[[package]]
+name = "vxd"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "camino",
+ "eyre",
+ "facet",
+ "futures-util",
+ "indicatif",
+ "jiff",
+ "petgraph",
+ "picante",
+ "roam",
+ "roam-stream",
+ "thiserror",
+ "tokio",
+ "tokio-test-lite",
+ "tracing",
+ "tracing-subscriber",
+ "ur-taking-me-with-you",
+ "vx-cc",
+ "vx-io",
+ "vx-manifest",
+ "vx-project",
+ "vx-report",
+ "vx-rs",
+ "vx-runner-proto",
+ "vx-store-proto",
+ "vx-toolchain",
+ "vx-tracing",
+ "vxd-proto",
+]
+
+[[package]]
+name = "vxd-proto"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "facet",
+ "facet-postcard",
+ "roam",
+ "vx-store-proto",
 ]
 
 [[package]]

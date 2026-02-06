@@ -8,20 +8,20 @@ rust_log := "trace"
 list:
     just --list
 
-# Run vx-cass with full logging
-cass *args:
+# Run vx-store with full logging
+store *args:
     mkdir -p {{ debug_home }}
-    RUST_LOG={{ rust_log }} VX_HOME={{ debug_home }} cargo run --bin vx-cass {{ args }}
+    RUST_LOG={{ rust_log }} VX_HOME={{ debug_home }} cargo run --bin vx-store {{ args }}
 
-# Run vx-rhea with full logging (start cass first!)
-rhea *args:
+# Run vx-runner with full logging (start store first!)
+runner *args:
     mkdir -p {{ debug_home }}
-    RUST_LOG={{ rust_log }} VX_HOME={{ debug_home }} cargo run --bin vx-rhea {{ args }}
+    RUST_LOG={{ rust_log }} VX_HOME={{ debug_home }} cargo run --bin vx-runner {{ args }}
 
-# Run vx-aether with full logging (start cass and rhea first!)
-aether *args:
+# Run vxd with full logging (start store and runner first!)
+vxd *args:
     mkdir -p {{ debug_home }}
-    RUST_LOG={{ rust_log }} VX_HOME={{ debug_home }} cargo run --bin vx-aether {{ args }}
+    RUST_LOG={{ rust_log }} VX_HOME={{ debug_home }} cargo run --bin vxd {{ args }}
 
 # Run a test against the manually-started services
 test name:

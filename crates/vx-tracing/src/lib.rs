@@ -14,7 +14,7 @@ pub fn init_service(default_filter: &str) {
 pub fn cli_env_filter() -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         tracing_subscriber::EnvFilter::new(
-            "warn,vx=info,vx_aether=info,vx_cass=info,vx_toolchain=info,vx_rhea=info",
+            "warn,vx=info,vxd=info,vx_store=info,vx_toolchain=info,vx_runner=info",
         )
     })
 }

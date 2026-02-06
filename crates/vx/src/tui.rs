@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, oneshot};
 use tracing_subscriber::Layer;
-use vx_aether_proto::ActionType;
+use vxd_proto::ActionType;
 
 /// Tracks a single action
 #[derive(Debug, Clone)]

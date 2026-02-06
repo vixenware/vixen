@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use thiserror::Error;
-use vx_cass_proto::Blake3Hash;
+use vx_store_proto::Blake3Hash;
 use vx_manifest::lockfile::{CargoLock, CargoLockExt, LockfileError, ReachablePackages};
 use vx_manifest::{Edition, Manifest, ManifestError};
 
@@ -633,7 +633,7 @@ impl CrateGraph {
 
         // Phase 5: Create stub nodes for registry crates (from lockfile)
         // These are minimal nodes just for topo order computation.
-        // Rhea will determine edition/lib_path when materializing.
+        // Runner will determine edition/lib_path when materializing.
         let mut registry_id_map: HashMap<(String, String), CrateId> = HashMap::new();
         if let Some(ref reachable) = reachable_packages {
             for info in &registry_crates {
@@ -646,7 +646,7 @@ impl CrateGraph {
                     checksum: info.checksum.clone(),
                 };
 
-                // Stub node - edition/crate_root are placeholders, rhea determines them
+                // Stub node - edition/crate_root are placeholders, runner determines them
                 let node = CrateNode {
                     id,
                     package_name: info.name.clone(),

@@ -9,7 +9,7 @@ futures-util = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-vx-cass-proto = { workspace = true }
+vx-store-proto = { workspace = true }
 
 async-compression = { version = "0.4.36", default-features = false, features = ["tokio", "gzip", "xz"] }
 pin-project-lite = { workspace = true }

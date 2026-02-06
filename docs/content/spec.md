@@ -71,7 +71,7 @@ compiled binary are all stored the same way: write bytes, get a hash back,
 read bytes by hash. The only non-blob storage in CAS is the cache mapping
 (cache_key → manifest_hash), which is an index, not content-addressed data.
 
-Implemented. The `cass` service handles blob storage and manifest tracking.
+Implemented. The `vx-store` service handles blob storage and manifest tracking.
 
 ### Correct Caching
 
@@ -110,14 +110,14 @@ Implemented for both Rust and C targets.
 > machines via CAS.
 
 vixen uses a daemon architecture with three roles:
-- **aether** — orchestration. Parses manifests, builds action graphs,
+- **vxd** — orchestration. Parses manifests, builds action graphs,
   schedules work.
-- **rhea** — execution. Runs compiler invocations in isolated environments.
-- **cass** — storage. Stores and retrieves content-addressed blobs and
+- **vx-runner** — execution. Runs compiler invocations in isolated environments.
+- **vx-store** — storage. Stores and retrieves content-addressed blobs and
   manifests.
 
 These communicate via roam RPC. Today they run as threads in the same process.
-The architecture is designed so that rhea and cass can run on separate machines.
+The architecture is designed so that runner and store can run on separate machines.
 
 ### Shared Cache
 
@@ -168,7 +168,7 @@ Partially implemented.
 
 > r[arch.daemon]
 > vixen MUST use a daemon architecture. The CLI (`vx`) is a thin client that
-> communicates with the daemon (`aether`) via RPC over a Unix socket.
+> communicates with the daemon (`vxd`) via RPC over a Unix socket.
 
 The daemon stays alive between builds, preserving the incremental computation
 state. This means the second `vx build` in a session is faster than the first
@@ -201,7 +201,7 @@ Action types include:
 - Compilation (Rust, C, C++)
 - Linking
 
-The graph is built by aether and executed in dependency order. Independent
+The graph is built by vxd and executed in dependency order. Independent
 actions can execute in parallel.
 
 Implemented.
@@ -291,6 +291,6 @@ Here is what does not work yet:
 - Tests, benches, examples
 - C++ compilation
 - Remote/shared CAS
-- Remote execution (rhea on a separate machine)
+- Remote execution (vx-runner on a separate machine)
 - Bit-for-bit reproducibility verification
 - Sub-crate incremental compilation

@@ -7,7 +7,7 @@ VFS protocol crate for Vixen's macOS FSKit integration.
 This crate defines the RPC protocol used between:
 
 - the macOS FSKit extension hosted by `Vixen.app`
-- a backend VFS server implementation (for Vixen, this is wired through `vx-rhea`)
+- a backend VFS server implementation (for Vixen, this is wired through `vx-runner`)
 
 The protocol is generic: if you want to implement your own backend, implement the `Vfs` trait from this crate.
 

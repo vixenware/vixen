@@ -16,7 +16,7 @@ else
     HTTP_CACHE="${XDG_CACHE_HOME:-${HOME}/.cache}/vx-test-http-cache"
 fi
 
-CAS_DIR="${CACHE_BASE}/cass"
+CAS_DIR="${CACHE_BASE}/store"
 
 # Fast path: if toolchain specs already exist, skip warmup.
 # The toolchains/ dir in CAS holds spec->manifest mappings; if it has
@@ -44,11 +44,11 @@ echo 'fn main() {}' > "${WARMUP_DIR}/src/main.rs"
 
 # Resolve absolute paths to built binaries (build-daemons ran first)
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-AETHER_BIN="${SCRIPT_DIR}/target/debug/vx-aether"
+VXD_BIN="${SCRIPT_DIR}/target/debug/vxd"
 VX_BIN="${SCRIPT_DIR}/target/debug/vx"
 
-if [[ ! -x "${AETHER_BIN}" ]]; then
-    echo "ERROR: ${AETHER_BIN} not found. build-daemons should run first."
+if [[ ! -x "${VXD_BIN}" ]]; then
+    echo "ERROR: ${VXD_BIN} not found. build-daemons should run first."
     exit 1
 fi
 
@@ -58,10 +58,10 @@ export VX_HTTP_CACHE_DIR="${HTTP_CACHE}"
 export VX_INHERIT_STDIO=1
 export RUST_LOG="${RUST_LOG:-info}"
 
-"${AETHER_BIN}" &
+"${VXD_BIN}" &
 DAEMON_PID=$!
 
-# Give daemon time to initialize (spawn cass, rhea, bind sockets)
+# Give daemon time to initialize (spawn store, runner, bind sockets)
 sleep 2
 
 # Build the warmup project to trigger toolchain download + materialization

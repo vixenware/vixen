@@ -1,0 +1,11 @@
+[package]
+name = "vx-runner-proto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+facet = { workspace = true }
+roam = { workspace = true }
+facet-postcard = { workspace = true, features = ["camino"] }
+
+vx-store-proto = { workspace = true }

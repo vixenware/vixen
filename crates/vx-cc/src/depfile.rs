@@ -245,7 +245,7 @@ fn normalize_path(path: &Utf8Path) -> Utf8PathBuf {
 }
 
 /// Hash a sorted list of dependency paths for cache key computation
-pub fn hash_deps(deps: &[Utf8PathBuf]) -> vx_cass_proto::Blake3Hash {
+pub fn hash_deps(deps: &[Utf8PathBuf]) -> vx_store_proto::Blake3Hash {
     let mut hasher = blake3::Hasher::new();
 
     for dep in deps {
@@ -253,7 +253,7 @@ pub fn hash_deps(deps: &[Utf8PathBuf]) -> vx_cass_proto::Blake3Hash {
         hasher.update(b"\0");
     }
 
-    vx_cass_proto::Blake3Hash(*hasher.finalize().as_bytes())
+    vx_store_proto::Blake3Hash(*hasher.finalize().as_bytes())
 }
 
 #[cfg(test)]

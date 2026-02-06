@@ -4,10 +4,10 @@
 experimental = ["setup-scripts"]
 
 # Setup script to build daemon binaries before tests
-# Integration tests spawn vx-aether/vx-cass/vx-rhea from target/debug/
+# Integration tests spawn vxd/vx-store/vx-runner from target/debug/
 # These aren't test dependencies, so cargo won't rebuild them automatically
 [scripts.setup.build-daemons]
-command = 'cargo build --bin vx --bin vx-aether --bin vx-cass --bin vx-rhea'
+command = 'cargo build --bin vx --bin vxd --bin vx-store --bin vx-runner'
 
 # Warmup script: prime a shared CAS with toolchains so per-test
 # materializations can read from it via LayeredStorage (VX_CAS_BASE).

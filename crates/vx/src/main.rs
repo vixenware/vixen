@@ -9,7 +9,7 @@ use eyre::{Result, bail};
 use facet::Facet;
 use figue as args;
 use owo_colors::OwoColorize;
-use vx_aether_proto::{ActionType, AetherClient, BuildRequest, ProgressListener};
+use vxd_proto::{ActionType, VxdClient, BuildRequest, ProgressListener};
 use vx_report::{CacheOutcome, ReportStore, RunDiff};
 
 /// vx - Build execution engine with deterministic caching
@@ -107,10 +107,10 @@ enum CliCommand {
     /// Execute a build
     Build(BuildArgs),
 
-    /// Stop the aether process
+    /// Stop the daemon process
     Kill(KillArgs),
 
-    /// Stop the aether and remove .vx/ directory
+    /// Stop the daemon and remove .vx/ directory
     Clean(CleanArgs),
 
     /// Explain the last build
@@ -183,9 +183,9 @@ struct ProgressListenerImpl {
     next_action_id: std::sync::atomic::AtomicU64,
 }
 
-type AetherCaller = roam_stream::Client<
+type VxdCaller = roam_stream::Client<
     vx_io::net::EndpointConnector,
-    vx_aether_proto::ProgressListenerDispatcher<ProgressListenerImpl>,
+    vxd_proto::ProgressListenerDispatcher<ProgressListenerImpl>,
 >;
 
 impl Clone for ProgressListenerImpl {
@@ -247,11 +247,11 @@ impl ProgressListener for ProgressListenerImpl {
     }
 }
 
-/// Connect to the aether, spawning it if necessary
-async fn get_or_spawn_aether(
+/// Connect to the daemon, spawning it if necessary
+async fn get_or_spawn_daemon(
     no_spawn: bool,
     no_tui: bool,
-) -> Result<(AetherClient<AetherCaller>, Option<tui::TuiHandle>)> {
+) -> Result<(VxdClient<VxdCaller>, Option<tui::TuiHandle>)> {
     use vx_io::net::Endpoint;
 
     let vx_home = std::env::var("VX_HOME")
@@ -259,12 +259,12 @@ async fn get_or_spawn_aether(
     let vx_home = camino::Utf8PathBuf::from(&vx_home);
 
     // Parse endpoint (defaults to Unix socket in VX_HOME)
-    let endpoint = match std::env::var("VX_AETHER") {
+    let endpoint = match std::env::var("VXD") {
         Ok(v) => Endpoint::parse(&v)?,
         Err(_) => {
             #[cfg(unix)]
             {
-                vx_io::net::default_unix_endpoint(&vx_home, "aether")
+                vx_io::net::default_unix_endpoint(&vx_home, "vxd")
             }
             #[cfg(not(unix))]
             {
@@ -290,7 +290,7 @@ async fn get_or_spawn_aether(
                     }
                 }
                 eyre::bail!(
-                    "failed to connect to vx-aether at {} (--no-spawn prevents auto-spawning): {}",
+                    "failed to connect to vxd at {} (--no-spawn prevents auto-spawning): {}",
                     endpoint,
                     e
                 );
@@ -298,18 +298,18 @@ async fn get_or_spawn_aether(
 
             if !endpoint.is_local() {
                 eyre::bail!(
-                    "failed to connect to vx-aether at {}.\n\
+                    "failed to connect to vxd at {}.\n\
                     Auto-spawn is only supported for local endpoints.\n\
-                    Start vx-aether on the remote host, or point VX_AETHER to a local endpoint.",
+                    Start vxd on the remote host, or point VXD to a local endpoint.",
                     endpoint
                 );
             }
 
             // Spawn daemon (local-only)
-            tracing::info!("Daemon not running, spawning vx-aether on {}", endpoint);
+            tracing::info!("Daemon not running, spawning vxd on {}", endpoint);
 
-            // Redirect aether logs to ~/.vx/aether.log
-            let log_path = vx_home.join("aether.log");
+            // Redirect daemon logs to ~/.vx/vxd.log
+            let log_path = vx_home.join("vxd.log");
 
             // Ensure ~/.vx directory exists
             std::fs::create_dir_all(&vx_home)?;
@@ -319,17 +319,17 @@ async fn get_or_spawn_aether(
                 .append(true)
                 .open(&log_path)?;
 
-            let mut cmd = std::process::Command::new("vx-aether");
-            // Pass the endpoint to the spawned aether
+            let mut cmd = std::process::Command::new("vxd");
+            // Pass the endpoint to the spawned daemon
             cmd.env("VX_HOME", vx_home.as_str());
-            cmd.env("VX_AETHER", endpoint.display());
+            cmd.env("VXD", endpoint.display());
             cmd.stdout(std::process::Stdio::from(log_file.try_clone()?));
             cmd.stderr(std::process::Stdio::from(log_file));
 
             ur_taking_me_with_you::spawn_dying_with_parent(cmd)
-                .map_err(|e| eyre::eyre!("failed to spawn vx-aether: {}", e))?;
+                .map_err(|e| eyre::eyre!("failed to spawn vxd: {}", e))?;
 
-            tracing::info!("vx-aether logs: {}", log_path);
+            tracing::info!("vxd logs: {}", log_path);
 
             // Retry with backoff
             for (attempt, delay) in backoff_ms.iter().enumerate() {
@@ -349,7 +349,7 @@ async fn get_or_spawn_aether(
 async fn try_connect_daemon(
     endpoint: &vx_io::net::Endpoint,
     no_tui: bool,
-) -> Result<(AetherClient<AetherCaller>, Option<tui::TuiHandle>)> {
+) -> Result<(VxdClient<VxdCaller>, Option<tui::TuiHandle>)> {
     // Create TUI and progress listener (only if TUI is enabled)
     let tui = if no_tui {
         None
@@ -357,14 +357,14 @@ async fn try_connect_daemon(
         Some(tui::TuiHandle::new())
     };
     let progress_listener = ProgressListenerImpl::new(tui.clone());
-    let dispatcher = vx_aether_proto::ProgressListenerDispatcher::new(progress_listener);
+    let dispatcher = vxd_proto::ProgressListenerDispatcher::new(progress_listener);
 
     let caller = vx_io::net::reconnecting_client(endpoint.clone(), dispatcher);
     caller
         .handle()
         .await
         .map_err(|e| eyre::eyre!("failed to connect to daemon at {}: {}", endpoint, e))?;
-    let client = AetherClient::new(caller);
+    let client = VxdClient::new(caller);
 
     Ok((client, tui))
 }
@@ -373,7 +373,7 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
     let cwd = Utf8PathBuf::try_from(std::env::current_dir()?)?;
 
     // Connect to daemon (spawning if necessary) and set up TUI
-    let (daemon, tui) = get_or_spawn_aether(args.no_spawn, args.no_tui).await?;
+    let (daemon, tui) = get_or_spawn_daemon(args.no_spawn, args.no_tui).await?;
 
     // Initialize tracing - with TUI layer or plain output to stderr
     if let Some(ref tui) = tui {
@@ -459,12 +459,12 @@ async fn cmd_kill(_args: KillArgs) -> Result<()> {
         .unwrap_or_else(|_| format!("{}/.vx", std::env::var("HOME").expect("HOME not set")));
     let vx_home = camino::Utf8PathBuf::from(&vx_home);
 
-    let endpoint = match std::env::var("VX_AETHER") {
+    let endpoint = match std::env::var("VXD") {
         Ok(v) => Endpoint::parse(&v)?,
         Err(_) => {
             #[cfg(unix)]
             {
-                vx_io::net::default_unix_endpoint(&vx_home, "aether")
+                vx_io::net::default_unix_endpoint(&vx_home, "vxd")
             }
             #[cfg(not(unix))]
             {
@@ -515,12 +515,12 @@ async fn cmd_clean(args: CleanArgs) -> Result<()> {
 
     // First, try to kill the daemon (best-effort, ignore errors since daemon may not be running)
     if !use_external_test_daemon {
-        let endpoint = match std::env::var("VX_AETHER") {
+        let endpoint = match std::env::var("VXD") {
             Ok(v) => Endpoint::parse(&v).ok(),
             Err(_) => {
                 #[cfg(unix)]
                 {
-                    Some(vx_io::net::default_unix_endpoint(&vx_home, "aether"))
+                    Some(vx_io::net::default_unix_endpoint(&vx_home, "vxd"))
                 }
                 #[cfg(not(unix))]
                 {
@@ -555,16 +555,16 @@ async fn cmd_clean(args: CleanArgs) -> Result<()> {
 }
 
 async fn cmd_doctor() -> Result<()> {
-    // Daemon status — check if aether socket exists
+    // Daemon status — check if vxd socket exists
     let vx_home = std::env::var("VX_HOME")
         .unwrap_or_else(|_| format!("{}/.vx", std::env::var("HOME").expect("HOME not set")));
-    let aether_sock = std::path::PathBuf::from(&vx_home).join("aether.sock");
-    if aether_sock.exists() {
+    let daemon_sock = std::path::PathBuf::from(&vx_home).join("vxd.sock");
+    if daemon_sock.exists() {
         println!(
             "{} {} (socket exists at {})",
             "daemon:".bold(),
             "likely running".green(),
-            aether_sock.display(),
+            daemon_sock.display(),
         );
     } else {
         println!(

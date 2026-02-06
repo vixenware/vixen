@@ -2,26 +2,26 @@
 
 ## Problem
 
-Tests are slow because each test gets a fresh vx-cass with an empty data directory.
+Tests are slow because each test gets a fresh vx-store with an empty data directory.
 Even with HTTP caching, toolchain extraction + blob writing happens per-test (~5-15s).
 
-We tried a client-side approach (`CassWithBase` wrapping `CassClient` with Deref
+We tried a client-side approach (`StoreWithBase` wrapping `StoreClient` with Deref
 shadowing), but the CAS API surface is too rich — `ensure_rust_toolchain`,
 `ensure_zig_toolchain`, `ensure_registry_crate` are server-side operations that
 check storage, download if missing, and store. Intercepting them on the client
 means reconstructing server logic. Not viable.
 
-## Solution: Storage trait inside vx-cass
+## Solution: Storage trait inside vx-store
 
-Give vx-cass a proper storage abstraction. All filesystem operations currently
-scattered across `CassService` methods (`blob_path()`, `blobs_dir()`, reads,
+Give vx-store a proper storage abstraction. All filesystem operations currently
+scattered across `StoreService` methods (`blob_path()`, `blobs_dir()`, reads,
 writes) get consolidated behind a trait. Then layering becomes a storage concern,
 not a client concern.
 
 ### The trait
 
 ```rust
-// crates/vx-cass/src/storage.rs
+// crates/vx-store/src/storage.rs
 
 #[async_trait]
 pub(crate) trait CasStorage: Send + Sync {
@@ -79,10 +79,10 @@ pub(crate) struct LayeredStorage {
 
 ### Wiring
 
-`CassServiceInner` gets a `Box<dyn CasStorage>` instead of a `root: Utf8PathBuf`:
+`StoreServiceInner` gets a `Box<dyn CasStorage>` instead of a `root: Utf8PathBuf`:
 
 ```rust
-pub(crate) struct CassServiceInner {
+pub(crate) struct StoreServiceInner {
     storage: Box<dyn CasStorage>,
     vx_home: Utf8PathBuf,
     toolchain_manager: ToolchainManager,
@@ -113,50 +113,50 @@ Same for `ensure_zig_toolchain` and `ensure_registry_crate`.
 
 ## Changes
 
-### Undo client-side CassWithBase
+### Undo client-side StoreWithBase
 
-- Delete `crates/vx-cass-proto/src/base.rs`
-- Remove `pub mod base;` from `crates/vx-cass-proto/src/lib.rs`
-- Remove `tokio` and `tracing` deps from `crates/vx-cass-proto/Cargo.toml`
+- Delete `crates/vx-store-proto/src/base.rs`
+- Remove `pub mod base;` from `crates/vx-store-proto/src/lib.rs`
+- Remove `tokio` and `tracing` deps from `crates/vx-store-proto/Cargo.toml`
   (keep `facet-json` — it was already there)
-- Revert `crates/vx-aether/src/main.rs` — remove CassWithBase import and wrapping
-- Revert `crates/vx-aether/src/service.rs` — `Arc<CassClient<...>>` not `Arc<CassWithBase<...>>`
-- Revert `crates/vx-aether/src/executor.rs` — same
-- Revert `crates/vx-rhea/src/main.rs` — remove CassWithBase import and wrapping
-- Revert `crates/vx-rhea/src/vfs.rs` — `Arc<CassClient<...>>` not `Arc<CassWithBase<...>>`
-- Revert `crates/vx-rhea/src/registry.rs` — same
+- Revert `crates/vxd/src/main.rs` — remove StoreWithBase import and wrapping
+- Revert `crates/vxd/src/service.rs` — `Arc<StoreClient<...>>` not `Arc<StoreWithBase<...>>`
+- Revert `crates/vxd/src/executor.rs` — same
+- Revert `crates/vx-runner/src/main.rs` — remove StoreWithBase import and wrapping
+- Revert `crates/vx-runner/src/vfs.rs` — `Arc<StoreClient<...>>` not `Arc<StoreWithBase<...>>`
+- Revert `crates/vx-runner/src/registry.rs` — same
 
 ### Keep
 
 - `tests/warmup-toolchains.sh` — still primes the shared CAS directory
 - `.config/nextest.toml` — still runs warmup-toolchains setup script
-- The `VX_CAS_BASE` env var concept — but now consumed by vx-cass, not clients
+- The `VX_CAS_BASE` env var concept — but now consumed by vx-store, not clients
 
 ### New files
 
-- `crates/vx-cass/src/storage.rs` — `CasStorage` trait, `FsStorage`, `LayeredStorage`
+- `crates/vx-store/src/storage.rs` — `CasStorage` trait, `FsStorage`, `LayeredStorage`
 
-### Modified files in vx-cass
+### Modified files in vx-store
 
-- `crates/vx-cass/src/types.rs` — `CassServiceInner.root` → `CassServiceInner.storage`
-- `crates/vx-cass/src/main.rs` — construct storage from env, replace all direct
+- `crates/vx-store/src/types.rs` — `StoreServiceInner.root` → `StoreServiceInner.storage`
+- `crates/vx-store/src/main.rs` — construct storage from env, replace all direct
   filesystem calls with `self.storage.*`
-- `crates/vx-cass/src/service.rs` — replace `self.blob_path()`, `self.blobs_dir()`,
+- `crates/vx-store/src/service.rs` — replace `self.blob_path()`, `self.blobs_dir()`,
   `self.manifests_dir()`, `self.cache_dir()`, direct `tokio::fs` calls
-- `crates/vx-cass/src/toolchain.rs` — replace direct filesystem calls
-- `crates/vx-cass/src/registry.rs` — replace direct filesystem calls
+- `crates/vx-store/src/toolchain.rs` — replace direct filesystem calls
+- `crates/vx-store/src/registry.rs` — replace direct filesystem calls
 
 ### Propagation
 
 `VX_CAS_BASE` propagates automatically to child daemons — `spawn_service` in
-vx-aether doesn't call `env_clear()`, so children inherit the parent environment.
+vxd doesn't call `env_clear()`, so children inherit the parent environment.
 Same for the test harness's `spawn_daemon`. No explicit forwarding needed.
 
 ## Scope
 
-This is a refactor internal to vx-cass. No changes to:
-- The `Cass` RPC trait (vx-cass-proto)
-- Any client code (vx-aether, vx-rhea, vx)
+This is a refactor internal to vx-store. No changes to:
+- The `Store` RPC trait (vx-store-proto)
+- Any client code (vxd, vx-runner, vx)
 - The RPC wire format
 
-The storage trait is `pub(crate)` — purely an implementation detail of vx-cass.
+The storage trait is `pub(crate)` — purely an implementation detail of vx-store.

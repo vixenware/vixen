@@ -25,9 +25,9 @@ vx clean           # remove .vx/ directory
 vixen uses a daemon-based multi-process architecture:
 
 - **vx** — Thin CLI client. Connects to the daemon via roam RPC over a Unix socket.
-- **aether** — The daemon. Orchestrates builds using picante incremental queries. Parses manifests, constructs action graphs, executes actions.
-- **rhea** — Remote compilation worker. Executes compile and link actions in isolated environments using CAS.
-- **cass** — Content-addressable storage. Stores toolchains, sources, and build artifacts as blake3-hashed blobs.
+- **vxd** — The daemon. Orchestrates builds using picante incremental queries. Parses manifests, constructs action graphs, executes actions.
+- **vx-runner** — Remote compilation worker. Executes compile and link actions in isolated environments using CAS.
+- **vx-store** — Content-addressable storage. Stores toolchains, sources, and build artifacts as blake3-hashed blobs.
 
 ## Key Properties
 

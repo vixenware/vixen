@@ -143,10 +143,10 @@ Download from https://ziglang.org/download/
 - [x] Add `AcquireZigToolchain` action (executor + RPC)
 - [x] Add `CompileCObject` action (executor + RPC)
 - [x] Add `LinkCBinary` action (executor + RPC)
-- [x] Add `CcCompileRequest`/`CcCompileResult` to vx-rhea-proto
-- [x] Add `CcLinkRequest`/`CcLinkResult` to vx-rhea-proto
+- [x] Add `CcCompileRequest`/`CcCompileResult` to vx-runner-proto
+- [x] Add `CcLinkRequest`/`CcLinkResult` to vx-runner-proto
 - [x] Wire up action graph building for C projects
-- [ ] Implement vx-rhea handlers for `compile_cc` and `link_cc`
+- [ ] Implement vx-runner handlers for `compile_cc` and `link_cc`
 - [ ] Test with hello world C program
 
 ### Phase 2: Rust via vx.styx
