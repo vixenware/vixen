@@ -39,6 +39,7 @@ picante = { git = "https://github.com/bearcove/picante", branch = "main", featur
 # RPC
 roam = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-stream = { git = "https://github.com/bearcove/roam", branch = "main" }
+roam-local = { git = "https://github.com/bearcove/roam", branch = "main" }
 
 # process management
 ur-taking-me-with-you = { git = "https://github.com/bearcove/rapace", tag = "v0.5.0" }

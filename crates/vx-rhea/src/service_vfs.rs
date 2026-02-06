@@ -1,9 +1,8 @@
 //! VFS-based action execution
 //!
 //! This module implements compilation using the VFS instead of disk materialization.
-//! Files are served lazily from CAS via the fs-kitty mount at ~/.rhea/.
+//! Files are served lazily from CAS via the fs-kitty mount.
 
-use camino::Utf8PathBuf;
 use jiff::Zoned;
 use std::time::Instant;
 use tokio::process::Command;
@@ -12,13 +11,6 @@ use vx_cass_proto::{NodeId, NodeManifest, OutputEntry};
 use vx_rhea_proto::{CcCompileRequest, CcCompileResult, RustCompileRequest, RustCompileResult};
 
 use crate::RheaService;
-
-/// VFS mount point base path
-/// This is where fs-kitty mounts the virtual filesystem
-fn rhea_mount_base() -> Utf8PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    Utf8PathBuf::from(format!("{}/.rhea", home))
-}
 
 impl RheaService {
     /// Compile a Rust crate using VFS-based execution
@@ -34,7 +26,7 @@ impl RheaService {
 
         // 1. Create action prefix
         let prefix_id = self.create_action_prefix().await;
-        let mount_base = rhea_mount_base();
+        let mount_base = crate::rhea_mount_base();
         let prefix_path = mount_base.join(&prefix_id);
 
         info!(prefix_id = %prefix_id, prefix_path = %prefix_path, "created action prefix");
@@ -352,7 +344,7 @@ impl RheaService {
 
         // 1. Create action prefix
         let prefix_id = self.create_action_prefix().await;
-        let prefix_path = rhea_mount_base().join(&prefix_id);
+        let prefix_path = crate::rhea_mount_base().join(&prefix_id);
 
         // 2. Add Zig toolchain to prefix
         if let Err(e) = self

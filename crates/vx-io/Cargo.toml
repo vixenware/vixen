@@ -8,3 +8,5 @@ camino = { workspace = true }
 eyre = { workspace = true }
 tokio = { workspace = true }
 tempfile = { workspace = true }
+roam-local = { workspace = true }
+roam-stream = { workspace = true }

@@ -132,6 +132,7 @@ impl TestEnv {
     /// This is public so tests can spawn a daemon at a custom path (e.g., shared_home).
     pub fn spawn_daemon(vx_home: &Path) -> DaemonGuard {
         let log_path = vx_home.join("aether.log");
+        let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "trace".to_string());
 
         // Ensure VX_HOME directory exists
         std::fs::create_dir_all(vx_home).expect("failed to create VX_HOME");
@@ -144,6 +145,7 @@ impl TestEnv {
 
         let mut cmd = Command::new(Self::aether_binary());
         cmd.env("VX_HOME", vx_home);
+        cmd.env("RUST_LOG", &rust_log);
         cmd.stdout(Stdio::from(log_file.try_clone().unwrap()));
         cmd.stderr(Stdio::from(log_file));
 
@@ -185,6 +187,11 @@ impl TestEnv {
     fn setup_env(&self, cmd: &mut Command, vx_home: &Path) {
         // Set VX_HOME - services will default to Unix sockets in this directory
         cmd.env("VX_HOME", vx_home);
+        // Ensure verbose, timestamped tracing in test runs unless caller overrides.
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "trace".to_string()),
+        );
         // Don't set VX_AETHER/VX_CASS/VX_RHEA - let them default to Unix sockets
     }
 

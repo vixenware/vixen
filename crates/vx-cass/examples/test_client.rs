@@ -1,8 +1,7 @@
 //! Simple test client to verify vx-cass TCP connectivity
 
 use eyre::Result;
-use roam_stream::{CobsFramed, HandshakeConfig, NoDispatcher, initiate_framed};
-use tokio::net::TcpStream;
+use roam_stream::NoDispatcher;
 use vx_cass_proto::CassClient;
 
 fn main() -> Result<()> {
@@ -20,22 +19,16 @@ async fn async_main() -> Result<()> {
     let addr = "127.0.0.1:9002";
     tracing::info!("Connecting to CAS at {}...", addr);
 
-    // Connect to server
-    let stream = TcpStream::connect(addr).await?;
+    let endpoint = vx_io::net::Endpoint::parse(addr)?;
+    let caller = vx_io::net::reconnecting_client(endpoint.clone(), NoDispatcher);
+    caller
+        .handle()
+        .await
+        .map_err(|e| eyre::eyre!("failed to connect to {}: {}", endpoint, e))?;
     tracing::info!("Connected!");
 
-    let framed = CobsFramed::new(stream);
-    let (handle, _incoming, driver) =
-        initiate_framed(framed, HandshakeConfig::default(), NoDispatcher).await?;
-
-    tokio::spawn(async move {
-        if let Err(e) = driver.run().await {
-            tracing::error!("Session error: {}", e);
-        }
-    });
-
     // Create CAS client
-    let client = CassClient::new(handle.clone());
+    let client = CassClient::new(caller.clone());
 
     // Test: put a blob
     tracing::info!("Testing put_blob...");
@@ -62,8 +55,8 @@ async fn async_main() -> Result<()> {
     let exists = client.has_blob(blob_hash).await?;
     tracing::info!("Blob exists: {}", exists);
 
-    // Close connection by dropping the handle
-    drop(handle);
+    // Close connection by dropping the caller
+    drop(caller);
     tracing::info!("Done!");
 
     Ok(())

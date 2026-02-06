@@ -9,7 +9,6 @@ use eyre::{Result, bail};
 use facet::Facet;
 use figue as args;
 use owo_colors::OwoColorize;
-use roam_stream::{CobsFramed, HandshakeConfig, initiate_framed};
 use tracing_subscriber::EnvFilter;
 
 use vx_aether_proto::{ActionType, AetherClient, BuildRequest, ProgressListener};
@@ -120,8 +119,8 @@ enum CliCommand {
 fn init_tracing_with_tui(tui: tui::TuiHandle) {
     use tracing_subscriber::prelude::*;
 
-    // Default to info for vx crates, warn for everything else
-    // Can be overridden with RUST_LOG env var
+    // Default to info for vx crates, warn for everything else.
+    // RUST_LOG overrides this entirely when set.
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new("warn,vx=info,vx_aether=info,vx_cass=info,vx_toolchain=info,vx_rhea=info")
     });
@@ -134,6 +133,8 @@ fn init_tracing_with_tui(tui: tui::TuiHandle) {
 
 /// Initialize basic tracing to stderr (for non-build commands)
 fn init_tracing_stderr() {
+    // Default to info for vx crates, warn for everything else.
+    // RUST_LOG overrides this entirely when set.
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new("warn,vx=info,vx_aether=info,vx_cass=info,vx_toolchain=info,vx_rhea=info")
     });
@@ -194,6 +195,11 @@ struct ProgressListenerImpl {
     tui: Option<tui::TuiHandle>,
     next_action_id: std::sync::atomic::AtomicU64,
 }
+
+type AetherCaller = roam_stream::Client<
+    vx_io::net::EndpointConnector,
+    vx_aether_proto::ProgressListenerDispatcher<ProgressListenerImpl>,
+>;
 
 impl Clone for ProgressListenerImpl {
     fn clone(&self) -> Self {
@@ -259,7 +265,7 @@ async fn get_or_spawn_aether(
     no_spawn: bool,
     no_tui: bool,
 ) -> Result<(
-    AetherClient<roam_stream::ConnectionHandle>,
+    AetherClient<AetherCaller>,
     Option<tui::TuiHandle>,
 )> {
     use vx_io::net::Endpoint;
@@ -291,6 +297,14 @@ async fn get_or_spawn_aether(
         Err(e) => {
             // If no_spawn is set, don't try to spawn - just fail
             if no_spawn {
+                // Allow daemon startup races in tests and external orchestration:
+                // retry connection a few times, but still never auto-spawn.
+                for delay in backoff_ms {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                    if let Ok(result) = try_connect_daemon(&endpoint, no_tui).await {
+                        return Ok(result);
+                    }
+                }
                 eyre::bail!(
                     "failed to connect to vx-aether at {} (--no-spawn prevents auto-spawning): {}",
                     endpoint,
@@ -352,12 +366,9 @@ async fn try_connect_daemon(
     endpoint: &vx_io::net::Endpoint,
     no_tui: bool,
 ) -> Result<(
-    AetherClient<roam_stream::ConnectionHandle>,
+    AetherClient<AetherCaller>,
     Option<tui::TuiHandle>,
 )> {
-    let stream = vx_io::net::connect(endpoint).await?;
-    let framed = CobsFramed::new(stream);
-
     // Create TUI and progress listener (only if TUI is enabled)
     let tui = if no_tui {
         None
@@ -367,18 +378,12 @@ async fn try_connect_daemon(
     let progress_listener = ProgressListenerImpl::new(tui.clone());
     let dispatcher = vx_aether_proto::ProgressListenerDispatcher::new(progress_listener);
 
-    let (handle, _incoming, driver) =
-        initiate_framed(framed, HandshakeConfig::default(), dispatcher).await?;
-
-    // Create aether client
-    let client = AetherClient::new(handle);
-
-    // Keep the connection driver running in the background.
-    tokio::spawn(async move {
-        if let Err(e) = driver.run().await {
-            tracing::error!("Daemon session error: {}", e);
-        }
-    });
+    let caller = vx_io::net::reconnecting_client(endpoint.clone(), dispatcher);
+    caller
+        .handle()
+        .await
+        .map_err(|e| eyre::eyre!("failed to connect to daemon at {}: {}", endpoint, e))?;
+    let client = AetherClient::new(caller);
 
     Ok((client, tui))
 }

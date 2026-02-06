@@ -56,10 +56,10 @@ pub struct AcquiredToolchains {
 #[derive(Clone)]
 pub struct AetherService {
     /// CAS client for content-addressed storage
-    cas: Arc<CassClient<roam_stream::ConnectionHandle>>,
+    cas: Arc<CassClient<crate::UpstreamCaller>>,
 
     /// Exec client for compilation
-    exec: Arc<RheaClient<roam_stream::ConnectionHandle>>,
+    exec: Arc<RheaClient<crate::UpstreamCaller>>,
 
     /// The host triple of the execd machine (used for toolchain selection + cache keys).
     exec_host_triple: String,
@@ -115,8 +115,8 @@ impl AetherService {
 
     /// Create a new daemon service
     pub async fn new(
-        cas: Arc<CassClient<roam_stream::ConnectionHandle>>,
-        exec: Arc<RheaClient<roam_stream::ConnectionHandle>>,
+        cas: Arc<CassClient<crate::UpstreamCaller>>,
+        exec: Arc<RheaClient<crate::UpstreamCaller>>,
         vx_home: Utf8PathBuf,
         exec_host_triple: String,
         spawn_tracker: Arc<Mutex<SpawnTracker>>,

@@ -141,10 +141,10 @@ pub struct Executor {
     progress_listener: Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>,
 
     /// CAS client (CAS)
-    cas: Arc<CassClient<roam_stream::ConnectionHandle>>,
+    cas: Arc<CassClient<crate::UpstreamCaller>>,
 
     /// Rhea client for execution
-    exec: Arc<RheaClient<roam_stream::ConnectionHandle>>,
+    exec: Arc<RheaClient<crate::UpstreamCaller>>,
 
     /// Picante database (Arc-shareable with internal synchronization)
     db: Arc<crate::db::Database>,
@@ -170,8 +170,8 @@ impl Executor {
     pub fn new(
         graph: ActionGraph,
         progress_listener: Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>,
-        cas: Arc<CassClient<roam_stream::ConnectionHandle>>,
-        exec: Arc<RheaClient<roam_stream::ConnectionHandle>>,
+        cas: Arc<CassClient<crate::UpstreamCaller>>,
+        exec: Arc<RheaClient<crate::UpstreamCaller>>,
         db: Arc<crate::db::Database>,
         workspace_root: camino::Utf8PathBuf,
         target_triple: String,
@@ -678,8 +678,8 @@ impl Executor {
 /// Execute a single action
 async fn execute_action(
     action: Action,
-    cas: &Arc<CassClient<roam_stream::ConnectionHandle>>,
-    exec: &Arc<RheaClient<roam_stream::ConnectionHandle>>,
+    cas: &Arc<CassClient<crate::UpstreamCaller>>,
+    exec: &Arc<RheaClient<crate::UpstreamCaller>>,
     db: &Arc<crate::db::Database>,
     results: &Arc<RwLock<HashMap<NodeIndex, ActionResult>>>,
     workspace_root: &camino::Utf8PathBuf,

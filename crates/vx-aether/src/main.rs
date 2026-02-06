@@ -22,8 +22,8 @@ mod service;
 mod tests;
 
 use camino::Utf8PathBuf;
-use eyre::Result;
-use roam_stream::{CobsFramed, HandshakeConfig, NoDispatcher, accept, initiate_framed};
+use eyre::{Result, WrapErr};
+use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::process::Child;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -36,6 +36,8 @@ pub use db::Database;
 pub use inputs::*;
 pub use queries::*;
 pub use service::AetherService;
+
+pub type UpstreamCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
 
 // No longer needed! The #[roam::service] macro on the Aether trait
 // generates a blanket impl for Arc<T>, solving the orphan rule issue.
@@ -162,7 +164,18 @@ fn spawn_service(
         .append(true)
         .open(log_path)?;
 
-    let mut cmd = std::process::Command::new(binary_name);
+    // Prefer spawning sibling binaries next to the currently running vx-aether.
+    // This keeps test runs using the same target/debug artifacts instead of any
+    // globally installed binaries found on PATH.
+    let binary_path = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(binary_name)))
+        .filter(|candidate| candidate.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from(binary_name));
+
+    tracing::debug!("spawning {} from {}", binary_name, binary_path.display());
+
+    let mut cmd = std::process::Command::new(&binary_path);
     for (key, value) in env_vars {
         cmd.env(key, value);
     }
@@ -176,7 +189,9 @@ fn spawn_service(
 
 /// Ensure services are running, spawning them if necessary
 async fn ensure_services(args: &Args, spawn_tracker: &Arc<Mutex<SpawnTracker>>) -> Result<()> {
-    let backoff_ms = [10, 50, 100, 500, 1000];
+    // Service startup can take a few seconds on cold systems (especially rhea).
+    // Keep retrying long enough to avoid flaking during daemon orchestration.
+    let backoff_ms = [10, 50, 100, 250, 500, 1000, 1500, 2000, 3000];
 
     // Check CAS (storage)
     if vx_io::net::try_connect(&args.cas_endpoint).await?.is_none() {
@@ -215,7 +230,9 @@ async fn ensure_services(args: &Args, spawn_tracker: &Arc<Mutex<SpawnTracker>>) 
         }
 
         // Final connection attempt
-        vx_io::net::connect(&args.cas_endpoint).await?;
+        vx_io::net::connect(&args.cas_endpoint)
+            .await
+            .wrap_err_with(|| format!("CAS still unreachable after spawn: {}", args.cas_endpoint))?;
     } else {
         tracing::info!("Cass already running at {}", args.cas_endpoint);
     }
@@ -264,7 +281,12 @@ async fn ensure_services(args: &Args, spawn_tracker: &Arc<Mutex<SpawnTracker>>) 
         }
 
         // Final connection attempt
-        vx_io::net::connect(&args.exec_endpoint).await?;
+        vx_io::net::connect(&args.exec_endpoint).await.wrap_err_with(|| {
+            format!(
+                "Rhea still unreachable after spawn: {}",
+                args.exec_endpoint
+            )
+        })?;
     } else {
         tracing::info!("Rhea already running at {}", args.exec_endpoint);
     }
@@ -322,33 +344,22 @@ async fn async_main() -> Result<()> {
         }
     };
 
-    // Create Roam clients for CAS and Exec.
+    // Create reconnecting Roam clients for CAS and Exec.
     tracing::info!("Connecting to CAS at {}", args.cas_endpoint);
-    let cas_stream = vx_io::net::connect(&args.cas_endpoint).await?;
-    let cas_framed = CobsFramed::new(cas_stream);
-    let (cas_handle, _cas_incoming, cas_driver) =
-        initiate_framed(cas_framed, HandshakeConfig::default(), NoDispatcher).await?;
-    let cas_client = Arc::new(CassClient::new(cas_handle));
+    let cas_caller = vx_io::net::reconnecting_client(args.cas_endpoint.clone(), NoDispatcher);
+    cas_caller
+        .handle()
+        .await
+        .map_err(|e| eyre::eyre!("failed to connect to CAS at {}: {}", args.cas_endpoint, e))?;
+    let cas_client = Arc::new(CassClient::new(cas_caller));
 
     tracing::info!("Connecting to Exec at {}", args.exec_endpoint);
-    let exec_stream = vx_io::net::connect(&args.exec_endpoint).await?;
-    let exec_framed = CobsFramed::new(exec_stream);
-    let (exec_handle, _exec_incoming, exec_driver) =
-        initiate_framed(exec_framed, HandshakeConfig::default(), NoDispatcher).await?;
-    let exec_client = Arc::new(RheaClient::new(exec_handle));
-
-    // Spawn drivers.
-    tokio::spawn(async move {
-        if let Err(e) = cas_driver.run().await {
-            tracing::error!("CAS session error: {}", e);
-        }
-    });
-
-    tokio::spawn(async move {
-        if let Err(e) = exec_driver.run().await {
-            tracing::error!("Exec session error: {}", e);
-        }
-    });
+    let exec_caller = vx_io::net::reconnecting_client(args.exec_endpoint.clone(), NoDispatcher);
+    exec_caller
+        .handle()
+        .await
+        .map_err(|e| eyre::eyre!("failed to connect to Exec at {}: {}", args.exec_endpoint, e))?;
+    let exec_client = Arc::new(RheaClient::new(exec_caller));
 
     // Initialize aether service (singleton shared across all connections)
     tracing::info!("Initializing aether service");

@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 # fs-kitty VFS protocol
-fs-kitty-proto = { path = "../../../fs-kitty/crates/fs-kitty-proto" }
+fs-kitty-proto = { git = "https://github.com/bearcove/fs-kitty", branch = "main" }
 
 tracing-subscriber = { workspace = true }
 facet = { workspace = true }

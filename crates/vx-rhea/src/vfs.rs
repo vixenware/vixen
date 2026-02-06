@@ -5,10 +5,11 @@
 //!
 //! # Architecture
 //!
-//! The VFS is mounted once at `~/.rhea/` and serves multiple action prefixes:
+//! The VFS is mounted once at a configured mount base (see `VX_RHEA_MOUNT`)
+//! and serves multiple action prefixes:
 //!
 //! ```text
-//! ~/.rhea/                        <- single persistent mount
+//! <mount-base>/                   <- single persistent mount
 //!   ├── build-01JFX.../           <- action prefix (sandboxed)
 //!   │   ├── toolchain/            <- Zig/Rust toolchain from CAS
 //!   │   │   └── bin/cc
@@ -81,7 +82,7 @@ pub struct PrefixEntry {
 /// CAS-backed VFS implementation
 pub struct CasVfs {
     /// CAS client for fetching blobs
-    cas: Arc<CassClient<roam_stream::ConnectionHandle>>,
+    cas: Arc<CassClient<crate::CasCaller>>,
     /// All items in the VFS (keyed by ItemId)
     items: RwLock<HashMap<ItemId, VfsItem>>,
     /// Active action prefixes (keyed by prefix ID like "build-01JFX...")
@@ -92,7 +93,7 @@ pub struct CasVfs {
 
 impl CasVfs {
     /// Create a new CAS-backed VFS
-    pub fn new(cas: Arc<CassClient<roam_stream::ConnectionHandle>>) -> Self {
+    pub fn new(cas: Arc<CassClient<crate::CasCaller>>) -> Self {
         let mut items = HashMap::new();
 
         // Create root directory (ID 1)

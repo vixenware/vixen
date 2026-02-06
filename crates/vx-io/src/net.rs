@@ -1,37 +1,37 @@
 use camino::Utf8Path;
 use eyre::Result;
+use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-/// A network endpoint - either TCP or Unix socket
+/// A network endpoint - either TCP or local IPC.
 #[derive(Debug, Clone)]
 pub enum Endpoint {
     /// TCP endpoint (host:port)
     Tcp(String),
-    /// Unix socket path
-    #[cfg(unix)]
-    Unix(camino::Utf8PathBuf),
+    /// Local IPC endpoint (Unix socket path on Unix, named pipe path on Windows)
+    Local(camino::Utf8PathBuf),
 }
 
 impl Endpoint {
     /// Parse an endpoint string.
     ///
     /// Accepts:
-    /// - `host:port` or `tcp://host:port` → TCP
-    /// - `unix:/path/to/socket` → Unix socket
-    /// - Absolute path starting with `/` → Unix socket (convenience)
+    /// - `host:port` or `tcp://host:port` -> TCP
+    /// - `unix:/path/to/socket` -> local IPC endpoint
+    /// - Absolute path starting with `/` -> local IPC endpoint (convenience on Unix)
     pub fn parse(endpoint: &str) -> Result<Self> {
         let endpoint = endpoint.trim();
 
-        // Unix socket: unix:/path or just /path
+        if let Some(path) = endpoint.strip_prefix("unix:") {
+            return Ok(Endpoint::Local(camino::Utf8PathBuf::from(path)));
+        }
+
         #[cfg(unix)]
         {
-            if let Some(path) = endpoint.strip_prefix("unix:") {
-                return Ok(Endpoint::Unix(camino::Utf8PathBuf::from(path)));
-            }
             if endpoint.starts_with('/') {
-                return Ok(Endpoint::Unix(camino::Utf8PathBuf::from(endpoint)));
+                return Ok(Endpoint::Local(camino::Utf8PathBuf::from(endpoint)));
             }
         }
 
@@ -48,25 +48,30 @@ impl Endpoint {
             );
         }
 
-        // Default: TCP
         Ok(Endpoint::Tcp(endpoint.to_string()))
     }
 
-    /// Check if this endpoint is local (loopback or unix socket)
+    /// Check if this endpoint is local (loopback or local IPC).
     pub fn is_local(&self) -> bool {
         match self {
             Endpoint::Tcp(addr) => is_loopback_tcp(addr),
-            #[cfg(unix)]
-            Endpoint::Unix(_) => true,
+            Endpoint::Local(_) => true,
         }
     }
 
-    /// Get a display string for this endpoint
+    /// Get a display string for this endpoint.
     pub fn display(&self) -> String {
         match self {
             Endpoint::Tcp(addr) => addr.clone(),
-            #[cfg(unix)]
-            Endpoint::Unix(path) => format!("unix:{}", path),
+            Endpoint::Local(path) => format!("unix:{}", path),
+        }
+    }
+
+    /// Get local endpoint path, if this is a local endpoint.
+    pub fn local_path(&self) -> Option<&camino::Utf8Path> {
+        match self {
+            Endpoint::Local(path) => Some(path),
+            Endpoint::Tcp(_) => None,
         }
     }
 }
@@ -77,11 +82,10 @@ impl std::fmt::Display for Endpoint {
     }
 }
 
-/// A stream that can be either TCP or Unix socket
+/// A stream that can be either TCP or local IPC stream.
 pub enum Stream {
     Tcp(tokio::net::TcpStream),
-    #[cfg(unix)]
-    Unix(tokio::net::UnixStream),
+    Local(roam_local::LocalStream),
 }
 
 impl AsyncRead for Stream {
@@ -92,8 +96,7 @@ impl AsyncRead for Stream {
     ) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
             Stream::Tcp(s) => Pin::new(s).poll_read(cx, buf),
-            #[cfg(unix)]
-            Stream::Unix(s) => Pin::new(s).poll_read(cx, buf),
+            Stream::Local(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -106,135 +109,174 @@ impl AsyncWrite for Stream {
     ) -> Poll<std::io::Result<usize>> {
         match self.get_mut() {
             Stream::Tcp(s) => Pin::new(s).poll_write(cx, buf),
-            #[cfg(unix)]
-            Stream::Unix(s) => Pin::new(s).poll_write(cx, buf),
+            Stream::Local(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
             Stream::Tcp(s) => Pin::new(s).poll_flush(cx),
-            #[cfg(unix)]
-            Stream::Unix(s) => Pin::new(s).poll_flush(cx),
+            Stream::Local(s) => Pin::new(s).poll_flush(cx),
         }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
             Stream::Tcp(s) => Pin::new(s).poll_shutdown(cx),
-            #[cfg(unix)]
-            Stream::Unix(s) => Pin::new(s).poll_shutdown(cx),
+            Stream::Local(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }
 
-/// Connect to an endpoint
-pub async fn connect(endpoint: &Endpoint) -> Result<Stream> {
+async fn connect_io(endpoint: &Endpoint) -> io::Result<Stream> {
     match endpoint {
         Endpoint::Tcp(addr) => {
             let stream = tokio::net::TcpStream::connect(addr).await?;
             Ok(Stream::Tcp(stream))
         }
-        #[cfg(unix)]
-        Endpoint::Unix(path) => {
-            let stream = tokio::net::UnixStream::connect(path.as_std_path()).await?;
-            Ok(Stream::Unix(stream))
+        Endpoint::Local(path) => {
+            #[cfg(unix)]
+            let local_target = path.as_std_path().to_path_buf();
+            #[cfg(windows)]
+            let local_target = roam_local::path_to_pipe_name(path.as_std_path());
+
+            let stream = roam_local::connect(local_target).await?;
+            Ok(Stream::Local(stream))
         }
     }
 }
 
-/// Try to connect to an endpoint, returning None if connection refused
+/// Connect to an endpoint.
+pub async fn connect(endpoint: &Endpoint) -> Result<Stream> {
+    Ok(connect_io(endpoint).await?)
+}
+
+/// Try to connect to an endpoint, returning None if connection refused.
 pub async fn try_connect(endpoint: &Endpoint) -> Result<Option<Stream>> {
-    match connect(endpoint).await {
+    match connect_io(endpoint).await {
         Ok(stream) => Ok(Some(stream)),
-        Err(e) => {
-            // Check if it's a connection refused error
-            if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
-                if io_err.kind() == std::io::ErrorKind::ConnectionRefused {
-                    return Ok(None);
-                }
-                // Also treat "No such file or directory" as not running (Unix socket)
-                if io_err.kind() == std::io::ErrorKind::NotFound {
-                    return Ok(None);
-                }
+        Err(io_err) => {
+            if io_err.kind() == std::io::ErrorKind::ConnectionRefused {
+                return Ok(None);
             }
-            Err(e)
+            if io_err.kind() == std::io::ErrorKind::NotFound {
+                return Ok(None);
+            }
+            Err(io_err.into())
         }
     }
 }
 
-/// A listener that can accept connections from an endpoint
+/// A listener that can accept connections from an endpoint.
 pub enum Listener {
     Tcp(tokio::net::TcpListener),
-    #[cfg(unix)]
-    Unix(tokio::net::UnixListener),
+    Local {
+        listener: tokio::sync::Mutex<roam_local::LocalListener>,
+        endpoint: camino::Utf8PathBuf,
+    },
 }
 
 impl Listener {
-    /// Bind to an endpoint
+    /// Bind to an endpoint.
     pub async fn bind(endpoint: &Endpoint) -> Result<Self> {
         match endpoint {
             Endpoint::Tcp(addr) => {
                 let listener = tokio::net::TcpListener::bind(addr).await?;
                 Ok(Listener::Tcp(listener))
             }
-            #[cfg(unix)]
-            Endpoint::Unix(path) => {
-                // Remove existing socket file if it exists
-                if path.exists() {
-                    std::fs::remove_file(path)?;
+            Endpoint::Local(path) => {
+                #[cfg(unix)]
+                {
+                    if path.exists() {
+                        let _ = roam_local::remove_endpoint(path.as_std_path());
+                    }
                 }
-                // Ensure parent directory exists
+
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                let listener = tokio::net::UnixListener::bind(path.as_std_path())?;
-                Ok(Listener::Unix(listener))
+
+                #[cfg(unix)]
+                let bind_target = path.as_std_path().to_path_buf();
+                #[cfg(windows)]
+                let bind_target = roam_local::path_to_pipe_name(path.as_std_path());
+
+                let listener = roam_local::LocalListener::bind(bind_target)?;
+                Ok(Listener::Local {
+                    listener: tokio::sync::Mutex::new(listener),
+                    endpoint: path.clone(),
+                })
             }
         }
     }
 
-    /// Accept a connection, returning the stream and peer address string
+    /// Accept a connection, returning the stream and peer address string.
     pub async fn accept(&self) -> Result<(Stream, String)> {
         match self {
             Listener::Tcp(listener) => {
                 let (stream, addr) = listener.accept().await?;
                 Ok((Stream::Tcp(stream), addr.to_string()))
             }
-            #[cfg(unix)]
-            Listener::Unix(listener) => {
-                let (stream, _addr) = listener.accept().await?;
-                Ok((Stream::Unix(stream), "unix".to_string()))
+            Listener::Local { listener, .. } => {
+                let guard = listener.lock().await;
+                let stream = guard.accept().await?;
+                Ok((Stream::Local(stream), "local".to_string()))
             }
         }
     }
 
-    /// Get the local address this listener is bound to
+    /// Get the local address this listener is bound to.
     pub fn local_addr(&self) -> Result<Endpoint> {
         match self {
             Listener::Tcp(listener) => {
                 let addr = listener.local_addr()?;
                 Ok(Endpoint::Tcp(addr.to_string()))
             }
-            #[cfg(unix)]
-            Listener::Unix(listener) => {
-                let addr = listener.local_addr()?;
-                if let Some(path) = addr.as_pathname() {
-                    Ok(Endpoint::Unix(camino::Utf8PathBuf::try_from(
-                        path.to_path_buf(),
-                    )?))
-                } else {
-                    eyre::bail!("Unix socket has no pathname")
-                }
-            }
+            Listener::Local { endpoint, .. } => Ok(Endpoint::Local(endpoint.clone())),
         }
     }
 }
 
-/// Create a default endpoint path for a service within VX_HOME
+/// Connector used with roam-stream reconnecting clients.
+#[derive(Debug, Clone)]
+pub struct EndpointConnector {
+    endpoint: Endpoint,
+}
+
+impl EndpointConnector {
+    pub fn new(endpoint: Endpoint) -> Self {
+        Self { endpoint }
+    }
+}
+
+impl roam_stream::Connector for EndpointConnector {
+    type Transport = Stream;
+
+    async fn connect(&self) -> io::Result<Self::Transport> {
+        connect_io(&self.endpoint).await
+    }
+}
+
+/// Create a reconnecting roam-stream client for an endpoint.
+pub fn reconnecting_client<D>(
+    endpoint: Endpoint,
+    dispatcher: D,
+) -> roam_stream::Client<EndpointConnector, D>
+where
+    D: roam_stream::ServiceDispatcher + Clone,
+{
+    roam_stream::connect_with_policy(
+        EndpointConnector::new(endpoint),
+        roam_stream::HandshakeConfig::default(),
+        dispatcher,
+        roam_stream::RetryPolicy::default(),
+    )
+}
+
+/// Create a default endpoint path for a service within VX_HOME.
 #[cfg(unix)]
 pub fn default_unix_endpoint(vx_home: &Utf8Path, service: &str) -> Endpoint {
-    Endpoint::Unix(vx_home.join(format!("{}.sock", service)))
+    Endpoint::Local(vx_home.join(format!("{}.sock", service)))
 }
 
 // --- Legacy API for backwards compatibility ---
@@ -265,7 +307,6 @@ pub fn normalize_tcp_endpoint(endpoint: &str) -> Result<String> {
 /// This intentionally does not do DNS resolution. Hostnames other than `localhost`
 /// are treated as non-loopback.
 pub fn is_loopback_endpoint(endpoint: &str) -> bool {
-    // Check for Unix socket first
     #[cfg(unix)]
     {
         if endpoint.starts_with("unix:") || endpoint.starts_with('/') {
@@ -280,13 +321,12 @@ pub fn is_loopback_endpoint(endpoint: &str) -> bool {
     is_loopback_tcp(&endpoint)
 }
 
-/// Check if a TCP address is loopback
+/// Check if a TCP address is loopback.
 fn is_loopback_tcp(addr: &str) -> bool {
     if addr.starts_with("localhost:") {
         return true;
     }
 
-    // SocketAddr parsing covers IPv4 literals and bracketed IPv6 literals.
     if let Ok(addr) = addr.parse::<std::net::SocketAddr>() {
         return addr.ip().is_loopback();
     }

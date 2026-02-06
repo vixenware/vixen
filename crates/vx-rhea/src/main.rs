@@ -27,7 +27,7 @@ use fs_kitty_proto::{
     CreateResult, GetAttributesResult, ItemId, ItemType, LookupResult, ReadDirResult, ReadResult,
     SetAttributesParams, Vfs, VfsDispatcher, VfsResult, WriteResult,
 };
-use roam_stream::{CobsFramed, HandshakeConfig, NoDispatcher, accept, initiate_framed};
+use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::collections::HashMap;
 use std::sync::Arc;
 use vx_cass_proto::{Blake3Hash, CassClient};
@@ -37,10 +37,49 @@ use vx_rhea_proto::RheaDispatcher;
 use crate::registry::RegistryMaterializer;
 use crate::vfs::CasVfs;
 
+pub type CasCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
+
 /// Type alias for inflight materialization tracking
 type InflightMaterializations = Arc<
     tokio::sync::Mutex<HashMap<Blake3Hash, Arc<tokio::sync::OnceCell<RheaResult<Utf8PathBuf>>>>>,
 >;
+
+#[cfg(target_os = "macos")]
+fn run_command_with_timeout(
+    program: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> std::io::Result<Option<std::process::Output>> {
+    use std::process::Command;
+    use std::time::Instant;
+
+    let mut child = Command::new(program).args(args).spawn()?;
+    let start = Instant::now();
+    loop {
+        if let Some(_status) = child.try_wait()? {
+            return child.wait_with_output().map(Some);
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+pub(crate) fn rhea_mount_base() -> Utf8PathBuf {
+    if let Ok(path) = std::env::var("VX_RHEA_MOUNT") {
+        return Utf8PathBuf::from(path);
+    }
+    if let Ok(vx_home) = std::env::var("VX_HOME") {
+        return Utf8PathBuf::from(vx_home).join("fskitty").join("rhea");
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return Utf8PathBuf::from(home).join(".vx").join("fskitty").join("rhea");
+    }
+    Utf8PathBuf::from("/tmp/vx/fskitty/rhea")
+}
 
 #[derive(Debug)]
 struct Args {
@@ -204,20 +243,13 @@ impl Args {
 /// Connect to CAS and return a client handle
 async fn connect_to_cas(
     endpoint: &Endpoint,
-) -> Result<vx_cass_proto::CassClient<roam_stream::ConnectionHandle>> {
-    let stream = vx_io::net::connect(endpoint).await?;
-    let framed = CobsFramed::new(stream);
-    let (handle, _incoming, driver) =
-        initiate_framed(framed, HandshakeConfig::default(), NoDispatcher).await?;
-    let client = CassClient::new(handle);
-
-    tokio::spawn(async move {
-        if let Err(e) = driver.run().await {
-            tracing::error!("CAS session error: {}", e);
-        }
-    });
-
-    Ok(client)
+) -> Result<vx_cass_proto::CassClient<CasCaller>> {
+    let caller = vx_io::net::reconnecting_client(endpoint.clone(), NoDispatcher);
+    caller
+        .handle()
+        .await
+        .map_err(|e| eyre::eyre!("failed to connect to CAS at {}: {}", endpoint, e))?;
+    Ok(CassClient::new(caller))
 }
 
 /// Check if a socket endpoint is already in use by trying to connect
@@ -258,30 +290,28 @@ fn check_fskitty_extension() -> Result<(), String> {
 
 /// Check if there's a stale mount at the rhea mount point
 #[cfg(target_os = "macos")]
-fn check_stale_mount(rhea_home: &Utf8PathBuf) -> Option<String> {
-    use std::process::Command;
-
-    // Check if ~/.rhea is a mount point
-    let output = Command::new("mount").output().ok()?;
+fn check_stale_mount(mount_base: &Utf8PathBuf) -> Option<String> {
+    // Check if mount_base is a mount point.
+    // Bound this call: in bad FSKit states, shell tools can hang.
+    let output = run_command_with_timeout("mount", &[], std::time::Duration::from_secs(2))
+        .ok()??;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     for line in stdout.lines() {
-        if line.contains(rhea_home.as_str()) && line.contains("fskitty") {
+        if line.contains(mount_base.as_str()) && line.contains("fskitty") {
             return Some(format!(
                 "Stale fs-kitty mount detected at {}\n\
                  To clean up, run: umount {} or diskutil unmount force {}",
-                rhea_home, rhea_home, rhea_home
+                mount_base, mount_base, mount_base
             ));
         }
     }
     None
 }
 
-/// Mount the VFS at ~/.rhea using fs-kitty
+/// Mount the VFS at the rhea mount base using fs-kitty
 #[cfg(target_os = "macos")]
 fn mount_fskitty(mount_point: &Utf8Path, host: &str, port: u16) -> Result<(), String> {
-    use std::process::Command;
-
     // Ensure mount point exists
     if let Err(e) = std::fs::create_dir_all(mount_point) {
         return Err(format!(
@@ -294,13 +324,21 @@ fn mount_fskitty(mount_point: &Utf8Path, host: &str, port: u16) -> Result<(), St
     let url = format!("fskitty://{}:{}", host, port);
     tracing::info!("Mounting fs-kitty at {} ({})", mount_point, url);
 
-    let output = Command::new("mount")
-        .arg("-t")
-        .arg("fskitty")
-        .arg(&url)
-        .arg(mount_point.as_str())
-        .output()
-        .map_err(|e| format!("Failed to execute mount: {}", e))?;
+    let output = match run_command_with_timeout(
+        "mount",
+        &["-t", "fskitty", &url, mount_point.as_str()],
+        std::time::Duration::from_secs(10),
+    ) {
+        Ok(Some(output)) => output,
+        Ok(None) => {
+            return Err(format!(
+                "Mount timed out after 10s for {} (url: {}). \
+                 fs-kitty extension may be stuck; try cleanup before retrying.",
+                mount_point, url
+            ));
+        }
+        Err(e) => return Err(format!("Failed to execute mount: {}", e)),
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -316,8 +354,8 @@ fn mount_fskitty(mount_point: &Utf8Path, host: &str, port: u16) -> Result<(), St
     }
 
     // Verify mount actually exists
-    let mount_output = Command::new("mount").output();
-    if let Ok(mo) = mount_output {
+    let mount_output = run_command_with_timeout("mount", &[], std::time::Duration::from_secs(2));
+    if let Ok(Some(mo)) = mount_output {
         let mount_list = String::from_utf8_lossy(&mo.stdout);
         if mount_list.contains(mount_point.as_str()) {
             tracing::info!("✅ VFS mounted at {} (verified)", mount_point);
@@ -333,6 +371,8 @@ fn mount_fskitty(mount_point: &Utf8Path, host: &str, port: u16) -> Result<(), St
                 }
             }
         }
+    } else {
+        tracing::warn!("Skipping mount list verification (mount command unavailable or timed out)");
     }
 
     Ok(())
@@ -341,27 +381,35 @@ fn mount_fskitty(mount_point: &Utf8Path, host: &str, port: u16) -> Result<(), St
 /// Unmount the VFS
 #[cfg(target_os = "macos")]
 fn unmount_fskitty(mount_point: &Utf8Path) {
-    use std::process::Command;
+    use std::time::Duration;
 
     tracing::info!("Unmounting fs-kitty at {}", mount_point);
 
     // Try regular unmount first
-    let output = Command::new("umount").arg(mount_point.as_str()).output();
+    let output = run_command_with_timeout("umount", &[mount_point.as_str()], Duration::from_secs(3));
 
     match output {
-        Ok(o) if o.status.success() => {
+        Ok(Some(o)) if o.status.success() => {
             tracing::info!("VFS unmounted successfully");
         }
-        Ok(o) => {
+        Ok(Some(o)) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             tracing::warn!("umount failed, trying force unmount: {}", stderr.trim());
 
             // Try force unmount
-            let _ = Command::new("diskutil")
-                .arg("unmount")
-                .arg("force")
-                .arg(mount_point.as_str())
-                .output();
+            let _ = run_command_with_timeout(
+                "diskutil",
+                &["unmount", "force", mount_point.as_str()],
+                Duration::from_secs(5),
+            );
+        }
+        Ok(None) => {
+            tracing::warn!("umount timed out, trying force unmount");
+            let _ = run_command_with_timeout(
+                "diskutil",
+                &["unmount", "force", mount_point.as_str()],
+                Duration::from_secs(5),
+            );
         }
         Err(e) => {
             tracing::warn!("Failed to execute umount: {}", e);
@@ -396,15 +444,15 @@ async fn main() -> Result<()> {
     }
 
     // Check for stale mounts
-    let rhea_home = args.toolchains_dir.parent().unwrap_or(&args.toolchains_dir);
-    if let Some(warning) = check_stale_mount(&rhea_home.to_path_buf()) {
+    let mount_base = rhea_mount_base();
+    if let Some(warning) = check_stale_mount(&mount_base) {
         tracing::warn!("{}", warning);
     }
 
     // Check if another rhea instance is already running
     #[cfg(unix)]
     {
-        if let Endpoint::Unix(ref path) = args.bind
+        if let Endpoint::Local(ref path) = args.bind
             && path.exists()
             && is_socket_in_use(path).await
         {
@@ -414,7 +462,7 @@ async fn main() -> Result<()> {
                 path
             ));
         }
-        if let Endpoint::Unix(ref path) = args.vfs_bind
+        if let Endpoint::Local(ref path) = args.vfs_bind
             && path.exists()
             && is_socket_in_use(path).await
         {
@@ -542,9 +590,7 @@ async fn main() -> Result<()> {
             };
 
             if let Some(port) = port {
-                // Mount at ~/.rhea (user's home directory)
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                let mount_path = Utf8PathBuf::from(format!("{}/.rhea", home));
+                let mount_path = rhea_mount_base();
 
                 // Unmount any stale mount first (blocking)
                 let mp_clone = mount_path.clone();
@@ -640,7 +686,7 @@ async fn main() -> Result<()> {
 /// Inner Exec service implementation
 pub struct RheaServiceInner {
     /// CAS client for storing outputs and fetching toolchains
-    pub(crate) cas: Arc<CassClient<roam_stream::ConnectionHandle>>,
+    pub(crate) cas: Arc<CassClient<crate::CasCaller>>,
 
     /// Toolchain materialization directory
     pub(crate) toolchains_dir: Utf8PathBuf,
@@ -671,7 +717,7 @@ impl std::ops::Deref for RheaService {
 
 impl RheaService {
     pub fn new(
-        cas: Arc<CassClient<roam_stream::ConnectionHandle>>,
+        cas: Arc<CassClient<crate::CasCaller>>,
         toolchains_dir: Utf8PathBuf,
         registry_cache_dir: Utf8PathBuf,
         vfs: Arc<CasVfs>,
@@ -953,13 +999,10 @@ impl RheaService {
     /// Get the VFS mount path for an action prefix
     ///
     /// This is the path that should be passed to sandboxed processes.
-    /// Format: ~/.rhea/<prefix_id>/
+    /// Format: <mount-base>/<prefix_id>/ where mount-base defaults to ~/.vx/fskitty/rhea.
     #[allow(dead_code)] // Will be used for sandbox integration
     pub(crate) fn get_prefix_mount_path(&self, prefix_id: &str) -> Utf8PathBuf {
-        // For now, return a path relative to rhea home
-        // In the future, this will be the actual mount point
-        let rhea_home = self.toolchains_dir.parent().unwrap_or(&self.toolchains_dir);
-        rhea_home.join(prefix_id)
+        rhea_mount_base().join(prefix_id)
     }
 }
 
