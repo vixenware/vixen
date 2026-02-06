@@ -497,7 +497,7 @@ impl AetherService {
         // Fall back to Cargo.toml (Rust-only projects)
         // Build the crate graph with lockfile support
         let graph = CrateGraph::build_with_lockfile(project_path)
-            .map_err(|e| AetherError::CrateGraph(format!("{:?}", miette::Report::new(e))))?;
+            .map_err(|e| AetherError::CrateGraph(format!("{e:?}")))?;
 
         let profile = if request.release { "release" } else { "debug" };
 

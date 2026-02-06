@@ -21,8 +21,6 @@ indicatif = "0.18"
 vx-aether-proto = { workspace = true }
 vx-io = { workspace = true }
 vx-report = { workspace = true }
-miette = { version = "7.6.0", default-features = false, features = ["fancy-no-backtrace"] }
-miette-arborium = { version = "2.4.5", features = ["lang-toml", "lang-rust"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

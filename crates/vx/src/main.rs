@@ -154,8 +154,6 @@ fn main() -> Result<()> {
 }
 
 async fn async_main() -> Result<()> {
-    let _ = miette_arborium::install_global();
-
     let cli: Cli = args::from_std_args().unwrap();
 
     if cli.version {

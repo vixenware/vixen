@@ -22,7 +22,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use miette::Diagnostic;
 use thiserror::Error;
 use vx_cass_proto::Blake3Hash;
 use vx_manifest::lockfile::{CargoLock, CargoLockExt, LockfileError, ReachablePackages};
@@ -94,29 +93,6 @@ pub enum CrateGraphError {
         version: String,
         dep_name: String,
     },
-}
-
-impl Diagnostic for CrateGraphError {
-    fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
-        let code = match self {
-            Self::ManifestError(_) => return None, // Transparent - use inner error's code
-            Self::LockfileError(_) => "vx_rs::lockfile_error",
-            Self::LockfileReadError(_) => "vx_rs::lockfile_read_error",
-            Self::CanonicalizationError { .. } => "vx_rs::canonicalization_error",
-            Self::CycleDetected(_) => "vx_rs::cycle_detected",
-            Self::DependencyNotFound { .. } => "vx_rs::dependency_not_found",
-            Self::NotALibrary { .. } => "vx_rs::not_a_library",
-            Self::PathOutsideWorkspace { .. } => "vx_rs::path_outside_workspace",
-            Self::MissingLockfile { .. } => "vx_rs::missing_lockfile",
-            Self::RegistryDepNotInLockfile { .. } => "vx_rs::registry_dep_not_in_lockfile",
-            Self::RegistryBuildScript { .. } => "vx_rs::registry_build_script",
-            Self::RegistryProcMacro { .. } => "vx_rs::registry_proc_macro",
-            Self::RegistryUnsupported { .. } => "vx_rs::registry_unsupported",
-            Self::RegistryNotMaterialized { .. } => "vx_rs::registry_not_materialized",
-            Self::RegistryDependsOnPath { .. } => "vx_rs::registry_depends_on_path",
-        };
-        Some(Box::new(code))
-    }
 }
 
 /// Type of crate target

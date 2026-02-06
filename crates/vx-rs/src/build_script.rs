@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::process::Command;
 
 use camino::Utf8Path;
-use miette::Diagnostic;
 use thiserror::Error;
 
 use crate::crate_graph::BuildScriptOutput;
@@ -41,18 +40,6 @@ pub enum BuildScriptError {
 
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
-}
-
-impl Diagnostic for BuildScriptError {
-    fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
-        let code = match self {
-            Self::CompileError { .. } => "vx_rs::build_script_compile_error",
-            Self::RunError { .. } => "vx_rs::build_script_run_error",
-            Self::ExitError { .. } => "vx_rs::build_script_failed",
-            Self::IoError(_) => "vx_rs::build_script_io_error",
-        };
-        Some(Box::new(code))
-    }
 }
 
 /// Context for running a build script

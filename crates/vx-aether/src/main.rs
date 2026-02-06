@@ -294,11 +294,6 @@ async fn async_main() -> Result<()> {
     // Now safe to call things that might log
     ur_taking_me_with_you::die_with_parent();
 
-    // Install miette-arborium for rich syntax-highlighted diagnostics
-    if let Err(e) = miette_arborium::install_global() {
-        tracing::warn!("Failed to install miette-arborium global handler: {e}");
-    }
-
     let args = Args::from_env()?;
     tracing::info!("Starting vx-aether");
     tracing::info!("  VX_HOME: {}", args.vx_home);
