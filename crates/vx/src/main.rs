@@ -510,30 +510,37 @@ async fn cmd_clean(args: CleanArgs) -> Result<()> {
         cwd.join(".vx")
     };
 
-    // First, try to kill the daemon (best-effort, ignore errors since daemon may not be running)
-    let endpoint = match std::env::var("VX_AETHER") {
-        Ok(v) => Endpoint::parse(&v).ok(),
-        Err(_) => {
-            #[cfg(unix)]
-            {
-                Some(vx_io::net::default_unix_endpoint(&vx_home, "aether"))
-            }
-            #[cfg(not(unix))]
-            {
-                Endpoint::parse("127.0.0.1:9001").ok()
-            }
-        }
-    };
+    // In external test-daemon mode, keep shared daemon(s) alive across tests.
+    let use_external_test_daemon = std::env::var("VX_TEST_EXTERNAL_DAEMON").is_ok();
 
-    if let Some(endpoint) = endpoint {
-        // No TUI needed for clean command
-        if let Ok((daemon, _tui)) = try_connect_daemon(&endpoint, true).await {
-            tracing::debug!("Killing daemon before clean");
-            let _ = daemon.shutdown().await;
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        } else {
-            tracing::debug!("Daemon not running, skipping shutdown");
+    // First, try to kill the daemon (best-effort, ignore errors since daemon may not be running)
+    if !use_external_test_daemon {
+        let endpoint = match std::env::var("VX_AETHER") {
+            Ok(v) => Endpoint::parse(&v).ok(),
+            Err(_) => {
+                #[cfg(unix)]
+                {
+                    Some(vx_io::net::default_unix_endpoint(&vx_home, "aether"))
+                }
+                #[cfg(not(unix))]
+                {
+                    Endpoint::parse("127.0.0.1:9001").ok()
+                }
+            }
+        };
+
+        if let Some(endpoint) = endpoint {
+            // No TUI needed for clean command
+            if let Ok((daemon, _tui)) = try_connect_daemon(&endpoint, true).await {
+                tracing::debug!("Killing daemon before clean");
+                let _ = daemon.shutdown().await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            } else {
+                tracing::debug!("Daemon not running, skipping shutdown");
+            }
         }
+    } else {
+        tracing::debug!("VX_TEST_EXTERNAL_DAEMON=1, skipping daemon shutdown in clean");
     }
 
     // Then remove the directory if it exists
