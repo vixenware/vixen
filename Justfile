@@ -27,6 +27,9 @@ aether *args:
 test name:
     VX_TEST_EXTERNAL_DAEMON=1 VX_TEST_VX_HOME={{ debug_home }} cargo nextest run {{ name }} --nocapture
 
+test-all *args:
+    VX_TEST_EXTERNAL_DAEMON=1 VX_TEST_VX_HOME={{ debug_home }} cargo nextest run {{ args }}
+
 # Clean up debug state (sockets, etc.)
 debug-clean:
     rm -rf {{ debug_home }}
