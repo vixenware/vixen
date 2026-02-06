@@ -153,12 +153,12 @@ fn check_plugin_registered() -> bool {
     stdout.contains("me.amos.fs-kitty") || stdout.contains("fskitty")
 }
 
-/// Unmount a single fskitty mount. For alive mounts, just diskutil unmount force.
-/// For ghost mounts, we need to first listen on the dead port so FSKit can talk to us.
+/// Unmount a single fskitty mount. For alive mounts, diskutil unmount force.
+/// For ghost mounts, kill the fs-kitty extension process (which auto-unmounts).
 pub async fn unmount(mount: &FskittyMount) -> Result<()> {
     match &mount.state {
         MountState::Alive { .. } => unmount_direct(&mount.mount_point).await,
-        MountState::Ghost => unmount_ghost(&mount.host, mount.port, &mount.mount_point).await,
+        MountState::Ghost => unmount_ghost(&mount.mount_point).await,
     }
 }
 
@@ -182,62 +182,93 @@ async fn unmount_direct(mount_point: &str) -> Result<()> {
     .await?
 }
 
-/// Ghost unmount: bind the dead port, accept connections (so FSKit can talk to us),
-/// then run diskutil unmount force.
-pub async fn unmount_ghost(host: &str, port: u16, mount_point: &str) -> Result<()> {
-    let addr = format!("{}:{}", host, port);
-
-    // Bind the dead port
-    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
-        eyre::eyre!(
-            "failed to bind {}:{} for ghost unmount of {}: {}",
-            host,
-            port,
-            mount_point,
-            e
-        )
-    })?;
-
-    tracing::info!(
-        port,
-        mount_point,
-        "listening on ghost port, running diskutil unmount force"
-    );
-
-    // Spawn accept loop that accepts and immediately drops connections
-    let accept_handle = tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((_stream, _addr)) => {
-                    // Drop the connection immediately — just enough to unblock FSKit
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    // Run diskutil unmount force with timeout
+/// Ghost unmount: kill all fs-kitty extension processes, which causes fskitd to
+/// auto-unmount. We kill all of them because there's no way to match a specific
+/// extension process to a specific mount (the launch args don't contain mount info).
+async fn unmount_ghost(mount_point: &str) -> Result<()> {
     let mp = mount_point.to_string();
-    let unmount_result = tokio::task::spawn_blocking(move || {
-        let Some(output) = run_command_with_timeout(
-            "diskutil",
-            &["unmount", "force", &mp],
-            Duration::from_secs(10),
-        ) else {
-            bail!("diskutil unmount force timed out after 10s for {}", mp);
+    tokio::task::spawn_blocking(move || {
+        kill_fskit_extensions();
+
+        // Give fskitd a moment to process the deaths and unmount
+        std::thread::sleep(Duration::from_millis(500));
+
+        // Verify the mount is gone — if not, fall back to diskutil
+        let Some(df_output) = run_command_with_timeout("df", &[], Duration::from_secs(2)) else {
+            return Ok(());
         };
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("diskutil unmount force failed for {}: {}", mp, stderr.trim());
+        let stdout = String::from_utf8_lossy(&df_output.stdout);
+        if stdout.contains(&mp) {
+            tracing::info!("Mount {} still present after killing extensions, trying diskutil", mp);
+            let Some(output) = run_command_with_timeout(
+                "diskutil",
+                &["unmount", "force", &mp],
+                Duration::from_secs(10),
+            ) else {
+                bail!("diskutil unmount force timed out after 10s for {}", mp);
+            };
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!("diskutil unmount force failed for {}: {}", mp, stderr.trim());
+            }
         }
         Ok(())
     })
-    .await?;
+    .await?
+}
 
-    // Abort the accept loop
-    accept_handle.abort();
+/// Kill all fs-kitty extension processes.
+fn kill_fskit_extensions() {
+    let Some(output) = run_command_with_timeout(
+        "pkill",
+        &["-f", "FsKitty.app/Contents/Extensions/fs-kitty.appex"],
+        Duration::from_secs(2),
+    ) else {
+        tracing::warn!("pkill timed out trying to kill fs-kitty extensions");
+        return;
+    };
+    // pkill returns 0 if processes were killed, 1 if none found — both are fine
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(-1);
+        if code != 1 {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!("pkill returned {}: {}", code, stderr.trim());
+        }
+    }
+}
 
-    unmount_result
+/// Reset all fs-kitty mounts by killing extension processes.
+/// This is a bulk operation — kills all extensions, waits, then verifies.
+pub async fn reset_all() -> Result<u32> {
+    let health = check_health().await;
+    if health.mounts.is_empty() {
+        return Ok(0);
+    }
+
+    let total = health.mounts.len() as u32;
+
+    // Kill all extension processes first (handles ghosts)
+    tokio::task::spawn_blocking(kill_fskit_extensions).await?;
+
+    // Give fskitd time to process
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // For any remaining mounts (alive ones whose server is still running),
+    // use diskutil unmount force
+    let remaining = discover_mounts();
+    for (mount_point, _, _) in &remaining {
+        let mp = mount_point.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            run_command_with_timeout(
+                "diskutil",
+                &["unmount", "force", &mp],
+                Duration::from_secs(10),
+            );
+        })
+        .await;
+    }
+
+    Ok(total)
 }
 
 /// Run a command with a timeout (blocking). Returns None on timeout.

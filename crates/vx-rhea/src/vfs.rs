@@ -790,6 +790,17 @@ impl Vfs for CasVfs {
     async fn ping(&self, _cx: &roam::Context) -> String {
         "pong from vx-rhea CAS VFS".to_string()
     }
+
+    async fn server_info(&self, _cx: &roam::Context) -> fs_kitty_proto::ServerInfo {
+        fs_kitty_proto::ServerInfo {
+            pid: std::process::id(),
+            process_name: std::env::current_exe()
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "unknown".to_string()),
+            command_line: std::env::args().collect(),
+        }
+    }
 }
 
 /// Flush a file's write buffer to CAS and return the blob hash
