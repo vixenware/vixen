@@ -59,6 +59,18 @@ This means:
 - An artifact's identity is its content, not its path or timestamp.
 - Integrity is verifiable: re-hash and compare.
 
+> r[axiom.cas-unified-blobs]
+> CAS MUST use a single blob store as its fundamental storage primitive.
+> All content-addressed data — build outputs, manifests, tree manifests,
+> toolchain components — MUST be stored as blobs, keyed by their blake3
+> hash. There MUST NOT be separate storage mechanisms for different kinds
+> of content-addressed data.
+
+Manifests are just JSON blobs. A node manifest, a tree manifest, and a
+compiled binary are all stored the same way: write bytes, get a hash back,
+read bytes by hash. The only non-blob storage in CAS is the cache mapping
+(cache_key → manifest_hash), which is an index, not content-addressed data.
+
 Implemented. The `cass` service handles blob storage and manifest tracking.
 
 ### Correct Caching
