@@ -3104,6 +3104,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-df"
+version = "0.1.0"
+
+[[package]]
 name = "vx-io"
 version = "0.1.0"
 dependencies = [
@@ -3171,6 +3175,7 @@ dependencies = [
  "vx-cache",
  "vx-cass-proto",
  "vx-cc",
+ "vx-df",
  "vx-io",
  "vx-rhea-proto",
  "vx-tarball",

@@ -11,6 +11,7 @@ repository = "https://github.com/bearcove/vx"
 [workspace.dependencies]
 # internal crates
 vx-cache = { path = "crates/vx-cache" }
+vx-df = { path = "crates/vx-df" }
 vx-cass-proto = { path = "crates/vx-cass-proto" }
 vx-cc = { path = "crates/vx-cc" }
 vx-rhea-proto = { path = "crates/vx-rhea-proto" }
@@ -24,13 +25,19 @@ vx-toolchain = { path = "crates/vx-toolchain" }
 vx-rs = { path = "crates/vx-rs" }
 
 # facet ecosystem
-facet = { git = "https://github.com/facet-rs/facet", branch = "main", features = ["jiff02", "camino"] }
+facet = { git = "https://github.com/facet-rs/facet", branch = "main", features = [
+  "jiff02",
+  "camino",
+] }
 figue = { git = "https://github.com/bearcove/figue", branch = "main" }
 facet-json = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-styx = { git = "https://github.com/bearcove/styx", branch = "main" }
 facet-toml = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-value = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-postcard = { git = "https://github.com/facet-rs/facet", branch = "main", features = ["jiff02", "camino"] }
+facet-postcard = { git = "https://github.com/facet-rs/facet", branch = "main", features = [
+  "jiff02",
+  "camino",
+] }
 facet-cargo-toml = { git = "https://github.com/bearcove/facet-cargo-toml", branch = "main" }
 
 # incremental computation
@@ -53,7 +60,16 @@ eyre = "0.6"
 thiserror = "2"
 
 # async
-tokio = { version = "1", features = ["rt-multi-thread", "io-util", "net", "time", "fs", "process", "sync", "signal"] }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "io-util",
+  "net",
+  "time",
+  "fs",
+  "process",
+  "sync",
+  "signal",
+] }
 tokio-test-lite = "0.2"
 futures-util = "0.3"
 
@@ -78,13 +94,22 @@ tempfile = "3"
 
 # logging
 tracing = { version = "0.1", default-features = false, features = ["std"] }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "ansi"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+  "env-filter",
+  "fmt",
+  "ansi",
+] }
 
 # Compile dependencies with optimizations even in dev builds.
 # This dramatically speeds up CPU-intensive operations like decompression (xz2/lzma)
 # and hashing (sha2, blake3) which dominate toolchain acquisition time.
 [profile.dev.package."*"]
 opt-level = 2
+
+[profile.release]
+debug = 1
+split-debuginfo = "unpacked"
+strip = "none"
 
 [patch.crates-io]
 facet = { git = "https://github.com/facet-rs/facet", branch = "main" }

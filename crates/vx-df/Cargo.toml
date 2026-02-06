@@ -1,0 +1,4 @@
+[package]
+name = "vx-df"
+version.workspace = true
+edition.workspace = true

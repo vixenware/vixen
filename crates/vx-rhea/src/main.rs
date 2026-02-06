@@ -265,6 +265,20 @@ async fn is_socket_in_use(path: &Utf8PathBuf) -> bool {
 fn check_fskitty_extension() -> Result<(), String> {
     use std::process::Command;
 
+    // Fast path: check if the app bundle exists
+    let app_path = std::path::Path::new("/Applications/FsKitty.app");
+    if !app_path.exists() {
+        return Err(
+            "FsKitty.app not found in /Applications.\n\
+             To install:\n  \
+               1. Download FsKitty.app and move it to /Applications\n  \
+               2. Open the app once to register the extension\n  \
+               3. Enable in: System Settings → General → Login Items & Extensions → File System Extensions"
+                .to_string(),
+        );
+    }
+
+    // Verify the extension is registered with the system
     let output = Command::new("pluginkit")
         .args(["-m", "-p", "com.apple.fskit.fsmodule"])
         .output()
@@ -275,10 +289,13 @@ fn check_fskitty_extension() -> Result<(), String> {
     if stdout.contains("me.amos.fs-kitty") || stdout.contains("fskitty") {
         Ok(())
     } else {
-        Err("fs-kitty extension not found.\n\
-             Install FsKitty.app and enable the extension in:\n\
-             System Settings → General → Login Items & Extensions → File System Extensions"
-            .to_string())
+        Err(
+            "FsKitty.app is installed but the extension is not registered.\n\
+             To fix:\n  \
+               1. Open FsKitty.app to register the extension\n  \
+               2. Enable in: System Settings → General → Login Items & Extensions → File System Extensions"
+                .to_string(),
+        )
     }
 }
 
@@ -301,8 +318,8 @@ fn check_stale_mount(mount_base: &Utf8PathBuf) -> Option<String> {
         if line.contains(mount_base.as_str()) && line.contains("fskitty") {
             return Some(format!(
                 "Stale fs-kitty mount detected at {}\n\
-                 To clean up, run: umount {} or diskutil unmount force {}",
-                mount_base, mount_base, mount_base
+                 To clean up, run: diskutil unmount force {}",
+                mount_base, mount_base
             ));
         }
     }
@@ -353,26 +370,32 @@ fn mount_fskitty(mount_point: &Utf8Path, host: &str, port: u16) -> Result<(), St
         return Err(format!("Mount failed: {}", stderr.trim()));
     }
 
-    // Verify mount actually exists
-    let mount_output = run_command_with_timeout("mount", &[], std::time::Duration::from_secs(2));
-    if let Ok(Some(mo)) = mount_output {
-        let mount_list = String::from_utf8_lossy(&mo.stdout);
-        if mount_list.contains(mount_point.as_str()) {
-            tracing::info!("✅ VFS mounted at {} (verified)", mount_point);
-        } else {
-            tracing::warn!(
-                "⚠️ Mount command succeeded but {} not in mount list!",
-                mount_point
-            );
-            tracing::info!("Current mounts with fskitty:");
-            for line in mount_list.lines() {
-                if line.contains("fskitty") {
-                    tracing::info!("  {}", line);
+    // Verify mount via `df` (subprocess with timeout to avoid hanging on stuck FSKit).
+    // Check that our specific fskitty://host:port is mounted at the expected path.
+    let mut verified = false;
+    for _ in 0..10 {
+        if let Ok(Some(output)) = run_command_with_timeout(
+            "df",
+            &[],
+            std::time::Duration::from_secs(2),
+        ) {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if vx_df::find_fskitty_mount(&stdout, mount_point.as_str(), host, port) {
+                    verified = true;
+                    break;
                 }
             }
         }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    if verified {
+        tracing::info!("VFS mounted at {} (verified via df)", mount_point);
     } else {
-        tracing::warn!("Skipping mount list verification (mount command unavailable or timed out)");
+        tracing::warn!(
+            "Mount command succeeded but df does not show fskitty://{}:{} at {}",
+            host, port, mount_point
+        );
     }
 
     Ok(())
@@ -385,34 +408,23 @@ fn unmount_fskitty(mount_point: &Utf8Path) {
 
     tracing::info!("Unmounting fs-kitty at {}", mount_point);
 
-    // Try regular unmount first
-    let output = run_command_with_timeout("umount", &[mount_point.as_str()], Duration::from_secs(3));
-
-    match output {
+    match run_command_with_timeout(
+        "diskutil",
+        &["unmount", "force", mount_point.as_str()],
+        Duration::from_secs(5),
+    ) {
         Ok(Some(o)) if o.status.success() => {
             tracing::info!("VFS unmounted successfully");
         }
         Ok(Some(o)) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            tracing::warn!("umount failed, trying force unmount: {}", stderr.trim());
-
-            // Try force unmount
-            let _ = run_command_with_timeout(
-                "diskutil",
-                &["unmount", "force", mount_point.as_str()],
-                Duration::from_secs(5),
-            );
+            tracing::warn!("diskutil unmount force failed: {}", stderr.trim());
         }
         Ok(None) => {
-            tracing::warn!("umount timed out, trying force unmount");
-            let _ = run_command_with_timeout(
-                "diskutil",
-                &["unmount", "force", mount_point.as_str()],
-                Duration::from_secs(5),
-            );
+            tracing::warn!("diskutil unmount force timed out after 5s");
         }
         Err(e) => {
-            tracing::warn!("Failed to execute umount: {}", e);
+            tracing::warn!("Failed to execute diskutil: {}", e);
         }
     }
 }

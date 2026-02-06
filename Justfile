@@ -2,25 +2,26 @@
 # Shared VX_HOME for manual debugging
 
 debug_home := "/tmp/vx-debug"
+rust_log := "trace"
 
 # List available tasks
 list:
     just --list
 
 # Run vx-cass with full logging
-cass:
+cass *args:
     mkdir -p {{ debug_home }}
-    RUST_LOG=trace VX_HOME={{ debug_home }} cargo run --bin vx-cass
+    RUST_LOG={{ rust_log }} VX_HOME={{ debug_home }} cargo run --bin vx-cass {{ args }}
 
 # Run vx-rhea with full logging (start cass first!)
-rhea:
+rhea *args:
     mkdir -p {{ debug_home }}
-    RUST_LOG=trace VX_HOME={{ debug_home }} cargo run --bin vx-rhea
+    RUST_LOG={{ rust_log }} VX_HOME={{ debug_home }} cargo run --bin vx-rhea {{ args }}
 
 # Run vx-aether with full logging (start cass and rhea first!)
-aether:
+aether *args:
     mkdir -p {{ debug_home }}
-    RUST_LOG=trace VX_HOME={{ debug_home }} cargo run --bin vx-aether
+    RUST_LOG={{ rust_log }} VX_HOME={{ debug_home }} cargo run --bin vx-aether {{ args }}
 
 # Run a test against the manually-started services
 test name:
@@ -28,5 +29,5 @@ test name:
 
 # Clean up debug state (sockets, mount, etc.)
 debug-clean:
-    -umount {{ debug_home }}/fskitty/rhea 2>/dev/null
+    -diskutil unmount force {{ debug_home }}/fskitty/rhea 2>/dev/null
     rm -rf {{ debug_home }}
