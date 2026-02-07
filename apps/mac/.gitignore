@@ -4,6 +4,8 @@ Cargo.lock
 
 # Build output
 build/
+/dist/
+/xcode/build/
 
 # Swift
 swift/*/.build/

@@ -1,9 +1,12 @@
 import AppKit
 @preconcurrency import FSKit
+import Sparkle
 import SwiftUI
 
 @main
 struct VixenApp: App {
+    private let updaterController = SparkleBootstrap.makeUpdaterController()
+
     init() {
         registerExtension()
     }
@@ -13,6 +16,14 @@ struct VixenApp: App {
             ContentView()
         }
         .windowResizability(.contentSize)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    updaterController?.checkForUpdates(nil)
+                }
+                .disabled(updaterController == nil)
+            }
+        }
     }
 
     private func registerExtension() {
@@ -372,6 +383,24 @@ private struct MockToggle: View {
                     .padding(.horizontal, 2)
             }
             .animation(.easeInOut(duration: 0.3), value: isOn)
+    }
+}
+
+private enum SparkleBootstrap {
+    static func makeUpdaterController() -> SPUStandardUpdaterController? {
+        guard let info = Bundle.main.infoDictionary else { return nil }
+        let feedURL = (info["SUFeedURL"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let publicKey = (info["SUPublicEDKey"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let feedURL, !feedURL.isEmpty, let publicKey, !publicKey.isEmpty else {
+            return nil
+        }
+
+        return SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
     }
 }
 
