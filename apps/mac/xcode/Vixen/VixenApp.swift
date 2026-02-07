@@ -22,15 +22,14 @@ struct VixenApp: App {
         else { return }
         guard FileManager.default.fileExists(atPath: extensionURL.path) else { return }
 
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pluginkit")
-        task.arguments = ["-a", extensionURL.path]
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pluginkit")
+        process.arguments = ["-a", extensionURL.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
 
         do {
-            try task.run()
-            task.waitUntilExit()
+            try process.run()
         } catch {
             print("Failed to register extension: \(error)")
         }
@@ -39,15 +38,19 @@ struct VixenApp: App {
 
 struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     @State private var isExtensionEnabled = false
+    @State private var extensionError: String? = nil
     @State private var demoToggleOn = false
     @State private var cursorBob = false
 
     private let requiredMajorVersion = 26
+    private let stepCircleSize: CGFloat = 28
     private let brandOrange = Color(hex: 0xE88602)
     private let brandOrangeMuted = Color(hex: 0xF6D9B6)
-    private let settingsBg = Color(light: 0xEAE8E5, dark: 0x2A2A2A)
-    private let settingsRowBg = Color(light: 0xFFFFFF, dark: 0x333333)
+    private let baseBg = Color(light: 0xFFFFFF, dark: 0x1E2020)
+    private let sectionBg = Color(light: 0xF0F0F0, dark: 0x252626)
+    private let sectionRowBg = Color(light: 0xFFFFFF, dark: 0x2E2E2E)
 
     private var isSupportedOS: Bool {
         ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= requiredMajorVersion
@@ -56,53 +59,126 @@ struct ContentView: View {
         isSupportedOS && isExtensionEnabled
     }
 
-    private var background: Color {
-        colorScheme == .dark
-            ? Color(red: 0x1c / 255.0, green: 0x1c / 255.0, blue: 0x1c / 255.0)
-            : Color(red: 0xf5 / 255.0, green: 0xf3 / 255.0, blue: 0xf0 / 255.0)
-    }
-
     var body: some View {
-        HStack(spacing: 64) {
-            Image("fox_logo")
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 128, height: 128)
-
-            Group {
-                if allComplete {
-                    completeView
-                } else {
-                    setupView
-                }
+        Group {
+            if !isSupportedOS {
+                unsupportedOSView
+            } else {
+                onboardingView
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(40)
-        .frame(width: 720)
-        .background(background)
+        .frame(width: 640)
+        .background(baseBg)
         .task {
+            guard isSupportedOS else { return }
             await pollExtensionStatus()
         }
         .task {
+            guard isSupportedOS else { return }
             await animateToggleDemo()
         }
         .onAppear {
             cursorBob = true
         }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active && isSupportedOS {
+                Task { await checkExtensionOnce() }
+            }
+        }
+    }
+
+    // MARK: - Unsupported OS
+
+    private var unsupportedOSView: some View {
+        VStack(spacing: 24) {
+            Image("fox_logo")
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 128, height: 128)
+
+            Text("macOS \(requiredMajorVersion) Required")
+                .font(.system(size: 24, weight: .semibold, design: .rounded))
+
+            Text("Vixen needs FSKit features available in macOS \(requiredMajorVersion) and later.")
+                .font(.system(size: 15))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            Button {
+                if let url = URL(string: "https://github.com/bearcove/vixen/issues/65") {
+                    NSWorkspace.shared.open(url)
+                }
+            } label: {
+                Label("Learn More", systemImage: "arrow.up.right")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 12)
+                    .background(brandOrange, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    // MARK: - Onboarding
+
+    private var onboardingView: some View {
+        HStack(alignment: .top, spacing: 48) {
+            Image("fox_logo")
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 128, height: 128)
+
+            if allComplete {
+                completeView
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                VStack(alignment: .leading, spacing: 20) {
+                    stepsView
+                    settingsPreview
+
+                    if let error = extensionError {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.yellow)
+                            Text(error)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Button(action: openExtensionSettings) {
+                        Label("Open Settings", systemImage: "gearshape.fill")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 28)
+                            .padding(.vertical, 12)
+                            .background(brandOrange, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
     }
 
     // MARK: - Extension status
 
+    private func checkExtensionOnce() async {
+        do {
+            let extensions = try await FSClient.shared.installedExtensions
+            let found = extensions.first { $0.bundleIdentifier == "eu.bearcove.vixenfs" }
+            isExtensionEnabled = found?.isEnabled ?? false
+            extensionError = nil
+        } catch {
+            extensionError = error.localizedDescription
+        }
+    }
+
     private func pollExtensionStatus() async {
         while !Task.isCancelled {
-            do {
-                let extensions = try await FSClient.shared.installedExtensions
-                let found = extensions.first { $0.bundleIdentifier == "eu.bearcove.vixenfs" }
-                isExtensionEnabled = found?.isEnabled ?? false
-            } catch {
-                print("FSClient error: \(error)")
-            }
+            await checkExtensionOnce()
             try? await Task.sleep(for: .seconds(4))
         }
     }
@@ -129,23 +205,7 @@ struct ContentView: View {
         NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
     }
 
-    // MARK: - Setup view
-
-    private var setupView: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            stepsView
-            settingsMockup
-            Button(action: openExtensionSettings) {
-                Label("Open Settings", systemImage: "gearshape.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 12)
-                    .background(brandOrange, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
-            .buttonStyle(.plain)
-        }
-    }
+    // MARK: - Steps
 
     private var stepsView: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -155,14 +215,9 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
             stepRow(title: "macOS \(requiredMajorVersion).0+", isComplete: isSupportedOS) {
-                HStack(spacing: 0) {
-                    Text("We need the latest FSKit. ")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                    Link("Why?", destination: URL(string: "https://developer.apple.com/documentation/fskit/fspathurlresource")!)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(brandOrange)
-                }
+                Text("We need the latest FSKit.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
             }
             stepRow(title: "VixenFS extension", isComplete: isExtensionEnabled) {
                 Text("Truly hermetic builds with a VFS")
@@ -170,13 +225,13 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .overlay(alignment: .topLeading) {
+        .background(alignment: .topLeading) {
             Rectangle()
                 .fill(Color(nsColor: .separatorColor).opacity(0.5))
                 .frame(width: 1)
                 .padding(.top, 24)
                 .padding(.bottom, 24)
-                .padding(.leading, 13.5)
+                .padding(.leading, stepCircleSize / 2)
         }
     }
 
@@ -188,7 +243,7 @@ struct ContentView: View {
         HStack(alignment: .center, spacing: 14) {
             ZStack {
                 Circle()
-                    .fill(isComplete ? brandOrange : background)
+                    .fill(isComplete ? brandOrange : baseBg)
                 if !isComplete {
                     Circle().stroke(brandOrangeMuted, lineWidth: 2)
                 }
@@ -198,7 +253,7 @@ struct ContentView: View {
                         .foregroundStyle(.white)
                 }
             }
-            .frame(width: 28, height: 28)
+            .frame(width: stepCircleSize, height: stepCircleSize)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -209,7 +264,7 @@ struct ContentView: View {
         .padding(.vertical, 10)
     }
 
-    // MARK: - Settings mockup
+    // MARK: - Settings preview
 
     private func settingsDiskIcon(filled: Bool) -> some View {
         Image(systemName: filled ? "externaldrive.fill" : "externaldrive")
@@ -220,73 +275,95 @@ struct ContentView: View {
             .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 
-    private var settingsMockup: some View {
-        VStack(spacing: 8) {
-            // Header section
-            HStack(alignment: .top, spacing: 12) {
-                settingsDiskIcon(filled: false)
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("File System Extensions")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text("File System extensions allow you to extend the file system functionality of macOS without requiring kernel-level access.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+    private var settingsPreview: some View {
+        VStack(spacing: 0) {
+            // Foreign chrome: signals this is a System Settings preview
+            HStack(spacing: 5) {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 9))
+                Text("System Settings")
+                    .font(.system(size: 11, weight: .medium))
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 7, weight: .bold))
+                Text("General")
+                    .font(.system(size: 11, weight: .medium))
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 7, weight: .bold))
+                Text("Login Items & Extensions")
+                    .font(.system(size: 11, weight: .medium))
             }
+            .foregroundStyle(.tertiary)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(14)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(settingsRowBg)
-            )
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
 
-            // VixenFS row
-            ZStack(alignment: .trailing) {
+            Divider()
+                .opacity(0.5)
+
+            // Muted to read as illustration, not interactive UI
+            VStack(spacing: 8) {
                 HStack(alignment: .top, spacing: 12) {
-                    settingsDiskIcon(filled: true)
-
+                    settingsDiskIcon(filled: false)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("VixenFS Extension")
-                            .font(.system(size: 13, weight: .medium))
-                        Text(" ")
+                        Text("File System Extensions")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("File System extensions allow you to extend the file system functionality of macOS without requiring kernel-level access.")
                             .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-
-                    Spacer()
-
-                    MockToggle(isOn: isExtensionEnabled || demoToggleOn)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(14)
                 .background(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(settingsRowBg)
+                        .fill(sectionRowBg)
                 )
 
-                Image(systemName: "cursorarrow.fill")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(
-                        colorScheme == .dark
-                            ? Color.white.opacity(0.85)
-                            : Color.black.opacity(0.7)
+                ZStack(alignment: .trailing) {
+                    HStack(alignment: .center, spacing: 12) {
+                        settingsDiskIcon(filled: true)
+                        Text("VixenFS Extension")
+                            .font(.system(size: 13, weight: .medium))
+                        Spacer()
+                        MockToggle(isOn: isExtensionEnabled || demoToggleOn)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(sectionRowBg)
                     )
-                    .offset(
-                        x: cursorBob ? -8 : -28,
-                        y: cursorBob ? -4 : 8
-                    )
-                    .animation(
-                        .easeInOut(duration: 1.25).repeatForever(autoreverses: true),
-                        value: cursorBob
-                    )
-                    .padding(.trailing, 14)
+
+                    Image(systemName: "cursorarrow.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(
+                            colorScheme == .dark
+                                ? Color.white.opacity(0.85)
+                                : Color.black.opacity(0.7)
+                        )
+                        .offset(
+                            x: cursorBob ? -8 : -28,
+                            y: cursorBob ? -4 : 8
+                        )
+                        .animation(
+                            .easeInOut(duration: 1.25).repeatForever(autoreverses: true),
+                            value: cursorBob
+                        )
+                        .padding(.trailing, 14)
+                }
             }
+            .padding(10)
+            .opacity(0.85)
         }
-        .padding(10)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(settingsBg)
+                .fill(sectionBg)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(brandOrange.opacity(0.25), lineWidth: 1)
         )
     }
 
@@ -308,7 +385,7 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
 
             Button {
-                if let url = URL(string: "https://github.com/bearcove/vixen") {
+                if let url = URL(string: "https://vixen.rs/") {
                     NSWorkspace.shared.open(url)
                 }
             } label: {
