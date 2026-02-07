@@ -52,6 +52,10 @@ struct ContentView: View {
     private let sectionBg = Color(light: 0xF0F0F0, dark: 0x252626)
     private let sectionRowBg = Color(light: 0xFFFFFF, dark: 0x2E2E2E)
 
+    private static let settingsAppIcon: NSImage = {
+        NSWorkspace.shared.icon(forFile: "/System/Applications/System Settings.app")
+    }()
+
     private var isSupportedOS: Bool {
         ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= requiredMajorVersion
     }
@@ -68,7 +72,7 @@ struct ContentView: View {
             }
         }
         .padding(40)
-        .frame(width: 640)
+        .frame(width: 720)
         .background(baseBg)
         .task {
             guard isSupportedOS else { return }
@@ -124,41 +128,18 @@ struct ContentView: View {
     // MARK: - Onboarding
 
     private var onboardingView: some View {
-        HStack(alignment: .top, spacing: 48) {
+        HStack(alignment: .center, spacing: 56) {
             Image("fox_logo")
                 .resizable()
                 .aspectRatio(contentMode: .fit)
-                .frame(width: 128, height: 128)
+                .frame(width: 160, height: 160)
 
             if allComplete {
                 completeView
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                VStack(alignment: .leading, spacing: 20) {
-                    stepsView
-                    settingsPreview
-
-                    if let error = extensionError {
-                        HStack(spacing: 8) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.yellow)
-                            Text(error)
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    Button(action: openExtensionSettings) {
-                        Label("Open Settings", systemImage: "gearshape.fill")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 28)
-                            .padding(.vertical, 12)
-                            .background(brandOrange, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                stepsView
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -224,6 +205,39 @@ struct ContentView: View {
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
             }
+
+            if !isExtensionEnabled {
+                VStack(alignment: .leading, spacing: 16) {
+                    settingsPreview
+
+                    if let error = extensionError {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.yellow)
+                            Text(error)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Button(action: openExtensionSettings) {
+                        HStack(spacing: 8) {
+                            Image(nsImage: Self.settingsAppIcon)
+                                .resizable()
+                                .frame(width: 24, height: 24)
+                            Text("Open Settings")
+                                .font(.system(size: 15))
+                            Image(systemName: "arrow.forward")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .foregroundStyle(brandOrange)
+                    }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                }
+                .padding(.leading, stepCircleSize + 14)
+                .padding(.top, 8)
+            }
         }
         .background(alignment: .topLeading) {
             Rectangle()
@@ -262,6 +276,7 @@ struct ContentView: View {
             }
         }
         .padding(.vertical, 10)
+        .opacity(isComplete ? 0.5 : 1.0)
     }
 
     // MARK: - Settings preview
