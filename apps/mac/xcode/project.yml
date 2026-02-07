@@ -35,6 +35,8 @@ targets:
       properties:
         com.apple.security.app-sandbox: true
         com.apple.security.network.client: true
+        com.apple.security.application-groups:
+          - group.eu.bearcove.vixen
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: eu.bearcove.vixen
@@ -93,6 +95,8 @@ targets:
         com.apple.security.app-sandbox: true
         com.apple.security.network.client: true
         com.apple.developer.fskit.fsmodule: true
+        com.apple.security.application-groups:
+          - group.eu.bearcove.vixen
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: eu.bearcove.vixenfs

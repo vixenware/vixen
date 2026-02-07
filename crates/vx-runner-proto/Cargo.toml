@@ -3,9 +3,13 @@ name = "vx-runner-proto"
 version.workspace = true
 edition.workspace = true
 
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
 [dependencies]
 facet = { workspace = true }
 roam = { workspace = true }
-facet-postcard = { workspace = true, features = ["camino"] }
 
 vx-store-proto = { workspace = true }

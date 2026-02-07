@@ -689,7 +689,13 @@ impl RunnerService {
 
             let obj_rel_path = format!("obj/{idx:04}.o");
             self.vfs
-                .add_file_to_prefix(&prefix_id, &obj_rel_path, object_entry.blob, 0, false)
+                .add_file_to_prefix(
+                    &prefix_id,
+                    &obj_rel_path,
+                    object_entry.blob,
+                    object_entry.size,
+                    false,
+                )
                 .await;
             object_paths.push(prefix_path.join(obj_rel_path));
         }

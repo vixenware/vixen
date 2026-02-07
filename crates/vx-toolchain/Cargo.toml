@@ -5,24 +5,22 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
 [dependencies]
 blake3 = { workspace = true }
 camino = { workspace = true }
-chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
-eyre = { workspace = true }
 facet = { workspace = true }
-facet-json = { workspace = true }
 facet-toml = { workspace = true }
-facet-value = { workspace = true }
 lzma-rs = "0.3"
 tar = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
 vx-store-proto = { workspace = true }
 walkdir = "2.5"
 vx-http = { workspace = true }
 uuid = { version = "1.19.0", features = ["v4"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }

@@ -3,6 +3,11 @@ name = "vx-tarball"
 version.workspace = true
 edition.workspace = true
 
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
 [dependencies]
 camino = { workspace = true }
 futures-util = { workspace = true }
@@ -12,6 +17,4 @@ tracing = { workspace = true }
 vx-store-proto = { workspace = true }
 
 async-compression = { version = "0.4.36", default-features = false, features = ["tokio", "gzip", "xz"] }
-pin-project-lite = { workspace = true }
 tokio-tar = "0.3"
-tokio-util = { workspace = true, features = ["compat", "io"] }

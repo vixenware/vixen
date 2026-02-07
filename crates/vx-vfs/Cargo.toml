@@ -3,6 +3,11 @@ name = "vx-vfs"
 version.workspace = true
 edition.workspace = true
 
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
 [dependencies]
 camino = { workspace = true }
 facet = { workspace = true }
@@ -24,3 +29,6 @@ roam = { workspace = true }
 libc = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
+
+[package.metadata.cargo-shear]
+ignored = ["facet-error"]

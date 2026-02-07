@@ -12,6 +12,7 @@ mod macos_bench {
     use std::os::unix::fs::{FileExt, PermissionsExt};
     use std::path::Path;
     use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use vixenfs_proto::{
@@ -291,10 +292,28 @@ mod macos_bench {
         children: Vec<ItemId>,
     }
 
+    struct PerFileReads {
+        counters: HashMap<ItemId, AtomicU64>,
+    }
+
+    impl Clone for PerFileReads {
+        fn clone(&self) -> Self {
+            Self {
+                counters: self
+                    .counters
+                    .iter()
+                    .map(|(&id, c)| (id, AtomicU64::new(c.load(Ordering::Relaxed))))
+                    .collect(),
+            }
+        }
+    }
+
     #[derive(Clone)]
     struct SyntheticVfs {
         nodes: Arc<HashMap<ItemId, BenchNode>>,
         child_lookup: Arc<HashMap<(ItemId, String), ItemId>>,
+        file_paths: Arc<HashMap<ItemId, String>>,
+        per_file_reads: Arc<PerFileReads>,
         read_stats: Arc<ReadStats>,
     }
 
@@ -302,6 +321,8 @@ mod macos_bench {
         fn from_file_specs(files: Vec<FileSpec>) -> Result<Self, String> {
             let mut nodes = HashMap::new();
             let mut child_lookup = HashMap::new();
+            let mut file_paths = HashMap::new();
+            let mut per_file_counters = HashMap::new();
             let now = now_secs();
 
             nodes.insert(
@@ -366,6 +387,8 @@ mod macos_bench {
                     },
                 );
                 child_lookup.insert(key, file_id);
+                file_paths.insert(file_id, spec.path);
+                per_file_counters.insert(file_id, AtomicU64::new(0));
 
                 let parent_node = nodes
                     .get_mut(&parent)
@@ -376,6 +399,10 @@ mod macos_bench {
             Ok(Self {
                 nodes: Arc::new(nodes),
                 child_lookup: Arc::new(child_lookup),
+                file_paths: Arc::new(file_paths),
+                per_file_reads: Arc::new(PerFileReads {
+                    counters: per_file_counters,
+                }),
                 read_stats: Arc::new(ReadStats::new()),
             })
         }
@@ -396,6 +423,25 @@ mod macos_bench {
 
         fn backend_stats(&self) -> StatsSnapshot {
             self.read_stats.snapshot()
+        }
+
+        fn per_file_read_counts(&self) -> Vec<(String, u64)> {
+            let mut counts: Vec<(String, u64)> = self
+                .per_file_reads
+                .counters
+                .iter()
+                .map(|(&id, counter)| {
+                    let path = self
+                        .file_paths
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("<item {id}>"));
+                    (path, counter.load(Ordering::Relaxed))
+                })
+                .filter(|(_, count)| *count > 0)
+                .collect();
+            counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            counts
         }
     }
 
@@ -580,6 +626,10 @@ mod macos_bench {
                         name: child.name.clone(),
                         item_id: child.id,
                         item_type: child.item_type,
+                        size: child.size,
+                        modified_time: child.modified_time,
+                        created_time: child.created_time,
+                        mode: child.mode,
                     });
                 }
             }
@@ -620,6 +670,10 @@ mod macos_bench {
                     error: errno::ENOENT,
                 },
             };
+
+            if let Some(counter) = self.per_file_reads.counters.get(&item_id) {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
 
             self.read_stats.record(
                 len,
@@ -944,6 +998,19 @@ mod macos_bench {
         sorted_values[idx]
     }
 
+    fn print_per_file_reads(vfs: &SyntheticVfs) {
+        let counts = vfs.per_file_read_counts();
+        if counts.is_empty() {
+            return;
+        }
+        let total_files = vfs.file_paths.len();
+        let read_files = counts.len();
+        println!("per-file reads ({read_files} of {total_files} files read):");
+        for (path, count) in &counts {
+            println!("  {count:>8}  {path}");
+        }
+    }
+
     async fn mount_with_vfs(
         mount_path: &Utf8PathBuf,
         vfs: SyntheticVfs,
@@ -1033,6 +1100,7 @@ mod macos_bench {
             (client.total_returned_bytes as f64 / (1024.0 * 1024.0))
                 / elapsed.as_secs_f64().max(1e-9)
         );
+        print_per_file_reads(&vfs);
 
         Ok(BenchSummary::RandomRead {
             elapsed,
@@ -1116,6 +1184,7 @@ mod macos_bench {
             );
             println!("  stdout: {}", run.stdout.trim_end());
         }
+        print_per_file_reads(&vfs);
 
         Ok(BenchSummary::Exec {
             preload_elapsed,
@@ -1329,6 +1398,7 @@ mod macos_bench {
                 run.backend_delta.avg_latency_ns(),
             );
         }
+        print_per_file_reads(&vfs);
 
         Ok(BenchSummary::ToolchainBuild {
             preload_elapsed,

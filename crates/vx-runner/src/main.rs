@@ -302,8 +302,15 @@ async fn main() -> Result<()> {
                 tokio::spawn(async move {
                     tracing::debug!("Runner connection from {}", peer_addr);
                     let dispatcher = RunnerDispatcher::new(exec);
-                    let Ok((_handle, _incoming, driver)) =
-                        accept(stream, HandshakeConfig::default(), dispatcher).await
+                    let Ok((_handle, _incoming, driver)) = accept(
+                        stream,
+                        HandshakeConfig {
+                            max_payload_size: 256 * 1024 * 1024, // 256 MiB
+                            ..Default::default()
+                        },
+                        dispatcher,
+                    )
+                    .await
                     else {
                         tracing::debug!("Runner handshake error from {}", peer_addr);
                         return;

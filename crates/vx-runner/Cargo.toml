@@ -3,16 +3,18 @@ name = "vx-runner"
 version.workspace = true
 edition.workspace = true
 
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
 [dependencies]
 # VFS protocol
 vixenfs-proto = { workspace = true }
 
 vx-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 facet = { workspace = true }
 thiserror = { workspace = true }
-facet-json = { workspace = true }
-facet-cargo-toml = { workspace = true }
 roam = { workspace = true }
 roam-stream = { workspace = true }
 tokio = { workspace = true }
@@ -21,17 +23,9 @@ eyre = { workspace = true }
 jiff = { workspace = true }
 tracing = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
-blake3 = { workspace = true }
-futures-util = { workspace = true }
 
 vx-cache = { workspace = true }
 vx-store-proto = { workspace = true }
-vx-cc = { workspace = true }
 vx-runner-proto = { workspace = true }
 vx-io = { workspace = true }
-vx-tarball = { workspace = true }
 vx-vfs = { workspace = true }
-
-
-# For copy-on-write/reflink file copying
-clonetree = "0.0.2"

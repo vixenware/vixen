@@ -96,6 +96,13 @@ pub struct DirEntry {
     pub name: String,
     pub item_id: ItemId,
     pub item_type: ItemType,
+    pub size: u64,
+    /// Unix timestamp (seconds since epoch)
+    pub modified_time: u64,
+    /// Unix timestamp (seconds since epoch)
+    pub created_time: u64,
+    /// Unix file permissions (e.g., 0o755 for executable, 0o644 for regular file)
+    pub mode: u32,
 }
 
 /// Result of reading a directory

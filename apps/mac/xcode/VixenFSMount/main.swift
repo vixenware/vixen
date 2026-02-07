@@ -8,10 +8,12 @@ private let log = Logger(subsystem: "eu.bearcove.vixenfs.mount", category: "Main
 enum Command {
     case mount(Config)
     case health(json: Bool)
+    case appGroupPath
 }
 
 struct Config {
     static let extensionBundleIdentifier = "eu.bearcove.vixenfs"
+    static let appGroupIdentifier = "group.eu.bearcove.vixen"
 
     let mountPoint: String
     let port: Int
@@ -19,9 +21,14 @@ struct Config {
     let scheme: String
     let fsType: String
     let parentPID: pid_t
+    let preload: Bool
 
     var source: String {
-        "\(scheme)://\(host):\(port)"
+        var url = "\(scheme)://\(host):\(port)"
+        if preload {
+            url += "?preload=1"
+        }
+        return url
     }
 
     static func parse(from args: [String]) throws -> Command {
@@ -31,8 +38,10 @@ struct Config {
         var scheme = "vixen"
         let fsType = "vixenfs"
         let parentPID = getppid()
+        var preload = false
         var healthRequested = false
         var jsonRequested = false
+        var appGroupPathRequested = false
         var mountArgumentsProvided = false
 
         var index = 0
@@ -59,16 +68,29 @@ struct Config {
                 mountArgumentsProvided = true
                 index += 1
                 scheme = try valueArg(args, index: index, name: "--scheme")
+            case "--preload":
+                mountArgumentsProvided = true
+                preload = true
             case "--health":
                 healthRequested = true
             case "--json":
                 jsonRequested = true
+            case "--app-group-path":
+                appGroupPathRequested = true
             case "--help":
                 throw MountError.usage
             default:
                 throw MountError.invalidArgument("Unknown argument: \(arg)")
             }
             index += 1
+        }
+
+        if appGroupPathRequested {
+            if mountArgumentsProvided || healthRequested {
+                throw MountError.invalidArgument(
+                    "--app-group-path cannot be combined with other arguments")
+            }
+            return .appGroupPath
         }
 
         if healthRequested {
@@ -97,7 +119,8 @@ struct Config {
                 host: host,
                 scheme: scheme,
                 fsType: fsType,
-                parentPID: parentPID
+                parentPID: parentPID,
+                preload: preload
             ))
     }
 
@@ -131,6 +154,7 @@ enum MountError: Error, CustomStringConvertible {
             return """
                 Usage:
                   vixenfs-mount --health [--json]
+                  vixenfs-mount --app-group-path
                   vixenfs-mount --port <port> --mount-point <path> [--host <host>] [--scheme <scheme>]
                 """
         }
@@ -359,6 +383,18 @@ do {
     switch command {
     case .health(let json):
         runHealthCheck(json: json)
+    case .appGroupPath:
+        guard
+            let url = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: Config.appGroupIdentifier)
+        else {
+            fputs(
+                "vixenfs-mount: failed to resolve App Group container for \(Config.appGroupIdentifier)\n",
+                stderr)
+            exit(2)
+        }
+        fputs(url.path, stdout)
+        exit(0)
     case .mount(let config):
         try MountLifecycle(config: config).run()
     }

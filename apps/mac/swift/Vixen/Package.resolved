@@ -1,5 +1,5 @@
 {
-  "originHash" : "ada36b52603bb7f8066def596df29dce65a4469f8db0464cfbd7163c96502bf6",
+  "originHash" : "930d298465c1ebf2f6064ed4e6aaf411c2c854ada61689bc63ada26eef0f7ab5",
   "pins" : [
     {
       "identity" : "roam",
@@ -7,7 +7,7 @@
       "location" : "https://github.com/bearcove/roam.git",
       "state" : {
         "branch" : "main",
-        "revision" : "aa0673eacf7cec6c541f493b8c493e2ed50f8236"
+        "revision" : "477ced939f33c83d72662f3b2797fe88f4936ad4"
       }
     },
     {

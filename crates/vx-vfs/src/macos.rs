@@ -9,6 +9,7 @@
 use crate::types::{VfsConfig, VfsError, VfsStart};
 use roam_stream::{HandshakeConfig, accept};
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -78,7 +79,13 @@ where
         .arg("--port")
         .arg(port.to_string())
         .arg("--mount-point")
-        .arg(config.mount_path.as_str())
+        .arg(config.mount_path.as_str());
+
+    if std::env::var("VIXENFS_PRELOAD").as_deref() == Ok("1") {
+        helper_command.arg("--preload");
+    }
+
+    helper_command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(false);
@@ -142,7 +149,11 @@ where
                     tokio::spawn(async move {
                         tracing::debug!(%peer_addr, "accepted Vixen VFS connection");
                         let dispatcher = VfsDispatcher::new(vfs);
-                        let accepted = accept(stream, HandshakeConfig::default(), dispatcher).await;
+                        let config = HandshakeConfig {
+                            max_payload_size: 256 * 1024 * 1024, // 256 MiB — large enough for librustc_driver
+                            ..Default::default()
+                        };
+                        let accepted = accept(stream, config, dispatcher).await;
                         let Ok((_handle, _incoming, driver)) = accepted else {
                             tracing::debug!(%peer_addr, "VFS handshake failed");
                             return;
@@ -277,6 +288,39 @@ pub(super) async fn check_extension_health() -> Option<VfsHealth> {
 
     let stdout = std::str::from_utf8(&output.stdout).ok()?.trim();
     facet_json::from_str(stdout).ok()
+}
+
+/// Resolve the App Group container path via the `vixenfs-mount` helper.
+///
+/// The helper is codesigned with the App Group entitlement, so it can call
+/// `FileManager.containerURL(forSecurityApplicationGroupIdentifier:)` and
+/// return the resolved path. This lets VXRunner (a plain Rust binary) discover
+/// the shared container without needing its own App Group entitlement.
+#[allow(dead_code)]
+pub async fn resolve_app_group_path() -> Result<PathBuf, String> {
+    let output = Command::new(VIXEN_MOUNT_HELPER_PATH)
+        .arg("--app-group-path")
+        .output()
+        .await
+        .map_err(|e| format!("failed to run {VIXEN_MOUNT_HELPER_PATH}: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "vixenfs-mount --app-group-path failed (status={:?}): {}",
+            output.status.code(),
+            stderr.trim()
+        ));
+    }
+
+    let path = String::from_utf8(output.stdout)
+        .map_err(|e| format!("vixenfs-mount --app-group-path returned invalid UTF-8: {e}"))?;
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("vixenfs-mount --app-group-path returned empty path".to_string());
+    }
+
+    Ok(PathBuf::from(path))
 }
 
 async fn snapshot_lines(lines: &Arc<Mutex<VecDeque<String>>>) -> String {

@@ -3,6 +3,11 @@ name = "vx-cache"
 version.workspace = true
 edition.workspace = true
 
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
 [dependencies]
 blake3 = { workspace = true }
 vx-store-proto = { workspace = true }

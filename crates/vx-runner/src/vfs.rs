@@ -48,7 +48,7 @@ pub struct VfsItem {
     pub mode: u32,
     /// For files: CAS blob hash (None means empty/new file)
     pub cas_hash: Option<Blake3Hash>,
-    /// For files: cached size (0 if unknown)
+    /// For files: size in bytes
     pub size: u64,
     /// For files being written: buffered data
     pub write_buffer: Option<Vec<u8>>,
@@ -475,6 +475,10 @@ impl Vfs for CasVfs {
                         name: child.name.clone(),
                         item_id: child.id,
                         item_type: child.item_type,
+                        size: child.size,
+                        modified_time: 0,
+                        created_time: 0,
+                        mode: child.mode,
                     })
                     .collect();
 

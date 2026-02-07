@@ -391,8 +391,15 @@ async fn async_main() -> Result<()> {
             tracing::debug!("New connection from {}", peer_addr);
 
             let dispatcher = VxdDispatcher::new(daemon.as_ref().clone());
-            let Ok((handle, _incoming, driver)) =
-                accept(stream, HandshakeConfig::default(), dispatcher).await
+            let Ok((handle, _incoming, driver)) = accept(
+                stream,
+                HandshakeConfig {
+                    max_payload_size: 256 * 1024 * 1024, // 256 MiB
+                    ..Default::default()
+                },
+                dispatcher,
+            )
+            .await
             else {
                 tracing::warn!("Handshake error from {}", peer_addr);
                 return;

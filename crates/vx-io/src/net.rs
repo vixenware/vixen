@@ -279,7 +279,10 @@ where
 {
     roam_stream::connect_with_policy(
         EndpointConnector::new(endpoint),
-        roam_stream::HandshakeConfig::default(),
+        roam_stream::HandshakeConfig {
+            max_payload_size: 256 * 1024 * 1024, // 256 MiB
+            ..Default::default()
+        },
         dispatcher,
         roam_stream::RetryPolicy::default(),
     )

@@ -6,6 +6,11 @@ description = "VFS protocol for VixenFS - implement the Vfs trait to create your
 license.workspace = true
 repository.workspace = true
 
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
 [dependencies]
 roam.workspace = true
 facet.workspace = true

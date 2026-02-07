@@ -3,14 +3,16 @@ name = "vx-store"
 version.workspace = true
 edition.workspace = true
 
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
 [dependencies]
-blake3 = { workspace = true }
 camino = { workspace = true }
 jiff = { workspace = true }
 eyre = { workspace = true }
-facet = { workspace = true }
 facet-json = { workspace = true }
-flate2 = "1"
 futures-util = { workspace = true }
 hex = { workspace = true }
 http-body-util = "0.1"
@@ -19,13 +21,10 @@ roam = { workspace = true }
 roam-stream = { workspace = true }
 sha2 = "0.10"
 tar = { workspace = true }
-tempfile.workspace = true
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = "0.1"
 tokio-util = { workspace = true, features = ["io"] }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
 vx-tracing = { workspace = true }
 vx-store-proto = { workspace = true }
@@ -33,3 +32,6 @@ vx-http = { workspace = true }
 vx-io = { workspace = true }
 vx-tarball = { workspace = true }
 vx-toolchain = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

@@ -29,6 +29,7 @@ extension FSItem.Attributes {
     /// Create attributes from VFS response using ItemType enum
     static func fromVfs(
         itemId: UInt64,
+        parentId: UInt64,
         itemType: ItemType,
         size: UInt64,
         modifiedTime: UInt64,
@@ -42,6 +43,11 @@ extension FSItem.Attributes {
             attrs.fileID = id
         }
 
+        // Set parent ID
+        if let pid = FSItem.Identifier(rawValue: parentId) {
+            attrs.parentID = pid
+        }
+
         // Set type
         switch itemType {
         case .file:
@@ -52,8 +58,12 @@ extension FSItem.Attributes {
             attrs.type = .symlink
         }
 
-        // Set size
+        // Set size and allocated size
         attrs.size = size
+        attrs.allocSize = size
+
+        // Set flags (st_flags — 0 for normal items)
+        attrs.flags = 0
 
         // Set times
         attrs.modifyTime = timespec(tv_sec: Int(modifiedTime), tv_nsec: 0)

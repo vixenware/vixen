@@ -66,10 +66,12 @@ actor VfsConnection {
         let host = String(parts[0])
         log.info("Connecting to \(host):\(port)")
 
+        let maxPayloadSize: UInt32 = 256 * 1024 * 1024  // 256 MiB
         let transport = try await RoamRuntime.connect(host: host, port: port)
         let (handle, driver) = try await establishInitiator(
             transport: transport,
-            dispatcher: NoopDispatcher()
+            dispatcher: NoopDispatcher(),
+            maxPayloadSize: maxPayloadSize
         )
 
         disconnectRequested = false
@@ -193,22 +195,23 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
         log.info("loadResource")
         let resourceDescription = describe(resource: resource)
 
-        // Extract server address from URL resource
+        // Extract server address and options from URL resource
         guard let address = extractServerAddress(from: resource) else {
             log.error("loadResource: not a valid vixen:// URL resource")
             replyHandler(nil, fs_errorForPOSIXError(POSIXError.EINVAL.rawValue))
             return
         }
+        let preload = extractPreloadFlag(from: resource)
 
         let sendable = SendableReplyHandler(handler: replyHandler)
         Task {
             await LifecycleTrace.shared.mark(
                 self.log, event: "bridge.loadResource.begin",
-                details: resourceDescription)
+                details: "\(resourceDescription) preload=\(preload)")
             do {
                 try await VfsConnection.shared.connect(address: address)
 
-                let volume = Volume()
+                let volume = Volume(preload: preload)
                 self.containerStatus = .ready
                 await LifecycleTrace.shared.mark(
                     self.log, event: "bridge.loadResource.success",
@@ -274,6 +277,14 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
 
         let port = url.port ?? 10001
         return "\(host):\(port)"
+    }
+
+    private func extractPreloadFlag(from resource: FSResource) -> Bool {
+        guard let urlResource = resource as? FSGenericURLResource else {
+            return false
+        }
+        let components = URLComponents(url: urlResource.url, resolvingAgainstBaseURL: false)
+        return components?.queryItems?.first(where: { $0.name == "preload" })?.value == "1"
     }
 
     private func describe(resource: FSResource) -> String {

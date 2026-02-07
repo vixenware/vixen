@@ -13,7 +13,6 @@ repository = "https://github.com/bearcove/vx"
 vx-cache = { path = "crates/vx-cache" }
 vixenfs-proto = { path = "crates/vixenfs-proto" }
 vx-store-proto = { path = "crates/vx-store-proto" }
-vx-cc = { path = "crates/vx-cc" }
 vx-runner-proto = { path = "crates/vx-runner-proto" }
 vx-manifest = { path = "crates/vx-manifest" }
 vx-project = { path = "crates/vx-project" }
@@ -38,7 +37,6 @@ figue = { git = "https://github.com/bearcove/figue", branch = "main" }
 facet-json = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-styx = { git = "https://github.com/bearcove/styx", branch = "main" }
 facet-toml = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-value = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-postcard = { git = "https://github.com/facet-rs/facet", branch = "main", features = [
   "jiff02",
   "camino",
@@ -52,6 +50,7 @@ picante = { git = "https://github.com/bearcove/picante", branch = "main", featur
 roam = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-stream = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-local = { git = "https://github.com/bearcove/roam", branch = "main" }
+roam-codegen = { git = "https://github.com/bearcove/roam", branch = "main" }
 
 # process management
 ur-taking-me-with-you = { git = "https://github.com/bearcove/rapace", tag = "v0.5.0" }
@@ -123,21 +122,30 @@ debug = 1
 split-debuginfo = "unpacked"
 strip = "none"
 
-[patch.crates-io]
-facet = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-core = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-macros = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-macros-impl = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-macro-parse = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-macro-types = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-reflect = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-json = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-toml = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-postcard = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-value = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-format = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# [patch.crates-io]
+# facet = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-core = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-macros = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-macros-impl = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-macro-parse = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-macro-types = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-reflect = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-json = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-toml = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-postcard = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-value = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-format = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
+
+# [patch."https://github.com/bearcove/roam"]
+# roam = { path = "../roam/rust/roam" }
+# roam-stream = { path = "../roam/rust/roam-stream" }
+# roam-local = { path = "../roam/rust/roam-local" }
+# roam-codegen = { path = "../roam/rust/roam-codegen" }
 
 [profile.samply]
 inherits = "release"
 debug = true
+
+[workspace.metadata.cargo-shear]
+ignored = ["facet-error"]
