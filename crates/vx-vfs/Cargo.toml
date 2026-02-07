@@ -17,3 +17,10 @@ vx-vfs-types = { workspace = true }
 vx-io = { workspace = true }
 roam-stream = { workspace = true }
 facet-json = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fuse3 = { workspace = true }
+roam = { workspace = true }
+libc = { workspace = true }
+bytes = { workspace = true }
+futures-util = { workspace = true }

@@ -5,6 +5,8 @@
 use cfg_if::cfg_if;
 use vixenfs_proto::Vfs;
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 mod types;
@@ -25,6 +27,9 @@ where
         if #[cfg(target_os = "macos")] {
             tracing::debug!(mount_path = %config.mount_path, "starting vfs orchestration");
             macos::mount(config, vfs).await
+        } else if #[cfg(target_os = "linux")] {
+            tracing::debug!(mount_path = %config.mount_path, "starting FUSE vfs");
+            linux::mount(config, vfs).await
         } else {
             _ = (config, vfs);
             use std::env::consts::OS;
