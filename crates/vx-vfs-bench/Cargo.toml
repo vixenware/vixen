@@ -1,0 +1,13 @@
+[package]
+name = "vx-vfs-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+vixenfs-proto.workspace = true
+vx-vfs.workspace = true
+camino.workspace = true
+tokio.workspace = true
+roam.workspace = true

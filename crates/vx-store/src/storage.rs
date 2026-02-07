@@ -14,10 +14,10 @@
 use std::io;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use vx_io::atomic_write;
 use vx_store_proto::{
     Blake3Hash, BlobHash, CacheKey, ManifestHash, RegistrySpecKey, ToolchainSpecKey,
 };
-use vx_io::atomic_write;
 
 // =============================================================================
 // CasStorage trait — blobs only
@@ -333,11 +333,7 @@ impl CasStore {
 
             std::fs::create_dir_all(&parent)?;
 
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut file) => {
                     file.write_all(manifest_hex.as_bytes())?;
                     file.sync_all()?;

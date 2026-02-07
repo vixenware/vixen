@@ -200,4 +200,3 @@ fn is_retryable_error(error: &DownloadError) -> bool {
         DownloadError::RateLimited | DownloadError::ServerError(_) | DownloadError::Http(_)
     )
 }
-

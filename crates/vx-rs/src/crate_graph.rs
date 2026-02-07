@@ -24,9 +24,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use thiserror::Error;
-use vx_store_proto::Blake3Hash;
 use vx_manifest::lockfile::{CargoLock, CargoLockExt, LockfileError, ReachablePackages};
 use vx_manifest::{Edition, Manifest, ManifestError};
+use vx_store_proto::Blake3Hash;
 
 /// Errors during crate graph construction
 #[derive(Error)]

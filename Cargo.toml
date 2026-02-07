@@ -130,3 +130,7 @@ facet-postcard = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-value = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-format = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
+
+[profile.samply]
+inherits = "release"
+debug = true

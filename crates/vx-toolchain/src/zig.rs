@@ -503,10 +503,12 @@ pub async fn acquire_zig_toolchain(
     let url = zig_download_url(&version, &platform);
 
     // Download the tarball
-    let tarball = vx_http::get_bytes(&url).await.map_err(|e| ZigError::FetchError {
-        url: url.clone(),
-        source: Box::new(e),
-    })?;
+    let tarball = vx_http::get_bytes(&url)
+        .await
+        .map_err(|e| ZigError::FetchError {
+            url: url.clone(),
+            source: Box::new(e),
+        })?;
 
     // Create a temp directory for extraction
     let extract_dir =

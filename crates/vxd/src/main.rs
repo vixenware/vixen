@@ -27,10 +27,10 @@ use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::process::Child;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use vxd_proto::VxdDispatcher;
-use vx_store_proto::StoreClient;
 use vx_io::net::{Endpoint, Listener};
 use vx_runner_proto::RunnerClient;
+use vx_store_proto::StoreClient;
+use vxd_proto::VxdDispatcher;
 
 pub use db::Database;
 pub use inputs::*;
@@ -241,7 +241,9 @@ async fn ensure_services(args: &Args, spawn_tracker: &Arc<Mutex<SpawnTracker>>) 
         // Final connection attempt
         vx_io::net::connect(&args.cas_endpoint)
             .await
-            .wrap_err_with(|| format!("Store still unreachable after spawn: {}", args.cas_endpoint))?;
+            .wrap_err_with(|| {
+                format!("Store still unreachable after spawn: {}", args.cas_endpoint)
+            })?;
     } else {
         tracing::info!("Store already running at {}", args.cas_endpoint);
     }
@@ -290,12 +292,14 @@ async fn ensure_services(args: &Args, spawn_tracker: &Arc<Mutex<SpawnTracker>>) 
         }
 
         // Final connection attempt
-        vx_io::net::connect(&args.exec_endpoint).await.wrap_err_with(|| {
-            format!(
-                "Runner still unreachable after spawn: {}",
-                args.exec_endpoint
-            )
-        })?;
+        vx_io::net::connect(&args.exec_endpoint)
+            .await
+            .wrap_err_with(|| {
+                format!(
+                    "Runner still unreachable after spawn: {}",
+                    args.exec_endpoint
+                )
+            })?;
     } else {
         tracing::info!("Runner already running at {}", args.exec_endpoint);
     }

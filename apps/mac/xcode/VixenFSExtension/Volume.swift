@@ -2,6 +2,84 @@ import FSKit
 import Foundation
 import os
 
+actor ReadTelemetry {
+    static let shared = ReadTelemetry()
+
+    private var readCount: UInt64 = 0
+    private var errorCount: UInt64 = 0
+    private var totalRequestedBytes: UInt64 = 0
+    private var totalBytes: UInt64 = 0
+    private var totalLatencyNs: UInt64 = 0
+    private var minRequestedBytes: UInt64 = .max
+    private var maxRequestedBytes: UInt64 = 0
+    private var minBytes: UInt64 = .max
+    private var maxBytes: UInt64 = 0
+    private var minLatencyNs: UInt64 = .max
+    private var maxLatencyNs: UInt64 = 0
+
+    func record(requestedBytes: Int, returnedBytes: Int, latencyNs: UInt64, isError: Bool) {
+        readCount += 1
+        if isError {
+            errorCount += 1
+        }
+
+        let requested = UInt64(max(0, requestedBytes))
+        totalRequestedBytes += requested
+        minRequestedBytes = min(minRequestedBytes, requested)
+        maxRequestedBytes = max(maxRequestedBytes, requested)
+
+        let returned = UInt64(max(0, returnedBytes))
+        totalBytes += returned
+        minBytes = min(minBytes, returned)
+        maxBytes = max(maxBytes, returned)
+
+        totalLatencyNs += latencyNs
+        minLatencyNs = min(minLatencyNs, latencyNs)
+        maxLatencyNs = max(maxLatencyNs, latencyNs)
+    }
+
+    func logSummary(_ logger: Logger, reason: String) {
+        guard readCount > 0 else {
+            logger.notice("read_stats reason=\(reason, privacy: .public) reads=0")
+            return
+        }
+
+        let avgBytes = Double(totalBytes) / Double(readCount)
+        let avgRequestedBytes = Double(totalRequestedBytes) / Double(readCount)
+        let avgLatencyNs = Double(totalLatencyNs) / Double(readCount)
+        logger.notice(
+            """
+            read_stats reason=\(reason, privacy: .public) \
+            reads=\(self.readCount) \
+            errors=\(self.errorCount) \
+            requested_bytes_min=\(self.minRequestedBytes) \
+            requested_bytes_max=\(self.maxRequestedBytes) \
+            requested_bytes_avg=\(avgRequestedBytes) \
+            bytes_min=\(self.minBytes) \
+            bytes_max=\(self.maxBytes) \
+            bytes_avg=\(avgBytes) \
+            latency_ns_min=\(self.minLatencyNs) \
+            latency_ns_max=\(self.maxLatencyNs) \
+            latency_ns_avg=\(avgLatencyNs)
+            """
+        )
+    }
+
+    func reset() {
+        readCount = 0
+        errorCount = 0
+        totalRequestedBytes = 0
+        totalBytes = 0
+        totalLatencyNs = 0
+        minRequestedBytes = .max
+        maxRequestedBytes = 0
+        minBytes = .max
+        maxBytes = 0
+        minLatencyNs = .max
+        maxLatencyNs = 0
+    }
+}
+
 /// FSKit Volume implementation that delegates to the VFS client.
 final class Volume: FSVolume {
 
@@ -103,6 +181,8 @@ extension Volume: FSVolume.Operations {
     func unmount() async {
         log.debug("unmount")
         await LifecycleTrace.shared.mark(log, event: "volume.unmount.begin")
+        await ReadTelemetry.shared.logSummary(log, reason: "unmount")
+        await ReadTelemetry.shared.reset()
         items.removeAll()
         await LifecycleTrace.shared.mark(log, event: "volume.unmount.done")
     }
@@ -150,6 +230,8 @@ extension Volume: FSVolume.Operations {
         log.debug("deactivate")
         await LifecycleTrace.shared.mark(
             log, event: "volume.deactivate.begin", details: "options=\(options.rawValue)")
+        await ReadTelemetry.shared.logSummary(log, reason: "deactivate")
+        await ReadTelemetry.shared.reset()
         items.removeAll()
         await LifecycleTrace.shared.mark(log, event: "volume.deactivate.done")
     }
@@ -421,25 +503,43 @@ extension Volume: FSVolume.ReadWriteOperations {
         let item = try getItem(fsItem)
         log.debug("read: itemId=\(item.itemId) offset=\(offset) length=\(length)")
 
-        let itemId = item.itemId
-        let result = try await vfsCall("read") { client in
-            try await client.read(itemId: itemId, offset: UInt64(offset), len: UInt64(length))
-        }
-
-        if result.error != 0 {
-            throw fs_errorForPOSIXError(result.error)
-        }
-
-        // Copy data to buffer
-        let copyLen = min(buffer.length, result.data.count)
-
-        buffer.withUnsafeMutableBytes { dst in
-            for i in 0..<copyLen {
-                dst.storeBytes(of: result.data[i], toByteOffset: i, as: UInt8.self)
+        let startNs = DispatchTime.now().uptimeNanoseconds
+        let requestedBytes = max(length, 0)
+        do {
+            let itemId = item.itemId
+            let result = try await vfsCall("read") { client in
+                try await client.read(itemId: itemId, offset: UInt64(offset), len: UInt64(length))
             }
-        }
 
-        return copyLen
+            if result.error != 0 {
+                throw fs_errorForPOSIXError(result.error)
+            }
+
+            let copyLen = min(buffer.length, result.data.count)
+            buffer.withUnsafeMutableBytes { dst in
+                for i in 0..<copyLen {
+                    dst.storeBytes(of: result.data[i], toByteOffset: i, as: UInt8.self)
+                }
+            }
+
+            let elapsedNs = DispatchTime.now().uptimeNanoseconds &- startNs
+            await ReadTelemetry.shared.record(
+                requestedBytes: requestedBytes,
+                returnedBytes: copyLen,
+                latencyNs: elapsedNs,
+                isError: false
+            )
+            return copyLen
+        } catch {
+            let elapsedNs = DispatchTime.now().uptimeNanoseconds &- startNs
+            await ReadTelemetry.shared.record(
+                requestedBytes: requestedBytes,
+                returnedBytes: 0,
+                latencyNs: elapsedNs,
+                isError: true
+            )
+            throw error
+        }
     }
 
     func write(

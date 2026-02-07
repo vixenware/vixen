@@ -17,8 +17,8 @@ use camino::Utf8PathBuf;
 use eyre::Result;
 use roam_stream::{HandshakeConfig, accept};
 use std::sync::Arc;
-use vx_store_proto::StoreDispatcher;
 use vx_io::net::{Endpoint, Listener};
+use vx_store_proto::StoreDispatcher;
 
 #[derive(Debug)]
 struct Args {

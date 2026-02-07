@@ -2871,6 +2871,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-vfs-bench"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "roam",
+ "tokio",
+ "vixenfs-proto",
+ "vx-vfs",
+]
+
+[[package]]
 name = "vx-vfs-types"
 version = "0.1.0"
 dependencies = [
