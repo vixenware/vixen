@@ -50,6 +50,7 @@ targets:
         embed: true
         codeSign: true
       - target: vixenfs-mount
+        embed: false
       - package: Sparkle
         product: Sparkle
       - sdk: FSKit.framework

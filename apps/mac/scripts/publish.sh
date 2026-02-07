@@ -9,7 +9,24 @@ if [[ ! -f "$DMG_PATH" ]]; then
 fi
 
 echo "Submitting DMG for notarization..."
-xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+SUBMIT_OUTPUT="$(xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait 2>&1)" || true
+echo "$SUBMIT_OUTPUT"
+
+SUBMISSION_ID="$(echo "$SUBMIT_OUTPUT" | grep -m1 '  id:' | awk '{print $2}')"
+
+if echo "$SUBMIT_OUTPUT" | grep -q 'status: Invalid'; then
+  echo ""
+  echo "Notarization failed. Fetching log for submission $SUBMISSION_ID..."
+  xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE"
+  exit 1
+fi
+
+if ! echo "$SUBMIT_OUTPUT" | grep -q 'status: Accepted'; then
+  echo ""
+  echo "Unexpected notarization status. Fetching log for submission $SUBMISSION_ID..."
+  xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE" 2>/dev/null || true
+  exit 1
+fi
 
 echo "Stapling notarization ticket..."
 xcrun stapler staple "$DMG_PATH"
