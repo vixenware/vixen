@@ -84,6 +84,7 @@ impl RunnerService {
             toolchain_manifest = %request.toolchain_manifest,
             "adding toolchain to VFS prefix"
         );
+        let before = Instant::now();
         if let Err(e) = self
             .add_toolchain_to_prefix(&prefix_id, request.toolchain_manifest)
             .await
@@ -91,6 +92,10 @@ impl RunnerService {
             self.remove_action_prefix(&prefix_id).await;
             return cleanup_and_error(&prefix_id, format!("failed to add toolchain: {}", e), start);
         }
+        info!(
+            "Adding Rust toolchain took {:.2}s",
+            before.elapsed().as_secs_f32()
+        );
         debug!("toolchain added to prefix successfully");
 
         // Dump VFS state to see what we actually have
@@ -272,10 +277,10 @@ impl RunnerService {
         // 8. Flush outputs from VFS to CAS
         let flushed = self.flush_prefix_outputs(&prefix_id).await;
 
-        // Find the output blob hash
+        // Find the output blob hash and size
         let output_rel_path = format!("out/{}", output_filename);
-        let blob_hash = match flushed.get(&output_rel_path) {
-            Some(hash) => *hash,
+        let (blob_hash, blob_size) = match flushed.get(&output_rel_path) {
+            Some(&(hash, size)) => (hash, size),
             None => {
                 self.remove_action_prefix(&prefix_id).await;
                 return cleanup_and_error(
@@ -311,6 +316,7 @@ impl RunnerService {
                 logical: logical.to_string(),
                 filename: output_filename,
                 blob: blob_hash,
+                size: blob_size,
                 executable: request.crate_type == "bin",
             }],
         };
@@ -517,8 +523,8 @@ impl RunnerService {
         let flushed = self.flush_prefix_outputs(&prefix_id).await;
 
         let output_rel_path = format!("out/{}", object_filename);
-        let blob_hash = match flushed.get(&output_rel_path) {
-            Some(hash) => *hash,
+        let (blob_hash, blob_size) = match flushed.get(&output_rel_path) {
+            Some(&(hash, size)) => (hash, size),
             None => {
                 self.remove_action_prefix(&prefix_id).await;
                 return CcCompileResult {
@@ -550,6 +556,7 @@ impl RunnerService {
                 logical: "object".to_string(),
                 filename: object_filename,
                 blob: blob_hash,
+                size: blob_size,
                 executable: false,
             }],
         };
@@ -742,8 +749,8 @@ impl RunnerService {
         }
 
         let flushed = self.flush_prefix_outputs(&prefix_id).await;
-        let blob_hash = match flushed.get(&output_rel_path) {
-            Some(hash) => *hash,
+        let (blob_hash, blob_size) = match flushed.get(&output_rel_path) {
+            Some(&(hash, size)) => (hash, size),
             None => {
                 self.remove_action_prefix(&prefix_id).await;
                 return CcLinkResult {
@@ -771,6 +778,7 @@ impl RunnerService {
                 logical: "binary".to_string(),
                 filename: request.binary_name,
                 blob: blob_hash,
+                size: blob_size,
                 executable: true,
             }],
         };

@@ -83,6 +83,8 @@ pub struct OutputEntry {
     pub filename: String,
     /// Hash of the blob
     pub blob: BlobHash,
+    /// Size in bytes
+    pub size: u64,
     /// Whether the file should be executable
     pub executable: bool,
 }

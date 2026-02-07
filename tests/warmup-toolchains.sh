@@ -7,6 +7,8 @@ set -euo pipefail
 # This runs once before all tests. When the shared CAS already has
 # toolchains from a previous run, this is a fast no-op.
 
+cargo build
+
 # Platform-appropriate cache directory
 if [[ "$(uname)" == "Darwin" ]]; then
     CACHE_BASE="${HOME}/Library/Caches/vx-test-cas"

@@ -31,7 +31,7 @@ use vx_store_proto::Blake3Hash;
 /// Errors during crate graph construction
 #[derive(Error)]
 pub enum CrateGraphError {
-    #[error("failed to parse manifest")]
+    #[error("failed to parse manifest: {0}")]
     ManifestError(#[from] ManifestError),
 
     #[error("failed to parse lockfile: {0}")]

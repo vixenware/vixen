@@ -794,7 +794,7 @@ impl Vfs for CasVfs {
 
 /// Flush a file's write buffer to CAS and return the blob hash
 impl CasVfs {
-    pub async fn flush_to_cas(&self, item_id: ItemId) -> Option<Blake3Hash> {
+    pub async fn flush_to_cas(&self, item_id: ItemId) -> Option<(Blake3Hash, u64)> {
         let data = {
             let mut items = self.items.write().await;
             let item = items.get_mut(&item_id)?;
@@ -805,14 +805,16 @@ impl CasVfs {
             return None;
         }
 
+        let size = data.len() as u64;
         match self.cas.put_blob(data).await {
             Ok(hash) => {
-                // Update the item's cas_hash
+                // Update the item's cas_hash and size
                 let mut items = self.items.write().await;
                 if let Some(item) = items.get_mut(&item_id) {
                     item.cas_hash = Some(hash);
+                    item.size = size;
                 }
-                Some(hash)
+                Some((hash, size))
             }
             Err(e) => {
                 tracing::error!(item_id, error = %e, "failed to flush to CAS");
@@ -823,7 +825,7 @@ impl CasVfs {
 
     /// Flush all written files in a prefix to CAS
     /// Returns a map of relative paths to their CAS hashes
-    pub async fn flush_prefix_to_cas(&self, prefix_id: &str) -> HashMap<String, Blake3Hash> {
+    pub async fn flush_prefix_to_cas(&self, prefix_id: &str) -> HashMap<String, (Blake3Hash, u64)> {
         let mut results = HashMap::new();
 
         // Get prefix root
@@ -857,8 +859,8 @@ impl CasVfs {
 
         // Flush each item
         for (item_id, path) in items_to_flush {
-            if let Some(hash) = self.flush_to_cas(item_id).await {
-                results.insert(path, hash);
+            if let Some(hash_and_size) = self.flush_to_cas(item_id).await {
+                results.insert(path, hash_and_size);
             }
         }
 

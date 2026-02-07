@@ -578,7 +578,7 @@ impl RunnerService {
 
         let path = format!("deps/lib{}.rlib", extern_name);
         self.vfs
-            .add_file_to_prefix(prefix_id, &path, rlib.blob, 0, false)
+            .add_file_to_prefix(prefix_id, &path, rlib.blob, rlib.size, false)
             .await;
 
         Ok(())
@@ -595,7 +595,7 @@ impl RunnerService {
     pub(crate) async fn flush_prefix_outputs(
         &self,
         prefix_id: &str,
-    ) -> HashMap<String, Blake3Hash> {
+    ) -> HashMap<String, (Blake3Hash, u64)> {
         self.vfs.flush_prefix_to_cas(prefix_id).await
     }
 
