@@ -79,6 +79,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(40)
+        .frame(width: 720)
         .background(background)
         .task {
             await pollExtensionStatus()
@@ -210,19 +211,20 @@ struct ContentView: View {
 
     // MARK: - Settings mockup
 
-    private var diskIcon: some View {
-        Image(systemName: "externaldrive.fill")
+    private func settingsDiskIcon(filled: Bool) -> some View {
+        Image(systemName: filled ? "externaldrive.fill" : "externaldrive")
+            .font(.system(size: 14, weight: .medium))
             .foregroundStyle(.white)
+            .frame(width: 32, height: 32)
+            .background(Color(nsColor: .systemGray))
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 
     private var settingsMockup: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(spacing: 8) {
+            // Header section
             HStack(alignment: .top, spacing: 12) {
-                diskIcon
-                    .font(.system(size: 22, weight: .medium))
-                    .frame(width: 48, height: 48)
-                    .background(Color(nsColor: .systemGray))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                settingsDiskIcon(filled: false)
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text("File System Extensions")
@@ -233,27 +235,35 @@ struct ContentView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(settingsRowBg)
+            )
 
+            // VixenFS row
             ZStack(alignment: .trailing) {
-                HStack(spacing: 10) {
-                    diskIcon
-                        .font(.system(size: 14, weight: .medium))
-                        .frame(width: 32, height: 32)
-                        .background(Color(nsColor: .systemGray))
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                HStack(alignment: .top, spacing: 12) {
+                    settingsDiskIcon(filled: true)
 
-                    Text("VixenFS Extension")
-                        .font(.system(size: 13, weight: .medium))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("VixenFS Extension")
+                            .font(.system(size: 13, weight: .medium))
+                        Text(" ")
+                            .font(.system(size: 11))
+                    }
 
                     Spacer()
 
                     MockToggle(isOn: isExtensionEnabled || demoToggleOn)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .background(settingsRowBg)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(settingsRowBg)
+                )
 
                 Image(systemName: "cursorarrow.fill")
                     .font(.system(size: 14, weight: .bold))
@@ -272,14 +282,12 @@ struct ContentView: View {
                     )
                     .padding(.trailing, 14)
             }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 10)
         }
+        .padding(10)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(settingsBg)
         )
-        .frame(maxWidth: 340)
     }
 
     // MARK: - Complete view
@@ -336,14 +344,14 @@ private struct MockToggle: View {
     let isOn: Bool
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .fill(isOn ? Color.accentColor : Color(nsColor: .tertiaryLabelColor).opacity(0.5))
-            .frame(width: 50, height: 30)
+        Capsule()
+            .fill(isOn ? Color.accentColor : Color(nsColor: .tertiaryLabelColor).opacity(0.4))
+            .frame(width: 38, height: 22)
             .overlay(alignment: isOn ? .trailing : .leading) {
                 Circle()
                     .fill(.white)
-                    .shadow(color: .black.opacity(0.15), radius: 1, y: 1)
-                    .frame(width: 26, height: 26)
+                    .shadow(color: .black.opacity(0.15), radius: 0.5, y: 0.5)
+                    .frame(width: 18, height: 18)
                     .padding(.horizontal, 2)
             }
             .animation(.easeInOut(duration: 0.3), value: isOn)
