@@ -312,10 +312,8 @@ async fn main() -> Result<()> {
             .await;
         }
         Err(error) => {
-            let reason = format!("Failed to mount VFS: {}", error);
-            tracing::error!("{}", reason);
-            tracing::warn!("Starting runner in degraded mode; compile requests will fail fast");
             let mut diagnostics = error.diagnostics().to_vec();
+            let reason = "Mount failed".to_string();
             if diagnostics.is_empty() {
                 diagnostics.push(VfsDiagnostic {
                     code: VfsIssueCode::MountFailed,

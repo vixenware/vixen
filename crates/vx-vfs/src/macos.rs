@@ -89,13 +89,12 @@ where
             let diagnostics = collect_mount_failure_diagnostics().await;
             return Err(VfsError::CommandFailed {
                 program: "vixenfs-mount",
-                message: format!(
-                    "failed to spawn {}: {}\n{}\n",
-                    VIXEN_MOUNT_HELPER_PATH,
-                    error,
-                    format_diagnostics(&diagnostics),
+                message: format!("failed to spawn {}: {}", VIXEN_MOUNT_HELPER_PATH, error),
+                _diagnostics: with_mount_context_diagnostic(
+                    diagnostics,
+                    "mount helper failed to start",
+                    format!("failed to spawn {}: {}", VIXEN_MOUNT_HELPER_PATH, error),
                 ),
-                _diagnostics: diagnostics,
             });
         }
     };
@@ -112,15 +111,19 @@ where
             let helper_output = snapshot_lines(&helper_output).await;
             let _ = helper.kill().await;
             let _ = helper.wait().await;
+            let mount_detail = if helper_output.is_empty() {
+                readiness_error.clone()
+            } else {
+                format!("{}\nhelper output:\n{}", readiness_error, helper_output)
+            };
             Err(VfsError::CommandFailed {
                 program: "vixenfs-mount",
-                message: format!(
-                    "{}\n{}\nhelper output:\n{}",
-                    readiness_error,
-                    format_diagnostics(&diagnostics),
-                    helper_output,
+                message: readiness_error,
+                _diagnostics: with_mount_context_diagnostic(
+                    diagnostics,
+                    "mount helper did not become ready",
+                    mount_detail,
                 ),
-                _diagnostics: diagnostics,
             })
         }
     }
@@ -169,7 +172,7 @@ async fn wait_for_mount_ready(
             let status = wait_result
                 .map_err(|e| format!("failed to wait for vixenfs-mount process: {e}"))?;
             Err(format!(
-                "vixenfs-mount exited before mount became ready (status={:?})",
+                "failed to mount (status={:?})",
                 status.code()
             ))
         }
@@ -242,7 +245,16 @@ async fn collect_mount_failure_diagnostics() -> Vec<VfsDiagnostic> {
     if diagnostics.is_empty() {
         diagnostics.push(VfsDiagnostic {
             code: VfsIssueCode::MountFailed,
-            summary: "no obvious app/plugin prerequisite issue found".to_string(),
+            summary: r#"App here, extension enabled, but mounting failed. You can try the following:
+
+ $ log stream --info --debug --predicate 'subsystem == "com.apple.FSKit" OR message CONTAINS "vixenfs"'
+
+ And sometimes, killing fskit fixes it
+
+ $ sudo killall fskitd fskit_agent
+
+ Yeah, FSKit is wonky. File an issue against http://github.com/bearcove/vixen if necessary.
+                "#.to_string(),
             detail: None,
             actions: vec![VfsAction::RetryBuild],
         });
@@ -267,14 +279,6 @@ pub(super) async fn check_extension_health() -> Option<VfsHealth> {
     facet_json::from_str(stdout).ok()
 }
 
-fn format_diagnostics(diagnostics: &[VfsDiagnostic]) -> String {
-    diagnostics
-        .iter()
-        .map(|d| format!("diagnostic: {}", d.summary))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 async fn snapshot_lines(lines: &Arc<Mutex<VecDeque<String>>>) -> String {
     lines
         .lock()
@@ -283,4 +287,31 @@ async fn snapshot_lines(lines: &Arc<Mutex<VecDeque<String>>>) -> String {
         .cloned()
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn with_mount_context_diagnostic(
+    mut diagnostics: Vec<VfsDiagnostic>,
+    summary: &str,
+    detail: String,
+) -> Vec<VfsDiagnostic> {
+    if let Some(existing) = diagnostics
+        .iter_mut()
+        .find(|diagnostic| diagnostic.code == VfsIssueCode::MountFailed)
+    {
+        existing.detail = Some(match existing.detail.take() {
+            Some(existing_detail) if !existing_detail.is_empty() => {
+                format!("{}\n\n{}", existing_detail, detail)
+            }
+            _ => detail,
+        });
+        return diagnostics;
+    }
+
+    diagnostics.push(VfsDiagnostic {
+        code: VfsIssueCode::MountFailed,
+        summary: summary.to_string(),
+        detail: Some(detail),
+        actions: vec![VfsAction::RetryBuild],
+    });
+    diagnostics
 }

@@ -312,7 +312,7 @@ impl Executor {
                             }
                         }
                         Err(error) => {
-                            warn!("EXECUTE: action {:?} failed: {}", node_idx, error);
+                            debug!("EXECUTE: action {:?} failed: {}", node_idx, error);
                             self.first_error = Some(error.clone());
                             return Err(error);
                         }
