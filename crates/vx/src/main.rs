@@ -47,9 +47,9 @@ struct KillArgs {}
 /// Arguments for the `clean` subcommand
 #[derive(Facet, Debug)]
 struct CleanArgs {
-    /// Remove ~/.vx (VX_HOME) instead of project .vx/
+    /// Remove VX_HOME instead of project .vx/ (asks for confirmation)
     #[facet(args::named)]
-    nuke: bool,
+    home: bool,
 }
 
 /// Arguments for the `doctor` subcommand
@@ -360,10 +360,17 @@ async fn try_connect_daemon(
     let dispatcher = vxd_proto::ProgressListenerDispatcher::new(progress_listener);
 
     let caller = vx_io::net::reconnecting_client(endpoint.clone(), dispatcher);
-    caller
-        .handle()
-        .await
-        .map_err(|e| eyre::eyre!("failed to connect to daemon at {}: {}", endpoint, e))?;
+    if let Err(e) = caller.handle().await {
+        // If the connection attempt fails, ensure we tear down the display task.
+        if let Some(tui) = tui {
+            tui.shutdown().await;
+        }
+        return Err(eyre::eyre!(
+            "failed to connect to daemon at {}: {}",
+            endpoint,
+            e
+        ));
+    }
     let client = VxdClient::new(caller);
 
     Ok((client, tui))
@@ -501,7 +508,7 @@ async fn cmd_clean(args: CleanArgs) -> Result<()> {
     let vx_home = Utf8PathBuf::from(&vx_home);
 
     // Determine which directory to remove
-    let vx_dir = if args.nuke {
+    let vx_dir = if args.home {
         // Remove VX_HOME (~/.vx)
         vx_home.clone()
     } else {
@@ -509,6 +516,21 @@ async fn cmd_clean(args: CleanArgs) -> Result<()> {
         let cwd = Utf8PathBuf::try_from(std::env::current_dir()?)?;
         cwd.join(".vx")
     };
+
+    if args.home {
+        use std::io::{self, Write};
+
+        print!("Remove VX_HOME at {}? [y/N] ", vx_dir);
+        io::stdout().flush()?;
+
+        let mut response = String::new();
+        io::stdin().read_line(&mut response)?;
+        let confirmed = matches!(response.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+        if !confirmed {
+            println!("{}", "Aborted.".yellow().bold());
+            return Ok(());
+        }
+    }
 
     // In external test-daemon mode, keep shared daemon(s) alive across tests.
     let use_external_test_daemon = std::env::var("VX_TEST_EXTERNAL_DAEMON").is_ok();
@@ -558,6 +580,7 @@ async fn cmd_doctor() -> Result<()> {
     // Daemon status — check if vxd socket exists
     let vx_home = std::env::var("VX_HOME")
         .unwrap_or_else(|_| format!("{}/.vx", std::env::var("HOME").expect("HOME not set")));
+    println!("{} {}", "home:".bold(), vx_home);
     let daemon_sock = std::path::PathBuf::from(&vx_home).join("vxd.sock");
     if daemon_sock.exists() {
         println!(

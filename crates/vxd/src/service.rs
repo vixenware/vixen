@@ -560,7 +560,7 @@ impl VxdService {
         let max_concurrency = std::thread::available_parallelism()
             .map(|n| n.get() * 2)
             .unwrap_or(16);
-        tracing::info!("creating executor with max_concurrency={}", max_concurrency);
+        tracing::debug!("creating executor with max_concurrency={}", max_concurrency);
 
         // Get current progress listener (clones the Option<Arc<...>> inside the RwLock)
         let progress_listener = self.progress_listener.read().await.clone();
@@ -576,9 +576,9 @@ impl VxdService {
             profile.to_string(),
             max_concurrency,
         );
-        tracing::info!("calling executor.execute()");
+        tracing::debug!("calling executor.execute()");
         executor.execute().await?;
-        tracing::info!("executor.execute() completed");
+        tracing::debug!("executor.execute() completed");
 
         // Append changes to WAL after build (incremental persistence)
         if let Some(ref mut wal) = *self.wal_writer.lock().await {
