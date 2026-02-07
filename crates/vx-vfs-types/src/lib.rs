@@ -3,7 +3,7 @@ use facet::Facet;
 pub const VIXEN_EXTENSION_IDENTIFIER: &str = "eu.bearcove.vixenfs";
 pub const VIXEN_APP_PATH: &str = "/Applications/Vixen.app";
 pub const VIXEN_MOUNT_HELPER_PATH: &str = "/Applications/Vixen.app/Contents/Helpers/vixenfs-mount";
-pub const VIXEN_DOWNLOAD_URL: &str = "https://github.com/bearcove/vixen/releases";
+pub const VIXEN_DOWNLOAD_URL: &str = "https://vixen.rs/download/";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
 #[repr(u8)]

@@ -7,6 +7,7 @@ vixen (`vx`) is a build engine for Rust with correct caching.
 
 ## Quick Links
 
+- [Download](/download/) - Install vixen on macOS
 - [Specification](/spec/) - Full specification document
 - [GitHub](https://github.com/bearcove/vixen)
 
