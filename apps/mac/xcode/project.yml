@@ -42,6 +42,7 @@ targets:
         embed: true
         codeSign: true
       - target: vixenfs-mount
+      - sdk: FSKit.framework
     postBuildScripts:
       - name: Embed vixenfs-mount
         inputFiles:
