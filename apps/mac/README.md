@@ -13,6 +13,12 @@ Brand accent color: `#E88602`.
 
 ## Build (local)
 
+Quick path (from repo root):
+
+- `just apps/mac/install`
+
+Or manual path:
+
 1. Install [XcodeGen](https://github.com/yonaskolb/XcodeGen):
    - `brew install xcodegen`
 2. Generate the Xcode project:
