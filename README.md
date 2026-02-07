@@ -1,6 +1,13 @@
 # vixen
 
+![Vixen fox logo](art/fox.svg)
+
 A Rust build engine with correct caching. The CLI is `vx`.
+
+## Brand
+
+- Primary brand color: `#E88602`
+- Brand guide: [`BRAND.md`](BRAND.md)
 
 ## What it does today
 

@@ -47,6 +47,7 @@ struct VixenApp: App {
     }
 }
 
+<<<<<<< HEAD
 private enum CheckStatus: Equatable {
     case unknown
     case ok
@@ -325,6 +326,274 @@ struct SetupView: View {
             expandedRow = .vfsPermissions
             SystemProbe.openFileSystemExtensionsSettings()
         }
+    }
+
+    private func refreshExtensionStatus() {
+        let task = Process()
+        let output = Pipe()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pluginkit")
+        task.arguments = ["-m", "-i", "eu.bearcove.vixenfs"]
+        task.standardOutput = output
+        task.standardError = Pipe()
+
+        do {
+            try task.run()
+            task.waitUntilExit()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            let statusOutput = String(decoding: data, as: UTF8.self)
+            isExtensionEnabled = parseExtensionEnabled(statusOutput)
+            lastStatusCheck = Date()
+        } catch {
+            isExtensionEnabled = false
+            lastStatusCheck = Date()
+        }
+    }
+
+    private func parseExtensionEnabled(_ output: String) -> Bool {
+        let row = output
+            .split(separator: "\n")
+            .first { $0.contains("eu.bearcove.vixenfs") }
+
+        guard let row else {
+            return false
+        }
+
+        let normalized = row.trimmingCharacters(in: .whitespaces)
+        if normalized.hasPrefix("+") {
+            return true
+        }
+        if normalized.localizedCaseInsensitiveContains("enabled") {
+            return true
+        }
+
+        return false
+    }
+
+    private var setupCard: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("\(completedSteps) of 3 steps complete")
+                .font(.system(size: 46, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color(hex: 0x2F2F2F))
+
+            SetupStepRow(
+                title: "Vixen app",
+                subtitle: "You made it!",
+                isComplete: isAppRunning,
+                showsConnector: true,
+                connectorColor: isSupportedOS ? brandOrange : brandOrangeMuted
+            )
+
+            SetupStepRow(
+                title: "macOS \(requiredMajorVersion).0+",
+                subtitle: "We need the latest FSKit features",
+                isComplete: isSupportedOS,
+                showsConnector: true,
+                connectorColor: isExtensionEnabled ? brandOrange : brandOrangeMuted
+            )
+
+            SetupStepRow(
+                title: "VixenFS extension",
+                subtitle: "Click \"Open settings\" then toggle it on",
+                isComplete: isExtensionEnabled,
+                showsConnector: false,
+                connectorColor: .clear
+            ) {
+                Button(action: openLoginItemsSettings) {
+                    HStack(spacing: 0) {
+                        Image(systemName: "gearshape.2.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .frame(width: 44, height: 42)
+                            .foregroundStyle(.white)
+                            .background(brandOrange)
+
+                        Text("Open settings")
+                            .font(.system(size: 34, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Color(hex: 0x2D2D2D))
+                            .padding(.horizontal, 16)
+                            .frame(height: 42)
+                    }
+                    .background(Color.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.black.opacity(0.04), lineWidth: 1)
+                    )
+                    .shadow(color: Color.black.opacity(0.1), radius: 12, y: 8)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 8)
+            }
+        }
+        .padding(.vertical, 28)
+        .padding(.horizontal, 30)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color(hex: 0xFCFBFA))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Color.black.opacity(0.04), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.08), radius: 18, y: 10)
+    }
+
+    private var walkthroughCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Walkthrough")
+                .font(.system(size: 42, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color(hex: 0x2B2B2B))
+
+            Text("Follow this while enabling VixenFS Extension.")
+                .font(.system(size: 28, weight: .regular, design: .rounded))
+                .foregroundStyle(Color(hex: 0x5D5D5D))
+
+            ZStack(alignment: .bottomTrailing) {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color(hex: 0x4EA2E6),
+                                brandOrange,
+                                Color(hex: 0xE36C3D)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(height: 280)
+
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .frame(width: 360, height: 86)
+                    .overlay(
+                        HStack(spacing: 14) {
+                            Image(nsImage: NSApp.applicationIconImage)
+                                .resizable()
+                                .frame(width: 28, height: 28)
+                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("VixenFS Extension")
+                                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(Color(hex: 0x303030))
+                                Text(isExtensionEnabled ? "Enabled" : "Tap to enable")
+                                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                                    .foregroundStyle(Color(hex: 0x707070))
+                            }
+
+                            Spacer()
+
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(isExtensionEnabled ? brandOrange : Color.white.opacity(0.85))
+                                .frame(width: 58, height: 32)
+                                .overlay(alignment: isExtensionEnabled ? .trailing : .leading) {
+                                    Circle()
+                                        .fill(.white)
+                                        .frame(width: 26, height: 26)
+                                        .padding(.horizontal, 3)
+                                }
+                        }
+                        .padding(.horizontal, 16)
+                    )
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 14)
+            }
+
+            Text("Last checked \(lastStatusCheck.formatted(date: .omitted, time: .shortened))")
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundStyle(Color(hex: 0x8A8A8A))
+        }
+        .padding(.vertical, 24)
+        .padding(.horizontal, 24)
+        .frame(width: 520, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color(hex: 0xFCFBFA))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Color.black.opacity(0.04), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.08), radius: 18, y: 10)
+    }
+}
+
+private struct SetupStepRow<ExtraContent: View>: View {
+    let title: String
+    let subtitle: String
+    let isComplete: Bool
+    let showsConnector: Bool
+    let connectorColor: Color
+    let extraContent: ExtraContent
+
+    init(
+        title: String,
+        subtitle: String,
+        isComplete: Bool,
+        showsConnector: Bool,
+        connectorColor: Color,
+        @ViewBuilder extraContent: () -> ExtraContent = { EmptyView() }
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.isComplete = isComplete
+        self.showsConnector = showsConnector
+        self.connectorColor = connectorColor
+        self.extraContent = extraContent()
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 16) {
+            VStack(spacing: 0) {
+                ZStack {
+                    Circle()
+                        .fill(isComplete ? Color(hex: 0xE88602) : .white)
+                        .overlay {
+                            Circle()
+                                .stroke(
+                                    isComplete ? Color(hex: 0xE88602) : Color(hex: 0xE5B18E),
+                                    lineWidth: isComplete ? 0 : 3
+                                )
+                        }
+                    if isComplete {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                }
+                .frame(width: 40, height: 40)
+
+                if showsConnector {
+                    RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                        .fill(connectorColor)
+                        .frame(width: 3, height: 88)
+                        .padding(.top, 6)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title)
+                    .font(.system(size: 50, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color(hex: 0x2F2F2F))
+
+                Text(subtitle)
+                    .font(.system(size: 34, weight: .regular, design: .rounded))
+                    .foregroundStyle(Color(hex: 0x606060))
+
+                extraContent
+            }
+            .padding(.top, 2)
+        }
+    }
+}
+
+private extension Color {
+    init(hex: UInt32) {
+        let red = Double((hex >> 16) & 0xFF) / 255.0
+        let green = Double((hex >> 8) & 0xFF) / 255.0
+        let blue = Double(hex & 0xFF) / 255.0
+        self.init(red: red, green: green, blue: blue)
     }
 }
 

@@ -1,6 +1,10 @@
 # Vixen.app (macOS FSKit host)
 
+![Vixen fox logo](../../art/fox.svg)
+
 `apps/mac` contains the macOS app, FSKit extension, and mount helper used by `vx-vfs`.
+
+Brand accent color: `#E88602`.
 
 ## Bundle IDs
 
