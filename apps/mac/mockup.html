@@ -18,6 +18,8 @@
     --window-bg: #f5f3f0;
     --titlebar-bg: #e8e6e3;
     --progress-line: rgba(0,0,0,0.12);
+    --chrome-text: rgba(0,0,0,0.35);
+    --preview-border: rgba(232,134,2,0.25);
   }
 
   @media (prefers-color-scheme: dark) {
@@ -32,6 +34,8 @@
       --window-bg: #1c1c1c;
       --titlebar-bg: #252525;
       --progress-line: rgba(255,255,255,0.12);
+      --chrome-text: rgba(255,255,255,0.3);
+      --preview-border: rgba(232,134,2,0.25);
     }
   }
 
@@ -58,7 +62,7 @@
   }
 
   .mac-window {
-    width: 780px;
+    width: 720px;
     border-radius: 10px;
     overflow: hidden;
     box-shadow: 0 20px 60px rgba(0,0,0,0.4);
@@ -90,15 +94,14 @@
     background: var(--window-bg);
     display: flex;
     align-items: center;
-    gap: 64px;
-    padding: 0 60px;
-    height: 480px;
+    gap: 56px;
+    padding: 48px;
   }
 
   .fox-icon { flex-shrink: 0; }
-  .fox-icon img { width: 128px; height: 128px; }
+  .fox-icon img { width: 160px; height: 160px; }
 
-  .right-column {
+  .content-column {
     display: flex;
     flex-direction: column;
     gap: 24px;
@@ -113,9 +116,9 @@
 
   .progress-line {
     position: absolute;
-    left: 13px; /* center of 28px circle = 14px, minus half line width */
-    top: 14px; /* center of first circle */
-    bottom: 14px; /* center of last circle */
+    left: 13px;
+    top: 14px;
+    bottom: 14px;
     width: 1px;
     background: var(--progress-line);
   }
@@ -127,6 +130,7 @@
     padding: 10px 0;
     position: relative;
   }
+  .step-row.faded { opacity: 0.5; }
 
   .circle {
     width: 28px;
@@ -136,7 +140,7 @@
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    background: var(--window-bg); /* covers the line behind it */
+    background: var(--window-bg);
   }
   .circle.done { background: var(--orange); }
   .circle.done svg { width: 14px; height: 14px; }
@@ -156,17 +160,42 @@
     margin-top: 2px;
   }
 
-  /* Settings mockup */
-  .settings-mockup {
-    width: 100%;
-    max-width: 340px;
-    position: relative;
+  /* Nested content under a step (indented past circles) */
+  .step-nested {
+    padding-left: 42px; /* 28px circle + 14px gap */
+    padding-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
   }
 
-  .settings-panel {
-    background: var(--settings-bg);
+  /* Settings preview */
+  .settings-preview {
+    position: relative;
+    border: 1px solid var(--preview-border);
     border-radius: 10px;
     overflow: hidden;
+    background: var(--settings-bg);
+  }
+
+  .settings-chrome {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 6px 12px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--chrome-text);
+    border-bottom: 1px solid var(--separator);
+  }
+  .settings-chrome .chevron { font-size: 8px; font-weight: 700; }
+
+  .settings-preview-content {
+    opacity: 0.85;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
 
   .settings-header {
@@ -174,6 +203,8 @@
     gap: 12px;
     padding: 14px 16px;
     align-items: flex-start;
+    background: var(--settings-row-bg);
+    border-radius: 8px;
   }
 
   .settings-header-icon {
@@ -191,13 +222,6 @@
 
   .settings-header-text h3 { font-size: 13px; font-weight: 600; margin-bottom: 3px; }
   .settings-header-text p { font-size: 11px; color: var(--text-secondary); line-height: 1.4; }
-
-  .settings-rows {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    padding: 0 10px 10px 10px;
-  }
 
   .settings-row {
     display: flex;
@@ -268,7 +292,106 @@
     100% { transform: translate(0px, 0px); }
   }
 
-  /* Big CTA button */
+  /* Open Settings link */
+  .open-settings-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--orange);
+    font-size: 15px;
+    cursor: pointer;
+    background: none;
+    border: none;
+    font-family: inherit;
+    align-self: center;
+  }
+  .open-settings-link img {
+    width: 24px;
+    height: 24px;
+  }
+  .open-settings-link .arrow {
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  /* Boring system button */
+  .boring-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    background: var(--settings-row-bg);
+    color: var(--text);
+    border: 1px solid var(--separator);
+    border-radius: 6px;
+    padding: 7px 20px;
+    font-size: 13px;
+    font-weight: 400;
+    cursor: pointer;
+    font-family: inherit;
+    align-self: center;
+  }
+
+  /* "Almost there" heading */
+  .almost-there-heading {
+    font-size: 24px;
+    font-weight: 600;
+    letter-spacing: -0.4px;
+  }
+
+  .almost-there-body {
+    font-size: 14px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
+
+  /* Variant B centered layout */
+  .window-body.centered {
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+    padding: 40px 60px;
+  }
+  .window-body.centered .fox-icon img { width: 96px; height: 96px; }
+  .window-body.centered .content-column {
+    align-items: center;
+    text-align: center;
+    gap: 16px;
+    margin-top: 20px;
+    max-width: 420px;
+  }
+  .window-body.centered .settings-preview {
+    text-align: left;
+    width: 100%;
+  }
+
+  /* Variant C: 3-column — fox | content | (balance) */
+  .window-body.fox-left {
+    display: grid;
+    grid-template-columns: 96px 1fr 96px;
+    align-items: center;
+    gap: 48px;
+    padding: 48px;
+  }
+  .window-body.fox-left .fox-icon {
+    display: flex;
+    justify-content: center;
+    align-items: flex-end;
+  }
+  .window-body.fox-left .fox-icon img { width: 96px; height: 96px; }
+  .window-body.fox-left .content-column {
+    align-items: center;
+    text-align: center;
+    gap: 16px;
+    max-width: 420px;
+    justify-self: center;
+  }
+  .window-body.fox-left .content-column .settings-preview {
+    text-align: left;
+    width: 100%;
+  }
+
+  /* Big CTA button (kept for complete state) */
   .cta-button {
     display: inline-flex;
     align-items: center;
@@ -332,8 +455,8 @@
 </head>
 <body>
 
-<!-- ==================== STATE 1: Setup in progress ==================== -->
-<h1 class="page-label">State 1 — Setup in progress</h1>
+<!-- ==================== VARIANT A: Checklist (current) ==================== -->
+<h1 class="page-label">Variant A — Checklist</h1>
 <div class="mac-window">
   <div class="titlebar">
     <div class="dot close"></div>
@@ -345,11 +468,11 @@
     <div class="fox-icon">
       <img src="../../art/fox.svg" alt="">
     </div>
-    <div class="right-column">
+    <div class="content-column">
       <div class="steps">
         <div class="progress-line"></div>
 
-        <div class="step-row">
+        <div class="step-row faded">
           <div class="circle done">
             <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
           </div>
@@ -359,13 +482,13 @@
           </div>
         </div>
 
-        <div class="step-row">
+        <div class="step-row faded">
           <div class="circle done">
             <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
           </div>
           <div class="step-content">
             <div class="step-title">macOS 26.0+</div>
-            <div class="step-subtitle">We need the latest FSKit. <a href="https://developer.apple.com/documentation/fskit/fspathurlresource" target="_blank" style="color: var(--orange); text-decoration: none; font-weight: 500; font-size: 11px;">Why?</a></div>
+            <div class="step-subtitle">We need the latest FSKit.</div>
           </div>
         </div>
 
@@ -378,8 +501,81 @@
         </div>
       </div>
 
-      <div class="settings-mockup">
-        <div class="settings-panel">
+      <div class="step-nested">
+        <div class="settings-preview">
+          <div class="settings-chrome">
+            <span>&#9881;&#xFE0E;</span>
+            <span>System Settings</span>
+            <span class="chevron">&#x203A;</span>
+            <span>General</span>
+            <span class="chevron">&#x203A;</span>
+            <span>Login Items &amp; Extensions</span>
+          </div>
+          <div class="settings-preview-content">
+            <div class="settings-header">
+              <div class="settings-header-icon">
+                <svg viewBox="0 0 24 24"><path d="M4 7h16a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V9a2 2 0 012-2zm0 2v6h16V9H4zm2 2h2v2H6v-2z"/></svg>
+              </div>
+              <div class="settings-header-text">
+                <h3>File System Extensions</h3>
+                <p>File System extensions allow you to extend the file system functionality of macOS without requiring kernel-level access.</p>
+              </div>
+            </div>
+
+            <div class="settings-row" style="position:relative;">
+              <div class="settings-row-icon vixen">
+                <img src="../../art/fox.svg" alt="">
+              </div>
+              <div class="settings-row-label">
+                <div class="name">VixenFS Extension</div>
+              </div>
+              <div class="toggle animated"><div class="knob"></div></div>
+              <div class="cursor-arrow" style="right:-4px; top:4px;">&#10094;&#xFE0E;</div>
+            </div>
+          </div>
+        </div>
+
+        <button class="open-settings-link">
+          <span>&#9881;&#xFE0E;</span>
+          <span>Open Settings</span>
+          <span class="arrow">&#x2192;</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== VARIANT B: "Almost there" ==================== -->
+<h1 class="page-label">Variant B — Almost there</h1>
+<div class="mac-window">
+  <div class="titlebar">
+    <div class="dot close"></div>
+    <div class="dot minimize"></div>
+    <div class="dot maximize"></div>
+    <div class="titlebar-title">Vixen</div>
+  </div>
+  <div class="window-body centered">
+    <div class="fox-icon">
+      <img src="../../art/fox.svg" alt="">
+    </div>
+    <div class="content-column">
+      <div class="almost-there-heading">Almost there</div>
+      <div class="almost-there-body">
+        Vixen uses a virtual file system to give your builds a hermetic,
+        reproducible view of the world. Enable the VixenFS extension
+        in System Settings to get started.
+      </div>
+
+      <div class="settings-preview">
+        <div class="settings-chrome">
+          <span>&#9881;&#xFE0E;</span>
+          <span>System Settings</span>
+          <span class="chevron">&#x203A;</span>
+          <span>General</span>
+          <span class="chevron">&#x203A;</span>
+          <span>Login Items &amp; Extensions</span>
+        </div>
+        <div class="settings-preview-content">
           <div class="settings-header">
             <div class="settings-header-icon">
               <svg viewBox="0 0 24 24"><path d="M4 7h16a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V9a2 2 0 012-2zm0 2v6h16V9H4zm2 2h2v2H6v-2z"/></svg>
@@ -390,35 +586,86 @@
             </div>
           </div>
 
-          <div class="settings-rows">
-            <div class="settings-row">
-              <div class="settings-row-icon vixen">
-                <img src="../../art/fox.svg" alt="">
-              </div>
-              <div class="settings-row-label">
-                <div class="name">VixenFS Extension</div>
-              </div>
-              <div class="toggle animated"><div class="knob"></div></div>
+          <div class="settings-row" style="position:relative;">
+            <div class="settings-row-icon vixen">
+              <img src="../../art/fox.svg" alt="">
             </div>
+            <div class="settings-row-label">
+              <div class="name">VixenFS Extension</div>
+            </div>
+            <div class="toggle animated"><div class="knob"></div></div>
+            <div class="cursor-arrow" style="right:-4px; top:4px;">&#10094;&#xFE0E;</div>
           </div>
         </div>
-
-        <div class="cursor-arrow">&#10094;&#xFE0E;</div>
       </div>
 
-      <button class="cta-button" onclick="window.open('x-apple.systempreferences:com.apple.ExtensionsPreferences')">
-        <svg viewBox="0 0 20 20" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="10" cy="10" r="3"/>
-          <path d="M10 1.5v2M10 16.5v2M1.5 10h2M16.5 10h2M3.4 3.4l1.4 1.4M15.2 15.2l1.4 1.4M3.4 16.6l1.4-1.4M15.2 4.8l1.4-1.4"/>
-        </svg>
-        Open Settings
-      </button>
+      <button class="boring-button">Open Settings</button>
     </div>
   </div>
 </div>
 
-<!-- ==================== STATE 2: All complete ==================== -->
-<h1 class="page-label">State 2 — All steps complete</h1>
+<!-- ==================== VARIANT C: Fox on left ==================== -->
+<h1 class="page-label">Variant C — Fox on left</h1>
+<div class="mac-window">
+  <div class="titlebar">
+    <div class="dot close"></div>
+    <div class="dot minimize"></div>
+    <div class="dot maximize"></div>
+    <div class="titlebar-title">Vixen</div>
+  </div>
+  <div class="window-body fox-left">
+    <div class="fox-icon">
+      <img src="../../art/fox.svg" alt="">
+    </div>
+    <div class="content-column">
+      <div class="almost-there-heading">Almost there</div>
+      <div class="almost-there-body">
+        Vixen uses a virtual file system to give your builds a hermetic,
+        reproducible view of the world. Enable the VixenFS extension
+        in System Settings to get started.
+      </div>
+
+      <div class="settings-preview">
+        <div class="settings-chrome">
+          <span>&#9881;&#xFE0E;</span>
+          <span>System Settings</span>
+          <span class="chevron">&#x203A;</span>
+          <span>General</span>
+          <span class="chevron">&#x203A;</span>
+          <span>Login Items &amp; Extensions</span>
+        </div>
+        <div class="settings-preview-content">
+          <div class="settings-header">
+            <div class="settings-header-icon">
+              <svg viewBox="0 0 24 24"><path d="M4 7h16a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V9a2 2 0 012-2zm0 2v6h16V9H4zm2 2h2v2H6v-2z"/></svg>
+            </div>
+            <div class="settings-header-text">
+              <h3>File System Extensions</h3>
+              <p>File System extensions allow you to extend the file system functionality of macOS without requiring kernel-level access.</p>
+            </div>
+          </div>
+
+          <div class="settings-row" style="position:relative;">
+            <div class="settings-row-icon vixen">
+              <img src="../../art/fox.svg" alt="">
+            </div>
+            <div class="settings-row-label">
+              <div class="name">VixenFS Extension</div>
+            </div>
+            <div class="toggle animated"><div class="knob"></div></div>
+            <div class="cursor-arrow" style="right:-4px; top:4px;">&#10094;&#xFE0E;</div>
+          </div>
+        </div>
+      </div>
+
+      <button class="boring-button">Open Settings</button>
+    </div>
+    <div></div>
+  </div>
+</div>
+
+<!-- ==================== STATE: All complete ==================== -->
+<h1 class="page-label">All steps complete</h1>
 <div class="mac-window">
   <div class="titlebar">
     <div class="dot close"></div>
