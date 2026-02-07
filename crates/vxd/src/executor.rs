@@ -16,10 +16,11 @@ use crate::error::VxdError;
 use vx_rs::CrateId;
 use vx_runner_proto::RunnerClient;
 use vx_store_proto::{Blake3Hash, StoreClient};
-use vxd_proto::{ActionType, ProgressListenerClient};
+use vxd_proto::ProgressListenerClient;
 
 /// State of an individual action
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ActionState {
     Pending,
     Running,
@@ -168,6 +169,7 @@ pub struct Executor {
 
 impl Executor {
     /// Create a new executor
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         graph: ActionGraph,
         progress_listener: Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>,
@@ -677,6 +679,7 @@ impl Executor {
 }
 
 /// Execute a single action
+#[allow(clippy::too_many_arguments)]
 async fn execute_action(
     action: Action,
     cas: &Arc<StoreClient<crate::UpstreamCaller>>,
@@ -684,8 +687,8 @@ async fn execute_action(
     db: &Arc<crate::db::Database>,
     results: &Arc<RwLock<HashMap<NodeIndex, ActionResult>>>,
     workspace_root: &camino::Utf8PathBuf,
-    target_triple: &str,
-    profile: &str,
+    _target_triple: &str,
+    _profile: &str,
     toolchain_node_idx: Option<NodeIndex>,
 ) -> Result<ActionResult, VxdError> {
     use crate::queries::*;
@@ -819,7 +822,7 @@ async fn execute_action(
             workspace_root: workspace_root_str,
             target_triple,
             profile,
-            mut rust_crate,
+            rust_crate: _,
             toolchain,
             config,
         } => {
@@ -903,7 +906,7 @@ async fn execute_action(
             );
             // Update RustCrate with actual closure hash
             let crate_id_hex = crate_id;
-            rust_crate = crate::inputs::RustCrate::new(
+            let rust_crate = crate::inputs::RustCrate::new(
                 &**db,
                 crate_id_hex.to_string(),
                 crate_name.clone(),
@@ -1346,7 +1349,7 @@ async fn execute_action(
 
         Action::LinkCBinary {
             name,
-            objects,
+            objects: _,
             output,
             target_triple,
         } => {

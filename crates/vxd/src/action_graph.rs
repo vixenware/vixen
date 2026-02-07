@@ -24,6 +24,7 @@ pub struct ActionDep {
 
 /// A single unit of work in the build process
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Action {
     /// Acquire Rust toolchain from static.rust-lang.org
     AcquireToolchain {
@@ -157,6 +158,7 @@ pub struct ActionNode {
 }
 
 /// The action dependency graph
+#[allow(dead_code)]
 pub struct ActionGraph {
     /// Directed graph: edges point from dependent → dependency
     /// (i.e., if A depends on B, there's an edge A → B)
@@ -360,7 +362,7 @@ impl ActionGraph {
         use tracing::debug;
 
         // Collect nodes with their dependency counts
-        let mut nodes_info: Vec<_> = self
+        let nodes_info: Vec<_> = self
             .graph
             .node_indices()
             .map(|idx| {
@@ -388,7 +390,7 @@ impl ActionGraph {
             .take(3)
             .collect();
 
-        for (idx, node, outgoing, incoming) in ready_examples {
+        for (idx, node, _outgoing, incoming) in ready_examples {
             debug!(
                 node = ?idx,
                 action = node.action.display_name(),

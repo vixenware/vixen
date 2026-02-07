@@ -11,20 +11,17 @@ use crate::db::Database;
 use crate::error::{Result, VxdError};
 use crate::executor::Executor;
 use crate::inputs::*;
-use crate::queries::*;
 use camino::Utf8PathBuf;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 use vx_report::{BuildReport, ReportStore};
-use vx_rs::crate_graph::CrateSource;
-use vx_rs::{CrateGraph, CrateId, CrateType};
-use vx_runner_proto::{RunnerClient, RustCompileRequest, RustDep};
+use vx_rs::CrateGraph;
+use vx_runner_proto::RunnerClient;
 use vx_store_proto::{
-    Blake3Hash, EnsureStatus, IngestTreeRequest, RegistrySpec, RustChannel, RustComponent,
+    Blake3Hash, EnsureStatus, RustChannel, RustComponent,
     RustToolchainSpec, ServiceVersion, StoreClient, TreeFile,
 };
 use vxd_proto::{
@@ -44,6 +41,7 @@ pub struct ToolchainInfo {
 }
 
 /// Acquired toolchains (manifest references only)
+#[allow(dead_code)]
 pub struct AcquiredToolchains {
     /// Rust toolchain (if acquired)
     pub rust: Option<ToolchainInfo>,

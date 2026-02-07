@@ -1228,6 +1228,7 @@ mod explain_json {
 
     #[derive(Facet)]
     #[repr(u8)]
+    #[allow(dead_code)]
     pub enum DepChangeKindJson {
         Added {
             rlib_hash: String,

@@ -26,6 +26,7 @@ pub(crate) struct StoreServiceInner {
     pub(crate) storage: crate::storage::CasStore,
 
     /// VX home directory (typically .vx) - parent of root, used for toolchain spec mappings
+    #[allow(dead_code)]
     pub(crate) vx_home: Utf8PathBuf,
 
     /// Toolchain acquisition manager (handles inflight deduplication)

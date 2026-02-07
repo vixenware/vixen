@@ -139,6 +139,7 @@ impl CasStore {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn tmp_dir(&self) -> Utf8PathBuf {
         self.primary.root().join("tmp")
     }
@@ -223,6 +224,7 @@ impl CasStore {
             .join(format!("{}.json", hex))
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn get_tree_manifest(
         &self,
         hash: &ManifestHash,
@@ -265,9 +267,8 @@ impl CasStore {
         key: &ToolchainSpecKey,
     ) -> io::Result<Option<Blake3Hash>> {
         let path = Self::toolchain_spec_path(self.primary.root(), key);
-        match read_hash_mapping(&path).await? {
-            Some(hash) => return Ok(Some(hash)),
-            None => {}
+        if let Some(hash) = read_hash_mapping(&path).await? {
+            return Ok(Some(hash));
         }
         if let Some(base) = &self.base {
             let path = Self::toolchain_spec_path(base.root(), key);
@@ -304,9 +305,8 @@ impl CasStore {
         key: &RegistrySpecKey,
     ) -> io::Result<Option<Blake3Hash>> {
         let path = Self::registry_spec_path(self.primary.root(), key);
-        match read_hash_mapping(&path).await? {
-            Some(hash) => return Ok(Some(hash)),
-            None => {}
+        if let Some(hash) = read_hash_mapping(&path).await? {
+            return Ok(Some(hash));
         }
         if let Some(base) = &self.base {
             let path = Self::registry_spec_path(base.root(), key);
@@ -361,9 +361,8 @@ impl CasStore {
 
     pub(crate) async fn get_cache(&self, key: &CacheKey) -> io::Result<Option<ManifestHash>> {
         let path = Self::cache_path(self.primary.root(), key);
-        match read_manifest_hash_mapping(&path).await? {
-            Some(hash) => return Ok(Some(hash)),
-            None => {}
+        if let Some(hash) = read_manifest_hash_mapping(&path).await? {
+            return Ok(Some(hash));
         }
         if let Some(base) = &self.base {
             let path = Self::cache_path(base.root(), key);

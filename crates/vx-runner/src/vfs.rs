@@ -92,6 +92,7 @@ pub struct CasVfs {
     /// Blob cache: blobs are immutable (content-addressed), so caching is unconditionally safe.
     /// Uses OnceCell per blob for single-flight fetching — concurrent reads of the same blob
     /// wait on the OnceCell, not the mutex. Different blobs proceed independently.
+    #[allow(clippy::type_complexity)]
     blob_cache: tokio::sync::Mutex<HashMap<Blake3Hash, Arc<tokio::sync::OnceCell<Arc<[u8]>>>>>,
 }
 

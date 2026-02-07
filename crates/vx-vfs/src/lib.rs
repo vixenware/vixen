@@ -21,13 +21,12 @@ pub async fn mount<T>(config: VfsConfig, vfs: T) -> Result<VfsStart, VfsError>
 where
     T: Vfs + Clone + Send + Sync + 'static,
 {
-    tracing::debug!(mount_path = %config.mount_path, "starting vfs orchestration");
-
     cfg_if! {
         if #[cfg(target_os = "macos")] {
-            tracing::debug!("dispatching to macos vfs startup");
+            tracing::debug!(mount_path = %config.mount_path, "starting vfs orchestration");
             macos::mount(config, vfs).await
         } else {
+            _ = (config, vfs);
             use std::env::consts::OS;
             tracing::debug!(platform = OS, "vfs unsupported on platform");
             Ok(VfsStart::Unsupported {
