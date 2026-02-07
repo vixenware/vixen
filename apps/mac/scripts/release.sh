@@ -73,8 +73,35 @@ if [[ ! -d "$APP_BUNDLE_PATH" ]]; then
   exit 1
 fi
 
-echo "Re-signing app bundle with '$SIGNING_IDENTITY'..."
-codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP_BUNDLE_PATH"
+echo "Re-signing app bundle with '$SIGNING_IDENTITY' (inside-out)..."
+
+# Sign nested components first (inside-out), each with hardened runtime + timestamp
+# and proper entitlements (without get-task-allow which Xcode adds for debug builds).
+
+# Helper tool
+codesign --force --options runtime --timestamp \
+  --sign "$SIGNING_IDENTITY" \
+  "$APP_BUNDLE_PATH/Contents/Helpers/vixenfs-mount"
+
+# FSKit extension
+codesign --force --options runtime --timestamp \
+  --entitlements "$XCODE_DIR/VixenFSExtension/VixenFSExtension.entitlements" \
+  --sign "$SIGNING_IDENTITY" \
+  "$APP_BUNDLE_PATH/Contents/Extensions/VixenFS Extension.appex"
+
+# Sparkle framework (XPC services inside it, then the framework itself)
+SPARKLE_FW="$APP_BUNDLE_PATH/Contents/Frameworks/Sparkle.framework"
+for xpc in "$SPARKLE_FW"/Versions/Current/XPCServices/*.xpc; do
+  codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$xpc"
+done
+codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$SPARKLE_FW"
+
+# Finally the outer app
+codesign --force --options runtime --timestamp \
+  --entitlements "$XCODE_DIR/Vixen/Vixen.entitlements" \
+  --sign "$SIGNING_IDENTITY" \
+  "$APP_BUNDLE_PATH"
+
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE_PATH"
 
 APP_STAGING_PATH="$STAGING_DIR/Vixen.app"
