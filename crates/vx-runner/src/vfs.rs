@@ -517,11 +517,15 @@ impl Vfs for CasVfs {
     ) -> ReadResult {
         tracing::trace!(item_id, offset, len, "VFS read");
 
-        // Get item info
-        let (item_type, cas_hash) = {
+        // Get item info — prefer write_buffer over CAS for locally-written files
+        let (item_type, cas_hash, buffered_data) = {
             let items = self.items.read().await;
             match items.get(&item_id) {
-                Some(item) => (item.item_type, item.cas_hash),
+                Some(item) => (
+                    item.item_type,
+                    item.cas_hash,
+                    item.write_buffer.clone(),
+                ),
                 None => {
                     return ReadResult {
                         data: Vec::new(),
@@ -535,6 +539,16 @@ impl Vfs for CasVfs {
             return ReadResult {
                 data: Vec::new(),
                 error: errno::EISDIR,
+            };
+        }
+
+        // If there's buffered write data, serve from that (it's newer than CAS)
+        if let Some(data) = buffered_data {
+            let start = (offset as usize).min(data.len());
+            let end = ((offset + len) as usize).min(data.len());
+            return ReadResult {
+                data: data[start..end].to_vec(),
+                error: errno::OK,
             };
         }
 
@@ -785,6 +799,12 @@ impl Vfs for CasVfs {
 
         if let Some(mode) = params.mode {
             item.mode = mode;
+        }
+
+        if let Some(new_size) = params.size {
+            let buffer = item.write_buffer.get_or_insert_with(Vec::new);
+            buffer.resize(new_size as usize, 0);
+            item.size = new_size;
         }
 
         // modified_time is ignored for now (we don't track times)

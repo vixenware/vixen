@@ -145,6 +145,8 @@ pub struct SetAttributesParams {
     pub mode: Option<u32>,
     /// New modified time (None = don't change)
     pub modified_time: Option<u64>,
+    /// New size in bytes (None = don't change). Used by ftruncate.
+    pub size: Option<u64>,
 }
 
 /// The VFS service trait - defines the RPC interface between client and server.

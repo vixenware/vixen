@@ -183,6 +183,12 @@ impl RunnerService {
             cmd.arg("-C").arg("opt-level=3");
         }
 
+        // On Linux, use lld instead of GNU ld (which doesn't support Rust's
+        // __rustc:: namespaced allocator symbols introduced in Rust 1.91+).
+        if cfg!(target_os = "linux") {
+            cmd.arg("-C").arg("link-arg=-fuse-ld=lld");
+        }
+
         // Crate root
         cmd.arg(crate_root.as_str());
 
