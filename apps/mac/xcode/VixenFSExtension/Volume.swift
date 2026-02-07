@@ -64,6 +64,11 @@ final class Volume: FSVolume {
 // MARK: - FSVolume.Operations
 
 extension Volume: FSVolume.Operations {
+    /// Keep block size page-aligned, but advertise a larger preferred I/O size
+    /// so FSKit can batch reads for CAS-backed files.
+    private static let reportedBlockSize: Int = 4096
+    private static let reportedPreferredIOSize: Int = 262_144  // 256 KiB
+
     var supportedVolumeCapabilities: FSVolume.SupportedCapabilities {
         let caps = FSVolume.SupportedCapabilities()
         caps.supportsSymbolicLinks = false  // TODO: enable when implemented
@@ -78,8 +83,8 @@ extension Volume: FSVolume.Operations {
         log.debug("volumeStatistics")
         // Return basic stats - in production, query the backend
         let stats = FSStatFSResult(fileSystemTypeName: "vixenfs")
-        stats.blockSize = 4096
-        stats.ioSize = 4096
+        stats.blockSize = Volume.reportedBlockSize
+        stats.ioSize = Volume.reportedPreferredIOSize
         stats.totalBlocks = 1_000_000
         stats.freeBlocks = 500_000
         stats.availableBlocks = 500_000

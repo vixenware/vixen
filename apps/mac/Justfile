@@ -1,0 +1,24 @@
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+# Generate the Xcode project from project.yml.
+generate:
+    cd xcode && xcodegen generate
+
+# Build Vixen.app in Release configuration.
+build: generate
+    cd xcode && xcodebuild \
+      -project Vixen.xcodeproj \
+      -scheme Vixen \
+      -configuration Release \
+      -sdk macosx \
+      -derivedDataPath build/DerivedData \
+      -clonedSourcePackagesDirPath build/SourcePackages \
+      build
+
+# Install Vixen.app into /Applications and launch once.
+install: build
+    rm -rf /Applications/Vixen.app
+    ditto xcode/build/DerivedData/Build/Products/Release/Vixen.app /Applications/Vixen.app
+    open /Applications/Vixen.app
+    @echo "Installed /Applications/Vixen.app"
+    @echo "Follow the instructions in Vixen.app to finish setup."

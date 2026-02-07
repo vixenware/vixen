@@ -574,7 +574,80 @@ async fn cmd_doctor() -> Result<()> {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        const VIXEN_APP_PATH: &str = "/Applications/Vixen.app";
+        const VIXEN_EXTENSION_IDENTIFIER: &str = "eu.bearcove.vixenfs";
+
+        let app_installed = std::path::Path::new(VIXEN_APP_PATH).exists();
+        let extension_enabled = check_vixen_extension_enabled(VIXEN_EXTENSION_IDENTIFIER);
+
+        if extension_enabled {
+            println!("{} {}", "filesystem extension:".bold(), "enabled".green());
+        } else {
+            println!(
+                "{} {}",
+                "filesystem extension:".bold(),
+                "not ready".yellow()
+            );
+
+            if app_installed {
+                match std::process::Command::new("open").arg(VIXEN_APP_PATH).status() {
+                    Ok(status) if status.success() => {
+                        println!(
+                            "{} Opened Vixen.app to guide filesystem extension setup.",
+                            "note:".bold()
+                        );
+                    }
+                    Ok(status) => {
+                        println!(
+                            "{} Failed to open Vixen.app automatically (exit {}).",
+                            "note:".bold(),
+                            status
+                        );
+                    }
+                    Err(error) => {
+                        println!(
+                            "{} Failed to open Vixen.app automatically: {}",
+                            "note:".bold(),
+                            error
+                        );
+                    }
+                }
+            } else {
+                println!(
+                    "{} {} is missing; install it first.",
+                    "note:".bold(),
+                    VIXEN_APP_PATH
+                );
+            }
+        }
+    }
+
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn check_vixen_extension_enabled(extension_identifier: &str) -> bool {
+    let output = match std::process::Command::new("pluginkit")
+        .arg("-m")
+        .arg("-p")
+        .arg("com.apple.fskit.fsmodule")
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return false,
+    };
+
+    if !output.status.success() {
+        return false;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with('+') && trimmed.contains(extension_identifier)
+    })
 }
 
 fn cmd_explain(args: ExplainArgs) -> Result<()> {
