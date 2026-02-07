@@ -23,12 +23,22 @@ install: build
     @echo "Installed /Applications/Vixen.app"
     @echo "Follow the instructions in Vixen.app to finish setup."
 
-# Build, sign, notarize, package, and publish a macOS release.
-# Optional argument: `just apps/mac/release 1.2.3`
+# Build, sign, and package a release DMG for review.
+# Optional argument: `just release-build 1.2.3`
+release-build version='':
+    ./scripts/build.sh {{ version }}
+
+# Notarize, generate appcast, and publish to GitHub.
+# Optional argument: `just release-publish 1.2.3`
+release-publish version='':
+    ./scripts/publish.sh {{ version }}
+
+# Build + publish in one shot (no review step).
 release version='':
-    ./scripts/release.sh {{ version }}
+    ./scripts/build.sh {{ version }}
+    ./scripts/publish.sh {{ version }}
 
 # Validate release prerequisites without building artifacts.
-# Optional argument: `just apps/mac/preflight 1.2.3`
+# Optional argument: `just preflight 1.2.3`
 preflight version='':
     ./scripts/preflight.sh {{ version }}
