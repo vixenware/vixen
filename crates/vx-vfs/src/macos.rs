@@ -7,32 +7,27 @@
 //! - `vx-vfs`, which accepts VFS connections over TCP.
 
 use crate::types::{VfsConfig, VfsError, VfsStart};
-use vixenfs_proto::{Vfs, VfsDispatcher};
 use roam_stream::{HandshakeConfig, accept};
 use std::collections::VecDeque;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc};
+use vixenfs_proto::{Vfs, VfsDispatcher};
 use vx_io::net::{Endpoint, Listener};
-
-const VIXEN_EXTENSION_IDENTIFIER: &str = "eu.bearcove.vixenfs";
-const VIXEN_APP_PATH: &str = "/Applications/Vixen.app";
-const VIXEN_MOUNT_HELPER_PATH: &str = "/Applications/Vixen.app/Contents/Helpers/vixenfs-mount";
+use vx_vfs_types::{
+    VIXEN_APP_PATH, VIXEN_DOWNLOAD_URL, VIXEN_EXTENSION_IDENTIFIER, VIXEN_MOUNT_HELPER_PATH,
+    VfsAction, VfsDiagnostic, VfsHealth, VfsIssueCode,
+};
 const LOG_STREAM_TIMEOUT: Duration = Duration::from_secs(2);
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_LOG_CAPTURE_LINES: usize = 200;
-const LOG_PREDICATE: &str = r#"subsystem == "com.apple.FSKit" OR subsystem == "eu.bearcove.vixenfs" OR composedMessage CONTAINS[c] "vixen" OR composedMessage CONTAINS[c] "vixenfs""#;
 
 pub(super) async fn mount<T>(config: VfsConfig, vfs: T) -> Result<VfsStart, VfsError>
 where
     T: Vfs + Clone + Send + Sync + 'static,
 {
     tracing::debug!(mount_path = %config.mount_path, "entering macos vfs startup");
-
-    let mut log_stream = start_log_stream().await?;
 
     tokio::fs::create_dir_all(config.mount_path.as_std_path())
         .await
@@ -42,6 +37,7 @@ where
                 "failed to create mount directory {}: {}",
                 config.mount_path, error
             ),
+            _diagnostics: vec![],
         })?;
     tracing::debug!(mount_path = %config.mount_path, "ensured mount directory exists");
 
@@ -50,12 +46,14 @@ where
         .map_err(|error| VfsError::CommandFailed {
             program: "mount",
             message: format!("failed to bind internal vfs listener: {}", error),
+            _diagnostics: vec![],
         })?;
     let local_addr = listener
         .local_addr()
         .map_err(|error| VfsError::CommandFailed {
             program: "mount",
             message: format!("failed to query internal vfs listener address: {}", error),
+            _diagnostics: vec![],
         })?;
     tracing::debug!(%local_addr, "bound internal VFS listener");
 
@@ -63,14 +61,12 @@ where
     spawn_accept_loop(listener, vfs, mount_ready_tx);
 
     let Endpoint::Tcp { port, .. } = local_addr else {
-        let log_output = log_stream.snapshot().await;
-        log_stream.stop().await;
         return Err(VfsError::CommandFailed {
             program: "vixenfs-mount",
-            message: format!(
-                "internal listener did not bind to TCP; cannot extract TCP port for vixenfs-mount\nlog stream output:\n{}",
-                log_output
-            ),
+            message:
+                "internal listener did not bind to TCP; cannot extract TCP port for vixenfs-mount"
+                    .to_string(),
+            _diagnostics: vec![],
         });
     };
 
@@ -91,37 +87,22 @@ where
         Ok(child) => child,
         Err(error) => {
             let diagnostics = collect_mount_failure_diagnostics().await;
-            let log_output = log_stream.snapshot().await;
-            log_stream.stop().await;
             return Err(VfsError::CommandFailed {
                 program: "vixenfs-mount",
                 message: format!(
-                    "failed to spawn {}: {}\n{}\nlog stream output:\n{}",
-                    VIXEN_MOUNT_HELPER_PATH, error, diagnostics, log_output
+                    "failed to spawn {}: {}\n{}\n",
+                    VIXEN_MOUNT_HELPER_PATH,
+                    error,
+                    format_diagnostics(&diagnostics),
                 ),
+                _diagnostics: diagnostics,
             });
         }
     };
 
-    if let Some(stdout) = helper.stdout.take() {
-        tokio::spawn(capture_log_stream(
-            "vixenfs-mount stdout",
-            stdout,
-            Arc::clone(&helper_output),
-        ));
-    }
-    if let Some(stderr) = helper.stderr.take() {
-        tokio::spawn(capture_log_stream(
-            "vixenfs-mount stderr",
-            stderr,
-            Arc::clone(&helper_output),
-        ));
-    }
-
     match wait_for_mount_ready(&mut helper, &mut mount_ready_rx, MOUNT_TIMEOUT).await {
         Ok(()) => {
-            tracing::debug!(mount_path = %config.mount_path, "vixenfs-mount became ready");
-            log_stream.stop().await;
+            tracing::info!(mount_path = %config.mount_path, "vixenfs-mount became ready");
             Ok(VfsStart::Mounted {
                 mount_path: config.mount_path,
             })
@@ -129,16 +110,17 @@ where
         Err(readiness_error) => {
             let diagnostics = collect_mount_failure_diagnostics().await;
             let helper_output = snapshot_lines(&helper_output).await;
-            let log_output = log_stream.snapshot().await;
             let _ = helper.kill().await;
             let _ = helper.wait().await;
-            log_stream.stop().await;
             Err(VfsError::CommandFailed {
                 program: "vixenfs-mount",
                 message: format!(
-                    "{}\n{}\nhelper output:\n{}\nlog stream output:\n{}",
-                    readiness_error, diagnostics, helper_output, log_output
+                    "{}\n{}\nhelper output:\n{}",
+                    readiness_error,
+                    format_diagnostics(&diagnostics),
+                    helper_output,
                 ),
+                _diagnostics: diagnostics,
             })
         }
     }
@@ -182,112 +164,115 @@ async fn wait_for_mount_ready(
     mount_ready_rx: &mut mpsc::Receiver<()>,
     timeout: Duration,
 ) -> Result<(), String> {
-    let start = tokio::time::Instant::now();
-    loop {
-        if let Some(status) = helper
-            .try_wait()
-            .map_err(|e| format!("failed to poll vixenfs-mount process: {e}"))?
-        {
-            return Err(format!(
+    tokio::select! {
+        wait_result = helper.wait() => {
+            let status = wait_result
+                .map_err(|e| format!("failed to wait for vixenfs-mount process: {e}"))?;
+            Err(format!(
                 "vixenfs-mount exited before mount became ready (status={:?})",
                 status.code()
-            ));
+            ))
         }
-        if mount_ready_rx.try_recv().is_ok() {
-            return Ok(());
+        ready = mount_ready_rx.recv() => {
+            match ready {
+                Some(()) => Ok(()),
+                None => Err("mount readiness channel closed before mount became ready".to_string()),
+            }
         }
-        if start.elapsed() >= timeout {
-            return Err(format!(
+        _ = tokio::time::sleep(timeout) => {
+            Err(format!(
                 "timed out waiting for mount readiness after {:?}",
                 timeout
-            ));
+            ))
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
-async fn collect_mount_failure_diagnostics() -> String {
-    let app_installed = tokio::fs::metadata(VIXEN_APP_PATH).await.is_ok();
-    let plugin_registered = check_plugin_registered().await;
+async fn collect_mount_failure_diagnostics() -> Vec<VfsDiagnostic> {
+    let app_installed = is_app_installed().await;
+    let health = check_extension_health().await;
 
-    let mut notes = Vec::new();
+    let mut diagnostics = Vec::new();
     if !app_installed {
-        notes.push(format!("diagnostic: {} is missing", VIXEN_APP_PATH));
+        diagnostics.push(VfsDiagnostic {
+            code: VfsIssueCode::AppMissing,
+            summary: format!("{} is missing", VIXEN_APP_PATH),
+            detail: None,
+            actions: vec![
+                VfsAction::OpenDownloadUrl(VIXEN_DOWNLOAD_URL.to_string()),
+                VfsAction::RetryBuild,
+            ],
+        });
     }
-    if app_installed && !plugin_registered {
-        notes.push(format!(
-            "diagnostic: plugin {} is not registered",
-            VIXEN_EXTENSION_IDENTIFIER
-        ));
+
+    if app_installed {
+        match health {
+            Some(health) if !health.extension_installed => {
+                diagnostics.push(VfsDiagnostic {
+                    code: VfsIssueCode::ExtensionNotInstalled,
+                    summary: format!("plugin {} is not registered", VIXEN_EXTENSION_IDENTIFIER),
+                    detail: None,
+                    actions: vec![VfsAction::RunVxApp, VfsAction::RetryBuild],
+                });
+            }
+            Some(health) if !health.extension_enabled => {
+                diagnostics.push(VfsDiagnostic {
+                    code: VfsIssueCode::ExtensionDisabled,
+                    summary: format!(
+                        "plugin {} is installed but disabled",
+                        VIXEN_EXTENSION_IDENTIFIER
+                    ),
+                    detail: None,
+                    actions: vec![VfsAction::RunVxApp, VfsAction::RetryBuild],
+                });
+            }
+            Some(_) => {}
+            None => {
+                diagnostics.push(VfsDiagnostic {
+                    code: VfsIssueCode::HealthCheckFailed,
+                    summary: "failed to read extension health from vixenfs-mount --health --json"
+                        .to_string(),
+                    detail: None,
+                    actions: vec![VfsAction::RetryBuild],
+                });
+            }
+        }
     }
-    if notes.is_empty() {
-        notes.push("diagnostic: no obvious app/plugin prerequisite issue found".to_string());
+
+    if diagnostics.is_empty() {
+        diagnostics.push(VfsDiagnostic {
+            code: VfsIssueCode::MountFailed,
+            summary: "no obvious app/plugin prerequisite issue found".to_string(),
+            detail: None,
+            actions: vec![VfsAction::RetryBuild],
+        });
     }
-    notes.join("\n")
+    diagnostics
 }
 
-async fn check_plugin_registered() -> bool {
-    let mut command = Command::new("pluginkit");
-    command.arg("-m").arg("-p").arg("com.apple.fskit.fsmodule");
+pub(super) async fn is_app_installed() -> bool {
+    tokio::fs::metadata(VIXEN_APP_PATH).await.is_ok()
+}
+
+pub(super) async fn check_extension_health() -> Option<VfsHealth> {
+    let mut command = Command::new(VIXEN_MOUNT_HELPER_PATH);
+    command.arg("--health").arg("--json");
 
     let output = match tokio::time::timeout(LOG_STREAM_TIMEOUT, command.output()).await {
         Ok(Ok(output)) => output,
-        _ => return false,
+        _ => return None,
     };
 
-    if !output.status.success() {
-        return false;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.contains(VIXEN_EXTENSION_IDENTIFIER)
+    let stdout = std::str::from_utf8(&output.stdout).ok()?.trim();
+    facet_json::from_str(stdout).ok()
 }
 
-struct LogStreamCapture {
-    child: Child,
-    lines: Arc<Mutex<VecDeque<String>>>,
-}
-
-impl LogStreamCapture {
-    async fn snapshot(&self) -> String {
-        snapshot_lines(&self.lines).await
-    }
-
-    async fn stop(&mut self) {
-        let _ = self.child.kill().await;
-        let _ = self.child.wait().await;
-    }
-}
-
-async fn start_log_stream() -> Result<LogStreamCapture, VfsError> {
-    let mut command = Command::new("log");
-    command
-        .arg("stream")
-        .arg("--info")
-        .arg("--debug")
-        .arg("--style")
-        .arg("syslog")
-        .arg("--predicate")
-        .arg(LOG_PREDICATE)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = command.spawn().map_err(|error| VfsError::CommandFailed {
-        program: "log",
-        message: error.to_string(),
-    })?;
-
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-
-    let lines = Arc::new(Mutex::new(VecDeque::new()));
-
-    tokio::spawn(capture_log_stream("stdout", stdout, Arc::clone(&lines)));
-    tokio::spawn(capture_log_stream("stderr", stderr, Arc::clone(&lines)));
-
-    tracing::debug!("started log stream capture");
-
-    Ok(LogStreamCapture { child, lines })
+fn format_diagnostics(diagnostics: &[VfsDiagnostic]) -> String {
+    diagnostics
+        .iter()
+        .map(|d| format!("diagnostic: {}", d.summary))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn snapshot_lines(lines: &Arc<Mutex<VecDeque<String>>>) -> String {
@@ -298,22 +283,4 @@ async fn snapshot_lines(lines: &Arc<Mutex<VecDeque<String>>>) -> String {
         .cloned()
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-async fn capture_log_stream<R>(source: &str, reader: R, lines: Arc<Mutex<VecDeque<String>>>)
-where
-    R: AsyncRead + Unpin,
-{
-    let mut reader_lines = BufReader::new(reader).lines();
-    while let Ok(Some(line)) = reader_lines.next_line().await {
-        let mut output = lines.lock().await;
-        append_line_capped(&mut output, format!("[{}] {}", source, line));
-    }
-}
-
-fn append_line_capped(output: &mut VecDeque<String>, line: String) {
-    if output.len() >= MAX_LOG_CAPTURE_LINES {
-        output.pop_front();
-    }
-    output.push_back(line);
 }

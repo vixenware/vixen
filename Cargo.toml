@@ -26,6 +26,7 @@ vx-toolchain = { path = "crates/vx-toolchain" }
 vx-tracing = { path = "crates/vx-tracing" }
 vx-rs = { path = "crates/vx-rs" }
 vx-vfs = { path = "crates/vx-vfs" }
+vx-vfs-types = { path = "crates/vx-vfs-types" }
 
 # facet ecosystem
 facet = { git = "https://github.com/facet-rs/facet", branch = "main", features = [

@@ -25,12 +25,13 @@ async fn fetch_channel_manifest(
 
     tracing::debug!(url = %url, "fetching channel manifest");
 
-    let body = vx_http::get_text(&url).await.map_err(|e| {
-        vx_toolchain::ToolchainError::FetchError {
-            url: url.clone(),
-            source: Box::new(e),
-        }
-    })?;
+    let body =
+        vx_http::get_text(&url)
+            .await
+            .map_err(|e| vx_toolchain::ToolchainError::FetchError {
+                url: url.clone(),
+                source: Box::new(e),
+            })?;
 
     vx_toolchain::ChannelManifest::from_toml(&body)
 }
@@ -43,7 +44,7 @@ async fn download_component(
     use http_body_util::BodyExt;
     use tokio::io::AsyncReadExt;
 
-    tracing::debug!(url = %url, "downloading component");
+    tracing::info!(url = %url, "downloading component");
 
     let response =
         vx_http::get(url)
@@ -178,7 +179,13 @@ impl StoreService {
         self.toolchain_manager
             .ensure(
                 spec_key,
-                async move || this.storage.get_toolchain_spec(&spec_key).await.ok().flatten(),
+                async move || {
+                    this.storage
+                        .get_toolchain_spec(&spec_key)
+                        .await
+                        .ok()
+                        .flatten()
+                },
                 async move || this2.acquire_rust_toolchain_impl(spec_key, &spec).await,
             )
             .await
@@ -480,7 +487,13 @@ impl StoreService {
         self.toolchain_manager
             .ensure(
                 spec_key,
-                async move || this.storage.get_toolchain_spec(&spec_key).await.ok().flatten(),
+                async move || {
+                    this.storage
+                        .get_toolchain_spec(&spec_key)
+                        .await
+                        .ok()
+                        .flatten()
+                },
                 async move || this2.acquire_zig_toolchain_impl(spec_key, &spec).await,
             )
             .await

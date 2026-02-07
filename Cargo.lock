@@ -2619,6 +2619,7 @@ dependencies = [
  "vx-io",
  "vx-report",
  "vx-tracing",
+ "vx-vfs",
  "vxd-proto",
 ]
 
@@ -2860,11 +2861,20 @@ dependencies = [
  "cfg-if",
  "facet",
  "facet-error",
+ "facet-json",
  "roam-stream",
  "tokio",
  "tracing",
  "vixenfs-proto",
  "vx-io",
+ "vx-vfs-types",
+]
+
+[[package]]
+name = "vx-vfs-types"
+version = "0.1.0"
+dependencies = [
+ "facet",
 ]
 
 [[package]]

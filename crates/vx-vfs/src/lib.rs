@@ -9,6 +9,9 @@ use vixenfs_proto::Vfs;
 mod macos;
 mod types;
 pub use types::{VfsConfig, VfsError, VfsStart};
+#[cfg(target_os = "macos")]
+pub use vx_vfs_types::{VIXEN_APP_PATH, VfsHealth};
+pub use vx_vfs_types::{VfsAction, VfsDiagnostic, VfsIssueCode};
 
 /// Mount VFS end-to-end (server startup, health checks, mount, verification).
 ///
@@ -32,4 +35,14 @@ where
             })
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+pub async fn is_app_installed() -> bool {
+    macos::is_app_installed().await
+}
+
+#[cfg(target_os = "macos")]
+pub async fn check_extension_health() -> Option<VfsHealth> {
+    macos::check_extension_health().await
 }

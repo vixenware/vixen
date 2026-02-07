@@ -1,10 +1,10 @@
 use jiff::Timestamp;
 use vx_store_proto::Store;
 use vx_store_proto::{
-    Blake3Hash, BlobHash, STORE_PROTOCOL_VERSION, CacheKey, EnsureRegistryCrateResult, EnsureStatus,
-    EnsureToolchainResult, IngestTreeRequest, IngestTreeResult, ManifestHash, MaterializationPlan,
-    MaterializeStep, NodeManifest, PublishResult, RegistryCrateManifest, RegistrySpec,
-    RegistrySpecKey, RustToolchainSpec, ServiceVersion, TREE_MANIFEST_SCHEMA_VERSION,
+    Blake3Hash, BlobHash, CacheKey, EnsureRegistryCrateResult, EnsureStatus, EnsureToolchainResult,
+    IngestTreeRequest, IngestTreeResult, ManifestHash, MaterializationPlan, MaterializeStep,
+    NodeManifest, PublishResult, RegistryCrateManifest, RegistrySpec, RegistrySpecKey,
+    RustToolchainSpec, STORE_PROTOCOL_VERSION, ServiceVersion, TREE_MANIFEST_SCHEMA_VERSION,
     ToolchainKind, ToolchainManifest, ToolchainSpecKey, TreeManifest, ZigToolchainSpec,
 };
 
@@ -46,11 +46,7 @@ impl Store for StoreService {
         }
 
         // Write the cache mapping
-        match self
-            .storage
-            .put_cache(&cache_key, &manifest_hash)
-            .await
-        {
+        match self.storage.put_cache(&cache_key, &manifest_hash).await {
             Ok(()) => PublishResult {
                 success: true,
                 error: None,
@@ -256,7 +252,11 @@ impl Store for StoreService {
         _cx: &roam::Context,
         spec_key: RegistrySpecKey,
     ) -> Option<Blake3Hash> {
-        self.storage.get_registry_spec(&spec_key).await.ok().flatten()
+        self.storage
+            .get_registry_spec(&spec_key)
+            .await
+            .ok()
+            .flatten()
     }
 
     async fn ensure_rust_toolchain(
@@ -283,7 +283,11 @@ impl Store for StoreService {
         spec_key: ToolchainSpecKey,
     ) -> Option<Blake3Hash> {
         // Delegate to the inherent method
-        self.storage.get_toolchain_spec(&spec_key).await.ok().flatten()
+        self.storage
+            .get_toolchain_spec(&spec_key)
+            .await
+            .ok()
+            .flatten()
     }
 
     async fn get_toolchain_manifest(
@@ -471,7 +475,7 @@ impl Store for StoreService {
         _cx: &roam::Context,
         hash: ManifestHash,
     ) -> Option<TreeManifest> {
-        tracing::info!(manifest_hash = %hash, "get_tree_manifest: reading from blob storage");
+        tracing::debug!(manifest_hash = %hash, "get_tree_manifest: reading from blob storage");
 
         let data = self.storage.get_blob(&hash).await.ok().flatten()?;
         let json = match String::from_utf8(data) {
@@ -482,10 +486,10 @@ impl Store for StoreService {
             }
         };
 
-        tracing::info!(manifest_hash = %hash, "get_tree_manifest: blob read successfully");
+        tracing::debug!(manifest_hash = %hash, "get_tree_manifest: blob read successfully");
         match facet_json::from_str(&json) {
             Ok(manifest) => {
-                tracing::info!(manifest_hash = %hash, "get_tree_manifest: parsed successfully");
+                tracing::debug!(manifest_hash = %hash, "get_tree_manifest: parsed successfully");
                 Some(manifest)
             }
             Err(e) => {

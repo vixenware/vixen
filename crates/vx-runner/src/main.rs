@@ -23,17 +23,17 @@ use error::{Result as RunnerResult, RunnerError};
 
 use camino::Utf8PathBuf;
 use eyre::Result;
+use roam_stream::{HandshakeConfig, NoDispatcher, accept};
+use std::collections::HashMap;
+use std::sync::Arc;
 use vixenfs_proto::{
     CreateResult, GetAttributesResult, ItemId, ItemType, LookupResult, ReadDirResult, ReadResult,
     SetAttributesParams, Vfs, VfsResult, WriteResult,
 };
-use roam_stream::{HandshakeConfig, NoDispatcher, accept};
-use std::collections::HashMap;
-use std::sync::Arc;
-use vx_store_proto::{Blake3Hash, StoreClient};
 use vx_io::net::{Endpoint, Listener};
 use vx_runner_proto::RunnerDispatcher;
-use vx_vfs::{VfsConfig, VfsStart};
+use vx_store_proto::{Blake3Hash, StoreClient};
+use vx_vfs::{VfsAction, VfsConfig, VfsDiagnostic, VfsIssueCode, VfsStart};
 
 use crate::registry::RegistryMaterializer;
 use crate::vfs::CasVfs;
@@ -44,6 +44,12 @@ pub type CasCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispat
 type InflightMaterializations = Arc<
     tokio::sync::Mutex<HashMap<Blake3Hash, Arc<tokio::sync::OnceCell<RunnerResult<Utf8PathBuf>>>>>,
 >;
+
+#[derive(Debug, Clone)]
+pub(crate) struct VfsStartupFailure {
+    pub(crate) reason: String,
+    pub(crate) diagnostics: Vec<VfsDiagnostic>,
+}
 
 pub(crate) fn runner_mount_base() -> Utf8PathBuf {
     if let Ok(path) = std::env::var("VX_RUNNER_MOUNT") {
@@ -264,7 +270,7 @@ async fn main() -> Result<()> {
         vfs.clone(),
     );
 
-    // Bind Runner RPC socket (but don't start accepting yet - wait for VFS mount)
+    // Bind Runner RPC socket before VFS mount attempt.
     let runner_listener = match Listener::bind(&args.bind).await {
         Ok(l) => l,
         Err(e) => {
@@ -276,10 +282,7 @@ async fn main() -> Result<()> {
             ));
         }
     };
-    tracing::info!(
-        "Runner RPC bound on {} (will accept after VFS mount)",
-        args.bind
-    );
+    tracing::info!("Runner RPC bound on {}", args.bind);
 
     // Mount VFS via vx-vfs (includes platform-specific behavior).
     match vx_vfs::mount(
@@ -292,19 +295,45 @@ async fn main() -> Result<()> {
     {
         Ok(VfsStart::Mounted { mount_path }) => {
             tracing::info!("VFS mounted at {}", mount_path);
+            exec.set_vfs_startup_error(None).await;
         }
         Ok(VfsStart::Unsupported { platform }) => {
-            tracing::warn!("VFS not supported on platform {}", platform);
+            let reason = format!("VFS not supported on platform {}", platform);
+            tracing::warn!("{}", reason);
+            exec.set_vfs_startup_error(Some(VfsStartupFailure {
+                reason: reason.clone(),
+                diagnostics: vec![VfsDiagnostic {
+                    code: VfsIssueCode::UnsupportedPlatform,
+                    summary: reason,
+                    detail: None,
+                    actions: vec![VfsAction::RetryBuild],
+                }],
+            }))
+            .await;
         }
         Err(error) => {
-            tracing::error!("Failed to mount VFS: {}", error);
-            tracing::error!("Cannot start runner without VFS");
-            std::process::exit(1);
+            let reason = format!("Failed to mount VFS: {}", error);
+            tracing::error!("{}", reason);
+            tracing::warn!("Starting runner in degraded mode; compile requests will fail fast");
+            let mut diagnostics = error.diagnostics().to_vec();
+            if diagnostics.is_empty() {
+                diagnostics.push(VfsDiagnostic {
+                    code: VfsIssueCode::MountFailed,
+                    summary: "VFS mount failed without structured diagnostics".to_string(),
+                    detail: Some(reason.clone()),
+                    actions: vec![VfsAction::RetryBuild],
+                });
+            }
+            exec.set_vfs_startup_error(Some(VfsStartupFailure {
+                reason,
+                diagnostics,
+            }))
+            .await;
         }
     }
 
-    // NOW start accepting Runner RPC connections (VFS is ready)
-    tracing::info!("Starting Runner RPC server (VFS is ready)");
+    // Start accepting Runner RPC connections regardless of VFS startup status.
+    tracing::info!("Starting Runner RPC server");
     loop {
         match runner_listener.accept().await {
             Ok((stream, peer_addr)) => {
@@ -347,6 +376,9 @@ pub struct RunnerServiceInner {
 
     /// VFS for hermetic action execution
     pub(crate) vfs: Arc<CasVfs>,
+
+    /// Startup-time VFS failure details, if any.
+    pub(crate) vfs_startup_error: tokio::sync::RwLock<Option<VfsStartupFailure>>,
 }
 
 /// Exec service handle - cloneable wrapper around shared inner state
@@ -377,8 +409,17 @@ impl RunnerService {
                 toolchains_dir,
                 materializing: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                 vfs,
+                vfs_startup_error: tokio::sync::RwLock::new(None),
             }),
         }
+    }
+
+    pub(crate) async fn set_vfs_startup_error(&self, error: Option<VfsStartupFailure>) {
+        *self.vfs_startup_error.write().await = error;
+    }
+
+    pub(crate) async fn get_vfs_startup_error(&self) -> Option<VfsStartupFailure> {
+        self.vfs_startup_error.read().await.clone()
     }
 
     /// Ensures a toolchain is materialized locally, returns the materialized directory.

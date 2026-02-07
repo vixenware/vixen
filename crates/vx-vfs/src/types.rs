@@ -1,6 +1,7 @@
 use camino::Utf8PathBuf;
 use facet::Facet;
 use std::time::Duration;
+use vx_vfs_types::VfsDiagnostic;
 
 /// Configuration for starting a VFS mount session.
 #[derive(Debug, Clone)]
@@ -32,5 +33,15 @@ pub enum VfsError {
     CommandFailed {
         program: &'static str,
         message: String,
+        _diagnostics: Vec<VfsDiagnostic>,
     },
+}
+
+impl VfsError {
+    pub fn diagnostics(&self) -> &[VfsDiagnostic] {
+        match self {
+            VfsError::CommandTimedOut { .. } => &[],
+            VfsError::CommandFailed { _diagnostics, .. } => _diagnostics,
+        }
+    }
 }

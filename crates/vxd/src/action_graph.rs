@@ -6,8 +6,8 @@
 
 use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::HashMap;
-use vx_store_proto::{Blake3Hash, RustChannel};
 use vx_rs::crate_graph::{CrateGraph, CrateId, CrateSource, CrateType};
+use vx_store_proto::{Blake3Hash, RustChannel};
 
 use crate::inputs::{BuildConfig, RustCrate, RustToolchain};
 
@@ -357,7 +357,7 @@ impl ActionGraph {
     /// Dump graph structure for debugging
     pub fn dump_graph(&self) {
         use petgraph::Direction::Incoming;
-        use tracing::info;
+        use tracing::debug;
 
         // Collect nodes with their dependency counts
         let mut nodes_info: Vec<_> = self
@@ -374,7 +374,7 @@ impl ActionGraph {
         // Count ready nodes
         let ready_count = nodes_info.iter().filter(|(_, _, out, _)| *out == 0).count();
 
-        info!(
+        debug!(
             nodes = self.graph.node_count(),
             edges = self.graph.edge_count(),
             ready_nodes = ready_count,
@@ -389,7 +389,7 @@ impl ActionGraph {
             .collect();
 
         for (idx, node, outgoing, incoming) in ready_examples {
-            info!(
+            debug!(
                 node = ?idx,
                 action = node.action.display_name(),
                 incoming = incoming,
@@ -411,7 +411,7 @@ impl ActionGraph {
                 .take(3)
                 .map(|dep_idx| self.graph[dep_idx].action.display_name())
                 .collect();
-            info!(
+            debug!(
                 node = ?idx,
                 action = node.action.display_name(),
                 dep_count = outgoing,

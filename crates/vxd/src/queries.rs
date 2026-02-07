@@ -6,7 +6,7 @@
 use crate::db::Db;
 use crate::inputs::*;
 use picante::PicanteResult;
-use tracing::debug;
+use tracing::trace;
 use vx_store_proto::{Blake3Hash, CacheKey, NodeId};
 
 // =============================================================================
@@ -20,7 +20,7 @@ pub async fn cache_key_compile_bin<DB: Db>(
     toolchain: RustToolchain,
     config: BuildConfig,
 ) -> PicanteResult<CacheKey> {
-    debug!("cache_key_compile_bin: COMPUTING");
+    trace!("cache_key_compile_bin: COMPUTING");
 
     let cargo = CargoToml::get(db)?.expect("CargoToml not set");
     let closure = SourceClosure::get(db)?.expect("SourceClosure not set");
@@ -71,7 +71,7 @@ pub async fn cache_key_compile_bin<DB: Db>(
 /// Generate a human-readable node ID for a compile-bin node.
 #[picante::tracked]
 pub async fn node_id_compile_bin<DB: Db>(db: &DB, config: BuildConfig) -> PicanteResult<NodeId> {
-    debug!("node_id_compile_bin: COMPUTING");
+    trace!("node_id_compile_bin: COMPUTING");
 
     let cargo = CargoToml::get(db)?.expect("CargoToml not set");
     let target_triple = config.target_triple(db)?;
@@ -91,7 +91,7 @@ pub async fn cache_key_compile_rlib<DB: Db>(
     toolchain: RustToolchain,
     config: BuildConfig,
 ) -> PicanteResult<CacheKey> {
-    debug!("cache_key_compile_rlib: COMPUTING");
+    trace!("cache_key_compile_rlib: COMPUTING");
 
     let crate_name = crate_info.crate_name(db)?;
     let edition = crate_info.edition(db)?;
@@ -143,7 +143,7 @@ pub async fn node_id_compile_rlib<DB: Db>(
     crate_info: RustCrate,
     config: BuildConfig,
 ) -> PicanteResult<NodeId> {
-    debug!("node_id_compile_rlib: COMPUTING");
+    trace!("node_id_compile_rlib: COMPUTING");
 
     let crate_name = crate_info.crate_name(db)?;
     let target_triple = config.target_triple(db)?;
@@ -164,7 +164,7 @@ pub async fn cache_key_compile_rlib_with_deps<DB: Db>(
     config: BuildConfig,
     dep_rlib_hashes: Vec<(String, Blake3Hash)>, // (extern_name, rlib_hash) sorted
 ) -> PicanteResult<CacheKey> {
-    debug!("cache_key_compile_rlib_with_deps: COMPUTING");
+    trace!("cache_key_compile_rlib_with_deps: COMPUTING");
 
     let crate_name = crate_info.crate_name(db)?;
     let edition = crate_info.edition(db)?;
@@ -227,7 +227,7 @@ pub async fn cache_key_compile_bin_with_deps<DB: Db>(
     config: BuildConfig,
     dep_rlib_hashes: Vec<(String, Blake3Hash)>, // (extern_name, rlib_hash) sorted
 ) -> PicanteResult<CacheKey> {
-    debug!("cache_key_compile_bin_with_deps: COMPUTING");
+    trace!("cache_key_compile_bin_with_deps: COMPUTING");
 
     let crate_name = crate_info.crate_name(db)?;
     let edition = crate_info.edition(db)?;
@@ -289,7 +289,7 @@ pub async fn node_id_compile_bin_with_deps<DB: Db>(
     crate_info: RustCrate,
     config: BuildConfig,
 ) -> PicanteResult<NodeId> {
-    debug!("node_id_compile_bin_with_deps: COMPUTING");
+    trace!("node_id_compile_bin_with_deps: COMPUTING");
 
     let crate_name = crate_info.crate_name(db)?;
     let target_triple = config.target_triple(db)?;
@@ -312,7 +312,7 @@ pub async fn cache_key_cc_compile<DB: Db>(
     source: CSourceFile,
     config: BuildConfig,
 ) -> PicanteResult<CacheKey> {
-    debug!("cache_key_cc_compile: COMPUTING");
+    trace!("cache_key_cc_compile: COMPUTING");
 
     let zig = ZigToolchainConfig::get(db)?.expect("ZigToolchainConfig not set");
     let source_hash = source.content_hash(db)?;
@@ -372,7 +372,7 @@ pub async fn node_id_cc_compile<DB: Db>(
     source: CSourceFile,
     config: BuildConfig,
 ) -> PicanteResult<NodeId> {
-    debug!("node_id_cc_compile: COMPUTING");
+    trace!("node_id_cc_compile: COMPUTING");
 
     let source_path = source.path(db)?;
     let target_triple = config.target_triple(db)?;
@@ -391,7 +391,7 @@ pub async fn cache_key_cc_link<DB: Db>(
     target: CTarget,
     config: BuildConfig,
 ) -> PicanteResult<CacheKey> {
-    debug!("cache_key_cc_link: COMPUTING");
+    trace!("cache_key_cc_link: COMPUTING");
 
     let zig = ZigToolchainConfig::get(db)?.expect("ZigToolchainConfig not set");
     let object_hashes = target.object_hashes(db)?;
@@ -433,7 +433,7 @@ pub async fn node_id_cc_link<DB: Db>(
     target: CTarget,
     config: BuildConfig,
 ) -> PicanteResult<NodeId> {
-    debug!("node_id_cc_link: COMPUTING");
+    trace!("node_id_cc_link: COMPUTING");
 
     let target_name = target.name(db)?;
     let target_triple = config.target_triple(db)?;

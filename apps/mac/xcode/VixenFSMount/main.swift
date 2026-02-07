@@ -1,10 +1,18 @@
 import Darwin
+@preconcurrency import FSKit
 import Foundation
 import os
 
 private let log = Logger(subsystem: "eu.bearcove.vixenfs.mount", category: "Main")
 
+enum Command {
+    case mount(Config)
+    case health(json: Bool)
+}
+
 struct Config {
+    static let extensionBundleIdentifier = "eu.bearcove.vixenfs"
+
     let mountPoint: String
     let port: Int
     let host: String
@@ -16,22 +24,27 @@ struct Config {
         "\(scheme)://\(host):\(port)"
     }
 
-    static func parse(from args: [String]) throws -> Config {
+    static func parse(from args: [String]) throws -> Command {
         var mountPoint: String?
         var port: Int?
         var host = "localhost"
         var scheme = "vixen"
         let fsType = "vixenfs"
         let parentPID = getppid()
+        var healthRequested = false
+        var jsonRequested = false
+        var mountArgumentsProvided = false
 
         var index = 0
         while index < args.count {
             let arg = args[index]
             switch arg {
             case "--mount-point":
+                mountArgumentsProvided = true
                 index += 1
                 mountPoint = try valueArg(args, index: index, name: "--mount-point")
             case "--port":
+                mountArgumentsProvided = true
                 index += 1
                 let value = try valueArg(args, index: index, name: "--port")
                 guard let parsed = Int(value), parsed > 0 else {
@@ -39,17 +52,35 @@ struct Config {
                 }
                 port = parsed
             case "--host":
+                mountArgumentsProvided = true
                 index += 1
                 host = try valueArg(args, index: index, name: "--host")
             case "--scheme":
+                mountArgumentsProvided = true
                 index += 1
                 scheme = try valueArg(args, index: index, name: "--scheme")
+            case "--health":
+                healthRequested = true
+            case "--json":
+                jsonRequested = true
             case "--help":
                 throw MountError.usage
             default:
                 throw MountError.invalidArgument("Unknown argument: \(arg)")
             }
             index += 1
+        }
+
+        if healthRequested {
+            if mountArgumentsProvided {
+                throw MountError.invalidArgument(
+                    "--health cannot be combined with mount arguments")
+            }
+            return .health(json: jsonRequested)
+        }
+
+        if jsonRequested {
+            throw MountError.invalidArgument("--json can only be used with --health")
         }
 
         guard let mountPoint else {
@@ -59,14 +90,15 @@ struct Config {
             throw MountError.invalidArgument("Missing required --port argument")
         }
 
-        return Config(
-            mountPoint: mountPoint,
-            port: port,
-            host: host,
-            scheme: scheme,
-            fsType: fsType,
-            parentPID: parentPID
-        )
+        return .mount(
+            Config(
+                mountPoint: mountPoint,
+                port: port,
+                host: host,
+                scheme: scheme,
+                fsType: fsType,
+                parentPID: parentPID
+            ))
     }
 
     private static func valueArg(_ args: [String], index: Int, name: String) throws -> String {
@@ -98,6 +130,7 @@ enum MountError: Error, CustomStringConvertible {
         case .usage:
             return """
                 Usage:
+                  vixenfs-mount --health [--json]
                   vixenfs-mount --port <port> --mount-point <path> [--host <host>] [--scheme <scheme>]
                 """
         }
@@ -257,9 +290,78 @@ final class MountLifecycle {
     }
 }
 
+private func emitHealthJSON(installed: Bool, enabled: Bool) {
+    fputs(
+        "{\"extensionInstalled\": \(installed ? "true" : "false"), \"extensionEnabled\": \(enabled ? "true" : "false")}\n",
+        stdout
+    )
+}
+
+private func runHealthCheck(json: Bool) -> Never {
+    FSClient.shared.fetchInstalledExtensions { modules, error in
+        if let error {
+            if json {
+                emitHealthJSON(installed: false, enabled: false)
+            }
+            fputs(
+                "vixenfs-mount: FSKit health check failed: \(error.localizedDescription)\n", stderr)
+            exit(2)
+        }
+
+        guard let modules else {
+            if json {
+                emitHealthJSON(installed: false, enabled: false)
+            }
+            fputs("vixenfs-mount: FSKit health check failed: no module list returned\n", stderr)
+            exit(2)
+        }
+
+        let module = modules.first(where: {
+            $0.bundleIdentifier == Config.extensionBundleIdentifier
+        })
+        let installed = module != nil
+        let enabled = module?.isEnabled ?? false
+
+        if json {
+            emitHealthJSON(installed: installed, enabled: enabled)
+        }
+
+        guard installed else {
+            if !json {
+                fputs(
+                    "vixenfs-mount: FSKit module \(Config.extensionBundleIdentifier) is not installed\n",
+                    stderr
+                )
+            }
+            exit(2)
+        }
+
+        guard enabled else {
+            if !json {
+                fputs(
+                    "vixenfs-mount: FSKit module \(Config.extensionBundleIdentifier) is installed but disabled\n",
+                    stderr
+                )
+            }
+            exit(2)
+        }
+
+        if !json {
+            fputs("ok: FSKit module \(Config.extensionBundleIdentifier) is enabled\n", stdout)
+        }
+        exit(0)
+    }
+    dispatchMain()
+}
+
 do {
-    let config = try Config.parse(from: Array(CommandLine.arguments.dropFirst()))
-    try MountLifecycle(config: config).run()
+    let command = try Config.parse(from: Array(CommandLine.arguments.dropFirst()))
+    switch command {
+    case .health(let json):
+        runHealthCheck(json: json)
+    case .mount(let config):
+        try MountLifecycle(config: config).run()
+    }
 } catch let error as MountError {
     fputs("vixenfs-mount: \(error.description)\n", stderr)
     if case .usage = error {

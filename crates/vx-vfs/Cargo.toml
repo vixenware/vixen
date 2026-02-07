@@ -11,7 +11,9 @@ tokio = { workspace = true }
 vixenfs-proto = { workspace = true }
 cfg-if = "1"
 tracing = { workspace = true }
+vx-vfs-types = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 vx-io = { workspace = true }
 roam-stream = { workspace = true }
+facet-json = { workspace = true }

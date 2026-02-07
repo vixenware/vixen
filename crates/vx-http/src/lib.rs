@@ -184,7 +184,7 @@ async fn cache_get_bytes(cache_dir: &Path, url: &str) -> Result<Vec<u8>, HttpErr
     // Fast path: cache hit without locking
     if let Ok(data) = std::fs::read(&data_path) {
         let elapsed = t0.elapsed();
-        tracing::info!(
+        tracing::debug!(
             url = %url,
             size = data.len(),
             elapsed_us = elapsed.as_micros() as u64,
@@ -220,7 +220,7 @@ async fn cache_get_bytes(cache_dir: &Path, url: &str) -> Result<Vec<u8>, HttpErr
         // Double-check: another process may have populated the cache while we waited
         if let Ok(data) = std::fs::read(&data_path_clone) {
             let total_elapsed = t0.elapsed();
-            tracing::info!(
+            tracing::debug!(
                 url = %url_owned,
                 size = data.len(),
                 lock_wait_us = lock_elapsed.as_micros() as u64,
@@ -251,7 +251,7 @@ async fn cache_get_bytes(cache_dir: &Path, url: &str) -> Result<Vec<u8>, HttpErr
         std::fs::rename(&tmp_path, &data_path_clone)?;
 
         let total_elapsed = t0.elapsed();
-        tracing::info!(
+        tracing::debug!(
             url = %url_owned,
             size = bytes.len(),
             lock_wait_us = lock_elapsed.as_micros() as u64,

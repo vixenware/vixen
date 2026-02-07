@@ -28,14 +28,14 @@
 //! - ID 1: Root directory (`/`)
 //! - ID 2+: Dynamically allocated for prefixes and their contents
 
-use vixenfs_proto::{
-    CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
-    ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
-};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
+use vixenfs_proto::{
+    CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
+    ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
+};
 use vx_store_proto::{Blake3Hash, StoreClient};
 
 /// A virtual filesystem item
@@ -188,7 +188,7 @@ impl CasVfs {
             );
         }
 
-        tracing::info!(prefix_id = %prefix_id, item_id = prefix_root_id, "created action prefix");
+        tracing::debug!(prefix_id = %prefix_id, item_id = prefix_root_id, "created action prefix");
         (prefix_id, prefix_root_id)
     }
 
@@ -371,7 +371,7 @@ impl CasVfs {
             prefixes.remove(prefix_id);
         }
 
-        tracing::info!(prefix_id = %prefix_id, "removed action prefix");
+        tracing::debug!(prefix_id = %prefix_id, "removed action prefix");
     }
 
     /// Collect all descendant ItemIds (including the item itself)
@@ -400,12 +400,12 @@ impl CasVfs {
 
 impl Vfs for CasVfs {
     async fn lookup(&self, _cx: &roam::Context, parent_id: ItemId, name: String) -> LookupResult {
-        tracing::debug!(parent_id, name = %name, "VFS lookup");
+        tracing::trace!(parent_id, name = %name, "VFS lookup");
 
         let items = self.items.read().await;
         for item in items.values() {
             if item.parent_id == parent_id && item.name == name {
-                tracing::debug!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found");
+                tracing::trace!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found");
                 return LookupResult {
                     item_id: item.id,
                     item_type: item.item_type,
@@ -420,7 +420,7 @@ impl Vfs for CasVfs {
             .filter(|i| i.parent_id == parent_id)
             .map(|i| i.name.as_str())
             .collect();
-        tracing::info!(parent_id, name = %name, ?children, "VFS lookup -> NOT FOUND");
+        tracing::debug!(parent_id, name = %name, ?children, "VFS lookup -> NOT FOUND");
         LookupResult {
             item_id: 0,
             item_type: ItemType::File,
@@ -429,7 +429,7 @@ impl Vfs for CasVfs {
     }
 
     async fn get_attributes(&self, _cx: &roam::Context, item_id: ItemId) -> GetAttributesResult {
-        tracing::debug!(item_id, "VFS get_attributes");
+        tracing::trace!(item_id, "VFS get_attributes");
 
         let items = self.items.read().await;
         match items.get(&item_id) {
@@ -870,9 +870,9 @@ impl CasVfs {
         let items = self.items.read().await;
         let prefixes = self.prefixes.read().await;
 
-        tracing::info!("=== VFS STATE DUMP ===");
-        tracing::info!("Total items: {}", items.len());
-        tracing::info!("Total prefixes: {}", prefixes.len());
+        tracing::debug!("=== VFS STATE DUMP ===");
+        tracing::debug!("Total items: {}", items.len());
+        tracing::debug!("Total prefixes: {}", prefixes.len());
 
         // Show root children
         let root_children: Vec<_> = items
@@ -880,11 +880,11 @@ impl CasVfs {
             .filter(|i| i.parent_id == 1)
             .map(|i| format!("{} (id={})", i.name, i.id))
             .collect();
-        tracing::info!("Root children: {:?}", root_children);
+        tracing::debug!("Root children: {:?}", root_children);
 
         // Show prefix info
         if let Some(prefix) = prefixes.get(prefix_id) {
-            tracing::info!(
+            tracing::debug!(
                 "Prefix '{}' root_item_id={}",
                 prefix_id,
                 prefix.root_item_id
@@ -896,7 +896,7 @@ impl CasVfs {
                 .filter(|i| i.parent_id == prefix.root_item_id)
                 .map(|i| format!("{} (id={}, type={:?})", i.name, i.id, i.item_type))
                 .collect();
-            tracing::info!("Prefix children: {:?}", prefix_children);
+            tracing::debug!("Prefix children: {:?}", prefix_children);
 
             // Find toolchain directory and show its children
             if let Some(toolchain) = items
@@ -908,7 +908,7 @@ impl CasVfs {
                     .filter(|i| i.parent_id == toolchain.id)
                     .map(|i| format!("{} (id={})", i.name, i.id))
                     .collect();
-                tracing::info!("toolchain/ children: {:?}", tc_children);
+                tracing::debug!("toolchain/ children: {:?}", tc_children);
 
                 // Find bin directory
                 if let Some(bin) = items
@@ -920,13 +920,13 @@ impl CasVfs {
                         .filter(|i| i.parent_id == bin.id)
                         .map(|i| format!("{} (id={})", i.name, i.id))
                         .collect();
-                    tracing::info!("toolchain/bin/ children: {:?}", bin_children);
+                    tracing::debug!("toolchain/bin/ children: {:?}", bin_children);
                 }
             }
         } else {
-            tracing::info!("Prefix '{}' NOT FOUND in prefixes map!", prefix_id);
+            tracing::debug!("Prefix '{}' NOT FOUND in prefixes map!", prefix_id);
         }
-        tracing::info!("=== END VFS STATE DUMP ===");
+        tracing::debug!("=== END VFS STATE DUMP ===");
     }
 
     /// Build the path from an item up to (but not including) a root

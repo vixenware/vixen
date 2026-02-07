@@ -6,16 +6,29 @@
 use jiff::Zoned;
 use std::time::Instant;
 use tokio::process::Command;
-use tracing::{debug, info};
-use vx_store_proto::{NodeId, NodeManifest, OutputEntry};
+use tracing::{debug, info, trace};
 use vx_runner_proto::{CcCompileRequest, CcCompileResult, RustCompileRequest, RustCompileResult};
+use vx_store_proto::{NodeId, NodeManifest, OutputEntry};
+use vx_vfs::{VfsAction, VfsIssueCode};
 
-use crate::RunnerService;
+use crate::{RunnerService, VfsStartupFailure};
 
 impl RunnerService {
     /// Compile a Rust crate using VFS-based execution
     pub async fn compile_rust_vfs(&self, request: RustCompileRequest) -> RustCompileResult {
         let start = Instant::now();
+
+        if let Some(reason) = self.get_vfs_startup_error().await {
+            return RustCompileResult {
+                success: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                output_manifest: None,
+                error: Some(format_vfs_startup_failure(&reason)),
+            };
+        }
 
         info!(
             crate_name = %request.crate_name,
@@ -29,15 +42,15 @@ impl RunnerService {
         let mount_base = crate::runner_mount_base();
         let prefix_path = mount_base.join(&prefix_id);
 
-        info!(prefix_id = %prefix_id, prefix_path = %prefix_path, "created action prefix");
+        debug!(prefix_id = %prefix_id, prefix_path = %prefix_path, "created action prefix");
 
         // Check if VFS mount exists (use tokio::fs to avoid blocking the tokio executor)
         match tokio::fs::metadata(mount_base.as_str()).await {
             Ok(meta) => {
-                info!(mount_base = %mount_base, is_dir = meta.is_dir(), "VFS mount base exists");
+                debug!(mount_base = %mount_base, is_dir = meta.is_dir(), "VFS mount base exists");
             }
             Err(e) => {
-                info!(mount_base = %mount_base, error = %e, "VFS mount base does NOT exist");
+                debug!(mount_base = %mount_base, error = %e, "VFS mount base does NOT exist");
             }
         }
 
@@ -56,15 +69,15 @@ impl RunnerService {
         // Check if prefix directory exists after creation (use tokio::fs)
         match tokio::fs::metadata(prefix_path.as_str()).await {
             Ok(meta) => {
-                info!(prefix_path = %prefix_path, is_dir = meta.is_dir(), "prefix directory exists after creation");
+                debug!(prefix_path = %prefix_path, is_dir = meta.is_dir(), "prefix directory exists after creation");
             }
             Err(e) => {
-                info!(prefix_path = %prefix_path, error = %e, "prefix directory does NOT exist after creation");
+                debug!(prefix_path = %prefix_path, error = %e, "prefix directory does NOT exist after creation");
             }
         }
 
         // 2. Add toolchain to prefix
-        info!(
+        debug!(
             toolchain_manifest = %request.toolchain_manifest,
             "adding toolchain to VFS prefix"
         );
@@ -75,7 +88,7 @@ impl RunnerService {
             self.remove_action_prefix(&prefix_id).await;
             return cleanup_and_error(&prefix_id, format!("failed to add toolchain: {}", e), start);
         }
-        info!("toolchain added to prefix successfully");
+        debug!("toolchain added to prefix successfully");
 
         // Dump VFS state to see what we actually have
         self.vfs.dump_state(&prefix_id).await;
@@ -84,16 +97,16 @@ impl RunnerService {
         let toolchain_dir = prefix_path.join("toolchain");
         match tokio::fs::metadata(toolchain_dir.as_str()).await {
             Ok(meta) => {
-                info!(toolchain_dir = %toolchain_dir, is_dir = meta.is_dir(), "toolchain directory exists");
+                debug!(toolchain_dir = %toolchain_dir, is_dir = meta.is_dir(), "toolchain directory exists");
                 // List contents
                 if let Ok(mut entries) = tokio::fs::read_dir(toolchain_dir.as_str()).await {
                     while let Ok(Some(entry)) = entries.next_entry().await {
-                        info!(entry = ?entry.path(), "  toolchain entry");
+                        trace!(entry = ?entry.path(), "  toolchain entry");
                     }
                 }
             }
             Err(e) => {
-                info!(toolchain_dir = %toolchain_dir, error = %e, "toolchain directory does NOT exist");
+                debug!(toolchain_dir = %toolchain_dir, error = %e, "toolchain directory does NOT exist");
             }
         }
 
@@ -175,7 +188,7 @@ impl RunnerService {
             cmd.env("PATH", path);
         }
 
-        info!(
+        debug!(
             rustc = %rustc_path,
             crate_name = %request.crate_name,
             crate_root = %crate_root,
@@ -183,10 +196,10 @@ impl RunnerService {
         );
 
         // Debug: Check if rustc exists before executing
-        info!(rustc_path = %rustc_path, "checking if rustc exists");
+        debug!(rustc_path = %rustc_path, "checking if rustc exists");
         match tokio::fs::metadata(rustc_path.as_str()).await {
             Ok(meta) => {
-                info!(
+                debug!(
                     rustc_path = %rustc_path,
                     is_file = meta.is_file(),
                     len = meta.len(),
@@ -195,25 +208,25 @@ impl RunnerService {
                 );
             }
             Err(e) => {
-                info!(rustc_path = %rustc_path, error = %e, "rustc does NOT exist");
+                debug!(rustc_path = %rustc_path, error = %e, "rustc does NOT exist");
                 // Try to list parent directory
                 let parent = rustc_path.parent().unwrap_or(&prefix_path);
-                info!(parent = %parent, "listing parent directory");
+                debug!(parent = %parent, "listing parent directory");
                 match tokio::fs::read_dir(parent.as_str()).await {
                     Ok(mut entries) => {
                         while let Ok(Some(entry)) = entries.next_entry().await {
-                            info!(entry = ?entry.path(), "  entry in parent");
+                            trace!(entry = ?entry.path(), "  entry in parent");
                         }
                     }
                     Err(e) => {
-                        info!(parent = %parent, error = %e, "failed to read parent directory");
+                        debug!(parent = %parent, error = %e, "failed to read parent directory");
                         // Try grandparent
                         if let Some(grandparent) = parent.parent() {
-                            info!(grandparent = %grandparent, "listing grandparent");
+                            debug!(grandparent = %grandparent, "listing grandparent");
                             if let Ok(mut entries) = tokio::fs::read_dir(grandparent.as_str()).await
                             {
                                 while let Ok(Some(entry)) = entries.next_entry().await {
-                                    info!(entry = ?entry.path(), "  entry in grandparent");
+                                    trace!(entry = ?entry.path(), "  entry in grandparent");
                                 }
                             }
                         }
@@ -335,6 +348,19 @@ impl RunnerService {
     /// Compile a C source file using VFS-based execution
     pub async fn compile_cc_vfs(&self, request: CcCompileRequest) -> CcCompileResult {
         let start = Instant::now();
+
+        if let Some(reason) = self.get_vfs_startup_error().await {
+            return CcCompileResult {
+                success: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                output_manifest: None,
+                discovered_deps: vec![],
+                error: Some(format_vfs_startup_failure(&reason)),
+            };
+        }
 
         info!(
             source = %request.source_path,
@@ -562,5 +588,51 @@ impl RunnerService {
             discovered_deps: vec![], // TODO: parse depfile if generated
             error: None,
         }
+    }
+}
+
+fn format_vfs_startup_failure(failure: &VfsStartupFailure) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("VFS unavailable: {}", failure.reason));
+
+    for diagnostic in &failure.diagnostics {
+        lines.push(format!(
+            "- [{}] {}",
+            issue_code_name(diagnostic.code),
+            diagnostic.summary
+        ));
+        if let Some(detail) = &diagnostic.detail {
+            lines.push(format!("  detail: {}", detail));
+        }
+        for action in &diagnostic.actions {
+            lines.push(format!("  action: {}", render_action(action)));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn issue_code_name(code: VfsIssueCode) -> &'static str {
+    match code {
+        VfsIssueCode::UnsupportedPlatform => "unsupported_platform",
+        VfsIssueCode::AppMissing => "app_missing",
+        VfsIssueCode::ExtensionNotInstalled => "extension_not_installed",
+        VfsIssueCode::ExtensionDisabled => "extension_disabled",
+        VfsIssueCode::HealthCheckFailed => "health_check_failed",
+        VfsIssueCode::MountFailed => "mount_failed",
+    }
+}
+
+fn render_action(action: &VfsAction) -> String {
+    match action {
+        VfsAction::RetryBuild => "retry the build".to_string(),
+        VfsAction::RunVxApp => {
+            if cfg!(target_os = "macos") {
+                "run `vx doctor`".to_string()
+            } else {
+                "run the platform-specific Vixen setup flow".to_string()
+            }
+        }
+        VfsAction::OpenDownloadUrl(url) => format!("install Vixen from {}", url),
     }
 }

@@ -12,10 +12,10 @@ use tracing::{debug, info, trace, warn};
 
 use crate::action_graph::{Action, ActionGraph};
 use crate::error::VxdError;
-use vxd_proto::{ActionType, ProgressListenerClient};
-use vx_store_proto::{Blake3Hash, StoreClient};
-use vx_runner_proto::RunnerClient;
 use vx_rs::CrateId;
+use vx_runner_proto::RunnerClient;
+use vx_store_proto::{Blake3Hash, StoreClient};
+use vxd_proto::{ActionType, ProgressListenerClient};
 
 /// State of an individual action
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,7 +200,7 @@ impl Executor {
 
             // If no dependencies, it's ready immediately
             if dep_count == 0 {
-                info!(
+                debug!(
                     "EXECUTOR NEW: READY node {:?} action={}",
                     node_idx,
                     action.display_name()
@@ -209,7 +209,7 @@ impl Executor {
             }
         }
 
-        info!(
+        debug!(
             "EXECUTOR NEW: initialized with ready_queue_size={} total_nodes={}",
             ready_queue.len(),
             graph.graph.node_count()
@@ -218,7 +218,7 @@ impl Executor {
         // Log first few ready actions for debugging
         for (i, &node_idx) in ready_queue.iter().enumerate().take(3) {
             let action = &graph.graph[node_idx].action;
-            info!(
+            debug!(
                 "EXECUTOR NEW: ready[{}] = {:?} {}",
                 i,
                 node_idx,
@@ -267,7 +267,7 @@ impl Executor {
 
             // Spawn all ready actions
             while let Some(node_idx) = self.ready_queue.pop_front() {
-                info!("EXECUTE: spawning action for node {:?}", node_idx);
+                debug!("EXECUTE: spawning action for node {:?}", node_idx);
                 self.states.insert(node_idx, ActionState::Running);
                 let permit = self
                     .concurrency_limit
@@ -295,7 +295,7 @@ impl Executor {
                 Some(ExecutorMessage::ActionCompleted { node_idx, result }) => {
                     match result {
                         Ok(action_result) => {
-                            info!("EXECUTE: action {:?} completed successfully", node_idx);
+                            debug!("EXECUTE: action {:?} completed successfully", node_idx);
                             self.states.insert(node_idx, ActionState::Completed);
                             self.results.write().await.insert(node_idx, action_result);
 
@@ -306,7 +306,7 @@ impl Executor {
                                 let count = self.remaining_deps.get_mut(&dependent_idx).unwrap();
                                 *count -= 1;
                                 if *count == 0 {
-                                    info!("EXECUTE: action {:?} now ready", dependent_idx);
+                                    debug!("EXECUTE: action {:?} now ready", dependent_idx);
                                     self.ready_queue.push_back(dependent_idx);
                                 }
                             }
@@ -623,7 +623,7 @@ impl Executor {
         let toolchain_node_idx = self.graph.toolchain_node; // For looking up toolchain result
 
         tokio::spawn(async move {
-            info!("SPAWN_ACTION task: started for {:?}", node_idx);
+            debug!("SPAWN_ACTION task: started for {:?}", node_idx);
 
             // Start progress tracking
             let action_type = action.to_progress_action_type();
@@ -633,7 +633,7 @@ impl Executor {
                 None
             };
 
-            info!(
+            debug!(
                 "SPAWN_ACTION task: calling execute_action for {:?}",
                 node_idx
             );
@@ -651,7 +651,7 @@ impl Executor {
             )
             .await;
 
-            info!(
+            debug!(
                 "SPAWN_ACTION task: execute_action returned for {:?}: {:?}",
                 node_idx,
                 result.is_ok()
@@ -662,14 +662,14 @@ impl Executor {
                 let _ = listener.complete_action(id).await;
             }
 
-            info!(
+            debug!(
                 "SPAWN_ACTION task: sending completion message for {:?}",
                 node_idx
             );
             // Send result back to executor
             let _ = message_tx.send(ExecutorMessage::ActionCompleted { node_idx, result });
 
-            info!("SPAWN_ACTION task: done for {:?}", node_idx);
+            debug!("SPAWN_ACTION task: done for {:?}", node_idx);
             // Permit dropped here, allowing next action to run
         });
     }
@@ -689,11 +689,11 @@ async fn execute_action(
 ) -> Result<ActionResult, VxdError> {
     use crate::queries::*;
     use camino::Utf8PathBuf;
-    use vx_store_proto::{IngestTreeRequest, TreeFile};
-    use vx_runner_proto::{RustCompileRequest, RustDep};
     use vx_rs::crate_graph::CrateSource;
+    use vx_runner_proto::{RustCompileRequest, RustDep};
+    use vx_store_proto::{IngestTreeRequest, TreeFile};
 
-    info!(
+    debug!(
         "EXECUTE_ACTION: processing action {}",
         action.display_name()
     );
@@ -772,12 +772,13 @@ async fn execute_action(
 
             match result.status {
                 EnsureStatus::Hit | EnsureStatus::Downloaded => {
-                    let manifest_hash = result.manifest_hash.ok_or_else(|| {
-                        VxdError::RegistryCrateNoManifest {
-                            name: name.clone(),
-                            version: version.clone(),
-                        }
-                    })?;
+                    let manifest_hash =
+                        result
+                            .manifest_hash
+                            .ok_or_else(|| VxdError::RegistryCrateNoManifest {
+                                name: name.clone(),
+                                version: version.clone(),
+                            })?;
 
                     let was_cached = result.status == EnsureStatus::Hit;
 
@@ -821,7 +822,7 @@ async fn execute_action(
             toolchain,
             config,
         } => {
-            info!("COMPILE: starting compilation for crate {}", crate_name);
+            debug!("COMPILE: starting compilation for crate {}", crate_name);
             let workspace_root = Utf8PathBuf::from(&workspace_root_str);
 
             // Look up the toolchain result to get the real manifest hash and toolchain ID
@@ -834,7 +835,7 @@ async fn execute_action(
                         manifest_hash,
                         ..
                     }) => {
-                        info!(
+                        debug!(
                             "COMPILE: using acquired toolchain manifest_hash={} toolchain_id={}",
                             manifest_hash, toolchain_id
                         );
@@ -873,7 +874,7 @@ async fn execute_action(
             )
             .map_err(|e| VxdError::Picante(e.to_string()))?;
 
-            info!("COMPILE: computing source closure for {}", crate_name);
+            debug!("COMPILE: computing source closure for {}", crate_name);
             // Compute source closure and hash (for path crates)
             let (closure_paths, closure_hash) = match &source {
                 CrateSource::Path { .. } => {
@@ -895,7 +896,7 @@ async fn execute_action(
                 }
             };
 
-            info!(
+            debug!(
                 "COMPILE: source closure computed for {}, updating picante",
                 crate_name
             );
@@ -1147,12 +1148,12 @@ async fn execute_action(
                     .join(target_triple)
                     .join(profile);
 
-                tokio::fs::create_dir_all(&output_dir).await.map_err(|e| {
-                    VxdError::CreateDir {
+                tokio::fs::create_dir_all(&output_dir)
+                    .await
+                    .map_err(|e| VxdError::CreateDir {
                         path: output_dir.clone(),
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
 
                 // Ensure .vx is in .gitignore (best-effort, don't fail build if this fails)
                 match vx_io::git::ensure_vx_gitignored(&workspace_root).await {
@@ -1324,12 +1325,11 @@ async fn execute_action(
                 });
             }
 
-            let object_hash =
-                result
-                    .output_manifest
-                    .ok_or_else(|| VxdError::NoOutputManifest {
-                        crate_name: source.clone(),
-                    })?;
+            let object_hash = result
+                .output_manifest
+                .ok_or_else(|| VxdError::NoOutputManifest {
+                    crate_name: source.clone(),
+                })?;
 
             info!(
                 source = %source,
@@ -1411,12 +1411,11 @@ async fn execute_action(
                 });
             }
 
-            let binary_hash =
-                result
-                    .output_manifest
-                    .ok_or_else(|| VxdError::NoOutputManifest {
-                        crate_name: name.clone(),
-                    })?;
+            let binary_hash = result
+                .output_manifest
+                .ok_or_else(|| VxdError::NoOutputManifest {
+                    crate_name: name.clone(),
+                })?;
 
             info!(
                 name = %name,
@@ -1427,12 +1426,10 @@ async fn execute_action(
 
             // Materialize binary to workspace
             let binary_path = workspace_root.join(output);
-            let binary_parent = binary_path
-                .parent()
-                .ok_or_else(|| VxdError::Compilation {
-                    crate_name: name.clone(),
-                    message: format!("Invalid binary output path: {}", binary_path),
-                })?;
+            let binary_parent = binary_path.parent().ok_or_else(|| VxdError::Compilation {
+                crate_name: name.clone(),
+                message: format!("Invalid binary output path: {}", binary_path),
+            })?;
 
             // Create output directory
             tokio::fs::create_dir_all(binary_parent)

@@ -9,8 +9,8 @@ use eyre::{Result, bail};
 use facet::Facet;
 use figue as args;
 use owo_colors::OwoColorize;
-use vxd_proto::{ActionType, VxdClient, BuildRequest, ProgressListener};
 use vx_report::{CacheOutcome, ReportStore, RunDiff};
+use vxd_proto::{ActionType, BuildRequest, ProgressListener, VxdClient};
 
 /// vx - Build execution engine with deterministic caching
 #[derive(Facet, Debug)]
@@ -576,13 +576,10 @@ async fn cmd_doctor() -> Result<()> {
 
     #[cfg(target_os = "macos")]
     {
-        const VIXEN_APP_PATH: &str = "/Applications/Vixen.app";
-        const VIXEN_EXTENSION_IDENTIFIER: &str = "eu.bearcove.vixenfs";
+        let app_installed = vx_vfs::is_app_installed().await;
+        let health = vx_vfs::check_extension_health().await;
 
-        let app_installed = std::path::Path::new(VIXEN_APP_PATH).exists();
-        let extension_enabled = check_vixen_extension_enabled(VIXEN_EXTENSION_IDENTIFIER);
-
-        if extension_enabled {
+        if matches!(health.as_ref(), Some(h) if h.extension_enabled) {
             println!("{} {}", "filesystem extension:".bold(), "enabled".green());
         } else {
             println!(
@@ -592,7 +589,10 @@ async fn cmd_doctor() -> Result<()> {
             );
 
             if app_installed {
-                match std::process::Command::new("open").arg(VIXEN_APP_PATH).status() {
+                match std::process::Command::new("open")
+                    .arg(vx_vfs::VIXEN_APP_PATH)
+                    .status()
+                {
                     Ok(status) if status.success() => {
                         println!(
                             "{} Opened Vixen.app to guide filesystem extension setup.",
@@ -618,7 +618,7 @@ async fn cmd_doctor() -> Result<()> {
                 println!(
                     "{} {} is missing; install it first.",
                     "note:".bold(),
-                    VIXEN_APP_PATH
+                    vx_vfs::VIXEN_APP_PATH
                 );
             }
         }
@@ -626,30 +626,6 @@ async fn cmd_doctor() -> Result<()> {
 
     Ok(())
 }
-
-#[cfg(target_os = "macos")]
-fn check_vixen_extension_enabled(extension_identifier: &str) -> bool {
-    let output = match std::process::Command::new("pluginkit")
-        .arg("-m")
-        .arg("-p")
-        .arg("com.apple.fskit.fsmodule")
-        .output()
-    {
-        Ok(output) => output,
-        Err(_) => return false,
-    };
-
-    if !output.status.success() {
-        return false;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.lines().any(|line| {
-        let trimmed = line.trim_start();
-        trimmed.starts_with('+') && trimmed.contains(extension_identifier)
-    })
-}
-
 fn cmd_explain(args: ExplainArgs) -> Result<()> {
     let cwd = Utf8PathBuf::try_from(std::env::current_dir()?)?;
     let store = ReportStore::new(&cwd);

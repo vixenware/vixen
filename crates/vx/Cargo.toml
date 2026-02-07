@@ -22,6 +22,7 @@ indicatif = { workspace = true }
 vxd-proto = { workspace = true }
 vx-io = { workspace = true }
 vx-report = { workspace = true }
+vx-vfs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
