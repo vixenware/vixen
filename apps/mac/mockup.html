@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vixen Setup Mockup</title>
+<style>
+  :root {
+    --bg: #f5f3f0;
+    --text: #1a1a1a;
+    --text-secondary: #888;
+    --orange: #E88602;
+    --orange-muted: #F6D9B6;
+    --settings-bg: #eae8e5;
+    --settings-row-bg: #ffffff;
+    --separator: rgba(0,0,0,0.08);
+    --toggle-off-bg: #ccc;
+    --toggle-on-bg: #007AFF;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1e1e1e;
+      --text: #f0f0f0;
+      --text-secondary: #888;
+      --settings-bg: #2a2a2a;
+      --settings-row-bg: #333;
+      --separator: rgba(255,255,255,0.08);
+      --toggle-off-bg: #555;
+    }
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px;
+    gap: 80px;
+  }
+
+  h1.page-label {
+    font-size: 14px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--text-secondary);
+    text-align: center;
+  }
+
+  .page {
+    max-width: 880px;
+    width: 100%;
+  }
+
+  .divider {
+    width: 100%;
+    max-width: 880px;
+    height: 1px;
+    background: var(--separator);
+  }
+
+  /* Fox icon */
+  .fox-icon {
+    text-align: center;
+    margin-bottom: 48px;
+  }
+  .fox-icon img {
+    width: 128px;
+    height: 128px;
+  }
+
+  /* Main layout: steps on left, settings mockup on right */
+  .main {
+    display: flex;
+    align-items: flex-start;
+    gap: 64px;
+  }
+
+  /* Steps column */
+  .steps {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .step-row {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+  }
+
+  .circle {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .circle.done {
+    background: var(--orange);
+  }
+  .circle.done svg {
+    width: 14px;
+    height: 14px;
+  }
+  .circle.pending {
+    border: 2.5px solid var(--orange-muted);
+    background: transparent;
+  }
+
+  .connector {
+    width: 3px;
+    height: 32px;
+    border-radius: 1.5px;
+    margin: 6px 0 6px 12.5px; /* centered under 28px circle */
+  }
+  .connector.active { background: var(--orange); }
+  .connector.muted { background: var(--orange-muted); }
+
+  .step-title {
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.3px;
+  }
+
+  .step-subtitle {
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin-top: 3px;
+  }
+
+  .step-action {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+  }
+
+  .open-settings-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--orange);
+    color: white;
+    border: none;
+    border-radius: 7px;
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .open-settings-btn svg {
+    width: 14px;
+    height: 14px;
+    fill: white;
+  }
+
+  .step-action span {
+    font-size: 14px;
+    color: var(--text-secondary);
+  }
+
+  /* Settings mockup */
+  .settings-mockup {
+    width: 340px;
+    flex-shrink: 0;
+    position: relative;
+  }
+
+  .settings-panel {
+    background: var(--settings-bg);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .settings-header {
+    display: flex;
+    gap: 12px;
+    padding: 14px 16px;
+    align-items: flex-start;
+  }
+
+  .settings-header-icon {
+    width: 36px;
+    height: 36px;
+    background: var(--toggle-off-bg);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    opacity: 0.7;
+  }
+  .settings-header-icon svg {
+    width: 20px;
+    height: 20px;
+    fill: var(--text);
+    opacity: 0.6;
+  }
+
+  .settings-header-text h3 {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 3px;
+  }
+  .settings-header-text p {
+    font-size: 11px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+  }
+
+  .settings-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 0 10px 10px 10px;
+  }
+
+  .settings-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--settings-row-bg);
+    min-height: 44px;
+  }
+  .settings-row:first-child { border-radius: 8px 8px 0 0; }
+  .settings-row:last-child { border-radius: 0 0 8px 8px; }
+  .settings-row:only-child { border-radius: 8px; }
+  .settings-row + .settings-row { border-top: 1px solid var(--separator); }
+
+  .settings-row-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+  .settings-row-icon.generic {
+    background: var(--toggle-off-bg);
+    opacity: 0.5;
+  }
+  .settings-row-icon.generic svg {
+    width: 16px;
+    height: 16px;
+    fill: var(--text);
+    opacity: 0.6;
+  }
+  .settings-row-icon.vixen {
+    background: var(--orange);
+  }
+  .settings-row-icon.vixen img {
+    width: 28px;
+    height: 28px;
+  }
+
+  .settings-row-label { flex: 1; min-width: 0; }
+  .settings-row-label .name { font-size: 13px; font-weight: 500; }
+  .settings-row-label .vendor { font-size: 11px; color: var(--text-secondary); }
+
+  .toggle {
+    width: 40px;
+    height: 24px;
+    border-radius: 12px;
+    position: relative;
+    flex-shrink: 0;
+    transition: background 0.3s ease;
+  }
+  .toggle.on { background: var(--toggle-on-bg); }
+  .toggle.off { background: var(--toggle-off-bg); }
+  .toggle .knob {
+    width: 20px;
+    height: 20px;
+    background: white;
+    border-radius: 50%;
+    position: absolute;
+    top: 2px;
+    transition: left 0.3s ease;
+  }
+  .toggle.on .knob { left: 18px; }
+  .toggle.off .knob { left: 2px; }
+
+  .toggle.animated {
+    animation: toggleBg 3s ease-in-out infinite;
+  }
+  .toggle.animated .knob {
+    animation: toggleKnob 3s ease-in-out infinite;
+  }
+  @keyframes toggleBg {
+    0%, 30% { background: var(--toggle-off-bg); }
+    40%, 90% { background: var(--toggle-on-bg); }
+    100% { background: var(--toggle-off-bg); }
+  }
+  @keyframes toggleKnob {
+    0%, 30% { left: 2px; }
+    40%, 90% { left: 18px; }
+    100% { left: 2px; }
+  }
+
+  .cursor-arrow {
+    position: absolute;
+    right: 44px;
+    top: 108px;
+    font-size: 20px;
+    animation: cursorBob 1.25s ease-in-out infinite alternate;
+    pointer-events: none;
+    opacity: 0.8;
+  }
+  @keyframes cursorBob {
+    0% { transform: translate(-20px, 12px); }
+    100% { transform: translate(0px, 0px); }
+  }
+
+  /* === Complete state === */
+  .complete-state {
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 20px;
+  }
+
+  .complete-state h2 {
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.5px;
+  }
+
+  .complete-state p {
+    font-size: 16px;
+    color: var(--text-secondary);
+    max-width: 400px;
+    line-height: 1.5;
+  }
+
+  .get-started-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--orange);
+    color: white;
+    border: none;
+    border-radius: 10px;
+    padding: 12px 28px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    margin-top: 8px;
+  }
+  .get-started-btn svg {
+    width: 18px;
+    height: 18px;
+    fill: white;
+  }
+
+  /* Checkmark summary row for complete state */
+  .check-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 4px;
+  }
+  .check-summary-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .check-summary-row .mini-circle {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--orange);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .check-summary-row .mini-circle svg {
+    width: 11px;
+    height: 11px;
+  }
+  .check-summary-row span {
+    font-size: 15px;
+    color: var(--text-secondary);
+  }
+
+  .gear-svg { fill: white; }
+</style>
+</head>
+<body>
+
+<!-- ==================== STATE 1: Setup in progress ==================== -->
+<h1 class="page-label">State 1 — Setup in progress</h1>
+<div class="page">
+  <div class="fox-icon">
+    <img src="../../art/fox.svg" alt="">
+  </div>
+
+  <div class="main">
+    <div class="steps">
+      <div class="step-row">
+        <div class="circle done">
+          <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="step-content">
+          <div class="step-title">Vixen app</div>
+          <div class="step-subtitle">An Apple requirement, also, look, a fox!</div>
+        </div>
+      </div>
+      <div class="connector active"></div>
+
+      <div class="step-row">
+        <div class="circle done">
+          <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="step-content">
+          <div class="step-title">macOS 26.0+</div>
+          <div class="step-subtitle">We need the latest FSKit. <a href="https://developer.apple.com/documentation/fskit/fspathurlresource" target="_blank" style="color: var(--orange); text-decoration: none; font-weight: 500; font-size: 12px;">Why?</a></div>
+        </div>
+      </div>
+      <div class="connector muted"></div>
+
+      <div class="step-row">
+        <div class="circle pending"></div>
+        <div class="step-content">
+          <div class="step-title">VixenFS extension</div>
+          <div class="step-subtitle">Truly hermetic builds with a VFS</div>
+        </div>
+      </div>
+      <div class="step-action" style="margin-left: 42px;">
+        <button class="open-settings-btn">
+          <svg class="gear-svg" viewBox="0 0 20 20"><path d="M10 13a3 3 0 100-6 3 3 0 000 6zm7.07-2.25l-1.12-.65a5.98 5.98 0 000-2.2l1.12-.65a.5.5 0 00.18-.68l-1-1.73a.5.5 0 00-.68-.18l-1.12.65a5.97 5.97 0 00-1.9-1.1V3.5a.5.5 0 00-.5-.5h-2a.5.5 0 00-.5.5v1.3a5.97 5.97 0 00-1.9 1.1l-1.12-.65a.5.5 0 00-.68.18l-1 1.73a.5.5 0 00.18.68l1.12.65a5.98 5.98 0 000 2.2l-1.12.65a.5.5 0 00-.18.68l1 1.73a.5.5 0 00.68.18l1.12-.65c.56.46 1.2.83 1.9 1.1v1.3a.5.5 0 00.5.5h2a.5.5 0 00.5-.5v-1.3a5.97 5.97 0 001.9-1.1l1.12.65a.5.5 0 00.68-.18l1-1.73a.5.5 0 00-.18-.68z"/></svg>
+          Open Settings
+        </button>
+        <span>then toggle it on.</span>
+      </div>
+    </div>
+
+    <!-- Settings mockup -->
+    <div class="settings-mockup">
+      <div class="settings-panel">
+        <div class="settings-header">
+          <div class="settings-header-icon">
+            <svg viewBox="0 0 24 24"><path d="M4 7h16a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V9a2 2 0 012-2zm0 2v6h16V9H4zm2 2h2v2H6v-2z"/></svg>
+          </div>
+          <div class="settings-header-text">
+            <h3>File System Extensions</h3>
+            <p>File System extensions allow you to extend the file system functionality of macOS without requiring kernel-level access.</p>
+          </div>
+        </div>
+
+        <div class="settings-rows">
+          <div class="settings-row">
+            <div class="settings-row-icon vixen">
+              <img src="../../art/fox.svg" alt="">
+            </div>
+            <div class="settings-row-label">
+              <div class="name">VixenFS Extension</div>
+            </div>
+            <div class="toggle animated"><div class="knob"></div></div>
+          </div>
+          <div class="settings-row">
+            <div class="settings-row-icon generic">
+              <svg viewBox="0 0 24 24"><path d="M4 7h16a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V9a2 2 0 012-2zm0 2v6h16V9H4z"/></svg>
+            </div>
+            <div class="settings-row-label">
+              <div class="name">exfat</div>
+              <div class="vendor">Apple</div>
+            </div>
+            <div class="toggle on"><div class="knob"></div></div>
+          </div>
+          <div class="settings-row">
+            <div class="settings-row-icon generic">
+              <svg viewBox="0 0 24 24"><path d="M4 7h16a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V9a2 2 0 012-2zm0 2v6h16V9H4z"/></svg>
+            </div>
+            <div class="settings-row-label">
+              <div class="name">msdos</div>
+              <div class="vendor">Apple</div>
+            </div>
+            <div class="toggle on"><div class="knob"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="cursor-arrow">&#10094;&#xFE0E;</div>
+    </div>
+  </div>
+</div>
+
+<div class="divider"></div>
+
+<!-- ==================== STATE 2: All complete ==================== -->
+<h1 class="page-label">State 2 — All steps complete</h1>
+<div class="page">
+  <div class="fox-icon">
+    <img src="../../art/fox.svg" alt="">
+  </div>
+
+  <div class="complete-state">
+    <h2>You're ready to use Vixen</h2>
+
+    <div class="check-summary">
+      <div class="check-summary-row">
+        <div class="mini-circle">
+          <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <span>Vixen app</span>
+      </div>
+      <div class="check-summary-row">
+        <div class="mini-circle">
+          <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <span>macOS 26.0+</span>
+      </div>
+      <div class="check-summary-row">
+        <div class="mini-circle">
+          <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <span>VixenFS extension enabled</span>
+      </div>
+    </div>
+
+    <p>Everything is set up. Vixen is ready to build.</p>
+
+    <button class="get-started-btn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+      Get Started
+    </button>
+  </div>
+</div>
+
+</body>
+</html>
