@@ -45,16 +45,11 @@ struct ContentView: View {
     @State private var cursorBob = false
 
     private let requiredMajorVersion = 26
-    private let stepCircleSize: CGFloat = 28
+    private let foxSize: CGFloat = 96
     private let brandOrange = Color(hex: 0xE88602)
-    private let brandOrangeMuted = Color(hex: 0xF6D9B6)
     private let baseBg = Color(light: 0xFFFFFF, dark: 0x1E2020)
     private let sectionBg = Color(light: 0xF0F0F0, dark: 0x252626)
     private let sectionRowBg = Color(light: 0xFFFFFF, dark: 0x2E2E2E)
-
-    private static let settingsAppIcon: NSImage = {
-        NSWorkspace.shared.icon(forFile: "/System/Applications/System Settings.app")
-    }()
 
     private var isSupportedOS: Bool {
         ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= requiredMajorVersion
@@ -67,11 +62,13 @@ struct ContentView: View {
         Group {
             if !isSupportedOS {
                 unsupportedOSView
+            } else if allComplete {
+                completeView
             } else {
-                onboardingView
+                setupView
             }
         }
-        .padding(40)
+        .padding(36)
         .frame(width: 720)
         .background(baseBg)
         .task {
@@ -102,7 +99,7 @@ struct ContentView: View {
                 .frame(width: 128, height: 128)
 
             Text("macOS \(requiredMajorVersion) Required")
-                .font(.system(size: 24, weight: .semibold, design: .rounded))
+                .font(.system(size: 24, weight: .bold))
 
             Text("Vixen needs FSKit features available in macOS \(requiredMajorVersion) and later.")
                 .font(.system(size: 15))
@@ -125,22 +122,54 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Onboarding
+    // MARK: - Setup (Almost there)
 
-    private var onboardingView: some View {
-        HStack(alignment: .center, spacing: 56) {
+    private var setupView: some View {
+        HStack(alignment: .center, spacing: 32) {
+            // Left column: fox (fixed width)
             Image("fox_logo")
                 .resizable()
                 .aspectRatio(contentMode: .fit)
-                .frame(width: 160, height: 160)
+                .frame(width: foxSize, height: foxSize)
 
-            if allComplete {
-                completeView
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                stepsView
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            // Center column: content (takes all remaining space)
+            VStack(spacing: 16) {
+                Text("Almost there")
+                    .font(.system(size: 24, weight: .bold))
+
+                Text("Vixen uses a virtual file system to give your builds a hermetic, reproducible view of the world. Enable the VixenFS extension in System Settings to get started.")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                settingsPreview
+
+                if let error = extensionError {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.yellow)
+                        Text(error)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Button(action: openExtensionSettings) {
+                    Text("Open Settings")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 28)
+                        .padding(.vertical, 12)
+                        .background(brandOrange, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
             }
+            .frame(maxWidth: .infinity)
+
+            // Right column: balance (fixed width, matches fox)
+            Spacer()
+                .frame(width: foxSize)
         }
     }
 
@@ -186,99 +215,6 @@ struct ContentView: View {
         NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
     }
 
-    // MARK: - Steps
-
-    private var stepsView: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            stepRow(title: "Vixen app", isComplete: true) {
-                Text("An Apple requirement, also, look, a fox!")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-            }
-            stepRow(title: "macOS \(requiredMajorVersion).0+", isComplete: isSupportedOS) {
-                Text("We need the latest FSKit.")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-            }
-            stepRow(title: "VixenFS extension", isComplete: isExtensionEnabled) {
-                Text("Truly hermetic builds with a VFS")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-            }
-
-            if !isExtensionEnabled {
-                VStack(alignment: .leading, spacing: 16) {
-                    settingsPreview
-
-                    if let error = extensionError {
-                        HStack(spacing: 8) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.yellow)
-                            Text(error)
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    Button(action: openExtensionSettings) {
-                        HStack(spacing: 8) {
-                            Image(nsImage: Self.settingsAppIcon)
-                                .resizable()
-                                .frame(width: 24, height: 24)
-                            Text("Open Settings")
-                                .font(.system(size: 15))
-                            Image(systemName: "arrow.forward")
-                                .font(.system(size: 12, weight: .semibold))
-                        }
-                        .foregroundStyle(brandOrange)
-                    }
-                    .buttonStyle(.plain)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                }
-                .padding(.leading, stepCircleSize + 14)
-                .padding(.top, 8)
-            }
-        }
-        .background(alignment: .topLeading) {
-            Rectangle()
-                .fill(Color(nsColor: .separatorColor).opacity(0.5))
-                .frame(width: 1)
-                .padding(.top, 24)
-                .padding(.bottom, 24)
-                .padding(.leading, stepCircleSize / 2)
-        }
-    }
-
-    private func stepRow<S: View>(
-        title: String,
-        isComplete: Bool,
-        @ViewBuilder subtitle: () -> S
-    ) -> some View {
-        HStack(alignment: .center, spacing: 14) {
-            ZStack {
-                Circle()
-                    .fill(isComplete ? brandOrange : baseBg)
-                if !isComplete {
-                    Circle().stroke(brandOrangeMuted, lineWidth: 2)
-                }
-                if isComplete {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(.white)
-                }
-            }
-            .frame(width: stepCircleSize, height: stepCircleSize)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 17, weight: .semibold))
-                subtitle()
-            }
-        }
-        .padding(.vertical, 10)
-        .opacity(isComplete ? 0.5 : 1.0)
-    }
-
     // MARK: - Settings preview
 
     private func settingsDiskIcon(filled: Bool) -> some View {
@@ -292,7 +228,6 @@ struct ContentView: View {
 
     private var settingsPreview: some View {
         VStack(spacing: 0) {
-            // Foreign chrome: signals this is a System Settings preview
             HStack(spacing: 5) {
                 Image(systemName: "gearshape.fill")
                     .font(.system(size: 9))
@@ -315,7 +250,6 @@ struct ContentView: View {
             Divider()
                 .opacity(0.5)
 
-            // Muted to read as illustration, not interactive UI
             VStack(spacing: 8) {
                 HStack(alignment: .top, spacing: 12) {
                     settingsDiskIcon(filled: false)
@@ -385,49 +319,40 @@ struct ContentView: View {
     // MARK: - Complete view
 
     private var completeView: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("All the boxes are checked")
-                .font(.system(size: 24, weight: .semibold, design: .rounded))
+        HStack(alignment: .center, spacing: 32) {
+            Image("fox_logo")
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: foxSize, height: foxSize)
 
-            VStack(alignment: .leading, spacing: 10) {
-                miniCheck("Vixen app")
-                miniCheck("macOS \(requiredMajorVersion).0+")
-                miniCheck("VixenFS extension enabled")
-            }
+            VStack(spacing: 20) {
+                Text("You're all set")
+                    .font(.system(size: 24, weight: .bold))
 
-            Text("You're ready to build with Vixen")
-                .font(.system(size: 15))
-                .foregroundStyle(.secondary)
+                Text("VixenFS is enabled. Head to the docs to install the CLI and run your first build.")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
 
-            Button {
-                if let url = URL(string: "https://vixen.rs/") {
-                    NSWorkspace.shared.open(url)
+                Button {
+                    if let url = URL(string: "https://vixen.rs/") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Label("Get Started", systemImage: "arrow.up.right")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 28)
+                        .padding(.vertical, 12)
+                        .background(brandOrange, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
-            } label: {
-                Label("Get Started", systemImage: "arrow.up.right")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 12)
-                    .background(brandOrange, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
-        }
-    }
+            .frame(maxWidth: .infinity)
 
-    private func miniCheck(_ label: String) -> some View {
-        HStack(spacing: 10) {
-            ZStack {
-                Circle()
-                    .fill(brandOrange)
-                    .frame(width: 20, height: 20)
-                Image(systemName: "checkmark")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-            Text(label)
-                .font(.system(size: 15))
-                .foregroundStyle(.secondary)
+            Spacer()
+                .frame(width: foxSize)
         }
     }
 }
