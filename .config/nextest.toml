@@ -3,12 +3,6 @@
 # Enable experimental setup scripts feature
 experimental = ["setup-scripts"]
 
-# Setup script to build daemon binaries before tests
-# Integration tests spawn vxd/vx-store/vx-runner from target/debug/
-# These aren't test dependencies, so cargo won't rebuild them automatically
-[scripts.setup.build-daemons]
-command = 'cargo build --bin vx --bin vxd --bin vx-store --bin vx-runner'
-
 # Warmup script: prime a shared CAS with toolchains so per-test
 # materializations can read from it via LayeredStorage (VX_CAS_BASE).
 # Runs after build-daemons (needs the built binaries).
@@ -18,4 +12,4 @@ command = 'bash tests/warmup-toolchains.sh'
 # Run setup scripts for all tests (order matters: build first, then warmup)
 [[profile.default.scripts]]
 filter = 'all()'
-setup = ['build-daemons', 'warmup-toolchains']
+setup = ['warmup-toolchains']

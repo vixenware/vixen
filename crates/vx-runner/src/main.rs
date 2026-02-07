@@ -4,19 +4,14 @@
 //! A remote-capable compilation service - all inputs/outputs go through CAS.
 //!
 //! Responsibilities:
-//! - Materialize toolchains from CAS (cached locally)
-//! - Materialize source trees from CAS
-//! - Materialize dependency artifacts from CAS
+//! - Populate VFS prefixes with toolchains/sources/deps from CAS metadata
 //! - Run rustc/zig
 //! - Ingest outputs to CAS
 //! - Return output manifest hashes
 
 pub(crate) mod error;
-pub(crate) mod extract;
-pub(crate) mod registry;
 pub(crate) mod service;
 pub(crate) mod service_vfs;
-pub(crate) mod toolchain;
 pub(crate) mod vfs;
 
 use error::{Result as RunnerResult, RunnerError};
@@ -35,15 +30,9 @@ use vx_runner_proto::RunnerDispatcher;
 use vx_store_proto::{Blake3Hash, StoreClient};
 use vx_vfs::{VfsAction, VfsConfig, VfsDiagnostic, VfsIssueCode, VfsStart};
 
-use crate::registry::RegistryMaterializer;
 use crate::vfs::CasVfs;
 
 pub type CasCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
-
-/// Type alias for inflight materialization tracking
-type InflightMaterializations = Arc<
-    tokio::sync::Mutex<HashMap<Blake3Hash, Arc<tokio::sync::OnceCell<RunnerResult<Utf8PathBuf>>>>>,
->;
 
 #[derive(Debug, Clone)]
 pub(crate) struct VfsStartupFailure {
@@ -69,12 +58,6 @@ pub(crate) fn runner_mount_base() -> Utf8PathBuf {
 
 #[derive(Debug)]
 struct Args {
-    /// Toolchains directory
-    toolchains_dir: Utf8PathBuf,
-
-    /// Registry cache directory
-    registry_cache_dir: Utf8PathBuf,
-
     /// CAS endpoint
     cas_endpoint: Endpoint,
 
@@ -156,10 +139,7 @@ impl Args {
             let home = std::env::var("HOME").expect("HOME not set");
             format!("{}/.vx", home)
         });
-        let vx_home = Utf8PathBuf::from(&vx_home);
-
-        let toolchains_dir = vx_home.join("toolchains");
-        let registry_cache_dir = vx_home.join("registry");
+        let vx_home = Utf8PathBuf::from(vx_home);
 
         // Parse CAS endpoint (defaults to Unix socket)
         let cas_endpoint = match std::env::var("VX_STORE") {
@@ -191,12 +171,7 @@ impl Args {
             }
         };
 
-        Ok(Args {
-            toolchains_dir,
-            registry_cache_dir,
-            cas_endpoint,
-            bind,
-        })
+        Ok(Args { cas_endpoint, bind })
     }
 }
 
@@ -250,25 +225,13 @@ async fn main() -> Result<()> {
 
     // Initialize services
     tracing::info!("Initializing Runner services");
-    tracing::info!("  Toolchains: {}", args.toolchains_dir);
-    tracing::info!("  Registry:   {}", args.registry_cache_dir);
-
-    // Ensure directories exist
-    tokio::fs::create_dir_all(&args.toolchains_dir).await?;
-    tokio::fs::create_dir_all(&args.registry_cache_dir).await?;
-
     let cas = Arc::new(cas);
 
     // Create VFS (shared between VFS server and runner service)
     let vfs = Arc::new(CasVfs::new(cas.clone()));
 
     // Create Runner service (will use VFS for action execution)
-    let exec = RunnerService::new(
-        cas.clone(),
-        args.toolchains_dir,
-        args.registry_cache_dir,
-        vfs.clone(),
-    );
+    let exec = RunnerService::new(cas.clone(), vfs.clone());
 
     // Bind Runner RPC socket before VFS mount attempt.
     let runner_listener = match Listener::bind(&args.bind).await {
@@ -342,17 +305,17 @@ async fn main() -> Result<()> {
                     let Ok((_handle, _incoming, driver)) =
                         accept(stream, HandshakeConfig::default(), dispatcher).await
                     else {
-                        tracing::warn!("Runner handshake error from {}", peer_addr);
+                        tracing::debug!("Runner handshake error from {}", peer_addr);
                         return;
                     };
                     if let Err(e) = driver.run().await {
-                        tracing::warn!("Runner connection error from {}: {}", peer_addr, e);
+                        tracing::debug!("Runner connection error from {}: {}", peer_addr, e);
                     }
                     tracing::debug!("Runner connection from {} closed", peer_addr);
                 });
             }
             Err(e) => {
-                tracing::error!("Runner accept error: {}", e);
+                tracing::debug!("Runner accept error: {}", e);
             }
         }
     }
@@ -362,15 +325,6 @@ async fn main() -> Result<()> {
 pub struct RunnerServiceInner {
     /// CAS client for storing outputs and fetching toolchains
     pub(crate) cas: Arc<StoreClient<crate::CasCaller>>,
-
-    /// Toolchain materialization directory
-    pub(crate) toolchains_dir: Utf8PathBuf,
-
-    /// In-flight toolchain materializations (keyed by manifest_hash)
-    materializing: InflightMaterializations,
-
-    /// Registry crate materializer
-    pub(crate) registry_materializer: RegistryMaterializer,
 
     /// VFS for hermetic action execution
     pub(crate) vfs: Arc<CasVfs>,
@@ -394,18 +348,10 @@ impl std::ops::Deref for RunnerService {
 }
 
 impl RunnerService {
-    pub fn new(
-        cas: Arc<StoreClient<crate::CasCaller>>,
-        toolchains_dir: Utf8PathBuf,
-        registry_cache_dir: Utf8PathBuf,
-        vfs: Arc<CasVfs>,
-    ) -> Self {
+    pub fn new(cas: Arc<StoreClient<crate::CasCaller>>, vfs: Arc<CasVfs>) -> Self {
         Self {
             inner: Arc::new(RunnerServiceInner {
-                registry_materializer: RegistryMaterializer::new(cas.clone(), registry_cache_dir),
                 cas,
-                toolchains_dir,
-                materializing: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                 vfs,
                 vfs_startup_error: tokio::sync::RwLock::new(None),
             }),
@@ -418,31 +364,6 @@ impl RunnerService {
 
     pub(crate) async fn get_vfs_startup_error(&self) -> Option<VfsStartupFailure> {
         self.vfs_startup_error.read().await.clone()
-    }
-
-    /// Ensures a toolchain is materialized locally, returns the materialized directory.
-    /// Uses async locking to prevent concurrent materializations of the same toolchain.
-    pub(crate) async fn ensure_materialized(
-        &self,
-        manifest_hash: Blake3Hash,
-    ) -> RunnerResult<Utf8PathBuf> {
-        // Check if already materializing
-        let cell = {
-            let mut map = self.materializing.lock().await;
-            map.entry(manifest_hash)
-                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
-                .clone()
-        };
-
-        // Wait for or perform materialization
-        cell.get_or_init(|| async { self.materialize_toolchain(manifest_hash).await })
-            .await
-            .clone()
-    }
-
-    /// Materialize a toolchain from CAS to local directory
-    async fn materialize_toolchain(&self, manifest_hash: Blake3Hash) -> RunnerResult<Utf8PathBuf> {
-        self.materialize_toolchain_impl(manifest_hash).await
     }
 
     // ========================================================================
@@ -470,9 +391,9 @@ impl RunnerService {
         prefix_id: &str,
         toolchain_manifest_hash: Blake3Hash,
     ) -> RunnerResult<()> {
-        tracing::info!(
+        tracing::debug!(
             toolchain_manifest = %toolchain_manifest_hash,
-            "add_toolchain_to_prefix: starting"
+            "starting toolchain population"
         );
 
         // Get the toolchain manifest from CAS
@@ -488,17 +409,17 @@ impl RunnerService {
                 ))
             })?;
 
-        tracing::info!(
+        tracing::debug!(
             component_count = toolchain_manifest.components.len(),
-            "add_toolchain_to_prefix: got toolchain manifest"
+            "loaded toolchain manifest"
         );
 
         // Add each component's tree to the VFS prefix under toolchain/
         for component in &toolchain_manifest.components {
-            tracing::info!(
+            tracing::debug!(
                 component_name = %component.name,
                 tree_manifest = %component.tree_manifest,
-                "add_toolchain_to_prefix: fetching component tree manifest"
+                "loading component tree manifest"
             );
 
             // Fetch the tree manifest for this component
@@ -511,7 +432,7 @@ impl RunnerService {
                         component_name = %component.name,
                         tree_manifest = %component.tree_manifest,
                         error = ?e,
-                        "add_toolchain_to_prefix: get_tree_manifest RPC error"
+                        "failed to fetch component tree manifest"
                     );
                     RunnerError::CasFetch(format!("{:?}", e))
                 })?
@@ -519,7 +440,7 @@ impl RunnerService {
                     tracing::error!(
                         component_name = %component.name,
                         tree_manifest = %component.tree_manifest,
-                        "add_toolchain_to_prefix: get_tree_manifest returned None"
+                        "component tree manifest missing"
                     );
                     RunnerError::CasFetch(format!(
                         "tree manifest {} not found for component {}",
@@ -527,10 +448,10 @@ impl RunnerService {
                     ))
                 })?;
 
-            tracing::info!(
+            tracing::debug!(
                 component_name = %component.name,
                 entry_count = tree_manifest.entries.len(),
-                "add_toolchain_to_prefix: got tree manifest, adding files"
+                "registering component files in VFS"
             );
 
             // Add all files from the tree
@@ -574,9 +495,9 @@ impl RunnerService {
     ) -> RunnerResult<()> {
         use vx_store_proto::TreeEntryKind;
 
-        tracing::info!(
+        tracing::debug!(
             source_manifest = %source_manifest_hash,
-            "add_source_tree_to_prefix: calling get_tree_manifest"
+            "loading source tree manifest"
         );
 
         // Get the source tree manifest from CAS (source trees are stored via ingest_tree)
@@ -588,14 +509,14 @@ impl RunnerService {
                 tracing::error!(
                     source_manifest = %source_manifest_hash,
                     error = ?e,
-                    "add_source_tree_to_prefix: RPC error from get_tree_manifest"
+                    "failed to fetch source tree manifest"
                 );
                 RunnerError::CasFetch(format!("{:?}", e))
             })?
             .ok_or_else(|| {
                 tracing::error!(
                     source_manifest = %source_manifest_hash,
-                    "add_source_tree_to_prefix: get_tree_manifest returned None"
+                    "source tree manifest missing"
                 );
                 RunnerError::CasFetch(format!(
                     "source manifest {} not found",
@@ -603,10 +524,10 @@ impl RunnerService {
                 ))
             })?;
 
-        tracing::info!(
+        tracing::debug!(
             source_manifest = %source_manifest_hash,
             entry_count = manifest.entries.len(),
-            "add_source_tree_to_prefix: got manifest, adding files"
+            "registering source files in VFS"
         );
 
         // Add each file to the VFS prefix under src/

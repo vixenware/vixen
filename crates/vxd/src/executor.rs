@@ -7,6 +7,7 @@ use petgraph::Direction::Incoming;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{RwLock, Semaphore};
 use tracing::{debug, info, trace, warn};
 
@@ -256,18 +257,18 @@ impl Executor {
 
     /// Main execution loop
     pub async fn execute(&mut self) -> Result<(), VxdError> {
-        info!("EXECUTE: Starting action graph execution");
+        info!("starting action graph execution");
 
         loop {
             // Check if any action has failed
             if let Some(ref error) = self.first_error {
-                warn!("EXECUTE: error detected, aborting");
+                warn!("error detected, aborting");
                 return Err(error.clone());
             }
 
             // Spawn all ready actions
             while let Some(node_idx) = self.ready_queue.pop_front() {
-                debug!("EXECUTE: spawning action for node {:?}", node_idx);
+                debug!("spawning action for node {:?}", node_idx);
                 self.states.insert(node_idx, ActionState::Running);
                 let permit = self
                     .concurrency_limit
@@ -286,7 +287,7 @@ impl Executor {
                 .filter(|&&s| s == ActionState::Completed)
                 .count();
             if completed == total && total > 0 {
-                info!("EXECUTE: all {} actions completed", total);
+                info!("all {} actions completed", total);
                 break;
             }
 
@@ -295,7 +296,7 @@ impl Executor {
                 Some(ExecutorMessage::ActionCompleted { node_idx, result }) => {
                     match result {
                         Ok(action_result) => {
-                            debug!("EXECUTE: action {:?} completed successfully", node_idx);
+                            debug!("action {:?} completed successfully", node_idx);
                             self.states.insert(node_idx, ActionState::Completed);
                             self.results.write().await.insert(node_idx, action_result);
 
@@ -306,13 +307,13 @@ impl Executor {
                                 let count = self.remaining_deps.get_mut(&dependent_idx).unwrap();
                                 *count -= 1;
                                 if *count == 0 {
-                                    debug!("EXECUTE: action {:?} now ready", dependent_idx);
+                                    debug!("action {:?} now ready", dependent_idx);
                                     self.ready_queue.push_back(dependent_idx);
                                 }
                             }
                         }
                         Err(error) => {
-                            debug!("EXECUTE: action {:?} failed: {}", node_idx, error);
+                            debug!("action {:?} failed: {}", node_idx, error);
                             self.first_error = Some(error.clone());
                             return Err(error);
                         }
@@ -704,6 +705,7 @@ async fn execute_action(
             target_triple,
         } => {
             use vx_store_proto::{EnsureStatus, RustComponent, RustToolchainSpec};
+            let started = Instant::now();
 
             let spec = RustToolchainSpec {
                 channel,
@@ -736,9 +738,8 @@ async fn execute_action(
             let toolchain_id = result.toolchain_id.unwrap_or(manifest.toolchain_id);
 
             info!(
-                toolchain_id = %toolchain_id,
-                manifest_hash = %manifest_hash,
-                version = ?manifest.rust_version,
+                version = %manifest.rust_version.as_deref().unwrap_or("unknown"),
+                elapsed_ms = started.elapsed().as_millis() as u64,
                 "toolchain acquired"
             );
 
@@ -1217,6 +1218,7 @@ async fn execute_action(
         Action::AcquireZigToolchain { version } => {
             use vx_store_proto::{EnsureStatus, ZigToolchainSpec};
             use vx_toolchain::zig::HostPlatform;
+            let started = Instant::now();
 
             let host = HostPlatform::detect()
                 .map_err(|e| VxdError::ToolchainAcquisition(e.to_string()))?;
@@ -1260,10 +1262,8 @@ async fn execute_action(
             };
 
             info!(
-                toolchain_id = %toolchain_id,
-                manifest_hash = %manifest_hash,
                 version = %version,
-                host = %host,
+                elapsed_ms = started.elapsed().as_millis() as u64,
                 "Zig toolchain acquired"
             );
 

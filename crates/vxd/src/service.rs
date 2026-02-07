@@ -8,7 +8,7 @@
 
 use crate::SpawnTracker;
 use crate::db::Database;
-use crate::error::{VxdError, Result};
+use crate::error::{Result, VxdError};
 use crate::executor::Executor;
 use crate::inputs::*;
 use crate::queries::*;
@@ -19,17 +19,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
-use vxd_proto::{
-    VXD_PROTOCOL_VERSION, ActionType, Vxd, BuildRequest, BuildResult, ProgressListenerClient,
-};
-use vx_store_proto::{
-    Blake3Hash, StoreClient, EnsureStatus, IngestTreeRequest, RegistrySpec, RustChannel,
-    RustComponent, RustToolchainSpec, ServiceVersion, TreeFile,
-};
 use vx_report::{BuildReport, ReportStore};
-use vx_runner_proto::{RunnerClient, RustCompileRequest, RustDep};
 use vx_rs::crate_graph::CrateSource;
 use vx_rs::{CrateGraph, CrateId, CrateType};
+use vx_runner_proto::{RunnerClient, RustCompileRequest, RustDep};
+use vx_store_proto::{
+    Blake3Hash, EnsureStatus, IngestTreeRequest, RegistrySpec, RustChannel, RustComponent,
+    RustToolchainSpec, ServiceVersion, StoreClient, TreeFile,
+};
+use vxd_proto::{
+    ActionType, BuildRequest, BuildResult, ProgressListenerClient, VXD_PROTOCOL_VERSION, Vxd,
+};
 
 /// Toolchain information (manifest-only, no materialization)
 pub struct ToolchainInfo {
@@ -161,7 +161,7 @@ impl VxdService {
         let current_revision = db.runtime().current_revision().0;
         let wal_writer = match WalWriter::create(&wal_path, current_revision) {
             Ok(writer) => {
-                info!(path = %wal_path, base_revision = current_revision, "created WAL writer for incremental persistence");
+                debug!(path = %wal_path, base_revision = current_revision, "created WAL writer for incremental persistence");
                 Some(writer)
             }
             Err(e) => {
@@ -560,10 +560,7 @@ impl VxdService {
         let max_concurrency = std::thread::available_parallelism()
             .map(|n| n.get() * 2)
             .unwrap_or(16);
-        tracing::info!(
-            "SERVICE: creating executor with max_concurrency={}",
-            max_concurrency
-        );
+        tracing::info!("creating executor with max_concurrency={}", max_concurrency);
 
         // Get current progress listener (clones the Option<Arc<...>> inside the RwLock)
         let progress_listener = self.progress_listener.read().await.clone();
@@ -579,9 +576,9 @@ impl VxdService {
             profile.to_string(),
             max_concurrency,
         );
-        tracing::info!("SERVICE: calling executor.execute()");
+        tracing::info!("calling executor.execute()");
         executor.execute().await?;
-        tracing::info!("SERVICE: executor.execute() completed");
+        tracing::info!("executor.execute() completed");
 
         // Append changes to WAL after build (incremental persistence)
         if let Some(ref mut wal) = *self.wal_writer.lock().await {

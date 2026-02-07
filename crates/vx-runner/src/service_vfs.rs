@@ -7,7 +7,10 @@ use jiff::Zoned;
 use std::time::Instant;
 use tokio::process::Command;
 use tracing::{debug, info, trace};
-use vx_runner_proto::{CcCompileRequest, CcCompileResult, RustCompileRequest, RustCompileResult};
+use vx_runner_proto::{
+    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RustCompileRequest,
+    RustCompileResult,
+};
 use vx_store_proto::{NodeId, NodeManifest, OutputEntry};
 use vx_vfs::{VfsAction, VfsIssueCode};
 
@@ -586,6 +589,217 @@ impl RunnerService {
             duration_ms,
             output_manifest: Some(manifest_hash),
             discovered_deps: vec![], // TODO: parse depfile if generated
+            error: None,
+        }
+    }
+
+    /// Link C object files into a binary using the VFS mount.
+    pub async fn link_cc_vfs(&self, request: CcLinkRequest) -> CcLinkResult {
+        let start = Instant::now();
+
+        if let Some(reason) = self.get_vfs_startup_error().await {
+            return CcLinkResult {
+                success: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                output_manifest: None,
+                error: Some(format_vfs_startup_failure(&reason)),
+            };
+        }
+
+        let prefix_id = self.create_action_prefix().await;
+        let prefix_path = crate::runner_mount_base().join(&prefix_id);
+
+        if let Err(e) = self
+            .add_toolchain_to_prefix(&prefix_id, request.toolchain_manifest)
+            .await
+        {
+            self.remove_action_prefix(&prefix_id).await;
+            return CcLinkResult {
+                success: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                output_manifest: None,
+                error: Some(format!("failed to add toolchain: {}", e)),
+            };
+        }
+
+        self.vfs.add_dir_to_prefix(&prefix_id, "obj").await;
+        self.create_output_dir_in_prefix(&prefix_id).await;
+
+        let mut object_paths = Vec::with_capacity(request.object_manifests.len());
+        for (idx, manifest_hash) in request.object_manifests.iter().enumerate() {
+            let manifest = match self.cas.get_manifest(*manifest_hash).await {
+                Ok(Some(m)) => m,
+                Ok(None) => {
+                    self.remove_action_prefix(&prefix_id).await;
+                    return CcLinkResult {
+                        success: false,
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        output_manifest: None,
+                        error: Some(format!(
+                            "object manifest {} not found in CAS",
+                            manifest_hash
+                        )),
+                    };
+                }
+                Err(e) => {
+                    self.remove_action_prefix(&prefix_id).await;
+                    return CcLinkResult {
+                        success: false,
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        output_manifest: None,
+                        error: Some(format!("failed to fetch object manifest: {:?}", e)),
+                    };
+                }
+            };
+
+            let object_entry = match manifest.outputs.iter().find(|o| o.logical == "object") {
+                Some(entry) => entry,
+                None => {
+                    self.remove_action_prefix(&prefix_id).await;
+                    return CcLinkResult {
+                        success: false,
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        output_manifest: None,
+                        error: Some(format!("no object output in manifest {}", manifest_hash)),
+                    };
+                }
+            };
+
+            let obj_rel_path = format!("obj/{idx:04}.o");
+            self.vfs
+                .add_file_to_prefix(&prefix_id, &obj_rel_path, object_entry.blob, 0, false)
+                .await;
+            object_paths.push(prefix_path.join(obj_rel_path));
+        }
+
+        let output_rel_path = format!("out/{}", request.binary_name);
+        let output_path = prefix_path.join(&output_rel_path);
+
+        let mut cmd = Command::new("cc");
+        for object_path in &object_paths {
+            cmd.arg(object_path.as_str());
+        }
+        cmd.arg("-o").arg(output_path.as_str());
+        for lib in &request.libs {
+            cmd.arg(format!("-l{}", lib));
+        }
+        cmd.current_dir(prefix_path.as_str());
+        cmd.env_clear();
+        if let Ok(path) = std::env::var("PATH") {
+            cmd.env("PATH", path);
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            cmd.env("HOME", home);
+        }
+
+        let output = match cmd.output().await {
+            Ok(o) => o,
+            Err(e) => {
+                self.remove_action_prefix(&prefix_id).await;
+                return CcLinkResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!("failed to execute linker: {}", e)),
+                };
+            }
+        };
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let exit_code = output.status.code().unwrap_or(-1);
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            self.remove_action_prefix(&prefix_id).await;
+            return CcLinkResult {
+                success: false,
+                exit_code,
+                stdout,
+                stderr,
+                duration_ms,
+                output_manifest: None,
+                error: None,
+            };
+        }
+
+        let flushed = self.flush_prefix_outputs(&prefix_id).await;
+        let blob_hash = match flushed.get(&output_rel_path) {
+            Some(hash) => *hash,
+            None => {
+                self.remove_action_prefix(&prefix_id).await;
+                return CcLinkResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout,
+                    stderr,
+                    duration_ms,
+                    output_manifest: None,
+                    error: Some(format!("output {} not found in VFS", output_rel_path)),
+                };
+            }
+        };
+
+        let node_id = NodeId(format!(
+            "link-c:{}:{}",
+            request.binary_name, request.target_triple
+        ));
+        let cache_key = vx_cache::cc_link_cache_key(&request);
+        let manifest = NodeManifest {
+            node_id,
+            cache_key,
+            produced_at: Zoned::now().to_string(),
+            outputs: vec![OutputEntry {
+                logical: "binary".to_string(),
+                filename: request.binary_name,
+                blob: blob_hash,
+                executable: true,
+            }],
+        };
+
+        let manifest_hash = match self.cas.put_manifest(manifest).await {
+            Ok(h) => h,
+            Err(e) => {
+                self.remove_action_prefix(&prefix_id).await;
+                return CcLinkResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout,
+                    stderr,
+                    duration_ms,
+                    output_manifest: None,
+                    error: Some(format!("failed to store manifest: {:?}", e)),
+                };
+            }
+        };
+
+        self.remove_action_prefix(&prefix_id).await;
+
+        CcLinkResult {
+            success: true,
+            exit_code,
+            stdout,
+            stderr,
+            duration_ms,
+            output_manifest: Some(manifest_hash),
             error: None,
         }
     }

@@ -368,7 +368,6 @@ impl Store for StoreService {
         })
     }
 
-    #[tracing::instrument(skip(self, request), fields(file_count = request.files.len()))]
     async fn ingest_tree(
         &self,
         _cx: &roam::Context,
