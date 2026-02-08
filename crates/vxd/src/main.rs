@@ -309,11 +309,8 @@ async fn async_main() -> Result<()> {
 
     let in_test = std::env::var("VX_TEST").is_ok();
 
-    // When spawned by a long-lived orchestrator (e.g. nextest setup script),
-    // the daemon must outlive its parent process.
-    if !in_test {
-        ur_taking_me_with_you::die_with_parent();
-    }
+    // The daemon outlives its parent process (vx CLI) and shuts down
+    // after an idle timeout instead (5s in test mode, 2h in production).
 
     let args = Args::from_env()?;
     tracing::info!("Starting vxd");
@@ -377,15 +374,20 @@ async fn async_main() -> Result<()> {
     let listener = Listener::bind(&args.bind).await?;
     tracing::info!("Daemon listening on {}", args.bind);
 
-    // In test mode, track active connections and quit after 5s idle.
+    // Track active connections and shut down after idle timeout.
+    // Test mode: 5s, production: 2 hours.
     let active_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let last_disconnect = Arc::new(Mutex::new(Option::<tokio::time::Instant>::None));
 
-    if in_test {
+    {
+        let idle_timeout = if in_test {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_secs(2 * 60 * 60)
+        };
         let active_connections = active_connections.clone();
         let last_disconnect = last_disconnect.clone();
         tokio::spawn(async move {
-            let idle_timeout = Duration::from_secs(5);
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let count = active_connections.load(std::sync::atomic::Ordering::Relaxed);
@@ -393,7 +395,7 @@ async fn async_main() -> Result<()> {
                     && let Some(when) = *last_disconnect.lock().await
                     && when.elapsed() >= idle_timeout
                 {
-                    tracing::info!("test mode: no connections for {idle_timeout:?}, shutting down");
+                    tracing::info!("no connections for {idle_timeout:?}, shutting down");
                     std::process::exit(0);
                 }
             }

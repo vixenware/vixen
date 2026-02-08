@@ -28,7 +28,7 @@ fi
 export VX_HOME="/tmp/.vx-test/nextest/home"
 export VX_TEST=1
 export VX_HTTP_CACHE_DIR="${HTTP_CACHE}"
-export RUST_LOG="${RUST_LOG:-debug}"
+export RUST_LOG="${RUST_LOG:-info}"
 
 mkdir -p "${VX_HOME}"
 
