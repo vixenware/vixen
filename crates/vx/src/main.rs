@@ -15,13 +15,13 @@ use vxd_proto::{ActionType, BuildRequest, ProgressListener, VxdClient};
 /// vx - Build execution engine with deterministic caching
 #[derive(Facet, Debug)]
 struct Cli {
-    /// Show version information
-    #[facet(args::named, args::short = 'V')]
-    version: bool,
-
     /// Command to run
     #[facet(args::subcommand)]
     command: CliCommand,
+
+    /// Standard CLI options (--help, --version, --completions)
+    #[facet(flatten)]
+    builtins: args::FigueBuiltins,
 }
 
 /// Arguments for the `build` subcommand
@@ -138,12 +138,17 @@ fn main() -> Result<()> {
 }
 
 async fn async_main() -> Result<()> {
-    let cli: Cli = args::from_std_args().unwrap();
-
-    if cli.version {
-        println!("vx {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
-    }
+    let cli: Cli = args::Driver::new(
+        args::builder::<Cli>()?
+            .cli(|cli| cli.args(std::env::args().skip(1)))
+            .help(|h| {
+                h.program_name(env!("CARGO_PKG_NAME"))
+                    .version(env!("CARGO_PKG_VERSION"))
+            })
+            .build(),
+    )
+    .run()
+    .unwrap();
 
     match cli.command {
         // Build command gets TUI-based tracing (initialized in cmd_build)
