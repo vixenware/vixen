@@ -22,9 +22,7 @@ tracing-subscriber = { workspace = true }
 roam = { workspace = true }
 roam-stream = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
-libc = { workspace = true }
 indicatif = { workspace = true }
-ulid.workspace = true
 
 vxd-proto = { workspace = true }
 vx-io = { workspace = true }
@@ -33,3 +31,4 @@ vx-vfs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ulid = { workspace = true }

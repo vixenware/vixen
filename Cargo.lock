@@ -2606,7 +2606,6 @@ dependencies = [
  "facet-json",
  "figue",
  "indicatif",
- "libc",
  "owo-colors",
  "roam",
  "roam-stream",

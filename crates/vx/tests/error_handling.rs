@@ -2,6 +2,7 @@
 //!
 //! These tests verify that vx fails loudly and clearly on unsupported features.
 
+#[allow(dead_code)]
 mod harness;
 use harness::{
     TestEnv, create_project_with_build_script, create_project_with_deps, create_workspace,
