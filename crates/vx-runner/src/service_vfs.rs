@@ -6,7 +6,7 @@
 use jiff::Zoned;
 use std::time::Instant;
 use tokio::process::Command;
-use tracing::{debug, info, trace};
+use tracing::{debug, info};
 use vx_runner_proto::{
     CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RustCompileRequest,
     RustCompileResult,
@@ -47,16 +47,6 @@ impl RunnerService {
 
         debug!(prefix_id = %prefix_id, prefix_path = %prefix_path, "created action prefix");
 
-        // Check if VFS mount exists (use tokio::fs to avoid blocking the tokio executor)
-        match tokio::fs::metadata(mount_base.as_str()).await {
-            Ok(meta) => {
-                debug!(mount_base = %mount_base, is_dir = meta.is_dir(), "VFS mount base exists");
-            }
-            Err(e) => {
-                debug!(mount_base = %mount_base, error = %e, "VFS mount base does NOT exist");
-            }
-        }
-
         // Helper to return an error result (cleanup is done before calling this)
         let cleanup_and_error =
             |_prefix_id: &str, error: String, start: Instant| RustCompileResult {
@@ -69,54 +59,32 @@ impl RunnerService {
                 error: Some(error),
             };
 
-        // Check if prefix directory exists after creation (use tokio::fs)
-        match tokio::fs::metadata(prefix_path.as_str()).await {
-            Ok(meta) => {
-                debug!(prefix_path = %prefix_path, is_dir = meta.is_dir(), "prefix directory exists after creation");
-            }
-            Err(e) => {
-                debug!(prefix_path = %prefix_path, error = %e, "prefix directory does NOT exist after creation");
-            }
-        }
-
-        // 2. Add toolchain to prefix
+        // 2. Ensure toolchain prefix exists (stable, persists across compilations)
         debug!(
             toolchain_manifest = %request.toolchain_manifest,
-            "adding toolchain to VFS prefix"
+            "ensuring toolchain VFS prefix"
         );
         let before = Instant::now();
-        if let Err(e) = self
-            .add_toolchain_to_prefix(&prefix_id, request.toolchain_manifest)
+        let toolchain_prefix_id = match self
+            .ensure_toolchain_prefix(request.toolchain_manifest)
             .await
         {
-            self.remove_action_prefix(&prefix_id).await;
-            return cleanup_and_error(&prefix_id, format!("failed to add toolchain: {}", e), start);
-        }
+            Ok(id) => id,
+            Err(e) => {
+                self.remove_action_prefix(&prefix_id).await;
+                return cleanup_and_error(
+                    &prefix_id,
+                    format!("failed to ensure toolchain: {}", e),
+                    start,
+                );
+            }
+        };
+        let toolchain_path = mount_base.join(&toolchain_prefix_id);
         info!(
-            "Adding Rust toolchain took {:.2}s",
+            toolchain_prefix = %toolchain_prefix_id,
+            "Rust toolchain ready in {:.2}s",
             before.elapsed().as_secs_f32()
         );
-        debug!("toolchain added to prefix successfully");
-
-        // Dump VFS state to see what we actually have
-        self.vfs.dump_state(&prefix_id).await;
-
-        // Check toolchain directory after adding
-        let toolchain_dir = prefix_path.join("toolchain");
-        match tokio::fs::metadata(toolchain_dir.as_str()).await {
-            Ok(meta) => {
-                debug!(toolchain_dir = %toolchain_dir, is_dir = meta.is_dir(), "toolchain directory exists");
-                // List contents
-                if let Ok(mut entries) = tokio::fs::read_dir(toolchain_dir.as_str()).await {
-                    while let Ok(Some(entry)) = entries.next_entry().await {
-                        trace!(entry = ?entry.path(), "  toolchain entry");
-                    }
-                }
-            }
-            Err(e) => {
-                debug!(toolchain_dir = %toolchain_dir, error = %e, "toolchain directory does NOT exist");
-            }
-        }
 
         // 3. Add source tree to prefix
         if let Err(e) = self
@@ -146,8 +114,8 @@ impl RunnerService {
         self.create_output_dir_in_prefix(&prefix_id).await;
 
         // 6. Build rustc command
-        let rustc_path = prefix_path.join("toolchain/bin/rustc");
-        let sysroot_path = prefix_path.join("toolchain/sysroot");
+        let rustc_path = toolchain_path.join("bin/rustc");
+        let sysroot_path = toolchain_path.join("sysroot");
         let src_path = prefix_path.join("src");
         let deps_path = prefix_path.join("deps");
         let out_path = prefix_path.join("out");
@@ -209,44 +177,63 @@ impl RunnerService {
             "executing rustc via VFS"
         );
 
-        // Debug: Check if rustc exists before executing
-        debug!(rustc_path = %rustc_path, "checking if rustc exists");
-        match tokio::fs::metadata(rustc_path.as_str()).await {
-            Ok(meta) => {
-                debug!(
-                    rustc_path = %rustc_path,
-                    is_file = meta.is_file(),
-                    len = meta.len(),
-                    permissions = ?meta.permissions(),
-                    "rustc metadata"
-                );
-            }
-            Err(e) => {
-                debug!(rustc_path = %rustc_path, error = %e, "rustc does NOT exist");
-                // Try to list parent directory
-                let parent = rustc_path.parent().unwrap_or(&prefix_path);
-                debug!(parent = %parent, "listing parent directory");
-                match tokio::fs::read_dir(parent.as_str()).await {
-                    Ok(mut entries) => {
-                        while let Ok(Some(entry)) = entries.next_entry().await {
-                            trace!(entry = ?entry.path(), "  entry in parent");
-                        }
+        // Diagnostic: list what the kernel sees as root children in the VFS mount.
+        // This tells us whether the kernel VFS cache is stale.
+        {
+            let mount_base = crate::runner_mount_base();
+            debug!(mount_base = %mount_base, "readdir: VFS mount root");
+            match tokio::fs::read_dir(mount_base.as_str()).await {
+                Ok(mut entries) => {
+                    let mut names = Vec::new();
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        names.push(entry.file_name().to_string_lossy().to_string());
                     }
-                    Err(e) => {
-                        debug!(parent = %parent, error = %e, "failed to read parent directory");
-                        // Try grandparent
-                        if let Some(grandparent) = parent.parent() {
-                            debug!(grandparent = %grandparent, "listing grandparent");
-                            if let Ok(mut entries) = tokio::fs::read_dir(grandparent.as_str()).await
-                            {
-                                while let Ok(Some(entry)) = entries.next_entry().await {
-                                    trace!(entry = ?entry.path(), "  entry in grandparent");
-                                }
-                            }
-                        }
-                    }
+                    info!(
+                        ?names,
+                        expected_build = %prefix_id,
+                        expected_tc = %toolchain_prefix_id,
+                        "VFS mount root children (kernel view)"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "readdir FAILED on VFS mount root");
                 }
             }
+        }
+
+        // Verify VFS paths are accessible before spawning rustc.
+        // These stats also warm the kernel VFS name cache for newly-created prefixes.
+        // Check all paths (no fail-fast) so we get a complete picture in logs.
+        let stat_checks: &[(&str, &str)] = &[
+            ("build prefix dir", prefix_path.as_str()),
+            ("toolchain prefix dir", toolchain_path.as_str()),
+            ("rustc binary", rustc_path.as_str()),
+            ("crate root", crate_root.as_str()),
+        ];
+        let mut stat_failures: Vec<String> = Vec::new();
+        for &(label, path) in stat_checks {
+            debug!(path, label, "stat check");
+            match tokio::fs::metadata(path).await {
+                Ok(meta) => debug!(
+                    path,
+                    label,
+                    len = meta.len(),
+                    is_dir = meta.is_dir(),
+                    "stat OK"
+                ),
+                Err(e) => {
+                    tracing::error!(path, label, error = %e, "stat FAILED");
+                    stat_failures.push(format!("{label}: {e} (path: {path})"));
+                }
+            }
+        }
+        if !stat_failures.is_empty() {
+            self.remove_action_prefix(&prefix_id).await;
+            return cleanup_and_error(
+                &prefix_id,
+                format!("VFS path checks failed:\n  {}", stat_failures.join("\n  ")),
+                start,
+            );
         }
 
         // 7. Run rustc
@@ -387,23 +374,27 @@ impl RunnerService {
         let prefix_id = self.create_action_prefix().await;
         let prefix_path = crate::runner_mount_base().join(&prefix_id);
 
-        // 2. Add Zig toolchain to prefix
-        if let Err(e) = self
-            .add_toolchain_to_prefix(&prefix_id, request.toolchain_manifest)
+        // 2. Ensure Zig toolchain prefix exists
+        let toolchain_prefix_id = match self
+            .ensure_toolchain_prefix(request.toolchain_manifest)
             .await
         {
-            self.remove_action_prefix(&prefix_id).await;
-            return CcCompileResult {
-                success: false,
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: String::new(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_manifest: None,
-                discovered_deps: vec![],
-                error: Some(format!("failed to add toolchain: {}", e)),
-            };
-        }
+            Ok(id) => id,
+            Err(e) => {
+                self.remove_action_prefix(&prefix_id).await;
+                return CcCompileResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    discovered_deps: vec![],
+                    error: Some(format!("failed to ensure toolchain: {}", e)),
+                };
+            }
+        };
+        let toolchain_path = crate::runner_mount_base().join(&toolchain_prefix_id);
 
         // 3. Add source tree to prefix
         if let Err(e) = self
@@ -427,7 +418,7 @@ impl RunnerService {
         self.create_output_dir_in_prefix(&prefix_id).await;
 
         // 5. Build zig cc command
-        let zig_path = prefix_path.join("toolchain/zig");
+        let zig_path = toolchain_path.join("zig");
         let src_path = prefix_path.join("src");
         let out_path = prefix_path.join("out");
 
@@ -479,7 +470,7 @@ impl RunnerService {
         if let Ok(home) = std::env::var("HOME") {
             cmd.env("HOME", home);
         }
-        cmd.env("ZIG_LIB_DIR", prefix_path.join("toolchain/lib").as_str());
+        cmd.env("ZIG_LIB_DIR", toolchain_path.join("lib").as_str());
 
         debug!(
             zig = %zig_path,
@@ -625,21 +616,24 @@ impl RunnerService {
         let prefix_id = self.create_action_prefix().await;
         let prefix_path = crate::runner_mount_base().join(&prefix_id);
 
-        if let Err(e) = self
-            .add_toolchain_to_prefix(&prefix_id, request.toolchain_manifest)
+        let _toolchain_prefix_id = match self
+            .ensure_toolchain_prefix(request.toolchain_manifest)
             .await
         {
-            self.remove_action_prefix(&prefix_id).await;
-            return CcLinkResult {
-                success: false,
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: String::new(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_manifest: None,
-                error: Some(format!("failed to add toolchain: {}", e)),
-            };
-        }
+            Ok(id) => id,
+            Err(e) => {
+                self.remove_action_prefix(&prefix_id).await;
+                return CcLinkResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!("failed to ensure toolchain: {}", e)),
+                };
+            }
+        };
 
         self.vfs.add_dir_to_prefix(&prefix_id, "obj").await;
         self.create_output_dir_in_prefix(&prefix_id).await;

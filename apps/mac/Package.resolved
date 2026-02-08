@@ -1,5 +1,5 @@
 {
-  "originHash" : "930d298465c1ebf2f6064ed4e6aaf411c2c854ada61689bc63ada26eef0f7ab5",
+  "originHash" : "b19d6add641b9c48cd07e4819c64fa98bded259f92ff204ac4ec0bbe8c08c258",
   "pins" : [
     {
       "identity" : "roam",
@@ -7,7 +7,16 @@
       "location" : "https://github.com/bearcove/roam.git",
       "state" : {
         "branch" : "main",
-        "revision" : "477ced939f33c83d72662f3b2797fe88f4936ad4"
+        "revision" : "456fb88e951c569cf0a237a872b795d14a1d2756"
+      }
+    },
+    {
+      "identity" : "sparkle",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/sparkle-project/Sparkle.git",
+      "state" : {
+        "revision" : "5581748cef2bae787496fe6d61139aebe0a451f6",
+        "version" : "2.8.1"
       }
     },
     {

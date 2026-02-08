@@ -58,6 +58,16 @@ impl Store for StoreService {
         }
     }
 
+    async fn unpublish(&self, _cx: &roam::Context, cache_key: CacheKey) -> bool {
+        match self.storage.delete_cache(&cache_key).await {
+            Ok(deleted) => deleted,
+            Err(e) => {
+                tracing::warn!(cache_key = %cache_key, error = %e, "failed to delete cache entry");
+                false
+            }
+        }
+    }
+
     // [impl axiom.cas-unified-blobs] Node manifests are stored as blobs
     async fn put_manifest(&self, _cx: &roam::Context, manifest: NodeManifest) -> ManifestHash {
         let json =

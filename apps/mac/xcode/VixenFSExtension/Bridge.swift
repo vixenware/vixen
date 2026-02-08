@@ -3,6 +3,11 @@ import Foundation
 import RoamRuntime
 import os
 
+enum VixenFS {
+    static let subsystem = "eu.bearcove.vixenfs"
+    static let maxPayloadSize: UInt32 = 256 * 1024 * 1024  // 256 MiB
+}
+
 extension VfsClient: @unchecked Sendable {}
 
 actor LifecycleTrace {
@@ -43,30 +48,27 @@ actor VfsConnection {
     private var client: VfsClient?
     private var driverTask: Task<Void, Never>?
     private var disconnectRequested = false
-    private let log = Logger(subsystem: "eu.bearcove.vixenfs", category: "VfsConnection")
+    private let log = Logger(subsystem: VixenFS.subsystem, category: "VfsConnection")
 
-    func connect(address: String) async throws {
+    func connect(url: URL) async throws {
         if client != nil {
             log.info("Already connected")
             return
         }
         await LifecycleTrace.shared.mark(
-            log, event: "vfs.connect.begin", details: "address=\(address)")
+            log, event: "vfs.connect.begin", details: "url=\(url.absoluteString)")
 
-        // Parse host:port
-        let parts = address.split(separator: ":")
-        guard parts.count == 2,
-            let port = Int(parts[1])
-        else {
+        guard let host = url.host else {
             throw NSError(
                 domain: "VFS", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid address format: \(address)"])
+                userInfo: [NSLocalizedDescriptionKey: "Missing host in URL: \(url)"])
         }
 
-        let host = String(parts[0])
+        let port = url.port ?? 10001
         log.info("Connecting to \(host):\(port)")
 
-        let maxPayloadSize: UInt32 = 256 * 1024 * 1024  // 256 MiB
+        let maxPayloadSize = VixenFS.maxPayloadSize
+
         let transport = try await RoamRuntime.connect(host: host, port: port)
         let (handle, driver) = try await establishInitiator(
             transport: transport,
@@ -85,10 +87,10 @@ actor VfsConnection {
             }
             await self?.handleDriverExit()
         }
-        client = VfsClient(connection: handle)
-        log.info("Connected to \(address)")
+        client = VfsClient(connection: handle, timeout: 5.0)
+        log.info("Connected to \(url.absoluteString)")
         await LifecycleTrace.shared.mark(
-            log, event: "vfs.connect.ready", details: "address=\(address)")
+            log, event: "vfs.connect.ready", details: "url=\(url.absoluteString)")
     }
 
     func disconnect() async {
@@ -100,6 +102,7 @@ actor VfsConnection {
     }
 
     func getClient() throws -> VfsClient {
+        // TODO: can't we make bad states unrepresentable instead of.. this?
         guard let client = client else {
             throw NSError(
                 domain: "VFS", code: -1, userInfo: [NSLocalizedDescriptionKey: "Not connected"])
@@ -122,6 +125,7 @@ actor VfsConnection {
 
 /// Wrapper to make FSKit callbacks Sendable for Swift 6 concurrency.
 /// FSKit callbacks are thread-safe in practice.
+/// TODO: they are CLEARLY not and that's why we've had crashes lol
 struct SendableReplyHandler<T>: @unchecked Sendable {
     let handler: (T?, (any Error)?) -> Void
 }
@@ -133,11 +137,11 @@ struct SendableVoidReplyHandler: @unchecked Sendable {
 /// The bridge between FSKit and our VFS client.
 /// Implements FSUnaryFileSystem which is the top-level FSKit protocol.
 final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked Sendable {
-
     // FSKit manages concurrency - singleton is safe here
+    // TODO: is it???
     static let shared = Bridge()
 
-    private let log = Logger(subsystem: "eu.bearcove.vixenfs", category: "Bridge")
+    private let log = Logger(subsystem: VixenFS.subsystem, category: "Bridge")
 
     private override init() {
         log.info("Bridge initialized")
@@ -152,10 +156,10 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
         log.info("probeResource")
         let resourceDescription = describe(resource: resource)
 
-        // Extract server address from URL resource
-        guard let address = extractServerAddress(from: resource) else {
+        // Extract server URL from resource
+        guard let url = extractVixenURL(from: resource) else {
             log.error("probeResource: not a valid vixen:// URL resource")
-            replyHandler(nil, nil)
+            replyHandler(nil, fs_errorForPOSIXError(POSIXError.EINVAL.rawValue))
             return
         }
 
@@ -165,7 +169,7 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
                 self.log, event: "bridge.probeResource.begin",
                 details: resourceDescription)
             do {
-                try await VfsConnection.shared.connect(address: address)
+                try await VfsConnection.shared.connect(url: url)
 
                 let containerUUID = UUID()
                 let result = FSProbeResult.usable(
@@ -181,7 +185,7 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
                 await LifecycleTrace.shared.mark(
                     self.log, event: "bridge.probeResource.failure",
                     details: "error=\(error.localizedDescription)")
-                sendable.handler(nil, nil)
+                sendable.handler(nil, error)
             }
         }
     }
@@ -195,23 +199,21 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
         log.info("loadResource")
         let resourceDescription = describe(resource: resource)
 
-        // Extract server address and options from URL resource
-        guard let address = extractServerAddress(from: resource) else {
+        // Extract server URL and options from resource
+        guard let url = extractVixenURL(from: resource) else {
             log.error("loadResource: not a valid vixen:// URL resource")
             replyHandler(nil, fs_errorForPOSIXError(POSIXError.EINVAL.rawValue))
             return
         }
-        let preload = extractPreloadFlag(from: resource)
-
         let sendable = SendableReplyHandler(handler: replyHandler)
         Task {
             await LifecycleTrace.shared.mark(
                 self.log, event: "bridge.loadResource.begin",
-                details: "\(resourceDescription) preload=\(preload)")
+                details: resourceDescription)
             do {
-                try await VfsConnection.shared.connect(address: address)
+                try await VfsConnection.shared.connect(url: url)
 
-                let volume = Volume(preload: preload)
+                let volume = Volume()
                 self.containerStatus = .ready
                 await LifecycleTrace.shared.mark(
                     self.log, event: "bridge.loadResource.success",
@@ -258,33 +260,20 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
 
     // MARK: - URL Resource Handling
 
-    /// Extract server address from FSGenericURLResource
+    /// Extract the vixen:// URL from an FSGenericURLResource.
     /// Expected URL format: vixen://host:port or vixen://host (defaults to port 10001)
-    private func extractServerAddress(from resource: FSResource) -> String? {
+    private func extractVixenURL(from resource: FSResource) -> URL? {
         guard let urlResource = resource as? FSGenericURLResource else {
             return nil
         }
 
         let url = urlResource.url
 
-        guard url.scheme == "vixen" else {
+        guard url.scheme == "vixen", url.host != nil else {
             return nil
         }
 
-        guard let host = url.host else {
-            return nil
-        }
-
-        let port = url.port ?? 10001
-        return "\(host):\(port)"
-    }
-
-    private func extractPreloadFlag(from resource: FSResource) -> Bool {
-        guard let urlResource = resource as? FSGenericURLResource else {
-            return false
-        }
-        let components = URLComponents(url: urlResource.url, resolvingAgainstBaseURL: false)
-        return components?.queryItems?.first(where: { $0.name == "preload" })?.value == "1"
+        return url
     }
 
     private func describe(resource: FSResource) -> String {

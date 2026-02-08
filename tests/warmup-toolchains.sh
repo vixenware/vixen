@@ -1,37 +1,51 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Nextest setup script: prime a shared CAS with toolchains so per-test
-# CAS clients can read from it via LayeredStorage (VX_CAS_BASE).
-#
-# This runs once before all tests. When the shared CAS already has
-# toolchains from a previous run, this is a fast no-op.
-
+# Build vx-store, vx-runner, vxd, vx
 cargo build
 
-# Platform-appropriate cache directory
+# HTTP download cache persists across runs (regular files, safe in ~/Library/Caches)
 if [[ "$(uname)" == "Darwin" ]]; then
-    CACHE_BASE="${HOME}/Library/Caches/vx-test-cas"
     HTTP_CACHE="${HOME}/Library/Caches/vx-test-http-cache"
 else
-    CACHE_BASE="${XDG_CACHE_HOME:-${HOME}/.cache}/vx-test-cas"
     HTTP_CACHE="${XDG_CACHE_HOME:-${HOME}/.cache}/vx-test-http-cache"
 fi
 
-CAS_DIR="${CACHE_BASE}/store"
 
-# Fast path: if toolchain specs already exist, skip warmup.
-# The toolchains/ dir in CAS holds spec->manifest mappings; if it has
-# content, the full toolchain data (blobs, manifests) is also present.
-if [[ -d "${CAS_DIR}/toolchains" ]] && [[ -n "$(ls -A "${CAS_DIR}/toolchains" 2>/dev/null)" ]]; then
-    echo "Toolchains already in shared CAS at ${CAS_DIR}"
-    echo "VX_CAS_BASE=${CAS_DIR}" >> "${NEXTEST_ENV}"
-    exit 0
+# Resolve absolute paths to built binaries
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+VXD_BIN="${SCRIPT_DIR}/target/debug/vxd"
+VX_BIN="${SCRIPT_DIR}/target/debug/vx"
+
+if [[ ! -x "${VXD_BIN}" ]]; then
+    echo "ERROR: ${VXD_BIN} not found. build-daemons should run first."
+    exit 1
 fi
 
-echo "Priming shared CAS with toolchains..."
+# VX_HOME goes in /tmp — sockets and VFS mounts must NOT be in ~/Library/Caches
+# or any location that macOS services scan (Finder, Spotlight, etc.), because
+# stale mounts cause system-wide hangs.
+export VX_HOME="/tmp/.vx-test/nextest/home"
+export VX_TEST=1
+export VX_HTTP_CACHE_DIR="${HTTP_CACHE}"
+export RUST_LOG="${RUST_LOG:-debug}"
 
-# Create a minimal project to trigger toolchain fetch
+mkdir -p "${VX_HOME}"
+
+# Kill any stale daemon (and its children: store, runner) from a previous run.
+# vx kill handles all cases: graceful RPC shutdown if vxd is alive, PID-file
+# cleanup if vxd is dead but children survived, and socket/pidfile removal.
+"${VX_BIN}" kill || echo "NOTE: vx kill reported no daemon running (clean slate)"
+
+# Spawn shared daemon. VX_TEST skips die_with_parent() so the daemon
+# outlives this setup script.
+"${VXD_BIN}" &
+DAEMON_PID=$!
+
+# Give daemon time to initialize (spawn store, runner, bind sockets)
+sleep 2
+
+# Build a warmup project to trigger toolchain download + materialization
 WARMUP_DIR=$(mktemp -d)
 trap 'rm -rf "${WARMUP_DIR}"' EXIT
 
@@ -44,39 +58,15 @@ edition = "2021"
 TOML
 echo 'fn main() {}' > "${WARMUP_DIR}/src/main.rs"
 
-# Resolve absolute paths to built binaries (build-daemons ran first)
-SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-VXD_BIN="${SCRIPT_DIR}/target/debug/vxd"
-VX_BIN="${SCRIPT_DIR}/target/debug/vx"
-
-if [[ ! -x "${VXD_BIN}" ]]; then
-    echo "ERROR: ${VXD_BIN} not found. build-daemons should run first."
-    exit 1
-fi
-
-# Spawn daemon at shared VX_HOME
-export VX_HOME="${CACHE_BASE}"
-export VX_HTTP_CACHE_DIR="${HTTP_CACHE}"
-export VX_INHERIT_STDIO=1
-export RUST_LOG="${RUST_LOG:-info}"
-
-"${VXD_BIN}" &
-DAEMON_PID=$!
-
-# Give daemon time to initialize (spawn store, runner, bind sockets)
-sleep 2
-
-# Build the warmup project to trigger toolchain download + materialization
-(cd "${WARMUP_DIR}" && "${VX_BIN}" build --no-spawn) || {
+(cd "${WARMUP_DIR}" && "${VX_BIN}" build --no-spawn --no-tui) || {
     echo "WARNING: warmup build failed, tests will still work but may be slower"
-    kill "${DAEMON_PID}" 2>/dev/null || true
-    wait "${DAEMON_PID}" 2>/dev/null || true
-    exit 0
 }
 
-# Shut down the warmup daemon
-kill "${DAEMON_PID}" 2>/dev/null || true
-wait "${DAEMON_PID}" 2>/dev/null || true
+# Export connection info for all tests. TestEnv::new() reads these to skip
+# spawning and connect to this daemon instead.
+{
+    echo "VX_HOME=${VX_HOME}"
+    echo "VX_TEST=${VX_TEST}"
+} >> "${NEXTEST_ENV}"
 
-echo "Shared CAS primed at ${CAS_DIR}"
-echo "VX_CAS_BASE=${CAS_DIR}" >> "${NEXTEST_ENV}"
+echo "Shared daemon running (pid ${DAEMON_PID}) at VX_HOME=${VX_HOME}"

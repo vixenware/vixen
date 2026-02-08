@@ -13,7 +13,7 @@ fn rejects_registry_deps_without_lockfile() {
     create_project_with_deps(&env);
 
     // No Cargo.lock file - should fail with a clear error message
-    let result = env.build(false);
+    let result = env.build().run();
 
     assert!(
         !result.success,
@@ -32,7 +32,7 @@ fn rejects_workspace() {
     let env = TestEnv::new();
     create_workspace(&env);
 
-    let result = env.build(false);
+    let result = env.build().run();
 
     assert!(!result.success, "build should fail for workspace");
     // Workspaces are rejected because they have [workspace] instead of [package]
@@ -52,7 +52,7 @@ fn rejects_build_script() {
     let env = TestEnv::new();
     create_project_with_build_script(&env);
 
-    let result = env.build(false);
+    let result = env.build().run();
 
     assert!(!result.success, "build should fail with build script");
     assert!(
@@ -80,7 +80,7 @@ foo = []
     );
     env.write_file("src/main.rs", "fn main() {}\n");
 
-    let result = env.build(false);
+    let result = env.build().run();
 
     assert!(!result.success, "build should fail with features");
     assert!(
@@ -105,7 +105,7 @@ proc-macro = true
     );
     env.write_file("src/lib.rs", "");
 
-    let result = env.build(false);
+    let result = env.build().run();
 
     assert!(!result.success, "build should fail with proc-macro");
 }

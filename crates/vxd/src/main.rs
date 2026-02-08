@@ -155,7 +155,7 @@ fn spawn_service(
 ) -> Result<Child> {
     use std::process::Stdio;
 
-    let inherit_stdio = std::env::var("VX_INHERIT_STDIO").is_ok();
+    let inherit_stdio = std::env::var("VX_TEST").is_ok();
 
     // Prefer spawning sibling binaries next to the currently running vxd.
     // This keeps test runs using the same target/debug artifacts instead of any
@@ -166,7 +166,7 @@ fn spawn_service(
         .filter(|candidate| candidate.exists())
         .unwrap_or_else(|| std::path::PathBuf::from(binary_name));
 
-    tracing::debug!("spawning {} from {}", binary_name, binary_path.display());
+    tracing::debug!(%inherit_stdio, "spawning {} from {}", binary_name, binary_path.display());
 
     let mut cmd = std::process::Command::new(&binary_path);
     for (key, value) in env_vars {
@@ -212,11 +212,6 @@ async fn ensure_services(args: &Args, spawn_tracker: &Arc<Mutex<SpawnTracker>>) 
             );
         }
 
-        tracing::info!(
-            "Store not running, spawning vx-store on {}",
-            args.cas_endpoint
-        );
-
         let store_log = args.vx_home.join("store.log");
         let child = spawn_service(
             "vx-store",
@@ -227,13 +222,12 @@ async fn ensure_services(args: &Args, spawn_tracker: &Arc<Mutex<SpawnTracker>>) 
             &store_log,
         )?;
 
-        tracing::info!("vx-store logs: {}", store_log);
         spawn_tracker.lock().await.store = Some(child);
 
         for (attempt, delay) in backoff_ms.iter().enumerate() {
             tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
             if vx_io::net::try_connect(&args.cas_endpoint).await?.is_some() {
-                tracing::info!("Connected to Store after {} attempts", attempt + 1);
+                tracing::trace!("Connected to Store after {} attempts", attempt + 1);
                 break;
             }
         }
@@ -261,11 +255,6 @@ async fn ensure_services(args: &Args, spawn_tracker: &Arc<Mutex<SpawnTracker>>) 
             );
         }
 
-        tracing::info!(
-            "Runner not running, spawning vx-runner on {}",
-            args.exec_endpoint
-        );
-
         let runner_log = args.vx_home.join("runner.log");
         let child = spawn_service(
             "vx-runner",
@@ -277,7 +266,6 @@ async fn ensure_services(args: &Args, spawn_tracker: &Arc<Mutex<SpawnTracker>>) 
             &runner_log,
         )?;
 
-        tracing::info!("vx-runner logs: {}", runner_log);
         spawn_tracker.lock().await.runner = Some(child);
 
         for (attempt, delay) in backoff_ms.iter().enumerate() {
@@ -286,7 +274,7 @@ async fn ensure_services(args: &Args, spawn_tracker: &Arc<Mutex<SpawnTracker>>) 
                 .await?
                 .is_some()
             {
-                tracing::info!("Connected to Runner after {} attempts", attempt + 1);
+                tracing::trace!("Connected to Runner after {} attempts", attempt + 1);
                 break;
             }
         }
@@ -318,8 +306,11 @@ async fn async_main() -> Result<()> {
     // Initialize tracing (logs will go to ~/.vx/vxd.log via spawn_service redirection)
     vx_tracing::init_service("vxd=debug");
 
-    // Now safe to call things that might log
-    ur_taking_me_with_you::die_with_parent();
+    // When spawned by a long-lived orchestrator (e.g. nextest setup script),
+    // the daemon must outlive its parent process.
+    if std::env::var("VX_TEST").is_err() {
+        ur_taking_me_with_you::die_with_parent();
+    }
 
     let args = Args::from_env()?;
     tracing::info!("Starting vxd");
@@ -390,7 +381,10 @@ async fn async_main() -> Result<()> {
         tokio::spawn(async move {
             tracing::debug!("New connection from {}", peer_addr);
 
-            let dispatcher = VxdDispatcher::new(daemon.as_ref().clone());
+            // Create a per-connection session with fresh state
+            let session = daemon.new_session();
+
+            let dispatcher = VxdDispatcher::new(session.clone());
             let Ok((handle, _incoming, driver)) = accept(
                 stream,
                 HandshakeConfig {
@@ -409,14 +403,11 @@ async fn async_main() -> Result<()> {
                 Arc::new(vxd_proto::ProgressListenerClient::new(handle.clone()));
 
             // Set progress listener for this connection
-            daemon.set_progress_listener(Some(progress_listener)).await;
+            session.set_progress_listener(Some(progress_listener)).await;
 
             if let Err(e) = driver.run().await {
                 tracing::warn!("Session error from {}: {}", peer_addr, e);
             }
-
-            // Clear progress listener when connection closes
-            daemon.set_progress_listener(None).await;
 
             tracing::debug!("Connection from {} closed", peer_addr);
         });

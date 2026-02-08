@@ -1025,7 +1025,10 @@ mod macos_bench {
         .await?;
 
         match result {
-            VfsStart::Mounted { mount_path } => Ok(mount_path),
+            VfsStart::Mounted {
+                mount_path,
+                vfs_dead: _,
+            } => Ok(mount_path),
             VfsStart::Unsupported { platform } => {
                 Err(format!("VFS mount unsupported on platform {platform}").into())
             }

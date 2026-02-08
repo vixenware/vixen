@@ -180,6 +180,11 @@ pub trait Store {
     /// writing the cache key → manifest hash mapping.
     async fn publish(&self, cache_key: CacheKey, manifest_hash: ManifestHash) -> PublishResult;
 
+    /// Remove a cache key mapping. Blobs and manifests are left intact
+    /// (they're content-addressed and harmless to keep).
+    /// Used by ephemeral sessions to roll back cache entries on disconnect.
+    async fn unpublish(&self, cache_key: CacheKey) -> bool;
+
     // =========================================================================
     // Manifest operations
     // =========================================================================

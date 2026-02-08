@@ -15,7 +15,7 @@ public enum VfsMethodId {
     public static let create: UInt64 = 0x2caaf8adf5eda0e1
     public static let delete: UInt64 = 0xfa37cb27061e7e2a
     public static let rename: UInt64 = 0x4d68b4b3208a8c07
-    public static let setAttributes: UInt64 = 0x5dcd5793362fcd20
+    public static let setAttributes: UInt64 = 0x320f6529a5a0e5ce
     public static let ping: UInt64 = 0xe35cdfdca59ce5ab
 }
 
@@ -140,10 +140,12 @@ public struct VfsResult: Codable, Sendable {
 public struct SetAttributesParams: Codable, Sendable {
     public var mode: UInt32?
     public var modifiedTime: UInt64?
+    public var size: UInt64?
 
-    public init(mode: UInt32?, modifiedTime: UInt64?) {
+    public init(mode: UInt32?, modifiedTime: UInt64?, size: UInt64?) {
         self.mode = mode
         self.modifiedTime = modifiedTime
+        self.size = size
     }
 }
 
@@ -176,9 +178,11 @@ public protocol VfsCaller {
 
 public final class VfsClient: VfsCaller {
     private let connection: RoamConnection
+    private let timeout: TimeInterval?
 
-    public init(connection: RoamConnection) {
+    public init(connection: RoamConnection, timeout: TimeInterval? = 30.0) {
         self.connection = connection
+        self.timeout = timeout
     }
 
     public func lookup(parentId: UInt64, name: String) async throws -> LookupResult {
@@ -186,7 +190,7 @@ public final class VfsClient: VfsCaller {
         payloadBytes += encodeVarint(parentId)
         payloadBytes += encodeString(name)
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0xac1f4b76a434caf5, payload: payload)
+        let response = try await connection.call(methodId: 0xac1f4b76a434caf5, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_itemId = try decodeVarint(from: response, offset: &cursor)
@@ -211,7 +215,7 @@ public final class VfsClient: VfsCaller {
         var payloadBytes: [UInt8] = []
         payloadBytes += encodeVarint(itemId)
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0xc968b68989c3f020, payload: payload)
+        let response = try await connection.call(methodId: 0xc968b68989c3f020, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let __result_attrs_itemId = try decodeVarint(from: response, offset: &cursor)
@@ -242,7 +246,7 @@ public final class VfsClient: VfsCaller {
         payloadBytes += encodeVarint(itemId)
         payloadBytes += encodeVarint(cursor)
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0xd717690e60df5af3, payload: payload)
+        let response = try await connection.call(methodId: 0xd717690e60df5af3, payload: payload, timeout: timeout)
         var cursor_ = 0
         try decodeRpcResult(from: response, offset: &cursor_)
         let _result_entries = try decodeVec(from: response, offset: &cursor_, decoder: { data, off in
@@ -281,7 +285,7 @@ public final class VfsClient: VfsCaller {
         payloadBytes += encodeVarint(offset)
         payloadBytes += encodeVarint(len)
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0x9c80fd555999d0e1, payload: payload)
+        let response = try await connection.call(methodId: 0x9c80fd555999d0e1, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_data = try decodeBytes(from: response, offset: &cursor)
@@ -296,7 +300,7 @@ public final class VfsClient: VfsCaller {
         payloadBytes += encodeVarint(offset)
         payloadBytes += encodeBytes(Array(data))
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0x5d398e81123c3597, payload: payload)
+        let response = try await connection.call(methodId: 0x5d398e81123c3597, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_bytesWritten = try decodeVarint(from: response, offset: &cursor)
@@ -320,7 +324,7 @@ public final class VfsClient: VfsCaller {
     }
 }(itemType)
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0x2caaf8adf5eda0e1, payload: payload)
+        let response = try await connection.call(methodId: 0x2caaf8adf5eda0e1, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_itemId = try decodeVarint(from: response, offset: &cursor)
@@ -333,7 +337,7 @@ public final class VfsClient: VfsCaller {
         var payloadBytes: [UInt8] = []
         payloadBytes += encodeVarint(itemId)
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0xfa37cb27061e7e2a, payload: payload)
+        let response = try await connection.call(methodId: 0xfa37cb27061e7e2a, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_error = try decodeI32(from: response, offset: &cursor)
@@ -347,7 +351,7 @@ public final class VfsClient: VfsCaller {
         payloadBytes += encodeVarint(newParentId)
         payloadBytes += encodeString(newName)
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0x4d68b4b3208a8c07, payload: payload)
+        let response = try await connection.call(methodId: 0x4d68b4b3208a8c07, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_error = try decodeI32(from: response, offset: &cursor)
@@ -358,9 +362,9 @@ public final class VfsClient: VfsCaller {
     public func setAttributes(itemId: UInt64, params: SetAttributesParams) async throws -> VfsResult {
         var payloadBytes: [UInt8] = []
         payloadBytes += encodeVarint(itemId)
-        payloadBytes += encodeOption(params.mode, encoder: { encodeU32($0) }) + encodeOption(params.modifiedTime, encoder: { encodeVarint($0) })
+        payloadBytes += encodeOption(params.mode, encoder: { encodeU32($0) }) + encodeOption(params.modifiedTime, encoder: { encodeVarint($0) }) + encodeOption(params.size, encoder: { encodeVarint($0) })
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0x5dcd5793362fcd20, payload: payload)
+        let response = try await connection.call(methodId: 0x320f6529a5a0e5ce, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_error = try decodeI32(from: response, offset: &cursor)
@@ -370,7 +374,7 @@ public final class VfsClient: VfsCaller {
 
     public func ping() async throws -> String {
         let payload = Data()
-        let response = try await connection.call(methodId: 0xe35cdfdca59ce5ab, payload: payload)
+        let response = try await connection.call(methodId: 0xe35cdfdca59ce5ab, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let result = try decodeString(from: response, offset: &cursor)
@@ -434,7 +438,7 @@ public final class VfsChannelingDispatcher {
             await dispatchdelete(requestId: requestId, payload: payload)
         case 0x4d68b4b3208a8c07:
             await dispatchrename(requestId: requestId, payload: payload)
-        case 0x5dcd5793362fcd20:
+        case 0x320f6529a5a0e5ce:
             await dispatchsetAttributes(requestId: requestId, payload: payload)
         case 0xe35cdfdca59ce5ab:
             await dispatchping(requestId: requestId, payload: payload)
@@ -595,7 +599,8 @@ public final class VfsChannelingDispatcher {
             let itemId = try decodeVarint(from: payload, offset: &cursor)
             let _params_mode = try decodeOption(from: payload, offset: &cursor, decoder: { data, off in try decodeU32(from: data, offset: &off) })
             let _params_modifiedTime = try decodeOption(from: payload, offset: &cursor, decoder: { data, off in try decodeVarint(from: data, offset: &off) })
-            let params = SetAttributesParams(mode: _params_mode, modifiedTime: _params_modifiedTime)
+            let _params_size = try decodeOption(from: payload, offset: &cursor, decoder: { data, off in try decodeVarint(from: data, offset: &off) })
+            let params = SetAttributesParams(mode: _params_mode, modifiedTime: _params_modifiedTime, size: _params_size)
             let result = try await handler.setAttributes(itemId: itemId, params: params)
             taskSender(.response(requestId: requestId, payload: encodeResultOk(result, encoder: { encodeI32($0.error) })))
         } catch {
@@ -626,7 +631,7 @@ public let vfs_schemas: [String: MethodSchema] = [
     "create": MethodSchema(args: [.u64, .string, .enum(variants: [("File", []), ("Directory", []), ("Symlink", [])])]),
     "delete": MethodSchema(args: [.u64]),
     "rename": MethodSchema(args: [.u64, .u64, .string]),
-    "setAttributes": MethodSchema(args: [.u64, .struct(fields: [("mode", .option(inner: .u32)), ("modified_time", .option(inner: .u64))])]),
+    "setAttributes": MethodSchema(args: [.u64, .struct(fields: [("mode", .option(inner: .u32)), ("modified_time", .option(inner: .u64)), ("size", .option(inner: .u64))])]),
     "ping": MethodSchema(args: []),
 ]
 

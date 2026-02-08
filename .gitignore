@@ -1,6 +1,17 @@
+# rust
 target
+
+# samply
 profile.json.gz
-.handoffs
+
+# claudio
 .claude
+.handoffs
+
 .conductor
+
+# tracey temp files
 .tracey/
+
+# swift build
+.build/

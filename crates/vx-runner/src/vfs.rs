@@ -152,6 +152,11 @@ impl CasVfs {
         .map(Arc::clone)
     }
 
+    /// Check if a prefix already exists
+    pub async fn has_prefix(&self, prefix_id: &str) -> bool {
+        self.prefixes.read().await.contains_key(prefix_id)
+    }
+
     /// Create a new action prefix
     ///
     /// Returns the prefix ID (e.g., "build-01JFX...") and the root ItemId
@@ -204,7 +209,7 @@ impl CasVfs {
         size: u64,
         executable: bool,
     ) -> Option<ItemId> {
-        tracing::debug!(
+        tracing::trace!(
             prefix_id = %prefix_id,
             path = %path,
             hash = %cas_hash,
@@ -232,7 +237,7 @@ impl CasVfs {
             )
             .await;
 
-        tracing::debug!(
+        tracing::trace!(
             prefix_id = %prefix_id,
             path = %path,
             item_id = ?result,
@@ -521,11 +526,7 @@ impl Vfs for CasVfs {
         let (item_type, cas_hash, buffered_data) = {
             let items = self.items.read().await;
             match items.get(&item_id) {
-                Some(item) => (
-                    item.item_type,
-                    item.cas_hash,
-                    item.write_buffer.clone(),
-                ),
+                Some(item) => (item.item_type, item.cas_hash, item.write_buffer.clone()),
                 None => {
                     return ReadResult {
                         data: Vec::new(),

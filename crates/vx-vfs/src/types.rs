@@ -11,10 +11,14 @@ pub struct VfsConfig {
 }
 
 /// Successful VFS start outcomes.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum VfsStart {
     /// VFS is mounted and ready at the given path.
-    Mounted { mount_path: Utf8PathBuf },
+    Mounted {
+        mount_path: Utf8PathBuf,
+        /// Becomes `true` when the VFS session dies unexpectedly.
+        vfs_dead: tokio::sync::watch::Receiver<bool>,
+    },
     /// VFS is unavailable on this platform.
     Unsupported { platform: String },
 }

@@ -127,7 +127,8 @@ struct ContentView: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 28)
                     .padding(.vertical, 12)
-                    .background(brandOrange, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .background(
+                        brandOrange, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
             .buttonStyle(.plain)
         }
@@ -148,11 +149,13 @@ struct ContentView: View {
                 Text("Almost there")
                     .font(.system(size: 24, weight: .bold))
 
-                Text("Vixen uses a virtual file system to give your builds a hermetic, reproducible view of the world. Enable the VixenFS extension in System Settings to get started.")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
+                Text(
+                    "Vixen uses a virtual file system to give your builds a hermetic, reproducible view of the world. Enable the VixenFS extension in System Settings to get started."
+                )
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
 
                 settingsPreview
 
@@ -172,7 +175,8 @@ struct ContentView: View {
                         .foregroundStyle(.white)
                         .padding(.horizontal, 28)
                         .padding(.vertical, 12)
-                        .background(brandOrange, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .background(
+                            brandOrange, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 .buttonStyle(.plain)
             }
@@ -267,10 +271,12 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("File System Extensions")
                             .font(.system(size: 13, weight: .semibold))
-                        Text("File System extensions allow you to extend the file system functionality of macOS without requiring kernel-level access.")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                        Text(
+                            "File System extensions allow you to extend the file system functionality of macOS without requiring kernel-level access."
+                        )
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -340,11 +346,13 @@ struct ContentView: View {
                 Text("You're all set")
                     .font(.system(size: 24, weight: .bold))
 
-                Text("VixenFS is enabled. Head to the docs to install the CLI and run your first build.")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
+                Text(
+                    "VixenFS is enabled. Head to the docs to install the CLI and run your first build."
+                )
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
 
                 Button {
                     if let url = URL(string: "https://vixen.rs/") {
@@ -356,7 +364,8 @@ struct ContentView: View {
                         .foregroundStyle(.white)
                         .padding(.horizontal, 28)
                         .padding(.vertical, 12)
-                        .background(brandOrange, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .background(
+                            brandOrange, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 .buttonStyle(.plain)
             }
@@ -389,8 +398,10 @@ private struct MockToggle: View {
 private enum SparkleBootstrap {
     static func makeUpdaterController() -> SPUStandardUpdaterController? {
         guard let info = Bundle.main.infoDictionary else { return nil }
-        let feedURL = (info["SUFeedURL"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let publicKey = (info["SUPublicEDKey"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let feedURL = (info["SUFeedURL"] as? String)?.trimmingCharacters(
+            in: .whitespacesAndNewlines)
+        let publicKey = (info["SUPublicEDKey"] as? String)?.trimmingCharacters(
+            in: .whitespacesAndNewlines)
 
         guard let feedURL, !feedURL.isEmpty, let publicKey, !publicKey.isEmpty else {
             return nil
@@ -404,23 +415,25 @@ private enum SparkleBootstrap {
     }
 }
 
-private extension Color {
-    init(hex: UInt32) {
+extension Color {
+    fileprivate init(hex: UInt32) {
         let red = Double((hex >> 16) & 0xFF) / 255.0
         let green = Double((hex >> 8) & 0xFF) / 255.0
         let blue = Double(hex & 0xFF) / 255.0
         self.init(red: red, green: green, blue: blue)
     }
 
-    init(light: UInt32, dark: UInt32) {
-        self.init(nsColor: NSColor(name: nil) { appearance in
-            let hex = appearance.bestMatch(from: [.darkAqua, .vibrantDark]) != nil ? dark : light
-            return NSColor(
-                red: CGFloat((hex >> 16) & 0xFF) / 255.0,
-                green: CGFloat((hex >> 8) & 0xFF) / 255.0,
-                blue: CGFloat(hex & 0xFF) / 255.0,
-                alpha: 1
-            )
-        })
+    fileprivate init(light: UInt32, dark: UInt32) {
+        self.init(
+            nsColor: NSColor(name: nil) { appearance in
+                let hex =
+                    appearance.bestMatch(from: [.darkAqua, .vibrantDark]) != nil ? dark : light
+                return NSColor(
+                    red: CGFloat((hex >> 16) & 0xFF) / 255.0,
+                    green: CGFloat((hex >> 8) & 0xFF) / 255.0,
+                    blue: CGFloat(hex & 0xFF) / 255.0,
+                    alpha: 1
+                )
+            })
     }
 }

@@ -51,9 +51,9 @@ roam = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-stream = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-local = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-codegen = { git = "https://github.com/bearcove/roam", branch = "main" }
+ur-taking-me-with-you = { git = "https://github.com/bearcove/roam", branch = "main" }
 
 # process management
-ur-taking-me-with-you = { git = "https://github.com/bearcove/rapace", tag = "v0.5.0" }
 
 # hashing
 blake3 = "1"
@@ -62,6 +62,8 @@ hex = "0.4"
 # error handling
 eyre = "0.6"
 thiserror = "2"
+
+ulid = "1.2"
 
 # async
 tokio = { version = "1", features = [
@@ -142,6 +144,10 @@ strip = "none"
 # roam-stream = { path = "../roam/rust/roam-stream" }
 # roam-local = { path = "../roam/rust/roam-local" }
 # roam-codegen = { path = "../roam/rust/roam-codegen" }
+
+# [patch."https://github.com/bearcove/picante"]
+# picante = { path = "../picante/crates/picante" }
+# picante-macros = { path = "../picante/crates/picante-macros" }
 
 [profile.samply]
 inherits = "release"

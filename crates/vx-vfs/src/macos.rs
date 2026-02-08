@@ -14,7 +14,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 use vixenfs_proto::{Vfs, VfsDispatcher};
 use vx_io::net::{Endpoint, Listener};
 use vx_vfs_types::{
@@ -42,34 +42,9 @@ where
         })?;
     tracing::debug!(mount_path = %config.mount_path, "ensured mount directory exists");
 
-    let listener = Listener::bind(&Endpoint::tcp("127.0.0.1", 0))
-        .await
-        .map_err(|error| VfsError::CommandFailed {
-            program: "mount",
-            message: format!("failed to bind internal vfs listener: {}", error),
-            _diagnostics: vec![],
-        })?;
-    let local_addr = listener
-        .local_addr()
-        .map_err(|error| VfsError::CommandFailed {
-            program: "mount",
-            message: format!("failed to query internal vfs listener address: {}", error),
-            _diagnostics: vec![],
-        })?;
-    tracing::debug!(%local_addr, "bound internal VFS listener");
-
     let (mount_ready_tx, mut mount_ready_rx) = mpsc::channel::<()>(1);
-    spawn_accept_loop(listener, vfs, mount_ready_tx);
-
-    let Endpoint::Tcp { port, .. } = local_addr else {
-        return Err(VfsError::CommandFailed {
-            program: "vixenfs-mount",
-            message:
-                "internal listener did not bind to TCP; cannot extract TCP port for vixenfs-mount"
-                    .to_string(),
-            _diagnostics: vec![],
-        });
-    };
+    let (vfs_dead_tx, vfs_dead_rx) = watch::channel(false);
+    let port = spawn_accept_loop(vfs, mount_ready_tx, vfs_dead_tx)?;
 
     tracing::debug!(%port, mount_path = %config.mount_path, "starting vixenfs-mount helper");
 
@@ -111,6 +86,7 @@ where
             tracing::info!(mount_path = %config.mount_path, "vixenfs-mount became ready");
             Ok(VfsStart::Mounted {
                 mount_path: config.mount_path,
+                vfs_dead: vfs_dead_rx,
             })
         }
         Err(readiness_error) => {
@@ -136,41 +112,104 @@ where
     }
 }
 
-fn spawn_accept_loop<T>(listener: Listener, vfs: T, mount_ready_tx: mpsc::Sender<()>)
+/// Run the VFS accept loop on a dedicated tokio runtime.
+///
+/// Compilation tasks block tokio worker threads in `posix_spawn` (launching
+/// rustc/zig). If the VFS accept loop shares that runtime, there may be no
+/// workers left to service VFS read requests — which rustc needs to proceed.
+/// A dedicated runtime guarantees VFS responsiveness regardless of how many
+/// compilations are in flight.
+///
+/// The listener is bound on the VFS runtime (not the caller's runtime) so the
+/// underlying `TcpListener` is registered with the correct reactor.
+fn spawn_accept_loop<T>(
+    vfs: T,
+    mount_ready_tx: mpsc::Sender<()>,
+    vfs_dead_tx: watch::Sender<bool>,
+) -> Result<u16, VfsError>
 where
     T: Vfs + Clone + Send + Sync + 'static,
 {
-    tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, peer_addr)) => {
-                    let _ = mount_ready_tx.try_send(());
-                    let vfs = vfs.clone();
-                    tokio::spawn(async move {
-                        tracing::debug!(%peer_addr, "accepted Vixen VFS connection");
-                        let dispatcher = VfsDispatcher::new(vfs);
-                        let config = HandshakeConfig {
-                            max_payload_size: 256 * 1024 * 1024, // 256 MiB — large enough for librustc_driver
-                            ..Default::default()
-                        };
-                        let accepted = accept(stream, config, dispatcher).await;
-                        let Ok((_handle, _incoming, driver)) = accepted else {
-                            tracing::debug!(%peer_addr, "VFS handshake failed");
-                            return;
-                        };
-                        if let Err(error) = driver.run().await {
-                            tracing::debug!(%peer_addr, %error, "VFS session ended with error");
-                        } else {
-                            tracing::debug!(%peer_addr, "VFS session closed");
+    // Use a oneshot to get the bound port (or error) back from the VFS runtime.
+    let (port_tx, port_rx) = std::sync::mpsc::channel::<Result<u16, String>>();
+
+    std::thread::Builder::new()
+        .name("vfs-runtime".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_name("vfs-worker")
+                .enable_all()
+                .build()
+                .expect("failed to create VFS tokio runtime");
+            rt.block_on(async move {
+                let listener = match Listener::bind(&Endpoint::tcp("127.0.0.1", 0)).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        let _ = port_tx.send(Err(format!("failed to bind VFS listener: {e}")));
+                        return;
+                    }
+                };
+                let local_addr = match listener.local_addr() {
+                    Ok(a) => a,
+                    Err(e) => {
+                        let _ = port_tx.send(Err(format!("failed to query VFS listener address: {e}")));
+                        return;
+                    }
+                };
+                let Endpoint::Tcp { port, .. } = local_addr else {
+                    let _ = port_tx.send(Err("VFS listener did not bind to TCP".to_string()));
+                    return;
+                };
+                tracing::debug!(%port, "VFS listener bound on dedicated runtime");
+                let _ = port_tx.send(Ok(port));
+
+                loop {
+                    match listener.accept().await {
+                        Ok((stream, peer_addr)) => {
+                            let _ = mount_ready_tx.try_send(());
+                            let vfs = vfs.clone();
+                            let vfs_dead_tx = vfs_dead_tx.clone();
+                            tokio::spawn(async move {
+                                tracing::debug!(%peer_addr, "accepted Vixen VFS connection");
+                                let dispatcher = VfsDispatcher::new(vfs);
+                                let config = HandshakeConfig {
+                                    max_payload_size: 256 * 1024 * 1024, // 256 MiB — large enough for librustc_driver
+                                    ..Default::default()
+                                };
+                                let accepted = accept(stream, config, dispatcher).await;
+                                let Ok((_handle, _incoming, driver)) = accepted else {
+                                    tracing::debug!(%peer_addr, "VFS handshake failed");
+                                    let _ = vfs_dead_tx.send(true);
+                                    return;
+                                };
+                                if let Err(error) = driver.run().await {
+                                    tracing::debug!(%peer_addr, %error, "VFS session ended with error");
+                                } else {
+                                    tracing::debug!(%peer_addr, "VFS session closed");
+                                }
+                                let _ = vfs_dead_tx.send(true);
+                            });
                         }
-                    });
+                        Err(error) => {
+                            tracing::debug!(%error, "VFS accept failed");
+                        }
+                    }
                 }
-                Err(error) => {
-                    tracing::debug!(%error, "VFS accept failed");
-                }
-            }
-        }
-    });
+            });
+        })
+        .expect("failed to spawn VFS runtime thread");
+
+    port_rx
+        .recv()
+        .unwrap_or(Err(
+            "VFS runtime thread died before sending port".to_string()
+        ))
+        .map_err(|msg| VfsError::CommandFailed {
+            program: "mount",
+            message: msg,
+            _diagnostics: vec![],
+        })
 }
 
 async fn wait_for_mount_ready(

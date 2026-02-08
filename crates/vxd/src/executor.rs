@@ -1140,8 +1140,6 @@ async fn execute_action(
                     .await
                     .map_err(|e| VxdError::CasRpc(e.to_string()))?;
 
-                // Track rebuild
-
                 (output_manifest, false)
             };
 

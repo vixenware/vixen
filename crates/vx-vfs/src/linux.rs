@@ -88,7 +88,12 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
 
     async fn destroy(&self, _req: Request) {}
 
-    async fn lookup(&self, _req: Request, parent: Inode, name: &OsStr) -> fuse3::Result<ReplyEntry> {
+    async fn lookup(
+        &self,
+        _req: Request,
+        parent: Inode,
+        name: &OsStr,
+    ) -> fuse3::Result<ReplyEntry> {
         let name_str = name.to_str().ok_or_else(Errno::new_not_exist)?;
         let cx = dummy_context();
         let result = self.vfs.lookup(&cx, parent, name_str.to_owned()).await;
@@ -314,12 +319,7 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         Ok(())
     }
 
-    async fn opendir(
-        &self,
-        _req: Request,
-        _inode: Inode,
-        _flags: u32,
-    ) -> fuse3::Result<ReplyOpen> {
+    async fn opendir(&self, _req: Request, _inode: Inode, _flags: u32) -> fuse3::Result<ReplyOpen> {
         Ok(ReplyOpen { fh: 0, flags: 0 })
     }
 
@@ -473,6 +473,8 @@ where
     let bridge = FuseBridge::new(vfs, uid, gid);
     let mount_path = config.mount_path.clone();
 
+    let (vfs_dead_tx, vfs_dead_rx) = tokio::sync::watch::channel(false);
+
     let mount_handle = Session::new(mount_options)
         .mount_with_unprivileged(bridge, mount_path.as_std_path())
         .await
@@ -486,6 +488,7 @@ where
         if let Err(e) = mount_handle.await {
             tracing::error!(%e, "FUSE mount ended with error");
         }
+        let _ = vfs_dead_tx.send(true);
     });
 
     // Fork a sentinel child process that will unmount the FUSE filesystem
@@ -547,5 +550,6 @@ where
 
     Ok(VfsStart::Mounted {
         mount_path: config.mount_path,
+        vfs_dead: vfs_dead_rx,
     })
 }

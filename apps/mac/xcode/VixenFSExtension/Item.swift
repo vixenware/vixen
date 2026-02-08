@@ -2,24 +2,37 @@ import FSKit
 import Foundation
 
 /// Wrapper around FSItem that holds our VFS item state.
+/// Mutable fields are protected by a lock since Item instances are shared
+/// between Volume's cache and FSKit, which may access them concurrently.
 final class Item: FSItem {
     /// VFS item ID (unique identifier)
     let itemId: UInt64
 
-    /// File name
-    private(set) var name: FSFileName
+    /// File name (immutable after init — set once during lookup/create)
+    let name: FSFileName
 
-    /// Cached attributes
-    private(set) var cachedAttributes: FSItem.Attributes
+    /// Cached attributes, protected by lock for concurrent access.
+    /// We use NSLock instead of OSAllocatedUnfairLock because FSItem.Attributes
+    /// is an ObjC class that doesn't conform to Sendable.
+    private let _lock = NSLock()
+    private var _cachedAttributes: FSItem.Attributes
+
+    var cachedAttributes: FSItem.Attributes {
+        _lock.lock()
+        defer { _lock.unlock() }
+        return _cachedAttributes
+    }
 
     init(itemId: UInt64, name: String, attributes: FSItem.Attributes) {
         self.itemId = itemId
         self.name = FSFileName(string: name)
-        self.cachedAttributes = attributes
+        self._cachedAttributes = attributes
     }
 
     func updateAttributes(_ attrs: FSItem.Attributes) {
-        self.cachedAttributes = attrs
+        _lock.lock()
+        defer { _lock.unlock() }
+        _cachedAttributes = attrs
     }
 }
 

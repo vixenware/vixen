@@ -83,6 +83,8 @@ async fn async_main() -> Result<()> {
     // Initialize tracing
     vx_tracing::init_service("vx_store=info");
 
+    tracing::info!("hello from vixen-store");
+
     let args = Args::from_env()?;
 
     // Build storage backend

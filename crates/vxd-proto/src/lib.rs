@@ -93,6 +93,12 @@ pub trait Vxd {
     /// Build a project
     async fn build(&self, request: BuildRequest) -> BuildResult;
 
+    /// Set a session ID for cache key namespacing. When set, all cache keys
+    /// computed during this connection include the session ID, providing
+    /// isolation between concurrent sessions (e.g., parallel tests).
+    /// An empty string means "session zero" (shared/global namespace).
+    async fn set_session(&self, session_id: String);
+
     /// Shutdown the daemon gracefully
     async fn shutdown(&self);
 }

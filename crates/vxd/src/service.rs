@@ -12,6 +12,7 @@ use crate::error::{Result, VxdError};
 use crate::executor::Executor;
 use crate::inputs::*;
 use camino::Utf8PathBuf;
+use facet::trace;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
 use std::sync::Arc;
@@ -21,8 +22,8 @@ use vx_report::{BuildReport, ReportStore};
 use vx_rs::CrateGraph;
 use vx_runner_proto::RunnerClient;
 use vx_store_proto::{
-    Blake3Hash, EnsureStatus, RustChannel, RustComponent,
-    RustToolchainSpec, ServiceVersion, StoreClient, TreeFile,
+    Blake3Hash, EnsureStatus, RustChannel, RustComponent, RustToolchainSpec, ServiceVersion,
+    StoreClient, TreeFile,
 };
 use vxd_proto::{
     ActionType, BuildRequest, BuildResult, ProgressListenerClient, VXD_PROTOCOL_VERSION, Vxd,
@@ -62,6 +63,9 @@ pub struct VxdService {
     /// The host triple of the execd machine (used for toolchain selection + cache keys).
     exec_host_triple: String,
 
+    /// VX_HOME directory
+    vx_home: Utf8PathBuf,
+
     /// The picante incremental database
     db: Arc<Database>,
 
@@ -84,6 +88,10 @@ pub struct VxdService {
     /// Uses RwLock for interior mutability so it can be updated per-connection
     progress_listener:
         Arc<RwLock<Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>>>,
+
+    /// Session ID for cache key namespacing. Empty = session zero (shared).
+    /// Per-connection state — each connection handler gets its own instance.
+    session_id: Arc<RwLock<String>>,
 }
 
 impl VxdService {
@@ -126,11 +134,11 @@ impl VxdService {
         // Load persisted picante cache
         let cache_loaded = match db.load_from_cache(&cache_path).await {
             Ok(true) => {
-                info!(path = %cache_path, "loaded picante cache");
+                trace!(path = %cache_path, "loaded picante cache");
                 true
             }
             Ok(false) => {
-                debug!(path = %cache_path, "no picante cache found, starting fresh");
+                trace!(path = %cache_path, "no picante cache found, starting fresh");
                 false
             }
             Err(e) => {
@@ -172,6 +180,7 @@ impl VxdService {
             cas,
             exec,
             exec_host_triple,
+            vx_home,
             db: Arc::new(db),
             picante_cache: cache_path,
             picante_wal: wal_path,
@@ -182,7 +191,34 @@ impl VxdService {
             })),
             spawn_tracker,
             progress_listener: Arc::new(RwLock::new(None)),
+            session_id: Arc::new(RwLock::new(String::new())),
         }
+    }
+
+    /// Create a per-connection session with fresh ephemeral state.
+    /// Shared state (CAS, exec, DB, toolchains, WAL) is still shared via Arc.
+    pub fn new_session(&self) -> Self {
+        Self {
+            cas: self.cas.clone(),
+            exec: self.exec.clone(),
+            exec_host_triple: self.exec_host_triple.clone(),
+            vx_home: self.vx_home.clone(),
+            // db: self.db.clone(),
+            db: Arc::new(Database::new()),
+            picante_cache: self.picante_cache.clone(),
+            picante_wal: self.picante_wal.clone(),
+            wal_writer: self.wal_writer.clone(),
+            toolchains: self.toolchains.clone(),
+            spawn_tracker: self.spawn_tracker.clone(),
+            // Per-connection state: fresh for each session
+            progress_listener: Arc::new(RwLock::new(None)),
+            session_id: Arc::new(RwLock::new(String::new())),
+        }
+    }
+
+    /// Get the current session ID for this connection.
+    pub async fn session_id(&self) -> String {
+        self.session_id.read().await.clone()
     }
 
     /// Update the progress listener for the current connection
@@ -523,14 +559,20 @@ impl VxdService {
         RustToolchainManifest::set(&*self.db, placeholder_hash)
             .map_err(|e| VxdError::Picante(e.to_string()))?;
 
-        let build_key =
-            BuildConfig::compute_key(profile, &target_triple, graph.workspace_root.as_ref());
+        let session_id = self.session_id().await;
+        let build_key = BuildConfig::compute_key(
+            profile,
+            &target_triple,
+            graph.workspace_root.as_ref(),
+            &session_id,
+        );
         let config = BuildConfig::new(
             &*self.db,
             build_key,
             profile.to_string(),
             target_triple.clone(),
             graph.workspace_root.to_string(),
+            session_id,
         )
         .map_err(|e| VxdError::Picante(e.to_string()))?;
 
@@ -660,6 +702,11 @@ impl Vxd for VxdService {
         }
     }
 
+    async fn set_session(&self, _cx: &roam::Context, session_id: String) {
+        info!(session_id = %session_id, "session ID set");
+        *self.session_id.write().await = session_id;
+    }
+
     async fn shutdown(&self, _cx: &roam::Context) {
         tracing::info!("Shutdown requested");
 
@@ -669,10 +716,10 @@ impl Vxd for VxdService {
             .compact_wal(&self.picante_cache, &self.picante_wal, false)
             .await
         {
-            Ok(revision) => {
-                info!(
+            Ok(_revision) => {
+                trace!(
                     cache = %self.picante_cache,
-                    revision = revision,
+                    revision = _revision,
                     "compacted WAL to snapshot"
                 );
             }
@@ -681,8 +728,6 @@ impl Vxd for VxdService {
             }
         }
 
-        // Kill spawned services
-        self.kill_spawned_services().await;
         tracing::info!("Spawned services killed, exiting daemon");
         std::process::exit(0);
     }

@@ -81,5 +81,11 @@ pub enum RunnerError {
     CasManifestStore(String),
 }
 
+impl<E: std::fmt::Debug> From<roam::session::CallError<E>> for RunnerError {
+    fn from(e: roam::session::CallError<E>) -> Self {
+        RunnerError::CasRpc(e.to_string())
+    }
+}
+
 /// Result type for exec operations.
 pub type Result<T> = std::result::Result<T, RunnerError>;

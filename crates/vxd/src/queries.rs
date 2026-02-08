@@ -10,6 +10,20 @@ use tracing::trace;
 use vx_store_proto::{Blake3Hash, CacheKey, NodeId};
 
 // =============================================================================
+// HELPERS
+// =============================================================================
+
+/// Hash session_id into a cache key hasher (only when non-empty).
+/// This provides per-session namespace isolation for parallel tests.
+fn hash_session_id(hasher: &mut blake3::Hasher, session_id: &str) {
+    if !session_id.is_empty() {
+        hasher.update(b"session:");
+        hasher.update(session_id.as_bytes());
+        hasher.update(b"\n");
+    }
+}
+
+// =============================================================================
 // RUST CACHE KEYS
 // =============================================================================
 
@@ -28,12 +42,15 @@ pub async fn cache_key_compile_bin<DB: Db>(
     let toolchain_id = toolchain.toolchain_id(db)?;
     let target_triple = config.target_triple(db)?;
     let profile = config.profile(db)?;
+    let session_id = config.session_id(db)?;
 
     let mut hasher = blake3::Hasher::new();
 
     hasher.update(b"vx-cache-key-v");
     hasher.update(&vx_store_proto::CACHE_KEY_SCHEMA_VERSION.to_le_bytes());
     hasher.update(b"\n");
+
+    hash_session_id(&mut hasher, &session_id);
 
     hasher.update(b"rust_toolchain:");
     hasher.update(&toolchain_id.0);
@@ -100,12 +117,15 @@ pub async fn cache_key_compile_rlib<DB: Db>(
     let toolchain_id = toolchain.toolchain_id(db)?;
     let target_triple = config.target_triple(db)?;
     let profile = config.profile(db)?;
+    let session_id = config.session_id(db)?;
 
     let mut hasher = blake3::Hasher::new();
 
     hasher.update(b"vx-rlib-cache-key-v");
     hasher.update(&vx_store_proto::CACHE_KEY_SCHEMA_VERSION.to_le_bytes());
     hasher.update(b"\n");
+
+    hash_session_id(&mut hasher, &session_id);
 
     hasher.update(b"rust_toolchain:");
     hasher.update(&toolchain_id.0);
@@ -173,12 +193,15 @@ pub async fn cache_key_compile_rlib_with_deps<DB: Db>(
     let toolchain_id = toolchain.toolchain_id(db)?;
     let target_triple = config.target_triple(db)?;
     let profile = config.profile(db)?;
+    let session_id = config.session_id(db)?;
 
     let mut hasher = blake3::Hasher::new();
 
     hasher.update(b"vx-rlib-cache-key-v");
     hasher.update(&vx_store_proto::CACHE_KEY_SCHEMA_VERSION.to_le_bytes());
     hasher.update(b"\n");
+
+    hash_session_id(&mut hasher, &session_id);
 
     hasher.update(b"rust_toolchain:");
     hasher.update(&toolchain_id.0);
@@ -236,12 +259,15 @@ pub async fn cache_key_compile_bin_with_deps<DB: Db>(
     let toolchain_id = toolchain.toolchain_id(db)?;
     let target_triple = config.target_triple(db)?;
     let profile = config.profile(db)?;
+    let session_id = config.session_id(db)?;
 
     let mut hasher = blake3::Hasher::new();
 
     hasher.update(b"vx-bin-deps-cache-key-v");
     hasher.update(&vx_store_proto::CACHE_KEY_SCHEMA_VERSION.to_le_bytes());
     hasher.update(b"\n");
+
+    hash_session_id(&mut hasher, &session_id);
 
     hasher.update(b"rust_toolchain:");
     hasher.update(&toolchain_id.0);
@@ -320,6 +346,7 @@ pub async fn cache_key_cc_compile<DB: Db>(
 
     let target_triple = config.target_triple(db)?;
     let profile = config.profile(db)?;
+    let session_id = config.session_id(db)?;
 
     // Build TU key for looking up discovered deps
     let tu_key = format!("cc:{}:{}:{}", &*source_path, &*profile, &*target_triple);
@@ -341,6 +368,8 @@ pub async fn cache_key_cc_compile<DB: Db>(
     hasher.update(b"vx-cc-cache-key-v");
     hasher.update(&vx_store_proto::CACHE_KEY_SCHEMA_VERSION.to_le_bytes());
     hasher.update(b"\n");
+
+    hash_session_id(&mut hasher, &session_id);
 
     hasher.update(b"toolchain:");
     hasher.update(zig.toolchain_id.as_bytes());
@@ -398,12 +427,15 @@ pub async fn cache_key_cc_link<DB: Db>(
 
     let target_triple = config.target_triple(db)?;
     let profile = config.profile(db)?;
+    let session_id = config.session_id(db)?;
 
     let mut hasher = blake3::Hasher::new();
 
     hasher.update(b"vx-cc-link-cache-key-v");
     hasher.update(&vx_store_proto::CACHE_KEY_SCHEMA_VERSION.to_le_bytes());
     hasher.update(b"\n");
+
+    hash_session_id(&mut hasher, &session_id);
 
     hasher.update(b"toolchain:");
     hasher.update(zig.toolchain_id.as_bytes());

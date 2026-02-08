@@ -9,13 +9,14 @@ fn test_db() -> Database {
 
 /// Set up common build configuration for C builds
 fn setup_cc_config(db: &Database) -> BuildConfig {
-    let build_key = BuildConfig::compute_key("debug", "x86_64-linux-musl", "/test/workspace");
+    let build_key = BuildConfig::compute_key("debug", "x86_64-linux-musl", "/test/workspace", "");
     let config = BuildConfig::new(
         db,
         build_key,
         "debug".to_string(),
         "x86_64-linux-musl".to_string(),
         "/test/workspace".to_string(),
+        String::new(),
     )
     .unwrap();
 
@@ -80,7 +81,8 @@ async fn test_cache_key_cc_compile_changes_with_profile() {
     let source_hash = Blake3Hash::from_bytes(b"int main() { return 0; }");
 
     // Debug profile
-    let build_key_debug = BuildConfig::compute_key("debug", "x86_64-linux-musl", "/test/workspace");
+    let build_key_debug =
+        BuildConfig::compute_key("debug", "x86_64-linux-musl", "/test/workspace", "");
     let source_debug = CSourceFile::new(&db, "src/main.c".to_string(), source_hash).unwrap();
     let config_debug = BuildConfig::new(
         &db,
@@ -88,6 +90,7 @@ async fn test_cache_key_cc_compile_changes_with_profile() {
         "debug".to_string(),
         "x86_64-linux-musl".to_string(),
         "/test/workspace".to_string(),
+        String::new(),
     )
     .unwrap();
     let key_debug = cache_key_cc_compile(&db, source_debug, config_debug)
@@ -96,13 +99,14 @@ async fn test_cache_key_cc_compile_changes_with_profile() {
 
     // Release profile
     let build_key_release =
-        BuildConfig::compute_key("release", "x86_64-linux-musl", "/test/workspace");
+        BuildConfig::compute_key("release", "x86_64-linux-musl", "/test/workspace", "");
     let config_release = BuildConfig::new(
         &db,
         build_key_release,
         "release".to_string(),
         "x86_64-linux-musl".to_string(),
         "/test/workspace".to_string(),
+        String::new(),
     )
     .unwrap();
 

@@ -80,92 +80,52 @@ actor ReadTelemetry {
     }
 }
 
-/// Cache that preloads entire file contents on first read.
-/// Concurrent reads for the same file coalesce into a single RPC fetch.
-actor FileContentCache {
-    private let log = Logger(subsystem: "eu.bearcove.vixenfs", category: "FileContentCache")
-
-    /// Cached file contents keyed by item ID
-    private var contents: [UInt64: Data] = [:]
-
-    /// In-flight fetch tasks for coalescing concurrent first-reads
-    private var inflight: [UInt64: Task<Data, Error>] = [:]
-
-    /// Get cached data for a file, or fetch the entire file on first access.
-    func getData(
-        itemId: UInt64,
-        fileSize: UInt64,
-        fetch: @escaping @Sendable () async throws -> Data
-    ) async throws -> Data {
-        if let cached = contents[itemId] {
-            return cached
-        }
-
-        if let existing = inflight[itemId] {
-            return try await existing.value
-        }
-
-        let task = Task<Data, Error> {
-            try await fetch()
-        }
-        inflight[itemId] = task
-
-        do {
-            let data = try await task.value
-            contents[itemId] = data
-            inflight.removeValue(forKey: itemId)
-            log.debug("preloaded itemId=\(itemId) size=\(data.count)")
-            return data
-        } catch {
-            inflight.removeValue(forKey: itemId)
-            throw error
-        }
-    }
-
-    func invalidate(itemId: UInt64) {
-        contents.removeValue(forKey: itemId)
-        inflight[itemId]?.cancel()
-        inflight.removeValue(forKey: itemId)
-    }
-
-    func clear() {
-        contents.removeAll()
-        for (_, task) in inflight {
-            task.cancel()
-        }
-        inflight.removeAll()
-    }
-}
-
 /// FSKit Volume implementation that delegates to the VFS client.
 final class Volume: FSVolume {
 
-    private let log = Logger(subsystem: "eu.bearcove.vixenfs", category: "Volume")
+    private let log = Logger(subsystem: VixenFS.subsystem, category: "Volume")
 
-    /// Item cache: itemId -> Item
-    private var items: [UInt64: Item] = [:]
-
-    /// File content cache for preloading entire files on first read
-    private let fileCache = FileContentCache()
-
-    /// Whether to preload entire files on first read
-    private let preloadEnabled: Bool
+    /// Item cache: itemId -> Item, protected by lock for thread safety.
+    /// Volume is a class (not an actor) because it subclasses FSVolume, so we need
+    /// explicit synchronization. FSKit may call operations concurrently.
+    /// We use NSLock because Item doesn't conform to Sendable (ObjC base class).
+    private let _itemsLock = NSLock()
+    private var _items: [UInt64: Item] = [:]
 
     /// Root item ID (always 1 in our VFS protocol)
     private let rootId: UInt64 = 1
 
-    init(preload: Bool = false) {
-        self.preloadEnabled = preload
+    init() {
         let volumeId = FSVolume.Identifier(uuid: UUID())
         let volumeName = FSFileName(string: "Vixen")
-        log.notice("Volume init preload=\(preload)")
+        log.notice("Volume init")
         super.init(volumeID: volumeId, volumeName: volumeName)
     }
 
     // MARK: - Item Cache
 
     private func cacheItem(_ item: Item) {
-        items[item.itemId] = item
+        _itemsLock.lock()
+        defer { _itemsLock.unlock() }
+        _items[item.itemId] = item
+    }
+
+    private func getCachedItem(_ itemId: UInt64) -> Item? {
+        _itemsLock.lock()
+        defer { _itemsLock.unlock() }
+        return _items[itemId]
+    }
+
+    private func removeCachedItem(_ itemId: UInt64) {
+        _itemsLock.lock()
+        defer { _itemsLock.unlock() }
+        _items.removeValue(forKey: itemId)
+    }
+
+    private func removeAllCachedItems() {
+        _itemsLock.lock()
+        defer { _itemsLock.unlock() }
+        _items.removeAll()
     }
 
     private func getItem(_ fsItem: FSItem, fn: StaticString = #function) throws -> Item {
@@ -178,29 +138,8 @@ final class Volume: FSVolume {
 
     // MARK: - VFS Client Access
 
-    private static let rpcTimeout: UInt64 = 5_000_000_000  // 5 seconds in nanoseconds
-
-    private func vfsCall<T: Sendable>(
-        _ operation: String, _ body: @escaping @Sendable (VfsClient) async throws -> T
-    ) async throws -> T {
-        do {
-            let vfsClient = try await VfsConnection.shared.getClient()
-            return try await withThrowingTaskGroup(of: T.self) { group in
-                group.addTask { @Sendable in
-                    try await body(vfsClient)
-                }
-                group.addTask { @Sendable in
-                    try await Task.sleep(nanoseconds: Volume.rpcTimeout)
-                    throw fs_errorForPOSIXError(POSIXError.EIO.rawValue)
-                }
-                let result = try await group.next()!
-                group.cancelAll()
-                return result
-            }
-        } catch {
-            log.error("\(operation): backend call failed: \(error.localizedDescription)")
-            throw fs_errorForPOSIXError(POSIXError.EIO.rawValue)
-        }
+    private func getClient() async throws -> VfsClient {
+        try await VfsConnection.shared.getClient()
     }
 }
 
@@ -224,7 +163,8 @@ extension Volume: FSVolume.Operations {
 
     var volumeStatistics: FSStatFSResult {
         log.debug("volumeStatistics")
-        // Return basic stats - in production, query the backend
+        // TODO: query the VFS backend for real stats. These are placeholder values
+        // so that tools like `df` don't error out. The numbers are meaningless.
         let stats = FSStatFSResult(fileSystemTypeName: "vixenfs")
         stats.blockSize = Volume.reportedBlockSize
         stats.ioSize = Volume.reportedPreferredIOSize
@@ -246,11 +186,9 @@ extension Volume: FSVolume.Operations {
     func unmount() async {
         log.debug("unmount")
         await LifecycleTrace.shared.mark(log, event: "volume.unmount.begin")
-        log.notice("unmount preload=\(self.preloadEnabled)")
         await ReadTelemetry.shared.logSummary(log, reason: "unmount")
         await ReadTelemetry.shared.reset()
-        await fileCache.clear()
-        items.removeAll()
+        removeAllCachedItems()
         await LifecycleTrace.shared.mark(log, event: "volume.unmount.done")
     }
 
@@ -264,9 +202,7 @@ extension Volume: FSVolume.Operations {
         await LifecycleTrace.shared.mark(log, event: "volume.activate.begin")
 
         let rootId = self.rootId
-        let result = try await vfsCall("activate") { client in
-            try await client.getAttributes(itemId: rootId)
-        }
+        let result = try await getClient().getAttributes(itemId: rootId)
 
         if result.error != 0 {
             throw fs_errorForPOSIXError(result.error)
@@ -293,11 +229,9 @@ extension Volume: FSVolume.Operations {
         log.debug("deactivate")
         await LifecycleTrace.shared.mark(
             log, event: "volume.deactivate.begin", details: "options=\(options.rawValue)")
-        log.notice("deactivate preload=\(self.preloadEnabled)")
         await ReadTelemetry.shared.logSummary(log, reason: "deactivate")
         await ReadTelemetry.shared.reset()
-        await fileCache.clear()
-        items.removeAll()
+        removeAllCachedItems()
         await LifecycleTrace.shared.mark(log, event: "volume.deactivate.done")
     }
 
@@ -316,8 +250,55 @@ extension Volume: FSVolume.Operations {
         let item = try getItem(fsItem)
         log.debug("setAttributes: itemId=\(item.itemId)")
 
-        // For now, just return current attributes
-        // TODO: implement setAttributes when VFS supports it properly
+        // Only forward attributes the kernel actually requested to change.
+        // Reading unset fields returns zero, which would clobber real values
+        // (e.g., setting mode=0 on a freshly-created directory).
+        var consumed: FSItem.Attribute = []
+        let params = SetAttributesParams(
+            mode: newAttributes.isValid(.mode)
+                ? {
+                    consumed.insert(.mode)
+                    return UInt32(newAttributes.mode)
+                }() : nil,
+            modifiedTime: newAttributes.isValid(.modifyTime)
+                ? {
+                    consumed.insert(.modifyTime)
+                    return UInt64(newAttributes.modifyTime.tv_sec)
+                }() : nil,
+            size: newAttributes.isValid(.size)
+                ? {
+                    consumed.insert(.size)
+                    return UInt64(newAttributes.size)
+                }() : nil
+        )
+
+        let itemId = item.itemId
+        let client = try await getClient()
+        let result = try await client.setAttributes(itemId: itemId, params: params)
+
+        if result.error != 0 {
+            throw fs_errorForPOSIXError(result.error)
+        }
+
+        newAttributes.consumedAttributes = consumed
+
+        // Refresh attributes from server
+        let attrsResult = try await client.getAttributes(itemId: itemId)
+
+        if attrsResult.error == 0 {
+            let cachedAttrs = item.cachedAttributes
+            let fsAttrs = FSItem.Attributes.fromVfs(
+                itemId: attrsResult.attrs.itemId,
+                parentId: cachedAttrs.parentID.rawValue,
+                itemType: attrsResult.attrs.itemType,
+                size: attrsResult.attrs.size,
+                modifiedTime: attrsResult.attrs.modifiedTime,
+                createdTime: attrsResult.attrs.createdTime,
+                mode: attrsResult.attrs.mode
+            )
+            item.updateAttributes(fsAttrs)
+        }
+
         return item.cachedAttributes
     }
 
@@ -330,9 +311,8 @@ extension Volume: FSVolume.Operations {
         log.debug("lookupItem: name=\(nameStr) in dir=\(dirItem.itemId)")
 
         let dirId = dirItem.itemId
-        let result = try await vfsCall("lookupItem") { client in
-            try await client.lookup(parentId: dirId, name: nameStr)
-        }
+        let client = try await getClient()
+        let result = try await client.lookup(parentId: dirId, name: nameStr)
 
         if result.error != 0 {
             log.debug("lookupItem: not found (error=\(result.error))")
@@ -340,9 +320,7 @@ extension Volume: FSVolume.Operations {
         }
 
         // Get full attributes for the found item
-        let attrsResult = try await vfsCall("lookupItem.getAttributes") { client in
-            try await client.getAttributes(itemId: result.itemId)
-        }
+        let attrsResult = try await client.getAttributes(itemId: result.itemId)
 
         let fsAttrs = FSItem.Attributes.fromVfs(
             itemId: result.itemId,
@@ -355,7 +333,7 @@ extension Volume: FSVolume.Operations {
         )
 
         // Check if we already have this item cached
-        if let existing = items[result.itemId] {
+        if let existing = getCachedItem(result.itemId) {
             existing.updateAttributes(fsAttrs)
             return (existing, existing.name)
         }
@@ -368,7 +346,7 @@ extension Volume: FSVolume.Operations {
     func reclaimItem(_ fsItem: FSItem) async throws {
         let item = try getItem(fsItem)
         log.debug("reclaimItem: itemId=\(item.itemId)")
-        items.removeValue(forKey: item.itemId)
+        removeCachedItem(item.itemId)
     }
 
     func readSymbolicLink(_ fsItem: FSItem) async throws -> FSFileName {
@@ -390,18 +368,15 @@ extension Volume: FSVolume.Operations {
 
         let vfsType: ItemType = (type == .directory) ? .directory : .file
         let dirId = dirItem.itemId
-        let result = try await vfsCall("createItem") { client in
-            try await client.create(parentId: dirId, name: nameStr, itemType: vfsType)
-        }
+        let client = try await getClient()
+        let result = try await client.create(parentId: dirId, name: nameStr, itemType: vfsType)
 
         if result.error != 0 {
             throw fs_errorForPOSIXError(result.error)
         }
 
         // Get attributes for new item
-        let attrsResult = try await vfsCall("createItem.getAttributes") { client in
-            try await client.getAttributes(itemId: result.itemId)
-        }
+        let attrsResult = try await client.getAttributes(itemId: result.itemId)
 
         let fsAttrs = FSItem.Attributes.fromVfs(
             itemId: result.itemId,
@@ -446,15 +421,13 @@ extension Volume: FSVolume.Operations {
         log.debug("removeItem: itemId=\(item.itemId)")
 
         let itemId = item.itemId
-        let result = try await vfsCall("removeItem") { client in
-            try await client.delete(itemId: itemId)
-        }
+        let result = try await getClient().delete(itemId: itemId)
 
         if result.error != 0 {
             throw fs_errorForPOSIXError(result.error)
         }
 
-        items.removeValue(forKey: item.itemId)
+        removeCachedItem(item.itemId)
     }
 
     func renameItem(
@@ -472,9 +445,8 @@ extension Volume: FSVolume.Operations {
 
         let itemId = item.itemId
         let destDirId = destDir.itemId
-        let result = try await vfsCall("renameItem") { client in
-            try await client.rename(itemId: itemId, newParentId: destDirId, newName: destName)
-        }
+        let result = try await getClient().rename(
+            itemId: itemId, newParentId: destDirId, newName: destName)
 
         if result.error != 0 {
             throw fs_errorForPOSIXError(result.error)
@@ -495,9 +467,7 @@ extension Volume: FSVolume.Operations {
 
         let dirId = dirItem.itemId
         let cursor = cookie.rawValue
-        let result = try await vfsCall("enumerateDirectory") { client in
-            try await client.readDir(itemId: dirId, cursor: cursor)
-        }
+        let result = try await getClient().readDir(itemId: dirId, cursor: cursor)
 
         if result.error != 0 {
             throw fs_errorForPOSIXError(result.error)
@@ -552,114 +522,26 @@ extension Volume: FSVolume.ReadWriteOperations {
         let requestedBytes = max(length, 0)
         do {
             let itemId = item.itemId
-            let fileSize = item.cachedAttributes.size
 
-            // Grab the client before the @Sendable closure to avoid capturing non-Sendable self
-            let vfsClient = try await VfsConnection.shared.getClient()
-            let rpcTimeout = Volume.rpcTimeout
+            let result = try await getClient().read(
+                itemId: itemId,
+                offset: UInt64(offset),
+                len: UInt64(requestedBytes)
+            )
 
-            let copyLen: Int
-            if preloadEnabled {
-                let preloadLog = self.log
-                // Preload entire file on first read, serve from cache thereafter
-                let fileData = try await fileCache.getData(
-                    itemId: itemId,
-                    fileSize: fileSize
-                ) {
-                    preloadLog.notice("preload fetch itemId=\(itemId) fileSize=\(fileSize)")
-                    let fetchStart = DispatchTime.now().uptimeNanoseconds
-                    let result: ReadResult
-                    do {
-                        result = try await withThrowingTaskGroup(of: ReadResult.self) { group in
-                            group.addTask {
-                                try await vfsClient.read(itemId: itemId, offset: 0, len: fileSize)
-                            }
-                            group.addTask {
-                                try await Task.sleep(nanoseconds: rpcTimeout)
-                                throw fs_errorForPOSIXError(POSIXError.EIO.rawValue)
-                            }
-                            let result = try await group.next()!
-                            group.cancelAll()
-                            return result
-                        }
-                    } catch {
-                        let elapsed = DispatchTime.now().uptimeNanoseconds &- fetchStart
-                        preloadLog.error(
-                            "preload fetch FAILED itemId=\(itemId) fileSize=\(fileSize) elapsed_ms=\(elapsed / 1_000_000) error=\(error.localizedDescription, privacy: .public)"
-                        )
-                        throw error
-                    }
-                    let elapsed = DispatchTime.now().uptimeNanoseconds &- fetchStart
-                    if result.error != 0 {
-                        preloadLog.error(
-                            "preload fetch RPC error itemId=\(itemId) fileSize=\(fileSize) elapsed_ms=\(elapsed / 1_000_000) rpc_error=\(result.error) data_len=\(result.data.count)"
-                        )
-                        throw fs_errorForPOSIXError(result.error)
-                    }
-                    preloadLog.notice(
-                        "preload fetch OK itemId=\(itemId) fileSize=\(fileSize) data_len=\(result.data.count) elapsed_ms=\(elapsed / 1_000_000)"
-                    )
-                    return result.data
-                }
+            if result.error != 0 {
+                throw fs_errorForPOSIXError(result.error)
+            }
 
-                // Serve the requested slice from cached data
-                let fileOffset = Int(offset)
-                guard fileOffset < fileData.count else {
-                    let elapsedNs = DispatchTime.now().uptimeNanoseconds &- startNs
-                    await ReadTelemetry.shared.record(
-                        requestedBytes: requestedBytes,
-                        returnedBytes: 0,
-                        latencyNs: elapsedNs,
-                        isError: false
-                    )
-                    return 0
-                }
-
-                let available = fileData.count - fileOffset
-                copyLen = min(min(buffer.length, requestedBytes), available)
-
-                fileData.withUnsafeBytes { src in
+            let copyLen = min(buffer.length, result.data.count)
+            if copyLen > 0 {
+                result.data.withUnsafeBytes { src in
                     buffer.withUnsafeMutableBytes { dst in
                         dst.copyBytes(
                             from: UnsafeRawBufferPointer(
-                                start: src.baseAddress! + fileOffset,
+                                start: src.baseAddress!,
                                 count: copyLen
                             ))
-                    }
-                }
-            } else {
-                // Direct per-read RPC: fetch only the requested range
-                let result = try await withThrowingTaskGroup(of: ReadResult.self) { group in
-                    group.addTask {
-                        try await vfsClient.read(
-                            itemId: itemId,
-                            offset: UInt64(offset),
-                            len: UInt64(requestedBytes)
-                        )
-                    }
-                    group.addTask {
-                        try await Task.sleep(nanoseconds: rpcTimeout)
-                        throw fs_errorForPOSIXError(POSIXError.EIO.rawValue)
-                    }
-                    let result = try await group.next()!
-                    group.cancelAll()
-                    return result
-                }
-
-                if result.error != 0 {
-                    throw fs_errorForPOSIXError(result.error)
-                }
-
-                copyLen = min(buffer.length, result.data.count)
-                if copyLen > 0 {
-                    result.data.withUnsafeBytes { src in
-                        buffer.withUnsafeMutableBytes { dst in
-                            dst.copyBytes(
-                                from: UnsafeRawBufferPointer(
-                                    start: src.baseAddress!,
-                                    count: copyLen
-                                ))
-                        }
                     }
                 }
             }
@@ -699,12 +581,8 @@ extension Volume: FSVolume.ReadWriteOperations {
 
         let itemId = item.itemId
 
-        // Invalidate cached content since the file is being modified
-        await fileCache.invalidate(itemId: itemId)
-
-        let result = try await vfsCall("write") { client in
-            try await client.write(itemId: itemId, offset: UInt64(offset), data: Data(bytes))
-        }
+        let result = try await getClient().write(
+            itemId: itemId, offset: UInt64(offset), data: Data(bytes))
 
         if result.error != 0 {
             throw fs_errorForPOSIXError(result.error)

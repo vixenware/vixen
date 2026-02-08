@@ -201,6 +201,8 @@ async fn main() -> Result<()> {
     // Initialize tracing
     vx_tracing::init_service("vx_runner=info");
 
+    tracing::info!("hello from vixen-runner");
+
     let args = Args::from_env()?;
 
     // Check if another runner instance is already running
@@ -256,9 +258,33 @@ async fn main() -> Result<()> {
     )
     .await
     {
-        Ok(VfsStart::Mounted { mount_path }) => {
+        Ok(VfsStart::Mounted {
+            mount_path,
+            vfs_dead,
+        }) => {
             tracing::info!("VFS mounted at {}", mount_path);
             exec.set_vfs_startup_error(None).await;
+            let exec_for_watcher = exec.clone();
+            tokio::spawn(async move {
+                let mut vfs_dead = vfs_dead;
+                while vfs_dead.changed().await.is_ok() {
+                    if *vfs_dead.borrow() {
+                        tracing::error!("VFS session died — marking VFS as failed");
+                        exec_for_watcher
+                            .set_vfs_startup_error(Some(VfsStartupFailure {
+                                reason: "VFS session closed unexpectedly".into(),
+                                diagnostics: vec![VfsDiagnostic {
+                                    code: VfsIssueCode::MountFailed,
+                                    summary: "VFS session died after mount".into(),
+                                    detail: None,
+                                    actions: vec![VfsAction::RetryBuild],
+                                }],
+                            }))
+                            .await;
+                        break;
+                    }
+                }
+            });
         }
         Ok(VfsStart::Unsupported { platform }) => {
             let reason = format!("VFS not supported on platform {}", platform);
@@ -338,6 +364,14 @@ pub struct RunnerServiceInner {
 
     /// Startup-time VFS failure details, if any.
     pub(crate) vfs_startup_error: tokio::sync::RwLock<Option<VfsStartupFailure>>,
+
+    /// Single-flight deduplication for toolchain prefix creation.
+    /// Concurrent requests for the same toolchain coalesce into one operation.
+    /// Stores Ok(prefix_id) or Err(message) — errors are cached too, since a missing
+    /// toolchain manifest won't fix itself without a new runner session.
+    #[allow(clippy::type_complexity)]
+    toolchain_flights:
+        tokio::sync::Mutex<HashMap<Blake3Hash, Arc<tokio::sync::OnceCell<Result<String, String>>>>>,
 }
 
 /// Exec service handle - cloneable wrapper around shared inner state
@@ -361,6 +395,7 @@ impl RunnerService {
                 cas,
                 vfs,
                 vfs_startup_error: tokio::sync::RwLock::new(None),
+                toolchain_flights: tokio::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -390,38 +425,77 @@ impl RunnerService {
         id
     }
 
-    /// Add a toolchain to an action prefix
+    /// Ensure a toolchain prefix exists in the VFS.
     ///
-    /// Populates `<prefix>/toolchain/` with the toolchain's files from CAS.
-    pub(crate) async fn add_toolchain_to_prefix(
+    /// Toolchain prefixes are stable — keyed by `toolchain_manifest_hash` — and
+    /// persist for the lifetime of the runner. This means the macOS FS cache stays
+    /// warm across compilations that use the same toolchain.
+    ///
+    /// Returns the prefix ID (e.g., "tc-ab3f...").
+    ///
+    /// Layout under the prefix:
+    /// ```text
+    /// tc-{short_hex}/
+    ///   bin/rustc          (from rustc component)
+    ///   sysroot/lib/...    (from rust-std component)
+    ///   zig                (from zig-exe component)
+    ///   lib/...            (from zig-lib component)
+    /// ```
+    pub(crate) async fn ensure_toolchain_prefix(
         &self,
-        prefix_id: &str,
         toolchain_manifest_hash: Blake3Hash,
-    ) -> RunnerResult<()> {
+    ) -> RunnerResult<String> {
+        // Single-flight: concurrent callers for the same toolchain coalesce into one.
+        let cell = {
+            let mut flights = self.toolchain_flights.lock().await;
+            flights
+                .entry(toolchain_manifest_hash)
+                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
+                .clone()
+        };
+        let result = cell
+            .get_or_init(|| async {
+                self.populate_toolchain_prefix(toolchain_manifest_hash)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+            .await;
+        match result {
+            Ok(prefix_id) => Ok(prefix_id.clone()),
+            Err(msg) => Err(RunnerError::CasFetch(msg.clone())),
+        }
+    }
+
+    async fn populate_toolchain_prefix(
+        &self,
+        toolchain_manifest_hash: Blake3Hash,
+    ) -> RunnerResult<String> {
+        let prefix_id = format!("tc-{}", toolchain_manifest_hash.short_hex());
+
         tracing::debug!(
+            prefix_id = %prefix_id,
             toolchain_manifest = %toolchain_manifest_hash,
-            "starting toolchain population"
+            "creating new toolchain prefix"
         );
 
         // Get the toolchain manifest from CAS
         let toolchain_manifest = self
             .cas
             .get_toolchain_manifest(toolchain_manifest_hash)
-            .await
-            .map_err(|e| RunnerError::CasFetch(format!("{:?}", e)))?
-            .ok_or_else(|| {
-                RunnerError::CasFetch(format!(
-                    "toolchain manifest {} not found",
-                    toolchain_manifest_hash
-                ))
-            })?;
+            .await?
+            .ok_or(RunnerError::ToolchainManifestNotFound(
+                toolchain_manifest_hash,
+            ))?;
 
         tracing::debug!(
             component_count = toolchain_manifest.components.len(),
             "loaded toolchain manifest"
         );
 
-        // Add each component's tree to the VFS prefix under toolchain/
+        // Create the prefix
+        self.vfs.create_prefix(prefix_id.clone()).await;
+
+        // Add each component's tree to the VFS prefix
         for component in &toolchain_manifest.components {
             tracing::debug!(
                 component_name = %component.name,
@@ -429,26 +503,11 @@ impl RunnerService {
                 "loading component tree manifest"
             );
 
-            // Fetch the tree manifest for this component
             let tree_manifest = self
                 .cas
                 .get_tree_manifest(component.tree_manifest)
-                .await
-                .map_err(|e| {
-                    tracing::error!(
-                        component_name = %component.name,
-                        tree_manifest = %component.tree_manifest,
-                        error = ?e,
-                        "failed to fetch component tree manifest"
-                    );
-                    RunnerError::CasFetch(format!("{:?}", e))
-                })?
+                .await?
                 .ok_or_else(|| {
-                    tracing::error!(
-                        component_name = %component.name,
-                        tree_manifest = %component.tree_manifest,
-                        "component tree manifest missing"
-                    );
                     RunnerError::CasFetch(format!(
                         "tree manifest {} not found for component {}",
                         component.tree_manifest, component.name
@@ -461,35 +520,39 @@ impl RunnerService {
                 "registering component files in VFS"
             );
 
-            // Add all files from the tree
             for entry in &tree_manifest.entries {
-                // Only handle files (not symlinks yet)
                 if let vx_store_proto::TreeEntryKind::File {
                     blob,
                     size,
                     executable,
                 } = &entry.kind
                 {
+                    // Files go directly under the prefix root — no "toolchain/" nesting.
+                    // The prefix itself IS the toolchain.
                     let path = if component.name == "rustc" {
-                        // rustc files go directly under toolchain/
-                        format!("toolchain/{}", entry.path)
+                        entry.path.to_string()
                     } else if component.name == "rust-std" {
-                        // rust-std files go under toolchain/sysroot/
-                        format!("toolchain/sysroot/{}", entry.path)
+                        format!("sysroot/{}", entry.path)
                     } else if matches!(component.name.as_str(), "zig-exe" | "zig-lib") {
-                        format!("toolchain/{}", entry.path)
+                        entry.path.to_string()
                     } else {
-                        format!("toolchain/{}/{}", component.name, entry.path)
+                        format!("{}/{}", component.name, entry.path)
                     };
 
                     self.vfs
-                        .add_file_to_prefix(prefix_id, &path, *blob, *size, *executable)
+                        .add_file_to_prefix(&prefix_id, &path, *blob, *size, *executable)
                         .await;
                 }
             }
         }
 
-        Ok(())
+        tracing::info!(
+            prefix_id = %prefix_id,
+            toolchain_manifest = %toolchain_manifest_hash,
+            "toolchain prefix created"
+        );
+
+        Ok(prefix_id)
     }
 
     /// Add a source tree to an action prefix
@@ -568,11 +631,8 @@ impl RunnerService {
         let manifest = self
             .cas
             .get_manifest(manifest_hash)
-            .await
-            .map_err(|e| RunnerError::CasFetch(format!("{:?}", e)))?
-            .ok_or_else(|| {
-                RunnerError::CasFetch(format!("dependency manifest {} not found", manifest_hash))
-            })?;
+            .await?
+            .ok_or(RunnerError::DependencyManifestNotFound(manifest_hash))?;
 
         // Find the rlib output
         let rlib = manifest

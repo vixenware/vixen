@@ -138,7 +138,7 @@ pub struct ZigToolchain {
 /// Build configuration (keyed picante input)
 #[picante::input]
 pub struct BuildConfig {
-    /// Composite key derived from profile, target, and workspace
+    /// Composite key derived from profile, target, workspace, and session
     #[key]
     pub build_key: String,
     /// Profile: "debug" or "release"
@@ -147,13 +147,23 @@ pub struct BuildConfig {
     pub target_triple: String,
     /// Workspace root (for --remap-path-prefix)
     pub workspace_root: String,
+    /// Session ID for cache key namespacing. Empty = session zero (shared).
+    /// When non-empty, all cache keys include this to isolate parallel tests.
+    pub session_id: String,
 }
 
 impl BuildConfig {
     /// Compute a unique key for this build configuration
-    pub fn compute_key(profile: &str, target_triple: &str, workspace_root: &str) -> String {
-        // Use a simple concatenation since this is just for keying
-        format!("{}:{}:{}", profile, target_triple, workspace_root)
+    pub fn compute_key(
+        profile: &str,
+        target_triple: &str,
+        workspace_root: &str,
+        session_id: &str,
+    ) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            profile, target_triple, workspace_root, session_id
+        )
     }
 }
 

@@ -1,22 +1,38 @@
 //! Test harness for vx integration tests
 //!
-//! Provides utilities for creating isolated test environments with temp directories
-//! for both the global CAS (~/.vx/) and project-local build outputs (.vx/).
+//! # Architecture
 //!
-//! Each test uses Unix sockets in its unique VX_HOME directory, avoiding any port
-//! conflicts when tests run in parallel.
+//! ```text
+//!                     Shared daemons (one instance each)
+//!                     ┌─────────┐  ┌──────────┐  ┌──────────┐
+//!                     │   vxd   │  │ vx-runner │  │ vx-store │
+//!                     └────┬────┘  └─────┬─────┘  └─────┬────┘
+//!                          │             │              │
+//!          ┌───────────────┼─────────────┼──────────────┤
+//!          │               │             │              │
+//!     ┌────┴────┐    ┌─────┴───┐   ┌─────┴───┐    ┌────┴────┐
+//!     │ vx      │    │ vx      │   │ vx      │    │ vx      │
+//!     │ pid=100 │    │ pid=101 │   │ pid=102 │    │ pid=103 │
+//!     │ test-100│    │ test-101│   │ test-102│    │ test-103│
+//!     └─────────┘    └─────────┘   └─────────┘    └─────────┘
+//!      test_1         test_2        test_3         test_4
+//! ```
 //!
-//! The daemon (vxd) is spawned by the test harness and lives for the duration
-//! of the test. Multiple `vx` invocations share the same daemon.
+//! Each test is a separate process (nextest runs one process per test).
+//! All tests share the same vxd, vx-runner, and vx-store daemon processes.
+//! Each test gets its own session ID (based on PID), which is mixed into
+//! cache keys so tests don't interfere with each other's cache state.
+//! Per-connection state (session ID, progress listener) is fresh for each
+//! roam connection via `VxdService::new_session()`.
 
 // Each integration test file compiles this module separately, so functions
 // used by one test file appear "unused" when compiling another.
-#![allow(dead_code)]
+
+mod scaffold;
+pub use scaffold::*;
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
-use std::thread;
-use std::time::Duration;
+use std::process::{Command, Output};
 use tempfile::TempDir;
 
 /// Initialize tracing for tests
@@ -32,265 +48,58 @@ pub fn init_test_tracing() {
 
 /// A test environment with isolated CAS, project directories, and Unix sockets
 pub struct TestEnv {
-    /// Temp dir for global CAS (simulates ~/.vx/)
-    /// When using VX_TEST_EXTERNAL_DAEMON, this may be a dummy TempDir
-    pub vx_home: TempDir,
-    /// The actual VX_HOME path (may differ from vx_home.path() when using external daemon)
-    vx_home_path: PathBuf,
+    /// Session ID for cache key namespacing (isolates parallel tests)
+    session_id: String,
+
     /// Temp dir for the test project
     pub project: TempDir,
-    /// The daemon process - lives as long as TestEnv
-    /// When TestEnv drops, daemon dies (via dying_with_parent)
-    /// None when using VX_TEST_EXTERNAL_DAEMON
-    #[allow(dead_code)]
-    daemon: Option<DaemonGuard>,
-}
-
-/// Owns a spawned daemon process and reaps it on drop.
-pub struct DaemonGuard {
-    child: Child,
-}
-
-impl DaemonGuard {
-    fn new(child: Child) -> Self {
-        Self { child }
-    }
-}
-
-impl Drop for DaemonGuard {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
 }
 
 impl TestEnv {
     /// Create a new isolated test environment
-    ///
-    /// Spawns vxd daemon which lives for the duration of the test.
-    /// Multiple `vx` commands will share this daemon.
-    ///
-    /// # External daemon mode
-    ///
-    /// Set `VX_TEST_EXTERNAL_DAEMON=1` to skip spawning and connect to an existing daemon.
-    /// Set `VX_TEST_VX_HOME=/path/to/home` to specify the VX_HOME for external daemon.
-    ///
-    /// Example for debugging under lldb:
-    /// ```bash
-    /// # Terminal 1: Run daemon under lldb
-    /// mkdir -p /tmp/test-vx-debug
-    /// VX_HOME=/tmp/test-vx-debug lldb target/debug/vxd
-    /// # (lldb) run
-    ///
-    /// # Terminal 2: Run test connecting to that daemon
-    /// VX_TEST_EXTERNAL_DAEMON=1 VX_TEST_VX_HOME=/tmp/test-vx-debug cargo test fresh_build_succeeds
-    /// ```
     pub fn new() -> Self {
-        let use_external = std::env::var("VX_TEST_EXTERNAL_DAEMON").is_ok();
+        let session_id = format!("test-pid{}-{}", std::process::id(), ulid::Ulid::new());
+        let project = TempDir::new().expect("failed to create project temp dir");
 
-        if use_external {
-            // External daemon mode - don't spawn, use fixed VX_HOME
-            let vx_home_path = std::env::var("VX_TEST_VX_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("/tmp/vx-test-external"));
-
-            std::fs::create_dir_all(&vx_home_path).expect("failed to create VX_HOME");
-
-            let project = TempDir::new().expect("failed to create project temp dir");
-
-            eprintln!(
-                "Using external daemon at VX_HOME: {}",
-                vx_home_path.display()
-            );
-
-            Self {
-                vx_home: TempDir::new().expect("dummy vx_home"),
-                vx_home_path,
-                project,
-                daemon: None,
-            }
-        } else {
-            // Normal mode - spawn isolated daemon
-            let vx_home = TempDir::new().expect("failed to create vx_home temp dir");
-            let vx_home_path = vx_home.path().to_path_buf();
-            let project = TempDir::new().expect("failed to create project temp dir");
-
-            // Spawn the daemon
-            let daemon = Self::spawn_daemon(&vx_home_path);
-
-            Self {
-                vx_home,
-                vx_home_path,
-                project,
-                daemon: Some(daemon),
-            }
+        Self {
+            project,
+            session_id,
         }
     }
 
-    /// Spawn vxd daemon for a given VX_HOME directory
-    ///
-    /// This is public so tests can spawn a daemon at a custom path (e.g., shared_home).
-    ///
-    /// All daemons (vxd, store, runner) inherit stdout/stderr so their logs appear
-    /// inline in test output. This is done via `VX_INHERIT_STDIO` which propagates
-    /// to child daemons spawned by vxd.
-    pub fn spawn_daemon(vx_home: &Path) -> DaemonGuard {
-        let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "trace".to_string());
-
-        // Ensure VX_HOME directory exists
-        std::fs::create_dir_all(vx_home).expect("failed to create VX_HOME");
-
-        let mut cmd = Command::new(Self::daemon_binary());
-        cmd.env("VX_HOME", vx_home);
-        cmd.env("RUST_LOG", &rust_log);
-        cmd.env("VX_INHERIT_STDIO", "1");
-        cmd.env("VX_HTTP_CACHE_DIR", http_cache_dir());
-        cmd.stdout(Stdio::inherit());
-        cmd.stderr(Stdio::inherit());
-
-        let child =
-            ur_taking_me_with_you::spawn_dying_with_parent(cmd).expect("failed to spawn vxd");
-
-        // Give daemon time to start listening
-        // The daemon needs to initialize picante DB, spawn store/runner, etc.
-        thread::sleep(Duration::from_millis(500));
-
-        DaemonGuard::new(child)
+    /// Path to the binary directory (target/debug or target/release)
+    fn bindir() -> PathBuf {
+        // TODO: What about release builds?
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug");
+        path.canonicalize()
+            .expect("bindir does not exist - did you run `cargo build`?")
     }
 
     /// Path to the vx binary (built by cargo)
     fn vx_binary() -> PathBuf {
-        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.pop(); // crates/
-        path.pop(); // vx/
-        path.push("target");
-        path.push("debug");
-        path.push("vx");
+        let path = Self::bindir().join("vx");
+        assert!(path.exists(), "vx binary does not exist at {:?}", path);
         path
     }
 
     /// Path to the vxd binary (built by cargo)
-    fn daemon_binary() -> PathBuf {
-        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.pop(); // crates/
-        path.pop(); // vx/
-        path.push("target");
-        path.push("debug");
-        path.push("vxd");
+    fn vxd_path() -> PathBuf {
+        let path = Self::bindir().join("vxd");
+        assert!(path.exists(), "vxd binary does not exist at {:?}", path);
         path
     }
 
-    /// Set up common environment variables for all vx commands
-    ///
-    /// Uses Unix sockets in VX_HOME for all services (no TCP ports needed).
-    fn setup_env(&self, cmd: &mut Command, vx_home: &Path) {
-        // Set VX_HOME - services will default to Unix sockets in this directory
-        cmd.env("VX_HOME", vx_home);
-        // Ensure verbose, timestamped tracing in test runs unless caller overrides.
-        cmd.env(
-            "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "trace".to_string()),
-        );
-        // Don't set VXD/VX_STORE/VX_RUNNER - let them default to Unix sockets
-    }
-
     /// Run `vx build` in this environment
-    pub fn build(&self, release: bool) -> VxOutput {
-        self.build_with_home(&self.vx_home_path, release)
-    }
-
-    /// Run `vx build` from a subdirectory within the project
-    pub fn build_in_subdir(&self, subdir: &str, release: bool) -> VxOutput {
-        self.build_in_subdir_with_home(subdir, &self.vx_home_path, release)
-    }
-
-    /// Run `vx build` from a subdirectory with a custom VX_HOME
-    pub fn build_in_subdir_with_home(
-        &self,
-        subdir: &str,
-        vx_home: &Path,
-        release: bool,
-    ) -> VxOutput {
-        let mut cmd = Command::new(Self::vx_binary());
-        cmd.current_dir(self.project.path().join(subdir));
-        self.setup_env(&mut cmd, vx_home);
-        cmd.arg("build");
-        cmd.arg("--no-spawn"); // Test harness spawns daemon, vx shouldn't
-        if release {
-            cmd.arg("--release");
-        }
-
-        let output = cmd.output().expect("failed to run vx");
-        VxOutput::from(output)
-    }
-
-    /// Run `vx build` with a custom VX_HOME (for testing shared cache)
-    pub fn build_with_home(&self, vx_home: &Path, release: bool) -> VxOutput {
-        self.build_with_home_and_env(vx_home, release, &[])
-    }
-
-    /// Run `vx build` with a custom VX_HOME and additional environment variables
-    pub fn build_with_home_and_env(
-        &self,
-        vx_home: &Path,
-        release: bool,
-        env_vars: &[(&str, &str)],
-    ) -> VxOutput {
-        let mut cmd = Command::new(Self::vx_binary());
-        cmd.current_dir(self.project.path());
-        self.setup_env(&mut cmd, vx_home);
-        for (key, value) in env_vars {
-            cmd.env(key, value);
-        }
-        cmd.arg("build");
-        cmd.arg("--no-spawn"); // Test harness spawns daemon, vx shouldn't
-        if release {
-            cmd.arg("--release");
-        }
-
-        let output = cmd.output().expect("failed to run vx");
-        VxOutput::from(output)
+    pub fn build(&self) -> BuildBuilder {
+        BuildBuilder::new(self)
     }
 
     /// Run `vx clean` in this environment
     pub fn clean(&self) -> VxOutput {
         let mut cmd = Command::new(Self::vx_binary());
         cmd.current_dir(self.project.path());
-        self.setup_env(&mut cmd, &self.vx_home_path);
+        cmd.env("VX_TEST_SESSION", &self.session_id);
         cmd.arg("clean");
-
-        let output = cmd.output().expect("failed to run vx");
-        VxOutput::from(output)
-    }
-
-    /// Run `vx explain` in this environment
-    pub fn explain(&self) -> VxOutput {
-        let mut cmd = Command::new(Self::vx_binary());
-        cmd.current_dir(self.project.path());
-        self.setup_env(&mut cmd, &self.vx_home_path);
-        cmd.arg("explain");
-
-        let output = cmd.output().expect("failed to run vx");
-        VxOutput::from(output)
-    }
-
-    /// Run `vx explain --diff` in this environment
-    pub fn explain_diff(&self) -> VxOutput {
-        let mut cmd = Command::new(Self::vx_binary());
-        cmd.current_dir(self.project.path());
-        self.setup_env(&mut cmd, &self.vx_home_path);
-        cmd.args(["explain", "--diff"]);
-
-        let output = cmd.output().expect("failed to run vx");
-        VxOutput::from(output)
-    }
-
-    /// Run `vx explain --last-miss` in this environment
-    pub fn explain_last_miss(&self) -> VxOutput {
-        let mut cmd = Command::new(Self::vx_binary());
-        cmd.current_dir(self.project.path());
-        self.setup_env(&mut cmd, &self.vx_home_path);
-        cmd.args(["explain", "--last-miss"]);
 
         let output = cmd.output().expect("failed to run vx");
         VxOutput::from(output)
@@ -316,19 +125,9 @@ impl TestEnv {
         self.project.path().join(relative_path).exists()
     }
 
-    /// Check if a file exists in the CAS directory
-    pub fn cas_file_exists(&self, relative_path: &str) -> bool {
-        self.vx_home_path.join(relative_path).exists()
-    }
-
     /// Get the project path
     pub fn project_path(&self) -> &Path {
         self.project.path()
-    }
-
-    /// Get the VX_HOME path
-    pub fn vx_home_path(&self) -> &Path {
-        &self.vx_home_path
     }
 }
 
@@ -351,6 +150,40 @@ impl VxOutput {
     /// Check if output contains a specific string
     pub fn contains(&self, s: &str) -> bool {
         self.stdout.contains(s) || self.stderr.contains(s)
+    }
+
+    /// Assert the command succeeded, panicking with full output on failure
+    #[track_caller]
+    pub fn assert_success(&self) {
+        assert!(
+            self.success,
+            "command failed (exit code {:?}):\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            self.exit_code, self.stdout, self.stderr
+        );
+    }
+
+    /// Assert the build was a cache hit, panicking with full output on failure
+    #[track_caller]
+    pub fn assert_cached(&self) {
+        self.assert_success();
+        assert!(
+            self.was_cached(),
+            "expected cache hit but was not cached:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            self.stdout,
+            self.stderr
+        );
+    }
+
+    /// Assert the build was NOT a cache hit, panicking with full output on failure
+    #[track_caller]
+    pub fn assert_not_cached(&self) {
+        self.assert_success();
+        assert!(
+            !self.was_cached(),
+            "expected cache miss but was cached:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            self.stdout,
+            self.stderr
+        );
     }
 }
 
@@ -391,186 +224,60 @@ fn dirs_next() -> PathBuf {
     }
 }
 
-/// Create a minimal hello world project
-pub fn create_hello_world(env: &TestEnv) {
-    env.write_file(
-        "Cargo.toml",
-        r#"[package]
-name = "hello"
-version = "0.1.0"
-edition = "2021"
-"#,
-    );
-
-    env.write_file(
-        "src/main.rs",
-        r#"fn main() {
-    println!("Hello, world!");
-}
-"#,
-    );
+/// Builder for `vx build` commands
+pub struct BuildBuilder {
+    project_dir: PathBuf,
+    session_id: String,
+    release: bool,
+    subdir: Option<String>,
+    extra_env: Vec<(String, String)>,
 }
 
-/// Create a project with dependencies (should fail)
-pub fn create_project_with_deps(env: &TestEnv) {
-    env.write_file(
-        "Cargo.toml",
-        r#"[package]
-name = "withdeps"
-version = "0.1.0"
-edition = "2021"
+impl BuildBuilder {
+    fn new(env: &TestEnv) -> Self {
+        Self {
+            project_dir: env.project.path().to_path_buf(),
+            session_id: env.session_id.clone(),
+            release: false,
+            subdir: None,
+            extra_env: Vec::new(),
+        }
+    }
 
-[dependencies]
-serde = "1.0"
-"#,
-    );
+    pub fn release(mut self) -> Self {
+        self.release = true;
+        self
+    }
 
-    env.write_file("src/main.rs", "fn main() {}\n");
-}
+    pub fn in_subdir(mut self, subdir: &str) -> Self {
+        self.subdir = Some(subdir.to_owned());
+        self
+    }
 
-/// Create a workspace project (should fail)
-pub fn create_workspace(env: &TestEnv) {
-    env.write_file(
-        "Cargo.toml",
-        r#"[workspace]
-members = ["crates/*"]
-"#,
-    );
-}
+    pub fn env(mut self, key: &str, value: &str) -> Self {
+        self.extra_env.push((key.to_owned(), value.to_owned()));
+        self
+    }
 
-/// Create a project with build script (should fail)
-pub fn create_project_with_build_script(env: &TestEnv) {
-    env.write_file(
-        "Cargo.toml",
-        r#"[package]
-name = "withbuild"
-version = "0.1.0"
-edition = "2021"
-build = "build.rs"
-"#,
-    );
+    pub fn run(self) -> VxOutput {
+        let mut cmd = Command::new(TestEnv::vx_binary());
+        let work_dir = match &self.subdir {
+            Some(sub) => self.project_dir.join(sub),
+            None => self.project_dir.clone(),
+        };
+        cmd.current_dir(&work_dir);
 
-    env.write_file("src/main.rs", "fn main() {}\n");
-    env.write_file("build.rs", "fn main() {}\n");
-}
+        cmd.env("VX_TEST_SESSION", &self.session_id);
+        for (key, value) in &self.extra_env {
+            cmd.env(key, value);
+        }
+        cmd.arg("build");
+        cmd.arg("--no-spawn");
+        if self.release {
+            cmd.arg("--release");
+        }
 
-/// Create a multi-crate project with app (bin) depending on util (lib)
-///
-/// Layout:
-/// ```
-/// project/
-/// ├── app/
-/// │   ├── Cargo.toml    # [dependencies] util = { path = "../util" }
-/// │   └── src/main.rs   # use util::greet;
-/// └── util/
-///     ├── Cargo.toml
-///     └── src/lib.rs    # pub fn greet() -> &'static str
-/// ```
-pub fn create_multi_crate_project(env: &TestEnv) {
-    // util library crate
-    env.write_file(
-        "util/Cargo.toml",
-        r#"[package]
-name = "util"
-version = "0.1.0"
-edition = "2021"
-"#,
-    );
-    env.write_file(
-        "util/src/lib.rs",
-        r#"pub fn greet() -> &'static str {
-    "Hello from util!"
-}
-"#,
-    );
-
-    // app binary crate that depends on util
-    env.write_file(
-        "app/Cargo.toml",
-        r#"[package]
-name = "app"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-util = { path = "../util" }
-"#,
-    );
-    env.write_file(
-        "app/src/main.rs",
-        r#"fn main() {
-    println!("{}", util::greet());
-}
-"#,
-    );
-}
-
-/// Create a diamond dependency project: app -> {common, helper}, helper -> common
-///
-/// Layout:
-/// ```
-/// project/
-/// ├── app/         # bin, depends on common and helper
-/// ├── helper/      # lib, depends on common
-/// └── common/      # lib, no deps
-/// ```
-pub fn create_diamond_dependency_project(env: &TestEnv) {
-    // common library (no deps)
-    env.write_file(
-        "common/Cargo.toml",
-        r#"[package]
-name = "common"
-version = "0.1.0"
-edition = "2021"
-"#,
-    );
-    env.write_file(
-        "common/src/lib.rs",
-        r#"pub fn version() -> &'static str {
-    "1.0.0"
-}
-"#,
-    );
-
-    // helper library (depends on common)
-    env.write_file(
-        "helper/Cargo.toml",
-        r#"[package]
-name = "helper"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-common = { path = "../common" }
-"#,
-    );
-    env.write_file(
-        "helper/src/lib.rs",
-        r#"pub fn describe() -> String {
-    format!("Helper v{}", common::version())
-}
-"#,
-    );
-
-    // app binary (depends on both common and helper)
-    env.write_file(
-        "app/Cargo.toml",
-        r#"[package]
-name = "app"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-common = { path = "../common" }
-helper = { path = "../helper" }
-"#,
-    );
-    env.write_file(
-        "app/src/main.rs",
-        r#"fn main() {
-    println!("Version: {}", common::version());
-    println!("{}", helper::describe());
-}
-"#,
-    );
+        let output = cmd.output().expect("failed to run vx");
+        VxOutput::from(output)
+    }
 }

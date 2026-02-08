@@ -379,6 +379,15 @@ impl CasStore {
         let dest = Self::cache_path(self.primary.root(), key);
         atomic_write(&dest, manifest_hash.to_hex().as_bytes()).await
     }
+
+    pub(crate) async fn delete_cache(&self, key: &CacheKey) -> io::Result<bool> {
+        let path = Self::cache_path(self.primary.root(), key);
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // =============================================================================

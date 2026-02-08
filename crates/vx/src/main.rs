@@ -335,7 +335,7 @@ async fn get_or_spawn_daemon(
             for (attempt, delay) in backoff_ms.iter().enumerate() {
                 tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
                 if let Ok(result) = try_connect_daemon(&endpoint, no_tui).await {
-                    tracing::info!("Connected to daemon after {} attempts", attempt + 1);
+                    tracing::trace!("Connected to daemon after {} attempts", attempt + 1);
                     return Ok(result);
                 }
             }
@@ -387,6 +387,12 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         init_tracing_with_tui(tui.clone());
     } else {
         vx_tracing::init_cli_stderr();
+    }
+
+    // When running under the test harness, set the session ID so cache keys
+    // are namespaced per-test (isolating parallel tests from each other).
+    if let Ok(session_id) = std::env::var("VX_TEST_SESSION") {
+        daemon.set_session(session_id).await?;
     }
 
     let request = BuildRequest {
@@ -480,28 +486,31 @@ async fn cmd_kill(_args: KillArgs) -> Result<()> {
         }
     };
 
-    // Try to connect to daemon (no TUI needed for kill command)
+    // Try graceful shutdown via RPC first
     match try_connect_daemon(&endpoint, true).await {
         Ok((daemon, _tui)) => {
             println!("{} daemon at {}", "Stopping".green().bold(), endpoint);
             if let Err(e) = daemon.shutdown().await {
-                tracing::warn!("Failed to send shutdown to daemon: {e}");
+                // shutdown() calls process::exit(0) on the daemon side, so the
+                // connection closing is expected — not an error.
+                tracing::debug!("shutdown RPC returned: {e} (expected — daemon exited)");
             }
-            // Give it a moment to shut down
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            // Give it a moment to finish cleanup
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             println!("{} daemon stopped", "✓".green().bold());
-            Ok(())
         }
         Err(_) => {
-            eprintln!("{} daemon not running", "Error:".red().bold());
-            std::process::exit(1);
+            println!(
+                "{} daemon not reachable, cleaning up orphaned processes",
+                "Note:".yellow().bold()
+            );
         }
     }
+
+    Ok(())
 }
 
 async fn cmd_clean(args: CleanArgs) -> Result<()> {
-    use vx_io::net::Endpoint;
-
     // Determine VX_HOME
     let vx_home = std::env::var("VX_HOME")
         .unwrap_or_else(|_| format!("{}/.vx", std::env::var("HOME").expect("HOME not set")));
@@ -530,39 +539,6 @@ async fn cmd_clean(args: CleanArgs) -> Result<()> {
             println!("{}", "Aborted.".yellow().bold());
             return Ok(());
         }
-    }
-
-    // In external test-daemon mode, keep shared daemon(s) alive across tests.
-    let use_external_test_daemon = std::env::var("VX_TEST_EXTERNAL_DAEMON").is_ok();
-
-    // First, try to kill the daemon (best-effort, ignore errors since daemon may not be running)
-    if !use_external_test_daemon {
-        let endpoint = match std::env::var("VXD") {
-            Ok(v) => Endpoint::parse(&v).ok(),
-            Err(_) => {
-                #[cfg(unix)]
-                {
-                    Some(vx_io::net::default_unix_endpoint(&vx_home, "vxd"))
-                }
-                #[cfg(not(unix))]
-                {
-                    Endpoint::parse("127.0.0.1:9001").ok()
-                }
-            }
-        };
-
-        if let Some(endpoint) = endpoint {
-            // No TUI needed for clean command
-            if let Ok((daemon, _tui)) = try_connect_daemon(&endpoint, true).await {
-                tracing::debug!("Killing daemon before clean");
-                let _ = daemon.shutdown().await;
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            } else {
-                tracing::debug!("Daemon not running, skipping shutdown");
-            }
-        }
-    } else {
-        tracing::debug!("VX_TEST_EXTERNAL_DAEMON=1, skipping daemon shutdown in clean");
     }
 
     // Then remove the directory if it exists

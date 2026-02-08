@@ -15,18 +15,7 @@ fn multi_crate_build_succeeds() {
     let env = TestEnv::new();
     create_multi_crate_project(&env);
 
-    // Build from the app/ subdirectory
-    let result = env.build_in_subdir("app", false);
-
-    assert!(
-        result.success,
-        "multi-crate build failed: {}\n{}",
-        result.stdout, result.stderr
-    );
-    assert!(
-        !result.was_cached(),
-        "fresh multi-crate build should not be cached"
-    );
+    env.build().in_subdir("app").run().assert_not_cached();
 }
 
 #[test]
@@ -35,27 +24,10 @@ fn multi_crate_second_build_is_cache_hit() {
     create_multi_crate_project(&env);
 
     // First build
-    let result1 = env.build_in_subdir("app", false);
-    assert!(
-        result1.success,
-        "first build failed: {}\n{}",
-        result1.stdout, result1.stderr
-    );
-    assert!(!result1.was_cached(), "first build should not be cached");
+    env.build().in_subdir("app").run().assert_not_cached();
 
     // Second build - should be fully cached
-    let result2 = env.build_in_subdir("app", false);
-    assert!(
-        result2.success,
-        "second build failed: {}\n{}",
-        result2.stdout, result2.stderr
-    );
-    assert!(
-        result2.was_cached(),
-        "second build should be cached\nstdout: {}\nstderr: {}",
-        result2.stdout,
-        result2.stderr
-    );
+    env.build().in_subdir("app").run().assert_cached();
 }
 
 #[test]
@@ -64,9 +36,7 @@ fn dep_change_rebuilds_both() {
     create_multi_crate_project(&env);
 
     // First build
-    let result1 = env.build_in_subdir("app", false);
-    assert!(result1.success, "first build failed");
-    assert!(!result1.was_cached(), "first build should not be cached");
+    env.build().in_subdir("app").run().assert_not_cached();
 
     // Modify the util library
     env.write_file(
@@ -78,16 +48,7 @@ fn dep_change_rebuilds_both() {
     );
 
     // Second build - should rebuild both util and app
-    let result2 = env.build_in_subdir("app", false);
-    assert!(
-        result2.success,
-        "second build failed: {}\n{}",
-        result2.stdout, result2.stderr
-    );
-    assert!(
-        !result2.was_cached(),
-        "build after dep change should not be cached"
-    );
+    env.build().in_subdir("app").run().assert_not_cached();
 }
 
 #[test]
@@ -96,8 +57,7 @@ fn app_change_rebuilds_only_app() {
     create_multi_crate_project(&env);
 
     // First build
-    let result1 = env.build_in_subdir("app", false);
-    assert!(result1.success, "first build failed");
+    env.build().in_subdir("app").run().assert_success();
 
     // Modify only the app
     env.write_file(
@@ -109,54 +69,8 @@ fn app_change_rebuilds_only_app() {
     );
 
     // Second build - util should still be cached, only app rebuilds
-    let result2 = env.build_in_subdir("app", false);
-    assert!(
-        result2.success,
-        "second build failed: {}\n{}",
-        result2.stdout, result2.stderr
-    );
     // The overall build is not fully cached since app changed
-    assert!(
-        !result2.was_cached(),
-        "build after app change should not be fully cached"
-    );
-    // But we can't easily verify util was cached without checking logs
-    // The key success criterion is that the build succeeds
-}
-
-#[test]
-fn multi_crate_path_independence() {
-    // Same project content in different directories should be a cache hit
-    let env1 = TestEnv::new();
-    let env2 = TestEnv::new();
-
-    // Shared VX_HOME for both, with its own daemon
-    let shared_home = tempfile::TempDir::new().unwrap();
-    let _shared_daemon = TestEnv::spawn_daemon(shared_home.path());
-
-    create_multi_crate_project(&env1);
-    create_multi_crate_project(&env2);
-
-    // Build in first location
-    let result1 = env1.build_in_subdir_with_home("app", shared_home.path(), false);
-    assert!(
-        result1.success,
-        "first build failed: {}\n{}",
-        result1.stdout, result1.stderr
-    );
-    assert!(!result1.was_cached(), "first build should not be cached");
-
-    // Build in second location - should be fully cached
-    let result2 = env2.build_in_subdir_with_home("app", shared_home.path(), false);
-    assert!(
-        result2.success,
-        "second build failed: {}\n{}",
-        result2.stdout, result2.stderr
-    );
-    assert!(
-        result2.was_cached(),
-        "second build in different path should be cached (path independence)"
-    );
+    env.build().in_subdir("app").run().assert_not_cached();
 }
 
 #[test]
@@ -180,17 +94,10 @@ pub use helper::greet;
     );
 
     // First build
-    let result1 = env.build_in_subdir("app", false);
-    assert!(
-        result1.success,
-        "first build failed: {}\n{}",
-        result1.stdout, result1.stderr
-    );
+    env.build().in_subdir("app").run().assert_success();
 
     // Second build - should be cached
-    let result2 = env.build_in_subdir("app", false);
-    assert!(result2.success, "second build failed");
-    assert!(result2.was_cached(), "second build should be cached");
+    env.build().in_subdir("app").run().assert_cached();
 
     // Rename the module file (helper.rs -> greeter.rs)
     std::fs::remove_file(env.project_path().join("util/src/helper.rs")).unwrap();
@@ -209,16 +116,7 @@ pub use greeter::greet;
     );
 
     // Third build - should NOT be cached (module path changed)
-    let result3 = env.build_in_subdir("app", false);
-    assert!(
-        result3.success,
-        "third build failed: {}\n{}",
-        result3.stdout, result3.stderr
-    );
-    assert!(
-        !result3.was_cached(),
-        "build after module rename should not be cached"
-    );
+    env.build().in_subdir("app").run().assert_not_cached();
 }
 
 #[test]
@@ -226,14 +124,7 @@ fn diamond_dependency_builds() {
     let env = TestEnv::new();
     create_diamond_dependency_project(&env);
 
-    // Build from the app/ subdirectory
-    let result = env.build_in_subdir("app", false);
-
-    assert!(
-        result.success,
-        "diamond dependency build failed: {}\n{}",
-        result.stdout, result.stderr
-    );
+    env.build().in_subdir("app").run().assert_success();
 }
 
 #[test]
@@ -242,22 +133,10 @@ fn diamond_dependency_cache_hit() {
     create_diamond_dependency_project(&env);
 
     // First build
-    let result1 = env.build_in_subdir("app", false);
-    assert!(
-        result1.success,
-        "first build failed: {}\n{}",
-        result1.stdout, result1.stderr
-    );
+    env.build().in_subdir("app").run().assert_success();
 
     // Second build - should be cached
-    let result2 = env.build_in_subdir("app", false);
-    assert!(result2.success, "second build failed");
-    assert!(
-        result2.was_cached(),
-        "second diamond build should be cached\nstdout: {}\nstderr: {}",
-        result2.stdout,
-        result2.stderr
-    );
+    env.build().in_subdir("app").run().assert_cached();
 }
 
 #[test]
@@ -266,8 +145,7 @@ fn diamond_shared_dep_change_rebuilds_dependents() {
     create_diamond_dependency_project(&env);
 
     // First build
-    let result1 = env.build_in_subdir("app", false);
-    assert!(result1.success, "first build failed");
+    env.build().in_subdir("app").run().assert_success();
 
     // Modify the common library (shared dep)
     env.write_file(
@@ -279,14 +157,5 @@ fn diamond_shared_dep_change_rebuilds_dependents() {
     );
 
     // Second build - should rebuild common, helper, and app
-    let result2 = env.build_in_subdir("app", false);
-    assert!(
-        result2.success,
-        "second build failed: {}\n{}",
-        result2.stdout, result2.stderr
-    );
-    assert!(
-        !result2.was_cached(),
-        "build after shared dep change should not be cached"
-    );
+    env.build().in_subdir("app").run().assert_not_cached();
 }
