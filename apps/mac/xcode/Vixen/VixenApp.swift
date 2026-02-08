@@ -158,6 +158,14 @@ struct ContentView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
                 settingsPreview
+                    .onTapGesture { openExtensionSettings() }
+                    .onHover { hovering in
+                        if hovering {
+                            NSCursor.pointingHand.push()
+                        } else {
+                            NSCursor.pop()
+                        }
+                    }
 
                 if let error = extensionError {
                     HStack(spacing: 8) {

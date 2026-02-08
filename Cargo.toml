@@ -102,6 +102,9 @@ camino = "1"
 # system
 libc = "0.2"
 
+# randomness
+fastrand = "2"
+
 # testing
 tempfile = "3"
 

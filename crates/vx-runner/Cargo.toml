@@ -21,6 +21,7 @@ tokio = { workspace = true }
 camino = { workspace = true }
 eyre = { workspace = true }
 jiff = { workspace = true }
+fastrand = { workspace = true }
 tracing = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
 

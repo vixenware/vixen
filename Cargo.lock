@@ -430,7 +430,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -464,7 +464,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1194,7 +1194,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1221,7 +1221,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1420,7 +1420,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1735,7 +1735,7 @@ dependencies = [
 [[package]]
 name = "roam"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#dd0e53ff739fa0c4b0e3b13676fa87c359bb1f02"
+source = "git+https://github.com/bearcove/roam?branch=main#88070908b7083f295eb41d09fabd111caa06f43c"
 dependencies = [
  "facet",
  "facet-core",
@@ -1752,7 +1752,7 @@ dependencies = [
 [[package]]
 name = "roam-codegen"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#dd0e53ff739fa0c4b0e3b13676fa87c359bb1f02"
+source = "git+https://github.com/bearcove/roam?branch=main#88070908b7083f295eb41d09fabd111caa06f43c"
 dependencies = [
  "facet-core",
  "heck",
@@ -1763,7 +1763,7 @@ dependencies = [
 [[package]]
 name = "roam-frame"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#dd0e53ff739fa0c4b0e3b13676fa87c359bb1f02"
+source = "git+https://github.com/bearcove/roam?branch=main#88070908b7083f295eb41d09fabd111caa06f43c"
 dependencies = [
  "bytes",
  "facet",
@@ -1773,7 +1773,7 @@ dependencies = [
 [[package]]
 name = "roam-hash"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#dd0e53ff739fa0c4b0e3b13676fa87c359bb1f02"
+source = "git+https://github.com/bearcove/roam?branch=main#88070908b7083f295eb41d09fabd111caa06f43c"
 dependencies = [
  "blake3",
  "facet-core",
@@ -1784,7 +1784,7 @@ dependencies = [
 [[package]]
 name = "roam-local"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#dd0e53ff739fa0c4b0e3b13676fa87c359bb1f02"
+source = "git+https://github.com/bearcove/roam?branch=main#88070908b7083f295eb41d09fabd111caa06f43c"
 dependencies = [
  "tokio",
 ]
@@ -1792,7 +1792,7 @@ dependencies = [
 [[package]]
 name = "roam-macros-parse"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#dd0e53ff739fa0c4b0e3b13676fa87c359bb1f02"
+source = "git+https://github.com/bearcove/roam?branch=main#88070908b7083f295eb41d09fabd111caa06f43c"
 dependencies = [
  "proc-macro2",
  "unsynn",
@@ -1801,7 +1801,7 @@ dependencies = [
 [[package]]
 name = "roam-schema"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#dd0e53ff739fa0c4b0e3b13676fa87c359bb1f02"
+source = "git+https://github.com/bearcove/roam?branch=main#88070908b7083f295eb41d09fabd111caa06f43c"
 dependencies = [
  "facet",
  "facet-core",
@@ -1811,7 +1811,7 @@ dependencies = [
 [[package]]
 name = "roam-service-macros"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#dd0e53ff739fa0c4b0e3b13676fa87c359bb1f02"
+source = "git+https://github.com/bearcove/roam?branch=main#88070908b7083f295eb41d09fabd111caa06f43c"
 dependencies = [
  "facet-cargo-toml",
  "heck",
@@ -1823,7 +1823,7 @@ dependencies = [
 [[package]]
 name = "roam-session"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#dd0e53ff739fa0c4b0e3b13676fa87c359bb1f02"
+source = "git+https://github.com/bearcove/roam?branch=main#88070908b7083f295eb41d09fabd111caa06f43c"
 dependencies = [
  "async-channel",
  "facet",
@@ -1846,7 +1846,7 @@ dependencies = [
 [[package]]
 name = "roam-stream"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#dd0e53ff739fa0c4b0e3b13676fa87c359bb1f02"
+source = "git+https://github.com/bearcove/roam?branch=main#88070908b7083f295eb41d09fabd111caa06f43c"
 dependencies = [
  "facet",
  "facet-postcard",
@@ -1859,7 +1859,7 @@ dependencies = [
 [[package]]
 name = "roam-task-local"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#dd0e53ff739fa0c4b0e3b13676fa87c359bb1f02"
+source = "git+https://github.com/bearcove/roam?branch=main#88070908b7083f295eb41d09fabd111caa06f43c"
 dependencies = [
  "pin-project-lite",
 ]
@@ -1867,7 +1867,7 @@ dependencies = [
 [[package]]
 name = "roam-wire"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#dd0e53ff739fa0c4b0e3b13676fa87c359bb1f02"
+source = "git+https://github.com/bearcove/roam?branch=main#88070908b7083f295eb41d09fabd111caa06f43c"
 dependencies = [
  "facet",
  "facet-postcard",
@@ -1926,7 +1926,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2276,7 +2276,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.3",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2548,7 +2548,7 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 [[package]]
 name = "ur-taking-me-with-you"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#dd0e53ff739fa0c4b0e3b13676fa87c359bb1f02"
+source = "git+https://github.com/bearcove/roam?branch=main#88070908b7083f295eb41d09fabd111caa06f43c"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -2723,6 +2723,7 @@ dependencies = [
  "camino",
  "eyre",
  "facet",
+ "fastrand",
  "jiff",
  "roam",
  "roam-stream",
@@ -3037,7 +3038,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

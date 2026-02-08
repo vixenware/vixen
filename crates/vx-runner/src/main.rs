@@ -418,11 +418,16 @@ impl RunnerService {
     /// to add files and later clean up.
     pub(crate) async fn create_action_prefix(&self) -> String {
         use jiff::Timestamp;
-        // Generate a unique prefix ID using timestamp + random suffix
         let ts = Timestamp::now().as_millisecond();
-        let prefix_id = format!("build-{:x}-{:04x}", ts, rand_u16());
-        let (id, _item_id) = self.vfs.create_prefix(prefix_id).await;
-        id
+        loop {
+            let prefix_id = format!("build-{:x}-{:08x}", ts, fastrand::u32(..));
+            if self.vfs.has_prefix(&prefix_id).await {
+                tracing::warn!(prefix_id = %prefix_id, "prefix ID collision, retrying");
+                continue;
+            }
+            let (id, _item_id) = self.vfs.create_prefix(prefix_id).await;
+            return id;
+        }
     }
 
     /// Ensure a toolchain prefix exists in the VFS.
@@ -679,14 +684,4 @@ impl RunnerService {
     pub(crate) fn get_prefix_mount_path(&self, prefix_id: &str) -> Utf8PathBuf {
         runner_mount_base().join(prefix_id)
     }
-}
-
-/// Generate a random u16 for prefix uniqueness
-fn rand_u16() -> u16 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos();
-    (nanos & 0xFFFF) as u16
 }

@@ -423,25 +423,25 @@ public final class VfsChannelingDispatcher {
     public func dispatch(methodId: UInt64, requestId: UInt64, payload: Data) async {
         switch methodId {
         case 0xac1f4b76a434caf5:
-            await dispatchlookup(requestId: requestId, payload: payload)
+            await dispatch_lookup(requestId: requestId, payload: payload)
         case 0xc968b68989c3f020:
-            await dispatchgetAttributes(requestId: requestId, payload: payload)
+            await dispatch_getAttributes(requestId: requestId, payload: payload)
         case 0xd717690e60df5af3:
-            await dispatchreadDir(requestId: requestId, payload: payload)
+            await dispatch_readDir(requestId: requestId, payload: payload)
         case 0x9c80fd555999d0e1:
-            await dispatchread(requestId: requestId, payload: payload)
+            await dispatch_read(requestId: requestId, payload: payload)
         case 0x5d398e81123c3597:
-            await dispatchwrite(requestId: requestId, payload: payload)
+            await dispatch_write(requestId: requestId, payload: payload)
         case 0x2caaf8adf5eda0e1:
-            await dispatchcreate(requestId: requestId, payload: payload)
+            await dispatch_create(requestId: requestId, payload: payload)
         case 0xfa37cb27061e7e2a:
-            await dispatchdelete(requestId: requestId, payload: payload)
+            await dispatch_delete(requestId: requestId, payload: payload)
         case 0x4d68b4b3208a8c07:
-            await dispatchrename(requestId: requestId, payload: payload)
+            await dispatch_rename(requestId: requestId, payload: payload)
         case 0x320f6529a5a0e5ce:
-            await dispatchsetAttributes(requestId: requestId, payload: payload)
+            await dispatch_setAttributes(requestId: requestId, payload: payload)
         case 0xe35cdfdca59ce5ab:
-            await dispatchping(requestId: requestId, payload: payload)
+            await dispatch_ping(requestId: requestId, payload: payload)
         default:
             taskSender(.response(requestId: requestId, payload: encodeUnknownMethodError()))
         }
@@ -457,7 +457,7 @@ public final class VfsChannelingDispatcher {
         }
     }
 
-    private func dispatchlookup(requestId: UInt64, payload: Data) async {
+    private func dispatch_lookup(requestId: UInt64, payload: Data) async {
         do {
             var cursor = 0
             let parentId = try decodeVarint(from: payload, offset: &cursor)
@@ -478,7 +478,7 @@ public final class VfsChannelingDispatcher {
         }
     }
 
-    private func dispatchgetAttributes(requestId: UInt64, payload: Data) async {
+    private func dispatch_getAttributes(requestId: UInt64, payload: Data) async {
         do {
             var cursor = 0
             let itemId = try decodeVarint(from: payload, offset: &cursor)
@@ -498,7 +498,7 @@ public final class VfsChannelingDispatcher {
         }
     }
 
-    private func dispatchreadDir(requestId: UInt64, payload: Data) async {
+    private func dispatch_readDir(requestId: UInt64, payload: Data) async {
         do {
             var cursor_ = 0
             let itemId = try decodeVarint(from: payload, offset: &cursor_)
@@ -519,7 +519,7 @@ public final class VfsChannelingDispatcher {
         }
     }
 
-    private func dispatchread(requestId: UInt64, payload: Data) async {
+    private func dispatch_read(requestId: UInt64, payload: Data) async {
         do {
             var cursor = 0
             let itemId = try decodeVarint(from: payload, offset: &cursor)
@@ -532,7 +532,7 @@ public final class VfsChannelingDispatcher {
         }
     }
 
-    private func dispatchwrite(requestId: UInt64, payload: Data) async {
+    private func dispatch_write(requestId: UInt64, payload: Data) async {
         do {
             var cursor = 0
             let itemId = try decodeVarint(from: payload, offset: &cursor)
@@ -545,7 +545,7 @@ public final class VfsChannelingDispatcher {
         }
     }
 
-    private func dispatchcreate(requestId: UInt64, payload: Data) async {
+    private func dispatch_create(requestId: UInt64, payload: Data) async {
         do {
             var cursor = 0
             let parentId = try decodeVarint(from: payload, offset: &cursor)
@@ -569,7 +569,7 @@ public final class VfsChannelingDispatcher {
         }
     }
 
-    private func dispatchdelete(requestId: UInt64, payload: Data) async {
+    private func dispatch_delete(requestId: UInt64, payload: Data) async {
         do {
             var cursor = 0
             let itemId = try decodeVarint(from: payload, offset: &cursor)
@@ -580,7 +580,7 @@ public final class VfsChannelingDispatcher {
         }
     }
 
-    private func dispatchrename(requestId: UInt64, payload: Data) async {
+    private func dispatch_rename(requestId: UInt64, payload: Data) async {
         do {
             var cursor = 0
             let itemId = try decodeVarint(from: payload, offset: &cursor)
@@ -593,7 +593,7 @@ public final class VfsChannelingDispatcher {
         }
     }
 
-    private func dispatchsetAttributes(requestId: UInt64, payload: Data) async {
+    private func dispatch_setAttributes(requestId: UInt64, payload: Data) async {
         do {
             var cursor = 0
             let itemId = try decodeVarint(from: payload, offset: &cursor)
@@ -608,9 +608,8 @@ public final class VfsChannelingDispatcher {
         }
     }
 
-    private func dispatchping(requestId: UInt64, payload: Data) async {
+    private func dispatch_ping(requestId: UInt64, payload: Data) async {
         do {
-            var cursor = 0
             let result = try await handler.ping()
             taskSender(.response(requestId: requestId, payload: encodeResultOk(result, encoder: { encodeString($0) })))
         } catch {
