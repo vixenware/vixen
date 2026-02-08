@@ -26,6 +26,7 @@ use eyre::{Result, WrapErr};
 use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::process::Child;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use vx_io::net::{Endpoint, Listener};
 use vx_runner_proto::RunnerClient;
@@ -155,7 +156,7 @@ fn spawn_service(
 ) -> Result<Child> {
     use std::process::Stdio;
 
-    let inherit_stdio = std::env::var("VX_TEST").is_ok();
+    let vx_test = std::env::var("VX_TEST").is_ok();
 
     // Prefer spawning sibling binaries next to the currently running vxd.
     // This keeps test runs using the same target/debug artifacts instead of any
@@ -166,14 +167,14 @@ fn spawn_service(
         .filter(|candidate| candidate.exists())
         .unwrap_or_else(|| std::path::PathBuf::from(binary_name));
 
-    tracing::debug!(%inherit_stdio, "spawning {} from {}", binary_name, binary_path.display());
+    tracing::debug!(%vx_test, "spawning {} from {}", binary_name, binary_path.display());
 
     let mut cmd = std::process::Command::new(&binary_path);
     for (key, value) in env_vars {
         cmd.env(key, value);
     }
 
-    if inherit_stdio {
+    if vx_test {
         cmd.stdout(Stdio::inherit());
         cmd.stderr(Stdio::inherit());
     } else {
@@ -306,9 +307,11 @@ async fn async_main() -> Result<()> {
     // Initialize tracing (logs will go to ~/.vx/vxd.log via spawn_service redirection)
     vx_tracing::init_service("vxd=debug");
 
+    let in_test = std::env::var("VX_TEST").is_ok();
+
     // When spawned by a long-lived orchestrator (e.g. nextest setup script),
     // the daemon must outlive its parent process.
-    if std::env::var("VX_TEST").is_err() {
+    if !in_test {
         ur_taking_me_with_you::die_with_parent();
     }
 
@@ -374,9 +377,36 @@ async fn async_main() -> Result<()> {
     let listener = Listener::bind(&args.bind).await?;
     tracing::info!("Daemon listening on {}", args.bind);
 
+    // In test mode, track active connections and quit after 5s idle.
+    let active_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let last_disconnect = Arc::new(Mutex::new(Option::<tokio::time::Instant>::None));
+
+    if in_test {
+        let active_connections = active_connections.clone();
+        let last_disconnect = last_disconnect.clone();
+        tokio::spawn(async move {
+            let idle_timeout = Duration::from_secs(5);
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let count = active_connections.load(std::sync::atomic::Ordering::Relaxed);
+                if count == 0
+                    && let Some(when) = *last_disconnect.lock().await
+                    && when.elapsed() >= idle_timeout
+                {
+                    tracing::info!("test mode: no connections for {idle_timeout:?}, shutting down");
+                    std::process::exit(0);
+                }
+            }
+        });
+    }
+
     loop {
         let (stream, peer_addr) = listener.accept().await?;
         let daemon = daemon.clone();
+        let active_connections = active_connections.clone();
+        let last_disconnect = last_disconnect.clone();
+
+        active_connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         tokio::spawn(async move {
             tracing::debug!("New connection from {}", peer_addr);
@@ -396,6 +426,8 @@ async fn async_main() -> Result<()> {
             .await
             else {
                 tracing::warn!("Handshake error from {}", peer_addr);
+                active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                *last_disconnect.lock().await = Some(tokio::time::Instant::now());
                 return;
             };
 
@@ -410,6 +442,8 @@ async fn async_main() -> Result<()> {
             }
 
             tracing::debug!("Connection from {} closed", peer_addr);
+            active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            *last_disconnect.lock().await = Some(tokio::time::Instant::now());
         });
     }
 }
