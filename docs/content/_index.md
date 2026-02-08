@@ -5,6 +5,20 @@ description = "A Rust build engine with correct caching"
 
 vixen (`vx`) is a build engine for Rust with correct caching.
 
+## Getting Started
+
+```
+cargo xtask install
+```
+
+This installs `vx` and `vxd`. On Linux, you also need `libfuse3` and `fusermount`.
+
+Then try it on your project:
+
+```
+vx build
+```
+
 ## Quick Links
 
 - [Download](/download/) - Install vixen on macOS
@@ -52,6 +66,18 @@ bins ({
     sources main.c
 })
 ```
+
+## FAQ
+
+### Why so many processes?
+
+vixen is designed for remote execution. Each component can run on a different machine:
+
+- `vx-store` could be in the cloud — a shared cache for your whole team
+- `vx-runner` could be on a beefy VM somewhere, doing the actual compilation
+- `vxd` is the local daemon that orchestrates everything
+
+When you develop locally, all of these just happen to run on the same machine. But the separation means that when you run `vx install somecrate` and someone else on your team has already built it, vixen just downloads the result from the shared store instead of compiling it again.
 
 ## Current Scope (v0)
 

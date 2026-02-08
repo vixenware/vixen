@@ -4,6 +4,20 @@
 
 A Rust build engine with correct caching. The CLI is `vx`.
 
+## Getting Started
+
+```bash
+cargo xtask install
+```
+
+This installs `vx` and `vxd`. On Linux, you also need `libfuse3` and `fusermount`.
+
+Then try it on your project:
+
+```bash
+vx build
+```
+
 ## Brand
 
 - Primary brand color: `#E88602`
