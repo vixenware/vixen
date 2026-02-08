@@ -301,8 +301,9 @@ async fn main() -> Result<()> {
             .await;
         }
         Err(error) => {
+            tracing::error!(%error, "VFS mount failed");
             let mut diagnostics = error.diagnostics().to_vec();
-            let reason = "Mount failed".to_string();
+            let reason = format!("Mount failed: {error}");
             if diagnostics.is_empty() {
                 diagnostics.push(VfsDiagnostic {
                     code: VfsIssueCode::MountFailed,

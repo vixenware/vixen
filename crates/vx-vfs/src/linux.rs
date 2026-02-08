@@ -461,77 +461,134 @@ where
             _diagnostics: vec![],
         })?;
 
-    let uid = unsafe { libc::getuid() };
-    let gid = unsafe { libc::getgid() };
+    // Clean up ghost mounts from previous runs that didn't unmount cleanly.
+    lazy_unmount_if_mounted(&config.mount_path);
 
-    let mut mount_options = MountOptions::default();
-    mount_options
-        .fs_name("vixenfs")
-        .allow_other(false)
-        .force_readdir_plus(true);
+    let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<VfsStart, VfsError>>();
 
-    let bridge = FuseBridge::new(vfs, uid, gid);
     let mount_path = config.mount_path.clone();
+    std::thread::Builder::new()
+        .name("fuse-runtime".into())
+        .spawn(move || {
+            // Fork the sentinel BEFORE creating the tokio runtime, so the child
+            // doesn't inherit any runtime threads or the /dev/fuse fd (which
+            // hasn't been opened yet).
+            fork_unmount_sentinel(&mount_path);
 
-    let (vfs_dead_tx, vfs_dead_rx) = tokio::sync::watch::channel(false);
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to create FUSE tokio runtime");
 
-    let mount_handle = Session::new(mount_options)
-        .mount_with_unprivileged(bridge, mount_path.as_std_path())
-        .await
-        .map_err(|e| VfsError::CommandFailed {
-            program: "fuse3",
-            message: format!("FUSE mount failed: {e}"),
-            _diagnostics: vec![],
-        })?;
+            rt.block_on(async move {
+                let uid = unsafe { libc::getuid() };
+                let gid = unsafe { libc::getgid() };
 
-    tokio::spawn(async move {
-        if let Err(e) = mount_handle.await {
-            tracing::error!(%e, "FUSE mount ended with error");
-        }
-        let _ = vfs_dead_tx.send(true);
-    });
+                let mut mount_options = MountOptions::default();
+                mount_options
+                    .fs_name("vixenfs")
+                    .allow_other(false)
+                    .force_readdir_plus(true);
 
-    // Fork a sentinel child process that will unmount the FUSE filesystem
-    // when the parent process dies (including SIGKILL). The child uses
-    // PR_SET_PDEATHSIG to receive SIGTERM when the parent exits, then calls
-    // fusermount3 -u to clean up the mount.
-    {
-        let mount_path_cstr = std::ffi::CString::new(config.mount_path.as_str()).unwrap();
-        // SAFETY: fork() is safe here because we're calling it before spawning
-        // many threads (the tokio runtime runs on the current thread until we
-        // return). The child process immediately sets up a signal handler and
-        // pauses — it does not use any async runtime or locks.
-        unsafe {
-            let pid = libc::fork();
-            match pid {
-                -1 => {
-                    tracing::warn!("failed to fork FUSE unmount sentinel");
-                }
-                0 => {
-                    // Child: set up death signal, then wait for it
-                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                let bridge = FuseBridge::new(vfs, uid, gid);
 
-                    // Check if parent already died between fork and prctl
-                    if libc::getppid() == 1 {
-                        let _ = libc::execlp(
-                            c"fusermount3".as_ptr(),
-                            c"fusermount3".as_ptr(),
-                            c"-u".as_ptr(),
-                            mount_path_cstr.as_ptr(),
-                            std::ptr::null::<libc::c_char>(),
-                        );
-                        libc::_exit(1);
+                let mount_handle = match Session::new(mount_options)
+                    .mount_with_unprivileged(bridge, mount_path.as_std_path())
+                    .await
+                {
+                    Ok(h) => h,
+                    Err(e) => {
+                        let _ = result_tx.send(Err(VfsError::CommandFailed {
+                            program: "fuse3",
+                            message: format!("FUSE mount failed: {e}"),
+                            _diagnostics: vec![],
+                        }));
+                        return;
                     }
+                };
 
-                    // Wait for SIGTERM (from parent death)
-                    let mut sigset: libc::sigset_t = std::mem::zeroed();
-                    libc::sigemptyset(&mut sigset);
-                    libc::sigaddset(&mut sigset, libc::SIGTERM);
-                    libc::sigprocmask(libc::SIG_BLOCK, &sigset, std::ptr::null_mut());
-                    let mut sig: libc::c_int = 0;
-                    libc::sigwait(&sigset, &mut sig);
+                let (vfs_dead_tx, vfs_dead_rx) = tokio::sync::watch::channel(false);
 
-                    // Parent died — unmount via fusermount3
+                let _ = result_tx.send(Ok(VfsStart::Mounted {
+                    mount_path,
+                    vfs_dead: vfs_dead_rx,
+                }));
+
+                // Run the FUSE session until it ends.
+                if let Err(e) = mount_handle.await {
+                    tracing::error!(%e, "FUSE mount ended with error");
+                }
+                let _ = vfs_dead_tx.send(true);
+            });
+        })
+        .expect("failed to spawn FUSE runtime thread");
+
+    result_rx
+        .recv()
+        .unwrap_or_else(|_| {
+            Err(VfsError::CommandFailed {
+                program: "fuse3",
+                message: "FUSE runtime thread died before sending result".to_string(),
+                _diagnostics: vec![],
+            })
+        })
+}
+
+/// If `mount_path` is already a mountpoint (ghost mount from a previous run),
+/// perform a lazy unmount (`fusermount3 -uz`) so we can re-mount cleanly.
+fn lazy_unmount_if_mounted(mount_path: &camino::Utf8Path) {
+    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+        return;
+    };
+    let is_mounted = mounts.lines().any(|line| {
+        // /proc/mounts format: device mountpoint fstype options ...
+        line.split_whitespace()
+            .nth(1)
+            .is_some_and(|mp| mp == mount_path.as_str())
+    });
+    if is_mounted {
+        tracing::warn!(%mount_path, "found ghost mount, performing lazy unmount");
+        let _ = std::process::Command::new("fusermount3")
+            .args(["-uz", mount_path.as_str()])
+            .status();
+    }
+}
+
+/// Fork a sentinel child that will unmount the FUSE filesystem when the parent
+/// dies (including SIGKILL). The child uses `PR_SET_PDEATHSIG` to receive
+/// `SIGTERM` when the parent exits, then calls `fusermount3 -u`.
+///
+/// Must be called **before** opening `/dev/fuse` (i.e. before the tokio runtime
+/// and FUSE session are created) so the child doesn't inherit the fd.
+fn fork_unmount_sentinel(mount_path: &camino::Utf8Path) {
+    let mount_path_cstr = std::ffi::CString::new(mount_path.as_str()).unwrap();
+    // SAFETY: fork() is called on the dedicated FUSE thread before the tokio
+    // runtime is created, so there is only one thread in this context. The
+    // child process immediately closes inherited fds, sets up a signal handler,
+    // and pauses — it does not use any async runtime or locks.
+    unsafe {
+        let pid = libc::fork();
+        match pid {
+            -1 => {
+                tracing::warn!("failed to fork FUSE unmount sentinel");
+            }
+            0 => {
+                // Child: close all inherited file descriptors (including any
+                // /dev/fuse fd). The sentinel only needs to wait for SIGTERM
+                // and exec fusermount3.
+                close_inherited_fds();
+
+                // Ignore SIGINT and SIGHUP so the sentinel survives Ctrl+C
+                // (which sends SIGINT to the whole process group). The sentinel
+                // must stay alive until the parent actually dies, at which point
+                // PR_SET_PDEATHSIG delivers SIGTERM.
+                libc::signal(libc::SIGINT, libc::SIG_IGN);
+                libc::signal(libc::SIGHUP, libc::SIG_IGN);
+
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+
+                // Check if parent already died between fork and prctl
+                if libc::getppid() == 1 {
                     let _ = libc::execlp(
                         c"fusermount3".as_ptr(),
                         c"fusermount3".as_ptr(),
@@ -541,15 +598,69 @@ where
                     );
                     libc::_exit(1);
                 }
-                _ => {
-                    tracing::debug!(mount_path = %config.mount_path, sentinel_pid = pid, "forked FUSE unmount sentinel");
-                }
+
+                // Wait for SIGTERM (from parent death)
+                let mut sigset: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut sigset);
+                libc::sigaddset(&mut sigset, libc::SIGTERM);
+                libc::sigprocmask(libc::SIG_BLOCK, &sigset, std::ptr::null_mut());
+                let mut sig: libc::c_int = 0;
+                libc::sigwait(&sigset, &mut sig);
+
+                // Parent died — unmount via fusermount3
+                let _ = libc::execlp(
+                    c"fusermount3".as_ptr(),
+                    c"fusermount3".as_ptr(),
+                    c"-u".as_ptr(),
+                    mount_path_cstr.as_ptr(),
+                    std::ptr::null::<libc::c_char>(),
+                );
+                libc::_exit(1);
+            }
+            _ => {
+                tracing::debug!(%mount_path, sentinel_pid = pid, "forked FUSE unmount sentinel");
             }
         }
     }
+}
 
-    Ok(VfsStart::Mounted {
-        mount_path: config.mount_path,
-        vfs_dead: vfs_dead_rx,
-    })
+/// Close all file descriptors >= 3 (preserving stdin/stdout/stderr).
+///
+/// Uses `/proc/self/fd` when available for efficiency, falling back to
+/// iterating up to the soft RLIMIT_NOFILE.
+fn close_inherited_fds() {
+    // Try /proc/self/fd first — only closes fds that actually exist.
+    // Collect fd numbers before closing, because the ReadDir iterator
+    // itself holds an open fd that we must not close while iterating.
+    if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
+        let fds: Vec<libc::c_int> = entries
+            .flatten()
+            .filter_map(|entry| {
+                entry
+                    .file_name()
+                    .into_string()
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+            })
+            .filter(|&fd| fd >= 3)
+            .collect();
+        // Drop entries (closes the dirfd) before closing the collected fds.
+        for fd in fds {
+            unsafe { libc::close(fd) };
+        }
+        return;
+    }
+
+    // Fallback: close up to the soft fd limit.
+    let max_fd = unsafe {
+        let mut rlim: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
+            rlim.rlim_cur as libc::c_int
+        } else {
+            1024
+        }
+    };
+    for fd in 3..max_fd {
+        unsafe { libc::close(fd) };
+    }
 }

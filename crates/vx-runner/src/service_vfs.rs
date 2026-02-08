@@ -177,65 +177,6 @@ impl RunnerService {
             "executing rustc via VFS"
         );
 
-        // Diagnostic: list what the kernel sees as root children in the VFS mount.
-        // This tells us whether the kernel VFS cache is stale.
-        {
-            let mount_base = crate::runner_mount_base();
-            debug!(mount_base = %mount_base, "readdir: VFS mount root");
-            match tokio::fs::read_dir(mount_base.as_str()).await {
-                Ok(mut entries) => {
-                    let mut names = Vec::new();
-                    while let Ok(Some(entry)) = entries.next_entry().await {
-                        names.push(entry.file_name().to_string_lossy().to_string());
-                    }
-                    info!(
-                        ?names,
-                        expected_build = %prefix_id,
-                        expected_tc = %toolchain_prefix_id,
-                        "VFS mount root children (kernel view)"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "readdir FAILED on VFS mount root");
-                }
-            }
-        }
-
-        // Verify VFS paths are accessible before spawning rustc.
-        // These stats also warm the kernel VFS name cache for newly-created prefixes.
-        // Check all paths (no fail-fast) so we get a complete picture in logs.
-        let stat_checks: &[(&str, &str)] = &[
-            ("build prefix dir", prefix_path.as_str()),
-            ("toolchain prefix dir", toolchain_path.as_str()),
-            ("rustc binary", rustc_path.as_str()),
-            ("crate root", crate_root.as_str()),
-        ];
-        let mut stat_failures: Vec<String> = Vec::new();
-        for &(label, path) in stat_checks {
-            debug!(path, label, "stat check");
-            match tokio::fs::metadata(path).await {
-                Ok(meta) => debug!(
-                    path,
-                    label,
-                    len = meta.len(),
-                    is_dir = meta.is_dir(),
-                    "stat OK"
-                ),
-                Err(e) => {
-                    tracing::error!(path, label, error = %e, "stat FAILED");
-                    stat_failures.push(format!("{label}: {e} (path: {path})"));
-                }
-            }
-        }
-        if !stat_failures.is_empty() {
-            self.remove_action_prefix(&prefix_id).await;
-            return cleanup_and_error(
-                &prefix_id,
-                format!("VFS path checks failed:\n  {}", stat_failures.join("\n  ")),
-                start,
-            );
-        }
-
         // 7. Run rustc
         let output = match cmd.output().await {
             Ok(o) => o,

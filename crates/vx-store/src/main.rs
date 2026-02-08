@@ -125,7 +125,7 @@ async fn async_main() -> Result<()> {
             )
             .await
             else {
-                tracing::warn!("Handshake failed for {}", peer_addr);
+                tracing::debug!("Handshake failed for {}", peer_addr);
                 return;
             };
             if let Err(e) = driver.run().await {

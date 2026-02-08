@@ -1,6 +1,9 @@
 # rust
 target
 
+# perf
+perf.data*
+
 # samply
 profile.json.gz
 
