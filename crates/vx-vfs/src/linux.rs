@@ -7,10 +7,11 @@ use std::ffi::OsStr;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
+use async_stream::try_stream;
 use bytes::Bytes;
 use fuse3::raw::prelude::*;
 use fuse3::{Errno, Inode, MountOptions, SetAttr, Timestamp};
-use futures_util::stream;
+use futures_util::Stream;
 use vixenfs_proto::{ItemAttributes, ItemType, Vfs};
 
 use crate::types::{VfsConfig, VfsError, VfsStart};
@@ -76,10 +77,6 @@ fn errno_from_vfs(code: i32) -> Errno {
 }
 
 impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
-    type DirEntryStream<'a> = stream::Iter<std::vec::IntoIter<fuse3::Result<DirectoryEntry>>>;
-    type DirEntryPlusStream<'a> =
-        stream::Iter<std::vec::IntoIter<fuse3::Result<DirectoryEntryPlus>>>;
-
     async fn init(&self, _req: Request) -> fuse3::Result<ReplyInit> {
         Ok(ReplyInit {
             max_write: NonZeroU32::new(MAX_WRITE).unwrap(),
@@ -329,36 +326,34 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         parent: Inode,
         _fh: u64,
         offset: i64,
-    ) -> fuse3::Result<ReplyDirectory<Self::DirEntryStream<'_>>> {
+    ) -> fuse3::Result<ReplyDirectory<impl Stream<Item = fuse3::Result<DirectoryEntry>> + Send + '_>> {
         let cx = dummy_context();
-        let mut entries: Vec<fuse3::Result<DirectoryEntry>> = Vec::new();
-        let mut cursor: u64 = 0;
-        let mut entry_offset: i64 = 1;
-
-        loop {
-            let result = self.vfs.read_dir(&cx, parent, cursor).await;
-            if result.error != 0 {
-                return Err(errno_from_vfs(result.error));
-            }
-            for entry in result.entries {
-                entries.push(Ok(DirectoryEntry {
-                    inode: entry.item_id,
-                    kind: item_type_to_file_type(entry.item_type),
-                    name: entry.name.into(),
-                    offset: entry_offset,
-                }));
-                entry_offset += 1;
-            }
-            if result.next_cursor == 0 {
-                break;
-            }
-            cursor = result.next_cursor;
-        }
-
-        // Skip entries before offset (FUSE provides the offset of the last entry it received)
-        let entries: Vec<_> = entries.into_iter().skip(offset as usize).collect();
         Ok(ReplyDirectory {
-            entries: stream::iter(entries),
+            entries: try_stream! {
+                let mut cursor: u64 = 0;
+                let mut entry_offset: i64 = 1;
+                loop {
+                    let result = self.vfs.read_dir(&cx, parent, cursor).await;
+                    if result.error != 0 {
+                        Err(errno_from_vfs(result.error))?;
+                    }
+                    for entry in result.entries {
+                        if entry_offset > offset {
+                            yield DirectoryEntry {
+                                inode: entry.item_id,
+                                kind: item_type_to_file_type(entry.item_type),
+                                name: entry.name.into(),
+                                offset: entry_offset,
+                            };
+                        }
+                        entry_offset += 1;
+                    }
+                    if result.next_cursor == 0 {
+                        break;
+                    }
+                    cursor = result.next_cursor;
+                }
+            },
         })
     }
 
@@ -369,62 +364,59 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         _fh: u64,
         offset: u64,
         _lock_owner: u64,
-    ) -> fuse3::Result<ReplyDirectoryPlus<Self::DirEntryPlusStream<'_>>> {
+    ) -> fuse3::Result<ReplyDirectoryPlus<impl Stream<Item = fuse3::Result<DirectoryEntryPlus>> + Send + '_>> {
         let cx = dummy_context();
-        let mut entries: Vec<fuse3::Result<DirectoryEntryPlus>> = Vec::new();
-        let mut cursor: u64 = 0;
-        let mut entry_offset: i64 = 1;
-
-        loop {
-            let result = self.vfs.read_dir(&cx, parent, cursor).await;
-            if result.error != 0 {
-                return Err(errno_from_vfs(result.error));
-            }
-            for entry in result.entries {
-                let attr_result = self.vfs.get_attributes(&cx, entry.item_id).await;
-                let attr = if attr_result.error == 0 {
-                    attrs_to_file_attr(&attr_result.attrs, self.uid, self.gid)
-                } else {
-                    // Fallback: synthesize minimal attributes from the dir entry
-                    let kind = item_type_to_file_type(entry.item_type);
-                    FileAttr {
-                        ino: entry.item_id,
-                        size: 0,
-                        blocks: 0,
-                        atime: Timestamp::new(0, 0),
-                        mtime: Timestamp::new(0, 0),
-                        ctime: Timestamp::new(0, 0),
-                        kind,
-                        perm: 0o444,
-                        nlink: 1,
-                        uid: self.uid,
-                        gid: self.gid,
-                        rdev: 0,
-                        blksize: 4096,
-                    }
-                };
-
-                entries.push(Ok(DirectoryEntryPlus {
-                    inode: entry.item_id,
-                    generation: 0,
-                    kind: item_type_to_file_type(entry.item_type),
-                    name: entry.name.into(),
-                    offset: entry_offset,
-                    attr,
-                    entry_ttl: TTL,
-                    attr_ttl: TTL,
-                }));
-                entry_offset += 1;
-            }
-            if result.next_cursor == 0 {
-                break;
-            }
-            cursor = result.next_cursor;
-        }
-
-        let entries: Vec<_> = entries.into_iter().skip(offset as usize).collect();
         Ok(ReplyDirectoryPlus {
-            entries: stream::iter(entries),
+            entries: try_stream! {
+                let mut cursor: u64 = 0;
+                let mut entry_offset: i64 = 1;
+                loop {
+                    let result = self.vfs.read_dir(&cx, parent, cursor).await;
+                    if result.error != 0 {
+                        Err(errno_from_vfs(result.error))?;
+                    }
+                    for entry in result.entries {
+                        if entry_offset > offset as i64 {
+                            let attr_result = self.vfs.get_attributes(&cx, entry.item_id).await;
+                            let attr = if attr_result.error == 0 {
+                                attrs_to_file_attr(&attr_result.attrs, self.uid, self.gid)
+                            } else {
+                                let kind = item_type_to_file_type(entry.item_type);
+                                FileAttr {
+                                    ino: entry.item_id,
+                                    size: 0,
+                                    blocks: 0,
+                                    atime: Timestamp::new(0, 0),
+                                    mtime: Timestamp::new(0, 0),
+                                    ctime: Timestamp::new(0, 0),
+                                    kind,
+                                    perm: 0o444,
+                                    nlink: 1,
+                                    uid: self.uid,
+                                    gid: self.gid,
+                                    rdev: 0,
+                                    blksize: 4096,
+                                }
+                            };
+                            yield DirectoryEntryPlus {
+                                inode: entry.item_id,
+                                generation: 0,
+                                kind: item_type_to_file_type(entry.item_type),
+                                name: entry.name.into(),
+                                offset: entry_offset,
+                                attr,
+                                entry_ttl: TTL,
+                                attr_ttl: TTL,
+                            };
+                        }
+                        entry_offset += 1;
+                    }
+                    if result.next_cursor == 0 {
+                        break;
+                    }
+                    cursor = result.next_cursor;
+                }
+            },
         })
     }
 

@@ -506,7 +506,7 @@ async fn cmd_kill(_args: KillArgs) -> Result<()> {
         }
         Err(_) => {
             println!(
-                "{} daemon not reachable, cleaning up orphaned processes",
+                "{} daemon not reachable (child processes use die-with-parent, so they'll exit on their own)",
                 "Note:".yellow().bold()
             );
         }

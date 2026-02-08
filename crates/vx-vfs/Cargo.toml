@@ -29,6 +29,7 @@ roam = { workspace = true }
 libc = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
+async-stream = { workspace = true }
 
 [package.metadata.cargo-shear]
 ignored = ["facet-error"]
