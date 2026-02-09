@@ -18,6 +18,7 @@ vixenfs-proto = { workspace = true }
 
 vx-tracing = { workspace = true }
 facet = { workspace = true }
+facet-json = { workspace = true }
 thiserror = { workspace = true }
 roam = { workspace = true }
 roam-session = { workspace = true }
@@ -33,6 +34,7 @@ ur-taking-me-with-you = { workspace = true }
 vx-cache = { workspace = true }
 vx-store-proto = { workspace = true }
 vx-runner-proto = { workspace = true }
+vx-vfsd = { path = "../vx-vfsd" }
 vx-io = { workspace = true }
 vx-vfs = { workspace = true }
 vx-locks = { workspace = true }

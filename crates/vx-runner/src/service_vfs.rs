@@ -11,27 +11,14 @@ use vx_runner_proto::{
     CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RustCompileRequest,
     RustCompileResult,
 };
-use vx_store_proto::{NodeId, NodeManifest, OutputEntry};
-use vx_vfs::{VfsAction, VfsIssueCode};
+use vx_store_proto::{Blake3Hash, NodeId, NodeManifest, OutputEntry};
 
-use crate::{RunnerService, VfsStartupFailure};
+use crate::RunnerService;
 
 impl RunnerService {
     /// Compile a Rust crate using VFS-based execution
     pub async fn compile_rust_vfs(&self, request: RustCompileRequest) -> RustCompileResult {
         let start = Instant::now();
-
-        if let Some(reason) = self.get_vfs_startup_error().await {
-            return RustCompileResult {
-                success: false,
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: String::new(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_manifest: None,
-                error: Some(format_vfs_startup_failure(&reason)),
-            };
-        }
 
         info!(
             crate_name = %request.crate_name,
@@ -292,19 +279,6 @@ impl RunnerService {
     pub async fn compile_cc_vfs(&self, request: CcCompileRequest) -> CcCompileResult {
         let start = Instant::now();
 
-        if let Some(reason) = self.get_vfs_startup_error().await {
-            return CcCompileResult {
-                success: false,
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: String::new(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_manifest: None,
-                discovered_deps: vec![],
-                error: Some(format_vfs_startup_failure(&reason)),
-            };
-        }
-
         info!(
             source = %request.source_path,
             target = %request.target_triple,
@@ -542,18 +516,6 @@ impl RunnerService {
     pub async fn link_cc_vfs(&self, request: CcLinkRequest) -> CcLinkResult {
         let start = Instant::now();
 
-        if let Some(reason) = self.get_vfs_startup_error().await {
-            return CcLinkResult {
-                success: false,
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: String::new(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_manifest: None,
-                error: Some(format_vfs_startup_failure(&reason)),
-            };
-        }
-
         let prefix_id = self.create_action_prefix().await;
         let prefix_path = crate::runner_mount_base().join(&prefix_id);
 
@@ -579,7 +541,11 @@ impl RunnerService {
         self.vfs.add_dir_to_prefix(&prefix_id, "obj").await;
         self.create_output_dir_in_prefix(&prefix_id).await;
 
+        // Build tree manifest with all object files
+        use vx_store_proto::TreeManifest;
+        let mut tree_manifest = TreeManifest::new();
         let mut object_paths = Vec::with_capacity(request.object_manifests.len());
+
         for (idx, manifest_hash) in request.object_manifests.iter().enumerate() {
             let manifest = match self.cas.get_manifest(*manifest_hash).await {
                 Ok(Some(m)) => m,
@@ -629,16 +595,41 @@ impl RunnerService {
             };
 
             let obj_rel_path = format!("obj/{idx:04}.o");
-            self.vfs
-                .add_file_to_prefix(
-                    &prefix_id,
-                    &obj_rel_path,
-                    object_entry.blob,
-                    object_entry.size,
-                    false,
-                )
-                .await;
+            tree_manifest.add_file(obj_rel_path.clone(), object_entry.blob, object_entry.size, false);
             object_paths.push(prefix_path.join(obj_rel_path));
+        }
+
+        // Upload tree manifest and mount it
+        tree_manifest.finalize();
+        let manifest_json = facet_json::to_string(&tree_manifest)
+            .map_err(|e| format!("failed to serialize object files tree manifest for linking: {}", e))
+            .unwrap();
+        let manifest_hash = Blake3Hash::from_bytes(manifest_json.as_bytes());
+
+        if let Err(e) = self.cas.put_blob(manifest_json.into_bytes()).await {
+            self.remove_action_prefix(&prefix_id).await;
+            return CcLinkResult {
+                success: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                output_manifest: None,
+                error: Some(format!("failed to store object files tree manifest to CAS: {}", e)),
+            };
+        }
+
+        if let Err(e) = self.vfs.mount_tree(&prefix_id, "", manifest_hash).await {
+            self.remove_action_prefix(&prefix_id).await;
+            return CcLinkResult {
+                success: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                output_manifest: None,
+                error: Some(format!("failed to mount object files tree manifest in VFS: {}", e)),
+            };
         }
 
         let output_rel_path = format!("out/{}", request.binary_name);
@@ -760,48 +751,3 @@ impl RunnerService {
     }
 }
 
-fn format_vfs_startup_failure(failure: &VfsStartupFailure) -> String {
-    let mut lines = Vec::new();
-    lines.push(format!("VFS unavailable: {}", failure.reason));
-
-    for diagnostic in &failure.diagnostics {
-        lines.push(format!(
-            "- [{}] {}",
-            issue_code_name(diagnostic.code),
-            diagnostic.summary
-        ));
-        if let Some(detail) = &diagnostic.detail {
-            lines.push(format!("  detail: {}", detail));
-        }
-        for action in &diagnostic.actions {
-            lines.push(format!("  action: {}", render_action(action)));
-        }
-    }
-
-    lines.join("\n")
-}
-
-fn issue_code_name(code: VfsIssueCode) -> &'static str {
-    match code {
-        VfsIssueCode::UnsupportedPlatform => "unsupported_platform",
-        VfsIssueCode::AppMissing => "app_missing",
-        VfsIssueCode::ExtensionNotInstalled => "extension_not_installed",
-        VfsIssueCode::ExtensionDisabled => "extension_disabled",
-        VfsIssueCode::HealthCheckFailed => "health_check_failed",
-        VfsIssueCode::MountFailed => "mount_failed",
-    }
-}
-
-fn render_action(action: &VfsAction) -> String {
-    match action {
-        VfsAction::RetryBuild => "retry the build".to_string(),
-        VfsAction::RunVxApp => {
-            if cfg!(target_os = "macos") {
-                "run `vx doctor`".to_string()
-            } else {
-                "run the platform-specific Vixen setup flow".to_string()
-            }
-        }
-        VfsAction::OpenDownloadUrl(url) => format!("install Vixen from {}", url),
-    }
-}

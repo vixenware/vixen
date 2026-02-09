@@ -1,0 +1,50 @@
+[package]
+name = "vx-vfsd"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "vx_vfsd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vx-vfsd"
+path = "src/main.rs"
+
+[dependencies]
+# Internal
+vx-store-proto = { workspace = true }
+vx-locks = { workspace = true }
+vixenfs-proto = { workspace = true }
+vx-vfs = { workspace = true }
+vx-tracing = { workspace = true }
+
+# RPC
+roam = { workspace = true }
+roam-stream = { workspace = true }
+vx-io = { workspace = true }
+async-trait = "0.1"
+
+# Async runtime
+tokio = { workspace = true }
+
+# Filesystem
+parking_lot = { workspace = true }
+
+# Serialization
+facet = { workspace = true }
+facet-json = { workspace = true }
+
+# CLI
+figue = { workspace = true }
+
+# Utilities
+camino = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+ur-taking-me-with-you = { workspace = true }
+libc = { workspace = true }
+
+[features]
+default = []
+diagnostics = ["vx-locks/diagnostics"]

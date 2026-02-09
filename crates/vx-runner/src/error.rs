@@ -42,6 +42,10 @@ pub enum RunnerError {
     #[error("CAS fetch error: {0}")]
     CasFetch(String),
 
+    // === VFS Errors ===
+    #[error("VFS mount error: {0}")]
+    VfsMount(String),
+
     // === IO Errors ===
     #[error("failed to create directory {path}: {message}")]
     CreateDir { path: Utf8PathBuf, message: String },

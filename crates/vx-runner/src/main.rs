@@ -12,7 +12,7 @@
 pub(crate) mod error;
 pub(crate) mod service;
 pub(crate) mod service_vfs;
-pub(crate) mod vfs;
+pub(crate) mod vfsd_client;
 
 use error::{Result as RunnerResult, RunnerError};
 
@@ -21,24 +21,14 @@ use eyre::Result;
 use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::collections::HashMap;
 use std::sync::Arc;
-use vixenfs_proto::{
-    CreateResult, GetAttributesResult, ItemId, ItemType, LookupResult, ReadDirResult, ReadResult,
-    SetAttributesParams, Vfs, VfsResult, WriteResult,
-};
 use vx_io::net::{Endpoint, Listener};
 use vx_runner_proto::RunnerDispatcher;
 use vx_store_proto::{Blake3Hash, StoreClient};
-use vx_vfs::{VfsAction, VfsConfig, VfsDiagnostic, VfsIssueCode, VfsStart};
 
-use crate::vfs::CasVfs;
+use crate::vfsd_client::VfsdClient as VfsClient;
 
 pub type CasCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
-
-#[derive(Debug, Clone)]
-pub(crate) struct VfsStartupFailure {
-    pub(crate) reason: String,
-    pub(crate) diagnostics: Vec<VfsDiagnostic>,
-}
+pub type VfsdCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
 
 pub(crate) fn runner_mount_base() -> Utf8PathBuf {
     if let Ok(path) = std::env::var("VX_RUNNER_MOUNT") {
@@ -58,79 +48,17 @@ pub(crate) fn runner_mount_base() -> Utf8PathBuf {
 
 #[derive(Debug)]
 struct Args {
+    /// VX_HOME directory
+    vx_home: Utf8PathBuf,
+
     /// CAS endpoint
     cas_endpoint: Endpoint,
 
     /// Bind endpoint for Runner RPC service
     bind: Endpoint,
-}
 
-#[derive(Clone)]
-struct SharedVfs(Arc<CasVfs>);
-
-impl Vfs for SharedVfs {
-    async fn lookup(&self, cx: &roam::Context, parent_id: ItemId, name: String) -> LookupResult {
-        self.0.lookup(cx, parent_id, name).await
-    }
-
-    async fn get_attributes(&self, cx: &roam::Context, item_id: ItemId) -> GetAttributesResult {
-        self.0.get_attributes(cx, item_id).await
-    }
-
-    async fn read_dir(&self, cx: &roam::Context, item_id: ItemId, cursor: u64) -> ReadDirResult {
-        self.0.read_dir(cx, item_id, cursor).await
-    }
-
-    async fn read(&self, cx: &roam::Context, item_id: ItemId, offset: u64, len: u64) -> ReadResult {
-        self.0.read(cx, item_id, offset, len).await
-    }
-
-    async fn write(
-        &self,
-        cx: &roam::Context,
-        item_id: ItemId,
-        offset: u64,
-        data: Vec<u8>,
-    ) -> WriteResult {
-        self.0.write(cx, item_id, offset, data).await
-    }
-
-    async fn create(
-        &self,
-        cx: &roam::Context,
-        parent_id: ItemId,
-        name: String,
-        item_type: ItemType,
-    ) -> CreateResult {
-        self.0.create(cx, parent_id, name, item_type).await
-    }
-
-    async fn delete(&self, cx: &roam::Context, item_id: ItemId) -> VfsResult {
-        self.0.delete(cx, item_id).await
-    }
-
-    async fn rename(
-        &self,
-        cx: &roam::Context,
-        item_id: ItemId,
-        new_parent_id: ItemId,
-        new_name: String,
-    ) -> VfsResult {
-        self.0.rename(cx, item_id, new_parent_id, new_name).await
-    }
-
-    async fn set_attributes(
-        &self,
-        cx: &roam::Context,
-        item_id: ItemId,
-        params: SetAttributesParams,
-    ) -> VfsResult {
-        self.0.set_attributes(cx, item_id, params).await
-    }
-
-    async fn ping(&self, cx: &roam::Context) -> String {
-        self.0.ping(cx).await
-    }
+    /// vx-vfsd endpoint
+    vfsd_endpoint: Endpoint,
 }
 
 impl Args {
@@ -171,7 +99,27 @@ impl Args {
             }
         };
 
-        Ok(Args { cas_endpoint, bind })
+        // Parse vfsd endpoint (defaults to Unix socket)
+        let vfsd_endpoint = match std::env::var("VX_VFSD") {
+            Ok(v) => Endpoint::parse(&v)?,
+            Err(_) => {
+                #[cfg(unix)]
+                {
+                    vx_io::net::default_unix_endpoint(&vx_home, "vfsd")
+                }
+                #[cfg(not(unix))]
+                {
+                    Endpoint::parse("127.0.0.1:9004")?
+                }
+            }
+        };
+
+        Ok(Args {
+            vx_home,
+            cas_endpoint,
+            bind,
+            vfsd_endpoint,
+        })
     }
 }
 
@@ -183,6 +131,208 @@ async fn connect_to_cas(endpoint: &Endpoint) -> Result<vx_store_proto::StoreClie
         .await
         .map_err(|e| eyre::eyre!("failed to connect to CAS at {}: {}", endpoint, e))?;
     Ok(vx_store_proto::StoreClient::new(caller))
+}
+
+/// Check for stuck FUSE mount and clean up if needed
+async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
+    // Check if mount exists in /proc/mounts
+    let mounts = match std::fs::read_to_string("/proc/mounts") {
+        Ok(content) => content,
+        Err(_) => return Ok(()), // Not Linux or can't read mounts, skip cleanup
+    };
+
+    if !mounts.contains(mount_path.as_str()) {
+        // Not mounted, nothing to clean up
+        return Ok(());
+    }
+
+    // Try to stat the mount point to see if it's stuck
+    match std::fs::metadata(mount_path.as_std_path()) {
+        Ok(_) => {
+            // stat succeeded, mount is healthy
+            return Ok(());
+        }
+        Err(e) if e.raw_os_error() == Some(107) => {
+            // ENOTCONN - Transport endpoint is not connected
+            // This is a stuck mount, proceed with cleanup
+            tracing::warn!("Detected stuck FUSE mount at {}, attempting cleanup", mount_path);
+        }
+        Err(e) => {
+            // Some other error, let it fail naturally
+            return Err(e.into());
+        }
+    }
+
+    // Verify this is our mount (matches pattern */vixen/runner)
+    if !mount_path.as_str().contains("/vixen/runner") {
+        return Err(eyre::eyre!(
+            "Refusing to clean up mount at {} - doesn't match vixen pattern",
+            mount_path
+        ));
+    }
+
+    // Level 1: Try gentle unmount
+    tracing::info!("Attempting gentle unmount: fusermount3 -u {}", mount_path);
+    let status = std::process::Command::new("fusermount3")
+        .arg("-u")
+        .arg(mount_path.as_str())
+        .status()?;
+
+    if status.success() {
+        tracing::info!("Successfully unmounted stuck FUSE mount");
+        return Ok(());
+    }
+
+    // Level 2: Try lazy unmount
+    tracing::warn!("Gentle unmount failed, trying lazy unmount: fusermount3 -uz {}", mount_path);
+    let status = std::process::Command::new("fusermount3")
+        .arg("-uz")
+        .arg(mount_path.as_str())
+        .status()?;
+
+    if status.success() {
+        tracing::info!("Successfully unmounted with lazy unmount");
+        return Ok(());
+    }
+
+    // Level 3: Nuclear option - abort FUSE connections then unmount
+    tracing::error!("Lazy unmount failed, attempting nuclear cleanup");
+
+    // Abort all FUSE connections
+    if let Ok(entries) = std::fs::read_dir("/sys/fs/fuse/connections") {
+        for entry in entries.flatten() {
+            let abort_path = entry.path().join("abort");
+            if abort_path.exists() {
+                let _ = std::fs::write(&abort_path, b"1");
+            }
+        }
+    }
+
+    // Try unmount again after abort
+    let status = std::process::Command::new("fusermount3")
+        .arg("-uz")
+        .arg(mount_path.as_str())
+        .status()?;
+
+    if status.success() {
+        tracing::warn!("Nuclear cleanup succeeded");
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Failed to clean up stuck FUSE mount at {} after all attempts",
+            mount_path
+        ))
+    }
+}
+
+/// Spawn vx-vfsd if not already running, return any startup errors
+async fn ensure_vfsd(
+    vfsd_endpoint: &Endpoint,
+    vx_home: &Utf8PathBuf,
+    cas_endpoint: &Endpoint,
+) -> Result<()> {
+    use std::process::Stdio;
+
+    // Check if already running
+    if vx_io::net::try_connect(vfsd_endpoint).await?.is_some() {
+        tracing::debug!("vx-vfsd already running at {}", vfsd_endpoint);
+        return Ok(());
+    }
+
+    tracing::info!("Spawning vx-vfsd");
+
+    // Find vx-vfsd binary (sibling to vx-runner)
+    let binary_path = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("vx-vfsd")))
+        .filter(|candidate| candidate.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("vx-vfsd"));
+
+    let mount_path = runner_mount_base();
+
+    // Check for stuck FUSE mount and clean up if needed
+    cleanup_stuck_mount(&mount_path).await?;
+
+    // Ensure mount directory exists
+    std::fs::create_dir_all(&mount_path)?;
+
+    let mut cmd = std::process::Command::new(&binary_path);
+    cmd.arg("--listen").arg(vfsd_endpoint.display());
+    cmd.arg("--mount").arg(mount_path.as_str());
+    cmd.arg("--store").arg(cas_endpoint.display());
+    cmd.env("VX_HOME", vx_home.as_str());
+
+    // Capture stderr for error messages
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = ur_taking_me_with_you::spawn_dying_with_parent(cmd)?;
+
+    // Capture stderr in background for error reporting
+    let stderr = child.stderr.take().expect("stderr was piped");
+    let stderr_buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stderr_buffer_clone = stderr_buffer.clone();
+
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut stderr = tokio::io::BufReader::new(tokio::process::ChildStderr::from_std(stderr).unwrap());
+        let mut buf = [0u8; 4096];
+        loop {
+            match stderr.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    stderr_buffer_clone.lock().unwrap().extend_from_slice(&buf[..n]);
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Wait for vx-vfsd to be ready with exponential backoff
+    let backoff_ms = [10, 50, 100, 250, 500, 1000, 2000];
+    for (attempt, delay) in backoff_ms.iter().enumerate() {
+        tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
+
+        // Check if process died
+        if let Ok(Some(status)) = child.try_wait() {
+            let stderr_data = stderr_buffer.lock().unwrap().clone();
+            let stderr_output = String::from_utf8_lossy(&stderr_data);
+            return Err(eyre::eyre!(
+                "vx-vfsd exited with status {} during startup.\n\nStderr:\n{}",
+                status,
+                stderr_output
+            ));
+        }
+
+        // Try to connect
+        if vx_io::net::try_connect(vfsd_endpoint).await?.is_some() {
+            tracing::info!("vx-vfsd started successfully (attempt {})", attempt + 1);
+            return Ok(());
+        }
+    }
+
+    // Final check - if still not connectable, report error
+    let stderr_data = stderr_buffer.lock().unwrap().clone();
+    let stderr_output = String::from_utf8_lossy(&stderr_data);
+    Err(eyre::eyre!(
+        "vx-vfsd failed to start after {} attempts.\n\nStderr:\n{}",
+        backoff_ms.len(),
+        stderr_output
+    ))
+}
+
+/// Connect to vx-vfsd and return a client handle
+async fn connect_to_vfsd(
+    endpoint: &Endpoint,
+    cas: Arc<StoreClient<CasCaller>>,
+) -> Result<VfsClient> {
+    let caller: VfsdCaller = vx_io::net::reconnecting_client(endpoint.clone(), NoDispatcher);
+    caller
+        .handle()
+        .await
+        .map_err(|e| eyre::eyre!("failed to connect to vx-vfsd at {}: {}", endpoint, e))?;
+    let protocol_client = vx_vfsd::protocol::VfsdClient::new(caller);
+    Ok(VfsClient::new(protocol_client, cas))
 }
 
 /// Check if a socket endpoint is already in use by trying to connect
@@ -222,18 +372,19 @@ async fn main() -> Result<()> {
 
     // Connect to CAS
     tracing::info!("Connecting to CAS at {}", args.cas_endpoint);
-    let cas = connect_to_cas(&args.cas_endpoint).await?;
+    let cas = Arc::new(connect_to_cas(&args.cas_endpoint).await?);
     tracing::info!("Connected to CAS");
 
-    // Initialize services
-    tracing::info!("Initializing Runner services");
-    let cas = Arc::new(cas);
+    // Ensure vx-vfsd is running
+    ensure_vfsd(&args.vfsd_endpoint, &args.vx_home, &args.cas_endpoint).await?;
 
-    // Create VFS (shared between VFS server and runner service)
-    let vfs = Arc::new(CasVfs::new(cas.clone()));
+    // Connect to vx-vfsd
+    tracing::info!("Connecting to vx-vfsd at {}", args.vfsd_endpoint);
+    let vfs = connect_to_vfsd(&args.vfsd_endpoint, cas.clone()).await?;
+    tracing::info!("Connected to vx-vfsd");
 
-    // Create Runner service (will use VFS for action execution)
-    let exec = RunnerService::new(cas.clone(), vfs.clone());
+    // Create Runner service (will use VFS via RPC)
+    let exec = RunnerService::new(cas.clone(), Arc::new(vfs));
 
     // Bind Runner RPC socket before VFS mount attempt.
     let runner_listener = match Listener::bind(&args.bind).await {
@@ -249,106 +400,10 @@ async fn main() -> Result<()> {
     };
     tracing::info!("Runner RPC bound on {}", args.bind);
 
-    // Mount VFS via vx-vfs (includes platform-specific behavior).
-    match vx_vfs::mount(
-        VfsConfig {
-            mount_path: runner_mount_base(),
-        },
-        SharedVfs(vfs.clone()),
-    )
-    .await
-    {
-        Ok(VfsStart::Mounted {
-            mount_path,
-            vfs_dead,
-            #[cfg(target_os = "linux")]
-            telemetry,
-        }) => {
-            tracing::info!("VFS mounted at {}", mount_path);
-            exec.set_vfs_startup_error(None).await;
+    // VFS is now mounted by vx-vfsd, not by vx-runner
+    tracing::info!("VFS provided by vx-vfsd at {}", runner_mount_base());
 
-            // Register SIGUSR1 handler for telemetry dumps (Linux only).
-            #[cfg(target_os = "linux")]
-            {
-                let telemetry_for_signal = telemetry.clone();
-                tokio::spawn(async move {
-                    use tokio::signal::unix::{SignalKind, signal};
-                    let mut sig = signal(SignalKind::user_defined1())
-                        .expect("failed to register SIGUSR1");
-                    loop {
-                        sig.recv().await;
-                        eprintln!("\n>>> SIGUSR1 received, dumping FUSE telemetry...");
-                        telemetry_for_signal.dump();
-                        // Dump roam RPC diagnostics
-                        eprintln!("\n--- Roam RPC diagnostics ---");
-                        eprint!("{}", roam_session::diagnostic::dump_all_diagnostics());
-                        // Dump lock contention diagnostics
-                        let lock_diag = vx_locks::dump_lock_diagnostics();
-                        if !lock_diag.is_empty() {
-                            eprintln!("\n--- Lock diagnostics ---");
-                            eprint!("{lock_diag}");
-                        }
-                        dump_kernel_fuse_state();
-                    }
-                });
-            }
-            let exec_for_watcher = exec.clone();
-            tokio::spawn(async move {
-                let mut vfs_dead = vfs_dead;
-                while vfs_dead.changed().await.is_ok() {
-                    if *vfs_dead.borrow() {
-                        tracing::error!("VFS session died — marking VFS as failed");
-                        exec_for_watcher
-                            .set_vfs_startup_error(Some(VfsStartupFailure {
-                                reason: "VFS session closed unexpectedly".into(),
-                                diagnostics: vec![VfsDiagnostic {
-                                    code: VfsIssueCode::MountFailed,
-                                    summary: "VFS session died after mount".into(),
-                                    detail: None,
-                                    actions: vec![VfsAction::RetryBuild],
-                                }],
-                            }))
-                            .await;
-                        break;
-                    }
-                }
-            });
-        }
-        Ok(VfsStart::Unsupported { platform }) => {
-            let reason = format!("VFS not supported on platform {}", platform);
-            tracing::warn!("{}", reason);
-            exec.set_vfs_startup_error(Some(VfsStartupFailure {
-                reason: reason.clone(),
-                diagnostics: vec![VfsDiagnostic {
-                    code: VfsIssueCode::UnsupportedPlatform,
-                    summary: reason,
-                    detail: None,
-                    actions: vec![VfsAction::RetryBuild],
-                }],
-            }))
-            .await;
-        }
-        Err(error) => {
-            tracing::error!(%error, "VFS mount failed");
-            let mut diagnostics = error.diagnostics().to_vec();
-            let reason = format!("Mount failed: {error}");
-            if diagnostics.is_empty() {
-                diagnostics.push(VfsDiagnostic {
-                    code: VfsIssueCode::MountFailed,
-                    summary: "VFS mount failed without structured diagnostics".to_string(),
-                    detail: Some(reason.clone()),
-                    actions: vec![VfsAction::RetryBuild],
-                });
-            }
-            exec.set_vfs_startup_error(Some(VfsStartupFailure {
-                reason,
-                diagnostics,
-            }))
-            .await;
-        }
-    }
-
-    // Start accepting Runner RPC connections regardless of VFS startup status.
+    // Start accepting Runner RPC connections
     tracing::info!("Starting Runner RPC server");
     loop {
         match runner_listener.accept().await {
@@ -388,11 +443,8 @@ pub struct RunnerServiceInner {
     /// CAS client for storing outputs and fetching toolchains
     pub(crate) cas: Arc<StoreClient<crate::CasCaller>>,
 
-    /// VFS for hermetic action execution
-    pub(crate) vfs: Arc<CasVfs>,
-
-    /// Startup-time VFS failure details, if any.
-    pub(crate) vfs_startup_error: tokio::sync::RwLock<Option<VfsStartupFailure>>,
+    /// VFS client for hermetic action execution (via vx-vfsd RPC)
+    pub(crate) vfs: Arc<VfsClient>,
 
     /// Single-flight deduplication for toolchain prefix creation.
     /// Concurrent requests for the same toolchain coalesce into one operation.
@@ -401,6 +453,9 @@ pub struct RunnerServiceInner {
     #[allow(clippy::type_complexity)]
     toolchain_flights:
         tokio::sync::Mutex<HashMap<Blake3Hash, Arc<tokio::sync::OnceCell<Result<String, String>>>>>,
+
+    /// Track created prefix IDs to avoid collisions
+    created_prefixes: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 /// Exec service handle - cloneable wrapper around shared inner state
@@ -418,24 +473,17 @@ impl std::ops::Deref for RunnerService {
 }
 
 impl RunnerService {
-    pub fn new(cas: Arc<StoreClient<crate::CasCaller>>, vfs: Arc<CasVfs>) -> Self {
+    pub fn new(cas: Arc<StoreClient<crate::CasCaller>>, vfs: Arc<VfsClient>) -> Self {
         Self {
             inner: Arc::new(RunnerServiceInner {
                 cas,
                 vfs,
-                vfs_startup_error: tokio::sync::RwLock::new(None),
                 toolchain_flights: tokio::sync::Mutex::new(HashMap::new()),
+                created_prefixes: std::sync::Mutex::new(std::collections::HashSet::new()),
             }),
         }
     }
 
-    pub(crate) async fn set_vfs_startup_error(&self, error: Option<VfsStartupFailure>) {
-        *self.vfs_startup_error.write().await = error;
-    }
-
-    pub(crate) async fn get_vfs_startup_error(&self) -> Option<VfsStartupFailure> {
-        self.vfs_startup_error.read().await.clone()
-    }
 
     // ========================================================================
     // VFS Prefix Management (for hermetic action execution)
@@ -448,15 +496,29 @@ impl RunnerService {
     pub(crate) async fn create_action_prefix(&self) -> String {
         use jiff::Timestamp;
         let ts = Timestamp::now().as_millisecond();
-        loop {
+
+        for attempt in 0..3 {
             let prefix_id = format!("build-{:x}-{:08x}", ts, fastrand::u32(..));
-            if self.vfs.has_prefix(&prefix_id).await {
-                tracing::warn!(prefix_id = %prefix_id, "prefix ID collision, retrying");
-                continue;
+
+            // Check local HashSet for collision
+            {
+                let prefixes = self.created_prefixes.lock().unwrap();
+                if prefixes.contains(&prefix_id) {
+                    tracing::warn!(prefix_id = %prefix_id, attempt, "prefix ID collision, retrying");
+                    continue;
+                }
             }
-            let (id, _item_id) = self.vfs.create_prefix(prefix_id).await;
+
+            // Create the prefix via RPC
+            let (id, _item_id) = self.vfs.create_prefix(prefix_id.clone()).await;
+
+            // Track it locally
+            self.created_prefixes.lock().unwrap().insert(prefix_id.clone());
+
             return id;
         }
+
+        panic!("Failed to generate unique prefix ID after 3 attempts");
     }
 
     /// Ensure a toolchain prefix exists in the VFS.
@@ -534,50 +596,30 @@ impl RunnerService {
             tracing::debug!(
                 component_name = %component.name,
                 tree_manifest = %component.tree_manifest,
-                "loading component tree manifest"
+                "mounting component tree in VFS"
             );
 
-            let tree_manifest = self
-                .cas
-                .get_tree_manifest(component.tree_manifest)
-                .await?
-                .ok_or_else(|| {
-                    RunnerError::CasFetch(format!(
-                        "tree manifest {} not found for component {}",
-                        component.tree_manifest, component.name
-                    ))
-                })?;
+            // Determine mount path prefix for this component
+            // Files go directly under the prefix root — no "toolchain/" nesting.
+            // The prefix itself IS the toolchain.
+            let mount_path = if component.name == "rustc" {
+                ""
+            } else if component.name == "rust-std" {
+                "sysroot"
+            } else if matches!(component.name.as_str(), "zig-exe" | "zig-lib") {
+                ""
+            } else {
+                &component.name
+            };
 
-            tracing::debug!(
-                component_name = %component.name,
-                entry_count = tree_manifest.entries.len(),
-                "registering component files in VFS"
-            );
-
-            for entry in &tree_manifest.entries {
-                if let vx_store_proto::TreeEntryKind::File {
-                    blob,
-                    size,
-                    executable,
-                } = &entry.kind
-                {
-                    // Files go directly under the prefix root — no "toolchain/" nesting.
-                    // The prefix itself IS the toolchain.
-                    let path = if component.name == "rustc" {
-                        entry.path.to_string()
-                    } else if component.name == "rust-std" {
-                        format!("sysroot/{}", entry.path)
-                    } else if matches!(component.name.as_str(), "zig-exe" | "zig-lib") {
-                        entry.path.to_string()
-                    } else {
-                        format!("{}/{}", component.name, entry.path)
-                    };
-
-                    self.vfs
-                        .add_file_to_prefix(&prefix_id, &path, *blob, *size, *executable)
-                        .await;
-                }
-            }
+            // Mount the entire component tree at once
+            self.vfs
+                .mount_tree(&prefix_id, mount_path, component.tree_manifest)
+                .await
+                .map_err(|e| RunnerError::VfsMount(format!(
+                    "failed to mount toolchain component {}: {}",
+                    component.name, e
+                )))?;
         }
 
         tracing::info!(
@@ -597,8 +639,6 @@ impl RunnerService {
         prefix_id: &str,
         source_manifest_hash: Blake3Hash,
     ) -> RunnerResult<()> {
-        use vx_store_proto::TreeEntryKind;
-
         tracing::debug!(
             source_manifest = %source_manifest_hash,
             "loading source tree manifest"
@@ -631,23 +671,14 @@ impl RunnerService {
         tracing::debug!(
             source_manifest = %source_manifest_hash,
             entry_count = manifest.entries.len(),
-            "registering source files in VFS"
+            "mounting source tree in VFS"
         );
 
-        // Add each file to the VFS prefix under src/
-        for entry in &manifest.entries {
-            if let TreeEntryKind::File {
-                blob,
-                size,
-                executable,
-            } = &entry.kind
-            {
-                let path = format!("src/{}", entry.path);
-                self.vfs
-                    .add_file_to_prefix(prefix_id, &path, *blob, *size, *executable)
-                    .await;
-            }
-        }
+        // Mount the entire source tree at src/
+        self.vfs
+            .mount_tree(prefix_id, "src", source_manifest_hash)
+            .await
+            .map_err(|e| RunnerError::VfsMount(format!("failed to mount source tree: {}", e)))?;
 
         Ok(())
     }
@@ -680,7 +711,8 @@ impl RunnerService {
         let path = format!("deps/lib{}.rlib", extern_name);
         self.vfs
             .add_file_to_prefix(prefix_id, &path, rlib.blob, rlib.size, false)
-            .await;
+            .await
+            .map_err(|e| RunnerError::VfsMount(format!("failed to add dependency {}: {}", extern_name, e)))?;
 
         Ok(())
     }
@@ -715,40 +747,3 @@ impl RunnerService {
     }
 }
 
-/// Dump kernel FUSE connection state and thread stacks to stderr.
-#[cfg(target_os = "linux")]
-fn dump_kernel_fuse_state() {
-    eprintln!("\n--- Kernel FUSE state ---");
-
-    if let Ok(entries) = std::fs::read_dir("/sys/fs/fuse/connections") {
-        for entry in entries.flatten() {
-            let waiting_path = entry.path().join("waiting");
-            if let Ok(val) = std::fs::read_to_string(&waiting_path) {
-                eprintln!(
-                    "  {}: waiting={}",
-                    entry.path().display(),
-                    val.trim()
-                );
-            }
-        }
-    }
-
-    eprintln!("\n--- Thread stacks ---");
-    if let Ok(tasks) = std::fs::read_dir("/proc/self/task") {
-        for task in tasks.flatten() {
-            let tid = task.file_name();
-            let comm = std::fs::read_to_string(task.path().join("comm")).unwrap_or_default();
-            let stack = std::fs::read_to_string(task.path().join("stack")).unwrap_or_default();
-            if !stack.trim().is_empty() {
-                eprintln!(
-                    "  Thread {} ({}):",
-                    tid.to_string_lossy(),
-                    comm.trim()
-                );
-                for line in stack.lines() {
-                    eprintln!("    {line}");
-                }
-            }
-        }
-    }
-}

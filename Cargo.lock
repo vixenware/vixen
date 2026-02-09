@@ -112,6 +112,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-trait"
+version = "0.1.89"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1765,6 +1776,7 @@ dependencies = [
 [[package]]
 name = "roam"
 version = "3.0.0"
+source = "git+https://github.com/bearcove/roam?branch=main#f63fcdfdc64b3a4b913ae87d7be3b71475a66f4b"
 dependencies = [
  "facet",
  "facet-core",
@@ -1781,6 +1793,7 @@ dependencies = [
 [[package]]
 name = "roam-codegen"
 version = "3.0.0"
+source = "git+https://github.com/bearcove/roam?branch=main#f63fcdfdc64b3a4b913ae87d7be3b71475a66f4b"
 dependencies = [
  "facet-core",
  "heck",
@@ -1791,6 +1804,7 @@ dependencies = [
 [[package]]
 name = "roam-frame"
 version = "3.0.0"
+source = "git+https://github.com/bearcove/roam?branch=main#f63fcdfdc64b3a4b913ae87d7be3b71475a66f4b"
 dependencies = [
  "bytes",
  "facet",
@@ -1800,6 +1814,7 @@ dependencies = [
 [[package]]
 name = "roam-hash"
 version = "3.0.0"
+source = "git+https://github.com/bearcove/roam?branch=main#f63fcdfdc64b3a4b913ae87d7be3b71475a66f4b"
 dependencies = [
  "blake3",
  "facet-core",
@@ -1810,6 +1825,7 @@ dependencies = [
 [[package]]
 name = "roam-local"
 version = "3.0.0"
+source = "git+https://github.com/bearcove/roam?branch=main#f63fcdfdc64b3a4b913ae87d7be3b71475a66f4b"
 dependencies = [
  "tokio",
 ]
@@ -1817,6 +1833,7 @@ dependencies = [
 [[package]]
 name = "roam-macros-parse"
 version = "3.0.0"
+source = "git+https://github.com/bearcove/roam?branch=main#f63fcdfdc64b3a4b913ae87d7be3b71475a66f4b"
 dependencies = [
  "proc-macro2",
  "unsynn",
@@ -1825,6 +1842,7 @@ dependencies = [
 [[package]]
 name = "roam-schema"
 version = "3.0.0"
+source = "git+https://github.com/bearcove/roam?branch=main#f63fcdfdc64b3a4b913ae87d7be3b71475a66f4b"
 dependencies = [
  "facet",
  "facet-core",
@@ -1834,6 +1852,7 @@ dependencies = [
 [[package]]
 name = "roam-service-macros"
 version = "3.0.0"
+source = "git+https://github.com/bearcove/roam?branch=main#f63fcdfdc64b3a4b913ae87d7be3b71475a66f4b"
 dependencies = [
  "facet-cargo-toml",
  "heck",
@@ -1845,6 +1864,7 @@ dependencies = [
 [[package]]
 name = "roam-session"
 version = "3.0.0"
+source = "git+https://github.com/bearcove/roam?branch=main#f63fcdfdc64b3a4b913ae87d7be3b71475a66f4b"
 dependencies = [
  "async-channel",
  "facet",
@@ -1867,6 +1887,7 @@ dependencies = [
 [[package]]
 name = "roam-stream"
 version = "3.0.0"
+source = "git+https://github.com/bearcove/roam?branch=main#f63fcdfdc64b3a4b913ae87d7be3b71475a66f4b"
 dependencies = [
  "facet",
  "facet-postcard",
@@ -1879,6 +1900,7 @@ dependencies = [
 [[package]]
 name = "roam-task-local"
 version = "3.0.0"
+source = "git+https://github.com/bearcove/roam?branch=main#f63fcdfdc64b3a4b913ae87d7be3b71475a66f4b"
 dependencies = [
  "pin-project-lite",
 ]
@@ -1886,6 +1908,7 @@ dependencies = [
 [[package]]
 name = "roam-wire"
 version = "3.0.0"
+source = "git+https://github.com/bearcove/roam?branch=main#f63fcdfdc64b3a4b913ae87d7be3b71475a66f4b"
 dependencies = [
  "facet",
  "facet-postcard",
@@ -2470,6 +2493,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+ "valuable",
+]
+
+[[package]]
+name = "tracing-log"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
+dependencies = [
+ "log",
+ "once_cell",
+ "tracing-core",
 ]
 
 [[package]]
@@ -2483,9 +2518,11 @@ dependencies = [
  "once_cell",
  "regex-automata",
  "sharded-slab",
+ "smallvec 1.15.1",
  "thread_local",
  "tracing",
  "tracing-core",
+ "tracing-log",
 ]
 
 [[package]]
@@ -2571,7 +2608,7 @@ checksum = "169ea32c8f5801e4b397f08d2b5d3d0d3675d11c241aad7338b601beed52a291"
 [[package]]
 name = "ur-taking-me-with-you"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#88070908b7083f295eb41d09fabd111caa06f43c"
+source = "git+https://github.com/bearcove/roam?branch=main#f63fcdfdc64b3a4b913ae87d7be3b71475a66f4b"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -2587,6 +2624,12 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "valuable"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "version_check"
@@ -2772,6 +2815,7 @@ dependencies = [
  "camino",
  "eyre",
  "facet",
+ "facet-json",
  "fastrand",
  "jiff",
  "roam",
@@ -2789,6 +2833,7 @@ dependencies = [
  "vx-store-proto",
  "vx-tracing",
  "vx-vfs",
+ "vx-vfsd",
 ]
 
 [[package]]
@@ -2917,6 +2962,31 @@ name = "vx-vfs-types"
 version = "0.1.0"
 dependencies = [
  "facet",
+]
+
+[[package]]
+name = "vx-vfsd"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "camino",
+ "facet",
+ "facet-json",
+ "figue",
+ "libc",
+ "parking_lot",
+ "roam",
+ "roam-stream",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ur-taking-me-with-you",
+ "vixenfs-proto",
+ "vx-io",
+ "vx-locks",
+ "vx-store-proto",
+ "vx-tracing",
+ "vx-vfs",
 ]
 
 [[package]]

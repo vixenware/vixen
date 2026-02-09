@@ -1,0 +1,58 @@
+//! RPC protocol between vx-runner and vx-vfsd.
+
+use vx_store_proto::Blake3Hash;
+
+/// VFS daemon RPC service.
+///
+/// Manages a FUSE-backed virtual filesystem for build sandboxes.
+/// Serves content from CAS (vx-store) and collects build outputs.
+#[roam::service]
+#[allow(async_fn_in_trait)]
+pub trait Vfsd {
+    /// Create a directory at the given path.
+    ///
+    /// Parent directory must exist (standard mkdir semantics).
+    async fn mkdir(&self, path: String) -> Result<(), String>;
+
+    /// Mount a tree manifest at the given path.
+    ///
+    /// Fetches the manifest from CAS and registers all entries in the VFS.
+    /// Parent directory must exist.
+    ///
+    /// # Arguments
+    /// - `path`: Mount point (e.g., "/build-xyz/src/")
+    /// - `tree_hash`: Blake3 hash of the tree manifest in CAS
+    async fn mount(&self, path: String, tree_hash: Blake3Hash) -> Result<(), String>;
+
+    /// Flush written files to CAS and return the tree manifest hash.
+    ///
+    /// Collects all files written under `path`, uploads them to CAS as blobs,
+    /// creates a tree manifest, uploads the manifest, and returns its hash.
+    ///
+    /// # Arguments
+    /// - `path`: Directory to flush (e.g., "/build-xyz/out/")
+    ///
+    /// # Returns
+    /// Blake3 hash of the generated tree manifest
+    async fn flush(&self, path: String) -> Result<Blake3Hash, String>;
+
+    /// Recursively remove a path from the VFS.
+    ///
+    /// Cleans up the path and all its descendants from VFS memory.
+    /// Does not affect CAS — blobs remain stored.
+    ///
+    /// # Arguments
+    /// - `path`: Root path to remove (e.g., "/build-xyz/")
+    async fn rm_rf(&self, path: String) -> Result<(), String>;
+
+    /// Health check / readiness probe.
+    ///
+    /// Returns immediately if the daemon is ready to serve requests.
+    async fn ping(&self) -> Result<(), String>;
+
+    /// Dump VFS state for a specific prefix to stderr (for diagnostics).
+    ///
+    /// # Arguments
+    /// - `prefix_id`: The prefix to dump (e.g., "build-xyz")
+    async fn dump_state(&self, prefix_id: String) -> Result<(), String>;
+}
