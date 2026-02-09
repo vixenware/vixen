@@ -5,7 +5,9 @@ import os
 
 enum VixenFS {
     static let subsystem = "eu.bearcove.vixenfs"
-    static let maxPayloadSize: UInt32 = 256 * 1024 * 1024  // 256 MiB
+    static let appGroupIdentifier = "group.eu.bearcove.vixen"
+    static let shmBootstrapMaxAttempts = 1
+    static let shmBootstrapRetryDelayNs: UInt64 = 0
 }
 
 extension VfsClient: @unchecked Sendable {}
@@ -28,8 +30,28 @@ actor LifecycleTrace {
 }
 
 final class NoopDispatcher: ServiceDispatcher, @unchecked Sendable {
-    func preregister(methodId: UInt64, payload: [UInt8], registry: ChannelRegistry) async {}
+    // Compatibility with older RoamRuntime protocol shape (no channels argument).
+    func preregister(
+        methodId: UInt64,
+        payload: [UInt8],
+        registry: ChannelRegistry
+    ) async {
+        _ = methodId
+        _ = payload
+        _ = registry
+    }
 
+    // Compatibility with newer RoamRuntime protocol shape (channels argument).
+    func preregister(
+        methodId: UInt64,
+        payload: [UInt8],
+        channels: [UInt64],
+        registry: ChannelRegistry
+    ) async {
+        _ = channels
+    }
+
+    // Compatibility with older RoamRuntime protocol shape (no channels argument).
     func dispatch(
         methodId: UInt64,
         payload: [UInt8],
@@ -37,6 +59,22 @@ final class NoopDispatcher: ServiceDispatcher, @unchecked Sendable {
         registry: ChannelRegistry,
         taskTx: @escaping @Sendable (TaskMessage) -> Void
     ) async {
+        _ = methodId
+        _ = payload
+        _ = registry
+        taskTx(.response(requestId: requestId, payload: encodeUnknownMethodError()))
+    }
+
+    // Compatibility with newer RoamRuntime protocol shape (channels argument).
+    func dispatch(
+        methodId: UInt64,
+        payload: [UInt8],
+        channels: [UInt64],
+        requestId: UInt64,
+        registry: ChannelRegistry,
+        taskTx: @escaping @Sendable (TaskMessage) -> Void
+    ) async {
+        _ = channels
         taskTx(.response(requestId: requestId, payload: encodeUnknownMethodError()))
     }
 }
@@ -48,6 +86,7 @@ actor VfsConnection {
     private var client: VfsClient?
     private var driverTask: Task<Void, Never>?
     private var disconnectRequested = false
+    private var debugEnabled = false
     private let log = Logger(subsystem: VixenFS.subsystem, category: "VfsConnection")
 
     func connect(url: URL) async throws {
@@ -58,22 +97,39 @@ actor VfsConnection {
         await LifecycleTrace.shared.mark(
             log, event: "vfs.connect.begin", details: "url=\(url.absoluteString)")
 
-        guard let host = url.host else {
+        guard let mountOptions = parseMountOptions(from: url) else {
             throw NSError(
                 domain: "VFS", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Missing host in URL: \(url)"])
+                userInfo: [NSLocalizedDescriptionKey: "Missing or invalid sid in URL: \(url)"])
+        }
+        let sid = mountOptions.sid
+        debugEnabled = mountOptions.debug
+        if debugEnabled {
+            log.notice("mount debug enabled for sid=\(sid, privacy: .public)")
+        }
+        log.info("Connecting over SHM sid=\(sid, privacy: .public)")
+
+        let ticket = try await requestTicket(sid: sid)
+        debugLog("bootstrap control socket established sid=\(sid)")
+        log.info(
+            "SHM bootstrap ticket sid=\(sid, privacy: .public) hubPath=\(ticket.hubPath, privacy: .public) peerId=\(ticket.peerId, privacy: .public)"
+        )
+        debugLog("ticket doorbellFd=\(ticket.doorbellFd) hubPathLen=\(ticket.hubPath.count)")
+        logPathState(path: ticket.hubPath, label: "hubPath")
+
+        let transport: ShmGuestTransport
+        do {
+            transport = try ShmGuestTransport.attach(ticket: ticket)
+        } catch {
+            log.error(
+                "SHM attach failed sid=\(sid, privacy: .public): \(self.describe(error: error), privacy: .public)"
+            )
+            throw error
         }
 
-        let port = url.port ?? 10001
-        log.info("Connecting to \(host):\(port)")
-
-        let maxPayloadSize = VixenFS.maxPayloadSize
-
-        let transport = try await RoamRuntime.connect(host: host, port: port)
-        let (handle, driver) = try await establishInitiator(
+        let (handle, driver) = establishShmGuest(
             transport: transport,
-            dispatcher: NoopDispatcher(),
-            maxPayloadSize: maxPayloadSize
+            dispatcher: NoopDispatcher()
         )
 
         disconnectRequested = false
@@ -96,13 +152,13 @@ actor VfsConnection {
     func disconnect() async {
         await LifecycleTrace.shared.mark(log, event: "vfs.disconnect")
         disconnectRequested = true
+        debugEnabled = false
         driverTask?.cancel()
         driverTask = nil
         client = nil
     }
 
     func getClient() throws -> VfsClient {
-        // TODO: can't we make bad states unrepresentable instead of.. this?
         guard let client = client else {
             throw NSError(
                 domain: "VFS", code: -1, userInfo: [NSLocalizedDescriptionKey: "Not connected"])
@@ -121,11 +177,166 @@ actor VfsConnection {
         client = nil
         driverTask = nil
     }
+
+    private func requestTicket(sid: String) async throws -> ShmBootstrapTicket {
+        guard
+            let appGroupURL = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: VixenFS.appGroupIdentifier)
+        else {
+            throw NSError(
+                domain: "VFS", code: -1,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Failed to resolve App Group container for \(VixenFS.appGroupIdentifier)"
+                ])
+        }
+
+        let controlSockURL = appGroupURL.appendingPathComponent("c-\(sid).sock", isDirectory: false)
+        let controlSockPath = controlSockURL.path
+        debugLog("appGroupPath=\(appGroupURL.path) len=\(appGroupURL.path.count)")
+        debugLog("controlSockPath=\(controlSockPath) len=\(controlSockPath.count)")
+        logPathState(path: controlSockPath, label: "controlSockPath")
+
+        do {
+            return try requestShmBootstrapTicket(controlSocketPath: controlSockPath, sid: sid)
+        } catch {
+            log.error(
+                "SHM bootstrap attempt 1 failed for sid=\(sid, privacy: .public): \(self.describe(error: error), privacy: .public)"
+            )
+            throw NSError(
+                domain: "VFS", code: -1,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Failed SHM bootstrap for sid=\(sid): \(self.describe(error: error))"
+                ])
+        }
+    }
+
+    private func describe(error: Error) -> String {
+        if let err = error as? ShmRegionError {
+            switch err {
+            case .invalidSize:
+                return "ShmRegionError.invalidSize"
+            case .invalidOffset:
+                return "ShmRegionError.invalidOffset"
+            case .createFailed(let errno):
+                return "ShmRegionError.createFailed(errno=\(errno))"
+            case .openFailed(let errno):
+                return "ShmRegionError.openFailed(errno=\(errno))"
+            case .statFailed(let errno):
+                return "ShmRegionError.statFailed(errno=\(errno))"
+            case .mmapFailed(let errno):
+                return "ShmRegionError.mmapFailed(errno=\(errno))"
+            case .munmapFailed(let errno):
+                return "ShmRegionError.munmapFailed(errno=\(errno))"
+            case .ftruncateFailed(let errno):
+                return "ShmRegionError.ftruncateFailed(errno=\(errno))"
+            case .fchmodFailed(let errno):
+                return "ShmRegionError.fchmodFailed(errno=\(errno))"
+            case .resizeShrinkUnsupported:
+                return "ShmRegionError.resizeShrinkUnsupported"
+            case .emptyFile:
+                return "ShmRegionError.emptyFile"
+            }
+        }
+        if let err = error as? ShmBootstrapError {
+            switch err {
+            case .invalidSid:
+                return "ShmBootstrapError.invalidSid"
+            case .unsupportedPlatform:
+                return "ShmBootstrapError.unsupportedPlatform"
+            case .invalidSocketPath:
+                return "ShmBootstrapError.invalidSocketPath"
+            case .socketCreateFailed(let errno):
+                return "ShmBootstrapError.socketCreateFailed(errno=\(errno))"
+            case .connectFailed(let errno):
+                return "ShmBootstrapError.connectFailed(errno=\(errno))"
+            case .writeFailed(let errno):
+                return "ShmBootstrapError.writeFailed(errno=\(errno))"
+            case .readFailed(let errno):
+                return "ShmBootstrapError.readFailed(errno=\(errno))"
+            case .eof:
+                return "ShmBootstrapError.eof"
+            case .invalidRequestEncoding:
+                return "ShmBootstrapError.invalidRequestEncoding"
+            case .invalidResponseMagic:
+                return "ShmBootstrapError.invalidResponseMagic"
+            case .protocolError(let message):
+                return "ShmBootstrapError.protocolError(\(message))"
+            case .missingFileDescriptor:
+                return "ShmBootstrapError.missingFileDescriptor"
+            }
+        }
+        return String(describing: error)
+    }
+
+    private struct MountOptions {
+        let sid: String
+        let debug: Bool
+    }
+
+    private func parseMountOptions(from url: URL) -> MountOptions? {
+        guard
+            let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+            let items = components.queryItems,
+            let sid = items.first(where: { $0.name == "sid" })?.value,
+            isValidSid(sid)
+        else {
+            return nil
+        }
+        let debugValue = items.first(where: { $0.name == "debug" })?.value?.lowercased()
+        let debug = debugValue == "1" || debugValue == "true" || debugValue == "yes"
+        return MountOptions(sid: sid, debug: debug)
+    }
+
+    private func isValidSid(_ sid: String) -> Bool {
+        if sid.count == 32 {
+            return sid.unicodeScalars.allSatisfy {
+                CharacterSet(charactersIn: "0123456789abcdefABCDEF").contains($0)
+            }
+        }
+        if sid.count == 36 {
+            let chars = Array(sid)
+            let hyphenPositions: Set<Int> = [8, 13, 18, 23]
+            for i in 0..<chars.count {
+                if hyphenPositions.contains(i) {
+                    if chars[i] != "-" {
+                        return false
+                    }
+                    continue
+                }
+                if !chars[i].isHexDigit {
+                    return false
+                }
+            }
+            return true
+        }
+        return false
+    }
+
+    private func debugLog(_ message: String) {
+        guard debugEnabled else { return }
+        log.notice("debug: \(message, privacy: .public)")
+    }
+
+    private func logPathState(path: String, label: String) {
+        guard debugEnabled else { return }
+        var isDir: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
+        if exists {
+            let attrs = (try? FileManager.default.attributesOfItem(atPath: path)) ?? [:]
+            let fileSize = attrs[.size] as? NSNumber
+            debugLog(
+                "\(label) exists=1 isDir=\(isDir.boolValue ? 1 : 0) size=\(fileSize?.int64Value ?? -1)"
+            )
+        } else {
+            debugLog("\(label) exists=0")
+        }
+    }
 }
 
 /// Wrapper to make FSKit callbacks Sendable for Swift 6 concurrency.
 /// FSKit callbacks are thread-safe in practice.
-/// TODO: they are CLEARLY not and that's why we've had crashes lol
 struct SendableReplyHandler<T>: @unchecked Sendable {
     let handler: (T?, (any Error)?) -> Void
 }
@@ -138,7 +349,6 @@ struct SendableVoidReplyHandler: @unchecked Sendable {
 /// Implements FSUnaryFileSystem which is the top-level FSKit protocol.
 final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked Sendable {
     // FSKit manages concurrency - singleton is safe here
-    // TODO: is it???
     static let shared = Bridge()
 
     private let log = Logger(subsystem: VixenFS.subsystem, category: "Bridge")
@@ -181,10 +391,11 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
                     details: resourceDescription)
                 sendable.handler(result, nil)
             } catch {
-                self.log.error("probeResource FAILED: \(error.localizedDescription)")
+                self.log.error(
+                    "probeResource FAILED: \(String(describing: error), privacy: .public)")
                 await LifecycleTrace.shared.mark(
                     self.log, event: "bridge.probeResource.failure",
-                    details: "error=\(error.localizedDescription)")
+                    details: "error=\(String(describing: error))")
                 sendable.handler(nil, error)
             }
         }
@@ -220,10 +431,11 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
                     details: resourceDescription)
                 sendable.handler(volume, nil)
             } catch {
-                self.log.error("loadResource FAILED: \(error.localizedDescription)")
+                self.log.error(
+                    "loadResource FAILED: \(String(describing: error), privacy: .public)")
                 await LifecycleTrace.shared.mark(
                     self.log, event: "bridge.loadResource.failure",
-                    details: "error=\(error.localizedDescription)")
+                    details: "error=\(String(describing: error))")
                 sendable.handler(nil, fs_errorForPOSIXError(POSIXError.EIO.rawValue))
             }
         }
@@ -261,7 +473,7 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
     // MARK: - URL Resource Handling
 
     /// Extract the vixen:// URL from an FSGenericURLResource.
-    /// Expected URL format: vixen://host:port or vixen://host (defaults to port 10001)
+    /// Expected URL format: vixen://session?sid=<sid>
     private func extractVixenURL(from resource: FSResource) -> URL? {
         guard let urlResource = resource as? FSGenericURLResource else {
             return nil
@@ -269,7 +481,7 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
 
         let url = urlResource.url
 
-        guard url.scheme == "vixen", url.host != nil else {
+        guard url.scheme == "vixen" else {
             return nil
         }
 

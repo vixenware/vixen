@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Simplified FUSE library for Linux/tokio.
 //!
 //! Vendored and stripped-down from github.com/Sherlock-Holo/fuse3.
@@ -12,8 +14,8 @@ pub use helper::{mode_from_kind_and_perm, perm_from_mode_and_kind};
 pub use mount_options::MountOptions;
 use nix::sys::stat::mode_t;
 use raw::abi::{
-    fuse_setattr_in, FATTR_ATIME, FATTR_ATIME_NOW, FATTR_CTIME, FATTR_GID, FATTR_LOCKOWNER,
-    FATTR_MODE, FATTR_MTIME, FATTR_MTIME_NOW, FATTR_SIZE, FATTR_UID,
+    FATTR_ATIME, FATTR_ATIME_NOW, FATTR_CTIME, FATTR_GID, FATTR_LOCKOWNER, FATTR_MODE, FATTR_MTIME,
+    FATTR_MTIME_NOW, FATTR_SIZE, FATTR_UID, fuse_setattr_in,
 };
 
 mod errno;
@@ -146,7 +148,6 @@ impl From<SystemTime> for Timestamp {
 }
 
 pub(crate) fn find_fusermount3() -> io::Result<PathBuf> {
-    which::which("fusermount3").map_err(|err| {
-        io::Error::other(format!("find fusermount3 binary failed {err:?}"))
-    })
+    which::which("fusermount3")
+        .map_err(|err| io::Error::other(format!("find fusermount3 binary failed {err:?}")))
 }

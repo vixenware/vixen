@@ -9,37 +9,37 @@ use std::os::fd::AsFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::pin::{pin, Pin};
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 
 use bincode_next::{decode_from_slice, encode_into_std_write, encode_to_vec};
 use bytes::Bytes;
-use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
+use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::future::{Either, FutureExt};
 use futures_util::select;
 use futures_util::sink::{Sink, SinkExt};
 use futures_util::stream::StreamExt;
 use nix::mount;
+use tokio::fs::read_dir;
 use tokio::process::Command;
 use tokio::task::{self, JoinHandle};
-use tokio::fs::read_dir;
-use tracing::{debug, debug_span, error, instrument, warn, Instrument, Span};
+use tracing::{Instrument, Span, debug, debug_span, error, instrument, warn};
 
+use crate::MountOptions;
 use crate::find_fusermount3;
 use crate::helper::*;
 use crate::notify::Notify;
+use crate::raw::FuseData;
 use crate::raw::abi::*;
 use crate::raw::connection::FuseConnection;
 use crate::raw::filesystem::Filesystem;
 use crate::raw::reply::ReplyXAttr;
 use crate::raw::request::Request;
-use crate::raw::FuseData;
-use crate::MountOptions;
-use crate::{Errno, SetAttr};
 #[cfg(feature = "telemetry")]
 use crate::telemetry::TelemetryState;
+use crate::{Errno, SetAttr};
 
 /// A Future which returns when a file system is unmounted
 ///
@@ -93,9 +93,7 @@ impl MountHandleInner {
                 .args([std::ffi::OsStr::new("-u"), self.mount_path.as_os_str()])
                 .spawn()?;
             if !child.wait().await?.success() {
-                return Err(IoError::other(
-                    "call fusermount3 -u to unmount failed",
-                ));
+                return Err(IoError::other("call fusermount3 -u to unmount failed"));
             }
 
             return Ok(());
@@ -304,8 +302,8 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
             #[cfg(feature = "telemetry")]
             telemetry,
         ))
-            .map(Result::unwrap)
-            .fuse();
+        .map(Result::unwrap)
+        .fuse();
         let mut reply_task = pin!(reply_task);
 
         select! {
@@ -322,8 +320,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
     async fn reply_fuse(
         fuse_connection: Arc<FuseConnection>,
         mut response_receiver: UnboundedReceiver<FuseData>,
-        #[cfg(feature = "telemetry")]
-        telemetry: Option<TelemetryState>,
+        #[cfg(feature = "telemetry")] telemetry: Option<TelemetryState>,
     ) -> IoResult<()> {
         while let Some(response) = response_receiver.next().await {
             let (data, extend_data) = match response {
@@ -333,13 +330,13 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
 
             // Extract unique from the fuse_out_header for telemetry
             #[cfg(feature = "telemetry")]
-            if let Some(ref telemetry) = telemetry {
-                if data.len() >= 16 {
-                    // fuse_out_header: len(4) + error(4) + unique(8)
-                    let unique = u64::from_le_bytes(data[8..16].try_into().unwrap());
-                    if unique != 0 {
-                        telemetry.request_end(unique);
-                    }
+            if let Some(ref telemetry) = telemetry
+                && data.len() >= 16
+            {
+                // fuse_out_header: len(4) + error(4) + unique(8)
+                let unique = u64::from_le_bytes(data[8..16].try_into().unwrap());
+                if unique != 0 {
+                    telemetry.request_end(unique);
                 }
             }
 
@@ -400,9 +397,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
 
                 reply_error_in_place(libc::ENOSYS.into(), request, &self.response_sender).await;
 
-                return Err(IoError::other(
-                    format!("receive unknown opcode {}", err.0),
-                ));
+                return Err(IoError::other(format!("receive unknown opcode {}", err.0)));
             }
 
             Ok(opcode) => opcode,
@@ -413,9 +408,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
         if opcode != fuse_opcode::FUSE_INIT {
             error!(?opcode, "received unexpected opcode");
 
-            return Err(IoError::other(
-                format!("unexpected opcode {opcode:?}"),
-            ));
+            return Err(IoError::other(format!("unexpected opcode {opcode:?}")));
         }
 
         let data_size = in_header.len as usize - FUSE_IN_HEADER_SIZE;
@@ -447,12 +440,12 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
         };
         let n = match res {
             Err(err) => {
-                if let Some(errno) = err.raw_os_error() {
-                    if errno == libc::ENODEV {
-                        debug!("read from /dev/fuse failed with ENODEV");
+                if let Some(errno) = err.raw_os_error()
+                    && errno == libc::ENODEV
+                {
+                    debug!("read from /dev/fuse failed with ENODEV");
 
-                        return ReadResult::Destroy;
-                    }
+                    return ReadResult::Destroy;
                 }
 
                 error!("read from /dev/fuse failed {}", err);
@@ -484,19 +477,20 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
             };
         }
 
-        let in_header = match decode_from_slice::<fuse_in_header, _>(&header_buffer, get_bincode_config()) {
-            Err(err) => {
-                error!("deserialize fuse_in_header failed {}", err);
+        let in_header =
+            match decode_from_slice::<fuse_in_header, _>(&header_buffer, get_bincode_config()) {
+                Err(err) => {
+                    error!("deserialize fuse_in_header failed {}", err);
 
-                return ReadResult::Request {
-                    in_header: Err(IoError::other(err)),
-                    header_buffer,
-                    data_buffer,
-                };
-            }
+                    return ReadResult::Request {
+                        in_header: Err(IoError::other(err)),
+                        header_buffer,
+                        data_buffer,
+                    };
+                }
 
-            Ok((in_header, _)) => in_header,
-        };
+                Ok((in_header, _)) => in_header,
+            };
 
         ReadResult::Request {
             in_header: Ok(in_header),
@@ -800,8 +794,8 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                     unique: request.unique,
                 };
 
-                let init_out_header_data  = encode_to_vec(&init_out_header, get_bincode_config())
-                    .expect("won't happened");
+                let init_out_header_data =
+                    encode_to_vec(&init_out_header, get_bincode_config()).expect("won't happened");
 
                 if let Err(err) = fuse_connection
                     .write_vectored::<_, Vec<u8>>(init_out_header_data, None)
@@ -974,8 +968,8 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                     unique: request.unique,
                 };
 
-                let init_out_header_data  = encode_to_vec(&init_out_header, get_bincode_config())
-                    .expect("won't happened");
+                let init_out_header_data =
+                    encode_to_vec(&init_out_header, get_bincode_config()).expect("won't happened");
 
                 if let Err(err) = fuse_connection
                     .write_vectored::<_, Vec<u8>>(init_out_header_data, None)
@@ -1071,8 +1065,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                         unique: request.unique,
                     };
 
-                    encode_to_vec(&out_header, get_bincode_config())
-                        .expect("won't happened")
+                    encode_to_vec(&out_header, get_bincode_config()).expect("won't happened")
                 }
 
                 Ok(entry) => {
@@ -1185,8 +1178,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                         unique: request.unique,
                     };
 
-                    encode_to_vec(&out_header, get_bincode_config())
-                        .expect("won't happened")
+                    encode_to_vec(&out_header, get_bincode_config()).expect("won't happened")
                 }
 
                 Ok(attr) => {
@@ -1265,8 +1257,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                         unique: request.unique,
                     };
 
-                    encode_to_vec(&out_header, get_bincode_config())
-                        .expect("won't happened")
+                    encode_to_vec(&out_header, get_bincode_config()).expect("won't happened")
                 }
 
                 Ok(attr) => {
@@ -1312,8 +1303,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                     };
 
                     Either::Left(
-                        encode_to_vec(&out_header, get_bincode_config())
-                            .expect("won't happened"),
+                        encode_to_vec(&out_header, get_bincode_config()).expect("won't happened"),
                     )
                 }
 
@@ -1394,8 +1384,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                         unique: request.unique,
                     };
 
-                    encode_to_vec(&out_header, get_bincode_config())
-                        .expect("won't happened")
+                    encode_to_vec(&out_header, get_bincode_config()).expect("won't happened")
                 }
 
                 Ok(entry) => {
@@ -1633,9 +1622,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                 unique: request.unique,
             };
 
-                    
-            let data = encode_to_vec(&out_header, get_bincode_config())
-                .expect("won't happened");
+            let data = encode_to_vec(&out_header, get_bincode_config()).expect("won't happened");
 
             let _ = resp_sender.send(Either::Left(data)).await;
         });
@@ -1685,8 +1672,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                 unique: request.unique,
             };
 
-            let data = encode_to_vec(&out_header, get_bincode_config())
-                .expect("won't happened");
+            let data = encode_to_vec(&out_header, get_bincode_config()).expect("won't happened");
 
             let _ = resp_sender.send(Either::Left(data)).await;
         });
@@ -1779,8 +1765,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                 unique: request.unique,
             };
 
-            let data = encode_to_vec(&out_header, get_bincode_config())
-                .expect("won't happened");
+            let data = encode_to_vec(&out_header, get_bincode_config()).expect("won't happened");
 
             let _ = resp_sender.send(Either::Left(data)).await;
         });
@@ -2179,8 +2164,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                 unique: request.unique,
             };
 
-            let data = encode_to_vec(&out_header, get_bincode_config())
-                .expect("won't happened");
+            let data = encode_to_vec(&out_header, get_bincode_config()).expect("won't happened");
 
             let _ = resp_sender.send(Either::Left(data)).await;
         });
@@ -2235,8 +2219,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                 unique: request.unique,
             };
 
-            let data = encode_to_vec(&out_header, get_bincode_config())
-                .expect("won't happened");
+            let data = encode_to_vec(&out_header, get_bincode_config()).expect("won't happened");
 
             let _ = resp_sender.send(Either::Left(data)).await;
         });
@@ -2250,7 +2233,8 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
         mut data: &[u8],
         fs: &Arc<FS>,
     ) {
-        let setxattr_in = match decode_from_slice::<fuse_setxattr_in, _>(data, get_bincode_config()) {
+        let setxattr_in = match decode_from_slice::<fuse_setxattr_in, _>(data, get_bincode_config())
+        {
             Err(err) => {
                 error!(
                     "deserialize fuse_setxattr_in failed {}, request unique {}",
@@ -2287,7 +2271,11 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
         // setxattr "size" field specifies size of only "Value" part of data
         if setxattr_in.size as usize != data.len() {
             error!(
-                "fuse_setxattr_in value field data length is not right, request unique {} setxattr_in.size={} data.len={}", request.unique, setxattr_in.size, data.len());
+                "fuse_setxattr_in value field data length is not right, request unique {} setxattr_in.size={} data.len={}",
+                request.unique,
+                setxattr_in.size,
+                data.len()
+            );
 
             reply_error_in_place(libc::EINVAL.into(), request, &self.response_sender).await;
 
@@ -2328,8 +2316,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                 unique: request.unique,
             };
 
-            let data = encode_to_vec(&out_header, get_bincode_config())
-                .expect("won't happened");
+            let data = encode_to_vec(&out_header, get_bincode_config()).expect("won't happened");
 
             let _ = resp_sender.send(Either::Left(data)).await;
         });
@@ -2343,7 +2330,8 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
         mut data: &[u8],
         fs: &Arc<FS>,
     ) {
-        let getxattr_in = match decode_from_slice::<fuse_getxattr_in, _>(data, get_bincode_config()) {
+        let getxattr_in = match decode_from_slice::<fuse_getxattr_in, _>(data, get_bincode_config())
+        {
             Err(err) => {
                 error!(
                     "deserialize fuse_getxattr_in failed {}, request unique {}",
@@ -2443,20 +2431,21 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
         data: &[u8],
         fs: &Arc<FS>,
     ) {
-        let listxattr_in = match decode_from_slice::<fuse_getxattr_in, _>(data, get_bincode_config()) {
-            Err(err) => {
-                error!(
-                    "deserialize fuse_getxattr_in in listxattr failed {}, request unique {}",
-                    err, request.unique
-                );
+        let listxattr_in =
+            match decode_from_slice::<fuse_getxattr_in, _>(data, get_bincode_config()) {
+                Err(err) => {
+                    error!(
+                        "deserialize fuse_getxattr_in in listxattr failed {}, request unique {}",
+                        err, request.unique
+                    );
 
-                reply_error_in_place(libc::EINVAL.into(), request, &self.response_sender).await;
+                    reply_error_in_place(libc::EINVAL.into(), request, &self.response_sender).await;
 
-                return;
-            }
+                    return;
+                }
 
-            Ok((listxattr_in, _)) => listxattr_in,
-        };
+                Ok((listxattr_in, _)) => listxattr_in,
+            };
 
         let mut resp_sender = self.response_sender.clone();
         let fs = fs.clone();
@@ -2566,8 +2555,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                 unique: request.unique,
             };
 
-            let data = encode_to_vec(&out_header, get_bincode_config())
-                .expect("won't happened");
+            let data = encode_to_vec(&out_header, get_bincode_config()).expect("won't happened");
 
             let _ = resp_sender.send(Either::Left(data)).await;
         });
@@ -2620,8 +2608,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                 unique: request.unique,
             };
 
-            let data = encode_to_vec(&out_header, get_bincode_config())
-                .expect("won't happened");
+            let data = encode_to_vec(&out_header, get_bincode_config()).expect("won't happened");
 
             let _ = resp_sender.send(Either::Left(data)).await;
         });
@@ -2849,8 +2836,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                 unique: request.unique,
             };
 
-            let data = encode_to_vec(&out_header, get_bincode_config())
-                .expect("won't happened");
+            let data = encode_to_vec(&out_header, get_bincode_config()).expect("won't happened");
 
             let _ = resp_sender.send(Either::Left(data)).await;
         });
@@ -2905,8 +2891,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                 unique: request.unique,
             };
 
-            let data = encode_to_vec(&out_header, get_bincode_config())
-                .expect("won't happened");
+            let data = encode_to_vec(&out_header, get_bincode_config()).expect("won't happened");
 
             let _ = resp_sender.send(Either::Left(data)).await;
         });
@@ -2959,8 +2944,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
 
             debug!("access response {}", resp_value);
 
-            let data = encode_to_vec(&out_header, get_bincode_config())
-                .expect("won't happened");
+            let data = encode_to_vec(&out_header, get_bincode_config()).expect("won't happened");
 
             let _ = resp_sender.send(Either::Left(data)).await;
         });
@@ -3056,20 +3040,21 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
 
     #[instrument(skip(self, data, fs))]
     async fn handle_interrupt(&mut self, request: Request, data: &[u8], fs: &Arc<FS>) {
-        let interrupt_in = match decode_from_slice::<fuse_interrupt_in, _>(data, get_bincode_config()) {
-            Err(err) => {
-                error!(
-                    "deserialize fuse_interrupt_in failed {}, request unique {}",
-                    err, request.unique
-                );
+        let interrupt_in =
+            match decode_from_slice::<fuse_interrupt_in, _>(data, get_bincode_config()) {
+                Err(err) => {
+                    error!(
+                        "deserialize fuse_interrupt_in failed {}, request unique {}",
+                        err, request.unique
+                    );
 
-                reply_error_in_place(libc::EINVAL.into(), request, &self.response_sender).await;
+                    reply_error_in_place(libc::EINVAL.into(), request, &self.response_sender).await;
 
-                return;
-            }
+                    return;
+                }
 
-            Ok((interrupt_in, _)) => interrupt_in,
-        };
+                Ok((interrupt_in, _)) => interrupt_in,
+            };
 
         let mut resp_sender = self.response_sender.clone();
         let fs = fs.clone();
@@ -3092,8 +3077,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                 unique: request.unique,
             };
 
-            let data = encode_to_vec(&out_header, get_bincode_config())
-                .expect("won't happened");
+            let data = encode_to_vec(&out_header, get_bincode_config()).expect("won't happened");
 
             let _ = resp_sender.send(Either::Left(data)).await;
         });
@@ -3251,7 +3235,8 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
     ) {
         let resp_sender = self.response_sender.clone();
 
-        let notify_retrieve_in: fuse_notify_retrieve_in = match decode_from_slice(data, get_bincode_config()) {
+        let notify_retrieve_in: fuse_notify_retrieve_in =
+            match decode_from_slice(data, get_bincode_config()) {
                 Err(err) => {
                     error!(
                         "deserialize fuse_notify_retrieve_in failed {}, request unique {}",
@@ -3304,19 +3289,20 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
         mut data: &[u8],
         fs: &Arc<FS>,
     ) {
-        let batch_forget_in: fuse_batch_forget_in = match decode_from_slice(data, get_bincode_config()) {
-            Err(err) => {
-                error!(
-                    "deserialize fuse_batch_forget_in failed {}, request unique {}",
-                    err, request.unique
-                );
+        let batch_forget_in: fuse_batch_forget_in =
+            match decode_from_slice(data, get_bincode_config()) {
+                Err(err) => {
+                    error!(
+                        "deserialize fuse_batch_forget_in failed {}, request unique {}",
+                        err, request.unique
+                    );
 
-                // no need to reply
-                return;
-            }
+                    // no need to reply
+                    return;
+                }
 
-            Ok((batch_forget_in, _)) => batch_forget_in,
-        };
+                Ok((batch_forget_in, _)) => batch_forget_in,
+            };
 
         let mut forgets = vec![];
 
@@ -3326,7 +3312,10 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
         while data.len() >= FUSE_FORGET_ONE_SIZE {
             match decode_from_slice::<fuse_forget_one, _>(data, get_bincode_config()) {
                 Err(err) => {
-                    error!("deserialize fuse_batch_forget_in body fuse_forget_one failed {}, request unique {}", err, request.unique);
+                    error!(
+                        "deserialize fuse_batch_forget_in body fuse_forget_one failed {}, request unique {}",
+                        err, request.unique
+                    );
 
                     // no need to reply
                     return;
@@ -3418,8 +3407,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
             };
 
             let config = get_bincode_config();
-            let data = encode_to_vec(&out_header, config)
-                .expect("won't happened");
+            let data = encode_to_vec(&out_header, config).expect("won't happened");
 
             let _ = resp_sender.send(Either::Left(data)).await;
         });
@@ -3526,8 +3514,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                 };
 
                 let config = get_bincode_config();
-                encode_into_std_write(&dir_entry, &mut entry_data, config)
-                    .expect("won't happened");
+                encode_into_std_write(&dir_entry, &mut entry_data, config).expect("won't happened");
 
                 entry_data.extend_from_slice(name.as_bytes());
 
@@ -3546,8 +3533,7 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
             let mut data = Vec::with_capacity(FUSE_OUT_HEADER_SIZE);
 
             let config = get_bincode_config();
-            encode_into_std_write(&out_header, &mut data, config)
-                .expect("won't happened");
+            encode_into_std_write(&out_header, &mut data, config).expect("won't happened");
 
             let _ = resp_sender
                 .send(Either::Right((data, entry_data.into())))
@@ -3735,7 +3721,8 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
     ) {
         let mut resp_sender = self.response_sender.clone();
 
-        let copy_file_range_in: fuse_copy_file_range_in = match decode_from_slice(data, get_bincode_config()) {
+        let copy_file_range_in: fuse_copy_file_range_in =
+            match decode_from_slice(data, get_bincode_config()) {
                 Err(err) => {
                     error!(
                         "deserialize fuse_copy_file_range_in failed {}, request unique {}",
@@ -3810,8 +3797,7 @@ where
         unique: request.unique,
     };
 
-    let data = encode_to_vec(&out_header, get_bincode_config())
-        .expect("won't happened");
+    let data = encode_to_vec(&out_header, get_bincode_config()).expect("won't happened");
 
     let _ = pin!(sender).send(Either::Left(data)).await;
 }

@@ -12,12 +12,10 @@ let package = Package(
         .executable(name: "vixenfs-mount", targets: ["vixenfs-mount"]),
     ],
     dependencies: [
-        // We cannot use branch main here because Xcode caches aggressively.
-        // We also duplicate these definitions in `xcode/project.yml`.
-        // If you know how to avoid that duplication, please open an issue on GitHub.
         .package(
             url: "https://github.com/bearcove/roam.git",
-            revision: "88070908b7083f295eb41d09fabd111caa06f43c"),
+            revision: "bda700bd2126e7cd3c4b0cfb2c10e43d3b3edd94"
+        ),
         .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.8.1"),
     ],
     targets: [

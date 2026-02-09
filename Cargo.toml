@@ -49,12 +49,13 @@ facet-cargo-toml = { git = "https://github.com/bearcove/facet-cargo-toml", branc
 picante = { git = "https://github.com/bearcove/picante", branch = "main", features = ["macros"] }
 
 # RPC
-roam = { git = "https://github.com/bearcove/roam", branch = "main" }
-roam-session = { git = "https://github.com/bearcove/roam", branch = "main", features = ["diagnostics"] }
-roam-stream = { git = "https://github.com/bearcove/roam", branch = "main", features = ["diagnostics"] }
-roam-local = { git = "https://github.com/bearcove/roam", branch = "main" }
-roam-codegen = { git = "https://github.com/bearcove/roam", branch = "main" }
-ur-taking-me-with-you = { git = "https://github.com/bearcove/roam", branch = "main" }
+roam = { git = "https://github.com/bearcove/roam", rev = "bda700bd2126e7cd3c4b0cfb2c10e43d3b3edd94" }
+roam-session = { git = "https://github.com/bearcove/roam", rev = "bda700bd2126e7cd3c4b0cfb2c10e43d3b3edd94", features = ["diagnostics"] }
+roam-stream = { git = "https://github.com/bearcove/roam", rev = "bda700bd2126e7cd3c4b0cfb2c10e43d3b3edd94", features = ["diagnostics"] }
+roam-shm = { git = "https://github.com/bearcove/roam", rev = "bda700bd2126e7cd3c4b0cfb2c10e43d3b3edd94" }
+roam-local = { git = "https://github.com/bearcove/roam", rev = "bda700bd2126e7cd3c4b0cfb2c10e43d3b3edd94" }
+roam-codegen = { git = "https://github.com/bearcove/roam", rev = "bda700bd2126e7cd3c4b0cfb2c10e43d3b3edd94" }
+ur-taking-me-with-you = { git = "https://github.com/bearcove/roam", rev = "bda700bd2126e7cd3c4b0cfb2c10e43d3b3edd94" }
 
 # process management
 
@@ -145,13 +146,6 @@ strip = "none"
 # facet-value = { git = "https://github.com/facet-rs/facet", branch = "main" }
 # facet-format = { git = "https://github.com/facet-rs/facet", branch = "main" }
 # facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
-
-# [patch."https://github.com/bearcove/roam"]
-# roam = { path = "../roam/rust/roam" }
-# roam-session = { path = "../roam/rust/roam-session" }
-# roam-stream = { path = "../roam/rust/roam-stream" }
-# roam-local = { path = "../roam/rust/roam-local" }
-# roam-codegen = { path = "../roam/rust/roam-codegen" }
 
 # [patch."https://github.com/bearcove/picante"]
 # picante = { path = "../picante/crates/picante" }

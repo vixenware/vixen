@@ -16,29 +16,39 @@ struct Config {
     static let appGroupIdentifier = "group.eu.bearcove.vixen"
 
     let mountPoint: String
-    let port: Int
-    let host: String
+    let sid: String
     let scheme: String
     let fsType: String
     let parentPID: pid_t
     let preload: Bool
+    let debug: Bool
 
     var source: String {
-        var url = "\(scheme)://\(host):\(port)"
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = "session"
+        var items = [URLQueryItem(name: "sid", value: sid)]
         if preload {
-            url += "?preload=1"
+            items.append(URLQueryItem(name: "preload", value: "1"))
         }
-        return url
+        if debug {
+            items.append(URLQueryItem(name: "debug", value: "1"))
+        }
+        components.queryItems = items
+        if let source = components.string {
+            return source
+        }
+        return "\(scheme)://session?sid=\(sid)"
     }
 
     static func parse(from args: [String]) throws -> Command {
         var mountPoint: String?
-        var port: Int?
-        var host = "localhost"
+        var sid: String?
         var scheme = "vixen"
         let fsType = "vixenfs"
         let parentPID = getppid()
         var preload = false
+        var debug = false
         var healthRequested = false
         var jsonRequested = false
         var appGroupPathRequested = false
@@ -52,18 +62,14 @@ struct Config {
                 mountArgumentsProvided = true
                 index += 1
                 mountPoint = try valueArg(args, index: index, name: "--mount-point")
-            case "--port":
+            case "--sid":
                 mountArgumentsProvided = true
                 index += 1
-                let value = try valueArg(args, index: index, name: "--port")
-                guard let parsed = Int(value), parsed > 0 else {
-                    throw MountError.invalidArgument("--port must be a positive integer")
+                let value = try valueArg(args, index: index, name: "--sid")
+                guard isValidSid(value) else {
+                    throw MountError.invalidArgument("--sid must be 32 hex chars or UUID format")
                 }
-                port = parsed
-            case "--host":
-                mountArgumentsProvided = true
-                index += 1
-                host = try valueArg(args, index: index, name: "--host")
+                sid = value
             case "--scheme":
                 mountArgumentsProvided = true
                 index += 1
@@ -71,6 +77,9 @@ struct Config {
             case "--preload":
                 mountArgumentsProvided = true
                 preload = true
+            case "--debug":
+                mountArgumentsProvided = true
+                debug = true
             case "--health":
                 healthRequested = true
             case "--json":
@@ -108,19 +117,19 @@ struct Config {
         guard let mountPoint else {
             throw MountError.invalidArgument("Missing required --mount-point argument")
         }
-        guard let port else {
-            throw MountError.invalidArgument("Missing required --port argument")
+        guard let sid else {
+            throw MountError.invalidArgument("Missing required --sid argument")
         }
 
         return .mount(
             Config(
                 mountPoint: mountPoint,
-                port: port,
-                host: host,
+                sid: sid,
                 scheme: scheme,
                 fsType: fsType,
                 parentPID: parentPID,
-                preload: preload
+                preload: preload,
+                debug: debug
             ))
     }
 
@@ -129,6 +138,31 @@ struct Config {
             throw MountError.invalidArgument("\(name) requires a value")
         }
         return args[index]
+    }
+
+    private static func isValidSid(_ sid: String) -> Bool {
+        if sid.count == 32 {
+            return sid.unicodeScalars.allSatisfy {
+                CharacterSet(charactersIn: "0123456789abcdefABCDEF").contains($0)
+            }
+        }
+        if sid.count == 36 {
+            let chars = Array(sid)
+            let hyphenPositions: Set<Int> = [8, 13, 18, 23]
+            for i in 0..<chars.count {
+                if hyphenPositions.contains(i) {
+                    if chars[i] != "-" {
+                        return false
+                    }
+                    continue
+                }
+                if !chars[i].isHexDigit {
+                    return false
+                }
+            }
+            return true
+        }
+        return false
     }
 }
 
@@ -155,7 +189,7 @@ enum MountError: Error, CustomStringConvertible {
                 Usage:
                   vixenfs-mount --health [--json]
                   vixenfs-mount --app-group-path
-                  vixenfs-mount --port <port> --mount-point <path> [--host <host>] [--scheme <scheme>]
+                  vixenfs-mount --sid <sid> --mount-point <path> [--scheme <scheme>] [--debug]
                 """
         }
     }

@@ -21,7 +21,9 @@ vx-vfs-types = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 vx-io = { workspace = true }
 roam-stream = { workspace = true }
+roam-shm = { workspace = true }
 facet-json = { workspace = true }
+fastrand = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuse3 = { workspace = true }

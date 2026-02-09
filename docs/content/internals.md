@@ -135,7 +135,7 @@ When rustc reads `toolchain/bin/rustc` through the VFS:
 ```
 
 1. The FSKit extension (macOS) or FUSE handler (Linux) receives the read syscall.
-2. It forwards it to vx-runner's VFS backend via roam RPC (currently TCP, future: shared memory).
+2. It forwards it to vx-runner's VFS backend via roam RPC (shared memory on macOS, stream transport elsewhere).
 3. vx-runner looks up the item in its in-memory VFS tree, finds the CAS blob hash.
 4. vx-runner fetches the blob from vx-store (or hits its in-process blob cache).
 5. Returns the requested byte range.
