@@ -3,8 +3,6 @@ import Foundation
 import os
 
 actor ReadTelemetry {
-    static let shared = ReadTelemetry()
-
     private var readCount: UInt64 = 0
     private var errorCount: UInt64 = 0
     private var totalRequestedBytes: UInt64 = 0
@@ -84,6 +82,7 @@ actor ReadTelemetry {
 final class Volume: FSVolume {
 
     private let log = Logger(subsystem: VixenFS.subsystem, category: "Volume")
+    private let readTelemetry = ReadTelemetry()
 
     /// Item cache: itemId -> Item, protected by lock for thread safety.
     /// Volume is a class (not an actor) because it subclasses FSVolume, so we need
@@ -94,6 +93,7 @@ final class Volume: FSVolume {
 
     /// Root item ID (always 1 in our VFS protocol)
     private let rootId: UInt64 = 1
+    private static let mutableAttributesTTLNs: UInt64 = 2_000_000_000
 
     init() {
         let volumeId = FSVolume.Identifier(uuid: UUID())
@@ -141,6 +141,13 @@ final class Volume: FSVolume {
     private func getClient() async throws -> VfsClient {
         try await VfsConnection.shared.getClient()
     }
+
+    private static func isImmutableFile(_ attrs: FSItem.Attributes) -> Bool {
+        guard attrs.type == .file else {
+            return false
+        }
+        return (attrs.mode & UInt32(0o222)) == 0
+    }
 }
 
 // MARK: - FSVolume.Operations
@@ -186,8 +193,8 @@ extension Volume: FSVolume.Operations {
     func unmount() async {
         log.debug("unmount")
         await LifecycleTrace.shared.mark(log, event: "volume.unmount.begin")
-        await ReadTelemetry.shared.logSummary(log, reason: "unmount")
-        await ReadTelemetry.shared.reset()
+        await readTelemetry.logSummary(log, reason: "unmount")
+        await readTelemetry.reset()
         removeAllCachedItems()
         await LifecycleTrace.shared.mark(log, event: "volume.unmount.done")
     }
@@ -229,8 +236,8 @@ extension Volume: FSVolume.Operations {
         log.debug("deactivate")
         await LifecycleTrace.shared.mark(
             log, event: "volume.deactivate.begin", details: "options=\(options.rawValue)")
-        await ReadTelemetry.shared.logSummary(log, reason: "deactivate")
-        await ReadTelemetry.shared.reset()
+        await readTelemetry.logSummary(log, reason: "deactivate")
+        await readTelemetry.reset()
         removeAllCachedItems()
         await LifecycleTrace.shared.mark(log, event: "volume.deactivate.done")
     }
@@ -240,7 +247,37 @@ extension Volume: FSVolume.Operations {
         of fsItem: FSItem
     ) async throws -> FSItem.Attributes {
         let item = try getItem(fsItem)
-        return item.cachedAttributes
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        let snapshot = item.attributesSnapshot()
+        let cachedAttrs = snapshot.attrs
+
+        if Volume.isImmutableFile(cachedAttrs) {
+            return cachedAttrs
+        }
+
+        if nowNs &- snapshot.lastValidationNs < Volume.mutableAttributesTTLNs {
+            return cachedAttrs
+        }
+
+        let result = try await getClient().getAttributes(itemId: item.itemId)
+        guard result.error == 0 else {
+            log.debug(
+                "attributes: revalidate failed for itemId=\(item.itemId) error=\(result.error); using cached"
+            )
+            return cachedAttrs
+        }
+
+        let refreshedAttrs = FSItem.Attributes.fromVfs(
+            itemId: result.attrs.itemId,
+            parentId: cachedAttrs.parentID.rawValue,
+            itemType: result.attrs.itemType,
+            size: result.attrs.size,
+            modifiedTime: result.attrs.modifiedTime,
+            createdTime: result.attrs.createdTime,
+            mode: result.attrs.mode
+        )
+        item.updateAttributes(refreshedAttrs, validatedAtNs: nowNs)
+        return refreshedAttrs
     }
 
     func setAttributes(
@@ -319,26 +356,25 @@ extension Volume: FSVolume.Operations {
             throw fs_errorForPOSIXError(result.error)
         }
 
-        // Get full attributes for the found item
-        let attrsResult = try await client.getAttributes(itemId: result.itemId)
+        let attrs = result.attrs
 
         let fsAttrs = FSItem.Attributes.fromVfs(
-            itemId: result.itemId,
+            itemId: attrs.itemId,
             parentId: dirId,
-            itemType: result.itemType,
-            size: attrsResult.attrs.size,
-            modifiedTime: attrsResult.attrs.modifiedTime,
-            createdTime: attrsResult.attrs.createdTime,
-            mode: attrsResult.attrs.mode
+            itemType: attrs.itemType,
+            size: attrs.size,
+            modifiedTime: attrs.modifiedTime,
+            createdTime: attrs.createdTime,
+            mode: attrs.mode
         )
 
         // Check if we already have this item cached
-        if let existing = getCachedItem(result.itemId) {
+        if let existing = getCachedItem(attrs.itemId) {
             existing.updateAttributes(fsAttrs)
             return (existing, existing.name)
         }
 
-        let item = Item(itemId: result.itemId, name: nameStr, attributes: fsAttrs)
+        let item = Item(itemId: attrs.itemId, name: nameStr, attributes: fsAttrs)
         cacheItem(item)
         return (item, item.name)
     }
@@ -473,7 +509,7 @@ extension Volume: FSVolume.Operations {
             throw fs_errorForPOSIXError(result.error)
         }
 
-        var nextCookie: UInt64 = 1
+        var nextCookie: UInt64 = cursor + 1
         for entry in result.entries {
             let entryAttrs = FSItem.Attributes.fromVfs(
                 itemId: entry.itemId,
@@ -547,7 +583,7 @@ extension Volume: FSVolume.ReadWriteOperations {
             }
 
             let elapsedNs = DispatchTime.now().uptimeNanoseconds &- startNs
-            await ReadTelemetry.shared.record(
+            await readTelemetry.record(
                 requestedBytes: requestedBytes,
                 returnedBytes: copyLen,
                 latencyNs: elapsedNs,
@@ -556,7 +592,7 @@ extension Volume: FSVolume.ReadWriteOperations {
             return copyLen
         } catch {
             let elapsedNs = DispatchTime.now().uptimeNanoseconds &- startNs
-            await ReadTelemetry.shared.record(
+            await readTelemetry.record(
                 requestedBytes: requestedBytes,
                 returnedBytes: 0,
                 latencyNs: elapsedNs,

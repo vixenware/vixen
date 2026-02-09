@@ -22,7 +22,6 @@ futures-channel = { version = "0.3.30", features = ["sink"] }
 futures-util = { version = "0.3.30", features = ["sink"] }
 libc = "0.2.168"
 nix = { version = "0.29.0", default-features = false, features = ["fs", "mount", "user", "socket"] }
-slab = "0.4.9"
 tracing = "0.1.40"
 trait-make = "0.1"
 which = "6"

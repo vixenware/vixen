@@ -1,3 +1,4 @@
+import CryptoKit
 import FSKit
 import Foundation
 import RoamRuntime
@@ -358,6 +359,18 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
         super.init()
     }
 
+    private static func deterministicContainerUUID(for url: URL) -> UUID {
+        var bytes = [UInt8](SHA256.hash(data: Data(url.absoluteString.utf8)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x50
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return UUID(
+            uuid: (
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
+                bytes[15]
+            ))
+    }
+
     /// Called by FSKit to check if we can handle this resource
     func probeResource(
         resource: FSResource,
@@ -381,7 +394,7 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
             do {
                 try await VfsConnection.shared.connect(url: url)
 
-                let containerUUID = UUID()
+                let containerUUID = Bridge.deterministicContainerUUID(for: url)
                 let result = FSProbeResult.usable(
                     name: "Vixen",
                     containerID: FSContainerIdentifier(uuid: containerUUID)

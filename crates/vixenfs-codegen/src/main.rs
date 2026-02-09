@@ -8,7 +8,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to_path_buf();
 
     let service = vixenfs_proto::vfs_service_detail();
-    let swift = roam_codegen::targets::swift::generate_service(&service);
+    let swift = roam_codegen::targets::swift::generate_service_with_bindings(
+        &service,
+        roam_codegen::targets::swift::SwiftBindings::Client,
+    );
 
     let output = workspace_root.join("apps/mac/xcode/VixenFSExtension/VfsClient.swift");
 

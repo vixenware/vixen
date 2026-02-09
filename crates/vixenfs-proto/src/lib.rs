@@ -68,8 +68,7 @@ pub enum ItemType {
 /// Result of a lookup operation
 #[derive(Debug, Clone, facet::Facet)]
 pub struct LookupResult {
-    pub item_id: ItemId,
-    pub item_type: ItemType,
+    pub attrs: ItemAttributes,
     /// 0 = success, non-zero = errno-like error code
     pub error: i32,
 }

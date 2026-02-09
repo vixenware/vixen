@@ -99,14 +99,9 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
             return Err(errno_from_vfs(result.error));
         }
 
-        let attr_result = self.vfs.get_attributes(&cx, result.item_id).await;
-        if attr_result.error != 0 {
-            return Err(errno_from_vfs(attr_result.error));
-        }
-
         Ok(ReplyEntry {
             ttl: TTL,
-            attr: attrs_to_file_attr(&attr_result.attrs, self.uid, self.gid),
+            attr: attrs_to_file_attr(&result.attrs, self.uid, self.gid),
             generation: 0,
         })
     }
@@ -271,7 +266,7 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         if lookup.error != 0 {
             return Err(errno_from_vfs(lookup.error));
         }
-        let result = self.vfs.delete(&cx, lookup.item_id).await;
+        let result = self.vfs.delete(&cx, lookup.attrs.item_id).await;
         if result.error != 0 {
             return Err(errno_from_vfs(result.error));
         }
@@ -285,7 +280,7 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         if lookup.error != 0 {
             return Err(errno_from_vfs(lookup.error));
         }
-        let result = self.vfs.delete(&cx, lookup.item_id).await;
+        let result = self.vfs.delete(&cx, lookup.attrs.item_id).await;
         if result.error != 0 {
             return Err(errno_from_vfs(result.error));
         }
@@ -309,7 +304,12 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         }
         let result = self
             .vfs
-            .rename(&cx, lookup.item_id, new_parent, new_name_str.to_owned())
+            .rename(
+                &cx,
+                lookup.attrs.item_id,
+                new_parent,
+                new_name_str.to_owned(),
+            )
             .await;
         if result.error != 0 {
             return Err(errno_from_vfs(result.error));
@@ -327,7 +327,8 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         parent: Inode,
         _fh: u64,
         offset: i64,
-    ) -> fuse3::Result<ReplyDirectory<impl Stream<Item = fuse3::Result<DirectoryEntry>> + Send + '_>> {
+    ) -> fuse3::Result<ReplyDirectory<impl Stream<Item = fuse3::Result<DirectoryEntry>> + Send + '_>>
+    {
         let cx = dummy_context();
         Ok(ReplyDirectory {
             entries: try_stream! {
@@ -365,7 +366,9 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         _fh: u64,
         offset: u64,
         _lock_owner: u64,
-    ) -> fuse3::Result<ReplyDirectoryPlus<impl Stream<Item = fuse3::Result<DirectoryEntryPlus>> + Send + '_>> {
+    ) -> fuse3::Result<
+        ReplyDirectoryPlus<impl Stream<Item = fuse3::Result<DirectoryEntryPlus>> + Send + '_>,
+    > {
         let cx = dummy_context();
         Ok(ReplyDirectoryPlus {
             entries: try_stream! {
@@ -518,15 +521,13 @@ where
         })
         .expect("failed to spawn FUSE runtime thread");
 
-    result_rx
-        .recv()
-        .unwrap_or_else(|_| {
-            Err(VfsError::CommandFailed {
-                program: "fuse3",
-                message: "FUSE runtime thread died before sending result".to_string(),
-                _diagnostics: vec![],
-            })
+    result_rx.recv().unwrap_or_else(|_| {
+        Err(VfsError::CommandFailed {
+            program: "fuse3",
+            message: "FUSE runtime thread died before sending result".to_string(),
+            _diagnostics: vec![],
         })
+    })
 }
 
 /// If `mount_path` is already a mountpoint (ghost mount from a previous run),

@@ -21,7 +21,6 @@ facet = { workspace = true }
 facet-json = { workspace = true }
 thiserror = { workspace = true }
 roam = { workspace = true }
-roam-session = { workspace = true }
 roam-stream = { workspace = true }
 tokio = { workspace = true }
 camino = { workspace = true }
@@ -36,5 +35,4 @@ vx-store-proto = { workspace = true }
 vx-runner-proto = { workspace = true }
 vx-vfsd = { path = "../vx-vfsd" }
 vx-io = { workspace = true }
-vx-vfs = { workspace = true }
 vx-locks = { workspace = true }

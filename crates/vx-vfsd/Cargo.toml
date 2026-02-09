@@ -22,19 +22,14 @@ vx-store-proto = { workspace = true }
 vx-locks = { workspace = true }
 vixenfs-proto = { workspace = true }
 vx-vfs = { workspace = true }
-vx-tracing = { workspace = true }
 
 # RPC
 roam = { workspace = true }
 roam-stream = { workspace = true }
 vx-io = { workspace = true }
-async-trait = "0.1"
 
 # Async runtime
 tokio = { workspace = true }
-
-# Filesystem
-parking_lot = { workspace = true }
 
 # Serialization
 facet = { workspace = true }

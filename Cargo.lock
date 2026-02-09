@@ -112,17 +112,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-trait"
-version = "0.1.89"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -921,7 +910,6 @@ dependencies = [
  "futures-util",
  "libc",
  "nix",
- "slab",
  "tokio",
  "tracing",
  "trait-make",
@@ -2997,7 +2985,6 @@ dependencies = [
  "fastrand",
  "jiff",
  "roam",
- "roam-session",
  "roam-stream",
  "thiserror",
  "tokio",
@@ -3010,7 +2997,6 @@ dependencies = [
  "vx-runner-proto",
  "vx-store-proto",
  "vx-tracing",
- "vx-vfs",
  "vx-vfsd",
 ]
 
@@ -3118,11 +3104,9 @@ dependencies = [
  "libc",
  "roam",
  "roam-shm",
- "roam-stream",
  "tokio",
  "tracing",
  "vixenfs-proto",
- "vx-io",
  "vx-vfs-types",
 ]
 
@@ -3148,13 +3132,11 @@ dependencies = [
 name = "vx-vfsd"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "camino",
  "facet",
  "facet-json",
  "figue",
  "libc",
- "parking_lot",
  "roam",
  "roam-stream",
  "tokio",
@@ -3165,7 +3147,6 @@ dependencies = [
  "vx-io",
  "vx-locks",
  "vx-store-proto",
- "vx-tracing",
  "vx-vfs",
 ]
 

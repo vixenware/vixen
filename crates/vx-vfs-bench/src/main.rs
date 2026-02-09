@@ -530,20 +530,28 @@ mod macos_bench {
         ) -> LookupResult {
             match self.child_lookup.get(&(parent_id, name)).copied() {
                 Some(id) => {
-                    let item_type = self
-                        .nodes
-                        .get(&id)
-                        .map(|n| n.item_type)
-                        .unwrap_or(ItemType::File);
+                    let node = self.nodes.get(&id);
                     LookupResult {
-                        item_id: id,
-                        item_type,
+                        attrs: ItemAttributes {
+                            item_id: id,
+                            item_type: node.map(|n| n.item_type).unwrap_or(ItemType::File),
+                            size: node.map(|n| n.size).unwrap_or(0),
+                            modified_time: node.map(|n| n.modified_time).unwrap_or(0),
+                            created_time: node.map(|n| n.created_time).unwrap_or(0),
+                            mode: node.map(|n| n.mode).unwrap_or(mode::FILE_REGULAR),
+                        },
                         error: errno::OK,
                     }
                 }
                 None => LookupResult {
-                    item_id: 0,
-                    item_type: ItemType::File,
+                    attrs: ItemAttributes {
+                        item_id: 0,
+                        item_type: ItemType::File,
+                        size: 0,
+                        modified_time: 0,
+                        created_time: 0,
+                        mode: mode::FILE_REGULAR,
+                    },
                     error: errno::ENOENT,
                 },
             }

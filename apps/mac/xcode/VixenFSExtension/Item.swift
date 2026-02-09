@@ -16,6 +16,7 @@ final class Item: FSItem {
     /// is an ObjC class that doesn't conform to Sendable.
     private let _lock = NSLock()
     private var _cachedAttributes: FSItem.Attributes
+    private var _lastAttributesValidationNs: UInt64
 
     var cachedAttributes: FSItem.Attributes {
         _lock.lock()
@@ -27,12 +28,23 @@ final class Item: FSItem {
         self.itemId = itemId
         self.name = FSFileName(string: name)
         self._cachedAttributes = attributes
+        self._lastAttributesValidationNs = DispatchTime.now().uptimeNanoseconds
     }
 
-    func updateAttributes(_ attrs: FSItem.Attributes) {
+    func attributesSnapshot() -> (attrs: FSItem.Attributes, lastValidationNs: UInt64) {
+        _lock.lock()
+        defer { _lock.unlock() }
+        return (_cachedAttributes, _lastAttributesValidationNs)
+    }
+
+    func updateAttributes(
+        _ attrs: FSItem.Attributes,
+        validatedAtNs: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) {
         _lock.lock()
         defer { _lock.unlock() }
         _cachedAttributes = attrs
+        _lastAttributesValidationNs = validatedAtNs
     }
 }
 

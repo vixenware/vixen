@@ -32,11 +32,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use vx_locks::{DiagnosticMutex, DiagnosticRwLock};
 use vixenfs_proto::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
     ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
 };
+use vx_locks::{DiagnosticMutex, DiagnosticRwLock};
 use vx_store_proto::{Blake3Hash, StoreClient};
 
 /// A virtual filesystem item
@@ -414,8 +414,14 @@ impl Vfs for CasVfs {
             if item.parent_id == parent_id && item.name == name {
                 tracing::trace!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found");
                 return LookupResult {
-                    item_id: item.id,
-                    item_type: item.item_type,
+                    attrs: ItemAttributes {
+                        item_id: item.id,
+                        item_type: item.item_type,
+                        size: item.size,
+                        modified_time: 0,
+                        created_time: 0,
+                        mode: item.mode,
+                    },
                     error: errno::OK,
                 };
             }
@@ -429,8 +435,14 @@ impl Vfs for CasVfs {
             .collect();
         tracing::debug!(parent_id, name = %name, ?children, "VFS lookup -> NOT FOUND");
         LookupResult {
-            item_id: 0,
-            item_type: ItemType::File,
+            attrs: ItemAttributes {
+                item_id: 0,
+                item_type: ItemType::File,
+                size: 0,
+                modified_time: 0,
+                created_time: 0,
+                mode: 0,
+            },
             error: errno::ENOENT,
         }
     }
@@ -904,7 +916,10 @@ impl CasVfs {
         eprintln!("Total prefixes: {}", prefixes.len());
 
         for (prefix_id, prefix) in prefixes.iter() {
-            eprintln!("\nPrefix '{}' root_item_id={}", prefix_id, prefix.root_item_id);
+            eprintln!(
+                "\nPrefix '{}' root_item_id={}",
+                prefix_id, prefix.root_item_id
+            );
 
             let children: Vec<_> = items
                 .values()

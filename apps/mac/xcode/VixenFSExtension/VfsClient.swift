@@ -7,7 +7,7 @@ import RoamRuntime
 // MARK: - Vfs Method IDs
 
 public enum VfsMethodId {
-    public static let lookup: UInt64 = 0xac1f4b76a434caf5
+    public static let lookup: UInt64 = 0x70460df96a9e3ebf
     public static let getAttributes: UInt64 = 0xc968b68989c3f020
     public static let readDir: UInt64 = 0xd717690e60df5af3
     public static let read: UInt64 = 0x9c80fd555999d0e1
@@ -27,18 +27,6 @@ public enum ItemType: Codable, Sendable {
     case symlink
 }
 
-public struct LookupResult: Codable, Sendable {
-    public var itemId: UInt64
-    public var itemType: ItemType
-    public var error: Int32
-
-    public init(itemId: UInt64, itemType: ItemType, error: Int32) {
-        self.itemId = itemId
-        self.itemType = itemType
-        self.error = error
-    }
-}
-
 public struct ItemAttributes: Codable, Sendable {
     public var itemId: UInt64
     public var itemType: ItemType
@@ -54,6 +42,16 @@ public struct ItemAttributes: Codable, Sendable {
         self.modifiedTime = modifiedTime
         self.createdTime = createdTime
         self.mode = mode
+    }
+}
+
+public struct LookupResult: Codable, Sendable {
+    public var attrs: ItemAttributes
+    public var error: Int32
+
+    public init(attrs: ItemAttributes, error: Int32) {
+        self.attrs = attrs
+        self.error = error
     }
 }
 
@@ -190,24 +188,29 @@ public final class VfsClient: VfsCaller {
         payloadBytes += encodeVarint(parentId)
         payloadBytes += encodeString(name)
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0xac1f4b76a434caf5, payload: payload, timeout: timeout)
+        let response = try await connection.call(methodId: 0x70460df96a9e3ebf, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
-        let _result_itemId = try decodeVarint(from: response, offset: &cursor)
-        let __result_itemType_disc = try decodeU8(from: response, offset: &cursor)
-        let _result_itemType: ItemType
-        switch __result_itemType_disc {
+        let __result_attrs_itemId = try decodeVarint(from: response, offset: &cursor)
+        let ___result_attrs_itemType_disc = try decodeU8(from: response, offset: &cursor)
+        let __result_attrs_itemType: ItemType
+        switch ___result_attrs_itemType_disc {
         case 0:
-            _result_itemType = .file
+            __result_attrs_itemType = .file
         case 1:
-            _result_itemType = .directory
+            __result_attrs_itemType = .directory
         case 2:
-            _result_itemType = .symlink
+            __result_attrs_itemType = .symlink
         default:
             throw RoamError.decodeError("unknown enum variant")
         }
+        let __result_attrs_size = try decodeVarint(from: response, offset: &cursor)
+        let __result_attrs_modifiedTime = try decodeVarint(from: response, offset: &cursor)
+        let __result_attrs_createdTime = try decodeVarint(from: response, offset: &cursor)
+        let __result_attrs_mode = try decodeU32(from: response, offset: &cursor)
+        let _result_attrs = ItemAttributes(itemId: __result_attrs_itemId, itemType: __result_attrs_itemType, size: __result_attrs_size, modifiedTime: __result_attrs_modifiedTime, createdTime: __result_attrs_createdTime, mode: __result_attrs_mode)
         let _result_error = try decodeI32(from: response, offset: &cursor)
-        let result = LookupResult(itemId: _result_itemId, itemType: _result_itemType, error: _result_error)
+        let result = LookupResult(attrs: _result_attrs, error: _result_error)
         return result
     }
 
@@ -380,243 +383,6 @@ public final class VfsClient: VfsCaller {
         let result = try decodeString(from: response, offset: &cursor)
         return result
     }
-}
-
-// MARK: - Vfs Server
-
-///  The VFS service trait - defines the RPC interface between client and server.
-public protocol VfsHandler {
-    ///  Look up an item by name in a parent directory.
-    func lookup(parentId: UInt64, name: String) async throws -> LookupResult
-    ///  Get attributes for an item.
-    func getAttributes(itemId: UInt64) async throws -> GetAttributesResult
-    ///  Read directory contents.
-    ///  Use cursor=0 for first page, then use returned next_cursor for subsequent pages.
-    func readDir(itemId: UInt64, cursor: UInt64) async throws -> ReadDirResult
-    ///  Read file contents.
-    func read(itemId: UInt64, offset: UInt64, len: UInt64) async throws -> ReadResult
-    ///  Write file contents.
-    func write(itemId: UInt64, offset: UInt64, data: Data) async throws -> WriteResult
-    ///  Create a new file or directory.
-    func create(parentId: UInt64, name: String, itemType: ItemType) async throws -> CreateResult
-    ///  Delete an item.
-    func delete(itemId: UInt64) async throws -> VfsResult
-    ///  Rename/move an item.
-    func rename(itemId: UInt64, newParentId: UInt64, newName: String) async throws -> VfsResult
-    ///  Set attributes (permissions, times, etc.) on an item.
-    func setAttributes(itemId: UInt64, params: SetAttributesParams) async throws -> VfsResult
-    ///  Ping for connectivity check.
-    func ping() async throws -> String
-}
-
-public final class VfsChannelingDispatcher {
-    private let handler: VfsHandler
-    private let registry: IncomingChannelRegistry
-    private let taskSender: TaskSender
-
-    public init(handler: VfsHandler, registry: IncomingChannelRegistry, taskSender: @escaping TaskSender) {
-        self.handler = handler
-        self.registry = registry
-        self.taskSender = taskSender
-    }
-
-    public func dispatch(methodId: UInt64, requestId: UInt64, payload: Data) async {
-        switch methodId {
-        case 0xac1f4b76a434caf5:
-            await dispatch_lookup(requestId: requestId, payload: payload)
-        case 0xc968b68989c3f020:
-            await dispatch_getAttributes(requestId: requestId, payload: payload)
-        case 0xd717690e60df5af3:
-            await dispatch_readDir(requestId: requestId, payload: payload)
-        case 0x9c80fd555999d0e1:
-            await dispatch_read(requestId: requestId, payload: payload)
-        case 0x5d398e81123c3597:
-            await dispatch_write(requestId: requestId, payload: payload)
-        case 0x2caaf8adf5eda0e1:
-            await dispatch_create(requestId: requestId, payload: payload)
-        case 0xfa37cb27061e7e2a:
-            await dispatch_delete(requestId: requestId, payload: payload)
-        case 0x4d68b4b3208a8c07:
-            await dispatch_rename(requestId: requestId, payload: payload)
-        case 0x320f6529a5a0e5ce:
-            await dispatch_setAttributes(requestId: requestId, payload: payload)
-        case 0xe35cdfdca59ce5ab:
-            await dispatch_ping(requestId: requestId, payload: payload)
-        default:
-            taskSender(.response(requestId: requestId, payload: encodeUnknownMethodError()))
-        }
-    }
-
-    /// Pre-register channel IDs from a request payload.
-    /// Call this synchronously before spawning the dispatch task to avoid
-    /// race conditions where Data arrives before channels are registered.
-    public static func preregisterChannels(methodId: UInt64, payload: Data, registry: ChannelRegistry) async {
-        switch methodId {
-        default:
-            break
-        }
-    }
-
-    private func dispatch_lookup(requestId: UInt64, payload: Data) async {
-        do {
-            var cursor = 0
-            let parentId = try decodeVarint(from: payload, offset: &cursor)
-            let name = try decodeString(from: payload, offset: &cursor)
-            let result = try await handler.lookup(parentId: parentId, name: name)
-            taskSender(.response(requestId: requestId, payload: encodeResultOk(result, encoder: { encodeVarint($0.itemId) + { v in
-    switch v {
-    case .file:
-        return [UInt8(0)]
-    case .directory:
-        return [UInt8(1)]
-    case .symlink:
-        return [UInt8(2)]
-    }
-}($0.itemType) + encodeI32($0.error) })))
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError()))
-        }
-    }
-
-    private func dispatch_getAttributes(requestId: UInt64, payload: Data) async {
-        do {
-            var cursor = 0
-            let itemId = try decodeVarint(from: payload, offset: &cursor)
-            let result = try await handler.getAttributes(itemId: itemId)
-            taskSender(.response(requestId: requestId, payload: encodeResultOk(result, encoder: { encodeVarint($0.attrs.itemId) + { v in
-    switch v {
-    case .file:
-        return [UInt8(0)]
-    case .directory:
-        return [UInt8(1)]
-    case .symlink:
-        return [UInt8(2)]
-    }
-}($0.attrs.itemType) + encodeVarint($0.attrs.size) + encodeVarint($0.attrs.modifiedTime) + encodeVarint($0.attrs.createdTime) + encodeU32($0.attrs.mode) + encodeI32($0.error) })))
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError()))
-        }
-    }
-
-    private func dispatch_readDir(requestId: UInt64, payload: Data) async {
-        do {
-            var cursor_ = 0
-            let itemId = try decodeVarint(from: payload, offset: &cursor_)
-            let cursor = try decodeVarint(from: payload, offset: &cursor_)
-            let result = try await handler.readDir(itemId: itemId, cursor: cursor)
-            taskSender(.response(requestId: requestId, payload: encodeResultOk(result, encoder: { encodeVec($0.entries, encoder: { encodeString($0.name) + encodeVarint($0.itemId) + { v in
-    switch v {
-    case .file:
-        return [UInt8(0)]
-    case .directory:
-        return [UInt8(1)]
-    case .symlink:
-        return [UInt8(2)]
-    }
-}($0.itemType) + encodeVarint($0.size) + encodeVarint($0.modifiedTime) + encodeVarint($0.createdTime) + encodeU32($0.mode) }) + encodeVarint($0.nextCursor) + encodeI32($0.error) })))
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError()))
-        }
-    }
-
-    private func dispatch_read(requestId: UInt64, payload: Data) async {
-        do {
-            var cursor = 0
-            let itemId = try decodeVarint(from: payload, offset: &cursor)
-            let offset = try decodeVarint(from: payload, offset: &cursor)
-            let len = try decodeVarint(from: payload, offset: &cursor)
-            let result = try await handler.read(itemId: itemId, offset: offset, len: len)
-            taskSender(.response(requestId: requestId, payload: encodeResultOk(result, encoder: { encodeBytes(Array($0.data)) + encodeI32($0.error) })))
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError()))
-        }
-    }
-
-    private func dispatch_write(requestId: UInt64, payload: Data) async {
-        do {
-            var cursor = 0
-            let itemId = try decodeVarint(from: payload, offset: &cursor)
-            let offset = try decodeVarint(from: payload, offset: &cursor)
-            let data = try decodeBytes(from: payload, offset: &cursor)
-            let result = try await handler.write(itemId: itemId, offset: offset, data: data)
-            taskSender(.response(requestId: requestId, payload: encodeResultOk(result, encoder: { encodeVarint($0.bytesWritten) + encodeI32($0.error) })))
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError()))
-        }
-    }
-
-    private func dispatch_create(requestId: UInt64, payload: Data) async {
-        do {
-            var cursor = 0
-            let parentId = try decodeVarint(from: payload, offset: &cursor)
-            let name = try decodeString(from: payload, offset: &cursor)
-            let _itemType_disc = try decodeU8(from: payload, offset: &cursor)
-            let itemType: ItemType
-            switch _itemType_disc {
-            case 0:
-                itemType = .file
-            case 1:
-                itemType = .directory
-            case 2:
-                itemType = .symlink
-            default:
-                throw RoamError.decodeError("unknown enum variant")
-            }
-            let result = try await handler.create(parentId: parentId, name: name, itemType: itemType)
-            taskSender(.response(requestId: requestId, payload: encodeResultOk(result, encoder: { encodeVarint($0.itemId) + encodeI32($0.error) })))
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError()))
-        }
-    }
-
-    private func dispatch_delete(requestId: UInt64, payload: Data) async {
-        do {
-            var cursor = 0
-            let itemId = try decodeVarint(from: payload, offset: &cursor)
-            let result = try await handler.delete(itemId: itemId)
-            taskSender(.response(requestId: requestId, payload: encodeResultOk(result, encoder: { encodeI32($0.error) })))
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError()))
-        }
-    }
-
-    private func dispatch_rename(requestId: UInt64, payload: Data) async {
-        do {
-            var cursor = 0
-            let itemId = try decodeVarint(from: payload, offset: &cursor)
-            let newParentId = try decodeVarint(from: payload, offset: &cursor)
-            let newName = try decodeString(from: payload, offset: &cursor)
-            let result = try await handler.rename(itemId: itemId, newParentId: newParentId, newName: newName)
-            taskSender(.response(requestId: requestId, payload: encodeResultOk(result, encoder: { encodeI32($0.error) })))
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError()))
-        }
-    }
-
-    private func dispatch_setAttributes(requestId: UInt64, payload: Data) async {
-        do {
-            var cursor = 0
-            let itemId = try decodeVarint(from: payload, offset: &cursor)
-            let _params_mode = try decodeOption(from: payload, offset: &cursor, decoder: { data, off in try decodeU32(from: data, offset: &off) })
-            let _params_modifiedTime = try decodeOption(from: payload, offset: &cursor, decoder: { data, off in try decodeVarint(from: data, offset: &off) })
-            let _params_size = try decodeOption(from: payload, offset: &cursor, decoder: { data, off in try decodeVarint(from: data, offset: &off) })
-            let params = SetAttributesParams(mode: _params_mode, modifiedTime: _params_modifiedTime, size: _params_size)
-            let result = try await handler.setAttributes(itemId: itemId, params: params)
-            taskSender(.response(requestId: requestId, payload: encodeResultOk(result, encoder: { encodeI32($0.error) })))
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError()))
-        }
-    }
-
-    private func dispatch_ping(requestId: UInt64, payload: Data) async {
-        do {
-            let result = try await handler.ping()
-            taskSender(.response(requestId: requestId, payload: encodeResultOk(result, encoder: { encodeString($0) })))
-        } catch {
-            taskSender(.response(requestId: requestId, payload: encodeInvalidPayloadError()))
-        }
-    }
-
 }
 
 // MARK: - Vfs Schemas
