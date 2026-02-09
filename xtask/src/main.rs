@@ -30,14 +30,6 @@ fn install_all() -> Result<(), Box<dyn std::error::Error>> {
     let status = Command::new("cargo")
         .arg("build")
         .arg("--release")
-        .arg("-p")
-        .arg("vx")
-        .arg("-p")
-        .arg("vx-store")
-        .arg("-p")
-        .arg("vx-runner")
-        .arg("-p")
-        .arg("vxd")
         .status()?;
 
     if !status.success() {
