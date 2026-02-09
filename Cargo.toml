@@ -26,6 +26,8 @@ vx-tracing = { path = "crates/vx-tracing" }
 vx-rs = { path = "crates/vx-rs" }
 vx-vfs = { path = "crates/vx-vfs" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
+vx-locks = { path = "crates/vx-locks", features = ["diagnostics"] }
+parking_lot = "0.12"
 
 # facet ecosystem
 facet = { git = "https://github.com/facet-rs/facet", branch = "main", features = [
@@ -48,7 +50,8 @@ picante = { git = "https://github.com/bearcove/picante", branch = "main", featur
 
 # RPC
 roam = { git = "https://github.com/bearcove/roam", branch = "main" }
-roam-stream = { git = "https://github.com/bearcove/roam", branch = "main" }
+roam-session = { git = "https://github.com/bearcove/roam", branch = "main", features = ["diagnostics"] }
+roam-stream = { git = "https://github.com/bearcove/roam", branch = "main", features = ["diagnostics"] }
 roam-local = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-codegen = { git = "https://github.com/bearcove/roam", branch = "main" }
 ur-taking-me-with-you = { git = "https://github.com/bearcove/roam", branch = "main" }
@@ -81,8 +84,8 @@ futures-util = "0.3"
 async-stream = "0.3"
 bytes = "1"
 
-# FUSE (Linux)
-fuse3 = { git = "https://github.com/bearcove/fuse3.git", default-features = false, features = ["tokio-runtime", "unprivileged"] }
+# FUSE (Linux) — vendored
+fuse3 = { path = "crates/fuse3", features = ["telemetry"] }
 
 # terminal
 owo-colors = "4"
@@ -145,6 +148,7 @@ strip = "none"
 
 # [patch."https://github.com/bearcove/roam"]
 # roam = { path = "../roam/rust/roam" }
+# roam-session = { path = "../roam/rust/roam-session" }
 # roam-stream = { path = "../roam/rust/roam-stream" }
 # roam-local = { path = "../roam/rust/roam-local" }
 # roam-codegen = { path = "../roam/rust/roam-codegen" }

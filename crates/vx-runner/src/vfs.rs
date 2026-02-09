@@ -31,7 +31,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::RwLock;
+
+use vx_locks::{DiagnosticMutex, DiagnosticRwLock};
 use vixenfs_proto::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
     ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
@@ -84,16 +85,16 @@ pub struct CasVfs {
     /// CAS client for fetching blobs
     cas: Arc<StoreClient<crate::CasCaller>>,
     /// All items in the VFS (keyed by ItemId)
-    items: RwLock<HashMap<ItemId, VfsItem>>,
+    items: DiagnosticRwLock<HashMap<ItemId, VfsItem>>,
     /// Active action prefixes (keyed by prefix ID like "build-01JFX...")
-    prefixes: RwLock<HashMap<String, ActionPrefix>>,
+    prefixes: DiagnosticRwLock<HashMap<String, ActionPrefix>>,
     /// Next available ItemId
     next_id: AtomicU64,
     /// Blob cache: blobs are immutable (content-addressed), so caching is unconditionally safe.
     /// Uses OnceCell per blob for single-flight fetching — concurrent reads of the same blob
     /// wait on the OnceCell, not the mutex. Different blobs proceed independently.
     #[allow(clippy::type_complexity)]
-    blob_cache: tokio::sync::Mutex<HashMap<Blake3Hash, Arc<tokio::sync::OnceCell<Arc<[u8]>>>>>,
+    blob_cache: DiagnosticMutex<HashMap<Blake3Hash, Arc<tokio::sync::OnceCell<Arc<[u8]>>>>>,
 }
 
 impl CasVfs {
@@ -118,10 +119,10 @@ impl CasVfs {
 
         Self {
             cas,
-            items: RwLock::new(items),
-            prefixes: RwLock::new(HashMap::new()),
+            items: DiagnosticRwLock::new("CasVfs::items", items),
+            prefixes: DiagnosticRwLock::new("CasVfs::prefixes", HashMap::new()),
             next_id: AtomicU64::new(2), // 1 is root
-            blob_cache: tokio::sync::Mutex::new(HashMap::new()),
+            blob_cache: DiagnosticMutex::new("CasVfs::blob_cache", HashMap::new()),
         }
     }
 
@@ -135,7 +136,7 @@ impl CasVfs {
     /// OnceCell — only one RPC is issued.
     async fn get_or_fetch_blob(&self, hash: Blake3Hash) -> Result<Arc<[u8]>, String> {
         let cell = {
-            let mut cache = self.blob_cache.lock().await;
+            let mut cache = self.blob_cache.lock();
             cache
                 .entry(hash)
                 .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
@@ -154,7 +155,7 @@ impl CasVfs {
 
     /// Check if a prefix already exists
     pub async fn has_prefix(&self, prefix_id: &str) -> bool {
-        self.prefixes.read().await.contains_key(prefix_id)
+        self.prefixes.read().contains_key(prefix_id)
     }
 
     /// Create a new action prefix
@@ -165,7 +166,7 @@ impl CasVfs {
 
         // Create the prefix directory under root
         {
-            let mut items = self.items.write().await;
+            let mut items = self.items.write();
             items.insert(
                 prefix_root_id,
                 VfsItem {
@@ -183,7 +184,7 @@ impl CasVfs {
 
         // Register the prefix
         {
-            let mut prefixes = self.prefixes.write().await;
+            let mut prefixes = self.prefixes.write();
             prefixes.insert(
                 prefix_id.clone(),
                 ActionPrefix {
@@ -271,7 +272,7 @@ impl CasVfs {
     ) -> Option<ItemId> {
         // Get the prefix root
         let prefix_root_id = {
-            let prefixes = self.prefixes.read().await;
+            let prefixes = self.prefixes.read();
             prefixes.get(prefix_id)?.root_item_id
         };
 
@@ -289,7 +290,7 @@ impl CasVfs {
 
             // Check if this component already exists
             let existing = {
-                let items = self.items.read().await;
+                let items = self.items.read();
                 items
                     .values()
                     .find(|item| item.parent_id == current_parent && item.name == *component)
@@ -318,7 +319,7 @@ impl CasVfs {
             };
 
             {
-                let mut items = self.items.write().await;
+                let mut items = self.items.write();
                 items.insert(
                     new_id,
                     VfsItem {
@@ -336,7 +337,7 @@ impl CasVfs {
 
             if is_last {
                 // Update prefix mappings
-                let mut prefixes = self.prefixes.write().await;
+                let mut prefixes = self.prefixes.write();
                 if let Some(prefix) = prefixes.get_mut(prefix_id) {
                     prefix.path_mappings.insert(path.to_string(), entry);
                 }
@@ -353,19 +354,19 @@ impl CasVfs {
     pub async fn remove_prefix(&self, prefix_id: &str) {
         // Get items to remove
         let items_to_remove: Vec<ItemId> = {
-            let prefixes = self.prefixes.read().await;
+            let prefixes = self.prefixes.read();
             let Some(prefix) = prefixes.get(prefix_id) else {
                 return;
             };
 
-            let items = self.items.read().await;
+            let items = self.items.read();
             // Collect all items under this prefix (including the prefix root)
             self.collect_descendants(&items, prefix.root_item_id)
         };
 
         // Remove items
         {
-            let mut items = self.items.write().await;
+            let mut items = self.items.write();
             for id in items_to_remove {
                 items.remove(&id);
             }
@@ -373,7 +374,7 @@ impl CasVfs {
 
         // Remove prefix registration
         {
-            let mut prefixes = self.prefixes.write().await;
+            let mut prefixes = self.prefixes.write();
             prefixes.remove(prefix_id);
         }
 
@@ -408,7 +409,7 @@ impl Vfs for CasVfs {
     async fn lookup(&self, _cx: &roam::Context, parent_id: ItemId, name: String) -> LookupResult {
         tracing::trace!(parent_id, name = %name, "VFS lookup");
 
-        let items = self.items.read().await;
+        let items = self.items.read();
         for item in items.values() {
             if item.parent_id == parent_id && item.name == name {
                 tracing::trace!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found");
@@ -437,7 +438,7 @@ impl Vfs for CasVfs {
     async fn get_attributes(&self, _cx: &roam::Context, item_id: ItemId) -> GetAttributesResult {
         tracing::trace!(item_id, "VFS get_attributes");
 
-        let items = self.items.read().await;
+        let items = self.items.read();
         match items.get(&item_id) {
             Some(item) => GetAttributesResult {
                 attrs: ItemAttributes {
@@ -467,7 +468,7 @@ impl Vfs for CasVfs {
     async fn read_dir(&self, _cx: &roam::Context, item_id: ItemId, cursor: u64) -> ReadDirResult {
         tracing::trace!(item_id, cursor, "VFS read_dir");
 
-        let items = self.items.read().await;
+        let items = self.items.read();
         match items.get(&item_id) {
             Some(item) if item.item_type == ItemType::Directory => {
                 let children: Vec<_> = items.values().filter(|i| i.parent_id == item_id).collect();
@@ -524,7 +525,7 @@ impl Vfs for CasVfs {
 
         // Get item info — prefer write_buffer over CAS for locally-written files
         let (item_type, cas_hash, buffered_data) = {
-            let items = self.items.read().await;
+            let items = self.items.read();
             match items.get(&item_id) {
                 Some(item) => (item.item_type, item.cas_hash, item.write_buffer.clone()),
                 None => {
@@ -591,7 +592,7 @@ impl Vfs for CasVfs {
     ) -> WriteResult {
         tracing::trace!(item_id, offset, len = data.len(), "write");
 
-        let mut items = self.items.write().await;
+        let mut items = self.items.write();
         let Some(item) = items.get_mut(&item_id) else {
             return WriteResult {
                 bytes_written: 0,
@@ -636,7 +637,7 @@ impl Vfs for CasVfs {
 
         // Verify parent exists and is a directory
         {
-            let items = self.items.read().await;
+            let items = self.items.read();
             match items.get(&parent_id) {
                 Some(item) if item.item_type == ItemType::Directory => {}
                 Some(_) => {
@@ -674,7 +675,7 @@ impl Vfs for CasVfs {
         };
 
         {
-            let mut items = self.items.write().await;
+            let mut items = self.items.write();
             items.insert(
                 new_id,
                 VfsItem {
@@ -706,7 +707,7 @@ impl Vfs for CasVfs {
             };
         }
 
-        let mut items = self.items.write().await;
+        let mut items = self.items.write();
 
         // Check if item exists
         let Some(item) = items.get(&item_id) else {
@@ -739,7 +740,7 @@ impl Vfs for CasVfs {
     ) -> VfsResult {
         tracing::trace!(item_id, new_parent_id, new_name = %new_name, "rename");
 
-        let mut items = self.items.write().await;
+        let mut items = self.items.write();
 
         // Check item exists
         if !items.contains_key(&item_id) {
@@ -790,7 +791,7 @@ impl Vfs for CasVfs {
     ) -> VfsResult {
         tracing::trace!(item_id, ?params, "set_attributes");
 
-        let mut items = self.items.write().await;
+        let mut items = self.items.write();
 
         let Some(item) = items.get_mut(&item_id) else {
             return VfsResult {
@@ -822,7 +823,7 @@ impl Vfs for CasVfs {
 impl CasVfs {
     pub async fn flush_to_cas(&self, item_id: ItemId) -> Option<(Blake3Hash, u64)> {
         let data = {
-            let mut items = self.items.write().await;
+            let mut items = self.items.write();
             let item = items.get_mut(&item_id)?;
             item.write_buffer.take()?
         };
@@ -835,7 +836,7 @@ impl CasVfs {
         match self.cas.put_blob(data).await {
             Ok(hash) => {
                 // Update the item's cas_hash and size
-                let mut items = self.items.write().await;
+                let mut items = self.items.write();
                 if let Some(item) = items.get_mut(&item_id) {
                     item.cas_hash = Some(hash);
                     item.size = size;
@@ -856,7 +857,7 @@ impl CasVfs {
 
         // Get prefix root
         let prefix_root_id = {
-            let prefixes = self.prefixes.read().await;
+            let prefixes = self.prefixes.read();
             match prefixes.get(prefix_id) {
                 Some(p) => p.root_item_id,
                 None => return results,
@@ -865,7 +866,7 @@ impl CasVfs {
 
         // Find all items with write buffers under this prefix
         let items_to_flush: Vec<(ItemId, String)> = {
-            let items = self.items.read().await;
+            let items = self.items.read();
             let descendants = self.collect_descendants(&items, prefix_root_id);
 
             descendants
@@ -895,8 +896,8 @@ impl CasVfs {
 
     /// Dump VFS state for debugging
     pub async fn dump_state(&self, prefix_id: &str) {
-        let items = self.items.read().await;
-        let prefixes = self.prefixes.read().await;
+        let items = self.items.read();
+        let prefixes = self.prefixes.read();
 
         tracing::debug!("=== VFS STATE DUMP ===");
         tracing::debug!("Total items: {}", items.len());

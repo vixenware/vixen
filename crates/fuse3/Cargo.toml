@@ -1,0 +1,24 @@
+[package]
+name = "fuse3"
+version = "0.8.1"
+edition = "2021"
+license = "MIT"
+description = "Simplified FUSE library for Linux/tokio, vendored from github.com/Sherlock-Holo/fuse3"
+
+[features]
+telemetry = []
+file-lock = []
+
+[dependencies]
+async-notify = "0.3"
+bincode-next = { version = "2.0.4", default-features = false, features = ["derive", "std"] }
+bytes = "1.5"
+futures-channel = { version = "0.3.30", features = ["sink"] }
+futures-util = { version = "0.3.30", features = ["sink"] }
+libc = "0.2.168"
+nix = { version = "0.29.0", default-features = false, features = ["fs", "mount", "user", "socket"] }
+slab = "0.4.9"
+tracing = "0.1.40"
+trait-make = "0.1"
+which = "6"
+tokio = { version = "1.45", features = ["fs", "rt", "sync", "net", "macros", "process", "time"] }

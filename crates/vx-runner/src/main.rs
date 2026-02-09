@@ -261,9 +261,37 @@ async fn main() -> Result<()> {
         Ok(VfsStart::Mounted {
             mount_path,
             vfs_dead,
+            #[cfg(target_os = "linux")]
+            telemetry,
         }) => {
             tracing::info!("VFS mounted at {}", mount_path);
             exec.set_vfs_startup_error(None).await;
+
+            // Register SIGUSR1 handler for telemetry dumps (Linux only).
+            #[cfg(target_os = "linux")]
+            {
+                let telemetry_for_signal = telemetry.clone();
+                tokio::spawn(async move {
+                    use tokio::signal::unix::{SignalKind, signal};
+                    let mut sig = signal(SignalKind::user_defined1())
+                        .expect("failed to register SIGUSR1");
+                    loop {
+                        sig.recv().await;
+                        eprintln!("\n>>> SIGUSR1 received, dumping FUSE telemetry...");
+                        telemetry_for_signal.dump();
+                        // Dump roam RPC diagnostics
+                        eprintln!("\n--- Roam RPC diagnostics ---");
+                        eprint!("{}", roam_session::diagnostic::dump_all_diagnostics());
+                        // Dump lock contention diagnostics
+                        let lock_diag = vx_locks::dump_lock_diagnostics();
+                        if !lock_diag.is_empty() {
+                            eprintln!("\n--- Lock diagnostics ---");
+                            eprint!("{lock_diag}");
+                        }
+                        dump_kernel_fuse_state();
+                    }
+                });
+            }
             let exec_for_watcher = exec.clone();
             tokio::spawn(async move {
                 let mut vfs_dead = vfs_dead;
@@ -684,5 +712,43 @@ impl RunnerService {
     #[allow(dead_code)] // Will be used for sandbox integration
     pub(crate) fn get_prefix_mount_path(&self, prefix_id: &str) -> Utf8PathBuf {
         runner_mount_base().join(prefix_id)
+    }
+}
+
+/// Dump kernel FUSE connection state and thread stacks to stderr.
+#[cfg(target_os = "linux")]
+fn dump_kernel_fuse_state() {
+    eprintln!("\n--- Kernel FUSE state ---");
+
+    if let Ok(entries) = std::fs::read_dir("/sys/fs/fuse/connections") {
+        for entry in entries.flatten() {
+            let waiting_path = entry.path().join("waiting");
+            if let Ok(val) = std::fs::read_to_string(&waiting_path) {
+                eprintln!(
+                    "  {}: waiting={}",
+                    entry.path().display(),
+                    val.trim()
+                );
+            }
+        }
+    }
+
+    eprintln!("\n--- Thread stacks ---");
+    if let Ok(tasks) = std::fs::read_dir("/proc/self/task") {
+        for task in tasks.flatten() {
+            let tid = task.file_name();
+            let comm = std::fs::read_to_string(task.path().join("comm")).unwrap_or_default();
+            let stack = std::fs::read_to_string(task.path().join("stack")).unwrap_or_default();
+            if !stack.trim().is_empty() {
+                eprintln!(
+                    "  Thread {} ({}):",
+                    tid.to_string_lossy(),
+                    comm.trim()
+                );
+                for line in stack.lines() {
+                    eprintln!("    {line}");
+                }
+            }
+        }
     }
 }

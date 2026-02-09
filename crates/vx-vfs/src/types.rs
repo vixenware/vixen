@@ -18,6 +18,9 @@ pub enum VfsStart {
         mount_path: Utf8PathBuf,
         /// Becomes `true` when the VFS session dies unexpectedly.
         vfs_dead: tokio::sync::watch::Receiver<bool>,
+        /// FUSE telemetry state for diagnostics (Linux only).
+        #[cfg(target_os = "linux")]
+        telemetry: fuse3::telemetry::TelemetryState,
     },
     /// VFS is unavailable on this platform.
     Unsupported { platform: String },

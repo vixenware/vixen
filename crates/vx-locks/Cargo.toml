@@ -1,0 +1,12 @@
+[package]
+name = "vx-locks"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+diagnostics = []
+
+[dependencies]
+parking_lot = { workspace = true }
+tokio = { workspace = true }
