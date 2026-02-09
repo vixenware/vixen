@@ -73,13 +73,21 @@ pub fn run_build_script(
 
     // Compile build.rs to a binary
     let build_script_bin = ctx.out_dir.join("build_script");
-    let compile_status = Command::new(ctx.rustc.as_str())
+    let mut compile_cmd = Command::new(ctx.rustc.as_str());
+    compile_cmd
         .arg(build_script_path.as_str())
         .arg("--crate-type=bin")
         .arg("--edition=2021") // Build scripts typically use modern edition
         .arg("-o")
-        .arg(build_script_bin.as_str())
-        .output()?;
+        .arg(build_script_bin.as_str());
+
+    // Clean environment for hermeticity — only pass through what the compiler needs
+    compile_cmd.env_clear();
+    if let Ok(path) = std::env::var("PATH") {
+        compile_cmd.env("PATH", path);
+    }
+
+    let compile_status = compile_cmd.output()?;
 
     if !compile_status.status.success() {
         return Err(BuildScriptError::CompileError {
@@ -88,15 +96,24 @@ pub fn run_build_script(
         });
     }
 
-    // Run the build script with required environment variables
-    let output = Command::new(build_script_bin.as_str())
+    // Run the build script with a clean environment for hermeticity.
+    // Only the Cargo-specified env vars and explicitly allowlisted vars are set.
+    let mut run_cmd = Command::new(build_script_bin.as_str());
+    run_cmd.env_clear();
+
+    // PATH is needed for build scripts that invoke tools (cc, pkg-config, etc.)
+    if let Ok(path) = std::env::var("PATH") {
+        run_cmd.env("PATH", path);
+    }
+
+    // Cargo-specified build script environment variables
+    run_cmd
         .env("CARGO_MANIFEST_DIR", manifest_dir.as_str())
         .env("OUT_DIR", ctx.out_dir.as_str())
         .env("TARGET", ctx.target)
         .env("HOST", ctx.host)
         .env("RUSTC", ctx.rustc.as_str())
         .env("CARGO_PKG_NAME", crate_name)
-        // Add common cargo env vars that build scripts expect
         .env("CARGO_PKG_VERSION", "0.0.0") // TODO: get from manifest
         .env("CARGO_PKG_VERSION_MAJOR", "0")
         .env("CARGO_PKG_VERSION_MINOR", "0")
@@ -105,8 +122,9 @@ pub fn run_build_script(
         .env("DEBUG", "false")
         .env("OPT_LEVEL", "3")
         .envs(ctx.env.iter())
-        .current_dir(manifest_dir)
-        .output()?;
+        .current_dir(manifest_dir);
+
+    let output = run_cmd.output()?;
 
     if !output.status.success() {
         return Err(BuildScriptError::ExitError {

@@ -170,6 +170,19 @@ fn spawn_service(
     tracing::debug!(%vx_test, "spawning {} from {}", binary_name, binary_path.display());
 
     let mut cmd = std::process::Command::new(&binary_path);
+
+    // Clean environment for hermeticity — services only see explicitly provided vars.
+    cmd.env_clear();
+    if let Ok(path) = std::env::var("PATH") {
+        cmd.env("PATH", path);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        cmd.env("HOME", home);
+    }
+    // Propagate VX_TEST so child services can detect test mode
+    if vx_test {
+        cmd.env("VX_TEST", "1");
+    }
     for (key, value) in env_vars {
         cmd.env(key, value);
     }
