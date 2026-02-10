@@ -1,5 +1,6 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
@@ -17,7 +18,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>EXAppExtensionAttributes</key>
 	<dict>
 		<key>EXExtensionPointIdentifier</key>
@@ -40,7 +41,7 @@
 			<string>v</string>
 		</dict>
 		<key>FSMediaTypes</key>
-		<dict/>
+		<dict />
 		<key>FSPersonalities</key>
 		<dict>
 			<key>VixenPersonality</key>
@@ -48,25 +49,25 @@
 				<key>FSName</key>
 				<string>vixenfs</string>
 				<key>FSfileObjectsAreCaseSensitive</key>
-				<true/>
+				<true />
 			</dict>
 		</dict>
 		<key>FSRequiresSecurityScopedPathURLResources</key>
-		<false/>
+		<false />
 		<key>FSShortName</key>
 		<string>vixenfs</string>
 		<key>FSSupportsBlockResources</key>
-		<false/>
+		<false />
 		<key>FSSupportsGenericURLResources</key>
-		<true/>
+		<true />
 		<key>FSSupportedSchemes</key>
 		<array>
 			<string>vixen</string>
 		</array>
 		<key>FSSupportsPathURLs</key>
-		<false/>
+		<false />
 		<key>FSSupportsServerURLs</key>
-		<false/>
+		<false />
 	</dict>
 </dict>
 </plist>

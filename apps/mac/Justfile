@@ -7,6 +7,10 @@ list:
 # Generate the Xcode project from project.yml.
 generate:
     cd xcode && xcodegen generate
+    plutil -convert xml1 xcode/VixenFSExtension/VixenFSExtension.entitlements
+    plutil -convert xml1 xcode/Vixen/Vixen.entitlements
+    plutil -lint xcode/VixenFSExtension/VixenFSExtension.entitlements
+    plutil -lint xcode/Vixen/Vixen.entitlements
 
 # Build Vixen.app in Release configuration.
 build: generate
@@ -28,11 +32,13 @@ install: build
     @echo "Follow the instructions in Vixen.app to finish setup."
 
 # Build, sign, and package a release DMG for review.
+
 # Optional argument: `just release-build 1.2.3`
 release-build version='':
     ./scripts/build.sh {{ version }}
 
 # Notarize, generate appcast, and publish to GitHub.
+
 # Optional argument: `just release-publish 1.2.3`
 release-publish version='':
     ./scripts/publish.sh {{ version }}
@@ -43,6 +49,7 @@ release version='':
     ./scripts/publish.sh {{ version }}
 
 # Validate release prerequisites without building artifacts.
+
 # Optional argument: `just preflight 1.2.3`
 preflight version='':
     ./scripts/preflight.sh {{ version }}
