@@ -53,11 +53,34 @@ codesign --force --options runtime --timestamp \
   --sign "$SIGNING_IDENTITY" \
   "$APP_BUNDLE_PATH/Contents/Extensions/VixenFS Extension.appex"
 
-# Sparkle framework (XPC services inside it, then the framework itself)
+# Sparkle framework (sign nested tools/apps first, then XPCs, then framework)
 SPARKLE_FW="$APP_BUNDLE_PATH/Contents/Frameworks/Sparkle.framework"
-for xpc in "$SPARKLE_FW"/Versions/Current/XPCServices/*.xpc; do
+SPARKLE_VER="$SPARKLE_FW/Versions/Current"
+
+# 1) Sparkle tools
+if [[ -f "$SPARKLE_VER/Autoupdate" ]]; then
+  codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
+    "$SPARKLE_VER/Autoupdate"
+fi
+
+if [[ -d "$SPARKLE_VER/Updater.app" ]]; then
+  # sign the actual binary first (inside-out)
+  if [[ -f "$SPARKLE_VER/Updater.app/Contents/MacOS/Updater" ]]; then
+    codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
+      "$SPARKLE_VER/Updater.app/Contents/MacOS/Updater"
+  fi
+  # then the app bundle
+  codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" \
+    "$SPARKLE_VER/Updater.app"
+fi
+
+# 2) Sparkle XPC services
+for xpc in "$SPARKLE_VER"/XPCServices/*.xpc; do
+  [[ -e "$xpc" ]] || continue
   codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$xpc"
 done
+
+# 3) Finally the framework bundle itself
 codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$SPARKLE_FW"
 
 # Finally the outer app
