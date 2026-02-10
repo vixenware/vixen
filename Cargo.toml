@@ -22,6 +22,7 @@ vx-manifest = { path = "crates/vx-manifest" }
 vx-project = { path = "crates/vx-project" }
 vxd-proto = { path = "crates/vxd-proto" }
 vx-report = { path = "crates/vx-report" }
+vx-plan = { path = "crates/vx-plan" }
 vx-io = { path = "crates/vx-io" }
 vx-tarball = { path = "crates/vx-tarball" }
 vx-http = { path = "crates/vx-http" }
@@ -110,6 +111,7 @@ jiff = "0.2"
 
 # paths
 camino = "1"
+strid = "8.0.0"
 
 # system
 libc = "0.2"
@@ -140,20 +142,20 @@ debug = 1
 split-debuginfo = "unpacked"
 strip = "none"
 
-# [patch.crates-io]
-# facet = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-core = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-macros = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-macros-impl = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-macro-parse = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-macro-types = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-reflect = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-json = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-toml = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-postcard = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-value = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-format = { git = "https://github.com/facet-rs/facet", branch = "main" }
-# facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
+[patch.crates-io]
+facet = { git = "https://github.com/facet-rs/facet", branch = "main" }
+facet-core = { git = "https://github.com/facet-rs/facet", branch = "main" }
+facet-macros = { git = "https://github.com/facet-rs/facet", branch = "main" }
+facet-macros-impl = { git = "https://github.com/facet-rs/facet", branch = "main" }
+facet-macro-parse = { git = "https://github.com/facet-rs/facet", branch = "main" }
+facet-macro-types = { git = "https://github.com/facet-rs/facet", branch = "main" }
+facet-reflect = { git = "https://github.com/facet-rs/facet", branch = "main" }
+facet-json = { git = "https://github.com/facet-rs/facet", branch = "main" }
+facet-toml = { git = "https://github.com/facet-rs/facet", branch = "main" }
+facet-postcard = { git = "https://github.com/facet-rs/facet", branch = "main" }
+facet-value = { git = "https://github.com/facet-rs/facet", branch = "main" }
+facet-format = { git = "https://github.com/facet-rs/facet", branch = "main" }
+facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
 
 # [patch."https://github.com/bearcove/picante"]
 # picante = { path = "../picante/crates/picante" }

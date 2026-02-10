@@ -605,6 +605,7 @@ version = "0.43.2"
 source = "git+https://github.com/facet-rs/facet?branch=main#967e78d7ba4ba05b270996c1235f951665cd201b"
 dependencies = [
  "autocfg",
+ "bytes",
  "camino",
  "const-fnv1a-hash",
  "iddqd",
@@ -2492,6 +2493,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "strid"
+version = "8.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a776194b07def83043ed2c0f690ce82366973370f647f7de4d4b2ef54a1b5ef"
+dependencies = [
+ "facet",
+ "strid-macros",
+]
+
+[[package]]
+name = "strid-macros"
+version = "8.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27efbaec5b763ecc98b1bb4c12150c71c7d104ff628363086052abaf9fed29ed"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unsynn",
+]
+
+[[package]]
 name = "strip-ansi-escapes"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3077,6 +3099,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-plan"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "facet",
+ "facet-json",
+ "strid",
+]
+
+[[package]]
 name = "vx-project"
 version = "0.1.0"
 dependencies = [
@@ -3094,6 +3126,7 @@ dependencies = [
  "facet",
  "facet-json",
  "ulid",
+ "vx-plan",
 ]
 
 [[package]]

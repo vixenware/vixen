@@ -4,6 +4,7 @@ description = "Typed planning IR between rule evaluation and execution"
 +++
 
 `RulePlan` is vixen's typed intermediate representation between rule evaluation and execution.
+Its canonical implementation lives in `crates/vx-plan`.
 
 ## Node Kinds
 
