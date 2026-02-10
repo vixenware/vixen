@@ -1,5 +1,9 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
+# List targets
+list:
+    just --list
+
 # Generate the Xcode project from project.yml.
 generate:
     cd xcode && xcodegen generate
