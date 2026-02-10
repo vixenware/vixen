@@ -27,14 +27,23 @@ struct VixenApp: App {
     }
 
     private func registerExtension() {
-        guard let plugInsURL = Bundle.main.builtInPlugInsURL else {
-            NSLog("builtInPlugInsURL is nil")
-            return
-        }
+        let name = "VixenFS Extension.appex"
+        let bundleURL = Bundle.main.bundleURL
 
-        let extensionURL = plugInsURL.appendingPathComponent("VixenFS Extension.appex")
-        guard FileManager.default.fileExists(atPath: extensionURL.path) else {
-            NSLog("VixenFS extension not found at: %@", extensionURL.path)
+        // ExtensionKit extensions land in Contents/Extensions/, classic appex
+        // plugins land in Contents/PlugIns/. Check both.
+        let candidates: [URL] = [
+            bundleURL.appendingPathComponent("Contents/Extensions", isDirectory: true),
+            Bundle.main.builtInPlugInsURL,
+        ].compactMap { $0 }
+
+        guard
+            let extensionURL =
+                candidates
+                .map({ $0.appendingPathComponent(name) })
+                .first(where: { FileManager.default.fileExists(atPath: $0.path) })
+        else {
+            NSLog("VixenFS extension not found in: %@", candidates.map(\.path).description)
             return
         }
 
