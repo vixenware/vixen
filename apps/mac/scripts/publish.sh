@@ -9,24 +9,55 @@ if [[ ! -f "$DMG_PATH" ]]; then
 fi
 
 echo "Submitting DMG for notarization..."
-SUBMIT_OUTPUT="$(xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait 2>&1)" || true
+SUBMIT_OUTPUT="$(xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" 2>&1)" || true
 echo "$SUBMIT_OUTPUT"
 
-SUBMISSION_ID="$(echo "$SUBMIT_OUTPUT" | grep -m1 '  id:' | awk '{print $2}')"
+SUBMISSION_ID="$(echo "$SUBMIT_OUTPUT" | awk '/  id:/{print $2; exit}')"
 
-if echo "$SUBMIT_OUTPUT" | grep -q 'status: Invalid'; then
-  echo ""
-  echo "Notarization failed. Fetching log for submission $SUBMISSION_ID..."
-  xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE"
+if [[ -z "${SUBMISSION_ID:-}" ]]; then
+  echo "No submission ID returned; cannot proceed." >&2
   exit 1
 fi
 
-if ! echo "$SUBMIT_OUTPUT" | grep -q 'status: Accepted'; then
-  echo ""
-  echo "Unexpected notarization status. Fetching log for submission $SUBMISSION_ID..."
-  xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE" 2>/dev/null || true
-  exit 1
-fi
+echo "Submission ID: $SUBMISSION_ID"
+echo "Polling for notarization result (timeout: 60 min)..."
+
+DEADLINE=$(( $(date +%s) + 3600 ))
+POLL_INTERVAL=15
+
+while :; do
+  if [[ $(date +%s) -ge $DEADLINE ]]; then
+    echo "Timed out waiting for notarization after 60 minutes." >&2
+    echo "Fetching log for submission $SUBMISSION_ID..."
+    xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE" 2>/dev/null || true
+    exit 1
+  fi
+
+  INFO="$(xcrun notarytool info "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE" 2>&1)" || true
+
+  if echo "$INFO" | grep -q 'status: Accepted'; then
+    echo "$INFO"
+    echo "Notarization accepted."
+    break
+  fi
+
+  if echo "$INFO" | grep -q 'status: Invalid'; then
+    echo "$INFO"
+    echo ""
+    echo "Notarization failed. Fetching log for submission $SUBMISSION_ID..."
+    xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE"
+    exit 1
+  fi
+
+  if echo "$INFO" | grep -q 'status: In Progress'; then
+    printf "."
+  else
+    # Transient error (connectTimeout, etc.) — keep polling
+    printf "x"
+  fi
+
+  sleep "$POLL_INTERVAL"
+done
 
 echo "Stapling notarization ticket..."
 xcrun stapler staple "$DMG_PATH"
