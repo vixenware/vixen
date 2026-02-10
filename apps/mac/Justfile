@@ -48,6 +48,12 @@ release version='':
     ./scripts/build.sh {{ version }}
     ./scripts/publish.sh {{ version }}
 
+# Update Homebrew tap with the release DMG SHA256.
+
+# Optional argument: `just update-tap 1.2.3`
+update-tap version='':
+    ./scripts/update-tap.sh {{ version }}
+
 # Validate release prerequisites without building artifacts.
 
 # Optional argument: `just preflight 1.2.3`
