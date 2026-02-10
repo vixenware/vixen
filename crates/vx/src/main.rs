@@ -9,6 +9,7 @@ use eyre::{Result, bail};
 use facet::Facet;
 use figue as args;
 use owo_colors::OwoColorize;
+use tui::emit_osc_progress;
 use vx_report::{CacheOutcome, ReportStore, RunDiff};
 use vxd_proto::{ActionProgress, ActionType, BuildRequest, ProgressListener, VxdClient};
 
@@ -186,10 +187,14 @@ fn short_hex(hash: &str, verbose: bool) -> String {
     }
 }
 
-/// Progress listener that drives the TUI (or logs to console if TUI is disabled)
+/// Progress listener that drives the TUI (or logs to console if TUI is disabled).
+/// In both modes, OSC 9;4 terminal progress sequences are emitted.
 struct ProgressListenerImpl {
     tui: Option<tui::TuiHandle>,
     next_action_id: std::sync::atomic::AtomicU64,
+    /// Tracks total/completed for OSC progress in no-tui mode
+    total_actions: std::sync::atomic::AtomicU64,
+    completed_actions: std::sync::atomic::AtomicU64,
 }
 
 type VxdCaller = roam_stream::Client<
@@ -205,6 +210,13 @@ impl Clone for ProgressListenerImpl {
                 self.next_action_id
                     .load(std::sync::atomic::Ordering::SeqCst),
             ),
+            total_actions: std::sync::atomic::AtomicU64::new(
+                self.total_actions.load(std::sync::atomic::Ordering::SeqCst),
+            ),
+            completed_actions: std::sync::atomic::AtomicU64::new(
+                self.completed_actions
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            ),
         }
     }
 }
@@ -214,6 +226,8 @@ impl ProgressListenerImpl {
         Self {
             tui,
             next_action_id: std::sync::atomic::AtomicU64::new(1),
+            total_actions: std::sync::atomic::AtomicU64::new(0),
+            completed_actions: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -223,6 +237,10 @@ impl ProgressListener for ProgressListenerImpl {
         if let Some(tui) = &self.tui {
             tui.set_total(total as usize).await;
         } else {
+            self.total_actions
+                .store(total, std::sync::atomic::Ordering::SeqCst);
+            // Emit OSC progress (0%) now that we know the total
+            emit_osc_progress(tui::OscProgressState::Set, Some(0));
             tracing::info!("Build: {} actions total", total);
         }
     }
@@ -265,6 +283,15 @@ impl ProgressListener for ProgressListenerImpl {
         if let Some(tui) = &self.tui {
             tui.complete_action(action_id).await;
         } else {
+            let completed = self
+                .completed_actions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            let total = self.total_actions.load(std::sync::atomic::Ordering::SeqCst);
+            if total > 0 {
+                let pct = (completed as f64 / total as f64 * 100.0).min(100.0) as u8;
+                emit_osc_progress(tui::OscProgressState::Set, Some(pct));
+            }
             tracing::info!("[{}] Complete", action_id);
         }
     }
@@ -410,6 +437,12 @@ async fn try_connect_daemon(
 async fn cmd_build(args: BuildArgs) -> Result<()> {
     let cwd = Utf8PathBuf::try_from(std::env::current_dir()?)?;
 
+    // Emit indeterminate OSC 9;4 progress while connecting to daemon
+    // (TUI mode emits this from its display task; no-tui mode needs it here)
+    if args.no_tui {
+        emit_osc_progress(tui::OscProgressState::Indeterminate, None);
+    }
+
     // Connect to daemon (spawning if necessary) and set up TUI
     let (daemon, tui) = get_or_spawn_daemon(args.no_spawn, args.no_tui).await?;
 
@@ -440,14 +473,24 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
             if let Some(tui) = tui {
                 tui.shutdown().await;
             }
+            // Clear terminal progress on interrupt
+            emit_osc_progress(tui::OscProgressState::Remove, None);
             eprintln!("Build interrupted");
             std::process::exit(130);
         }
     };
 
-    // Shutdown the TUI and wait for cleanup (if TUI was enabled)
+    // Signal the build outcome and shutdown the TUI
     if let Some(tui) = tui {
+        tui.set_build_outcome(result.success).await;
         tui.shutdown().await;
+    } else {
+        // No TUI — emit final OSC 9;4 state directly
+        if result.success {
+            emit_osc_progress(tui::OscProgressState::Remove, None);
+        } else {
+            emit_osc_progress(tui::OscProgressState::Error, None);
+        }
     }
 
     if result.success {

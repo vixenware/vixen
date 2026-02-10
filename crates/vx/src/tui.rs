@@ -27,6 +27,38 @@ impl Action {
     }
 }
 
+/// OSC 9;4 progress state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OscProgressState {
+    /// Remove progress indicator
+    Remove = 0,
+    /// Set progress (0-100)
+    Set = 1,
+    /// Error state (red)
+    Error = 2,
+    /// Indeterminate (pulsing)
+    Indeterminate = 3,
+}
+
+/// Emit an OSC 9;4 terminal progress escape sequence.
+///
+/// Terminals that support this protocol (Ghostty 1.2+, Windows Terminal,
+/// ConEmu, WezTerm) render a native progress bar in the title bar, tab,
+/// or taskbar. Unsupported terminals silently ignore the sequence.
+pub(crate) fn emit_osc_progress(state: OscProgressState, progress: Option<u8>) {
+    use std::io::Write;
+
+    let progress_val = progress.unwrap_or(0);
+    // ESC ] 9 ; 4 ; <state> ; <progress> BEL
+    let _ = write!(
+        std::io::stderr(),
+        "\x1b]9;4;{};{}\x07",
+        state as u8,
+        progress_val
+    );
+    let _ = std::io::stderr().flush();
+}
+
 /// TUI state shared between the service and the display task
 struct TuiState {
     /// Active actions (action_id -> Action)
@@ -41,6 +73,8 @@ struct TuiState {
     logs: VecDeque<String>,
     /// Shutdown flag to stop the display task
     shutdown: bool,
+    /// Build outcome: None while running, Some(true) on success, Some(false) on failure
+    build_outcome: Option<bool>,
 }
 
 impl TuiState {
@@ -52,6 +86,7 @@ impl TuiState {
             next_id: 1,
             logs: VecDeque::with_capacity(100),
             shutdown: false,
+            build_outcome: None,
         }
     }
 
@@ -145,6 +180,12 @@ impl TuiHandle {
         }
     }
 
+    /// Signal the build outcome so the terminal progress shows the right final state
+    pub async fn set_build_outcome(&self, success: bool) {
+        let mut state = self.state.write().await;
+        state.build_outcome = Some(success);
+    }
+
     /// Shutdown the TUI and wait for cleanup to complete
     pub async fn shutdown(&self) {
         // Set the shutdown flag
@@ -200,6 +241,9 @@ impl TuiHandle {
             })
             .collect();
 
+        // Emit indeterminate progress while the build graph is being computed
+        emit_osc_progress(OscProgressState::Indeterminate, None);
+
         // Update loop at ~15fps (every 67ms)
         let mut interval = tokio::time::interval(Duration::from_millis(67));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -214,6 +258,12 @@ impl TuiHandle {
             let completed = state_snapshot.completed;
             let pending = state_snapshot.pending();
             let active = state_snapshot.active.len();
+
+            // Emit OSC 9;4 progress (doubles as keepalive for Ghostty's 15s timeout)
+            if state_snapshot.total > 0 {
+                let pct = (completed as f64 / total as f64 * 100.0).min(100.0) as u8;
+                emit_osc_progress(OscProgressState::Set, Some(pct));
+            }
 
             progress_bar.set_length(total as u64);
             progress_bar.set_position(completed as u64);
@@ -287,6 +337,14 @@ impl TuiHandle {
 
             // If shutdown was requested, clean up and exit
             if state_snapshot.shutdown {
+                // Emit final OSC 9;4 state based on build outcome
+                match state_snapshot.build_outcome {
+                    Some(true) => emit_osc_progress(OscProgressState::Remove, None),
+                    Some(false) => emit_osc_progress(OscProgressState::Error, None),
+                    // No outcome yet (e.g. Ctrl-C) — just clear
+                    None => emit_osc_progress(OscProgressState::Remove, None),
+                }
+
                 // Clear all bars in reverse order (logs, actions, progress)
                 for bar in log_bars.iter().rev() {
                     bar.finish_and_clear();
