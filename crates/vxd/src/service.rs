@@ -20,9 +20,9 @@ use tokio_util::sync::CancellationToken;
 use peeps::locks::{DiagnosticAsyncMutex, DiagnosticAsyncRwLock};
 use tracing::{debug, info, warn};
 use vx_report::{
-    BuildReport, ReportStore, RuleId, RulePlan, RulePlanEdge, RulePlanEdgeKind, RulePlanFact,
-    RulePlanFactId, RulePlanNode, RulePlanNodeId, RulePlanNodeKind, RulePlanProvenance,
-    RulePlanSource, RulePlanSourceId, RulePlanSpan, RulePlanValue,
+    BuildReport, GraphTopology, ReportStore, RuleId, RulePlan, RulePlanEdge, RulePlanEdgeKind,
+    RulePlanFact, RulePlanFactId, RulePlanNode, RulePlanNodeId, RulePlanNodeKind,
+    RulePlanProvenance, RulePlanSource, RulePlanSourceId, RulePlanSpan, RulePlanValue,
 };
 use vx_rs::CrateGraph;
 use vx_runner_proto::RunnerClient;
@@ -116,6 +116,69 @@ fn rule_plan_bridge_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn rule_plan_parity_strict_enabled() -> bool {
+    std::env::var("VX_RULE_PLAN_PARITY_STRICT")
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn parity_focus_node_id(node_id: &str) -> bool {
+    node_id.starts_with("compile-") || node_id.starts_with("acquire-registry:")
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct RulePlanParityDiff {
+    pub legacy_focus_count: usize,
+    pub rule_plan_focus_count: usize,
+    pub missing_in_rule_plan: Vec<String>,
+    pub extra_in_rule_plan: Vec<String>,
+}
+
+impl RulePlanParityDiff {
+    fn has_drift(&self) -> bool {
+        !self.missing_in_rule_plan.is_empty() || !self.extra_in_rule_plan.is_empty()
+    }
+}
+
+pub(crate) fn compare_rule_plan_parity(
+    legacy_topology: &GraphTopology,
+    rule_plan_topology: &GraphTopology,
+) -> RulePlanParityDiff {
+    let legacy_ids = legacy_topology
+        .nodes
+        .iter()
+        .filter(|node| parity_focus_node_id(&node.node_id))
+        .map(|node| node.node_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let rule_plan_ids = rule_plan_topology
+        .nodes
+        .iter()
+        .filter(|node| parity_focus_node_id(&node.node_id))
+        .map(|node| node.node_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let missing_in_rule_plan = legacy_ids
+        .difference(&rule_plan_ids)
+        .cloned()
+        .collect::<Vec<_>>();
+    let extra_in_rule_plan = rule_plan_ids
+        .difference(&legacy_ids)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    RulePlanParityDiff {
+        legacy_focus_count: legacy_ids.len(),
+        rule_plan_focus_count: rule_plan_ids.len(),
+        missing_in_rule_plan,
+        extra_in_rule_plan,
+    }
+}
+
 pub(crate) fn sanitize_id_component(input: &str) -> String {
     input
         .chars()
@@ -127,6 +190,10 @@ pub(crate) fn sanitize_id_component(input: &str) -> String {
             }
         })
         .collect()
+}
+
+pub(crate) fn legacy_compile_node_id(crate_name: &str, crate_type: &str) -> String {
+    format!("compile-{crate_type}:{crate_name}")
 }
 
 fn build_rule_plan_from_crate_graph(graph: &CrateGraph) -> RulePlan {
@@ -180,6 +247,44 @@ fn build_rule_plan_from_crate_graph(graph: &CrateGraph) -> RulePlan {
 
     let mut artifact_by_crate_id = std::collections::HashMap::new();
     let mut action_by_crate_id = std::collections::HashMap::new();
+    let mut registry_artifact_by_name_version = std::collections::HashMap::new();
+
+    let mut registry_crates = graph.iter_registry_crates().collect::<Vec<_>>();
+    registry_crates.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.version.cmp(&b.version))
+            .then_with(|| a.checksum.cmp(&b.checksum))
+    });
+    for (idx, registry) in registry_crates.iter().enumerate() {
+        let key = format!(
+            "{}_{}",
+            sanitize_id_component(&registry.name),
+            sanitize_id_component(&registry.version)
+        );
+        let node_id = RulePlanNodeId::from(format!("n_registry_artifact_{key}"));
+        let registry_action_node_id =
+            format!("acquire-registry:{}:{}", registry.name, registry.version);
+        let mut provenance = base_provenance("rule.registry.artifact", 6 + idx as u32);
+        provenance.metadata.insert(
+            "legacy_node_id".to_string(),
+            registry_action_node_id.clone(),
+        );
+        provenance
+            .metadata
+            .insert("registry_name".to_string(), registry.name.clone());
+        provenance
+            .metadata
+            .insert("registry_version".to_string(), registry.version.clone());
+        nodes.push(RulePlanNode {
+            id: node_id.clone(),
+            kind: RulePlanNodeKind::Artifact,
+            label: registry_action_node_id,
+            provenance,
+        });
+        registry_artifact_by_name_version
+            .insert((registry.name.clone(), registry.version.clone()), node_id);
+    }
 
     for (idx, crate_node) in crate_nodes.iter().enumerate() {
         let key = format!(
@@ -190,17 +295,30 @@ fn build_rule_plan_from_crate_graph(graph: &CrateGraph) -> RulePlan {
         );
         let action_id = RulePlanNodeId::from(format!("n_action_{key}"));
         let artifact_id = RulePlanNodeId::from(format!("n_artifact_{key}"));
+        let legacy_node_id =
+            legacy_compile_node_id(&crate_node.crate_name, crate_node.crate_type.as_str());
+        let mut action_provenance = base_provenance("rule.rust.compile", 10 + idx as u32);
+        action_provenance
+            .metadata
+            .insert("legacy_node_id".to_string(), legacy_node_id.clone());
+        action_provenance
+            .metadata
+            .insert("crate_name".to_string(), crate_node.crate_name.clone());
+        action_provenance.metadata.insert(
+            "crate_type".to_string(),
+            crate_node.crate_type.as_str().to_string(),
+        );
 
         nodes.push(RulePlanNode {
             id: action_id.clone(),
             kind: RulePlanNodeKind::Action,
-            label: format!("compile {}", crate_node.crate_name),
-            provenance: base_provenance("rule.rust.compile", 10 + idx as u32),
+            label: legacy_node_id,
+            provenance: action_provenance,
         });
         nodes.push(RulePlanNode {
             id: artifact_id.clone(),
             kind: RulePlanNodeKind::Artifact,
-            label: format!("artifact {}", crate_node.crate_name),
+            label: format!("artifact:{}", crate_node.crate_name),
             provenance: base_provenance("rule.rust.artifact", 30 + idx as u32),
         });
 
@@ -241,6 +359,19 @@ fn build_rule_plan_from_crate_graph(graph: &CrateGraph) -> RulePlan {
                         ),
                     });
                 }
+            }
+
+            if let vx_rs::crate_graph::CrateSource::Registry { name, version, .. } =
+                &crate_node.source
+                && let Some(registry_artifact_id) =
+                    registry_artifact_by_name_version.get(&(name.clone(), version.clone()))
+            {
+                edges.push(RulePlanEdge {
+                    from: registry_artifact_id.clone(),
+                    to: action_id.clone(),
+                    kind: RulePlanEdgeKind::IfChanged,
+                    provenance: base_provenance("rule.registry.triggers-action", 140 + idx as u32),
+                });
             }
         }
     }
@@ -844,6 +975,39 @@ impl VxdService {
             config,
             &self.db,
         )?;
+        let legacy_topology = action_graph.to_topology();
+        if let Some(rule_plan_topology_ref) = rule_plan_topology.as_ref() {
+            let parity = compare_rule_plan_parity(&legacy_topology, rule_plan_topology_ref);
+            if parity.has_drift() {
+                let max_examples = 5;
+                warn!(
+                    missing = ?parity
+                        .missing_in_rule_plan
+                        .iter()
+                        .take(max_examples)
+                        .collect::<Vec<_>>(),
+                    extra = ?parity
+                        .extra_in_rule_plan
+                        .iter()
+                        .take(max_examples)
+                        .collect::<Vec<_>>(),
+                    legacy_focus_count = parity.legacy_focus_count,
+                    rule_plan_focus_count = parity.rule_plan_focus_count,
+                    "RulePlan parity drift detected for compile/registry nodes"
+                );
+                if rule_plan_parity_strict_enabled() {
+                    return Err(VxdError::InvalidManifest(
+                        "RulePlan parity drift detected (set VX_RULE_PLAN_PARITY_STRICT=0 to run non-strict)"
+                            .to_string(),
+                    ));
+                }
+            } else {
+                info!(
+                    focus_node_count = parity.legacy_focus_count,
+                    "RulePlan parity check passed for compile/registry nodes"
+                );
+            }
+        }
 
         // Dump graph for debugging
         action_graph.dump_graph();

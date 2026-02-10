@@ -149,6 +149,7 @@ pub enum Action {
     /// Synthetic planner node used by RulePlan lowering bridge.
     PlannerSynthetic {
         node_id: String,
+        report_node_id: Option<String>,
         label: String,
         kind: PlannerSyntheticKind,
     },
@@ -181,11 +182,22 @@ impl Action {
             }
             Action::PlannerSynthetic {
                 node_id,
+                report_node_id,
                 kind,
                 label,
                 ..
             } => {
-                format!("planner {} {} ({})", kind.label(), node_id, label)
+                if let Some(report_node_id) = report_node_id {
+                    format!(
+                        "planner {} {} ({}, legacy={})",
+                        kind.label(),
+                        node_id,
+                        label,
+                        report_node_id
+                    )
+                } else {
+                    format!("planner {} {} ({})", kind.label(), node_id, label)
+                }
             }
         }
     }
@@ -210,9 +222,14 @@ impl Action {
             } => {
                 format!("compile-{}:{crate_name}", crate_type.as_str())
             }
-            Action::PlannerSynthetic { node_id, kind, .. } => {
-                format!("planner-{}:{node_id}", kind.label())
-            }
+            Action::PlannerSynthetic {
+                node_id,
+                report_node_id,
+                kind,
+                ..
+            } => report_node_id
+                .clone()
+                .unwrap_or_else(|| format!("planner-{}:{node_id}", kind.label())),
         }
     }
 
@@ -569,6 +586,7 @@ impl ActionGraph {
             let synthetic_kind = planner_kind_for_node(node);
             let idx = lowered.add_action(Action::PlannerSynthetic {
                 node_id: node.id.as_str().to_string(),
+                report_node_id: node.provenance.metadata.get("legacy_node_id").cloned(),
                 label: node.label.clone(),
                 kind: synthetic_kind,
             });
@@ -865,5 +883,28 @@ mod tests {
         assert_eq!(err.source_id, "src0");
         assert_eq!(err.line, 99);
         assert_eq!(err.column, 1);
+    }
+
+    #[test]
+    fn lowering_uses_legacy_node_id_metadata_for_report_node_ids() {
+        let mut plan = sample_plan();
+        let action_node = plan
+            .nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == "n_action")
+            .expect("action node");
+        action_node.provenance.metadata.insert(
+            "legacy_node_id".to_string(),
+            "compile-bin:example".to_string(),
+        );
+
+        let graph = ActionGraph::from_rule_plan(&plan).expect("lowering should pass");
+        let topology = graph.to_topology();
+        assert!(
+            topology
+                .nodes
+                .iter()
+                .any(|node| node.node_id == "compile-bin:example")
+        );
     }
 }

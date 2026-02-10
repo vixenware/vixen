@@ -2015,12 +2015,15 @@ async fn execute_action(
             })
         }
 
-        Action::PlannerSynthetic { node_id, kind, .. } => {
-            Ok(ActionResult::PlannerSyntheticExecuted {
-                node_id,
-                kind: kind.report_kind().to_string(),
-            })
-        }
+        Action::PlannerSynthetic {
+            node_id,
+            report_node_id,
+            kind,
+            ..
+        } => Ok(ActionResult::PlannerSyntheticExecuted {
+            node_id: report_node_id.unwrap_or(node_id),
+            kind: kind.report_kind().to_string(),
+        }),
     }
 }
 

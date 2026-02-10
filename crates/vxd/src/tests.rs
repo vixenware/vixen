@@ -1,5 +1,6 @@
 use super::*;
 use tokio_test_lite::test as vx_test;
+use vx_report::{GraphEdge, GraphNode, GraphTopology};
 use vx_store_proto::Blake3Hash;
 
 /// Create a fresh database for testing
@@ -13,6 +14,72 @@ fn test_sanitize_id_component_replaces_non_identifier_chars() {
         crate::service::sanitize_id_component("hello/world::crate@1.2.3"),
         "hello_world__crate_1_2_3"
     );
+}
+
+#[test]
+fn test_legacy_compile_node_id_format() {
+    assert_eq!(
+        crate::service::legacy_compile_node_id("my-crate", "bin"),
+        "compile-bin:my-crate"
+    );
+}
+
+#[test]
+fn test_rule_plan_parity_detects_missing_focus_nodes() {
+    let legacy = GraphTopology {
+        nodes: vec![GraphNode {
+            index: 0,
+            node_id: "compile-bin:app".to_string(),
+            kind: "rust.compile_bin".to_string(),
+            label: "compile app".to_string(),
+        }],
+        edges: vec![],
+    };
+    let rule_plan = GraphTopology {
+        nodes: vec![],
+        edges: vec![],
+    };
+
+    let diff = crate::service::compare_rule_plan_parity(&legacy, &rule_plan);
+    assert_eq!(diff.legacy_focus_count, 1);
+    assert_eq!(diff.rule_plan_focus_count, 0);
+    assert_eq!(
+        diff.missing_in_rule_plan,
+        vec!["compile-bin:app".to_string()]
+    );
+    assert!(diff.extra_in_rule_plan.is_empty());
+}
+
+#[test]
+fn test_rule_plan_parity_ignores_non_focus_nodes() {
+    let legacy = GraphTopology {
+        nodes: vec![GraphNode {
+            index: 0,
+            node_id: "download toolchain Rustc".to_string(),
+            kind: "toolchain.component.download".to_string(),
+            label: "download toolchain Rustc".to_string(),
+        }],
+        edges: vec![GraphEdge {
+            from: 0,
+            to: 0,
+            kind: Some("always".to_string()),
+        }],
+    };
+    let rule_plan = GraphTopology {
+        nodes: vec![GraphNode {
+            index: 0,
+            node_id: "planner-action:n_action".to_string(),
+            kind: "planner.action".to_string(),
+            label: "planner action".to_string(),
+        }],
+        edges: vec![],
+    };
+
+    let diff = crate::service::compare_rule_plan_parity(&legacy, &rule_plan);
+    assert_eq!(diff.legacy_focus_count, 0);
+    assert_eq!(diff.rule_plan_focus_count, 0);
+    assert!(diff.missing_in_rule_plan.is_empty());
+    assert!(diff.extra_in_rule_plan.is_empty());
 }
 
 /// Set up common build configuration for C builds
