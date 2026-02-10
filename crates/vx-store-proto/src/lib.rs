@@ -15,7 +15,7 @@ pub const CACHE_KEY_SCHEMA_VERSION: u32 = 1;
 
 /// CAS protocol version.
 /// Bump this when making breaking changes to the CAS RPC interface.
-pub const STORE_PROTOCOL_VERSION: u32 = 1;
+pub const STORE_PROTOCOL_VERSION: u32 = 2;
 
 /// A blake3 hash, used for blobs, manifests, and cache keys.
 /// Internally stored as raw bytes; hex formatting is for display only.
@@ -207,6 +207,11 @@ pub trait Store {
     /// Get a blob by hash.
     /// Returns None if not found.
     async fn get_blob(&self, hash: BlobHash) -> Option<Vec<u8>>;
+
+    /// Get a range of bytes from a blob.
+    /// Returns None if the blob does not exist.
+    /// The returned Vec may be shorter than `len` if the range extends past EOF.
+    async fn get_blob_range(&self, hash: BlobHash, offset: u64, len: u64) -> Option<Vec<u8>>;
 
     /// Check if a blob exists
     async fn has_blob(&self, hash: BlobHash) -> bool;

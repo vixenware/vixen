@@ -32,11 +32,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use vx_locks::{DiagnosticMutex, DiagnosticRwLock};
 use vixenfs_proto::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
     ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
 };
+use vx_locks::{DiagnosticMutex, DiagnosticRwLock};
 use vx_store_proto::{Blake3Hash, StoreClient};
 
 /// A virtual filesystem item
@@ -129,28 +129,6 @@ impl CasVfs {
     /// Allocate a new ItemId
     fn alloc_id(&self) -> ItemId {
         self.next_id.fetch_add(1, Ordering::SeqCst)
-    }
-
-    /// Fetch a blob from CAS, caching the result. Blobs are immutable (content-addressed),
-    /// so caching is unconditionally safe. Concurrent reads of the same blob coalesce via
-    /// OnceCell — only one RPC is issued.
-    async fn get_or_fetch_blob(&self, hash: Blake3Hash) -> Result<Arc<[u8]>, String> {
-        let cell = {
-            let mut cache = self.blob_cache.lock();
-            cache
-                .entry(hash)
-                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
-                .clone()
-        };
-        cell.get_or_try_init(|| async {
-            match self.cas.get_blob(hash).await {
-                Ok(Some(data)) => Ok(Arc::from(data)),
-                Ok(None) => Err(format!("blob {hash} not found in CAS")),
-                Err(e) => Err(format!("CAS fetch error: {e}")),
-            }
-        })
-        .await
-        .map(Arc::clone)
     }
 
     /// Check if a prefix already exists
@@ -563,18 +541,36 @@ impl Vfs for CasVfs {
             };
         };
 
-        // Fetch blob from CAS (cached — blobs are immutable)
-        match self.get_or_fetch_blob(hash).await {
-            Ok(data) => {
-                let start = (offset as usize).min(data.len());
-                let end = ((offset + len) as usize).min(data.len());
+        // Check if blob is already in cache — if so, slice from it
+        let cached = {
+            let cache = self.blob_cache.lock();
+            cache.get(&hash).and_then(|cell| cell.get().cloned())
+        };
+
+        if let Some(data) = cached {
+            let start = (offset as usize).min(data.len());
+            let end = ((offset + len) as usize).min(data.len());
+            return ReadResult {
+                data: data[start..end].to_vec(),
+                error: errno::OK,
+            };
+        }
+
+        // Not cached — use range read to fetch only the requested slice
+        match self.cas.get_blob_range(hash, offset, len).await {
+            Ok(Some(data)) => ReadResult {
+                data,
+                error: errno::OK,
+            },
+            Ok(None) => {
+                tracing::error!(hash = %hash, "blob not found in CAS");
                 ReadResult {
-                    data: data[start..end].to_vec(),
-                    error: errno::OK,
+                    data: Vec::new(),
+                    error: errno::EIO,
                 }
             }
             Err(e) => {
-                tracing::error!(hash = %hash, error = %e, "failed to fetch blob from CAS");
+                tracing::error!(hash = %hash, error = %e, "failed to fetch blob range from CAS");
                 ReadResult {
                     data: Vec::new(),
                     error: errno::EIO,

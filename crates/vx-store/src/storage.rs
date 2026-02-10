@@ -30,6 +30,15 @@ pub(crate) trait CasStorage: Send + Sync {
     /// Read a blob by hash. Returns `None` if the blob does not exist.
     async fn get_blob(&self, hash: &BlobHash) -> io::Result<Option<Vec<u8>>>;
 
+    /// Read a range of bytes from a blob. Returns `None` if the blob does not exist.
+    /// The returned Vec may be shorter than `len` if the range extends past EOF.
+    async fn get_blob_range(
+        &self,
+        hash: &BlobHash,
+        offset: u64,
+        len: u64,
+    ) -> io::Result<Option<Vec<u8>>>;
+
     /// Write a blob. Idempotent — writing the same hash twice is a no-op.
     async fn put_blob(&self, hash: &BlobHash, data: &[u8]) -> io::Result<()>;
 
@@ -76,6 +85,33 @@ impl CasStorage for FsStorage {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    async fn get_blob_range(
+        &self,
+        hash: &BlobHash,
+        offset: u64,
+        len: u64,
+    ) -> io::Result<Option<Vec<u8>>> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        let path = self.blob_path_for(hash);
+        let mut file = match tokio::fs::File::open(&path).await {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+
+        let file_len = file.metadata().await?.len();
+        if offset >= file_len {
+            return Ok(Some(Vec::new()));
+        }
+
+        let actual_len = len.min(file_len - offset) as usize;
+        file.seek(io::SeekFrom::Start(offset)).await?;
+        let mut buf = vec![0u8; actual_len];
+        file.read_exact(&mut buf).await?;
+        Ok(Some(buf))
     }
 
     async fn put_blob(&self, hash: &BlobHash, data: &[u8]) -> io::Result<()> {
@@ -152,6 +188,21 @@ impl CasStore {
         }
         if let Some(base) = &self.base {
             return base.get_blob(hash).await;
+        }
+        Ok(None)
+    }
+
+    pub(crate) async fn get_blob_range(
+        &self,
+        hash: &BlobHash,
+        offset: u64,
+        len: u64,
+    ) -> io::Result<Option<Vec<u8>>> {
+        if let Some(data) = self.primary.get_blob_range(hash, offset, len).await? {
+            return Ok(Some(data));
+        }
+        if let Some(base) = &self.base {
+            return base.get_blob_range(hash, offset, len).await;
         }
         Ok(None)
     }

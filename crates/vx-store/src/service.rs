@@ -115,6 +115,20 @@ impl Store for StoreService {
         self.storage.get_blob(&hash).await.ok().flatten()
     }
 
+    async fn get_blob_range(
+        &self,
+        _cx: &roam::Context,
+        hash: BlobHash,
+        offset: u64,
+        len: u64,
+    ) -> Option<Vec<u8>> {
+        self.storage
+            .get_blob_range(&hash, offset, len)
+            .await
+            .ok()
+            .flatten()
+    }
+
     async fn has_blob(&self, _cx: &roam::Context, hash: BlobHash) -> bool {
         self.storage.has_blob(&hash).await.unwrap_or(false)
     }

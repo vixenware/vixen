@@ -37,7 +37,7 @@ use vixenfs_proto::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
     ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
 };
-use vx_locks::{DiagnosticMutex, DiagnosticRwLock};
+use vx_locks::DiagnosticRwLock;
 use vx_store_proto::{Blake3Hash, StoreClient};
 
 /// A virtual filesystem item
@@ -81,6 +81,9 @@ pub struct PrefixEntry {
     pub mode: u32,
 }
 
+/// Block size for L2 disk cache. 64 KiB matches typical FUSE read sizes.
+const BLOCK_SIZE: u64 = 64 * 1024;
+
 /// CAS-backed VFS implementation
 pub struct CasVfs {
     /// CAS client for fetching blobs
@@ -91,14 +94,9 @@ pub struct CasVfs {
     pub(crate) prefixes: DiagnosticRwLock<HashMap<String, ActionPrefix>>,
     /// Next available ItemId
     next_id: AtomicU64,
-    /// L1 blob cache (memory): blobs are immutable (content-addressed), so caching is
-    /// unconditionally safe. Uses OnceCell per blob for single-flight fetching — concurrent
-    /// reads of the same blob wait on the OnceCell, not the mutex. Different blobs proceed
-    /// independently.
-    #[allow(clippy::type_complexity)]
-    blob_cache: DiagnosticMutex<HashMap<Blake3Hash, Arc<tokio::sync::OnceCell<Arc<[u8]>>>>>,
-    /// L2 blob cache (disk): persistent across vx-vfsd restarts. Same two-level directory
-    /// layout as vx-store: `{cache_dir}/{hex[..2]}/{hex}`. None if VX_HOME is not set.
+    /// L2 blob block cache (disk): persistent across vx-vfsd restarts.
+    /// Stores fixed-size blocks: `{cache_dir}/{hex[..2]}/{hex}.{block_idx}`.
+    /// None if VX_HOME is not set.
     disk_cache_dir: Option<Utf8PathBuf>,
 }
 
@@ -133,7 +131,6 @@ impl CasVfs {
             items: DiagnosticRwLock::new("CasVfs::items", items),
             prefixes: DiagnosticRwLock::new("CasVfs::prefixes", HashMap::new()),
             next_id: AtomicU64::new(2), // 1 is root
-            blob_cache: DiagnosticMutex::new("CasVfs::blob_cache", HashMap::new()),
             disk_cache_dir,
         }
     }
@@ -143,62 +140,92 @@ impl CasVfs {
         self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
-    /// Compute the disk cache path for a blob hash.
-    fn disk_cache_path(&self, hash: &Blake3Hash) -> Option<Utf8PathBuf> {
+    /// Compute the disk cache path for a block of a blob.
+    /// Layout: `{cache_dir}/{hex[..2]}/{hex}.{block_idx}`
+    fn block_cache_path(&self, hash: &Blake3Hash, block_idx: u64) -> Option<Utf8PathBuf> {
         let dir = self.disk_cache_dir.as_ref()?;
         let hex = hash.to_hex();
-        Some(dir.join(&hex[..2]).join(&hex))
+        Some(dir.join(&hex[..2]).join(format!("{hex}.{block_idx}")))
     }
 
-    /// Fetch a blob, checking L1 (memory) → L2 (disk) → CAS (RPC).
+    /// Read a range from a blob, using L2 block cache with write-through.
     ///
-    /// Blobs are immutable (content-addressed), so all caching is unconditionally safe.
-    /// Concurrent reads of the same blob coalesce via OnceCell — only one fetch is issued.
-    /// On CAS fetch, the blob is written through to L2 disk cache.
-    async fn get_or_fetch_blob(&self, hash: Blake3Hash) -> Result<Arc<[u8]>, String> {
-        let cell = {
-            let mut cache = self.blob_cache.lock();
-            cache
-                .entry(hash)
-                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
-                .clone()
-        };
-        let disk_path = self.disk_cache_path(&hash);
-        cell.get_or_try_init(|| async {
-            // L2: try disk cache
-            if let Some(ref path) = disk_path {
+    /// Splits the request into BLOCK_SIZE-aligned blocks, reads cached blocks from disk,
+    /// fetches missing blocks from CAS via `get_blob_range`, writes them through to L2,
+    /// then assembles the response.
+    async fn read_blob_range(
+        &self,
+        hash: Blake3Hash,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, String> {
+        let first_block = offset / BLOCK_SIZE;
+        let last_block = (offset + len).saturating_sub(1) / BLOCK_SIZE;
+
+        let mut result = Vec::with_capacity(len as usize);
+
+        for block_idx in first_block..=last_block {
+            let block_start = block_idx * BLOCK_SIZE;
+
+            // Try L2 disk cache
+            let block_data = if let Some(path) = self.block_cache_path(&hash, block_idx) {
                 match tokio::fs::read(path.as_std_path()).await {
                     Ok(data) => {
-                        tracing::trace!(%hash, "L2 disk cache hit");
-                        return Ok(Arc::from(data));
+                        tracing::trace!(%hash, block_idx, "L2 block cache hit");
+                        Some(data)
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                     Err(e) => {
-                        tracing::warn!(%hash, error = %e, "L2 disk cache read error");
+                        tracing::warn!(%hash, block_idx, error = %e, "L2 block cache read error");
+                        None
                     }
                 }
-            }
-
-            // L3: RPC to vx-store
-            let data: Arc<[u8]> = match self.cas.get_blob(hash).await {
-                Ok(Some(data)) => Arc::from(data),
-                Ok(None) => return Err(format!("blob {hash} not found in CAS")),
-                Err(e) => return Err(format!("CAS fetch error: {e}")),
+            } else {
+                None
             };
 
-            // Write-through to L2 disk cache
-            if let Some(ref path) = disk_path
-                && let Err(e) = vx_io::atomic_write(path, &data).await
-            {
-                tracing::warn!(%hash, error = %e, "L2 disk cache write-through failed");
+            // L2 miss → fetch from CAS via range read
+            let block_data = match block_data {
+                Some(data) => data,
+                None => {
+                    let data = match self.cas.get_blob_range(hash, block_start, BLOCK_SIZE).await {
+                        Ok(Some(data)) => data,
+                        Ok(None) => return Err(format!("blob {hash} not found in CAS")),
+                        Err(e) => return Err(format!("CAS range read error: {e}")),
+                    };
+
+                    // Write-through to L2 disk cache
+                    if let Some(path) = self.block_cache_path(&hash, block_idx)
+                        && let Err(e) = vx_io::atomic_write(&path, &data).await
+                    {
+                        tracing::warn!(%hash, block_idx, error = %e, "L2 block cache write-through failed");
+                    }
+
+                    data
+                }
+            };
+
+            // Slice out the portion of this block that overlaps with the request
+            let slice_start = if block_idx == first_block {
+                (offset - block_start) as usize
+            } else {
+                0
+            };
+            let slice_end = if block_idx == last_block {
+                let request_end = offset + len;
+                (request_end - block_start) as usize
+            } else {
+                BLOCK_SIZE as usize
+            };
+            let slice_end = slice_end.min(block_data.len());
+
+            if slice_start < block_data.len() {
+                result.extend_from_slice(&block_data[slice_start..slice_end]);
             }
+        }
 
-            Ok(data)
-        })
-        .await
-        .map(Arc::clone)
+        Ok(result)
     }
-
     /// Check if a prefix already exists
     pub async fn has_prefix(&self, prefix_id: &str) -> bool {
         self.prefixes.read().contains_key(prefix_id)
@@ -621,18 +648,14 @@ impl Vfs for CasVfs {
             };
         };
 
-        // Fetch blob from CAS (cached — blobs are immutable)
-        match self.get_or_fetch_blob(hash).await {
-            Ok(data) => {
-                let start = (offset as usize).min(data.len());
-                let end = ((offset + len) as usize).min(data.len());
-                ReadResult {
-                    data: data[start..end].to_vec(),
-                    error: errno::OK,
-                }
-            }
+        // Fetch via L2 block cache → CAS range read
+        match self.read_blob_range(hash, offset, len).await {
+            Ok(data) => ReadResult {
+                data,
+                error: errno::OK,
+            },
             Err(e) => {
-                tracing::error!(hash = %hash, error = %e, "failed to fetch blob from CAS");
+                tracing::error!(hash = %hash, error = %e, "failed to read blob range");
                 ReadResult {
                     data: Vec::new(),
                     error: errno::EIO,
