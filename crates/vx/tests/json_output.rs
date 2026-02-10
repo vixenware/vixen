@@ -18,6 +18,32 @@ fn json_lines(output: &harness::VxOutput) -> Vec<&str> {
         .collect()
 }
 
+/// Extract a u64 value for a given key from a JSON line.
+///
+/// Looks for `"key":NUMBER` and parses the number.
+fn json_u64(line: &str, key: &str) -> u64 {
+    let needle = format!("\"{}\":", key);
+    let start = line
+        .find(&needle)
+        .unwrap_or_else(|| panic!("key {key:?} not found in: {line}"))
+        + needle.len();
+    let rest = &line[start..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end]
+        .parse()
+        .unwrap_or_else(|e| panic!("failed to parse {key:?} from {rest:?}: {e}"))
+}
+
+/// Find the build_finished event line from JSON output.
+fn build_finished_line<'a>(lines: &[&'a str]) -> &'a str {
+    lines
+        .iter()
+        .rfind(|l| l.contains("\"event\":\"build_finished\""))
+        .expect("no build_finished event in output")
+}
+
 #[test]
 fn json_output_success() {
     let env = TestEnv::new();
@@ -86,19 +112,33 @@ fn json_output_cache_hit() {
     let result1 = env.build().json().run();
     assert_eq!(result1.exit_code, Some(0));
 
-    // Second build — should be cached
+    // Second build — nothing changed, must be a full cache hit
     let result2 = env.build().json().run();
     assert_eq!(result2.exit_code, Some(0));
 
     let lines = json_lines(&result2);
-    let last = lines.last().expect("expected build_finished event");
+    let finished = build_finished_line(&lines);
+
     assert!(
-        last.contains("\"event\":\"build_finished\""),
-        "last event should be build_finished"
+        finished.contains("\"cached\":true"),
+        "second build should report cached:true, got: {finished}"
     );
+
+    let total_actions = json_u64(finished, "total_actions");
+    let cache_hits = json_u64(finished, "cache_hits");
+    let rebuilt = json_u64(finished, "rebuilt");
+
     assert!(
-        last.contains("\"cached\":true"),
-        "second build should report cached:true, got: {last}"
+        total_actions > 0,
+        "total_actions must be nonzero, got: {finished}"
+    );
+    assert_eq!(
+        cache_hits, total_actions,
+        "every action must be a cache hit: cache_hits={cache_hits}, total_actions={total_actions}"
+    );
+    assert_eq!(
+        rebuilt, 0,
+        "zero actions should be rebuilt on a no-op second build, got rebuilt={rebuilt}"
     );
 }
 
