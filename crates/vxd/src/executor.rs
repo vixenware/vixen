@@ -76,6 +76,8 @@ pub enum ActionResult {
         bin_output: Option<camino::Utf8PathBuf>,
         /// Whether this was a cache hit
         was_cached: bool,
+        /// Actual CAS cache key used for publish/lookup
+        cas_cache_key: Blake3Hash,
     },
 
     /// Zig toolchain acquired successfully
@@ -565,6 +567,7 @@ impl Executor {
                         }],
                         invocation: None,
                         diagnostics: vx_report::DiagnosticsRecord::default(),
+                        cas_cache_key: None,
                     });
                 }
                 ActionResult::RustToolchainComponentExtracted {
@@ -614,6 +617,7 @@ impl Executor {
                         }],
                         invocation: None,
                         diagnostics: vx_report::DiagnosticsRecord::default(),
+                        cas_cache_key: None,
                     });
                 }
                 ActionResult::RegistryCrateAcquired {
@@ -665,6 +669,7 @@ impl Executor {
                         }],
                         invocation: None,
                         diagnostics: vx_report::DiagnosticsRecord::default(),
+                        cas_cache_key: None,
                     });
                 }
                 ActionResult::CrateCompiled {
@@ -672,6 +677,7 @@ impl Executor {
                     output_manifest,
                     bin_output: bin_path,
                     was_cached,
+                    cas_cache_key,
                 } => {
                     if *was_cached {
                         cache_hits += 1;
@@ -738,6 +744,7 @@ impl Executor {
                         }],
                         invocation: None,
                         diagnostics: vx_report::DiagnosticsRecord::default(),
+                        cas_cache_key: Some(cas_cache_key.to_hex()),
                     });
                 }
                 ActionResult::ZigToolchainAcquired {
@@ -785,6 +792,7 @@ impl Executor {
                         }],
                         invocation: None,
                         diagnostics: vx_report::DiagnosticsRecord::default(),
+                        cas_cache_key: None,
                     });
                 }
                 ActionResult::CObjectCompiled {
@@ -831,6 +839,7 @@ impl Executor {
                         }],
                         invocation: None,
                         diagnostics: vx_report::DiagnosticsRecord::default(),
+                        cas_cache_key: None,
                     });
                 }
                 ActionResult::CBinaryLinked {
@@ -880,6 +889,7 @@ impl Executor {
                         }],
                         invocation: None,
                         diagnostics: vx_report::DiagnosticsRecord::default(),
+                        cas_cache_key: None,
                     });
                 }
             }
@@ -1624,6 +1634,7 @@ async fn execute_action(
                 output_manifest,
                 bin_output,
                 was_cached,
+                cas_cache_key: cache_key,
             })
         }
 

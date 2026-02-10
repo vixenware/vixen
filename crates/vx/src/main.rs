@@ -12,6 +12,7 @@ use figue as args;
 use owo_colors::OwoColorize;
 use tui::emit_osc_progress;
 use vx_report::{CacheOutcome, ReportStore, RunDiff};
+use vx_store_proto::{Blake3Hash, StoreClient};
 use vxd_proto::{ActionProgress, ActionType, BuildRequest, ProgressListener, VxdClient};
 
 /// vx - Build execution engine with deterministic caching
@@ -56,6 +57,10 @@ struct CleanArgs {
     /// Remove VX_HOME instead of project .vx/ (asks for confirmation)
     #[facet(args::named)]
     home: bool,
+
+    /// Invalidate cache entries from the last build (keeps toolchains)
+    #[facet(args::named)]
+    cache: bool,
 }
 
 /// Arguments for the `doctor` subcommand
@@ -702,6 +707,10 @@ async fn cmd_clean(args: CleanArgs) -> Result<()> {
         .unwrap_or_else(|_| format!("{}/.vx", std::env::var("HOME").expect("HOME not set")));
     let vx_home = Utf8PathBuf::from(&vx_home);
 
+    if args.cache {
+        return cmd_clean_cache(&vx_home).await;
+    }
+
     // Determine which directory to remove
     let vx_dir = if args.home {
         // Remove VX_HOME (~/.vx)
@@ -733,6 +742,115 @@ async fn cmd_clean(args: CleanArgs) -> Result<()> {
         println!("{} {}", "Removed".green().bold(), vx_dir);
     } else {
         println!("{} {} does not exist", "Note:".yellow().bold(), vx_dir);
+    }
+
+    Ok(())
+}
+
+/// Invalidate cache entries from the last build while preserving toolchains
+/// and registry crates.
+async fn cmd_clean_cache(vx_home: &Utf8PathBuf) -> Result<()> {
+    let cwd = Utf8PathBuf::try_from(std::env::current_dir()?)?;
+    let store = ReportStore::new(&cwd);
+
+    let Some(report) = store.load_latest()? else {
+        println!(
+            "{} No build reports found. Run {} first.",
+            "Error:".red().bold(),
+            "vx build".cyan()
+        );
+        return Ok(());
+    };
+
+    // Collect cache keys to invalidate (skip infrastructure nodes)
+    let mut keys_to_invalidate: Vec<(String, Blake3Hash)> = Vec::new();
+    let mut skipped = 0usize;
+
+    for node in &report.nodes {
+        // Skip infrastructure nodes
+        if node.kind.starts_with("toolchain.")
+            || node.kind == "registry.acquire"
+            || node.kind.starts_with("zig.toolchain")
+        {
+            skipped += 1;
+            continue;
+        }
+
+        // Only invalidate nodes that have a CAS cache key
+        if let Some(ref hex) = node.cas_cache_key
+            && let Some(hash) = Blake3Hash::from_hex(hex)
+        {
+            keys_to_invalidate.push((node.node_id.clone(), hash));
+        }
+    }
+
+    if keys_to_invalidate.is_empty() {
+        println!(
+            "{} No cache entries to invalidate (report has no CAS cache keys).",
+            "Note:".yellow().bold()
+        );
+        println!(
+            "{}",
+            "Rebuild with latest vxd to generate reports with CAS cache keys.".dimmed()
+        );
+        return Ok(());
+    }
+
+    // Connect to the store daemon
+    let store_endpoint = match std::env::var("VX_STORE") {
+        Ok(v) => vx_io::net::Endpoint::parse(&v)?,
+        Err(_) => {
+            #[cfg(unix)]
+            {
+                vx_io::net::default_unix_endpoint(vx_home, "store")
+            }
+            #[cfg(not(unix))]
+            {
+                vx_io::net::Endpoint::parse("127.0.0.1:9002")?
+            }
+        }
+    };
+
+    let caller = vx_io::net::reconnecting_client(store_endpoint.clone(), roam_stream::NoDispatcher);
+    caller.handle().await.map_err(|e| {
+        eyre::eyre!(
+            "failed to connect to store at {}: {}\nIs the daemon running? Try: vx build",
+            store_endpoint,
+            e
+        )
+    })?;
+    let store_client = StoreClient::new(caller);
+
+    // Unpublish each cache key
+    let mut invalidated = 0usize;
+    for (node_id, cache_key) in &keys_to_invalidate {
+        if store_client.unpublish(*cache_key).await? {
+            invalidated += 1;
+            println!("  {} {}", "Invalidated".yellow(), node_id);
+        }
+    }
+
+    // Clear picante cache so the daemon recomputes everything on next build
+    let picante_cache = vx_home.join("picante.cache");
+    let picante_wal = vx_home.join("picante.wal");
+    for path in [&picante_cache, &picante_wal] {
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+    }
+
+    println!();
+    println!(
+        "{} Invalidated {} cache entries ({} infrastructure preserved)",
+        "Done.".green().bold(),
+        invalidated,
+        skipped
+    );
+    if invalidated > 0 {
+        println!(
+            "{}",
+            "Next build will re-execute these nodes from scratch.".dimmed()
+        );
     }
 
     Ok(())

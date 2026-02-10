@@ -262,6 +262,13 @@ pub struct NodeReport {
 
     /// Diagnostic output
     pub diagnostics: DiagnosticsRecord,
+
+    /// Actual CAS cache key (Blake3 hex) used for store publish/unpublish.
+    /// Distinct from `cache_key` which may be a human-readable identifier.
+    /// `None` for infrastructure nodes (toolchains, registry crates) that
+    /// use different storage paths.
+    #[facet(default)]
+    pub cas_cache_key: Option<String>,
 }
 
 /// Cache outcome for a node.
@@ -1083,6 +1090,7 @@ mod tests {
             outputs: vec![],
             invocation: None,
             diagnostics: DiagnosticsRecord::default(),
+            cas_cache_key: None,
         };
 
         let explanation = NodeRebuildExplanation::compute(&node, None).unwrap();
@@ -1114,6 +1122,7 @@ mod tests {
             outputs: vec![],
             invocation: None,
             diagnostics: DiagnosticsRecord::default(),
+            cas_cache_key: None,
         };
 
         let current_node = NodeReport {
@@ -1162,6 +1171,7 @@ mod tests {
             outputs: vec![],
             invocation: None,
             diagnostics: DiagnosticsRecord::default(),
+            cas_cache_key: None,
         };
 
         let current_node = NodeReport {
@@ -1207,6 +1217,7 @@ mod tests {
             outputs: vec![],
             invocation: None,
             diagnostics: DiagnosticsRecord::default(),
+            cas_cache_key: None,
         });
 
         // Add a rebuilt app node that depends on util
@@ -1228,6 +1239,7 @@ mod tests {
             outputs: vec![],
             invocation: None,
             diagnostics: DiagnosticsRecord::default(),
+            cas_cache_key: None,
         });
 
         // Add a cache hit node (should not appear in fanout)
@@ -1249,6 +1261,7 @@ mod tests {
             outputs: vec![],
             invocation: None,
             diagnostics: DiagnosticsRecord::default(),
+            cas_cache_key: None,
         });
 
         let fanout = FanoutAnalysis::compute(&report);
@@ -1279,6 +1292,7 @@ mod tests {
             outputs: vec![],
             invocation: None,
             diagnostics: DiagnosticsRecord::default(),
+            cas_cache_key: None,
         };
 
         let current_node = NodeReport {

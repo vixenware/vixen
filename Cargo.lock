@@ -2911,6 +2911,7 @@ dependencies = [
  "ur-taking-me-with-you",
  "vx-io",
  "vx-report",
+ "vx-store-proto",
  "vx-tracing",
  "vx-vfs",
  "vxd-proto",

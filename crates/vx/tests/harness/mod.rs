@@ -105,6 +105,17 @@ impl TestEnv {
         VxOutput::from(output)
     }
 
+    /// Run `vx clean --cache` in this environment
+    pub fn clean_cache(&self) -> VxOutput {
+        let mut cmd = Command::new(Self::vx_binary());
+        cmd.current_dir(self.project.path());
+        cmd.env("VX_TEST_SESSION", &self.session_id);
+        cmd.args(["clean", "--cache"]);
+
+        let output = cmd.output().expect("failed to run vx");
+        VxOutput::from(output)
+    }
+
     /// Write a file to the project directory
     pub fn write_file(&self, relative_path: &str, contents: &str) {
         let path = self.project.path().join(relative_path);

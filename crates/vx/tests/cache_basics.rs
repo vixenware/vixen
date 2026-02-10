@@ -117,6 +117,25 @@ fn clean_removes_project_local_vx_dir() {
 }
 
 #[test]
+fn clean_cache_invalidates_last_build() {
+    let env = TestEnv::new();
+    create_hello_world(&env);
+
+    // First build — cache miss
+    env.build().run().assert_not_cached();
+
+    // Second build — should be cached
+    env.build().run().assert_cached();
+
+    // Invalidate cache entries
+    let clean_result = env.clean_cache();
+    clean_result.assert_success();
+
+    // Third build — should be a cache miss again (entries were invalidated)
+    env.build().run().assert_not_cached();
+}
+
+#[test]
 fn multi_file_crate_builds_successfully() {
     // This test verifies that crates with multiple source files
     // (using mod declarations) build correctly.
