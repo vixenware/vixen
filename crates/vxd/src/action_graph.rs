@@ -583,13 +583,7 @@ impl ActionGraph {
         let mut node_map = HashMap::with_capacity(plan.nodes.len());
 
         for node in &plan.nodes {
-            let synthetic_kind = planner_kind_for_node(node);
-            let idx = lowered.add_action(Action::PlannerSynthetic {
-                node_id: node.id.as_str().to_string(),
-                report_node_id: node.provenance.metadata.get("legacy_node_id").cloned(),
-                label: node.label.clone(),
-                kind: synthetic_kind,
-            });
+            let idx = lowered.add_action(action_from_rule_plan_node(node));
             node_map.insert(node.id.as_str().to_string(), idx);
         }
 
@@ -726,6 +720,33 @@ fn planner_kind_for_node(node: &RulePlanNode) -> PlannerSyntheticKind {
         RulePlanNodeKind::Artifact => PlannerSyntheticKind::Artifact,
         RulePlanNodeKind::Fact => PlannerSyntheticKind::Fact,
     }
+}
+
+#[allow(dead_code)]
+fn action_from_rule_plan_node(node: &RulePlanNode) -> Action {
+    if let Some(action) = try_lower_registry_node(node) {
+        return action;
+    }
+
+    let synthetic_kind = planner_kind_for_node(node);
+    Action::PlannerSynthetic {
+        node_id: node.id.as_str().to_string(),
+        report_node_id: node.provenance.metadata.get("legacy_node_id").cloned(),
+        label: node.label.clone(),
+        kind: synthetic_kind,
+    }
+}
+
+#[allow(dead_code)]
+fn try_lower_registry_node(node: &RulePlanNode) -> Option<Action> {
+    let name = node.provenance.metadata.get("registry_name")?.clone();
+    let version = node.provenance.metadata.get("registry_version")?.clone();
+    let checksum = node.provenance.metadata.get("registry_checksum")?.clone();
+    Some(Action::AcquireRegistryCrate {
+        name,
+        version,
+        checksum,
+    })
 }
 
 #[allow(dead_code)]
@@ -906,5 +927,33 @@ mod tests {
                 .iter()
                 .any(|node| node.node_id == "compile-bin:example")
         );
+    }
+
+    #[test]
+    fn lowering_registry_metadata_emits_real_registry_action_node() {
+        let mut plan = sample_plan();
+        let artifact_node = plan
+            .nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == "n_artifact")
+            .expect("artifact node");
+        artifact_node
+            .provenance
+            .metadata
+            .insert("registry_name".to_string(), "serde".to_string());
+        artifact_node
+            .provenance
+            .metadata
+            .insert("registry_version".to_string(), "1.0.0".to_string());
+        artifact_node
+            .provenance
+            .metadata
+            .insert("registry_checksum".to_string(), "abc123".to_string());
+
+        let graph = ActionGraph::from_rule_plan(&plan).expect("lowering should pass");
+        let topology = graph.to_topology();
+        assert!(topology.nodes.iter().any(|node| {
+            node.node_id == "acquire-registry:serde:1.0.0" && node.kind == "registry.acquire"
+        }));
     }
 }

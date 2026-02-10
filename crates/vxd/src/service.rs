@@ -276,6 +276,9 @@ fn build_rule_plan_from_crate_graph(graph: &CrateGraph) -> RulePlan {
         provenance
             .metadata
             .insert("registry_version".to_string(), registry.version.clone());
+        provenance
+            .metadata
+            .insert("registry_checksum".to_string(), registry.checksum.clone());
         nodes.push(RulePlanNode {
             id: node_id.clone(),
             kind: RulePlanNodeKind::Artifact,

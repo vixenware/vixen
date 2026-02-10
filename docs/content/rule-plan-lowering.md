@@ -31,6 +31,10 @@ Supported edge kinds:
 Current bridge plans also annotate compile action nodes with `legacy_node_id` metadata
 so planner output can be correlated with existing executor node identities.
 
+Registry artifact nodes that include `registry_name`, `registry_version`, and
+`registry_checksum` provenance metadata are lowered to real
+`AcquireRegistryCrate` executor actions.
+
 When `VX_RULE_PLAN_BRIDGE=1`, vxd also runs a focused parity check between the
 legacy planner topology and RulePlan-lowered topology for compile/registry node IDs.
 Set `VX_RULE_PLAN_PARITY_STRICT=1` to fail builds when that parity check detects drift.
