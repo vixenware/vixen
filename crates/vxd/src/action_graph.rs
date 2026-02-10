@@ -482,7 +482,11 @@ impl ActionGraph {
         for edge in self.graph.edge_references() {
             let from = index_map[&edge.source()];
             let to = index_map[&edge.target()];
-            edges.push(vx_report::GraphEdge { from, to });
+            edges.push(vx_report::GraphEdge {
+                from,
+                to,
+                kind: Some("always".to_string()),
+            });
         }
 
         vx_report::GraphTopology { nodes, edges }

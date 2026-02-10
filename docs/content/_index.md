@@ -24,6 +24,7 @@ vx build
 - [Download](/download/) - Install vixen on macOS
 - [Specification](/spec/) - Full specification document
 - [Internals](/internals/) - How vixen builds things under the hood
+- [RulePlan Schema](/rule-plan/) - Typed planning IR and validation rules
 - [GitHub](https://github.com/bearcove/vixen)
 
 ## Overview

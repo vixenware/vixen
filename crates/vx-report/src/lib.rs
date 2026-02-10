@@ -13,6 +13,7 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 use facet::Facet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Current report schema version.
 /// Bump when schema changes in backwards-incompatible ways.
@@ -75,6 +76,300 @@ impl std::fmt::Display for RunId {
 // GRAPH TOPOLOGY
 // =============================================================================
 
+/// Canonical typed intermediate representation between rule evaluation and execution.
+///
+/// This schema is designed for deterministic explain/diff/caching workflows.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct RulePlan {
+    /// Typed graph nodes.
+    pub nodes: Vec<RulePlanNode>,
+    /// Typed graph edges.
+    pub edges: Vec<RulePlanEdge>,
+    /// Emitted facts with values.
+    pub facts: Vec<RulePlanFact>,
+}
+
+impl RulePlan {
+    /// Serialize this plan to canonical deterministic JSON.
+    pub fn to_canonical_json(&self) -> Result<String, String> {
+        let canonical = self.canonicalized();
+        facet_json::to_string(&canonical).map_err(|e| e.to_string())
+    }
+
+    /// Deserialize a plan from JSON.
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        facet_json::from_str(json).map_err(|e| e.to_string())
+    }
+
+    /// Validate structural invariants and type constraints.
+    pub fn validate(&self) -> Result<(), RulePlanValidationError> {
+        let mut diagnostics = Vec::new();
+        let mut node_ids = HashSet::new();
+        let mut node_kind_by_id = HashMap::new();
+
+        for node in &self.nodes {
+            if node.id.trim().is_empty() {
+                diagnostics.push("node has empty id".to_string());
+            }
+            if !node_ids.insert(node.id.clone()) {
+                diagnostics.push(format!("duplicate node id: {}", node.id));
+            }
+            if let Some(issue) = validate_provenance(&node.provenance, "node", &node.id) {
+                diagnostics.push(issue);
+            }
+            node_kind_by_id.insert(node.id.clone(), node.kind.clone());
+        }
+
+        let mut fact_ids = HashSet::new();
+        for fact in &self.facts {
+            if fact.id.trim().is_empty() {
+                diagnostics.push("fact has empty id".to_string());
+            }
+            if !fact_ids.insert(fact.id.clone()) {
+                diagnostics.push(format!("duplicate fact id: {}", fact.id));
+            }
+            if fact.node_id.trim().is_empty() {
+                diagnostics.push(format!("fact {} has empty node_id", fact.id));
+            }
+            match node_kind_by_id.get(&fact.node_id) {
+                Some(RulePlanNodeKind::Fact) => {}
+                Some(kind) => diagnostics.push(format!(
+                    "fact {} references node {} with incompatible kind {:?}",
+                    fact.id, fact.node_id, kind
+                )),
+                None => diagnostics.push(format!(
+                    "fact {} references unknown node_id {}",
+                    fact.id, fact.node_id
+                )),
+            }
+            if let Some(issue) = validate_provenance(&fact.provenance, "fact", &fact.id) {
+                diagnostics.push(issue);
+            }
+        }
+
+        for edge in &self.edges {
+            if edge.from.trim().is_empty() || edge.to.trim().is_empty() {
+                diagnostics.push(format!(
+                    "edge {} -> {} has empty endpoint id",
+                    edge.from, edge.to
+                ));
+                continue;
+            }
+
+            let from_kind = node_kind_by_id.get(&edge.from);
+            let to_kind = node_kind_by_id.get(&edge.to);
+
+            if from_kind.is_none() {
+                diagnostics.push(format!(
+                    "edge {} -> {} references unknown from node {}",
+                    edge.from, edge.to, edge.from
+                ));
+            }
+            if to_kind.is_none() {
+                diagnostics.push(format!(
+                    "edge {} -> {} references unknown to node {}",
+                    edge.from, edge.to, edge.to
+                ));
+            }
+
+            if let (Some(from_kind), Some(to_kind)) = (from_kind, to_kind)
+                && !edge_kind_allowed(edge.kind, *from_kind, *to_kind)
+            {
+                diagnostics.push(format!(
+                    "edge {} -> {} with kind {:?} is invalid between {:?} and {:?}",
+                    edge.from, edge.to, edge.kind, from_kind, to_kind
+                ));
+            }
+
+            if let Some(issue) = validate_provenance(&edge.provenance, "edge", &edge.from) {
+                diagnostics.push(issue);
+            }
+        }
+
+        if diagnostics.is_empty() {
+            Ok(())
+        } else {
+            Err(RulePlanValidationError { diagnostics })
+        }
+    }
+
+    fn canonicalized(&self) -> Self {
+        let mut canonical = self.clone();
+        canonical.nodes.sort_by(|a, b| {
+            a.id.cmp(&b.id)
+                .then_with(|| a.kind.canonical_name().cmp(b.kind.canonical_name()))
+                .then_with(|| a.label.cmp(&b.label))
+        });
+        canonical.edges.sort_by(|a, b| {
+            a.from
+                .cmp(&b.from)
+                .then_with(|| a.to.cmp(&b.to))
+                .then_with(|| a.kind.canonical_name().cmp(b.kind.canonical_name()))
+        });
+        canonical
+            .facts
+            .sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.node_id.cmp(&b.node_id)));
+        canonical
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RulePlanValidationError {
+    pub diagnostics: Vec<String>,
+}
+
+impl std::fmt::Display for RulePlanValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RulePlan validation failed: {}",
+            self.diagnostics.join("; ")
+        )
+    }
+}
+
+impl std::error::Error for RulePlanValidationError {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct RulePlanNode {
+    pub id: String,
+    pub kind: RulePlanNodeKind,
+    pub label: String,
+    pub provenance: RulePlanProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum RulePlanNodeKind {
+    #[facet(rename = "action")]
+    Action,
+    #[facet(rename = "artifact")]
+    Artifact,
+    #[facet(rename = "fact")]
+    Fact,
+    #[facet(rename = "group")]
+    Group,
+}
+
+impl RulePlanNodeKind {
+    fn canonical_name(self) -> &'static str {
+        match self {
+            Self::Action => "action",
+            Self::Artifact => "artifact",
+            Self::Fact => "fact",
+            Self::Group => "group",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct RulePlanEdge {
+    pub from: String,
+    pub to: String,
+    pub kind: RulePlanEdgeKind,
+    pub provenance: RulePlanProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum RulePlanEdgeKind {
+    #[facet(rename = "ifchanged")]
+    IfChanged,
+    #[facet(rename = "ifwritten")]
+    IfWritten,
+    #[facet(rename = "ifcreate")]
+    IfCreate,
+    #[facet(rename = "ifdeleted")]
+    IfDeleted,
+    #[facet(rename = "always")]
+    Always,
+}
+
+impl RulePlanEdgeKind {
+    fn canonical_name(self) -> &'static str {
+        match self {
+            Self::IfChanged => "ifchanged",
+            Self::IfWritten => "ifwritten",
+            Self::IfCreate => "ifcreate",
+            Self::IfDeleted => "ifdeleted",
+            Self::Always => "always",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct RulePlanFact {
+    pub id: String,
+    pub node_id: String,
+    pub value: String,
+    pub provenance: RulePlanProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct RulePlanProvenance {
+    pub rule_id: String,
+    pub source: RulePlanSourceLocation,
+    #[facet(default)]
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct RulePlanSourceLocation {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+}
+
+fn validate_provenance(
+    provenance: &RulePlanProvenance,
+    owner_kind: &str,
+    owner_id: &str,
+) -> Option<String> {
+    if provenance.rule_id.trim().is_empty() {
+        return Some(format!(
+            "{} {} has empty provenance.rule_id",
+            owner_kind, owner_id
+        ));
+    }
+    if provenance.source.file.trim().is_empty() {
+        return Some(format!(
+            "{} {} has empty provenance.source.file",
+            owner_kind, owner_id
+        ));
+    }
+    if provenance.source.line == 0 || provenance.source.column == 0 {
+        return Some(format!(
+            "{} {} has invalid provenance source position {}:{}",
+            owner_kind, owner_id, provenance.source.line, provenance.source.column
+        ));
+    }
+    None
+}
+
+fn edge_kind_allowed(
+    edge_kind: RulePlanEdgeKind,
+    from_kind: RulePlanNodeKind,
+    to_kind: RulePlanNodeKind,
+) -> bool {
+    match edge_kind {
+        RulePlanEdgeKind::IfWritten | RulePlanEdgeKind::IfCreate | RulePlanEdgeKind::IfDeleted => {
+            from_kind == RulePlanNodeKind::Action && to_kind == RulePlanNodeKind::Artifact
+        }
+        RulePlanEdgeKind::IfChanged => {
+            matches!(
+                from_kind,
+                RulePlanNodeKind::Artifact | RulePlanNodeKind::Fact
+            ) && matches!(to_kind, RulePlanNodeKind::Action | RulePlanNodeKind::Group)
+        }
+        RulePlanEdgeKind::Always => {
+            matches!(
+                from_kind,
+                RulePlanNodeKind::Action | RulePlanNodeKind::Group
+            ) && matches!(to_kind, RulePlanNodeKind::Action | RulePlanNodeKind::Group)
+        }
+    }
+}
+
 /// Serialized build graph topology (DAG of action nodes and dependency edges).
 #[derive(Debug, Clone, Facet)]
 pub struct GraphTopology {
@@ -104,6 +399,9 @@ pub struct GraphEdge {
     pub from: u32,
     /// Index of the dependency node.
     pub to: u32,
+    /// Typed edge kind (for current plans this is always "always").
+    #[facet(default)]
+    pub kind: Option<String>,
 }
 
 // =============================================================================
@@ -1328,7 +1626,11 @@ mod tests {
                     label: "compile app".to_string(),
                 },
             ],
-            edges: vec![GraphEdge { from: 1, to: 0 }],
+            edges: vec![GraphEdge {
+                from: 1,
+                to: 0,
+                kind: Some("always".to_string()),
+            }],
         };
 
         let mut report = BuildReport::new(
@@ -1349,6 +1651,7 @@ mod tests {
         assert_eq!(g.nodes[1].node_id, "compile-bin:app");
         assert_eq!(g.edges[0].from, 1);
         assert_eq!(g.edges[0].to, 0);
+        assert_eq!(g.edges[0].kind.as_deref(), Some("always"));
     }
 
     #[test]
@@ -1365,5 +1668,152 @@ mod tests {
         let json = facet_json::to_string(&report).expect("serialize");
         let parsed: BuildReport = facet_json::from_str(&json).expect("deserialize");
         assert!(parsed.graph.is_none());
+    }
+
+    fn sample_provenance(rule_id: &str, line: u32) -> RulePlanProvenance {
+        RulePlanProvenance {
+            rule_id: rule_id.to_string(),
+            source: RulePlanSourceLocation {
+                file: "fixtures/rules/sample.edn".to_string(),
+                line,
+                column: 1,
+            },
+            metadata: BTreeMap::from([
+                ("phase".to_string(), "planner".to_string()),
+                ("fixture".to_string(), "true".to_string()),
+            ]),
+        }
+    }
+
+    fn sample_rule_plan() -> RulePlan {
+        RulePlan {
+            nodes: vec![
+                RulePlanNode {
+                    id: "n_group_build".to_string(),
+                    kind: RulePlanNodeKind::Group,
+                    label: "group build".to_string(),
+                    provenance: sample_provenance("rule.group.build", 1),
+                },
+                RulePlanNode {
+                    id: "n_action_compile".to_string(),
+                    kind: RulePlanNodeKind::Action,
+                    label: "compile app".to_string(),
+                    provenance: sample_provenance("rule.compile.app", 5),
+                },
+                RulePlanNode {
+                    id: "n_artifact_bin".to_string(),
+                    kind: RulePlanNodeKind::Artifact,
+                    label: "target/app".to_string(),
+                    provenance: sample_provenance("rule.compile.app", 8),
+                },
+                RulePlanNode {
+                    id: "n_fact_src_changed".to_string(),
+                    kind: RulePlanNodeKind::Fact,
+                    label: "src_changed".to_string(),
+                    provenance: sample_provenance("rule.detect.src", 12),
+                },
+            ],
+            edges: vec![
+                RulePlanEdge {
+                    from: "n_group_build".to_string(),
+                    to: "n_action_compile".to_string(),
+                    kind: RulePlanEdgeKind::Always,
+                    provenance: sample_provenance("rule.group.build", 2),
+                },
+                RulePlanEdge {
+                    from: "n_action_compile".to_string(),
+                    to: "n_artifact_bin".to_string(),
+                    kind: RulePlanEdgeKind::IfWritten,
+                    provenance: sample_provenance("rule.compile.app", 9),
+                },
+                RulePlanEdge {
+                    from: "n_fact_src_changed".to_string(),
+                    to: "n_action_compile".to_string(),
+                    kind: RulePlanEdgeKind::IfChanged,
+                    provenance: sample_provenance("rule.detect.src", 13),
+                },
+            ],
+            facts: vec![RulePlanFact {
+                id: "fact.src_changed".to_string(),
+                node_id: "n_fact_src_changed".to_string(),
+                value: "true".to_string(),
+                provenance: sample_provenance("rule.detect.src", 14),
+            }],
+        }
+    }
+
+    #[test]
+    fn test_rule_plan_roundtrip_canonical_json_stable() {
+        let plan = sample_rule_plan();
+        plan.validate().expect("sample plan should validate");
+
+        let canonical_1 = plan.to_canonical_json().expect("canonical json");
+        let parsed = RulePlan::from_json(&canonical_1).expect("parse canonical json");
+        let canonical_2 = parsed.to_canonical_json().expect("canonical json");
+
+        assert_eq!(canonical_1, canonical_2);
+    }
+
+    #[test]
+    fn test_rule_plan_validation_reports_actionable_diagnostics() {
+        let mut invalid = sample_rule_plan();
+        invalid.nodes.push(RulePlanNode {
+            id: "n_action_compile".to_string(),
+            kind: RulePlanNodeKind::Action,
+            label: "duplicate".to_string(),
+            provenance: sample_provenance("rule.duplicate", 20),
+        });
+        invalid.edges.push(RulePlanEdge {
+            from: "n_artifact_bin".to_string(),
+            to: "n_action_compile".to_string(),
+            kind: RulePlanEdgeKind::IfWritten,
+            provenance: sample_provenance("rule.invalid.edge", 21),
+        });
+        invalid.facts.push(RulePlanFact {
+            id: "fact.bad_ref".to_string(),
+            node_id: "missing_node".to_string(),
+            value: "x".to_string(),
+            provenance: sample_provenance("rule.bad.fact", 22),
+        });
+
+        let err = invalid.validate().expect_err("invalid plan should fail");
+
+        assert!(
+            err.diagnostics
+                .iter()
+                .any(|d| d.contains("duplicate node id"))
+        );
+        assert!(err.diagnostics.iter().any(|d| {
+            d.contains("IfWritten") && d.contains("invalid between Artifact and Action")
+        }));
+        assert!(
+            err.diagnostics
+                .iter()
+                .any(|d| d.contains("references unknown node_id"))
+        );
+    }
+
+    #[test]
+    fn test_rule_plan_fixture_provenance_is_populated() {
+        let plan = sample_rule_plan();
+
+        for node in &plan.nodes {
+            assert!(!node.provenance.rule_id.is_empty());
+            assert!(!node.provenance.source.file.is_empty());
+            assert!(node.provenance.source.line > 0);
+            assert!(node.provenance.source.column > 0);
+        }
+        for edge in &plan.edges {
+            assert!(!edge.provenance.rule_id.is_empty());
+            assert!(!edge.provenance.source.file.is_empty());
+            assert!(edge.provenance.source.line > 0);
+            assert!(edge.provenance.source.column > 0);
+        }
+        for fact in &plan.facts {
+            assert!(!fact.provenance.rule_id.is_empty());
+            assert!(!fact.provenance.source.file.is_empty());
+            assert!(fact.provenance.source.line > 0);
+            assert!(fact.provenance.source.column > 0);
+        }
     }
 }
