@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use camino::Utf8PathBuf;
 use vixenfs_proto::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
     ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
@@ -90,16 +91,26 @@ pub struct CasVfs {
     pub(crate) prefixes: DiagnosticRwLock<HashMap<String, ActionPrefix>>,
     /// Next available ItemId
     next_id: AtomicU64,
-    /// Blob cache: blobs are immutable (content-addressed), so caching is unconditionally safe.
-    /// Uses OnceCell per blob for single-flight fetching — concurrent reads of the same blob
-    /// wait on the OnceCell, not the mutex. Different blobs proceed independently.
+    /// L1 blob cache (memory): blobs are immutable (content-addressed), so caching is
+    /// unconditionally safe. Uses OnceCell per blob for single-flight fetching — concurrent
+    /// reads of the same blob wait on the OnceCell, not the mutex. Different blobs proceed
+    /// independently.
     #[allow(clippy::type_complexity)]
     blob_cache: DiagnosticMutex<HashMap<Blake3Hash, Arc<tokio::sync::OnceCell<Arc<[u8]>>>>>,
+    /// L2 blob cache (disk): persistent across vx-vfsd restarts. Same two-level directory
+    /// layout as vx-store: `{cache_dir}/{hex[..2]}/{hex}`. None if VX_HOME is not set.
+    disk_cache_dir: Option<Utf8PathBuf>,
 }
 
 impl CasVfs {
     /// Create a new CAS-backed VFS
-    pub fn new(cas: Arc<StoreClient<crate::CasCaller>>) -> Self {
+    ///
+    /// `disk_cache_dir` enables persistent L2 blob cache across restarts.
+    /// Pass `None` to disable (L1 memory-only).
+    pub fn new(
+        cas: Arc<StoreClient<crate::CasCaller>>,
+        disk_cache_dir: Option<Utf8PathBuf>,
+    ) -> Self {
         let mut items = HashMap::new();
 
         // Create root directory (ID 1)
@@ -123,6 +134,7 @@ impl CasVfs {
             prefixes: DiagnosticRwLock::new("CasVfs::prefixes", HashMap::new()),
             next_id: AtomicU64::new(2), // 1 is root
             blob_cache: DiagnosticMutex::new("CasVfs::blob_cache", HashMap::new()),
+            disk_cache_dir,
         }
     }
 
@@ -131,9 +143,18 @@ impl CasVfs {
         self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
-    /// Fetch a blob from CAS, caching the result. Blobs are immutable (content-addressed),
-    /// so caching is unconditionally safe. Concurrent reads of the same blob coalesce via
-    /// OnceCell — only one RPC is issued.
+    /// Compute the disk cache path for a blob hash.
+    fn disk_cache_path(&self, hash: &Blake3Hash) -> Option<Utf8PathBuf> {
+        let dir = self.disk_cache_dir.as_ref()?;
+        let hex = hash.to_hex();
+        Some(dir.join(&hex[..2]).join(&hex))
+    }
+
+    /// Fetch a blob, checking L1 (memory) → L2 (disk) → CAS (RPC).
+    ///
+    /// Blobs are immutable (content-addressed), so all caching is unconditionally safe.
+    /// Concurrent reads of the same blob coalesce via OnceCell — only one fetch is issued.
+    /// On CAS fetch, the blob is written through to L2 disk cache.
     async fn get_or_fetch_blob(&self, hash: Blake3Hash) -> Result<Arc<[u8]>, String> {
         let cell = {
             let mut cache = self.blob_cache.lock();
@@ -142,12 +163,37 @@ impl CasVfs {
                 .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
                 .clone()
         };
+        let disk_path = self.disk_cache_path(&hash);
         cell.get_or_try_init(|| async {
-            match self.cas.get_blob(hash).await {
-                Ok(Some(data)) => Ok(Arc::from(data)),
-                Ok(None) => Err(format!("blob {hash} not found in CAS")),
-                Err(e) => Err(format!("CAS fetch error: {e}")),
+            // L2: try disk cache
+            if let Some(ref path) = disk_path {
+                match tokio::fs::read(path.as_std_path()).await {
+                    Ok(data) => {
+                        tracing::trace!(%hash, "L2 disk cache hit");
+                        return Ok(Arc::from(data));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        tracing::warn!(%hash, error = %e, "L2 disk cache read error");
+                    }
+                }
             }
+
+            // L3: RPC to vx-store
+            let data: Arc<[u8]> = match self.cas.get_blob(hash).await {
+                Ok(Some(data)) => Arc::from(data),
+                Ok(None) => return Err(format!("blob {hash} not found in CAS")),
+                Err(e) => return Err(format!("CAS fetch error: {e}")),
+            };
+
+            // Write-through to L2 disk cache
+            if let Some(ref path) = disk_path
+                && let Err(e) = vx_io::atomic_write(path, &data).await
+            {
+                tracing::warn!(%hash, error = %e, "L2 disk cache write-through failed");
+            }
+
+            Ok(data)
         })
         .await
         .map(Arc::clone)

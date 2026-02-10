@@ -9,10 +9,10 @@ mod vfs;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-use std::sync::Arc;
 use facet::Facet;
 use figue as args;
 use roam_stream::{HandshakeConfig, NoDispatcher, accept};
+use std::sync::Arc;
 use vixenfs_proto::{
     CreateResult, GetAttributesResult, ItemId, LookupResult, ReadDirResult, ReadResult,
     SetAttributesParams, Vfs, VfsResult, WriteResult,
@@ -48,11 +48,23 @@ impl Vfs for SharedVfs {
         self.0.read(cx, item_id, offset, len).await
     }
 
-    async fn write(&self, cx: &roam::Context, item_id: ItemId, offset: u64, data: Vec<u8>) -> WriteResult {
+    async fn write(
+        &self,
+        cx: &roam::Context,
+        item_id: ItemId,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> WriteResult {
         self.0.write(cx, item_id, offset, data).await
     }
 
-    async fn create(&self, cx: &roam::Context, parent_id: ItemId, name: String, item_type: vixenfs_proto::ItemType) -> CreateResult {
+    async fn create(
+        &self,
+        cx: &roam::Context,
+        parent_id: ItemId,
+        name: String,
+        item_type: vixenfs_proto::ItemType,
+    ) -> CreateResult {
         self.0.create(cx, parent_id, name, item_type).await
     }
 
@@ -60,11 +72,22 @@ impl Vfs for SharedVfs {
         self.0.delete(cx, item_id).await
     }
 
-    async fn rename(&self, cx: &roam::Context, item_id: ItemId, new_parent_id: ItemId, new_name: String) -> VfsResult {
+    async fn rename(
+        &self,
+        cx: &roam::Context,
+        item_id: ItemId,
+        new_parent_id: ItemId,
+        new_name: String,
+    ) -> VfsResult {
         self.0.rename(cx, item_id, new_parent_id, new_name).await
     }
 
-    async fn set_attributes(&self, cx: &roam::Context, item_id: ItemId, params: SetAttributesParams) -> VfsResult {
+    async fn set_attributes(
+        &self,
+        cx: &roam::Context,
+        item_id: ItemId,
+        params: SetAttributesParams,
+    ) -> VfsResult {
         self.0.set_attributes(cx, item_id, params).await
     }
 
@@ -107,10 +130,7 @@ async fn main() -> Result<()> {
     let args: Args = args::Driver::new(
         args::builder::<Args>()?
             .cli(|cli| cli.args(std::env::args().skip(1)))
-            .help(|h| {
-                h.program_name("vx-vfsd")
-                    .version(env!("CARGO_PKG_VERSION"))
-            })
+            .help(|h| h.program_name("vx-vfsd").version(env!("CARGO_PKG_VERSION")))
             .build(),
     )
     .run()
@@ -166,8 +186,14 @@ async fn main() -> Result<()> {
 
     let cas = Arc::new(cas);
 
-    // 2. Create VFS
-    let vfs = Arc::new(CasVfs::new(cas.clone()));
+    // 2. Create VFS with optional L2 disk blob cache
+    let disk_cache_dir = std::env::var("VX_HOME")
+        .ok()
+        .map(|vx_home| camino::Utf8PathBuf::from(vx_home).join("cache/blobs/blake3"));
+    if let Some(ref dir) = disk_cache_dir {
+        tracing::info!(%dir, "L2 disk blob cache enabled");
+    }
+    let vfs = Arc::new(CasVfs::new(cas.clone(), disk_cache_dir));
 
     // 3. Bind RPC listener before FUSE mount
     let listen_endpoint = Endpoint::parse(&args.listen)?;
@@ -193,7 +219,11 @@ async fn main() -> Result<()> {
     )
     .await
     {
-        Ok(VfsStart::Mounted { mount_path, mut vfs_dead, .. }) => {
+        Ok(VfsStart::Mounted {
+            mount_path,
+            mut vfs_dead,
+            ..
+        }) => {
             tracing::info!("VFS mounted at {}", mount_path);
 
             // Set up SIGUSR1 handler for diagnostics
@@ -201,7 +231,7 @@ async fn main() -> Result<()> {
             {
                 let vfs_for_signal = vfs.clone();
                 tokio::spawn(async move {
-                    use tokio::signal::unix::{signal, SignalKind};
+                    use tokio::signal::unix::{SignalKind, signal};
                     let mut sigusr1 = signal(SignalKind::user_defined1())
                         .expect("failed to register SIGUSR1 handler");
                     loop {
@@ -279,11 +309,7 @@ fn dump_kernel_fuse_state() {
         for entry in entries.flatten() {
             let waiting_path = entry.path().join("waiting");
             if let Ok(val) = std::fs::read_to_string(&waiting_path) {
-                eprintln!(
-                    "  {}: waiting={}",
-                    entry.path().display(),
-                    val.trim()
-                );
+                eprintln!("  {}: waiting={}", entry.path().display(), val.trim());
             }
         }
     }
@@ -295,11 +321,7 @@ fn dump_kernel_fuse_state() {
             let comm = std::fs::read_to_string(task.path().join("comm")).unwrap_or_default();
             let stack = std::fs::read_to_string(task.path().join("stack")).unwrap_or_default();
             if !stack.trim().is_empty() {
-                eprintln!(
-                    "  Thread {} ({}):",
-                    tid.to_string_lossy(),
-                    comm.trim()
-                );
+                eprintln!("  Thread {} ({}):", tid.to_string_lossy(), comm.trim());
                 for line in stack.lines() {
                     eprintln!("    {line}");
                 }
