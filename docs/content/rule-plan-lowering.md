@@ -30,6 +30,9 @@ Supported edge kinds:
 
 Current bridge plans also annotate compile action nodes with `legacy_node_id` metadata
 so planner output can be correlated with existing executor node identities.
+Compile action nodes that include `crate_name` + `crate_type` provenance metadata
+are lowered to a dedicated planner-compile action that reports as
+`rust.compile_bin`/`rust.compile_rlib`.
 
 Registry artifact nodes that include `registry_name`, `registry_version`, and
 `registry_checksum` provenance metadata are lowered to real

@@ -146,6 +146,14 @@ pub enum Action {
         target_triple: String,
     },
 
+    /// Planner-lowered Rust compile action (metadata-backed migration step).
+    PlannerCompileRustCrate {
+        node_id: String,
+        report_node_id: Option<String>,
+        crate_name: String,
+        crate_type: CrateType,
+    },
+
     /// Synthetic planner node used by RulePlan lowering bridge.
     PlannerSynthetic {
         node_id: String,
@@ -179,6 +187,25 @@ impl Action {
             }
             Action::LinkCBinary { name, .. } => {
                 format!("link {}", name)
+            }
+            Action::PlannerCompileRustCrate {
+                node_id,
+                report_node_id,
+                crate_name,
+                crate_type,
+            } => {
+                let crate_type = crate_type.as_str();
+                if let Some(report_node_id) = report_node_id {
+                    format!(
+                        "planner compile {} ({}, legacy={})",
+                        crate_name, node_id, report_node_id
+                    )
+                } else {
+                    format!(
+                        "planner compile {} ({}:{})",
+                        crate_name, crate_type, node_id
+                    )
+                }
             }
             Action::PlannerSynthetic {
                 node_id,
@@ -222,6 +249,14 @@ impl Action {
             } => {
                 format!("compile-{}:{crate_name}", crate_type.as_str())
             }
+            Action::PlannerCompileRustCrate {
+                crate_name,
+                crate_type,
+                report_node_id,
+                ..
+            } => report_node_id
+                .clone()
+                .unwrap_or_else(|| format!("compile-{}:{crate_name}", crate_type.as_str())),
             Action::PlannerSynthetic {
                 node_id,
                 report_node_id,
@@ -243,6 +278,13 @@ impl Action {
             Action::AcquireZigToolchain { .. } => "zig.toolchain.acquire",
             Action::AcquireRegistryCrate { .. } => "registry.acquire",
             Action::CompileRustCrate { crate_type, .. } => {
+                if crate_type.as_str() == "bin" {
+                    "rust.compile_bin"
+                } else {
+                    "rust.compile_rlib"
+                }
+            }
+            Action::PlannerCompileRustCrate { crate_type, .. } => {
                 if crate_type.as_str() == "bin" {
                     "rust.compile_bin"
                 } else {
@@ -271,6 +313,9 @@ impl Action {
                 vxd_proto::ActionType::AcquireRegistryCrate(name.clone(), version.clone())
             }
             Action::CompileRustCrate { crate_name, .. } => {
+                vxd_proto::ActionType::CompileRust(crate_name.clone())
+            }
+            Action::PlannerCompileRustCrate { crate_name, .. } => {
                 vxd_proto::ActionType::CompileRust(crate_name.clone())
             }
             Action::CompileCObject { source, .. } => {
@@ -724,6 +769,9 @@ fn planner_kind_for_node(node: &RulePlanNode) -> PlannerSyntheticKind {
 
 #[allow(dead_code)]
 fn action_from_rule_plan_node(node: &RulePlanNode) -> Action {
+    if let Some(action) = try_lower_compile_node(node) {
+        return action;
+    }
     if let Some(action) = try_lower_registry_node(node) {
         return action;
     }
@@ -735,6 +783,23 @@ fn action_from_rule_plan_node(node: &RulePlanNode) -> Action {
         label: node.label.clone(),
         kind: synthetic_kind,
     }
+}
+
+#[allow(dead_code)]
+fn try_lower_compile_node(node: &RulePlanNode) -> Option<Action> {
+    let crate_name = node.provenance.metadata.get("crate_name")?.clone();
+    let crate_type_raw = node.provenance.metadata.get("crate_type")?.as_str();
+    let crate_type = match crate_type_raw {
+        "bin" => CrateType::Bin,
+        "lib" => CrateType::Lib,
+        _ => return None,
+    };
+    Some(Action::PlannerCompileRustCrate {
+        node_id: node.id.as_str().to_string(),
+        report_node_id: node.provenance.metadata.get("legacy_node_id").cloned(),
+        crate_name,
+        crate_type,
+    })
 }
 
 #[allow(dead_code)]
@@ -955,5 +1020,36 @@ mod tests {
         assert!(topology.nodes.iter().any(|node| {
             node.node_id == "acquire-registry:serde:1.0.0" && node.kind == "registry.acquire"
         }));
+    }
+
+    #[test]
+    fn lowering_compile_metadata_emits_planner_compile_action_node() {
+        let mut plan = sample_plan();
+        let action_node = plan
+            .nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == "n_action")
+            .expect("action node");
+        action_node
+            .provenance
+            .metadata
+            .insert("crate_name".to_string(), "app".to_string());
+        action_node
+            .provenance
+            .metadata
+            .insert("crate_type".to_string(), "bin".to_string());
+        action_node
+            .provenance
+            .metadata
+            .insert("legacy_node_id".to_string(), "compile-bin:app".to_string());
+
+        let graph = ActionGraph::from_rule_plan(&plan).expect("lowering should pass");
+        let topology = graph.to_topology();
+        assert!(
+            topology
+                .nodes
+                .iter()
+                .any(|node| node.node_id == "compile-bin:app" && node.kind == "rust.compile_bin")
+        );
     }
 }

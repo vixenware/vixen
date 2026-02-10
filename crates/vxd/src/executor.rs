@@ -2015,6 +2015,21 @@ async fn execute_action(
             })
         }
 
+        Action::PlannerCompileRustCrate {
+            crate_name,
+            crate_type,
+            report_node_id,
+            ..
+        } => Ok(ActionResult::PlannerSyntheticExecuted {
+            node_id: report_node_id
+                .unwrap_or_else(|| format!("compile-{}:{crate_name}", crate_type.as_str())),
+            kind: if crate_type.as_str() == "bin" {
+                "rust.compile_bin".to_string()
+            } else {
+                "rust.compile_rlib".to_string()
+            },
+        }),
+
         Action::PlannerSynthetic {
             node_id,
             report_node_id,
