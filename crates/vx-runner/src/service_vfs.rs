@@ -11,9 +11,10 @@ use vx_runner_proto::{
     CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RustCompileRequest,
     RustCompileResult,
 };
-use vx_store_proto::{Blake3Hash, NodeId, NodeManifest, OutputEntry};
+use vx_store_proto::{Blake3Hash, NodeId, NodeManifest, OutputEntry, StoreProgress};
 
 use crate::RunnerService;
+use crate::sandbox::{ActionKind, CommandError};
 
 /// Action execution context with all paths and sandbox config.
 pub struct ActionContext {
@@ -40,7 +41,11 @@ impl RunnerService {
     }
 
     /// Compile a Rust crate using VFS-based execution
-    pub async fn compile_rust_vfs(&self, request: RustCompileRequest) -> RustCompileResult {
+    pub async fn compile_rust_vfs(
+        &self,
+        request: RustCompileRequest,
+        progress: roam::Tx<StoreProgress>,
+    ) -> RustCompileResult {
         let start = Instant::now();
 
         info!(
@@ -215,10 +220,18 @@ impl RunnerService {
             );
         }
 
-        // 7. Run rustc
-        let output = match cmd.output().await {
+        // 7. Run rustc with streaming output and timeout
+        let action_desc = format!("rustc {}", request.crate_name);
+        let output = match crate::sandbox::run_sandboxed_command(
+            cmd,
+            &ActionKind::RustCompile,
+            &action_desc,
+            progress,
+        )
+        .await
+        {
             Ok(o) => o,
-            Err(e) => {
+            Err(CommandError::SpawnFailed(e)) => {
                 tracing::error!(
                     error = %e,
                     error_kind = ?e.kind(),
@@ -232,20 +245,40 @@ impl RunnerService {
                     start,
                 );
             }
+            Err(CommandError::TimedOut {
+                action_desc,
+                timeout,
+                partial_output,
+                ..
+            }) => {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return RustCompileResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: partial_output,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!(
+                        "action '{}' timed out after {}s (limit: {}s)",
+                        action_desc,
+                        timeout.as_secs(),
+                        timeout.as_secs()
+                    )),
+                };
+            }
         };
 
         let duration_ms = start.elapsed().as_millis() as u64;
-        let exit_code = output.status.code().unwrap_or(-1);
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_code = output.exit_status.code().unwrap_or(-1);
 
-        if !output.status.success() {
+        if !output.exit_status.success() {
             self.remove_action_prefix(&action.prefix_id).await;
             return RustCompileResult {
                 success: false,
                 exit_code,
-                stdout,
-                stderr,
+                stdout: String::new(),
+                stderr: output.combined_output,
                 duration_ms,
                 output_manifest: None,
                 error: None,
@@ -324,8 +357,8 @@ impl RunnerService {
         RustCompileResult {
             success: true,
             exit_code,
-            stdout,
-            stderr,
+            stdout: String::new(),
+            stderr: output.combined_output,
             duration_ms,
             output_manifest: Some(manifest_hash),
             error: None,
@@ -333,7 +366,11 @@ impl RunnerService {
     }
 
     /// Compile a C source file using VFS-based execution
-    pub async fn compile_cc_vfs(&self, request: CcCompileRequest) -> CcCompileResult {
+    pub async fn compile_cc_vfs(
+        &self,
+        request: CcCompileRequest,
+        progress: roam::Tx<StoreProgress>,
+    ) -> CcCompileResult {
         let start = Instant::now();
 
         info!(
@@ -449,10 +486,18 @@ impl RunnerService {
             "executing zig cc via VFS"
         );
 
-        // 6. Run zig cc
-        let output = match cmd.output().await {
+        // 6. Run zig cc with streaming output and timeout
+        let action_desc = format!("zig cc {}", request.source_path);
+        let output = match crate::sandbox::run_sandboxed_command(
+            cmd,
+            &ActionKind::CcCompile,
+            &action_desc,
+            progress,
+        )
+        .await
+        {
             Ok(o) => o,
-            Err(e) => {
+            Err(CommandError::SpawnFailed(e)) => {
                 self.remove_action_prefix(&action.prefix_id).await;
                 return CcCompileResult {
                     success: false,
@@ -465,20 +510,41 @@ impl RunnerService {
                     error: Some(format!("failed to execute zig cc: {}", e)),
                 };
             }
+            Err(CommandError::TimedOut {
+                action_desc,
+                timeout,
+                partial_output,
+                ..
+            }) => {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return CcCompileResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: partial_output,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    discovered_deps: vec![],
+                    error: Some(format!(
+                        "action '{}' timed out after {}s (limit: {}s)",
+                        action_desc,
+                        timeout.as_secs(),
+                        timeout.as_secs()
+                    )),
+                };
+            }
         };
 
         let duration_ms = start.elapsed().as_millis() as u64;
-        let exit_code = output.status.code().unwrap_or(-1);
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_code = output.exit_status.code().unwrap_or(-1);
 
-        if !output.status.success() {
+        if !output.exit_status.success() {
             self.remove_action_prefix(&action.prefix_id).await;
             return CcCompileResult {
                 success: false,
                 exit_code,
-                stdout,
-                stderr,
+                stdout: String::new(),
+                stderr: output.combined_output,
                 duration_ms,
                 output_manifest: None,
                 discovered_deps: vec![],
@@ -497,8 +563,8 @@ impl RunnerService {
                 return CcCompileResult {
                     success: false,
                     exit_code: -1,
-                    stdout,
-                    stderr,
+                    stdout: String::new(),
+                    stderr: output.combined_output,
                     duration_ms,
                     output_manifest: None,
                     discovered_deps: vec![],
@@ -535,8 +601,8 @@ impl RunnerService {
                 return CcCompileResult {
                     success: false,
                     exit_code: -1,
-                    stdout,
-                    stderr,
+                    stdout: String::new(),
+                    stderr: output.combined_output,
                     duration_ms,
                     output_manifest: None,
                     discovered_deps: vec![],
@@ -558,8 +624,8 @@ impl RunnerService {
         CcCompileResult {
             success: true,
             exit_code,
-            stdout,
-            stderr,
+            stdout: String::new(),
+            stderr: output.combined_output,
             duration_ms,
             output_manifest: Some(manifest_hash),
             discovered_deps: vec![], // TODO: parse depfile if generated
@@ -568,7 +634,11 @@ impl RunnerService {
     }
 
     /// Link C object files into a binary using the VFS mount.
-    pub async fn link_cc_vfs(&self, request: CcLinkRequest) -> CcLinkResult {
+    pub async fn link_cc_vfs(
+        &self,
+        request: CcLinkRequest,
+        progress: roam::Tx<StoreProgress>,
+    ) -> CcLinkResult {
         let start = Instant::now();
 
         let action = self.create_action_context().await;
@@ -726,9 +796,17 @@ impl RunnerService {
             cmd.env("HOME", home);
         }
 
-        let output = match cmd.output().await {
+        let action_desc = format!("link {}", request.binary_name);
+        let output = match crate::sandbox::run_sandboxed_command(
+            cmd,
+            &ActionKind::CcLink,
+            &action_desc,
+            progress,
+        )
+        .await
+        {
             Ok(o) => o,
-            Err(e) => {
+            Err(CommandError::SpawnFailed(e)) => {
                 self.remove_action_prefix(&action.prefix_id).await;
                 return CcLinkResult {
                     success: false,
@@ -740,20 +818,40 @@ impl RunnerService {
                     error: Some(format!("failed to execute linker: {}", e)),
                 };
             }
+            Err(CommandError::TimedOut {
+                action_desc,
+                timeout,
+                partial_output,
+                ..
+            }) => {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return CcLinkResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: partial_output,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!(
+                        "action '{}' timed out after {}s (limit: {}s)",
+                        action_desc,
+                        timeout.as_secs(),
+                        timeout.as_secs()
+                    )),
+                };
+            }
         };
 
         let duration_ms = start.elapsed().as_millis() as u64;
-        let exit_code = output.status.code().unwrap_or(-1);
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_code = output.exit_status.code().unwrap_or(-1);
 
-        if !output.status.success() {
+        if !output.exit_status.success() {
             self.remove_action_prefix(&action.prefix_id).await;
             return CcLinkResult {
                 success: false,
                 exit_code,
-                stdout,
-                stderr,
+                stdout: String::new(),
+                stderr: output.combined_output,
                 duration_ms,
                 output_manifest: None,
                 error: None,
@@ -768,8 +866,8 @@ impl RunnerService {
                 return CcLinkResult {
                     success: false,
                     exit_code: -1,
-                    stdout,
-                    stderr,
+                    stdout: String::new(),
+                    stderr: output.combined_output,
                     duration_ms,
                     output_manifest: None,
                     error: Some(format!("output {} not found in VFS", output_rel_path)),
@@ -802,8 +900,8 @@ impl RunnerService {
                 return CcLinkResult {
                     success: false,
                     exit_code: -1,
-                    stdout,
-                    stderr,
+                    stdout: String::new(),
+                    stderr: output.combined_output,
                     duration_ms,
                     output_manifest: None,
                     error: Some(format!("failed to store manifest: {:?}", e)),
@@ -816,8 +914,8 @@ impl RunnerService {
         CcLinkResult {
             success: true,
             exit_code,
-            stdout,
-            stderr,
+            stdout: String::new(),
+            stderr: output.combined_output,
             duration_ms,
             output_manifest: Some(manifest_hash),
             error: None,

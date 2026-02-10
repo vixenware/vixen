@@ -2,7 +2,7 @@ use vx_runner_proto::{
     CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RUNNER_PROTOCOL_VERSION,
     Runner, RustCompileRequest, RustCompileResult,
 };
-use vx_store_proto::ServiceVersion;
+use vx_store_proto::{ServiceVersion, StoreProgress};
 
 use crate::RunnerService;
 
@@ -19,15 +19,26 @@ impl Runner for RunnerService {
         &self,
         _cx: &roam::Context,
         request: RustCompileRequest,
+        progress: roam::Tx<StoreProgress>,
     ) -> RustCompileResult {
-        self.compile_rust_vfs(request).await
+        self.compile_rust_vfs(request, progress).await
     }
 
-    async fn compile_cc(&self, _cx: &roam::Context, request: CcCompileRequest) -> CcCompileResult {
-        self.compile_cc_vfs(request).await
+    async fn compile_cc(
+        &self,
+        _cx: &roam::Context,
+        request: CcCompileRequest,
+        progress: roam::Tx<StoreProgress>,
+    ) -> CcCompileResult {
+        self.compile_cc_vfs(request, progress).await
     }
 
-    async fn link_cc(&self, _cx: &roam::Context, request: CcLinkRequest) -> CcLinkResult {
-        self.link_cc_vfs(request).await
+    async fn link_cc(
+        &self,
+        _cx: &roam::Context,
+        request: CcLinkRequest,
+        progress: roam::Tx<StoreProgress>,
+    ) -> CcLinkResult {
+        self.link_cc_vfs(request, progress).await
     }
 }

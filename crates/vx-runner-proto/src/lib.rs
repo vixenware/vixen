@@ -19,11 +19,11 @@
 //! - Materialize final outputs locally (if needed)
 
 use facet::Facet;
-use vx_store_proto::{ManifestHash, ServiceVersion};
+use vx_store_proto::{ManifestHash, ServiceVersion, StoreProgress};
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 1;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 2;
 
 // =============================================================================
 // Rust Compilation
@@ -242,13 +242,25 @@ pub trait Runner {
     /// 4. Run rustc
     /// 5. Ingest output to CAS
     /// 6. Return the output manifest hash
-    async fn compile_rust(&self, request: RustCompileRequest) -> RustCompileResult;
+    ///
+    /// Progress channel receives merged stdout/stderr lines during compilation.
+    async fn compile_rust(
+        &self,
+        request: RustCompileRequest,
+        progress: roam::Tx<StoreProgress>,
+    ) -> RustCompileResult;
 
     /// Compile a C/C++ translation unit
     ///
     /// Similar to compile_rust but for C/C++ via zig cc.
     /// Returns discovered dependencies for incremental builds.
-    async fn compile_cc(&self, request: CcCompileRequest) -> CcCompileResult;
+    ///
+    /// Progress channel receives merged stdout/stderr lines during compilation.
+    async fn compile_cc(
+        &self,
+        request: CcCompileRequest,
+        progress: roam::Tx<StoreProgress>,
+    ) -> CcCompileResult;
 
     /// Link C/C++ object files into a binary
     ///
@@ -258,5 +270,11 @@ pub trait Runner {
     /// 3. Run zig cc to link them
     /// 4. Ingest the binary to CAS
     /// 5. Return the binary manifest hash
-    async fn link_cc(&self, request: CcLinkRequest) -> CcLinkResult;
+    ///
+    /// Progress channel receives merged stdout/stderr lines during linking.
+    async fn link_cc(
+        &self,
+        request: CcLinkRequest,
+        progress: roam::Tx<StoreProgress>,
+    ) -> CcLinkResult;
 }

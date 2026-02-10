@@ -10,21 +10,35 @@
 //! - Network: denied entirely (no BindTcp/ConnectTcp rules added)
 //! - Execution: allowed from VFS_ROOT + system paths
 
-use landlock::{
-    Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
-    RulesetStatus, ABI,
-};
-use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
-use std::process::Command;
-
 fn main() {
-    if let Err(e) = run() {
-        eprintln!("landlock-exec error: {e}");
+    #[cfg(not(target_os = "linux"))]
+    {
+        eprintln!("landlock-exec: this binary only works on Linux");
         std::process::exit(1);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(e) = run() {
+            eprintln!("landlock-exec error: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
+#[cfg(target_os = "linux")]
+use landlock::{
+    ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+    RulesetStatus,
+};
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::process::Command;
+
+#[cfg(target_os = "linux")]
 #[derive(Debug)]
 struct Args {
     vfs_root: PathBuf,
@@ -33,6 +47,7 @@ struct Args {
     program_args: Vec<String>,
 }
 
+#[cfg(target_os = "linux")]
 fn parse_args() -> Result<Args, String> {
     let mut args = std::env::args().skip(1);
     let mut vfs_root = None;
@@ -41,16 +56,10 @@ fn parse_args() -> Result<Args, String> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--vfs-root" => {
-                vfs_root = Some(
-                    args.next()
-                        .ok_or("--vfs-root requires a path argument")?,
-                );
+                vfs_root = Some(args.next().ok_or("--vfs-root requires a path argument")?);
             }
             "--write-dir" => {
-                write_dir = Some(
-                    args.next()
-                        .ok_or("--write-dir requires a path argument")?,
-                );
+                write_dir = Some(args.next().ok_or("--write-dir requires a path argument")?);
             }
             "--" => break,
             other => return Err(format!("unknown argument: {other}")),
@@ -61,17 +70,14 @@ fn parse_args() -> Result<Args, String> {
     let program_args: Vec<String> = args.collect();
 
     Ok(Args {
-        vfs_root: vfs_root
-            .ok_or("missing required --vfs-root")?
-            .into(),
-        write_dir: write_dir
-            .ok_or("missing required --write-dir")?
-            .into(),
+        vfs_root: vfs_root.ok_or("missing required --vfs-root")?.into(),
+        write_dir: write_dir.ok_or("missing required --write-dir")?.into(),
         program,
         program_args,
     })
 }
 
+#[cfg(target_os = "linux")]
 fn run() -> Result<(), String> {
     let args = parse_args()?;
 
@@ -127,9 +133,8 @@ fn run() -> Result<(), String> {
     // Add read-only access to VFS root
     created = created
         .add_rule(PathBeneath::new(
-            PathFd::new(&args.vfs_root).map_err(|e| {
-                format!("failed to open vfs_root {}: {e}", args.vfs_root.display())
-            })?,
+            PathFd::new(&args.vfs_root)
+                .map_err(|e| format!("failed to open vfs_root {}: {e}", args.vfs_root.display()))?,
             fs_read_only,
         ))
         .map_err(|e| format!("failed to add vfs_root rule: {e}"))?;
@@ -178,18 +183,13 @@ fn run() -> Result<(), String> {
 
     // Verify sandbox is fully enforced
     if status.ruleset != RulesetStatus::FullyEnforced {
-        return Err(format!(
-            "sandbox not fully enforced: {:?}",
-            status.ruleset
-        ));
+        return Err(format!("sandbox not fully enforced: {:?}", status.ruleset));
     }
 
     eprintln!("landlock-exec: exec'ing {}", args.program);
 
     // Replace this process with the target program
-    let err = Command::new(&args.program)
-        .args(&args.program_args)
-        .exec(); // This never returns on success
+    let err = Command::new(&args.program).args(&args.program_args).exec(); // This never returns on success
 
     Err(format!("exec failed: {err}"))
 }

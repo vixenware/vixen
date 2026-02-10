@@ -36,3 +36,4 @@ vx-runner-proto = { workspace = true }
 vx-vfsd = { path = "../vx-vfsd" }
 vx-io = { workspace = true }
 vx-locks = { workspace = true }
+libc = { workspace = true }

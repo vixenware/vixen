@@ -5,5 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[dependencies]
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.4"

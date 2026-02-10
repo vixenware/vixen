@@ -1180,7 +1180,7 @@ async fn execute_action(
                 };
 
                 let result = exec
-                    .compile_rust(compile_request)
+                    .compile_rust(compile_request, progress)
                     .await
                     .map_err(|e| VxdError::ExecRpc(e.to_string()))?;
 
@@ -1376,7 +1376,7 @@ async fn execute_action(
             };
 
             let result = exec
-                .compile_cc(request)
+                .compile_cc(request, progress)
                 .await
                 .map_err(|e| VxdError::ExecRpc(e.to_string()))?;
 
@@ -1463,7 +1463,7 @@ async fn execute_action(
             };
 
             let result = exec
-                .link_cc(request)
+                .link_cc(request, progress)
                 .await
                 .map_err(|e| VxdError::ExecRpc(e.to_string()))?;
 

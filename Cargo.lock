@@ -3077,6 +3077,7 @@ dependencies = [
  "facet-json",
  "fastrand",
  "jiff",
+ "libc",
  "roam",
  "roam-stream",
  "thiserror",
