@@ -72,6 +72,11 @@ vixen explicitly rejects (with clear errors):
 RUST_LOG=vx_daemon=debug vx build
 ```
 
+## Co-developed with LLMs
+
+This project was co-developed with LLMs such as Claude, Codex, etc. Human
+maintainers are responsible for their contributions regardless of machine help.
+
 ## License
 
 Vixen is licensed under [AGPL-3.0-or-later](LICENSE).
