@@ -256,6 +256,11 @@ final class MountLifecycle {
     }
 
     private func ensureMountPointExists() throws {
+        // Skip creating mount directory for /Volumes - diskarbitrationd creates it
+        if config.mountPoint.hasPrefix("/Volumes/") {
+            return
+        }
+
         var isDir: ObjCBool = false
         if FileManager.default.fileExists(atPath: config.mountPoint, isDirectory: &isDir) {
             if !isDir.boolValue {
@@ -271,7 +276,7 @@ final class MountLifecycle {
     private func mount() throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/sbin/mount")
-        process.arguments = ["-t", config.fsType, config.source, config.mountPoint]
+        process.arguments = ["-F", "-t", config.fsType, config.source, config.mountPoint]
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()

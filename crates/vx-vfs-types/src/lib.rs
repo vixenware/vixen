@@ -16,6 +16,19 @@ pub enum VfsIssueCode {
     MountFailed,
 }
 
+impl core::fmt::Display for VfsIssueCode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            VfsIssueCode::UnsupportedPlatform => write!(f, "Unsupported platform"),
+            VfsIssueCode::AppMissing => write!(f, "Vixen app is missing"),
+            VfsIssueCode::ExtensionNotInstalled => write!(f, "VFS extension is not installed"),
+            VfsIssueCode::ExtensionDisabled => write!(f, "VFS extension is disabled"),
+            VfsIssueCode::HealthCheckFailed => write!(f, "VFS health check failed"),
+            VfsIssueCode::MountFailed => write!(f, "VFS mount failed"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 #[repr(u8)]
 pub enum VfsAction {

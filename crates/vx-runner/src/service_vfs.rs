@@ -3,9 +3,9 @@
 //! This module implements compilation using the VFS instead of disk materialization.
 //! Files are served lazily from CAS via the Vixen mount.
 
+use camino::Utf8PathBuf;
 use jiff::Zoned;
 use std::time::Instant;
-use tokio::process::Command;
 use tracing::{debug, info};
 use vx_runner_proto::{
     CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RustCompileRequest,
@@ -15,7 +15,30 @@ use vx_store_proto::{Blake3Hash, NodeId, NodeManifest, OutputEntry};
 
 use crate::RunnerService;
 
+/// Action execution context with all paths and sandbox config.
+pub struct ActionContext {
+    pub prefix_id: String,
+    pub mount_base: Utf8PathBuf,
+    pub prefix_path: Utf8PathBuf,
+    pub out_path: Utf8PathBuf,
+}
+
 impl RunnerService {
+    /// Create action execution context with prefix, paths, and sandbox config.
+    async fn create_action_context(&self) -> ActionContext {
+        let prefix_id = self.create_action_prefix().await;
+        let mount_base = crate::runner_mount_base();
+        let prefix_path = mount_base.join(&prefix_id);
+        let out_path = prefix_path.join("out");
+
+        ActionContext {
+            prefix_id,
+            mount_base,
+            prefix_path,
+            out_path,
+        }
+    }
+
     /// Compile a Rust crate using VFS-based execution
     pub async fn compile_rust_vfs(&self, request: RustCompileRequest) -> RustCompileResult {
         let start = Instant::now();
@@ -27,12 +50,9 @@ impl RunnerService {
             "compiling rust crate (VFS mode)"
         );
 
-        // 1. Create action prefix
-        let prefix_id = self.create_action_prefix().await;
-        let mount_base = crate::runner_mount_base();
-        let prefix_path = mount_base.join(&prefix_id);
-
-        debug!(prefix_id = %prefix_id, prefix_path = %prefix_path, "created action prefix");
+        // 1. Create action context
+        let action = self.create_action_context().await;
+        debug!(action.prefix_id = %action.prefix_id, action.prefix_path = %action.prefix_path, "created action prefix");
 
         // Helper to return an error result (cleanup is done before calling this)
         let cleanup_and_error =
@@ -58,15 +78,15 @@ impl RunnerService {
         {
             Ok(id) => id,
             Err(e) => {
-                self.remove_action_prefix(&prefix_id).await;
+                self.remove_action_prefix(&action.prefix_id).await;
                 return cleanup_and_error(
-                    &prefix_id,
+                    &action.prefix_id,
                     format!("failed to ensure toolchain: {}", e),
                     start,
                 );
             }
         };
-        let toolchain_path = mount_base.join(&toolchain_prefix_id);
+        let toolchain_path = action.mount_base.join(&toolchain_prefix_id);
         info!(
             toolchain_prefix = %toolchain_prefix_id,
             "Rust toolchain ready in {:.2}s",
@@ -75,22 +95,26 @@ impl RunnerService {
 
         // 3. Add source tree to prefix
         if let Err(e) = self
-            .add_source_tree_to_prefix(&prefix_id, request.source_manifest)
+            .add_source_tree_to_prefix(&action.prefix_id, request.source_manifest)
             .await
         {
-            self.remove_action_prefix(&prefix_id).await;
-            return cleanup_and_error(&prefix_id, format!("failed to add sources: {}", e), start);
+            self.remove_action_prefix(&action.prefix_id).await;
+            return cleanup_and_error(
+                &action.prefix_id,
+                format!("failed to add sources: {}", e),
+                start,
+            );
         }
 
         // 4. Add dependencies to prefix
         for dep in &request.deps {
             if let Err(e) = self
-                .add_dep_to_prefix(&prefix_id, &dep.extern_name, dep.manifest_hash)
+                .add_dep_to_prefix(&action.prefix_id, &dep.extern_name, dep.manifest_hash)
                 .await
             {
-                self.remove_action_prefix(&prefix_id).await;
+                self.remove_action_prefix(&action.prefix_id).await;
                 return cleanup_and_error(
-                    &prefix_id,
+                    &action.prefix_id,
                     format!("failed to add dep {}: {}", dep.extern_name, e),
                     start,
                 );
@@ -98,25 +122,24 @@ impl RunnerService {
         }
 
         // 5. Create output directory
-        self.create_output_dir_in_prefix(&prefix_id).await;
+        self.create_output_dir_in_prefix(&action.prefix_id).await;
 
         // 6. Build rustc command
         let rustc_path = toolchain_path.join("bin/rustc");
         let sysroot_path = toolchain_path.join("sysroot");
-        let src_path = prefix_path.join("src");
-        let deps_path = prefix_path.join("deps");
-        let out_path = prefix_path.join("out");
+        let src_path = action.prefix_path.join("src");
+        let deps_path = action.prefix_path.join("deps");
 
         let output_filename = if request.crate_type == "lib" {
             format!("lib{}.rlib", request.crate_name)
         } else {
             request.crate_name.clone()
         };
-        let output_file = out_path.join(&output_filename);
+        let output_file = action.out_path.join(&output_filename);
 
         let crate_root = src_path.join(&request.crate_root);
 
-        let mut cmd = Command::new(rustc_path.as_str());
+        let mut cmd = crate::sandbox::sandboxed_command(rustc_path.as_str(), &action);
         cmd.arg("--sysroot").arg(sysroot_path.as_str());
         cmd.arg("--crate-name").arg(&request.crate_name);
         cmd.arg("--crate-type").arg(&request.crate_type);
@@ -148,11 +171,11 @@ impl RunnerService {
         cmd.arg(crate_root.as_str());
 
         // Working directory
-        cmd.current_dir(prefix_path.as_str());
+        cmd.current_dir(action.prefix_path.as_str());
 
         // Clean environment for hermeticity
         cmd.env_clear();
-        // Need PATH for linker (for now - later sandbox will provide this)
+        // Need PATH for linker discovery (sandbox restricts writes/network, not reads)
         if let Ok(path) = std::env::var("PATH") {
             cmd.env("PATH", path);
         }
@@ -164,13 +187,47 @@ impl RunnerService {
             "executing rustc via VFS"
         );
 
+        // Log full command details at trace level for debugging sandbox issues
+        {
+            let cmd_std = cmd.as_std();
+            let program = cmd_std.get_program().to_string_lossy();
+            let args: Vec<_> = cmd_std.get_args().map(|a| a.to_string_lossy()).collect();
+            let envs: Vec<_> = cmd_std
+                .get_envs()
+                .map(|(k, v)| {
+                    format!(
+                        "{}={}",
+                        k.to_string_lossy(),
+                        v.map(|v| v.to_string_lossy()).unwrap_or_default()
+                    )
+                })
+                .collect();
+            let cwd = cmd_std
+                .get_current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            tracing::trace!(
+                %program,
+                ?args,
+                ?envs,
+                cwd,
+                "rustc: full command before spawn"
+            );
+        }
+
         // 7. Run rustc
         let output = match cmd.output().await {
             Ok(o) => o,
             Err(e) => {
-                self.remove_action_prefix(&prefix_id).await;
+                tracing::error!(
+                    error = %e,
+                    error_kind = ?e.kind(),
+                    rustc_path = %rustc_path,
+                    "failed to spawn rustc process"
+                );
+                self.remove_action_prefix(&action.prefix_id).await;
                 return cleanup_and_error(
-                    &prefix_id,
+                    &action.prefix_id,
                     format!("failed to execute rustc: {}", e),
                     start,
                 );
@@ -183,7 +240,7 @@ impl RunnerService {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         if !output.status.success() {
-            self.remove_action_prefix(&prefix_id).await;
+            self.remove_action_prefix(&action.prefix_id).await;
             return RustCompileResult {
                 success: false,
                 exit_code,
@@ -196,16 +253,16 @@ impl RunnerService {
         }
 
         // 8. Flush outputs from VFS to CAS
-        let flushed = self.flush_prefix_outputs(&prefix_id).await;
+        let flushed = self.flush_prefix_outputs(&action.prefix_id).await;
 
         // Find the output blob hash and size
         let output_rel_path = format!("out/{}", output_filename);
         let (blob_hash, blob_size) = match flushed.get(&output_rel_path) {
             Some(&(hash, size)) => (hash, size),
             None => {
-                self.remove_action_prefix(&prefix_id).await;
+                self.remove_action_prefix(&action.prefix_id).await;
                 return cleanup_and_error(
-                    &prefix_id,
+                    &action.prefix_id,
                     format!(
                         "output {} not found in VFS after compilation",
                         output_rel_path
@@ -245,9 +302,9 @@ impl RunnerService {
         let manifest_hash = match self.cas.put_manifest(manifest).await {
             Ok(h) => h,
             Err(e) => {
-                self.remove_action_prefix(&prefix_id).await;
+                self.remove_action_prefix(&action.prefix_id).await;
                 return cleanup_and_error(
-                    &prefix_id,
+                    &action.prefix_id,
                     format!("failed to store manifest: {:?}", e),
                     start,
                 );
@@ -255,7 +312,7 @@ impl RunnerService {
         };
 
         // 10. Cleanup
-        self.remove_action_prefix(&prefix_id).await;
+        self.remove_action_prefix(&action.prefix_id).await;
 
         info!(
             crate_name = %request.crate_name,
@@ -285,9 +342,8 @@ impl RunnerService {
             "compiling C source (VFS mode)"
         );
 
-        // 1. Create action prefix
-        let prefix_id = self.create_action_prefix().await;
-        let prefix_path = crate::runner_mount_base().join(&prefix_id);
+        // 1. Create action context
+        let action = self.create_action_context().await;
 
         // 2. Ensure Zig toolchain prefix exists
         let toolchain_prefix_id = match self
@@ -296,7 +352,7 @@ impl RunnerService {
         {
             Ok(id) => id,
             Err(e) => {
-                self.remove_action_prefix(&prefix_id).await;
+                self.remove_action_prefix(&action.prefix_id).await;
                 return CcCompileResult {
                     success: false,
                     exit_code: -1,
@@ -309,14 +365,14 @@ impl RunnerService {
                 };
             }
         };
-        let toolchain_path = crate::runner_mount_base().join(&toolchain_prefix_id);
+        let toolchain_path = action.mount_base.join(&toolchain_prefix_id);
 
         // 3. Add source tree to prefix
         if let Err(e) = self
-            .add_source_tree_to_prefix(&prefix_id, request.source_manifest)
+            .add_source_tree_to_prefix(&action.prefix_id, request.source_manifest)
             .await
         {
-            self.remove_action_prefix(&prefix_id).await;
+            self.remove_action_prefix(&action.prefix_id).await;
             return CcCompileResult {
                 success: false,
                 exit_code: -1,
@@ -330,12 +386,11 @@ impl RunnerService {
         }
 
         // 4. Create output directory
-        self.create_output_dir_in_prefix(&prefix_id).await;
+        self.create_output_dir_in_prefix(&action.prefix_id).await;
 
         // 5. Build zig cc command
         let zig_path = toolchain_path.join("zig");
-        let src_path = prefix_path.join("src");
-        let out_path = prefix_path.join("out");
+        let src_path = action.prefix_path.join("src");
 
         let source_file = src_path.join(&request.source_path);
         let object_filename = format!(
@@ -345,9 +400,9 @@ impl RunnerService {
                 .strip_suffix(".c")
                 .unwrap_or(&request.source_path)
         );
-        let object_file = out_path.join(&object_filename);
+        let object_file = action.out_path.join(&object_filename);
 
-        let mut cmd = Command::new(zig_path.as_str());
+        let mut cmd = crate::sandbox::sandboxed_command(zig_path.as_str(), &action);
         cmd.arg("cc");
         cmd.arg("-c");
         cmd.arg(source_file.as_str());
@@ -375,7 +430,7 @@ impl RunnerService {
             }
         }
 
-        cmd.current_dir(prefix_path.as_str());
+        cmd.current_dir(action.prefix_path.as_str());
 
         // Clean environment
         cmd.env_clear();
@@ -398,7 +453,7 @@ impl RunnerService {
         let output = match cmd.output().await {
             Ok(o) => o,
             Err(e) => {
-                self.remove_action_prefix(&prefix_id).await;
+                self.remove_action_prefix(&action.prefix_id).await;
                 return CcCompileResult {
                     success: false,
                     exit_code: -1,
@@ -418,7 +473,7 @@ impl RunnerService {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         if !output.status.success() {
-            self.remove_action_prefix(&prefix_id).await;
+            self.remove_action_prefix(&action.prefix_id).await;
             return CcCompileResult {
                 success: false,
                 exit_code,
@@ -432,13 +487,13 @@ impl RunnerService {
         }
 
         // 7. Flush outputs from VFS to CAS
-        let flushed = self.flush_prefix_outputs(&prefix_id).await;
+        let flushed = self.flush_prefix_outputs(&action.prefix_id).await;
 
         let output_rel_path = format!("out/{}", object_filename);
         let (blob_hash, blob_size) = match flushed.get(&output_rel_path) {
             Some(&(hash, size)) => (hash, size),
             None => {
-                self.remove_action_prefix(&prefix_id).await;
+                self.remove_action_prefix(&action.prefix_id).await;
                 return CcCompileResult {
                     success: false,
                     exit_code: -1,
@@ -476,7 +531,7 @@ impl RunnerService {
         let manifest_hash = match self.cas.put_manifest(manifest).await {
             Ok(h) => h,
             Err(e) => {
-                self.remove_action_prefix(&prefix_id).await;
+                self.remove_action_prefix(&action.prefix_id).await;
                 return CcCompileResult {
                     success: false,
                     exit_code: -1,
@@ -491,7 +546,7 @@ impl RunnerService {
         };
 
         // 9. Cleanup
-        self.remove_action_prefix(&prefix_id).await;
+        self.remove_action_prefix(&action.prefix_id).await;
 
         info!(
             source = %request.source_path,
@@ -516,8 +571,7 @@ impl RunnerService {
     pub async fn link_cc_vfs(&self, request: CcLinkRequest) -> CcLinkResult {
         let start = Instant::now();
 
-        let prefix_id = self.create_action_prefix().await;
-        let prefix_path = crate::runner_mount_base().join(&prefix_id);
+        let action = self.create_action_context().await;
 
         let _toolchain_prefix_id = match self
             .ensure_toolchain_prefix(request.toolchain_manifest)
@@ -525,7 +579,7 @@ impl RunnerService {
         {
             Ok(id) => id,
             Err(e) => {
-                self.remove_action_prefix(&prefix_id).await;
+                self.remove_action_prefix(&action.prefix_id).await;
                 return CcLinkResult {
                     success: false,
                     exit_code: -1,
@@ -538,8 +592,8 @@ impl RunnerService {
             }
         };
 
-        self.vfs.add_dir_to_prefix(&prefix_id, "obj").await;
-        self.create_output_dir_in_prefix(&prefix_id).await;
+        self.vfs.add_dir_to_prefix(&action.prefix_id, "obj").await;
+        self.create_output_dir_in_prefix(&action.prefix_id).await;
 
         // Build tree manifest with all object files
         use vx_store_proto::TreeManifest;
@@ -550,7 +604,7 @@ impl RunnerService {
             let manifest = match self.cas.get_manifest(*manifest_hash).await {
                 Ok(Some(m)) => m,
                 Ok(None) => {
-                    self.remove_action_prefix(&prefix_id).await;
+                    self.remove_action_prefix(&action.prefix_id).await;
                     return CcLinkResult {
                         success: false,
                         exit_code: -1,
@@ -565,7 +619,7 @@ impl RunnerService {
                     };
                 }
                 Err(e) => {
-                    self.remove_action_prefix(&prefix_id).await;
+                    self.remove_action_prefix(&action.prefix_id).await;
                     return CcLinkResult {
                         success: false,
                         exit_code: -1,
@@ -581,7 +635,7 @@ impl RunnerService {
             let object_entry = match manifest.outputs.iter().find(|o| o.logical == "object") {
                 Some(entry) => entry,
                 None => {
-                    self.remove_action_prefix(&prefix_id).await;
+                    self.remove_action_prefix(&action.prefix_id).await;
                     return CcLinkResult {
                         success: false,
                         exit_code: -1,
@@ -595,19 +649,29 @@ impl RunnerService {
             };
 
             let obj_rel_path = format!("obj/{idx:04}.o");
-            tree_manifest.add_file(obj_rel_path.clone(), object_entry.blob, object_entry.size, false);
-            object_paths.push(prefix_path.join(obj_rel_path));
+            tree_manifest.add_file(
+                obj_rel_path.clone(),
+                object_entry.blob,
+                object_entry.size,
+                false,
+            );
+            object_paths.push(action.prefix_path.join(obj_rel_path));
         }
 
         // Upload tree manifest and mount it
         tree_manifest.finalize();
         let manifest_json = facet_json::to_string(&tree_manifest)
-            .map_err(|e| format!("failed to serialize object files tree manifest for linking: {}", e))
+            .map_err(|e| {
+                format!(
+                    "failed to serialize object files tree manifest for linking: {}",
+                    e
+                )
+            })
             .unwrap();
         let manifest_hash = Blake3Hash::from_bytes(manifest_json.as_bytes());
 
         if let Err(e) = self.cas.put_blob(manifest_json.into_bytes()).await {
-            self.remove_action_prefix(&prefix_id).await;
+            self.remove_action_prefix(&action.prefix_id).await;
             return CcLinkResult {
                 success: false,
                 exit_code: -1,
@@ -615,12 +679,19 @@ impl RunnerService {
                 stderr: String::new(),
                 duration_ms: start.elapsed().as_millis() as u64,
                 output_manifest: None,
-                error: Some(format!("failed to store object files tree manifest to CAS: {}", e)),
+                error: Some(format!(
+                    "failed to store object files tree manifest to CAS: {}",
+                    e
+                )),
             };
         }
 
-        if let Err(e) = self.vfs.mount_tree(&prefix_id, "", manifest_hash).await {
-            self.remove_action_prefix(&prefix_id).await;
+        if let Err(e) = self
+            .vfs
+            .mount_tree(&action.prefix_id, "", manifest_hash)
+            .await
+        {
+            self.remove_action_prefix(&action.prefix_id).await;
             return CcLinkResult {
                 success: false,
                 exit_code: -1,
@@ -628,14 +699,17 @@ impl RunnerService {
                 stderr: String::new(),
                 duration_ms: start.elapsed().as_millis() as u64,
                 output_manifest: None,
-                error: Some(format!("failed to mount object files tree manifest in VFS: {}", e)),
+                error: Some(format!(
+                    "failed to mount object files tree manifest in VFS: {}",
+                    e
+                )),
             };
         }
 
         let output_rel_path = format!("out/{}", request.binary_name);
-        let output_path = prefix_path.join(&output_rel_path);
+        let output_path = action.prefix_path.join(&output_rel_path);
 
-        let mut cmd = Command::new("cc");
+        let mut cmd = crate::sandbox::sandboxed_command("cc", &action);
         for object_path in &object_paths {
             cmd.arg(object_path.as_str());
         }
@@ -643,7 +717,7 @@ impl RunnerService {
         for lib in &request.libs {
             cmd.arg(format!("-l{}", lib));
         }
-        cmd.current_dir(prefix_path.as_str());
+        cmd.current_dir(action.prefix_path.as_str());
         cmd.env_clear();
         if let Ok(path) = std::env::var("PATH") {
             cmd.env("PATH", path);
@@ -655,7 +729,7 @@ impl RunnerService {
         let output = match cmd.output().await {
             Ok(o) => o,
             Err(e) => {
-                self.remove_action_prefix(&prefix_id).await;
+                self.remove_action_prefix(&action.prefix_id).await;
                 return CcLinkResult {
                     success: false,
                     exit_code: -1,
@@ -674,7 +748,7 @@ impl RunnerService {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         if !output.status.success() {
-            self.remove_action_prefix(&prefix_id).await;
+            self.remove_action_prefix(&action.prefix_id).await;
             return CcLinkResult {
                 success: false,
                 exit_code,
@@ -686,11 +760,11 @@ impl RunnerService {
             };
         }
 
-        let flushed = self.flush_prefix_outputs(&prefix_id).await;
+        let flushed = self.flush_prefix_outputs(&action.prefix_id).await;
         let (blob_hash, blob_size) = match flushed.get(&output_rel_path) {
             Some(&(hash, size)) => (hash, size),
             None => {
-                self.remove_action_prefix(&prefix_id).await;
+                self.remove_action_prefix(&action.prefix_id).await;
                 return CcLinkResult {
                     success: false,
                     exit_code: -1,
@@ -724,7 +798,7 @@ impl RunnerService {
         let manifest_hash = match self.cas.put_manifest(manifest).await {
             Ok(h) => h,
             Err(e) => {
-                self.remove_action_prefix(&prefix_id).await;
+                self.remove_action_prefix(&action.prefix_id).await;
                 return CcLinkResult {
                     success: false,
                     exit_code: -1,
@@ -737,7 +811,7 @@ impl RunnerService {
             }
         };
 
-        self.remove_action_prefix(&prefix_id).await;
+        self.remove_action_prefix(&action.prefix_id).await;
 
         CcLinkResult {
             success: true,
@@ -750,4 +824,3 @@ impl RunnerService {
         }
     }
 }
-

@@ -9,6 +9,7 @@ mod vfs;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+use camino::Utf8PathBuf;
 use facet::Facet;
 use figue as args;
 use roam_stream::{HandshakeConfig, NoDispatcher, accept};
@@ -101,7 +102,7 @@ impl Vfs for SharedVfs {
 struct Args {
     /// Sentinel mode: clean up mount on parent death
     #[facet(args::named)]
-    sentinel: Option<camino::Utf8PathBuf>,
+    sentinel: Option<Utf8PathBuf>,
 
     /// RPC listen address (e.g., "127.0.0.1:0" for random port)
     #[facet(args::named, default = "127.0.0.1:0")]
@@ -109,7 +110,7 @@ struct Args {
 
     /// FUSE mount point
     #[facet(args::named)]
-    mount: camino::Utf8PathBuf,
+    mount: Utf8PathBuf,
 
     /// vx-store RPC address
     #[facet(args::named)]
@@ -122,7 +123,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    vx_tracing::init_service("vx-vfsd=debug");
 
     // Die when parent dies
     ur_taking_me_with_you::die_with_parent();
@@ -156,6 +157,7 @@ async fn main() -> Result<()> {
         }
 
         // Unmount the FUSE filesystem
+        // FIXME: no cfg code in the main path!! move to per-platform submodules
         #[cfg(unix)]
         {
             let status = std::process::Command::new("fusermount3")
@@ -189,7 +191,7 @@ async fn main() -> Result<()> {
     // 2. Create VFS with optional L2 disk blob cache
     let disk_cache_dir = std::env::var("VX_HOME")
         .ok()
-        .map(|vx_home| camino::Utf8PathBuf::from(vx_home).join("cache/blobs/blake3"));
+        .map(|vx_home| Utf8PathBuf::from(vx_home).join("cache/blobs/blake3"));
     if let Some(ref dir) = disk_cache_dir {
         tracing::info!(%dir, "L2 disk blob cache enabled");
     }
@@ -209,7 +211,20 @@ async fn main() -> Result<()> {
     // Print the actual address to stdout so vxd can parse it
     println!("{}", actual_addr);
 
-    // 4. Mount VFS
+    // 4. Clean up stuck mounts BEFORE creating directory
+    #[cfg(target_os = "linux")]
+    cleanup_stuck_fuse_mount(&args.mount).await?;
+    #[cfg(target_os = "macos")]
+    cleanup_stuck_fskit_mount(&args.mount).await?;
+
+    // 5. Ensure mount directory exists (skip for /Volumes - system creates it)
+    if !args.mount.starts_with("/Volumes/") {
+        tokio::fs::create_dir_all(args.mount.as_std_path())
+            .await
+            .map_err(|e| format!("failed to create mount directory {}: {}", args.mount, e))?;
+    }
+
+    // 6. Mount VFS
     tracing::info!("Mounting VFS at {}", args.mount);
     match vx_vfs::mount(
         VfsConfig {
@@ -260,11 +275,18 @@ async fn main() -> Result<()> {
             return Err(format!("VFS not supported on platform {}", platform).into());
         }
         Err(error) => {
+            eprintln!("VFS mount failed: {}", error);
+            for diagnostic in error.diagnostics() {
+                eprintln!("  {}: {}", diagnostic.code, diagnostic.summary);
+                if let Some(ref detail) = diagnostic.detail {
+                    eprintln!("    {}", detail);
+                }
+            }
             return Err(format!("VFS mount failed: {}", error).into());
         }
     }
 
-    // 5. Start accepting RPC connections
+    // 7. Start accepting RPC connections
     tracing::info!("Starting vx-vfsd RPC server");
     let vfsd_service = VfsdService::new(vfs);
 
@@ -341,4 +363,252 @@ async fn connect_to_store(endpoint_str: &str) -> Result<StoreClient<CasCaller>> 
         .map_err(|e| format!("failed to connect to vx-store at {}: {}", endpoint, e))?;
 
     Ok(StoreClient::new(caller))
+}
+
+/// Clean up stuck FUSE mount if needed (Linux only)
+#[cfg(target_os = "linux")]
+async fn cleanup_stuck_fuse_mount(mount_path: &Utf8PathBuf) -> Result<()> {
+    // Check if mount exists in /proc/mounts
+    let mounts = match std::fs::read_to_string("/proc/mounts") {
+        Ok(content) => content,
+        Err(_) => return Ok(()), // Can't read mounts, skip cleanup
+    };
+
+    if !mounts.contains(mount_path.as_str()) {
+        // Not mounted, nothing to clean up
+        return Ok(());
+    }
+
+    // Try to stat the mount point to see if it's stuck
+    match std::fs::metadata(mount_path.as_std_path()) {
+        Ok(_) => {
+            // stat succeeded, mount is healthy
+            return Ok(());
+        }
+        Err(e) if e.raw_os_error() == Some(107) => {
+            // ENOTCONN - Transport endpoint is not connected
+            // This is a stuck mount, proceed with cleanup
+            tracing::warn!(
+                mount_path = %mount_path,
+                "detected stuck FUSE mount, attempting cleanup"
+            );
+        }
+        Err(_) => {
+            // Some other error, let it fail naturally
+            return Ok(());
+        }
+    }
+
+    // Level 1: Try gentle unmount
+    tracing::info!(mount_path = %mount_path, "attempting gentle unmount: fusermount3 -u");
+    let status = std::process::Command::new("fusermount3")
+        .arg("-u")
+        .arg(mount_path.as_str())
+        .status()
+        .map_err(|e| format!("failed to run fusermount3: {}", e))?;
+
+    if status.success() {
+        tracing::info!("successfully unmounted stuck FUSE mount");
+        return Ok(());
+    }
+
+    // Level 2: Try lazy unmount
+    tracing::warn!(mount_path = %mount_path, "gentle unmount failed, trying lazy unmount: fusermount3 -uz");
+    let status = std::process::Command::new("fusermount3")
+        .arg("-uz")
+        .arg(mount_path.as_str())
+        .status()
+        .map_err(|e| format!("failed to run fusermount3: {}", e))?;
+
+    if status.success() {
+        tracing::info!("successfully unmounted with lazy unmount");
+        return Ok(());
+    }
+
+    // Level 3: Nuclear option - abort FUSE connections then unmount
+    tracing::error!("lazy unmount failed, attempting nuclear cleanup");
+
+    // Abort all FUSE connections
+    if let Ok(entries) = std::fs::read_dir("/sys/fs/fuse/connections") {
+        for entry in entries.flatten() {
+            let abort_path = entry.path().join("abort");
+            if abort_path.exists() {
+                let _ = std::fs::write(&abort_path, b"1");
+            }
+        }
+    }
+
+    // Try unmount again after abort
+    let status = std::process::Command::new("fusermount3")
+        .arg("-uz")
+        .arg(mount_path.as_str())
+        .status()
+        .map_err(|e| format!("failed to run fusermount3: {}", e))?;
+
+    if status.success() {
+        tracing::warn!("nuclear cleanup succeeded");
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to clean up stuck FUSE mount at {} after all attempts",
+            mount_path
+        )
+        .into())
+    }
+}
+
+/// Clean up stuck FSKit mount if needed (macOS only)
+#[cfg(target_os = "macos")]
+async fn cleanup_stuck_fskit_mount(mount_path: &Utf8PathBuf) -> Result<()> {
+    use std::process::Command;
+
+    tracing::debug!(mount_path = %mount_path, "checking for stuck FSKit mount");
+
+    // Canonicalize the mount path
+    // If it doesn't exist, canonicalize the parent and append the final component
+    let canonical_mount_path = match tokio::fs::canonicalize(mount_path.as_std_path()).await {
+        Ok(p) => {
+            let canonical = Utf8PathBuf::try_from(p).unwrap_or_else(|_| mount_path.clone());
+            tracing::debug!(
+                mount_path = %mount_path,
+                canonical_mount_path = %canonical,
+                "canonicalized mount path directly"
+            );
+            canonical
+        }
+        Err(_) => {
+            // Path doesn't exist, try canonicalizing parent
+            if let Some(parent) = mount_path.parent() {
+                match tokio::fs::canonicalize(parent.as_std_path()).await {
+                    Ok(canonical_parent) => {
+                        let canonical_parent = Utf8PathBuf::try_from(canonical_parent)
+                            .unwrap_or_else(|_| parent.to_path_buf());
+                        let canonical = canonical_parent.join(mount_path.file_name().unwrap());
+                        tracing::debug!(
+                            mount_path = %mount_path,
+                            canonical_mount_path = %canonical,
+                            "canonicalized via parent directory"
+                        );
+                        canonical
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            mount_path = %mount_path,
+                            error = %e,
+                            "parent does not exist, using mount path as-is"
+                        );
+                        mount_path.clone()
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    mount_path = %mount_path,
+                    "no parent directory, using mount path as-is"
+                );
+                mount_path.clone()
+            }
+        }
+    };
+
+    // Run `df` to check for existing mounts
+    tracing::debug!("running df to check for existing mounts");
+    let output = Command::new("df")
+        .output()
+        .map_err(|e| format!("failed to run df: {}", e))?;
+
+    if !output.status.success() {
+        tracing::warn!("df command failed, skipping mount cleanup");
+        return Ok(()); // df failed, skip cleanup
+    }
+
+    let df_output = String::from_utf8_lossy(&output.stdout);
+    tracing::trace!(df_output = %df_output, "df output");
+
+    // Look for a mount at our target path
+    // df output format: "Filesystem ... Mounted on"
+    // Example: "vixen://session?sid=... 8000000 0 4000000 0% 50000 50000 50% /private/tmp/.vx-test/..."
+    let mut is_mounted = false;
+    let mut found_mount_at: Option<String> = None;
+    for line in df_output.lines().skip(1) {
+        // Last field is the mount point
+        if let Some(mounted_on) = line.split_whitespace().last() {
+            // Canonicalize both paths for comparison (handles /tmp -> /private/tmp, symlinks, etc.)
+            let canonical_df_path = match std::fs::canonicalize(mounted_on) {
+                Ok(p) => Utf8PathBuf::try_from(p).ok(),
+                Err(_) => None,
+            };
+
+            if let Some(df_path) = canonical_df_path {
+                if df_path == canonical_mount_path {
+                    tracing::info!(
+                        mount_path = %mount_path,
+                        canonical_mount_path = %canonical_mount_path,
+                        df_entry = %mounted_on,
+                        "found existing mount (matched via canonicalization)"
+                    );
+                    is_mounted = true;
+                    found_mount_at = Some(mounted_on.to_string());
+                    break;
+                }
+            } else {
+                // If canonicalization fails, fall back to string comparison
+                if mounted_on == mount_path.as_str() || mounted_on == canonical_mount_path.as_str()
+                {
+                    tracing::info!(
+                        mount_path = %mount_path,
+                        df_entry = %mounted_on,
+                        "found existing mount (matched via string comparison)"
+                    );
+                    is_mounted = true;
+                    found_mount_at = Some(mounted_on.to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    if !is_mounted {
+        tracing::debug!(mount_path = %mount_path, "no existing mount found");
+        return Ok(()); // Not mounted, nothing to clean up
+    }
+
+    let found_at = found_mount_at.as_deref().unwrap_or("unknown");
+    tracing::info!(mount_path = %mount_path, found_at = %found_at, "proceeding with unmount");
+
+    // Try to stat the mount point to see if it's responsive
+    match tokio::fs::metadata(mount_path.as_std_path()).await {
+        Ok(_) => {
+            // Mount is responsive, but we still need to unmount to re-mount
+            tracing::warn!(
+                mount_path = %mount_path,
+                "found existing mount, attempting unmount"
+            );
+        }
+        Err(_) => {
+            // Mount is stuck/unresponsive
+            tracing::warn!(
+                mount_path = %mount_path,
+                "detected stuck FSKit mount, attempting cleanup"
+            );
+        }
+    }
+
+    // Use diskutil to unmount
+    tracing::info!(mount_path = %mount_path, "attempting unmount: diskutil unmount");
+    let status = Command::new("diskutil")
+        .arg("unmount")
+        .arg(canonical_mount_path.as_str())
+        .status()
+        .map_err(|e| format!("failed to run diskutil: {}", e))?;
+
+    if status.success() {
+        tracing::info!("successfully unmounted existing mount");
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to unmount existing mount at {}",
+            canonical_mount_path
+        )
+        .into())
+    }
 }

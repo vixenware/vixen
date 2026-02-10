@@ -446,16 +446,19 @@ pub(super) async fn mount<T>(config: VfsConfig, vfs: T) -> Result<VfsStart, VfsE
 where
     T: Vfs + Clone + Send + Sync + 'static,
 {
-    tokio::fs::create_dir_all(config.mount_path.as_std_path())
-        .await
-        .map_err(|error| VfsError::CommandFailed {
-            program: "mount",
-            message: format!(
-                "failed to create mount directory {}: {}",
-                config.mount_path, error
-            ),
-            _diagnostics: vec![],
-        })?;
+    // Skip creating mount directory for system-managed mount points
+    if !config.mount_path.starts_with("/media/") {
+        tokio::fs::create_dir_all(config.mount_path.as_std_path())
+            .await
+            .map_err(|error| VfsError::CommandFailed {
+                program: "mount",
+                message: format!(
+                    "failed to create mount directory {}: {}",
+                    config.mount_path, error
+                ),
+                _diagnostics: vec![],
+            })?;
+    }
 
     // Clean up ghost mounts from previous runs that didn't unmount cleanly.
     lazy_unmount_if_mounted(&config.mount_path);

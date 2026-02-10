@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Build vx-store, vx-runner, vxd, vx
-cargo build
+cargo build --verbose
 
 # HTTP download cache persists across runs (regular files, safe in ~/Library/Caches)
 if [[ "$(uname)" == "Darwin" ]]; then
@@ -14,8 +14,9 @@ fi
 
 # Resolve absolute paths to built binaries
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-VXD_BIN="${SCRIPT_DIR}/target/debug/vxd"
-VX_BIN="${SCRIPT_DIR}/target/debug/vx"
+TARGET_DIR="${CARGO_TARGET_DIR:-${SCRIPT_DIR}/target}"
+VXD_BIN="${TARGET_DIR}/debug/vxd"
+VX_BIN="${TARGET_DIR}/debug/vx"
 
 if [[ ! -x "${VXD_BIN}" ]]; then
     echo "ERROR: ${VXD_BIN} not found. build-daemons should run first."
@@ -59,7 +60,8 @@ TOML
 echo 'fn main() {}' > "${WARMUP_DIR}/src/main.rs"
 
 (cd "${WARMUP_DIR}" && "${VX_BIN}" build --no-spawn --no-tui) || {
-    echo "WARNING: warmup build failed, tests will still work but may be slower"
+    echo "Warmup build failed, this means nothing'll work. Probably FSKit, darn it."
+    exit 1
 }
 
 # Export connection info for all tests. TestEnv::new() reads these to skip

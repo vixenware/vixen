@@ -149,11 +149,7 @@ impl SpawnTracker {
 ///
 /// When `VX_INHERIT_STDIO` is set, stdout/stderr are inherited from the parent
 /// (so daemon logs appear inline in test output). Otherwise they go to `log_path`.
-fn spawn_service(
-    binary_name: &str,
-    env_vars: &[(&str, String)],
-    log_path: &camino::Utf8Path,
-) -> Result<Child> {
+fn spawn_service(binary_name: &str, log_path: &camino::Utf8Path) -> Result<Child> {
     use std::process::Stdio;
 
     let vx_test = std::env::var("VX_TEST").is_ok();
@@ -170,22 +166,6 @@ fn spawn_service(
     tracing::debug!(%vx_test, "spawning {} from {}", binary_name, binary_path.display());
 
     let mut cmd = std::process::Command::new(&binary_path);
-
-    // Clean environment for hermeticity — services only see explicitly provided vars.
-    cmd.env_clear();
-    if let Ok(path) = std::env::var("PATH") {
-        cmd.env("PATH", path);
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        cmd.env("HOME", home);
-    }
-    // Propagate VX_TEST so child services can detect test mode
-    if vx_test {
-        cmd.env("VX_TEST", "1");
-    }
-    for (key, value) in env_vars {
-        cmd.env(key, value);
-    }
 
     if vx_test {
         cmd.stdout(Stdio::inherit());
@@ -227,14 +207,7 @@ async fn ensure_services(args: &Args, spawn_tracker: &Arc<Mutex<SpawnTracker>>) 
         }
 
         let store_log = args.vx_home.join("store.log");
-        let child = spawn_service(
-            "vx-store",
-            &[
-                ("VX_HOME", args.vx_home.to_string()),
-                ("VX_STORE", args.cas_endpoint.display()),
-            ],
-            &store_log,
-        )?;
+        let child = spawn_service("vx-store", &store_log)?;
 
         spawn_tracker.lock().await.store = Some(child);
 
@@ -270,15 +243,7 @@ async fn ensure_services(args: &Args, spawn_tracker: &Arc<Mutex<SpawnTracker>>) 
         }
 
         let runner_log = args.vx_home.join("runner.log");
-        let child = spawn_service(
-            "vx-runner",
-            &[
-                ("VX_HOME", args.vx_home.to_string()),
-                ("VX_STORE", args.cas_endpoint.display()),
-                ("VX_RUNNER", args.exec_endpoint.display()),
-            ],
-            &runner_log,
-        )?;
+        let child = spawn_service("vx-runner", &runner_log)?;
 
         spawn_tracker.lock().await.runner = Some(child);
 

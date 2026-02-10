@@ -181,8 +181,8 @@ impl Executor {
         profile: String,
         max_concurrency: usize,
     ) -> Self {
-        trace!("EXECUTOR NEW: starting initialization");
-        trace!("EXECUTOR NEW: graph has {} nodes", graph.graph.node_count());
+        trace!("starting initialization");
+        trace!("graph has {} nodes", graph.graph.node_count());
 
         // Initialize remaining deps count and ready queue
         // We own the graph here, so no locking needed
@@ -194,7 +194,7 @@ impl Executor {
             let dep_count = graph.graph.neighbors(node_idx).count();
             let action = &graph.graph[node_idx].action;
             trace!(
-                "EXECUTOR NEW: node {:?} action={} dep_count={}",
+                "node {:?} action={} dep_count={}",
                 node_idx,
                 action.display_name(),
                 dep_count
@@ -203,17 +203,13 @@ impl Executor {
 
             // If no dependencies, it's ready immediately
             if dep_count == 0 {
-                debug!(
-                    "EXECUTOR NEW: READY node {:?} action={}",
-                    node_idx,
-                    action.display_name()
-                );
+                debug!("READY node {:?} action={}", node_idx, action.display_name());
                 ready_queue.push_back(node_idx);
             }
         }
 
         debug!(
-            "EXECUTOR NEW: initialized with ready_queue_size={} total_nodes={}",
+            "initialized with ready_queue_size={} total_nodes={}",
             ready_queue.len(),
             graph.graph.node_count()
         );
@@ -221,12 +217,7 @@ impl Executor {
         // Log first few ready actions for debugging
         for (i, &node_idx) in ready_queue.iter().enumerate().take(3) {
             let action = &graph.graph[node_idx].action;
-            debug!(
-                "EXECUTOR NEW: ready[{}] = {:?} {}",
-                i,
-                node_idx,
-                action.display_name()
-            );
+            debug!("ready[{}] = {:?} {}", i, node_idx, action.display_name());
         }
 
         let (message_tx, message_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -626,7 +617,7 @@ impl Executor {
         let toolchain_node_idx = self.graph.toolchain_node; // For looking up toolchain result
 
         tokio::spawn(async move {
-            debug!("SPAWN_ACTION task: started for {:?}", node_idx);
+            debug!("started for {:?}", node_idx);
 
             // Start progress tracking
             let action_type = action.to_progress_action_type();
@@ -661,10 +652,7 @@ impl Executor {
                 }
             });
 
-            debug!(
-                "SPAWN_ACTION task: calling execute_action for {:?}",
-                node_idx
-            );
+            debug!("calling execute_action for {:?}", node_idx);
             // Execute action - pass results as immutable ref
             let result = execute_action(
                 action,
@@ -681,7 +669,7 @@ impl Executor {
             .await;
 
             debug!(
-                "SPAWN_ACTION task: execute_action returned for {:?}: {:?}",
+                "execute_action returned for {:?}: {:?}",
                 node_idx,
                 result.is_ok()
             );
@@ -694,14 +682,11 @@ impl Executor {
                 let _ = listener.complete_action(id).await;
             }
 
-            debug!(
-                "SPAWN_ACTION task: sending completion message for {:?}",
-                node_idx
-            );
+            debug!("sending completion message for {:?}", node_idx);
             // Send result back to executor
             let _ = message_tx.send(ExecutorMessage::ActionCompleted { node_idx, result });
 
-            debug!("SPAWN_ACTION task: done for {:?}", node_idx);
+            debug!("done for {:?}", node_idx);
             // Permit dropped here, allowing next action to run
         });
     }
@@ -727,10 +712,7 @@ async fn execute_action(
     use vx_runner_proto::{RustCompileRequest, RustDep};
     use vx_store_proto::{IngestTreeRequest, TreeFile};
 
-    debug!(
-        "EXECUTE_ACTION: processing action {}",
-        action.display_name()
-    );
+    debug!("processing action {}", action.display_name());
 
     match action {
         Action::AcquireToolchain {

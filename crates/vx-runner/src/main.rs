@@ -10,6 +10,7 @@
 //! - Return output manifest hashes
 
 pub(crate) mod error;
+pub(crate) mod sandbox;
 pub(crate) mod service;
 pub(crate) mod service_vfs;
 pub(crate) mod vfsd_client;
@@ -31,19 +32,29 @@ pub type CasCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispat
 pub type VfsdCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
 
 pub(crate) fn runner_mount_base() -> Utf8PathBuf {
-    if let Ok(path) = std::env::var("VX_RUNNER_MOUNT") {
-        return Utf8PathBuf::from(path);
-    }
-    if let Ok(vx_home) = std::env::var("VX_HOME") {
-        return Utf8PathBuf::from(vx_home).join("vixen").join("runner");
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return Utf8PathBuf::from(home)
-            .join(".vx")
-            .join("vixen")
-            .join("runner");
-    }
-    Utf8PathBuf::from("/tmp/vx/vixen/runner")
+    // Option 1: VX_HOME-based path (works with FSKit, but has system policy restrictions on unsigned binaries)
+    let vx_home = std::env::var("VX_HOME")
+        .ok()
+        .map(Utf8PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").expect("HOME not set");
+            Utf8PathBuf::from(format!("{}/.vx", home))
+        });
+
+    vx_home.join("vixen/runner")
+
+    // Option 2: /Volumes path (avoids system policy restrictions, but FSKit mount fails)
+    // let base = if cfg!(target_os = "macos") {
+    //     "/Volumes"
+    // } else {
+    //     "/tmp"
+    // };
+    // let suffix = if std::env::var("VX_TEST").is_ok() {
+    //     "vixenfs-test"
+    // } else {
+    //     "vixenfs"
+    // };
+    // Utf8PathBuf::from(format!("{}/{}", base, suffix))
 }
 
 #[derive(Debug)]
@@ -133,98 +144,6 @@ async fn connect_to_cas(endpoint: &Endpoint) -> Result<vx_store_proto::StoreClie
     Ok(vx_store_proto::StoreClient::new(caller))
 }
 
-/// Check for stuck FUSE mount and clean up if needed
-async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
-    // Check if mount exists in /proc/mounts
-    let mounts = match std::fs::read_to_string("/proc/mounts") {
-        Ok(content) => content,
-        Err(_) => return Ok(()), // Not Linux or can't read mounts, skip cleanup
-    };
-
-    if !mounts.contains(mount_path.as_str()) {
-        // Not mounted, nothing to clean up
-        return Ok(());
-    }
-
-    // Try to stat the mount point to see if it's stuck
-    match std::fs::metadata(mount_path.as_std_path()) {
-        Ok(_) => {
-            // stat succeeded, mount is healthy
-            return Ok(());
-        }
-        Err(e) if e.raw_os_error() == Some(107) => {
-            // ENOTCONN - Transport endpoint is not connected
-            // This is a stuck mount, proceed with cleanup
-            tracing::warn!("Detected stuck FUSE mount at {}, attempting cleanup", mount_path);
-        }
-        Err(e) => {
-            // Some other error, let it fail naturally
-            return Err(e.into());
-        }
-    }
-
-    // Verify this is our mount (matches pattern */vixen/runner)
-    if !mount_path.as_str().contains("/vixen/runner") {
-        return Err(eyre::eyre!(
-            "Refusing to clean up mount at {} - doesn't match vixen pattern",
-            mount_path
-        ));
-    }
-
-    // Level 1: Try gentle unmount
-    tracing::info!("Attempting gentle unmount: fusermount3 -u {}", mount_path);
-    let status = std::process::Command::new("fusermount3")
-        .arg("-u")
-        .arg(mount_path.as_str())
-        .status()?;
-
-    if status.success() {
-        tracing::info!("Successfully unmounted stuck FUSE mount");
-        return Ok(());
-    }
-
-    // Level 2: Try lazy unmount
-    tracing::warn!("Gentle unmount failed, trying lazy unmount: fusermount3 -uz {}", mount_path);
-    let status = std::process::Command::new("fusermount3")
-        .arg("-uz")
-        .arg(mount_path.as_str())
-        .status()?;
-
-    if status.success() {
-        tracing::info!("Successfully unmounted with lazy unmount");
-        return Ok(());
-    }
-
-    // Level 3: Nuclear option - abort FUSE connections then unmount
-    tracing::error!("Lazy unmount failed, attempting nuclear cleanup");
-
-    // Abort all FUSE connections
-    if let Ok(entries) = std::fs::read_dir("/sys/fs/fuse/connections") {
-        for entry in entries.flatten() {
-            let abort_path = entry.path().join("abort");
-            if abort_path.exists() {
-                let _ = std::fs::write(&abort_path, b"1");
-            }
-        }
-    }
-
-    // Try unmount again after abort
-    let status = std::process::Command::new("fusermount3")
-        .arg("-uz")
-        .arg(mount_path.as_str())
-        .status()?;
-
-    if status.success() {
-        tracing::warn!("Nuclear cleanup succeeded");
-        Ok(())
-    } else {
-        Err(eyre::eyre!(
-            "Failed to clean up stuck FUSE mount at {} after all attempts",
-            mount_path
-        ))
-    }
-}
-
 /// Spawn vx-vfsd if not already running, return any startup errors
 async fn ensure_vfsd(
     vfsd_endpoint: &Endpoint,
@@ -239,7 +158,7 @@ async fn ensure_vfsd(
         return Ok(());
     }
 
-    tracing::info!("Spawning vx-vfsd");
+    tracing::info!("Spawning vx-vfsd.");
 
     // Find vx-vfsd binary (sibling to vx-runner)
     let binary_path = std::env::current_exe()
@@ -250,12 +169,6 @@ async fn ensure_vfsd(
 
     let mount_path = runner_mount_base();
 
-    // Check for stuck FUSE mount and clean up if needed
-    cleanup_stuck_mount(&mount_path).await?;
-
-    // Ensure mount directory exists
-    std::fs::create_dir_all(&mount_path)?;
-
     let mut cmd = std::process::Command::new(&binary_path);
     cmd.arg("--listen").arg(vfsd_endpoint.display());
     cmd.arg("--mount").arg(mount_path.as_str());
@@ -263,7 +176,11 @@ async fn ensure_vfsd(
     cmd.env("VX_HOME", vx_home.as_str());
 
     // Capture stderr for error messages
-    cmd.stdout(Stdio::null());
+    if std::env::var("VX_TEST").is_ok() {
+        cmd.stdout(Stdio::inherit());
+    } else {
+        cmd.stdout(Stdio::null());
+    }
     cmd.stderr(Stdio::piped());
 
     let mut child = ur_taking_me_with_you::spawn_dying_with_parent(cmd)?;
@@ -274,14 +191,24 @@ async fn ensure_vfsd(
     let stderr_buffer_clone = stderr_buffer.clone();
 
     tokio::spawn(async move {
-        use tokio::io::AsyncReadExt;
-        let mut stderr = tokio::io::BufReader::new(tokio::process::ChildStderr::from_std(stderr).unwrap());
-        let mut buf = [0u8; 4096];
+        use tokio::io::AsyncBufReadExt;
+        let mut stderr =
+            tokio::io::BufReader::new(tokio::process::ChildStderr::from_std(stderr).unwrap());
+
+        // Stream line-by-line to both buffer and stderr
+        let mut buf = String::new();
         loop {
-            match stderr.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    stderr_buffer_clone.lock().unwrap().extend_from_slice(&buf[..n]);
+            buf.clear();
+            match stderr.read_line(&mut buf).await {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    // Write to parent's stderr
+                    eprint!("[vx-vfsd] {}", buf);
+                    // Also buffer for error reporting
+                    stderr_buffer_clone
+                        .lock()
+                        .unwrap()
+                        .extend_from_slice(buf.as_bytes());
                 }
                 Err(_) => break,
             }
@@ -484,7 +411,6 @@ impl RunnerService {
         }
     }
 
-
     // ========================================================================
     // VFS Prefix Management (for hermetic action execution)
     // ========================================================================
@@ -513,7 +439,10 @@ impl RunnerService {
             let (id, _item_id) = self.vfs.create_prefix(prefix_id.clone()).await;
 
             // Track it locally
-            self.created_prefixes.lock().unwrap().insert(prefix_id.clone());
+            self.created_prefixes
+                .lock()
+                .unwrap()
+                .insert(prefix_id.clone());
 
             return id;
         }
@@ -616,10 +545,12 @@ impl RunnerService {
             self.vfs
                 .mount_tree(&prefix_id, mount_path, component.tree_manifest)
                 .await
-                .map_err(|e| RunnerError::VfsMount(format!(
-                    "failed to mount toolchain component {}: {}",
-                    component.name, e
-                )))?;
+                .map_err(|e| {
+                    RunnerError::VfsMount(format!(
+                        "failed to mount toolchain component {}: {}",
+                        component.name, e
+                    ))
+                })?;
         }
 
         tracing::info!(
@@ -712,7 +643,9 @@ impl RunnerService {
         self.vfs
             .add_file_to_prefix(prefix_id, &path, rlib.blob, rlib.size, false)
             .await
-            .map_err(|e| RunnerError::VfsMount(format!("failed to add dependency {}: {}", extern_name, e)))?;
+            .map_err(|e| {
+                RunnerError::VfsMount(format!("failed to add dependency {}: {}", extern_name, e))
+            })?;
 
         Ok(())
     }
@@ -740,10 +673,9 @@ impl RunnerService {
     /// Get the VFS mount path for an action prefix
     ///
     /// This is the path that should be passed to sandboxed processes.
-    /// Format: <mount-base>/<prefix_id>/ where mount-base defaults to ~/.vx/vixen/runner.
+    /// Format: <mount-base>/<prefix_id>/ where mount-base is /Volumes/vixenfs (macOS) or /tmp/vixenfs (Linux).
     #[allow(dead_code)] // Will be used for sandbox integration
     pub(crate) fn get_prefix_mount_path(&self, prefix_id: &str) -> Utf8PathBuf {
         runner_mount_base().join(prefix_id)
     }
 }
-

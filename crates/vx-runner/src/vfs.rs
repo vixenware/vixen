@@ -20,8 +20,8 @@
 //!   └── build-01JFY.../           <- another action
 //! ```
 //!
-//! Each action gets its own prefix directory. The sandbox (wardstone) restricts
-//! the subprocess to only access its prefix.
+//! Each action gets its own prefix directory. The sandbox (seatbelt on macOS,
+//! seccomp/landlock on Linux) restricts the subprocess to only access its prefix.
 //!
 //! # Item ID Allocation
 //!

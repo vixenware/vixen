@@ -6,7 +6,7 @@ for conn in /sys/fs/fuse/connections/*/abort; do
 done
 
 # Unmount all vixen FUSE mounts (nextest, stress test, etc.)
-grep -o '[^ ]*/vixen/runner' /proc/mounts 2>/dev/null | while read -r mp; do
+grep -o '/tmp/vixenfs[^ ]*' /proc/mounts 2>/dev/null | while read -r mp; do
   echo "unmounting $mp"
   fusermount3 -uz "$mp" 2>/dev/null || true
 done

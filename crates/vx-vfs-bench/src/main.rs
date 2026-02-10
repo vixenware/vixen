@@ -29,6 +29,7 @@ mod macos_bench {
         RandomRead,
         Exec,
         ToolchainBuild,
+        MountAndWait,
     }
 
     impl BenchMode {
@@ -37,6 +38,7 @@ mod macos_bench {
                 Self::RandomRead => "random-read",
                 Self::Exec => "exec",
                 Self::ToolchainBuild => "toolchain-build",
+                Self::MountAndWait => "mount-and-wait",
             }
         }
     }
@@ -46,8 +48,9 @@ mod macos_bench {
             "random-read" => Ok(BenchMode::RandomRead),
             "exec" => Ok(BenchMode::Exec),
             "toolchain-build" => Ok(BenchMode::ToolchainBuild),
+            "mount-and-wait" => Ok(BenchMode::MountAndWait),
             _ => Err(format!(
-                "Invalid --mode value: {value} (expected random-read, exec, toolchain-build)"
+                "Invalid --mode value: {value} (expected random-read, exec, toolchain-build, mount-and-wait)"
             )),
         }
     }
@@ -206,6 +209,9 @@ mod macos_bench {
                         return Err("--build-repeat must be > 0".to_string());
                     }
                 }
+                BenchMode::MountAndWait => {
+                    // No validation needed - will mount exec_host_file
+                }
             }
 
             Ok(config)
@@ -217,7 +223,7 @@ mod macos_bench {
             "Usage: vx-vfs-bench [OPTIONS]\n\
              \n\
              Options:\n\
-             --mode <random-read|exec|toolchain-build>\n\
+             --mode <random-read|exec|toolchain-build|mount-and-wait>\n\
              --mount-path <path>\n\
              --reads <n>\n\
              --min-read-bytes <n>\n\
@@ -1426,6 +1432,43 @@ mod macos_bench {
         })
     }
 
+    async fn run_mount_and_wait_benchmark(
+        config: &BenchConfig,
+    ) -> Result<BenchSummary, Box<dyn std::error::Error>> {
+        let host_bytes = std::fs::read(config.exec_host_file.as_std_path())?;
+
+        let vfs = SyntheticVfs::from_file_specs(vec![FileSpec {
+            path: config.exec_mounted_name.clone(),
+            data: Arc::from(host_bytes),
+            mode: mode::FILE_EXECUTABLE,
+        }])
+        .map_err(|e| format!("failed to create vfs: {e}"))?;
+
+        let mount_path = mount_with_vfs(&config.mount_path, vfs.clone()).await?;
+        let mounted_file_path = mount_path.join(&config.exec_mounted_name);
+
+        println!("mode: {}", config.mode.as_str());
+        println!("mount path: {}", mount_path);
+        println!("mounted file: {}", mounted_file_path);
+        println!("host file: {}", config.exec_host_file);
+        println!();
+        println!("VFS is mounted. You can now test from another shell:");
+        println!("  ls -la {}", mount_path);
+        println!("  cat {}", mounted_file_path);
+        println!("  {}", mounted_file_path);
+        println!(
+            "  sandbox-exec -p '(version 1) (allow default)' {}",
+            mounted_file_path
+        );
+        println!();
+        println!("Press Ctrl+C to unmount and exit");
+
+        // Sleep indefinitely
+        loop {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+    }
+
     async fn run_benchmark(
         config: &BenchConfig,
     ) -> Result<BenchSummary, Box<dyn std::error::Error>> {
@@ -1433,6 +1476,7 @@ mod macos_bench {
             BenchMode::RandomRead => run_random_read_benchmark(config).await,
             BenchMode::Exec => run_exec_benchmark(config).await,
             BenchMode::ToolchainBuild => run_toolchain_build_benchmark(config).await,
+            BenchMode::MountAndWait => run_mount_and_wait_benchmark(config).await,
         }
     }
 
@@ -1602,6 +1646,8 @@ mod macos_bench {
 
     #[tokio::main]
     pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
+        tracing_subscriber::fmt::init();
+
         let config = BenchConfig::parse().map_err(|e| format!("Argument parsing failed: {e}"))?;
         let summary = run_benchmark(&config).await?;
 

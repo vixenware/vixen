@@ -32,17 +32,22 @@ where
 {
     tracing::debug!(mount_path = %config.mount_path, "entering macos vfs startup");
 
-    tokio::fs::create_dir_all(config.mount_path.as_std_path())
-        .await
-        .map_err(|error| VfsError::CommandFailed {
-            program: "mount",
-            message: format!(
-                "failed to create mount directory {}: {}",
-                config.mount_path, error
-            ),
-            _diagnostics: vec![],
-        })?;
-    tracing::debug!(mount_path = %config.mount_path, "ensured mount directory exists");
+    // Skip creating mount directory for /Volumes - FSKit/diskarbitrationd creates it
+    if !config.mount_path.starts_with("/Volumes/") {
+        tokio::fs::create_dir_all(config.mount_path.as_std_path())
+            .await
+            .map_err(|error| VfsError::CommandFailed {
+                program: "mount",
+                message: format!(
+                    "failed to create mount directory {}: {}",
+                    config.mount_path, error
+                ),
+                _diagnostics: vec![],
+            })?;
+        tracing::debug!(mount_path = %config.mount_path, "ensured mount directory exists");
+    } else {
+        tracing::debug!(mount_path = %config.mount_path, "skipping mount directory creation for /Volumes (system creates it)");
+    }
 
     let (mount_ready_tx, mut mount_ready_rx) = mpsc::channel::<()>(2);
     let (vfs_dead_tx, vfs_dead_rx) = watch::channel(false);
@@ -87,6 +92,41 @@ where
         }
     };
 
+    // Stream helper stdout/stderr to tracing and capture for error reporting
+    let stdout_task = if let Some(stdout) = helper.stdout.take() {
+        let output_clone = helper_output.clone();
+        Some(tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(target: "vixenfs-mount", "stdout: {}", line);
+                output_clone
+                    .lock()
+                    .await
+                    .push_back(format!("stdout: {}", line));
+            }
+        }))
+    } else {
+        None
+    };
+
+    let stderr_task = if let Some(stderr) = helper.stderr.take() {
+        let output_clone = helper_output.clone();
+        Some(tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(target: "vixenfs-mount", "stderr: {}", line);
+                output_clone
+                    .lock()
+                    .await
+                    .push_back(format!("stderr: {}", line));
+            }
+        }))
+    } else {
+        None
+    };
+
     match wait_for_mount_ready(&mut helper, &mut mount_ready_rx, MOUNT_TIMEOUT).await {
         Ok(()) => {
             tracing::info!(mount_path = %config.mount_path, "vixenfs-mount became ready");
@@ -98,9 +138,19 @@ where
         Err(readiness_error) => {
             cleanup_session_dir(&sid).await;
             let diagnostics = collect_mount_failure_diagnostics().await;
-            let helper_output = snapshot_lines(&helper_output).await;
             let _ = helper.kill().await;
             let _ = helper.wait().await;
+
+            // Wait for stdout/stderr readers to finish draining
+            if let Some(task) = stdout_task {
+                let _ = task.await;
+            }
+            if let Some(task) = stderr_task {
+                let _ = task.await;
+            }
+
+            let helper_output = snapshot_lines(&helper_output).await;
+
             let mount_detail = if helper_output.is_empty() {
                 readiness_error.clone()
             } else {

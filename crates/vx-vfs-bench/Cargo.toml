@@ -16,3 +16,4 @@ vx-vfs.workspace = true
 camino.workspace = true
 tokio.workspace = true
 roam.workspace = true
+tracing-subscriber.workspace = true
