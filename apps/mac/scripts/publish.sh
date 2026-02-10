@@ -8,26 +8,32 @@ if [[ ! -f "$DMG_PATH" ]]; then
   exit 1
 fi
 
-echo "Submitting DMG for notarization..."
-SUBMIT_OUTPUT="$(xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" 2>&1)" || true
-echo "$SUBMIT_OUTPUT"
+SUBMISSION_ID="${VX_MAC_SUBMISSION_ID:-}"
 
-SUBMISSION_ID="$(echo "$SUBMIT_OUTPUT" | awk '/  id:/{print $2; exit}')"
+if [[ -n "$SUBMISSION_ID" ]]; then
+  echo "Resuming with existing submission ID: $SUBMISSION_ID"
+else
+  echo "Submitting DMG for notarization..."
+  SUBMIT_OUTPUT="$(xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" 2>&1)" || true
+  echo "$SUBMIT_OUTPUT"
 
-if [[ -z "${SUBMISSION_ID:-}" ]]; then
-  echo "No submission ID returned; cannot proceed." >&2
-  exit 1
+  SUBMISSION_ID="$(echo "$SUBMIT_OUTPUT" | awk '/  id:/{print $2; exit}')"
+
+  if [[ -z "${SUBMISSION_ID:-}" ]]; then
+    echo "No submission ID returned; cannot proceed." >&2
+    exit 1
+  fi
 fi
 
 echo "Submission ID: $SUBMISSION_ID"
-echo "Polling for notarization result (timeout: 60 min)..."
+echo "Polling for notarization result (timeout: 4 hours)..."
 
-DEADLINE=$(( $(date +%s) + 3600 ))
+DEADLINE=$(( $(date +%s) + 14400 ))
 POLL_INTERVAL=15
 
 while :; do
   if [[ $(date +%s) -ge $DEADLINE ]]; then
-    echo "Timed out waiting for notarization after 60 minutes." >&2
+    echo "Timed out waiting for notarization after 4 hours." >&2
     echo "Fetching log for submission $SUBMISSION_ID..."
     xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "$NOTARY_PROFILE" 2>/dev/null || true
     exit 1
