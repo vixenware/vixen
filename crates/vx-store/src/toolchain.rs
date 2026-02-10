@@ -156,6 +156,151 @@ async fn download_component(
     Ok(bytes)
 }
 
+/// Download and extract a component in a single streaming pipeline.
+///
+/// Instead of buffering the entire tarball in memory, this pipes the HTTP response
+/// directly through decompression and tar extraction:
+///
+/// ```text
+/// HTTP body → StreamReader → Sha256VerifyingReader → CountingReader → extract_to_tree → CAS
+/// ```
+///
+/// Progress is reported by polling an atomic byte counter on a 250ms interval.
+/// SHA256 verification is triggered by draining the reader to EOF after extraction
+/// (the tar reader stops at the end-of-archive marker, leaving compressed stream
+/// tail bytes unread).
+async fn download_and_extract_component(
+    url: &str,
+    expected_hash: &str,
+    component_name: &str,
+    compression: Compression,
+    strip_components: u32,
+    progress: &roam::Tx<StoreProgress>,
+    store_blob: impl AsyncFn(Vec<u8>) -> Result<BlobHash, String>,
+) -> Result<vx_store_proto::TreeManifest, vx_toolchain::ToolchainError> {
+    use http_body_util::BodyExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    tracing::info!(url = %url, "streaming download+extract for {component_name}");
+
+    let response =
+        vx_http::get(url)
+            .await
+            .map_err(|e| vx_toolchain::ToolchainError::FetchError {
+                url: url.to_string(),
+                source: Box::new(e),
+            })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(vx_toolchain::ToolchainError::FetchError {
+            url: url.to_string(),
+            source: Box::new(std::io::Error::other(format!("HTTP {status}"))),
+        });
+    }
+
+    let content_length = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+
+    // Build reader chain: HTTP body → StreamReader → Sha256VerifyingReader → CountingReader
+    let body_reader = tokio_util::io::StreamReader::new(
+        response
+            .into_body()
+            .into_data_stream()
+            .map(|result| result.map_err(std::io::Error::other)),
+    );
+    let verifying_reader =
+        crate::hash_reader::Sha256VerifyingReader::new(body_reader, expected_hash.to_string());
+    let counter = Arc::new(AtomicU64::new(0));
+    let counting_reader =
+        crate::hash_reader::CountingReader::new(verifying_reader, counter.clone());
+
+    // Box::pin so &mut reader satisfies AsyncRead + Unpin
+    let mut reader = Box::pin(counting_reader);
+
+    // Run extraction with periodic progress reporting via tokio::select!
+    let tree = {
+        let extract_fut =
+            vx_tarball::extract_to_tree(&mut reader, compression, strip_components, store_blob);
+        tokio::pin!(extract_fut);
+        let mut interval = tokio::time::interval(Duration::from_millis(250));
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut extract_fut => break result,
+                _ = interval.tick() => {
+                    let current = counter.load(Ordering::Relaxed);
+                    let _ = progress
+                        .send(&StoreProgress {
+                            message: format!("downloading+extracting {component_name}"),
+                            current: Some(current),
+                            total: content_length,
+                        })
+                        .await;
+                }
+            }
+        }
+    };
+
+    let tree = tree.map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("SHA256 mismatch") {
+            vx_toolchain::ToolchainError::ChecksumMismatch {
+                url: url.to_string(),
+                expected: expected_hash.to_string(),
+                actual: msg,
+            }
+        } else {
+            vx_toolchain::ToolchainError::FetchError {
+                url: url.to_string(),
+                source: Box::new(e),
+            }
+        }
+    })?;
+
+    // Drain remaining compressed bytes to trigger SHA256 verification on EOF.
+    // The tar reader stops at the end-of-archive marker; there may be trailing
+    // bytes in the compressed stream that haven't been read yet.
+    if let Err(e) = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await {
+        let msg = e.to_string();
+        if msg.contains("SHA256 mismatch") {
+            return Err(vx_toolchain::ToolchainError::ChecksumMismatch {
+                url: url.to_string(),
+                expected: expected_hash.to_string(),
+                actual: msg,
+            });
+        }
+        return Err(vx_toolchain::ToolchainError::FetchError {
+            url: url.to_string(),
+            source: Box::new(e),
+        });
+    }
+
+    // Final progress update
+    let _ = progress
+        .send(&StoreProgress {
+            message: format!("downloading+extracting {component_name}"),
+            current: Some(counter.load(Ordering::Relaxed)),
+            total: content_length,
+        })
+        .await;
+
+    tracing::debug!(
+        url = %url,
+        bytes = counter.load(Ordering::Relaxed),
+        hash = %expected_hash,
+        files = tree.entries.len(),
+        "component streamed, extracted, and verified"
+    );
+
+    Ok(tree)
+}
+
 fn rust_component_name(component: &RustComponent) -> Option<&'static str> {
     match component {
         RustComponent::Rustc => Some("rustc"),
@@ -330,75 +475,60 @@ impl StoreService {
             &rust_std_target.hash,
         );
 
-        // Download both components in parallel (with semaphore limiting)
+        // Download AND extract both components in parallel (streaming pipeline).
+        // Each component streams: HTTP → SHA256 verify → decompress → tar → CAS.
         let rustc_url = rustc_target.url.clone();
         let rustc_hash = rustc_target.hash.clone();
         let rust_std_url = rust_std_target.url.clone();
         let rust_std_hash = rust_std_target.hash.clone();
         let sem = self.download_semaphore.clone();
 
+        let this1 = self.clone();
+        let this2 = self.clone();
+
         let (rustc_result, rust_std_result) = join(
             async {
                 let _permit = sem.acquire().await.unwrap();
-                download_component(&rustc_url, &rustc_hash, "rustc", progress).await
+                download_and_extract_component(
+                    &rustc_url,
+                    &rustc_hash,
+                    "rustc",
+                    Compression::Xz,
+                    2,
+                    progress,
+                    async move |data: Vec<u8>| {
+                        let hash = BlobHash::from_bytes(&data);
+                        if let Err(e) = this1.storage.put_blob(&hash, &data).await {
+                            tracing::warn!("failed to write blob: {}", e);
+                        }
+                        Ok(hash)
+                    },
+                )
+                .await
             },
             async {
                 let _permit = sem.acquire().await.unwrap();
-                download_component(&rust_std_url, &rust_std_hash, "rust-std", progress).await
+                download_and_extract_component(
+                    &rust_std_url,
+                    &rust_std_hash,
+                    "rust-std",
+                    Compression::Xz,
+                    2,
+                    progress,
+                    async move |data: Vec<u8>| {
+                        let hash = BlobHash::from_bytes(&data);
+                        if let Err(e) = this2.storage.put_blob(&hash, &data).await {
+                            tracing::warn!("failed to write blob: {}", e);
+                        }
+                        Ok(hash)
+                    },
+                )
+                .await
             },
         )
         .await;
 
-        let rustc_tarball = match rustc_result {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                return EnsureToolchainResult {
-                    spec_key: Some(spec_key),
-                    toolchain_id: None,
-                    manifest_hash: None,
-                    status: ToolchainEnsureStatus::Failed,
-                    error: Some(format!("failed to download rustc: {}", e)),
-                };
-            }
-        };
-
-        let rust_std_tarball = match rust_std_result {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                return EnsureToolchainResult {
-                    spec_key: Some(spec_key),
-                    toolchain_id: None,
-                    manifest_hash: None,
-                    status: ToolchainEnsureStatus::Failed,
-                    error: Some(format!("failed to download rust-std: {}", e)),
-                };
-            }
-        };
-
-        let _ = progress
-            .send(&StoreProgress {
-                message: "extracting rustc".to_string(),
-                current: None,
-                total: None,
-            })
-            .await;
-
-        // Extract rustc to tree
-        let this = self.clone();
-        let rustc_tree = match vx_tarball::extract_to_tree(
-            std::io::Cursor::new(rustc_tarball),
-            Compression::Xz,
-            2, // strip rustc-VERSION/ and rustc/ components
-            async move |data: Vec<u8>| {
-                let hash = BlobHash::from_bytes(&data);
-                if let Err(e) = this.storage.put_blob(&hash, &data).await {
-                    tracing::warn!("failed to write blob: {}", e);
-                }
-                Ok(hash)
-            },
-        )
-        .await
-        {
+        let rustc_tree = match rustc_result {
             Ok(tree) => tree,
             Err(e) => {
                 return EnsureToolchainResult {
@@ -406,7 +536,20 @@ impl StoreService {
                     toolchain_id: None,
                     manifest_hash: None,
                     status: ToolchainEnsureStatus::Failed,
-                    error: Some(format!("failed to extract rustc: {}", e)),
+                    error: Some(format!("failed to download/extract rustc: {}", e)),
+                };
+            }
+        };
+
+        let rust_std_tree = match rust_std_result {
+            Ok(tree) => tree,
+            Err(e) => {
+                return EnsureToolchainResult {
+                    spec_key: Some(spec_key),
+                    toolchain_id: None,
+                    manifest_hash: None,
+                    status: ToolchainEnsureStatus::Failed,
+                    error: Some(format!("failed to download/extract rust-std: {}", e)),
                 };
             }
         };
@@ -430,42 +573,6 @@ impl StoreService {
             total_bytes = rustc_tree.total_size_bytes,
             "stored rustc tree"
         );
-
-        let _ = progress
-            .send(&StoreProgress {
-                message: "extracting rust-std".to_string(),
-                current: None,
-                total: None,
-            })
-            .await;
-
-        // Extract rust-std to tree (already downloaded in parallel above)
-        let this = self.clone();
-        let rust_std_tree = match vx_tarball::extract_to_tree(
-            std::io::Cursor::new(rust_std_tarball),
-            Compression::Xz,
-            2, // strip rust-std-VERSION/ and rust-std-TARGET/ components
-            async move |data: Vec<u8>| {
-                let hash = BlobHash::from_bytes(&data);
-                if let Err(e) = this.storage.put_blob(&hash, &data).await {
-                    tracing::warn!("failed to write blob: {}", e);
-                }
-                Ok(hash)
-            },
-        )
-        .await
-        {
-            Ok(tree) => tree,
-            Err(e) => {
-                return EnsureToolchainResult {
-                    spec_key: Some(spec_key),
-                    toolchain_id: None,
-                    manifest_hash: None,
-                    status: ToolchainEnsureStatus::Failed,
-                    error: Some(format!("failed to extract rust-std: {}", e)),
-                };
-            }
-        };
 
         // Store rust-std tree manifest
         let rust_std_tree_json = facet_json::to_string(&rust_std_tree)

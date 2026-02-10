@@ -1,11 +1,14 @@
-//! Hash-verifying AsyncRead wrapper
+//! Hash-verifying and counting AsyncRead wrappers
 //!
-//! Streams data through while computing a hash, verifying on EOF.
+//! - [`Sha256VerifyingReader`]: Streams data through while computing a SHA256 hash, verifying on EOF.
+//! - [`CountingReader`]: Tracks total bytes read through an atomic counter for progress reporting.
 
 use pin_project_lite::pin_project;
 use sha2::{Digest, Sha256};
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, ReadBuf};
 
@@ -71,6 +74,46 @@ impl<R: AsyncRead> AsyncRead for Sha256VerifyingReader<R> {
             }
             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
             Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+pin_project! {
+    /// AsyncRead wrapper that counts total bytes read through a shared atomic counter.
+    ///
+    /// Enables progress reporting from outside the reader chain without requiring
+    /// async calls inside `poll_read`.
+    pub struct CountingReader<R> {
+        #[pin]
+        inner: R,
+        bytes_read: Arc<AtomicU64>,
+    }
+}
+
+impl<R> CountingReader<R> {
+    pub fn new(inner: R, counter: Arc<AtomicU64>) -> Self {
+        Self {
+            inner,
+            bytes_read: counter,
+        }
+    }
+}
+
+impl<R: AsyncRead> AsyncRead for CountingReader<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.project();
+        let before = buf.filled().len();
+        match this.inner.poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                let new_bytes = (buf.filled().len() - before) as u64;
+                this.bytes_read.fetch_add(new_bytes, Ordering::Relaxed);
+                Poll::Ready(Ok(()))
+            }
+            other => other,
         }
     }
 }
