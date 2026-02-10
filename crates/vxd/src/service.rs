@@ -791,59 +791,59 @@ impl VxdService {
             "resolved crate graph, building action graph"
         );
 
-        use crate::action_graph::ActionGraph;
-        let action_graph = if rule_plan_bridge_enabled() {
+        let mut rule_plan_topology: Option<vx_report::GraphTopology> = None;
+        if rule_plan_bridge_enabled() {
             info!(
-                "VX_RULE_PLAN_BRIDGE is enabled, lowering RulePlan into ActionGraph (starter bridge)"
+                "VX_RULE_PLAN_BRIDGE is enabled; validating/lowering RulePlan and using RulePlan topology in report"
             );
             let plan = build_rule_plan_from_crate_graph(&graph);
-            ActionGraph::from_rule_plan(&plan)
-                .map_err(|e| VxdError::InvalidManifest(format!("RulePlan lowering failed: {e}")))?
-        } else {
-            // Set up picante inputs (for cache key computation)
-            // We create placeholder toolchain/config inputs since we don't have the actual
-            // toolchain yet - it will be acquired by the action graph executor
-            // Use a placeholder toolchain_id and manifest_hash - these will be acquired dynamically
-            let placeholder_hash = Blake3Hash([0u8; 32]);
-            let toolchain = RustToolchain::new(
-                &*self.db,
-                placeholder_hash,
-                placeholder_hash,
-                target_triple.clone(),
-                target_triple.clone(),
-            )
+            let lowered = crate::action_graph::ActionGraph::from_rule_plan(&plan)
+                .map_err(|e| VxdError::InvalidManifest(format!("RulePlan lowering failed: {e}")))?;
+            rule_plan_topology = Some(lowered.to_topology());
+        }
+
+        use crate::action_graph::ActionGraph;
+        // Execution remains on the real Rust action graph while RulePlan evolves.
+        // This keeps behavior stable while letting us move planner semantics forward.
+        let placeholder_hash = Blake3Hash([0u8; 32]);
+        let toolchain = RustToolchain::new(
+            &*self.db,
+            placeholder_hash,
+            placeholder_hash,
+            target_triple.clone(),
+            target_triple.clone(),
+        )
+        .map_err(|e| VxdError::Picante(e.to_string()))?;
+
+        RustToolchainManifest::set(&*self.db, placeholder_hash)
             .map_err(|e| VxdError::Picante(e.to_string()))?;
 
-            RustToolchainManifest::set(&*self.db, placeholder_hash)
-                .map_err(|e| VxdError::Picante(e.to_string()))?;
+        let session_id = self.session_id().await;
+        let build_key = BuildConfig::compute_key(
+            profile,
+            &target_triple,
+            graph.workspace_root.as_ref(),
+            &session_id,
+        );
+        let config = BuildConfig::new(
+            &*self.db,
+            build_key,
+            profile.to_string(),
+            target_triple.clone(),
+            graph.workspace_root.to_string(),
+            session_id,
+        )
+        .map_err(|e| VxdError::Picante(e.to_string()))?;
 
-            let session_id = self.session_id().await;
-            let build_key = BuildConfig::compute_key(
-                profile,
-                &target_triple,
-                graph.workspace_root.as_ref(),
-                &session_id,
-            );
-            let config = BuildConfig::new(
-                &*self.db,
-                build_key,
-                profile.to_string(),
-                target_triple.clone(),
-                graph.workspace_root.to_string(),
-                session_id,
-            )
-            .map_err(|e| VxdError::Picante(e.to_string()))?;
-
-            use vx_store_proto::RustChannel;
-            ActionGraph::from_crate_graph(
-                &graph,
-                RustChannel::Stable,
-                target_triple.clone(),
-                toolchain,
-                config,
-                &self.db,
-            )?
-        };
+        use vx_store_proto::RustChannel;
+        let action_graph = ActionGraph::from_crate_graph(
+            &graph,
+            RustChannel::Stable,
+            target_triple.clone(),
+            toolchain,
+            config,
+            &self.db,
+        )?;
 
         // Dump graph for debugging
         action_graph.dump_graph();
@@ -904,7 +904,10 @@ impl VxdService {
         }
 
         // Get execution statistics
-        let exec_stats = executor.get_stats();
+        let mut exec_stats = executor.get_stats();
+        if let Some(rule_plan_graph) = rule_plan_topology {
+            exec_stats.graph_topology = Some(rule_plan_graph);
+        }
         let duration = total_start.elapsed();
 
         // Create and save build report

@@ -58,3 +58,13 @@ This allows explain/report consumers to distinguish conditional edge semantics e
 
 - successful lowering with preserved edge kinds
 - unsupported edge kind failures with provenance context
+
+## Build Integration Mode
+
+When `VX_RULE_PLAN_BRIDGE=1` is set, vxd currently:
+
+1. builds + validates + lowers `RulePlan`
+2. uses lowered RulePlan topology in reports
+3. still executes the existing Rust action graph for actual compilation
+
+This keeps real build behavior stable while planner semantics move forward.
