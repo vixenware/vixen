@@ -16,7 +16,7 @@ use facet::Facet;
 
 /// Current report schema version.
 /// Bump when schema changes in backwards-incompatible ways.
-pub const REPORT_SCHEMA_VERSION: u32 = 1;
+pub const REPORT_SCHEMA_VERSION: u32 = 2;
 
 // =============================================================================
 // RUN ID
@@ -72,6 +72,41 @@ impl std::fmt::Display for RunId {
 }
 
 // =============================================================================
+// GRAPH TOPOLOGY
+// =============================================================================
+
+/// Serialized build graph topology (DAG of action nodes and dependency edges).
+#[derive(Debug, Clone, Facet)]
+pub struct GraphTopology {
+    /// Action nodes in the graph.
+    pub nodes: Vec<GraphNode>,
+    /// Dependency edges (from dependent → dependency).
+    pub edges: Vec<GraphEdge>,
+}
+
+/// A node in the serialized build graph.
+#[derive(Debug, Clone, Facet)]
+pub struct GraphNode {
+    /// Stable index for edge references.
+    pub index: u32,
+    /// Node identifier (matches `NodeReport.node_id`).
+    pub node_id: String,
+    /// Node kind (matches `NodeReport.kind`).
+    pub kind: String,
+    /// Human-readable display name.
+    pub label: String,
+}
+
+/// A directed edge in the build graph: the node at `from` depends on the node at `to`.
+#[derive(Debug, Clone, Facet)]
+pub struct GraphEdge {
+    /// Index of the dependent node.
+    pub from: u32,
+    /// Index of the dependency node.
+    pub to: u32,
+}
+
+// =============================================================================
 // BUILD REPORT
 // =============================================================================
 
@@ -99,6 +134,11 @@ pub struct BuildReport {
     /// Per-node reports
     pub nodes: Vec<NodeReport>,
 
+    /// Build graph topology (DAG structure).
+    /// `None` for reports from schema version 1 (before graph serialization).
+    #[facet(default)]
+    pub graph: Option<GraphTopology>,
+
     /// Overall build success
     pub success: bool,
     /// Error message if build failed
@@ -125,6 +165,7 @@ impl BuildReport {
             target_triple,
             toolchains: ToolchainsUsed::default(),
             nodes: Vec::new(),
+            graph: None,
             success: false,
             error: None,
         }
@@ -1248,5 +1289,61 @@ mod tests {
             explanation.observed_reason,
             ObservedReason::Unknown
         ));
+    }
+
+    #[test]
+    fn test_graph_topology_roundtrip() {
+        let graph = GraphTopology {
+            nodes: vec![
+                GraphNode {
+                    index: 0,
+                    node_id: "compile-rlib:serde".to_string(),
+                    kind: "rust.compile_rlib".to_string(),
+                    label: "compile serde".to_string(),
+                },
+                GraphNode {
+                    index: 1,
+                    node_id: "compile-bin:app".to_string(),
+                    kind: "rust.compile_bin".to_string(),
+                    label: "compile app".to_string(),
+                },
+            ],
+            edges: vec![GraphEdge { from: 1, to: 0 }],
+        };
+
+        let mut report = BuildReport::new(
+            "/test".to_string(),
+            "debug".to_string(),
+            "test-triple".to_string(),
+        );
+        report.graph = Some(graph);
+        report.finalize(true, None);
+
+        let json = facet_json::to_string(&report).expect("serialize");
+        let parsed: BuildReport = facet_json::from_str(&json).expect("deserialize");
+
+        let g = parsed.graph.expect("graph should be present");
+        assert_eq!(g.nodes.len(), 2);
+        assert_eq!(g.edges.len(), 1);
+        assert_eq!(g.nodes[0].node_id, "compile-rlib:serde");
+        assert_eq!(g.nodes[1].node_id, "compile-bin:app");
+        assert_eq!(g.edges[0].from, 1);
+        assert_eq!(g.edges[0].to, 0);
+    }
+
+    #[test]
+    fn test_report_without_graph_deserializes() {
+        // Simulate a schema v1 report that has no graph field
+        let report = BuildReport::new(
+            "/test".to_string(),
+            "debug".to_string(),
+            "test-triple".to_string(),
+        );
+        // graph is None by default
+        assert!(report.graph.is_none());
+
+        let json = facet_json::to_string(&report).expect("serialize");
+        let parsed: BuildReport = facet_json::from_str(&json).expect("deserialize");
+        assert!(parsed.graph.is_none());
     }
 }

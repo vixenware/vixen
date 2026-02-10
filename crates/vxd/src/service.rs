@@ -717,6 +717,9 @@ impl VxdService {
             report.add_node(node_report.clone());
         }
 
+        // Add graph topology
+        report.graph = exec_stats.graph_topology;
+
         // Finalize the report
         report.finalize(true, None);
 

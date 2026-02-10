@@ -86,6 +86,10 @@ struct ExplainArgs {
     /// Show details of the last cache miss
     #[facet(args::named)]
     last_miss: bool,
+
+    /// Open interactive build graph in browser
+    #[facet(args::named)]
+    web: bool,
 }
 
 /// Options for displaying the explain report (internal)
@@ -691,6 +695,11 @@ fn cmd_explain(args: ExplainArgs) -> Result<()> {
         );
         return Ok(());
     };
+
+    // Handle --web: open interactive graph in browser
+    if args.web {
+        return cmd_explain_web(&report);
+    }
 
     // Handle --diff: compare last two builds
     if args.diff {
@@ -1420,5 +1429,67 @@ fn cmd_explain_json(
         facet_json::to_string_pretty(&output)
             .map_err(|e| eyre::eyre!("failed to serialize explain output: {e}"))?
     );
+    Ok(())
+}
+
+/// Open an interactive build graph in the browser.
+fn cmd_explain_web(report: &vx_report::BuildReport) -> Result<()> {
+    use std::io::{Read, Write};
+
+    if report.graph.is_none() {
+        println!(
+            "{} This build report has no graph topology data.",
+            "Error:".red().bold()
+        );
+        println!(
+            "Graph topology was added in schema version 2. Re-run {} to generate a report with graph data.",
+            "vx build".cyan()
+        );
+        return Ok(());
+    }
+
+    let report_json = facet_json::to_string(report)
+        .map_err(|e| eyre::eyre!("failed to serialize report: {e}"))?;
+
+    let html_template = include_str!("graph.html");
+    let html = html_template.replace("__REPORT_DATA__", &report_json);
+
+    // Start a tiny HTTP server on a random port
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    let url = format!("http://127.0.0.1:{port}");
+
+    println!("{} {}", "Build graph:".green().bold(), url.cyan());
+    println!("{}", "Press Ctrl+C to stop".dimmed());
+
+    // Open browser
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(&url).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+    }
+
+    // Serve requests until interrupted
+    for stream in listener.incoming() {
+        let mut stream = match stream {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        // Read request (we only serve one page, ignore the actual request path)
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf);
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            html.len(),
+            html
+        );
+        let _ = stream.write_all(response.as_bytes());
+    }
+
     Ok(())
 }

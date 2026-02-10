@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vx build graph</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #1a1b26; --bg2: #24283b; --bg3: #414868;
+  --fg: #c0caf5; --fg2: #a9b1d6; --fg3: #565f89;
+  --green: #9ece6a; --red: #f7768e; --blue: #7aa2f7;
+  --yellow: #e0af68; --cyan: #7dcfff; --orange: #ff9e64;
+  --border: #3b4261;
+}
+body { background: var(--bg); color: var(--fg); font-family: -apple-system, system-ui, "Segoe UI", sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+header { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+header h1 { font-size: 14px; font-weight: 600; color: var(--fg2); }
+header .stats { font-size: 12px; color: var(--fg3); display: flex; gap: 12px; }
+header .stats span { display: inline-flex; align-items: center; gap: 4px; }
+header .stats .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+header .stats .dot.hit { background: var(--green); }
+header .stats .dot.miss { background: var(--red); }
+
+.toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 16px; background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.toolbar input[type="text"] { background: var(--bg); border: 1px solid var(--border); color: var(--fg); padding: 4px 8px; border-radius: 4px; font-size: 12px; width: 220px; }
+.toolbar input[type="text"]::placeholder { color: var(--fg3); }
+.toolbar button { background: var(--bg3); border: 1px solid var(--border); color: var(--fg2); padding: 4px 10px; border-radius: 4px; font-size: 12px; cursor: pointer; }
+.toolbar button:hover { background: var(--border); }
+.toolbar button.active { background: var(--blue); color: var(--bg); border-color: var(--blue); }
+.toolbar .sep { width: 1px; height: 20px; background: var(--border); }
+.toolbar label { font-size: 12px; color: var(--fg3); display: flex; align-items: center; gap: 4px; cursor: pointer; }
+
+.main { display: flex; flex: 1; overflow: hidden; }
+.graph-container { flex: 1; overflow: hidden; position: relative; }
+svg { width: 100%; height: 100%; }
+svg .edge { stroke: var(--fg3); stroke-width: 1; fill: none; marker-end: url(#arrowhead); }
+svg .edge.critical { stroke: var(--orange); stroke-width: 2; }
+svg .node-group { cursor: pointer; }
+svg .node-rect { rx: 4; ry: 4; stroke-width: 1.5; }
+svg .node-rect.hit { fill: #1a2e1a; stroke: var(--green); }
+svg .node-rect.miss { fill: #2e1a1a; stroke: var(--red); }
+svg .node-rect.first { fill: #1a1a2e; stroke: var(--blue); }
+svg .node-rect.cancelled { fill: #1a1a1a; stroke: var(--fg3); }
+svg .node-rect.unknown { fill: var(--bg2); stroke: var(--fg3); }
+svg .node-rect.selected { stroke-width: 3; filter: brightness(1.3); }
+svg .node-rect.dimmed { opacity: 0.25; }
+svg .node-label { fill: var(--fg); font-size: 11px; font-family: "SF Mono", "Fira Code", monospace; }
+svg .node-label.dimmed { opacity: 0.25; }
+svg .node-timing { fill: var(--fg3); font-size: 9px; font-family: "SF Mono", "Fira Code", monospace; }
+svg .node-timing.dimmed { opacity: 0.25; }
+svg .edge.dimmed { opacity: 0.1; }
+svg .edge.highlight { stroke: var(--cyan); stroke-width: 2; }
+
+.sidebar { width: 360px; background: var(--bg2); border-left: 1px solid var(--border); overflow-y: auto; flex-shrink: 0; display: none; }
+.sidebar.open { display: block; }
+.sidebar .close-btn { position: absolute; top: 8px; right: 8px; background: none; border: none; color: var(--fg3); cursor: pointer; font-size: 16px; }
+.sidebar .detail-header { padding: 12px 16px; border-bottom: 1px solid var(--border); position: relative; }
+.sidebar .detail-header h2 { font-size: 13px; font-weight: 600; color: var(--fg); word-break: break-all; padding-right: 24px; }
+.sidebar .detail-header .kind { font-size: 11px; color: var(--fg3); margin-top: 2px; }
+.sidebar .detail-section { padding: 10px 16px; border-bottom: 1px solid var(--border); }
+.sidebar .detail-section h3 { font-size: 11px; font-weight: 600; color: var(--fg3); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.sidebar .detail-row { display: flex; justify-content: space-between; align-items: baseline; padding: 2px 0; font-size: 12px; }
+.sidebar .detail-row .label { color: var(--fg3); }
+.sidebar .detail-row .value { color: var(--fg); font-family: "SF Mono", "Fira Code", monospace; font-size: 11px; }
+.sidebar .detail-row .value.hit { color: var(--green); }
+.sidebar .detail-row .value.miss { color: var(--red); }
+.sidebar .dep-list { list-style: none; font-size: 12px; }
+.sidebar .dep-list li { padding: 2px 0; color: var(--fg2); cursor: pointer; }
+.sidebar .dep-list li:hover { color: var(--cyan); }
+
+.tooltip { position: fixed; background: var(--bg2); border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px; font-size: 11px; pointer-events: none; z-index: 100; max-width: 400px; display: none; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+.tooltip .tt-title { font-weight: 600; color: var(--fg); margin-bottom: 4px; }
+.tooltip .tt-row { display: flex; gap: 8px; color: var(--fg3); }
+.tooltip .tt-row .tt-val { color: var(--fg2); }
+
+.legend { display: flex; gap: 12px; font-size: 11px; color: var(--fg3); }
+.legend .legend-item { display: flex; align-items: center; gap: 4px; }
+.legend .legend-swatch { width: 12px; height: 12px; border-radius: 2px; border: 1px solid; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>vx build graph</h1>
+  <div class="stats" id="stats"></div>
+</header>
+
+<div class="toolbar">
+  <input type="text" id="search" placeholder="Search nodes...">
+  <div class="sep"></div>
+  <button id="btn-critical" title="Highlight critical path">Critical path</button>
+  <button id="btn-fit" title="Fit graph to viewport">Fit</button>
+  <button id="btn-zoom-in" title="Zoom in">+</button>
+  <button id="btn-zoom-out" title="Zoom out">&minus;</button>
+  <div class="sep"></div>
+  <div class="legend">
+    <div class="legend-item"><div class="legend-swatch" style="background:#1a2e1a;border-color:var(--green)"></div> Hit</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#2e1a1a;border-color:var(--red)"></div> Miss</div>
+    <div class="legend-item"><div class="legend-swatch" style="background:#1a1a2e;border-color:var(--blue)"></div> First build</div>
+  </div>
+</div>
+
+<div class="main">
+  <div class="graph-container" id="graph-container">
+    <svg id="graph-svg">
+      <defs>
+        <marker id="arrowhead" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto-start-reverse">
+          <polygon points="0 0, 10 3.5, 0 7" fill="var(--fg3)"/>
+        </marker>
+        <marker id="arrowhead-critical" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto-start-reverse">
+          <polygon points="0 0, 10 3.5, 0 7" fill="var(--orange)"/>
+        </marker>
+        <marker id="arrowhead-highlight" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto-start-reverse">
+          <polygon points="0 0, 10 3.5, 0 7" fill="var(--cyan)"/>
+        </marker>
+      </defs>
+      <g id="graph-root"></g>
+    </svg>
+  </div>
+
+  <div class="sidebar" id="sidebar">
+    <div class="detail-header" id="detail-header">
+      <button class="close-btn" id="sidebar-close">&times;</button>
+      <h2 id="detail-title"></h2>
+      <div class="kind" id="detail-kind"></div>
+    </div>
+    <div id="detail-body"></div>
+  </div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script type="module">
+// ELK.js loaded from CDN
+import ELK from 'https://cdn.jsdelivr.net/npm/elkjs@0.9.3/lib/elk.bundled.js';
+
+const REPORT_DATA = __REPORT_DATA__;
+
+const report = REPORT_DATA;
+const graph = report.graph;
+const nodeReports = new Map();
+for (const nr of report.nodes) {
+  nodeReports.set(nr.node_id, nr);
+}
+
+// Build adjacency for navigation
+const deps = new Map();   // node_id -> [dependency node_ids]
+const rdeps = new Map();  // node_id -> [dependent node_ids]
+if (graph) {
+  const idByIndex = new Map();
+  for (const n of graph.nodes) idByIndex.set(n.index, n.node_id);
+  for (const n of graph.nodes) { deps.set(n.node_id, []); rdeps.set(n.node_id, []); }
+  for (const e of graph.edges) {
+    const from = idByIndex.get(e.from);
+    const to = idByIndex.get(e.to);
+    if (from && to) {
+      deps.get(from).push(to);
+      rdeps.get(to).push(from);
+    }
+  }
+}
+
+// Stats header
+{
+  const el = document.getElementById('stats');
+  const hits = report.nodes.filter(n => n.cache === 'hit' || (n.cache && n.cache.Hit)).length;
+  const misses = report.nodes.length - hits;
+  const duration = report.ended_at_unix_ms - report.started_at_unix_ms;
+  const nodeCount = graph ? graph.nodes.length : report.nodes.length;
+  const edgeCount = graph ? graph.edges.length : 0;
+  el.innerHTML = `
+    <span><span class="dot hit"></span> ${hits} hits</span>
+    <span><span class="dot miss"></span> ${misses} misses</span>
+    <span>${nodeCount} nodes, ${edgeCount} edges</span>
+    <span>${formatDuration(duration)}</span>
+  `;
+}
+
+function formatDuration(ms) {
+  if (ms < 1000) return ms + 'ms';
+  return (ms / 1000).toFixed(2) + 's';
+}
+
+function cacheClass(nr) {
+  if (!nr) return 'unknown';
+  if (typeof nr.cache === 'string') return nr.cache === 'hit' ? 'hit' : 'miss';
+  if (nr.cache && nr.cache.Hit) return 'hit';
+  if (nr.cache && nr.cache.Miss) {
+    const reason = nr.cache.Miss.reason;
+    if (reason === 'FirstBuild' || (typeof reason === 'object' && 'FirstBuild' in reason)) return 'first';
+    return 'miss';
+  }
+  return 'unknown';
+}
+
+// Lay out graph with ELK
+const elk = new ELK();
+const elkGraph = {
+  id: 'root',
+  layoutOptions: {
+    'elk.algorithm': 'layered',
+    'elk.direction': 'DOWN',
+    'elk.layered.spacing.nodeNodeBetweenLayers': '60',
+    'elk.spacing.nodeNode': '20',
+    'elk.layered.nodePlacement.strategy': 'BRANDES_KOEPF',
+    'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
+    'elk.hierarchyHandling': 'INCLUDE_CHILDREN',
+  },
+  children: [],
+  edges: [],
+};
+
+if (graph) {
+  for (const n of graph.nodes) {
+    const labelText = n.label.length > 30 ? n.label.slice(0, 28) + '..' : n.label;
+    const width = Math.max(100, labelText.length * 7 + 24);
+    elkGraph.children.push({ id: String(n.index), width, height: 36 });
+  }
+  for (let i = 0; i < graph.edges.length; i++) {
+    const e = graph.edges[i];
+    elkGraph.edges.push({ id: 'e' + i, sources: [String(e.from)], targets: [String(e.to)] });
+  }
+}
+
+const layout = await elk.layout(elkGraph);
+
+// Compute critical path (longest-execution-time path through the graph)
+function computeCriticalPath() {
+  if (!graph) return new Set();
+  const idByIndex = new Map();
+  for (const n of graph.nodes) idByIndex.set(n.index, n.node_id);
+
+  // For each node, compute max total execution time from that node to any leaf
+  const maxTime = new Map();  // index -> { time, next }
+  const adjOut = new Map();   // index -> [dependency indices]
+  for (const n of graph.nodes) adjOut.set(n.index, []);
+  for (const e of graph.edges) adjOut.get(e.from).push(e.to);
+
+  function dfs(idx) {
+    if (maxTime.has(idx)) return maxTime.get(idx);
+    const nid = idByIndex.get(idx);
+    const nr = nodeReports.get(nid);
+    const selfTime = nr ? (nr.timing ? nr.timing.execute_ms : 0) : 0;
+    const children = adjOut.get(idx) || [];
+    if (children.length === 0) {
+      const entry = { time: selfTime, next: null };
+      maxTime.set(idx, entry);
+      return entry;
+    }
+    let best = { time: 0, next: null };
+    for (const c of children) {
+      const child = dfs(c);
+      if (child.time > best.time) best = { time: child.time, next: c };
+    }
+    const entry = { time: selfTime + best.time, next: best.next };
+    maxTime.set(idx, entry);
+    return entry;
+  }
+
+  for (const n of graph.nodes) dfs(n.index);
+
+  // Find the root with the highest total time
+  let bestRoot = { time: 0, idx: null };
+  for (const n of graph.nodes) {
+    const entry = maxTime.get(n.index);
+    if (entry.time > bestRoot.time) bestRoot = { time: entry.time, idx: n.index };
+  }
+
+  // Walk the path
+  const pathEdges = new Set();
+  let cur = bestRoot.idx;
+  while (cur !== null) {
+    const entry = maxTime.get(cur);
+    if (entry.next !== null) {
+      pathEdges.add(cur + '->' + entry.next);
+    }
+    cur = entry.next;
+  }
+  return pathEdges;
+}
+
+const criticalPathEdges = computeCriticalPath();
+
+// Render SVG
+const svgRoot = document.getElementById('graph-root');
+const svg = document.getElementById('graph-svg');
+const container = document.getElementById('graph-container');
+
+// Pan/zoom state
+let viewX = 0, viewY = 0, viewScale = 1;
+function updateTransform() {
+  svgRoot.setAttribute('transform', `translate(${viewX},${viewY}) scale(${viewScale})`);
+}
+
+// Fit to viewport
+function fitToViewport() {
+  if (!layout.children || layout.children.length === 0) return;
+  const pad = 40;
+  const gw = layout.width || 800;
+  const gh = layout.height || 600;
+  const cw = container.clientWidth;
+  const ch = container.clientHeight;
+  viewScale = Math.min((cw - 2 * pad) / gw, (ch - 2 * pad) / gh, 1.5);
+  viewX = (cw - gw * viewScale) / 2;
+  viewY = (ch - gh * viewScale) / 2;
+  updateTransform();
+}
+
+// Draw edges
+const edgeElements = new Map();
+if (layout.edges) {
+  for (const e of layout.edges) {
+    const sections = e.sections || [];
+    for (const sec of sections) {
+      const points = [sec.startPoint, ...(sec.bendPoints || []), sec.endPoint];
+      const d = 'M ' + points.map(p => p.x + ' ' + p.y).join(' L ');
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', d);
+      path.classList.add('edge');
+      // Check if this edge is on the critical path
+      const srcIdx = parseInt(e.sources[0]);
+      const tgtIdx = parseInt(e.targets[0]);
+      const edgeKey = srcIdx + '->' + tgtIdx;
+      if (criticalPathEdges.has(edgeKey)) {
+        path.classList.add('critical');
+        path.setAttribute('marker-end', 'url(#arrowhead-critical)');
+      }
+      path.dataset.from = e.sources[0];
+      path.dataset.to = e.targets[0];
+      svgRoot.appendChild(path);
+      if (!edgeElements.has(edgeKey)) edgeElements.set(edgeKey, []);
+      edgeElements.get(edgeKey).push(path);
+    }
+  }
+}
+
+// Draw nodes
+const nodeElements = new Map();
+const idByIndex = new Map();
+if (graph) {
+  for (const n of graph.nodes) idByIndex.set(n.index, n.node_id);
+}
+
+if (layout.children) {
+  for (const child of layout.children) {
+    const idx = parseInt(child.id);
+    const gNode = graph ? graph.nodes.find(n => n.index === idx) : null;
+    const nodeId = gNode ? gNode.node_id : child.id;
+    const nr = nodeReports.get(nodeId);
+    const cc = cacheClass(nr);
+
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.classList.add('node-group');
+    g.dataset.nodeId = nodeId;
+    g.dataset.index = String(idx);
+
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', child.x);
+    rect.setAttribute('y', child.y);
+    rect.setAttribute('width', child.width);
+    rect.setAttribute('height', child.height);
+    rect.classList.add('node-rect', cc);
+
+    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    const labelText = gNode ? gNode.label : nodeId;
+    const displayLabel = labelText.length > 30 ? labelText.slice(0, 28) + '..' : labelText;
+    label.setAttribute('x', child.x + child.width / 2);
+    label.setAttribute('y', child.y + 16);
+    label.setAttribute('text-anchor', 'middle');
+    label.classList.add('node-label');
+    label.textContent = displayLabel;
+
+    const timing = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    const ms = nr ? (nr.timing ? nr.timing.execute_ms : 0) : 0;
+    timing.setAttribute('x', child.x + child.width / 2);
+    timing.setAttribute('y', child.y + 28);
+    timing.setAttribute('text-anchor', 'middle');
+    timing.classList.add('node-timing');
+    timing.textContent = formatDuration(ms);
+
+    g.appendChild(rect);
+    g.appendChild(label);
+    g.appendChild(timing);
+    svgRoot.appendChild(g);
+
+    nodeElements.set(String(idx), { g, rect, label, timing, nodeId });
+  }
+}
+
+fitToViewport();
+
+// Pan/zoom interaction
+let isPanning = false, panStartX = 0, panStartY = 0;
+svg.addEventListener('pointerdown', e => {
+  if (e.target === svg || e.target === svgRoot) {
+    isPanning = true;
+    panStartX = e.clientX - viewX;
+    panStartY = e.clientY - viewY;
+    svg.setPointerCapture(e.pointerId);
+  }
+});
+svg.addEventListener('pointermove', e => {
+  if (isPanning) {
+    viewX = e.clientX - panStartX;
+    viewY = e.clientY - panStartY;
+    updateTransform();
+  }
+});
+svg.addEventListener('pointerup', () => { isPanning = false; });
+svg.addEventListener('wheel', e => {
+  e.preventDefault();
+  const rect = container.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const factor = e.deltaY < 0 ? 1.1 : 0.9;
+  const newScale = Math.max(0.05, Math.min(5, viewScale * factor));
+  viewX = mx - (mx - viewX) * (newScale / viewScale);
+  viewY = my - (my - viewY) * (newScale / viewScale);
+  viewScale = newScale;
+  updateTransform();
+}, { passive: false });
+
+// Tooltip
+const tooltip = document.getElementById('tooltip');
+for (const [, entry] of nodeElements) {
+  entry.g.addEventListener('pointerenter', e => {
+    const nr = nodeReports.get(entry.nodeId);
+    const cc = cacheClass(nr);
+    const ms = nr ? (nr.timing ? nr.timing.execute_ms : 0) : 0;
+    const cacheStr = cc === 'hit' ? 'cache hit' : cc === 'first' ? 'first build' : cc === 'miss' ? 'cache miss' : cc;
+    tooltip.innerHTML = `
+      <div class="tt-title">${entry.nodeId}</div>
+      <div class="tt-row">cache: <span class="tt-val">${cacheStr}</span></div>
+      <div class="tt-row">time: <span class="tt-val">${formatDuration(ms)}</span></div>
+      ${nr && nr.inputs && nr.inputs.length ? `<div class="tt-row">inputs: <span class="tt-val">${nr.inputs.length}</span></div>` : ''}
+      ${nr && nr.deps && nr.deps.length ? `<div class="tt-row">deps: <span class="tt-val">${nr.deps.length}</span></div>` : ''}
+    `;
+    tooltip.style.display = 'block';
+    positionTooltip(e);
+  });
+  entry.g.addEventListener('pointermove', e => positionTooltip(e));
+  entry.g.addEventListener('pointerleave', () => { tooltip.style.display = 'none'; });
+  entry.g.addEventListener('click', () => selectNode(entry.nodeId));
+}
+
+function positionTooltip(e) {
+  const x = e.clientX + 12;
+  const y = e.clientY + 12;
+  tooltip.style.left = Math.min(x, window.innerWidth - tooltip.offsetWidth - 12) + 'px';
+  tooltip.style.top = Math.min(y, window.innerHeight - tooltip.offsetHeight - 12) + 'px';
+}
+
+// Node selection & sidebar
+const sidebar = document.getElementById('sidebar');
+let selectedNodeId = null;
+
+function selectNode(nodeId) {
+  selectedNodeId = nodeId;
+  const nr = nodeReports.get(nodeId);
+  const cc = cacheClass(nr);
+
+  document.getElementById('detail-title').textContent = nodeId;
+  document.getElementById('detail-kind').textContent = nr ? nr.kind : '';
+
+  const body = document.getElementById('detail-body');
+  let html = '';
+
+  // Cache & timing
+  html += '<div class="detail-section"><h3>Status</h3>';
+  const cacheLabel = cc === 'hit' ? 'Cache hit' : cc === 'first' ? 'First build' : cc === 'miss' ? 'Cache miss' : cc;
+  html += `<div class="detail-row"><span class="label">Cache</span><span class="value ${cc}">${cacheLabel}</span></div>`;
+  if (nr) {
+    const ms = nr.timing ? nr.timing.execute_ms : 0;
+    html += `<div class="detail-row"><span class="label">Execute</span><span class="value">${formatDuration(ms)}</span></div>`;
+    if (nr.cache_key) {
+      const short = nr.cache_key.length > 16 ? nr.cache_key.slice(0, 16) + '...' : nr.cache_key;
+      html += `<div class="detail-row"><span class="label">Cache key</span><span class="value">${short}</span></div>`;
+    }
+  }
+  html += '</div>';
+
+  // Inputs
+  if (nr && nr.inputs && nr.inputs.length > 0) {
+    html += '<div class="detail-section"><h3>Inputs</h3>';
+    for (const inp of nr.inputs) {
+      const short = inp.value.length > 20 ? inp.value.slice(0, 18) + '..' : inp.value;
+      html += `<div class="detail-row"><span class="label">${inp.label}</span><span class="value">${short}</span></div>`;
+    }
+    html += '</div>';
+  }
+
+  // Graph dependencies
+  const nodeDeps = deps.get(nodeId) || [];
+  const nodeRdeps = rdeps.get(nodeId) || [];
+  if (nodeDeps.length > 0) {
+    html += '<div class="detail-section"><h3>Dependencies (' + nodeDeps.length + ')</h3><ul class="dep-list">';
+    for (const d of nodeDeps.slice(0, 50)) {
+      html += `<li data-node="${d}">${d}</li>`;
+    }
+    if (nodeDeps.length > 50) html += `<li>... ${nodeDeps.length - 50} more</li>`;
+    html += '</ul></div>';
+  }
+  if (nodeRdeps.length > 0) {
+    html += '<div class="detail-section"><h3>Dependents (' + nodeRdeps.length + ')</h3><ul class="dep-list">';
+    for (const d of nodeRdeps.slice(0, 50)) {
+      html += `<li data-node="${d}">${d}</li>`;
+    }
+    if (nodeRdeps.length > 50) html += `<li>... ${nodeRdeps.length - 50} more</li>`;
+    html += '</ul></div>';
+  }
+
+  // Outputs
+  if (nr && nr.outputs && nr.outputs.length > 0) {
+    html += '<div class="detail-section"><h3>Outputs</h3>';
+    for (const out of nr.outputs) {
+      const val = out.path || out.manifest || out.blob || '';
+      const short = val.length > 20 ? val.slice(0, 18) + '..' : val;
+      html += `<div class="detail-row"><span class="label">${out.logical}</span><span class="value">${short}</span></div>`;
+    }
+    html += '</div>';
+  }
+
+  body.innerHTML = html;
+  sidebar.classList.add('open');
+
+  // Clickable dep/rdep links
+  for (const li of body.querySelectorAll('.dep-list li[data-node]')) {
+    li.addEventListener('click', () => selectNode(li.dataset.node));
+  }
+
+  // Highlight node + connected edges
+  highlightNode(nodeId);
+}
+
+function highlightNode(nodeId) {
+  // Reset all
+  for (const [, entry] of nodeElements) {
+    entry.rect.classList.remove('selected', 'dimmed');
+    entry.label.classList.remove('dimmed');
+    entry.timing.classList.remove('dimmed');
+  }
+  for (const [, paths] of edgeElements) {
+    for (const p of paths) { p.classList.remove('dimmed', 'highlight'); p.removeAttribute('marker-end'); }
+  }
+  // Re-apply default markers
+  for (const [key, paths] of edgeElements) {
+    for (const p of paths) {
+      if (p.classList.contains('critical')) {
+        p.setAttribute('marker-end', 'url(#arrowhead-critical)');
+      } else {
+        p.setAttribute('marker-end', 'url(#arrowhead)');
+      }
+    }
+  }
+
+  if (!nodeId) return;
+
+  // Find connected nodes
+  const connected = new Set([nodeId]);
+  const connectedEdges = new Set();
+  for (const d of (deps.get(nodeId) || [])) { connected.add(d); }
+  for (const d of (rdeps.get(nodeId) || [])) { connected.add(d); }
+
+  // Find connected edge keys
+  if (graph) {
+    const indexByNodeId = new Map();
+    for (const n of graph.nodes) indexByNodeId.set(n.node_id, n.index);
+    const myIdx = indexByNodeId.get(nodeId);
+    if (myIdx !== undefined) {
+      for (const e of graph.edges) {
+        if (e.from === myIdx || e.to === myIdx) {
+          connectedEdges.add(e.from + '->' + e.to);
+        }
+      }
+    }
+  }
+
+  // Dim non-connected
+  for (const [, entry] of nodeElements) {
+    if (!connected.has(entry.nodeId)) {
+      entry.rect.classList.add('dimmed');
+      entry.label.classList.add('dimmed');
+      entry.timing.classList.add('dimmed');
+    }
+    if (entry.nodeId === nodeId) entry.rect.classList.add('selected');
+  }
+  for (const [key, paths] of edgeElements) {
+    for (const p of paths) {
+      if (connectedEdges.has(key)) {
+        p.classList.add('highlight');
+        p.setAttribute('marker-end', 'url(#arrowhead-highlight)');
+      } else {
+        p.classList.add('dimmed');
+      }
+    }
+  }
+}
+
+// Sidebar close
+document.getElementById('sidebar-close').addEventListener('click', () => {
+  sidebar.classList.remove('open');
+  selectedNodeId = null;
+  highlightNode(null);
+});
+
+// Search
+const searchInput = document.getElementById('search');
+searchInput.addEventListener('input', () => {
+  const q = searchInput.value.toLowerCase().trim();
+  if (!q) {
+    for (const [, entry] of nodeElements) {
+      entry.rect.classList.remove('dimmed');
+      entry.label.classList.remove('dimmed');
+      entry.timing.classList.remove('dimmed');
+    }
+    for (const [, paths] of edgeElements) {
+      for (const p of paths) p.classList.remove('dimmed');
+    }
+    return;
+  }
+  const matched = new Set();
+  for (const [, entry] of nodeElements) {
+    if (entry.nodeId.toLowerCase().includes(q)) {
+      matched.add(entry.nodeId);
+      entry.rect.classList.remove('dimmed');
+      entry.label.classList.remove('dimmed');
+      entry.timing.classList.remove('dimmed');
+    } else {
+      entry.rect.classList.add('dimmed');
+      entry.label.classList.add('dimmed');
+      entry.timing.classList.add('dimmed');
+    }
+  }
+  for (const [key, paths] of edgeElements) {
+    const [fromIdx, toIdx] = key.split('->').map(Number);
+    const fromId = idByIndex.get(fromIdx);
+    const toId = idByIndex.get(toIdx);
+    const show = matched.has(fromId) || matched.has(toId);
+    for (const p of paths) {
+      if (show) p.classList.remove('dimmed');
+      else p.classList.add('dimmed');
+    }
+  }
+});
+
+// Critical path toggle
+let criticalHighlight = false;
+document.getElementById('btn-critical').addEventListener('click', function() {
+  criticalHighlight = !criticalHighlight;
+  this.classList.toggle('active', criticalHighlight);
+  if (criticalHighlight) {
+    // Dim everything not on critical path
+    const criticalNodes = new Set();
+    if (graph) {
+      for (const key of criticalPathEdges) {
+        const [from, to] = key.split('->').map(Number);
+        criticalNodes.add(idByIndex.get(from));
+        criticalNodes.add(idByIndex.get(to));
+      }
+    }
+    for (const [, entry] of nodeElements) {
+      if (!criticalNodes.has(entry.nodeId)) {
+        entry.rect.classList.add('dimmed');
+        entry.label.classList.add('dimmed');
+        entry.timing.classList.add('dimmed');
+      } else {
+        entry.rect.classList.remove('dimmed');
+        entry.label.classList.remove('dimmed');
+        entry.timing.classList.remove('dimmed');
+      }
+    }
+    for (const [key, paths] of edgeElements) {
+      for (const p of paths) {
+        if (criticalPathEdges.has(key)) {
+          p.classList.remove('dimmed');
+        } else {
+          p.classList.add('dimmed');
+        }
+      }
+    }
+  } else {
+    for (const [, entry] of nodeElements) {
+      entry.rect.classList.remove('dimmed');
+      entry.label.classList.remove('dimmed');
+      entry.timing.classList.remove('dimmed');
+    }
+    for (const [, paths] of edgeElements) {
+      for (const p of paths) p.classList.remove('dimmed');
+    }
+  }
+});
+
+// Zoom buttons
+document.getElementById('btn-fit').addEventListener('click', fitToViewport);
+document.getElementById('btn-zoom-in').addEventListener('click', () => {
+  const cx = container.clientWidth / 2;
+  const cy = container.clientHeight / 2;
+  const factor = 1.3;
+  const newScale = Math.min(5, viewScale * factor);
+  viewX = cx - (cx - viewX) * (newScale / viewScale);
+  viewY = cy - (cy - viewY) * (newScale / viewScale);
+  viewScale = newScale;
+  updateTransform();
+});
+document.getElementById('btn-zoom-out').addEventListener('click', () => {
+  const cx = container.clientWidth / 2;
+  const cy = container.clientHeight / 2;
+  const factor = 0.77;
+  const newScale = Math.max(0.05, viewScale * factor);
+  viewX = cx - (cx - viewX) * (newScale / viewScale);
+  viewY = cy - (cy - viewY) * (newScale / viewScale);
+  viewScale = newScale;
+  updateTransform();
+});
+
+// Keyboard shortcuts
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    sidebar.classList.remove('open');
+    selectedNodeId = null;
+    highlightNode(null);
+    searchInput.value = '';
+    searchInput.dispatchEvent(new Event('input'));
+  }
+  if (e.key === '/' && document.activeElement !== searchInput) {
+    e.preventDefault();
+    searchInput.focus();
+  }
+});
+</script>
+</body>
+</html>

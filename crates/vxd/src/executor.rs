@@ -120,6 +120,8 @@ pub struct ExecutionStats {
     pub bin_output: Option<camino::Utf8PathBuf>,
     /// Per-node reports for build report generation
     pub node_reports: Vec<vx_report::NodeReport>,
+    /// Graph topology for visualization
+    pub graph_topology: Option<vx_report::GraphTopology>,
 }
 
 /// Message from spawned task to executor
@@ -791,6 +793,7 @@ impl Executor {
         self.stats.rebuilt = rebuilt;
         self.stats.bin_output = bin_output;
         self.stats.node_reports = node_reports;
+        self.stats.graph_topology = Some(self.graph.to_topology());
 
         Ok(())
     }

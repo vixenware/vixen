@@ -5,6 +5,7 @@
 //! and the executor schedules them for optimal parallelism.
 
 use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
 use vx_rs::crate_graph::{CrateGraph, CrateId, CrateSource, CrateType};
 use vx_store_proto::{Blake3Hash, RustChannel, RustComponent, RustToolchainSpec};
@@ -141,6 +142,50 @@ impl Action {
             Action::LinkCBinary { name, .. } => {
                 format!("link {}", name)
             }
+        }
+    }
+
+    /// Get the node_id as it appears in `NodeReport.node_id`.
+    ///
+    /// Must stay in sync with the node_id generation in `executor.rs`.
+    pub fn report_node_id(&self) -> String {
+        match self {
+            Action::DownloadRustToolchainComponent { .. }
+            | Action::ExtractRustToolchainComponent { .. }
+            | Action::AcquireZigToolchain { .. }
+            | Action::CompileCObject { .. }
+            | Action::LinkCBinary { .. } => self.display_name(),
+            Action::AcquireRegistryCrate { name, version, .. } => {
+                format!("acquire-registry:{name}:{version}")
+            }
+            Action::CompileRustCrate {
+                crate_type,
+                crate_name,
+                ..
+            } => {
+                format!("compile-{}:{crate_name}", crate_type.as_str())
+            }
+        }
+    }
+
+    /// Get the kind string as it appears in `NodeReport.kind`.
+    ///
+    /// Must stay in sync with the kind generation in `executor.rs`.
+    pub fn report_kind(&self) -> &'static str {
+        match self {
+            Action::DownloadRustToolchainComponent { .. } => "toolchain.component.download",
+            Action::ExtractRustToolchainComponent { .. } => "toolchain.component.extract",
+            Action::AcquireZigToolchain { .. } => "zig.toolchain.acquire",
+            Action::AcquireRegistryCrate { .. } => "registry.acquire",
+            Action::CompileRustCrate { crate_type, .. } => {
+                if crate_type.as_str() == "bin" {
+                    "rust.compile_bin"
+                } else {
+                    "rust.compile_rlib"
+                }
+            }
+            Action::CompileCObject { .. } => "c.compile_obj",
+            Action::LinkCBinary { .. } => "c.link_bin",
         }
     }
 
@@ -414,6 +459,33 @@ impl ActionGraph {
     /// Get total number of actions
     pub fn node_count(&self) -> usize {
         self.graph.node_count()
+    }
+
+    /// Serialize the graph structure into a `GraphTopology` for the build report.
+    pub fn to_topology(&self) -> vx_report::GraphTopology {
+        let mut index_map: HashMap<NodeIndex, u32> = HashMap::new();
+        let mut nodes = Vec::with_capacity(self.graph.node_count());
+
+        for (i, idx) in self.graph.node_indices().enumerate() {
+            let action = &self.graph[idx].action;
+            let index = i as u32;
+            index_map.insert(idx, index);
+            nodes.push(vx_report::GraphNode {
+                index,
+                node_id: action.report_node_id(),
+                kind: action.report_kind().to_string(),
+                label: action.display_name(),
+            });
+        }
+
+        let mut edges = Vec::with_capacity(self.graph.edge_count());
+        for edge in self.graph.edge_references() {
+            let from = index_map[&edge.source()];
+            let to = index_map[&edge.target()];
+            edges.push(vx_report::GraphEdge { from, to });
+        }
+
+        vx_report::GraphTopology { nodes, edges }
     }
 
     /// Dump graph structure for debugging
