@@ -54,6 +54,7 @@ targets:
       - target: VixenFS Extension
         embed: true
         codeSign: true
+        embedLocation: plugins
       - target: vixenfs-mount
         embed: false
       - package: Sparkle

@@ -51,7 +51,7 @@ codesign --force --options runtime --timestamp \
 codesign --force --options runtime --timestamp \
   --entitlements "$XCODE_DIR/VixenFSExtension/VixenFSExtension.entitlements" \
   --sign "$SIGNING_IDENTITY" \
-  "$APP_BUNDLE_PATH/Contents/Extensions/VixenFS Extension.appex"
+  "$APP_BUNDLE_PATH/Contents/PlugIns/VixenFS Extension.appex"
 
 # Sparkle framework (sign nested tools/apps first, then XPCs, then framework)
 SPARKLE_FW="$APP_BUNDLE_PATH/Contents/Frameworks/Sparkle.framework"

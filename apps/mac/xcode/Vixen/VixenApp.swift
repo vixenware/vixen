@@ -27,22 +27,39 @@ struct VixenApp: App {
     }
 
     private func registerExtension() {
-        guard
-            let extensionURL = Bundle.main.builtInPlugInsURL?
-                .appendingPathComponent("VixenFS Extension.appex")
-        else { return }
-        guard FileManager.default.fileExists(atPath: extensionURL.path) else { return }
+        guard let plugInsURL = Bundle.main.builtInPlugInsURL else {
+            NSLog("builtInPlugInsURL is nil")
+            return
+        }
+
+        let extensionURL = plugInsURL.appendingPathComponent("VixenFS Extension.appex")
+        guard FileManager.default.fileExists(atPath: extensionURL.path) else {
+            NSLog("VixenFS extension not found at: %@", extensionURL.path)
+            return
+        }
+
+        NSLog("Registering VixenFS extension from: %@", extensionURL.path)
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/pluginkit")
         process.arguments = ["-a", extensionURL.path]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+
+        let errPipe = Pipe()
+        process.standardOutput = nil
+        process.standardError = errPipe
 
         do {
             try process.run()
+            process.waitUntilExit()
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            if !errData.isEmpty, let errStr = String(data: errData, encoding: .utf8) {
+                NSLog("pluginkit stderr: %@", errStr)
+            }
+            if process.terminationStatus != 0 {
+                NSLog("pluginkit exited with status %d", process.terminationStatus)
+            }
         } catch {
-            print("Failed to register extension: \(error)")
+            NSLog("Failed to register extension: %@", error.localizedDescription)
         }
     }
 }
