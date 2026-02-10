@@ -427,7 +427,19 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         release: args.release,
     };
 
-    let result = daemon.build(request).await?;
+    // Race the build against Ctrl-C. When the user hits Ctrl-C, we shut down
+    // the TUI cleanly and exit. The daemon detects the dropped connection and
+    // cancels the in-flight build on its own.
+    let result = tokio::select! {
+        result = daemon.build(request) => result?,
+        _ = tokio::signal::ctrl_c() => {
+            if let Some(tui) = tui {
+                tui.shutdown().await;
+            }
+            eprintln!("Build interrupted");
+            std::process::exit(130);
+        }
+    };
 
     // Shutdown the TUI and wait for cleanup (if TUI was enabled)
     if let Some(tui) = tui {

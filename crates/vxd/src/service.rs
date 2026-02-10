@@ -17,6 +17,7 @@ use picante::HasRuntime;
 use picante::wal::WalWriter;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use vx_report::{BuildReport, ReportStore};
 use vx_rs::CrateGraph;
@@ -92,6 +93,10 @@ pub struct VxdService {
     /// Session ID for cache key namespacing. Empty = session zero (shared).
     /// Per-connection state — each connection handler gets its own instance.
     session_id: Arc<RwLock<String>>,
+
+    /// Cancellation token for the build active on this session (if any).
+    /// Per-connection: when the CLI disconnects, only this session's build is cancelled.
+    active_build_cancel: Arc<Mutex<Option<CancellationToken>>>,
 }
 
 impl VxdService {
@@ -192,6 +197,7 @@ impl VxdService {
             spawn_tracker,
             progress_listener: Arc::new(RwLock::new(None)),
             session_id: Arc::new(RwLock::new(String::new())),
+            active_build_cancel: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -213,6 +219,7 @@ impl VxdService {
             // Per-connection state: fresh for each session
             progress_listener: Arc::new(RwLock::new(None)),
             session_id: Arc::new(RwLock::new(String::new())),
+            active_build_cancel: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -227,6 +234,14 @@ impl VxdService {
         listener: Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>,
     ) {
         *self.progress_listener.write().await = listener;
+    }
+
+    /// Cancel any active build. Called by the signal handler on SIGINT/SIGTERM.
+    pub async fn cancel_active_build(&self) {
+        if let Some(token) = self.active_build_cancel.lock().await.as_ref() {
+            info!("cancelling active build");
+            token.cancel();
+        }
     }
 
     /// Ensure Rust toolchain exists in CAS. Returns info for cache keys.
@@ -508,9 +523,16 @@ impl VxdService {
                     max_concurrency,
                 );
 
+                // Register the executor's cancel token so signal handlers can cancel this build
+                *self.active_build_cancel.lock().await = Some(executor.cancel_token());
+
                 let build_start = std::time::Instant::now();
-                executor.execute().await?;
+                let exec_result = executor.execute().await;
                 let duration = build_start.elapsed();
+
+                // Clear the cancel token now that the build is done
+                *self.active_build_cancel.lock().await = None;
+                exec_result?;
 
                 // Get execution statistics
                 let exec_stats = executor.get_stats();
@@ -648,9 +670,17 @@ impl VxdService {
             profile.to_string(),
             max_concurrency,
         );
+
+        // Register the executor's cancel token so signal handlers can cancel this build
+        *self.active_build_cancel.lock().await = Some(executor.cancel_token());
+
         tracing::debug!("calling executor.execute()");
-        executor.execute().await?;
+        let exec_result = executor.execute().await;
         tracing::debug!("executor.execute() completed");
+
+        // Clear the cancel token now that the build is done
+        *self.active_build_cancel.lock().await = None;
+        exec_result?;
 
         // Append changes to WAL after build (incremental persistence)
         if let Some(ref mut wal) = *self.wal_writer.lock().await {

@@ -329,7 +329,6 @@ impl Executor {
     ///
     /// External code (e.g. signal handlers) can call `.cancel()` on this token
     /// to request cancellation of all in-flight actions.
-    #[allow(dead_code)]
     pub fn cancel_token(&self) -> CancellationToken {
         self.cancel_token.clone()
     }

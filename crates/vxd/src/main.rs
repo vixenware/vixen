@@ -421,6 +421,11 @@ async fn async_main() -> Result<()> {
                 tracing::warn!("Session error from {}: {}", peer_addr, e);
             }
 
+            // Connection dropped — cancel any in-flight build for this session.
+            // This is the primary graceful shutdown mechanism: when the CLI exits
+            // (e.g. Ctrl-C), its connection closes, which cancels the build.
+            session.cancel_active_build().await;
+
             tracing::debug!("Connection from {} closed", peer_addr);
             active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             *last_disconnect.lock().await = Some(tokio::time::Instant::now());
