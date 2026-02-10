@@ -2,6 +2,7 @@
 //!
 //! This is a thin CLI client that talks to the vx daemon.
 
+mod build_json;
 mod tui;
 
 use camino::Utf8PathBuf;
@@ -39,6 +40,10 @@ struct BuildArgs {
     /// Disable TUI and use plain log output
     #[facet(args::named)]
     no_tui: bool,
+
+    /// Emit NDJSON build events to stdout (implies --no-tui)
+    #[facet(args::named)]
+    json: bool,
 }
 
 /// Arguments for the `kill` subcommand
@@ -135,11 +140,20 @@ fn init_tracing_with_tui(tui: tui::TuiHandle) {
         .init();
 }
 
-fn main() -> Result<()> {
+fn main() {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()?;
-    rt.block_on(async_main())
+        .build()
+        .expect("failed to build tokio runtime");
+    match rt.block_on(async_main()) {
+        Ok(()) => {}
+        Err(e) => {
+            // Build failures already call process::exit(1) directly,
+            // so any error reaching here is an internal error (exit code 2).
+            eprintln!("vx: {e:#}");
+            std::process::exit(2);
+        }
+    }
 }
 
 async fn async_main() -> Result<()> {
@@ -188,9 +202,11 @@ fn short_hex(hash: &str, verbose: bool) -> String {
 }
 
 /// Progress listener that drives the TUI (or logs to console if TUI is disabled).
-/// In both modes, OSC 9;4 terminal progress sequences are emitted.
+/// When `json` is true, emits NDJSON events to stdout instead.
+/// In non-JSON modes, OSC 9;4 terminal progress sequences are emitted.
 struct ProgressListenerImpl {
     tui: Option<tui::TuiHandle>,
+    json: bool,
     next_action_id: std::sync::atomic::AtomicU64,
     /// Tracks total/completed for OSC progress in no-tui mode
     total_actions: std::sync::atomic::AtomicU64,
@@ -206,6 +222,7 @@ impl Clone for ProgressListenerImpl {
     fn clone(&self) -> Self {
         Self {
             tui: self.tui.clone(),
+            json: self.json,
             next_action_id: std::sync::atomic::AtomicU64::new(
                 self.next_action_id
                     .load(std::sync::atomic::Ordering::SeqCst),
@@ -222,9 +239,10 @@ impl Clone for ProgressListenerImpl {
 }
 
 impl ProgressListenerImpl {
-    fn new(tui: Option<tui::TuiHandle>) -> Self {
+    fn new(tui: Option<tui::TuiHandle>, json: bool) -> Self {
         Self {
             tui,
+            json,
             next_action_id: std::sync::atomic::AtomicU64::new(1),
             total_actions: std::sync::atomic::AtomicU64::new(0),
             completed_actions: std::sync::atomic::AtomicU64::new(0),
@@ -234,7 +252,12 @@ impl ProgressListenerImpl {
 
 impl ProgressListener for ProgressListenerImpl {
     async fn set_total(&self, _cx: &roam::Context, total: u64) {
-        if let Some(tui) = &self.tui {
+        if self.json {
+            build_json::emit(&build_json::BuildStarted {
+                event: "build_started".into(),
+                total_actions: total,
+            });
+        } else if let Some(tui) = &self.tui {
             tui.set_total(total as usize).await;
         } else {
             self.total_actions
@@ -246,7 +269,17 @@ impl ProgressListener for ProgressListenerImpl {
     }
 
     async fn start_action(&self, _cx: &roam::Context, action_type: ActionType) -> u64 {
-        if let Some(tui) = &self.tui {
+        if self.json {
+            let id = self
+                .next_action_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            build_json::emit(&build_json::ActionStarted {
+                event: "action_started".into(),
+                action_id: id,
+                action: action_type.display_name(),
+            });
+            id
+        } else if let Some(tui) = &self.tui {
             tui.start_action(action_type).await
         } else {
             let id = self
@@ -258,7 +291,15 @@ impl ProgressListener for ProgressListenerImpl {
     }
 
     async fn update_progress(&self, _cx: &roam::Context, action_id: u64, progress: ActionProgress) {
-        if let Some(tui) = &self.tui {
+        if self.json {
+            build_json::emit(&build_json::ActionProgress {
+                event: "action_progress".into(),
+                action_id,
+                message: progress.message,
+                current: progress.current,
+                total: progress.total,
+            });
+        } else if let Some(tui) = &self.tui {
             tui.update_progress(action_id, progress).await;
         } else if let (Some(current), Some(total)) = (progress.current, progress.total) {
             let pct = if total > 0 {
@@ -280,7 +321,12 @@ impl ProgressListener for ProgressListenerImpl {
     }
 
     async fn complete_action(&self, _cx: &roam::Context, action_id: u64) {
-        if let Some(tui) = &self.tui {
+        if self.json {
+            build_json::emit(&build_json::ActionCompleted {
+                event: "action_completed".into(),
+                action_id,
+            });
+        } else if let Some(tui) = &self.tui {
             tui.complete_action(action_id).await;
         } else {
             let completed = self
@@ -297,7 +343,12 @@ impl ProgressListener for ProgressListenerImpl {
     }
 
     async fn log_message(&self, _cx: &roam::Context, message: String) {
-        if let Some(tui) = &self.tui {
+        if self.json {
+            build_json::emit(&build_json::LogMessage {
+                event: "log".into(),
+                message,
+            });
+        } else if let Some(tui) = &self.tui {
             tui.log_message(message).await;
         } else {
             tracing::info!("{}", message);
@@ -309,6 +360,7 @@ impl ProgressListener for ProgressListenerImpl {
 async fn get_or_spawn_daemon(
     no_spawn: bool,
     no_tui: bool,
+    json: bool,
 ) -> Result<(VxdClient<VxdCaller>, Option<tui::TuiHandle>)> {
     use vx_io::net::Endpoint;
 
@@ -334,7 +386,7 @@ async fn get_or_spawn_daemon(
     let backoff_ms = [10, 50, 100, 500, 1000];
 
     // Try to connect first
-    match try_connect_daemon(&endpoint, no_tui).await {
+    match try_connect_daemon(&endpoint, no_tui, json).await {
         Ok(result) => Ok(result),
         Err(e) => {
             // If no_spawn is set, don't try to spawn - just fail
@@ -343,7 +395,7 @@ async fn get_or_spawn_daemon(
                 // retry connection a few times, but still never auto-spawn.
                 for delay in backoff_ms {
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
-                    if let Ok(result) = try_connect_daemon(&endpoint, no_tui).await {
+                    if let Ok(result) = try_connect_daemon(&endpoint, no_tui, json).await {
                         return Ok(result);
                     }
                 }
@@ -392,14 +444,14 @@ async fn get_or_spawn_daemon(
             // Retry with backoff
             for (attempt, delay) in backoff_ms.iter().enumerate() {
                 tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
-                if let Ok(result) = try_connect_daemon(&endpoint, no_tui).await {
+                if let Ok(result) = try_connect_daemon(&endpoint, no_tui, json).await {
                     tracing::trace!("Connected to daemon after {} attempts", attempt + 1);
                     return Ok(result);
                 }
             }
 
             // Final attempt
-            try_connect_daemon(&endpoint, no_tui).await
+            try_connect_daemon(&endpoint, no_tui, json).await
         }
     }
 }
@@ -407,6 +459,7 @@ async fn get_or_spawn_daemon(
 async fn try_connect_daemon(
     endpoint: &vx_io::net::Endpoint,
     no_tui: bool,
+    json: bool,
 ) -> Result<(VxdClient<VxdCaller>, Option<tui::TuiHandle>)> {
     // Create TUI and progress listener (only if TUI is enabled)
     let tui = if no_tui {
@@ -414,7 +467,7 @@ async fn try_connect_daemon(
     } else {
         Some(tui::TuiHandle::new())
     };
-    let progress_listener = ProgressListenerImpl::new(tui.clone());
+    let progress_listener = ProgressListenerImpl::new(tui.clone(), json);
     let dispatcher = vxd_proto::ProgressListenerDispatcher::new(progress_listener);
 
     let caller = vx_io::net::reconnecting_client(endpoint.clone(), dispatcher);
@@ -436,17 +489,21 @@ async fn try_connect_daemon(
 
 async fn cmd_build(args: BuildArgs) -> Result<()> {
     let cwd = Utf8PathBuf::try_from(std::env::current_dir()?)?;
+    let json_mode = args.json;
+    let no_tui = args.no_tui || json_mode;
 
     // Emit indeterminate OSC 9;4 progress while connecting to daemon
     // (TUI mode emits this from its display task; no-tui mode needs it here)
-    if args.no_tui {
+    // Skip in JSON mode — CI doesn't need terminal progress sequences.
+    if no_tui && !json_mode {
         emit_osc_progress(tui::OscProgressState::Indeterminate, None);
     }
 
     // Connect to daemon (spawning if necessary) and set up TUI
-    let (daemon, tui) = get_or_spawn_daemon(args.no_spawn, args.no_tui).await?;
+    let (daemon, tui) = get_or_spawn_daemon(args.no_spawn, no_tui, json_mode).await?;
 
-    // Initialize tracing - with TUI layer or plain output to stderr
+    // Initialize tracing - with TUI layer, or plain output to stderr.
+    // In JSON mode, tracing goes to stderr so stdout stays clean NDJSON.
     if let Some(ref tui) = tui {
         init_tracing_with_tui(tui.clone());
     } else {
@@ -484,13 +541,42 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
     if let Some(tui) = tui {
         tui.set_build_outcome(result.success).await;
         tui.shutdown().await;
-    } else {
+    } else if !json_mode {
         // No TUI — emit final OSC 9;4 state directly
+        // (skip in JSON mode — CI doesn't need terminal progress sequences)
         if result.success {
             emit_osc_progress(tui::OscProgressState::Remove, None);
         } else {
             emit_osc_progress(tui::OscProgressState::Error, None);
         }
+    }
+
+    // JSON mode: emit BuildFinished event and exit with appropriate code
+    if json_mode {
+        build_json::emit(&build_json::BuildFinished {
+            event: "build_finished".into(),
+            success: result.success,
+            cached: result.cached,
+            duration_ms: result.duration_ms,
+            total_actions: result.total_actions as u64,
+            cache_hits: result.cache_hits as u64,
+            rebuilt: result.rebuilt as u64,
+            cancelled: result.cancelled as u64,
+            output_path: result.output_path.map(|p| p.to_string()),
+            error: result.error.clone(),
+        });
+
+        if !result.success {
+            // Emit GitHub Actions annotation to stderr
+            if let Some(ref error) = result.error
+                && let Some(first_line) = error.lines().next()
+            {
+                eprintln!("::error::{first_line}");
+            }
+            std::process::exit(1);
+        }
+
+        return Ok(());
     }
 
     if result.success {
@@ -587,7 +673,7 @@ async fn cmd_kill(_args: KillArgs) -> Result<()> {
     };
 
     // Try graceful shutdown via RPC first
-    match try_connect_daemon(&endpoint, true).await {
+    match try_connect_daemon(&endpoint, true, false).await {
         Ok((daemon, _tui)) => {
             println!("{} daemon at {}", "Stopping".green().bold(), endpoint);
             if let Err(e) = daemon.shutdown().await {

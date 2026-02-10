@@ -229,6 +229,7 @@ pub struct BuildBuilder {
     project_dir: PathBuf,
     session_id: String,
     release: bool,
+    json: bool,
     subdir: Option<String>,
     extra_env: Vec<(String, String)>,
 }
@@ -239,6 +240,7 @@ impl BuildBuilder {
             project_dir: env.project.path().to_path_buf(),
             session_id: env.session_id.clone(),
             release: false,
+            json: false,
             subdir: None,
             extra_env: Vec::new(),
         }
@@ -246,6 +248,11 @@ impl BuildBuilder {
 
     pub fn release(mut self) -> Self {
         self.release = true;
+        self
+    }
+
+    pub fn json(mut self) -> Self {
+        self.json = true;
         self
     }
 
@@ -275,6 +282,9 @@ impl BuildBuilder {
         cmd.arg("--no-spawn");
         if self.release {
             cmd.arg("--release");
+        }
+        if self.json {
+            cmd.arg("--json");
         }
 
         let output = cmd.output().expect("failed to run vx");
