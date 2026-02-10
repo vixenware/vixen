@@ -1,9 +1,16 @@
-//! Seatbelt sandbox for compiler subprocesses (macOS).
+//! Platform-specific sandboxing for compiler subprocesses.
 //!
+//! ## macOS (Seatbelt)
 //! Wraps compiler invocations with `sandbox-exec` to enforce:
 //! - No network access
 //! - File writes restricted to the action's output directory
-//! - Unrestricted file reads (VFS controls what files exist)
+//! - File reads restricted to VFS root + system paths
+//!
+//! ## Linux (Landlock)
+//! Wraps compiler invocations with `landlock-exec` (custom binary) to enforce:
+//! - No network access (no BindTcp/ConnectTcp rules)
+//! - File writes restricted to the action's output directory + /tmp (rustc ignores TMPDIR)
+//! - File reads restricted to VFS root + system paths (/usr, /lib, /etc)
 
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
@@ -136,8 +143,51 @@ pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
     cmd
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
+    tracing::trace!(
+        program,
+        vfs_root = %action.mount_base,
+        write_dir = %action.out_path,
+        "sandboxed_command: wrapping with landlock-exec"
+    );
+
+    // Try to find landlock-exec in the same directory as the current executable
+    let landlock_exec = std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            exe.parent().map(|dir| dir.join("landlock-exec"))
+        })
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| "landlock-exec".into());
+
+    tracing::trace!(
+        landlock_exec = %landlock_exec.display(),
+        "using landlock-exec binary"
+    );
+
+    let mut cmd = Command::new(landlock_exec);
+    cmd.arg("--vfs-root")
+        .arg(action.mount_base.as_str())
+        .arg("--write-dir")
+        .arg(action.out_path.as_str())
+        .arg("--")
+        .arg(program);
+
+    tracing::trace!(
+        landlock_exec = "landlock-exec",
+        write_dir = %action.out_path,
+        vfs_root = %action.mount_base,
+        tmpdir = %action.out_path,
+        program,
+        "spawning sandboxed command"
+    );
+
+    cmd
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn sandboxed_command(program: &str, _action: &ActionContext) -> Command {
-    tracing::trace!(program, "sandboxed_command: no sandbox (not macOS)");
+    tracing::trace!(program, "sandboxed_command: no sandbox (unsupported platform)");
     Command::new(program)
 }
