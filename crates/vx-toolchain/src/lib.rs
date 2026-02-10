@@ -3,11 +3,15 @@
 //! Downloads and manages toolchains for hermetic builds:
 //! - Rust toolchains from static.rust-lang.org (without rustup)
 //! - Zig toolchains for C/C++ compilation (via `zig cc`)
+//! - CommandLineTools version detection on macOS
 //!
 //! Toolchains are stored in CAS for deduplication and remote execution.
 
 pub mod rust;
 pub mod zig;
+
+#[cfg(target_os = "macos")]
+pub mod macos;
 
 use thiserror::Error;
 
@@ -18,6 +22,10 @@ pub use rust::{
     ChannelManifest, PackageManifest, RustToolchainId, TargetManifest, parse_rust_channel,
     rust_channel_manifest_url, rust_toolchain_spec_cross, rust_toolchain_spec_native,
 };
+
+// Re-export macOS CommandLineTools detection
+#[cfg(target_os = "macos")]
+pub use macos::{CommandLineToolsVersion, detect_command_line_tools_version};
 
 // Re-export types used in tests
 #[cfg(test)]

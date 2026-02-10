@@ -3236,7 +3236,6 @@ dependencies = [
  "roam-stream",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "ur-taking-me-with-you",
  "vixenfs-proto",
  "vx-io",

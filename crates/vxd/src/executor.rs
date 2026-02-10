@@ -165,6 +165,9 @@ pub struct Executor {
 
     /// Profile for bin materialization
     profile: String,
+
+    /// CommandLineTools version on macOS (for C/C++ cache keys)
+    macos_commandlinetools_version: Option<String>,
 }
 
 impl Executor {
@@ -222,6 +225,29 @@ impl Executor {
 
         let (message_tx, message_rx) = tokio::sync::mpsc::unbounded_channel();
 
+        // Detect CommandLineTools version on macOS
+        #[cfg(target_os = "macos")]
+        let macos_commandlinetools_version = {
+            match vx_toolchain::detect_command_line_tools_version() {
+                Ok(Some(version)) => {
+                    let version_str = version.as_cache_key_string();
+                    info!("Detected CommandLineTools version: {}", version_str);
+                    Some(version_str)
+                }
+                Ok(None) => {
+                    warn!("No CommandLineTools found on macOS");
+                    None
+                }
+                Err(e) => {
+                    warn!("Failed to detect CommandLineTools version: {}", e);
+                    None
+                }
+            }
+        };
+
+        #[cfg(not(target_os = "macos"))]
+        let macos_commandlinetools_version = None;
+
         Self {
             graph,
             states: HashMap::new(),
@@ -240,6 +266,7 @@ impl Executor {
             workspace_root,
             target_triple,
             profile,
+            macos_commandlinetools_version,
         }
     }
 
@@ -615,6 +642,7 @@ impl Executor {
         let profile = self.profile.clone();
         let results = self.results.clone(); // Cloned Arc for execute_action
         let toolchain_node_idx = self.graph.toolchain_node; // For looking up toolchain result
+        let macos_commandlinetools_version = self.macos_commandlinetools_version.clone();
 
         tokio::spawn(async move {
             debug!("started for {:?}", node_idx);
@@ -665,6 +693,7 @@ impl Executor {
                 &profile,
                 toolchain_node_idx,
                 store_progress_tx,
+                macos_commandlinetools_version,
             )
             .await;
 
@@ -705,6 +734,7 @@ async fn execute_action(
     _profile: &str,
     toolchain_node_idx: Option<NodeIndex>,
     progress: roam::Tx<StoreProgress>,
+    macos_commandlinetools_version: Option<String>,
 ) -> Result<ActionResult, VxdError> {
     use crate::queries::*;
     use camino::Utf8PathBuf;
@@ -1342,6 +1372,7 @@ async fn execute_action(
                 profile: profile.clone(),
                 include_paths: vec![],
                 defines: vec![],
+                macos_commandlinetools_version,
             };
 
             let result = exec
@@ -1427,7 +1458,8 @@ async fn execute_action(
                 object_manifests,
                 binary_name: name.clone(),
                 target_triple: target_triple.clone(),
-                libs: vec![], // Zig automatically links libc when using printf etc.
+                libs: vec![],
+                macos_commandlinetools_version: macos_commandlinetools_version.clone(),
             };
 
             let result = exec

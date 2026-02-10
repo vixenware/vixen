@@ -137,6 +137,10 @@ pub struct CcCompileRequest {
 
     /// Preprocessor defines
     pub defines: Vec<(String, Option<String>)>,
+
+    /// CommandLineTools version on macOS (for cache key)
+    /// This ensures different CommandLineTools versions produce different cache keys
+    pub macos_commandlinetools_version: Option<String>,
 }
 
 /// Result of compiling a C/C++ translation unit
@@ -185,6 +189,10 @@ pub struct CcLinkRequest {
 
     /// Libraries to link against (e.g., "c", "m")
     pub libs: Vec<String>,
+
+    /// CommandLineTools version on macOS (for cache key)
+    /// This ensures different CommandLineTools versions produce different cache keys
+    pub macos_commandlinetools_version: Option<String>,
 }
 
 /// Result of linking C/C++ objects

@@ -13,7 +13,8 @@ use vx_store_proto::Blake3Hash;
 pub const RUST_CACHE_KEY_VERSION: u32 = 1;
 
 /// Current cache key schema version for C/C++ compilation.
-pub const CC_CACHE_KEY_VERSION: u32 = 1;
+/// Version 2: Added macos_commandlinetools_version to cache key
+pub const CC_CACHE_KEY_VERSION: u32 = 2;
 
 /// Compute a cache key for a Rust compile request.
 ///
@@ -86,6 +87,7 @@ pub fn rust_compile_cache_key(request: &RustCompileRequest) -> Blake3Hash {
 /// - Target triple and profile
 /// - Include paths (sorted for determinism)
 /// - Defines (sorted for determinism)
+/// - CommandLineTools version on macOS (for system linker/headers)
 pub fn cc_compile_cache_key(request: &CcCompileRequest) -> Blake3Hash {
     let mut hasher = blake3::Hasher::new();
 
@@ -112,6 +114,13 @@ pub fn cc_compile_cache_key(request: &CcCompileRequest) -> Blake3Hash {
     hasher.update(b"profile:");
     hasher.update(request.profile.as_bytes());
     hasher.update(b"\n");
+
+    // Hash CommandLineTools version (macOS only)
+    if let Some(ref version) = request.macos_commandlinetools_version {
+        hasher.update(b"macos_clt:");
+        hasher.update(version.as_bytes());
+        hasher.update(b"\n");
+    }
 
     // Hash include paths (sorted for determinism)
     let mut includes: Vec<_> = request.include_paths.iter().collect();
@@ -146,6 +155,7 @@ pub fn cc_compile_cache_key(request: &CcCompileRequest) -> Blake3Hash {
 /// - Binary name
 /// - Target triple
 /// - Libraries (sorted for determinism)
+/// - CommandLineTools version on macOS (for system linker)
 pub fn cc_link_cache_key(request: &CcLinkRequest) -> Blake3Hash {
     let mut hasher = blake3::Hasher::new();
 
@@ -164,6 +174,13 @@ pub fn cc_link_cache_key(request: &CcLinkRequest) -> Blake3Hash {
     hasher.update(b"target:");
     hasher.update(request.target_triple.as_bytes());
     hasher.update(b"\n");
+
+    // Hash CommandLineTools version (macOS only)
+    if let Some(ref version) = request.macos_commandlinetools_version {
+        hasher.update(b"macos_clt:");
+        hasher.update(version.as_bytes());
+        hasher.update(b"\n");
+    }
 
     // Hash object manifests (sorted for determinism)
     let mut objects: Vec<_> = request.object_manifests.iter().collect();

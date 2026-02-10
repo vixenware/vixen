@@ -42,7 +42,6 @@ figue = { workspace = true }
 # Utilities
 camino = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = "0.3"
 ur-taking-me-with-you = { workspace = true }
 libc = { workspace = true }
 vx-tracing.workspace = true
