@@ -75,7 +75,6 @@ struct VixenApp: App {
 
 struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.scenePhase) private var scenePhase
     @State private var isExtensionEnabled = false
     @State private var extensionError: String? = nil
     @State private var demoToggleOn = false
@@ -119,10 +118,11 @@ struct ContentView: View {
         .onAppear {
             cursorBob = true
         }
-        .onChange(of: scenePhase) { _, newPhase in
-            if newPhase == .active && isSupportedOS {
-                Task { await checkExtensionOnce() }
-            }
+        .onReceive(
+            NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+        ) { _ in
+            guard isSupportedOS else { return }
+            Task { await checkExtensionOnce() }
         }
     }
 
