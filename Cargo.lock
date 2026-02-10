@@ -3220,6 +3220,7 @@ dependencies = [
  "camino",
  "eyre",
  "facet",
+ "libc",
  "petgraph",
  "picante",
  "roam",

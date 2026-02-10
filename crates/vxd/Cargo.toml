@@ -21,6 +21,7 @@ eyre = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
+libc = { workspace = true }
 petgraph = { workspace = true }
 tokio-util = { workspace = true }
 

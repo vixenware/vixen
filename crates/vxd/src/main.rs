@@ -15,6 +15,7 @@ mod db;
 mod error;
 mod executor;
 mod inputs;
+mod nextest_watcher;
 mod queries;
 mod service;
 
@@ -289,6 +290,20 @@ async fn async_main() -> Result<()> {
 
     // The daemon outlives its parent process (vx CLI) and shuts down
     // after an idle timeout instead (5s in test mode, 2h in production).
+    // In test mode, we also watch the cargo-nextest ancestor and exit
+    // immediately when it dies — no lingering.
+    if in_test {
+        if let Some(nextest_pid) = nextest_watcher::find_nextest_ancestor() {
+            tracing::info!(nextest_pid, "watching cargo-nextest process");
+            tokio::spawn(async move {
+                nextest_watcher::wait_for_exit(nextest_pid).await;
+                tracing::info!("cargo-nextest exited, shutting down");
+                std::process::exit(0);
+            });
+        } else {
+            tracing::debug!("no cargo-nextest ancestor found (external daemon?)");
+        }
+    }
 
     let args = Args::from_env()?;
     tracing::info!("Starting vxd");
