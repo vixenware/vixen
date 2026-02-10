@@ -111,6 +111,9 @@ pub enum ActionResult {
         /// Whether this was a cache hit
         was_cached: bool,
     },
+
+    /// Synthetic planner node executed by the RulePlan lowering bridge.
+    PlannerSyntheticExecuted { node_id: String, kind: String },
 }
 
 /// Statistics from build execution
@@ -899,6 +902,33 @@ impl Executor {
                             blob: None,
                             path: Some(binary_path.to_string()),
                         }],
+                        invocation: None,
+                        diagnostics: vx_report::DiagnosticsRecord::default(),
+                        cas_cache_key: None,
+                    });
+                }
+                ActionResult::PlannerSyntheticExecuted { node_id, kind } => {
+                    rebuilt += 1;
+                    node_reports.push(vx_report::NodeReport {
+                        node_id: node_id.clone(),
+                        kind: kind.clone(),
+                        cache_key: node_id.clone(),
+                        cache: vx_report::CacheOutcome::Miss {
+                            reason: vx_report::MissReason::FirstBuild,
+                        },
+                        timing: {
+                            let &(exec, start, ln) =
+                                node_timings.get(node_idx).unwrap_or(&(0, 0, 0));
+                            vx_report::NodeTiming {
+                                execute_ms: exec,
+                                start_offset_ms: start,
+                                lane: ln,
+                                ..Default::default()
+                            }
+                        },
+                        inputs: vec![],
+                        deps: vec![],
+                        outputs: vec![],
                         invocation: None,
                         diagnostics: vx_report::DiagnosticsRecord::default(),
                         cas_cache_key: None,
@@ -1982,6 +2012,13 @@ async fn execute_action(
                 binary_hash,
                 binary_path,
                 was_cached: false, // TODO: Check cache
+            })
+        }
+
+        Action::PlannerSynthetic { node_id, kind, .. } => {
+            Ok(ActionResult::PlannerSyntheticExecuted {
+                node_id,
+                kind: kind.report_kind().to_string(),
             })
         }
     }

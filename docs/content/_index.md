@@ -27,6 +27,7 @@ vx build
 - [RulePlan Schema](/rule-plan/) - Typed planning IR and validation rules
 - [Planner Runtime Boundary](/planner-runtime/) - In-process host/interpreter contract
 - [Planner Builtins and Capability Policy](/planner-builtins/) - Deterministic builtin catalog and guardrails
+- [RulePlan Lowering Bridge](/rule-plan-lowering/) - Starter RulePlan -> ActionGraph mapping
 - [GitHub](https://github.com/bearcove/vixen)
 
 ## Overview

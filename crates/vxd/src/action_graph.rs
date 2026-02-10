@@ -7,6 +7,7 @@
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
+use vx_report::{RulePlan, RulePlanEdge, RulePlanEdgeKind, RulePlanNode, RulePlanNodeKind};
 use vx_rs::crate_graph::{CrateGraph, CrateId, CrateSource, CrateType};
 use vx_store_proto::{Blake3Hash, RustChannel, RustComponent, RustToolchainSpec};
 
@@ -21,6 +22,35 @@ pub struct ActionDep {
     pub crate_id: CrateId,
     /// Source of the dependency (to determine if registry_crate_manifest is needed)
     pub source: CrateSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum PlannerSyntheticKind {
+    Group,
+    Action,
+    Artifact,
+    Fact,
+}
+
+impl PlannerSyntheticKind {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Group => "group",
+            Self::Action => "action",
+            Self::Artifact => "artifact",
+            Self::Fact => "fact",
+        }
+    }
+
+    pub(crate) fn report_kind(self) -> &'static str {
+        match self {
+            Self::Group => "planner.group",
+            Self::Action => "planner.action",
+            Self::Artifact => "planner.artifact",
+            Self::Fact => "planner.fact",
+        }
+    }
 }
 
 /// A single unit of work in the build process
@@ -115,6 +145,13 @@ pub enum Action {
         /// Target triple
         target_triple: String,
     },
+
+    /// Synthetic planner node used by RulePlan lowering bridge.
+    PlannerSynthetic {
+        node_id: String,
+        label: String,
+        kind: PlannerSyntheticKind,
+    },
 }
 
 impl Action {
@@ -142,6 +179,14 @@ impl Action {
             Action::LinkCBinary { name, .. } => {
                 format!("link {}", name)
             }
+            Action::PlannerSynthetic {
+                node_id,
+                kind,
+                label,
+                ..
+            } => {
+                format!("planner {} {} ({})", kind.label(), node_id, label)
+            }
         }
     }
 
@@ -165,6 +210,9 @@ impl Action {
             } => {
                 format!("compile-{}:{crate_name}", crate_type.as_str())
             }
+            Action::PlannerSynthetic { node_id, kind, .. } => {
+                format!("planner-{}:{node_id}", kind.label())
+            }
         }
     }
 
@@ -186,6 +234,7 @@ impl Action {
             }
             Action::CompileCObject { .. } => "c.compile_obj",
             Action::LinkCBinary { .. } => "c.link_bin",
+            Action::PlannerSynthetic { kind, .. } => kind.report_kind(),
         }
     }
 
@@ -211,6 +260,9 @@ impl Action {
                 vxd_proto::ActionType::CompileC(source.clone())
             }
             Action::LinkCBinary { name, .. } => vxd_proto::ActionType::LinkC(name.clone()),
+            Action::PlannerSynthetic { node_id, kind, .. } => {
+                vxd_proto::ActionType::CompileRust(format!("planner:{}:{}", kind.label(), node_id))
+            }
         }
     }
 }
@@ -227,7 +279,7 @@ pub struct ActionNode {
 pub struct ActionGraph {
     /// Directed graph: edges point from dependent → dependency
     /// (i.e., if A depends on B, there's an edge A → B)
-    pub graph: DiGraph<ActionNode, ()>,
+    pub graph: DiGraph<ActionNode, String>,
 
     /// Map from CrateId to its action node (for resolving dependencies)
     pub crate_to_node: HashMap<CrateId, NodeIndex>,
@@ -241,6 +293,28 @@ pub struct ActionGraph {
     /// Map from (name, version) to registry crate acquisition node
     pub registry_nodes: HashMap<(String, String), NodeIndex>,
 }
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct RulePlanLoweringError {
+    pub message: String,
+    pub rule_id: String,
+    pub source_id: String,
+    pub line: u32,
+    pub column: u32,
+}
+
+impl std::fmt::Display for RulePlanLoweringError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} (rule={}, source={}, at {}:{})",
+            self.message, self.rule_id, self.source_id, self.line, self.column
+        )
+    }
+}
+
+impl std::error::Error for RulePlanLoweringError {}
 
 impl ActionGraph {
     /// Create an empty action graph (for manual construction, e.g., C projects)
@@ -262,7 +336,12 @@ impl ActionGraph {
     /// Add a dependency edge from dependent to dependency
     /// (i.e., dependent depends on dependency, so dependency must execute first)
     pub fn add_edge(&mut self, dependency: NodeIndex, dependent: NodeIndex) {
-        self.graph.add_edge(dependent, dependency, ());
+        self.add_edge_with_kind(dependency, dependent, "always");
+    }
+
+    /// Add a dependency edge with a typed semantic kind.
+    pub fn add_edge_with_kind(&mut self, dependency: NodeIndex, dependent: NodeIndex, kind: &str) {
+        self.graph.add_edge(dependent, dependency, kind.to_string());
     }
 
     /// Build action graph from a CrateGraph
@@ -317,8 +396,16 @@ impl ActionGraph {
         });
 
         // Extraction depends on matching download.
-        graph.add_edge(extract_rustc_node, download_rustc_node, ());
-        graph.add_edge(extract_rust_std_node, download_rust_std_node, ());
+        graph.add_edge(
+            extract_rustc_node,
+            download_rustc_node,
+            "always".to_string(),
+        );
+        graph.add_edge(
+            extract_rust_std_node,
+            download_rust_std_node,
+            "always".to_string(),
+        );
 
         // 2. Create registry crate acquisition actions
         debug!(
@@ -415,20 +502,20 @@ impl ActionGraph {
             let compile_idx = crate_to_node[&crate_node.id];
 
             // Every compilation depends on both extracted toolchain components.
-            graph.add_edge(compile_idx, extract_rustc_node, ());
-            graph.add_edge(compile_idx, extract_rust_std_node, ());
+            graph.add_edge(compile_idx, extract_rustc_node, "always".to_string());
+            graph.add_edge(compile_idx, extract_rust_std_node, "always".to_string());
 
             // Registry crates also depend on their registry acquisition
             if let CrateSource::Registry { name, version, .. } = &crate_node.source
                 && let Some(&registry_idx) = registry_nodes.get(&(name.clone(), version.clone()))
             {
-                graph.add_edge(compile_idx, registry_idx, ());
+                graph.add_edge(compile_idx, registry_idx, "always".to_string());
             }
 
             // Add edges to crate dependencies
             for dep in &crate_node.deps {
                 if let Some(&dep_compile_idx) = crate_to_node.get(&dep.crate_id) {
-                    graph.add_edge(compile_idx, dep_compile_idx, ());
+                    graph.add_edge(compile_idx, dep_compile_idx, "always".to_string());
                 }
             }
         }
@@ -454,6 +541,59 @@ impl ActionGraph {
             }),
             registry_nodes,
         })
+    }
+
+    /// Lower a `RulePlan` into an executable `ActionGraph`.
+    ///
+    /// This bridge intentionally starts small: it materializes `group`/`action`/`artifact`/`fact`
+    /// nodes as synthetic planner actions and preserves edge kinds in topology metadata.
+    #[allow(dead_code)]
+    pub fn from_rule_plan(plan: &RulePlan) -> Result<Self, RulePlanLoweringError> {
+        if let Err(err) = plan.validate() {
+            return Err(RulePlanLoweringError {
+                message: format!(
+                    "RulePlan validation failed before lowering: {}",
+                    err.diagnostics.join("; ")
+                ),
+                rule_id: "ruleplan.validate".to_string(),
+                source_id: "ruleplan".to_string(),
+                line: 1,
+                column: 1,
+            });
+        }
+
+        let mut lowered = Self::new();
+        let mut node_map = HashMap::with_capacity(plan.nodes.len());
+
+        for node in &plan.nodes {
+            let synthetic_kind = planner_kind_for_node(node);
+            let idx = lowered.add_action(Action::PlannerSynthetic {
+                node_id: node.id.as_str().to_string(),
+                label: node.label.clone(),
+                kind: synthetic_kind,
+            });
+            node_map.insert(node.id.as_str().to_string(), idx);
+        }
+
+        for edge in &plan.edges {
+            let from_idx = node_map.get(edge.from.as_str()).copied().ok_or_else(|| {
+                lowering_error_for_edge(
+                    edge,
+                    format!("edge references missing from node '{}'", edge.from),
+                )
+            })?;
+            let to_idx = node_map.get(edge.to.as_str()).copied().ok_or_else(|| {
+                lowering_error_for_edge(
+                    edge,
+                    format!("edge references missing to node '{}'", edge.to),
+                )
+            })?;
+
+            let edge_kind = planner_edge_kind(edge)?;
+            lowered.add_edge_with_kind(from_idx, to_idx, edge_kind);
+        }
+
+        Ok(lowered)
     }
 
     /// Get total number of actions
@@ -485,7 +625,7 @@ impl ActionGraph {
             edges.push(vx_report::GraphEdge {
                 from,
                 to,
-                kind: Some("always".to_string()),
+                kind: Some(edge.weight().clone()),
             });
         }
 
@@ -557,5 +697,173 @@ impl ActionGraph {
                 "Example blocked node"
             );
         }
+    }
+}
+
+#[allow(dead_code)]
+fn planner_kind_for_node(node: &RulePlanNode) -> PlannerSyntheticKind {
+    match node.kind {
+        RulePlanNodeKind::Group => PlannerSyntheticKind::Group,
+        RulePlanNodeKind::Action => PlannerSyntheticKind::Action,
+        RulePlanNodeKind::Artifact => PlannerSyntheticKind::Artifact,
+        RulePlanNodeKind::Fact => PlannerSyntheticKind::Fact,
+    }
+}
+
+#[allow(dead_code)]
+fn planner_edge_kind(edge: &RulePlanEdge) -> Result<&'static str, RulePlanLoweringError> {
+    match edge.kind {
+        RulePlanEdgeKind::Always => Ok("always"),
+        RulePlanEdgeKind::IfChanged => Ok("ifchanged"),
+        RulePlanEdgeKind::IfWritten => Ok("ifwritten"),
+        RulePlanEdgeKind::IfCreate => Err(lowering_error_for_edge(
+            edge,
+            "edge kind 'ifcreate' is not supported by the starter lowering bridge".to_string(),
+        )),
+        RulePlanEdgeKind::IfDeleted => Err(lowering_error_for_edge(
+            edge,
+            "edge kind 'ifdeleted' is not supported by the starter lowering bridge".to_string(),
+        )),
+    }
+}
+
+#[allow(dead_code)]
+fn lowering_error_for_edge(edge: &RulePlanEdge, message: String) -> RulePlanLoweringError {
+    RulePlanLoweringError {
+        message,
+        rule_id: edge.provenance.rule_id.as_str().to_string(),
+        source_id: edge.provenance.source_id.as_str().to_string(),
+        line: edge.provenance.span.line,
+        column: edge.provenance.span.column,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use vx_report::{
+        RuleId, RulePlan, RulePlanEdge, RulePlanFact, RulePlanFactId, RulePlanNode, RulePlanNodeId,
+        RulePlanProvenance, RulePlanSource, RulePlanSourceId, RulePlanSpan, RulePlanValue,
+    };
+
+    fn provenance(rule: &str, line: u32) -> RulePlanProvenance {
+        RulePlanProvenance {
+            rule_id: RuleId::from(rule.to_string()),
+            source_id: RulePlanSourceId::from("src0".to_string()),
+            span: RulePlanSpan {
+                line,
+                column: 1,
+                end_line: line,
+                end_column: 8,
+            },
+            comment: None,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    fn sample_plan() -> RulePlan {
+        RulePlan {
+            sources: vec![RulePlanSource {
+                id: RulePlanSourceId::from("src0".to_string()),
+                path: camino::Utf8PathBuf::from("rules/sample.edn"),
+            }],
+            nodes: vec![
+                RulePlanNode {
+                    id: RulePlanNodeId::from("n_group".to_string()),
+                    kind: RulePlanNodeKind::Group,
+                    label: "build".to_string(),
+                    provenance: provenance("rule.group", 1),
+                },
+                RulePlanNode {
+                    id: RulePlanNodeId::from("n_action".to_string()),
+                    kind: RulePlanNodeKind::Action,
+                    label: "compile".to_string(),
+                    provenance: provenance("rule.action", 2),
+                },
+                RulePlanNode {
+                    id: RulePlanNodeId::from("n_artifact".to_string()),
+                    kind: RulePlanNodeKind::Artifact,
+                    label: "target/app".to_string(),
+                    provenance: provenance("rule.artifact", 3),
+                },
+                RulePlanNode {
+                    id: RulePlanNodeId::from("n_fact".to_string()),
+                    kind: RulePlanNodeKind::Fact,
+                    label: "src-changed".to_string(),
+                    provenance: provenance("rule.fact", 4),
+                },
+            ],
+            edges: vec![
+                RulePlanEdge {
+                    from: RulePlanNodeId::from("n_group".to_string()),
+                    to: RulePlanNodeId::from("n_action".to_string()),
+                    kind: RulePlanEdgeKind::Always,
+                    provenance: provenance("rule.edge.always", 10),
+                },
+                RulePlanEdge {
+                    from: RulePlanNodeId::from("n_action".to_string()),
+                    to: RulePlanNodeId::from("n_artifact".to_string()),
+                    kind: RulePlanEdgeKind::IfWritten,
+                    provenance: provenance("rule.edge.ifwritten", 11),
+                },
+                RulePlanEdge {
+                    from: RulePlanNodeId::from("n_fact".to_string()),
+                    to: RulePlanNodeId::from("n_action".to_string()),
+                    kind: RulePlanEdgeKind::IfChanged,
+                    provenance: provenance("rule.edge.ifchanged", 12),
+                },
+            ],
+            facts: vec![RulePlanFact {
+                id: RulePlanFactId::from("f0".to_string()),
+                node_id: RulePlanNodeId::from("n_fact".to_string()),
+                value: RulePlanValue::from("true".to_string()),
+                provenance: provenance("rule.fact.emit", 13),
+            }],
+        }
+    }
+
+    #[test]
+    fn lowers_rule_plan_to_action_graph_with_edge_kinds() {
+        let graph = ActionGraph::from_rule_plan(&sample_plan()).expect("lowering should pass");
+        assert_eq!(graph.graph.node_count(), 4);
+        assert_eq!(graph.graph.edge_count(), 3);
+
+        let topology = graph.to_topology();
+        let mut kinds = topology
+            .edges
+            .into_iter()
+            .map(|edge| edge.kind.expect("edge kind"))
+            .collect::<Vec<_>>();
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            vec![
+                "always".to_string(),
+                "ifchanged".to_string(),
+                "ifwritten".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn unsupported_rule_plan_edge_kind_returns_provenance_error() {
+        let mut plan = sample_plan();
+        plan.edges.push(RulePlanEdge {
+            from: RulePlanNodeId::from("n_action".to_string()),
+            to: RulePlanNodeId::from("n_artifact".to_string()),
+            kind: RulePlanEdgeKind::IfDeleted,
+            provenance: provenance("rule.edge.ifdeleted", 99),
+        });
+
+        let err = match ActionGraph::from_rule_plan(&plan) {
+            Ok(_) => panic!("lowering should fail"),
+            Err(err) => err,
+        };
+        assert!(err.message.contains("ifdeleted"));
+        assert_eq!(err.rule_id, "rule.edge.ifdeleted");
+        assert_eq!(err.source_id, "src0");
+        assert_eq!(err.line, 99);
+        assert_eq!(err.column, 1);
     }
 }
