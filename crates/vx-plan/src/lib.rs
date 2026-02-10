@@ -3,6 +3,9 @@ use facet::Facet;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use strid::braid;
 
+pub mod runtime;
+pub use runtime::*;
+
 #[braid]
 pub struct RulePlanNodeId {
     value: String,
