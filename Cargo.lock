@@ -3230,6 +3230,7 @@ name = "vx-vfsd"
 version = "0.1.0"
 dependencies = [
  "camino",
+ "cfg-if",
  "facet",
  "facet-json",
  "figue",

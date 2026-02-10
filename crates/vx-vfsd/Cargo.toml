@@ -26,7 +26,6 @@ vx-vfs = { workspace = true }
 # RPC
 roam = { workspace = true }
 roam-stream = { workspace = true }
-roam-shm = { workspace = true }
 vx-io = { workspace = true }
 
 # Async runtime
@@ -41,11 +40,15 @@ figue = { workspace = true }
 
 # Utilities
 camino = { workspace = true }
+cfg-if = { workspace = true }
 tracing = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
 libc = { workspace = true }
 vx-tracing.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+roam-shm = { workspace = true }
+
 [features]
 default = []
-diagnostics = ["vx-locks/diagnostics", "roam-shm/diagnostics"]
+diagnostics = ["vx-locks/diagnostics"]
