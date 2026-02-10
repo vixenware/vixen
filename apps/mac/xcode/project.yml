@@ -38,8 +38,8 @@ targets:
         com.apple.security.application-groups:
           - group.eu.bearcove.vixen
         com.apple.security.temporary-exception.mach-lookup.global-name:
-          - "$(PRODUCT_BUNDLE_IDENTIFIER)-spks"
-          - "$(PRODUCT_BUNDLE_IDENTIFIER)-spki"
+          - "eu.bearcove.vixen-spks"
+          - "eu.bearcove.vixen-spki"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: eu.bearcove.vixen
