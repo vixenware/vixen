@@ -13,7 +13,7 @@ use facet::Facet;
 
 /// Daemon protocol version.
 /// Bump this when making breaking changes to the daemon RPC interface.
-pub const VXD_PROTOCOL_VERSION: u32 = 1;
+pub const VXD_PROTOCOL_VERSION: u32 = 2;
 
 /// Request to build a project
 #[derive(Debug, Clone, Facet)]
@@ -103,6 +103,20 @@ pub trait Vxd {
     async fn shutdown(&self);
 }
 
+/// Progress update for a running action.
+///
+/// When `current` and `total` are both set, the TUI renders a progress bar
+/// with percentage. When only `message` is set, it's shown as a status string.
+#[derive(Debug, Clone, Facet)]
+pub struct ActionProgress {
+    /// Human-readable phase description (e.g., "downloading rustc", "extracting")
+    pub message: String,
+    /// Bytes or items completed so far
+    pub current: Option<u64>,
+    /// Total bytes or items expected
+    pub total: Option<u64>,
+}
+
 /// Progress reporting service (implemented by vx CLI, called by daemon)
 #[roam::service]
 pub trait ProgressListener {
@@ -111,6 +125,9 @@ pub trait ProgressListener {
 
     /// Start tracking an action, returning its ID
     async fn start_action(&self, action_type: ActionType) -> u64;
+
+    /// Update progress on a running action (download bytes, extraction files, etc.)
+    async fn update_progress(&self, action_id: u64, progress: ActionProgress);
 
     /// Mark an action as completed
     async fn complete_action(&self, action_id: u64);
@@ -231,6 +248,33 @@ mod tests {
         total_actions: usize,
         cache_hits: usize,
         rebuilt: usize,
+    }
+
+    #[test]
+    fn test_action_progress_roundtrip() {
+        let progress = ActionProgress {
+            message: "downloading rustc".to_string(),
+            current: Some(82_000_000),
+            total: Some(158_000_000),
+        };
+
+        let bytes = to_vec(&progress).expect("serialize");
+        let decoded: ActionProgress = from_slice(&bytes).expect("deserialize");
+        assert_eq!(decoded.message, progress.message);
+        assert_eq!(decoded.current, progress.current);
+        assert_eq!(decoded.total, progress.total);
+
+        // Also test with None values
+        let progress_indeterminate = ActionProgress {
+            message: "extracting".to_string(),
+            current: None,
+            total: None,
+        };
+        let bytes = to_vec(&progress_indeterminate).expect("serialize");
+        let decoded: ActionProgress = from_slice(&bytes).expect("deserialize");
+        assert_eq!(decoded.message, "extracting");
+        assert_eq!(decoded.current, None);
+        assert_eq!(decoded.total, None);
     }
 
     #[test]

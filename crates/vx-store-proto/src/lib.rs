@@ -193,6 +193,17 @@ pub struct IngestTreeResult {
     pub error: Option<String>,
 }
 
+/// Progress update streamed during long-running store operations (downloads, extraction).
+#[derive(Debug, Clone, Facet)]
+pub struct StoreProgress {
+    /// Human-readable phase description (e.g., "downloading rustc", "extracting rust-std")
+    pub message: String,
+    /// Bytes or items completed so far
+    pub current: Option<u64>,
+    /// Total bytes or items expected
+    pub total: Option<u64>,
+}
+
 /// CAS service trait
 ///
 /// CAS stores immutable content. Clients produce working directories.
@@ -285,10 +296,20 @@ pub trait Store {
     // =========================================================================
 
     /// Ensure a Rust toolchain exists in the store. Downloads if needed.
-    async fn ensure_rust_toolchain(&self, spec: RustToolchainSpec) -> EnsureToolchainResult;
+    /// Progress updates (download bytes, extraction files) are streamed to `progress`.
+    async fn ensure_rust_toolchain(
+        &self,
+        spec: RustToolchainSpec,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureToolchainResult;
 
     /// Ensure a Zig toolchain exists in the store. Downloads if needed.
-    async fn ensure_zig_toolchain(&self, spec: ZigToolchainSpec) -> EnsureToolchainResult;
+    /// Progress updates are streamed to `progress`.
+    async fn ensure_zig_toolchain(
+        &self,
+        spec: ZigToolchainSpec,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureToolchainResult;
 
     /// Get toolchain manifest by its hash
     async fn get_toolchain_manifest(&self, manifest_hash: Blake3Hash) -> Option<ToolchainManifest>;
@@ -307,7 +328,12 @@ pub trait Store {
     // =========================================================================
 
     /// Ensure a registry crate exists in the store. Downloads if needed.
-    async fn ensure_registry_crate(&self, spec: RegistrySpec) -> EnsureRegistryCrateResult;
+    /// Progress updates are streamed to `progress`.
+    async fn ensure_registry_crate(
+        &self,
+        spec: RegistrySpec,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureRegistryCrateResult;
 
     /// Get a registry crate manifest by its hash
     async fn get_registry_manifest(

@@ -10,7 +10,7 @@ use facet::Facet;
 use figue as args;
 use owo_colors::OwoColorize;
 use vx_report::{CacheOutcome, ReportStore, RunDiff};
-use vxd_proto::{ActionType, BuildRequest, ProgressListener, VxdClient};
+use vxd_proto::{ActionProgress, ActionType, BuildRequest, ProgressListener, VxdClient};
 
 /// vx - Build execution engine with deterministic caching
 #[derive(Facet, Debug)]
@@ -232,6 +232,28 @@ impl ProgressListener for ProgressListenerImpl {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             tracing::info!("[{}] Starting: {:?}", id, action_type);
             id
+        }
+    }
+
+    async fn update_progress(&self, _cx: &roam::Context, action_id: u64, progress: ActionProgress) {
+        if let Some(tui) = &self.tui {
+            tui.update_progress(action_id, progress).await;
+        } else if let (Some(current), Some(total)) = (progress.current, progress.total) {
+            let pct = if total > 0 {
+                current as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            };
+            tracing::info!(
+                "[{}] {}: {:.0}% ({}/{})",
+                action_id,
+                progress.message,
+                pct,
+                current,
+                total
+            );
+        } else {
+            tracing::info!("[{}] {}", action_id, progress.message);
         }
     }
 

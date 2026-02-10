@@ -11,13 +11,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, oneshot};
 use tracing_subscriber::Layer;
-use vxd_proto::ActionType;
+use vxd_proto::{ActionProgress, ActionType};
 
 /// Tracks a single action
 #[derive(Debug, Clone)]
 struct Action {
     action_type: ActionType,
     started_at: Instant,
+    progress: Option<ActionProgress>,
 }
 
 impl Action {
@@ -111,10 +112,19 @@ impl TuiHandle {
             Action {
                 action_type,
                 started_at: Instant::now(),
+                progress: None,
             },
         );
 
         id
+    }
+
+    /// Update progress on a running action
+    pub async fn update_progress(&self, id: u64, progress: ActionProgress) {
+        let mut state = self.state.write().await;
+        if let Some(action) = state.active.get_mut(&id) {
+            action.progress = Some(progress);
+        }
     }
 
     /// Mark an action as completed
@@ -220,9 +230,39 @@ impl TuiHandle {
                 if let Some(action) = actions.get(i) {
                     bar.set_style(spinner_style.clone());
                     let elapsed_secs = action.elapsed().as_secs_f64();
+
+                    let progress_str = match &action.progress {
+                        Some(p) if p.current.is_some() && p.total.is_some() => {
+                            let current = p.current.unwrap();
+                            let total = p.total.unwrap();
+                            if total > 0 {
+                                let pct = (current as f64 / total as f64 * 100.0).min(100.0);
+                                let filled = (pct / 100.0 * 20.0) as usize;
+                                let empty = 20 - filled;
+                                let current_mb = current as f64 / 1_048_576.0;
+                                let total_mb = total as f64 / 1_048_576.0;
+                                format!(
+                                    " [{}{}] {:.0}% ({:.0}/{:.0} MB)",
+                                    "█".repeat(filled),
+                                    "░".repeat(empty),
+                                    pct,
+                                    current_mb,
+                                    total_mb,
+                                )
+                            } else {
+                                format!("  {}", p.message)
+                            }
+                        }
+                        Some(p) if !p.message.is_empty() => {
+                            format!("  {}", p.message)
+                        }
+                        _ => String::new(),
+                    };
+
                     bar.set_message(format!(
-                        "{:<40} ({:.1}s)",
+                        "{:<40}{} ({:.1}s)",
                         action.action_type.display_name(),
+                        progress_str,
                         elapsed_secs
                     ));
                     bar.tick(); // Manually tick to advance spinner animation

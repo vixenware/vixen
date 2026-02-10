@@ -254,12 +254,43 @@ impl VxdService {
             components: vec![RustComponent::Rustc, RustComponent::RustStd],
         };
 
-        let result = self.cas.ensure_rust_toolchain(spec).await.map_err(|e| {
-            // Complete action on error
-            let this = self.clone();
-            tokio::spawn(async move { this.report_complete_action(action_id).await });
-            VxdError::CasRpc(e.to_string())
-        })?;
+        // Create a progress channel — progress is forwarded to the CLI's ProgressListener
+        // if one is connected, otherwise silently dropped.
+        let (progress_tx, mut progress_rx) = roam::channel::<vx_store_proto::StoreProgress>();
+
+        // Forward store progress to the CLI's ProgressListener
+        let forward_listener = self.progress_listener.read().await.clone();
+        let forward_action_id = action_id;
+        let forward_handle = tokio::spawn(async move {
+            while let Ok(Some(sp)) = progress_rx.recv().await {
+                if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
+                    let _ = listener
+                        .update_progress(
+                            id,
+                            vxd_proto::ActionProgress {
+                                message: sp.message,
+                                current: sp.current,
+                                total: sp.total,
+                            },
+                        )
+                        .await;
+                }
+            }
+        });
+
+        let result = self
+            .cas
+            .ensure_rust_toolchain(spec, progress_tx)
+            .await
+            .map_err(|e| {
+                // Complete action on error
+                let this = self.clone();
+                tokio::spawn(async move { this.report_complete_action(action_id).await });
+                VxdError::CasRpc(e.to_string())
+            })?;
+
+        // Wait for progress forwarding to drain
+        let _ = forward_handle.await;
 
         if result.status == EnsureStatus::Failed {
             self.report_complete_action(action_id).await;

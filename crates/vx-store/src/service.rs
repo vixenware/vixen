@@ -4,8 +4,9 @@ use vx_store_proto::{
     Blake3Hash, BlobHash, CacheKey, EnsureRegistryCrateResult, EnsureStatus, EnsureToolchainResult,
     IngestTreeRequest, IngestTreeResult, ManifestHash, MaterializationPlan, MaterializeStep,
     NodeManifest, PublishResult, RegistryCrateManifest, RegistrySpec, RegistrySpecKey,
-    RustToolchainSpec, STORE_PROTOCOL_VERSION, ServiceVersion, TREE_MANIFEST_SCHEMA_VERSION,
-    ToolchainKind, ToolchainManifest, ToolchainSpecKey, TreeManifest, ZigToolchainSpec,
+    RustToolchainSpec, STORE_PROTOCOL_VERSION, ServiceVersion, StoreProgress,
+    TREE_MANIFEST_SCHEMA_VERSION, ToolchainKind, ToolchainManifest, ToolchainSpecKey, TreeManifest,
+    ZigToolchainSpec,
 };
 
 use crate::registry::download_crate;
@@ -133,11 +134,12 @@ impl Store for StoreService {
         self.storage.has_blob(&hash).await.unwrap_or(false)
     }
 
-    #[tracing::instrument(skip(self), fields(name = %spec.name, version = %spec.version))]
+    #[tracing::instrument(skip(self, progress), fields(name = %spec.name, version = %spec.version))]
     async fn ensure_registry_crate(
         &self,
         _cx: &roam::Context,
         spec: RegistrySpec,
+        progress: roam::Tx<StoreProgress>,
     ) -> EnsureRegistryCrateResult {
         // Validate spec and compute spec_key
         let spec_key = match spec.spec_key() {
@@ -173,6 +175,14 @@ impl Store for StoreService {
                 spec_key,
                 async move || this.storage.get_registry_spec(&spec_key).await.ok().flatten(),
                 async move || {
+                    let _ = progress
+                        .send(&StoreProgress {
+                            message: format!("downloading {}@{}", spec.name, spec.version),
+                            current: None,
+                            total: None,
+                        })
+                        .await;
+
                     // Download tarball
                     let tarball_bytes =
                         match download_crate(&spec.name, &spec.version, &spec.checksum).await {
@@ -186,6 +196,14 @@ impl Store for StoreService {
                                 };
                             }
                         };
+
+                    let _ = progress
+                        .send(&StoreProgress {
+                            message: format!("storing {}@{}", spec.name, spec.version),
+                            current: None,
+                            total: None,
+                        })
+                        .await;
 
                     // Store tarball as blob
                     let tarball_blob = BlobHash::from_bytes(&tarball_bytes);
@@ -287,18 +305,18 @@ impl Store for StoreService {
         &self,
         _cx: &roam::Context,
         spec: RustToolchainSpec,
+        progress: roam::Tx<StoreProgress>,
     ) -> EnsureToolchainResult {
-        // Delegate to the inherent method which handles deduplication via ToolchainManager
-        StoreService::ensure_rust_toolchain(self, spec).await
+        StoreService::ensure_rust_toolchain(self, spec, progress).await
     }
 
     async fn ensure_zig_toolchain(
         &self,
         _cx: &roam::Context,
         spec: ZigToolchainSpec,
+        progress: roam::Tx<StoreProgress>,
     ) -> EnsureToolchainResult {
-        // Delegate to the inherent method
-        StoreService::ensure_zig_toolchain(self, spec).await
+        StoreService::ensure_zig_toolchain(self, spec, progress).await
     }
 
     async fn lookup_toolchain_spec(

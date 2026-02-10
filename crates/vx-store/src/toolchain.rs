@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use vx_store_proto::{
     Blake3Hash, BlobHash, EnsureStatus as ToolchainEnsureStatus, EnsureToolchainResult,
-    RustChannel, RustToolchainSpec, TOOLCHAIN_MANIFEST_SCHEMA_VERSION, ToolchainComponentTree,
-    ToolchainKind, ToolchainManifest, ToolchainSpecKey, ZigToolchainSpec,
+    RustChannel, RustToolchainSpec, StoreProgress, TOOLCHAIN_MANIFEST_SCHEMA_VERSION,
+    ToolchainComponentTree, ToolchainKind, ToolchainManifest, ToolchainSpecKey, ZigToolchainSpec,
 };
 use vx_tarball::Compression;
 
@@ -36,10 +36,15 @@ async fn fetch_channel_manifest(
     vx_toolchain::ChannelManifest::from_toml(&body)
 }
 
-/// Download a component with streaming checksum verification
+/// Download a component with streaming checksum verification and progress reporting.
+///
+/// Reads Content-Length from the HTTP response and streams progress updates
+/// through the provided channel as bytes arrive.
 async fn download_component(
     url: &str,
     expected_hash: &str,
+    component_name: &str,
+    progress: &roam::Tx<StoreProgress>,
 ) -> Result<Vec<u8>, vx_toolchain::ToolchainError> {
     use http_body_util::BodyExt;
     use tokio::io::AsyncReadExt;
@@ -62,6 +67,21 @@ async fn download_component(
         });
     }
 
+    // Extract Content-Length for progress tracking
+    let content_length = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+
+    let _ = progress
+        .send(&StoreProgress {
+            message: format!("downloading {component_name}"),
+            current: Some(0),
+            total: content_length,
+        })
+        .await;
+
     // Wrap the response body in a hash-verifying reader
     let body_reader = tokio_util::io::StreamReader::new(
         response
@@ -73,16 +93,48 @@ async fn download_component(
     let mut verifying_reader =
         crate::hash_reader::Sha256VerifyingReader::new(body_reader, expected_hash.to_string());
 
-    // Read through the verifying reader (hash verification happens on EOF)
-    let mut bytes = Vec::new();
-    verifying_reader
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|e| vx_toolchain::ToolchainError::ChecksumMismatch {
-            url: url.to_string(),
-            expected: expected_hash.to_string(),
-            actual: e.to_string(),
-        })?;
+    // Read in chunks, reporting progress at most every 250ms
+    let mut bytes = Vec::with_capacity(content_length.unwrap_or(0) as usize);
+    let mut buf = vec![0u8; 256 * 1024]; // 256KB chunks
+    let mut bytes_read: u64 = 0;
+    let mut last_progress = std::time::Instant::now();
+
+    loop {
+        match verifying_reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                bytes.extend_from_slice(&buf[..n]);
+                bytes_read += n as u64;
+                let now = std::time::Instant::now();
+                if now.duration_since(last_progress) >= std::time::Duration::from_millis(250) {
+                    last_progress = now;
+                    let _ = progress
+                        .send(&StoreProgress {
+                            message: format!("downloading {component_name}"),
+                            current: Some(bytes_read),
+                            total: content_length,
+                        })
+                        .await;
+                }
+            }
+            Err(e) => {
+                return Err(vx_toolchain::ToolchainError::ChecksumMismatch {
+                    url: url.to_string(),
+                    expected: expected_hash.to_string(),
+                    actual: e.to_string(),
+                });
+            }
+        }
+    }
+
+    // Always send a final progress update at 100%
+    let _ = progress
+        .send(&StoreProgress {
+            message: format!("downloading {component_name}"),
+            current: Some(bytes_read),
+            total: content_length,
+        })
+        .await;
 
     tracing::debug!(
         url = %url,
@@ -154,8 +206,12 @@ impl ToolchainManager {
 
 impl StoreService {
     /// Ensure a Rust toolchain exists in CAS (internal helper, not an RPC method).
-    #[tracing::instrument(skip(self), fields(spec_key = tracing::field::Empty))]
-    pub async fn ensure_rust_toolchain(&self, spec: RustToolchainSpec) -> EnsureToolchainResult {
+    #[tracing::instrument(skip(self, progress), fields(spec_key = tracing::field::Empty))]
+    pub async fn ensure_rust_toolchain(
+        &self,
+        spec: RustToolchainSpec,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureToolchainResult {
         // Validate and compute spec_key first
         let spec_key = match spec.spec_key() {
             Ok(k) => {
@@ -186,7 +242,11 @@ impl StoreService {
                         .ok()
                         .flatten()
                 },
-                async move || this2.acquire_rust_toolchain_impl(spec_key, &spec).await,
+                async move || {
+                    this2
+                        .acquire_rust_toolchain_impl(spec_key, &spec, &progress)
+                        .await
+                },
             )
             .await
     }
@@ -195,6 +255,7 @@ impl StoreService {
         &self,
         spec_key: ToolchainSpecKey,
         spec: &RustToolchainSpec,
+        progress: &roam::Tx<StoreProgress>,
     ) -> EnsureToolchainResult {
         // Convert proto spec to vx_toolchain types
         let channel = match &spec.channel {
@@ -261,11 +322,11 @@ impl StoreService {
         let (rustc_result, rust_std_result) = join(
             async {
                 let _permit = sem.acquire().await.unwrap();
-                download_component(&rustc_url, &rustc_hash).await
+                download_component(&rustc_url, &rustc_hash, "rustc", progress).await
             },
             async {
                 let _permit = sem.acquire().await.unwrap();
-                download_component(&rust_std_url, &rust_std_hash).await
+                download_component(&rust_std_url, &rust_std_hash, "rust-std", progress).await
             },
         )
         .await;
@@ -295,6 +356,14 @@ impl StoreService {
                 };
             }
         };
+
+        let _ = progress
+            .send(&StoreProgress {
+                message: "extracting rustc".to_string(),
+                current: None,
+                total: None,
+            })
+            .await;
 
         // Extract rustc to tree
         let this = self.clone();
@@ -343,6 +412,14 @@ impl StoreService {
             total_bytes = rustc_tree.total_size_bytes,
             "stored rustc tree"
         );
+
+        let _ = progress
+            .send(&StoreProgress {
+                message: "extracting rust-std".to_string(),
+                current: None,
+                total: None,
+            })
+            .await;
 
         // Extract rust-std to tree (already downloaded in parallel above)
         let this = self.clone();
@@ -462,8 +539,12 @@ impl StoreService {
     }
 
     /// Ensure a Zig toolchain exists in CAS (internal helper, not an RPC method).
-    #[tracing::instrument(skip(self), fields(spec_key = tracing::field::Empty))]
-    pub async fn ensure_zig_toolchain(&self, spec: ZigToolchainSpec) -> EnsureToolchainResult {
+    #[tracing::instrument(skip(self, progress), fields(spec_key = tracing::field::Empty))]
+    pub async fn ensure_zig_toolchain(
+        &self,
+        spec: ZigToolchainSpec,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureToolchainResult {
         // Compute spec_key
         let spec_key = match spec.spec_key() {
             Ok(k) => {
@@ -494,7 +575,11 @@ impl StoreService {
                         .ok()
                         .flatten()
                 },
-                async move || this2.acquire_zig_toolchain_impl(spec_key, &spec).await,
+                async move || {
+                    this2
+                        .acquire_zig_toolchain_impl(spec_key, &spec, &progress)
+                        .await
+                },
             )
             .await
     }
@@ -503,6 +588,7 @@ impl StoreService {
         &self,
         spec_key: ToolchainSpecKey,
         spec: &ZigToolchainSpec,
+        progress: &roam::Tx<StoreProgress>,
     ) -> EnsureToolchainResult {
         // Convert spec to vx_toolchain types
         let version = vx_toolchain::zig::ZigVersion::new(&spec.version);
@@ -539,6 +625,14 @@ impl StoreService {
             .to_string(),
         };
 
+        let _ = progress
+            .send(&StoreProgress {
+                message: format!("downloading zig {}", spec.version),
+                current: None,
+                total: None,
+            })
+            .await;
+
         // Download and extract Zig toolchain
         let acquired =
             match vx_toolchain::zig::acquire_zig_toolchain(version.clone(), platform.clone()).await
@@ -554,6 +648,14 @@ impl StoreService {
                     };
                 }
             };
+
+        let _ = progress
+            .send(&StoreProgress {
+                message: "storing zig toolchain".to_string(),
+                current: None,
+                total: None,
+            })
+            .await;
 
         // Store zig executable as tree manifest (single-file tree)
         let zig_exe_blob_hash = BlobHash::from_bytes(&acquired.zig_exe_contents);

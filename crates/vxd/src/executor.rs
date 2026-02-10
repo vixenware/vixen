@@ -15,8 +15,8 @@ use crate::action_graph::{Action, ActionGraph};
 use crate::error::VxdError;
 use vx_rs::CrateId;
 use vx_runner_proto::RunnerClient;
-use vx_store_proto::{Blake3Hash, StoreClient};
-use vxd_proto::ProgressListenerClient;
+use vx_store_proto::{Blake3Hash, StoreClient, StoreProgress};
+use vxd_proto::{ActionProgress, ProgressListenerClient};
 
 /// State of an individual action
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -636,6 +636,31 @@ impl Executor {
                 None
             };
 
+            // Create a progress channel for the store RPC.
+            // The store sends StoreProgress on tx; we receive on rx and forward
+            // to the CLI's ProgressListener as ActionProgress.
+            let (store_progress_tx, mut store_progress_rx) = roam::channel::<StoreProgress>();
+
+            // Spawn a task to forward StoreProgress → ActionProgress
+            let forward_listener = progress_listener.clone();
+            let forward_action_id = action_id;
+            let forward_handle = tokio::spawn(async move {
+                while let Ok(Some(sp)) = store_progress_rx.recv().await {
+                    if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
+                        let _ = listener
+                            .update_progress(
+                                id,
+                                ActionProgress {
+                                    message: sp.message,
+                                    current: sp.current,
+                                    total: sp.total,
+                                },
+                            )
+                            .await;
+                    }
+                }
+            });
+
             debug!(
                 "SPAWN_ACTION task: calling execute_action for {:?}",
                 node_idx
@@ -651,6 +676,7 @@ impl Executor {
                 &target_triple,
                 &profile,
                 toolchain_node_idx,
+                store_progress_tx,
             )
             .await;
 
@@ -659,6 +685,9 @@ impl Executor {
                 node_idx,
                 result.is_ok()
             );
+
+            // Wait for progress forwarding to drain
+            let _ = forward_handle.await;
 
             // Complete progress tracking
             if let (Some(listener), Some(id)) = (&progress_listener, action_id) {
@@ -690,6 +719,7 @@ async fn execute_action(
     _target_triple: &str,
     _profile: &str,
     toolchain_node_idx: Option<NodeIndex>,
+    progress: roam::Tx<StoreProgress>,
 ) -> Result<ActionResult, VxdError> {
     use crate::queries::*;
     use camino::Utf8PathBuf;
@@ -718,7 +748,7 @@ async fn execute_action(
             };
 
             let result = cas
-                .ensure_rust_toolchain(spec)
+                .ensure_rust_toolchain(spec, progress)
                 .await
                 .map_err(|e| VxdError::CasRpc(e.to_string()))?;
 
@@ -770,7 +800,7 @@ async fn execute_action(
             debug!(name = %name, version = %version, "ensuring registry crate");
 
             let result = cas
-                .ensure_registry_crate(spec)
+                .ensure_registry_crate(spec, progress)
                 .await
                 .map_err(|e| VxdError::CasRpc(e.to_string()))?;
 
@@ -827,6 +857,13 @@ async fn execute_action(
             config,
         } => {
             debug!("COMPILE: starting compilation for crate {}", crate_name);
+            let _ = progress
+                .send(&StoreProgress {
+                    message: format!("resolving {crate_name}"),
+                    current: None,
+                    total: None,
+                })
+                .await;
             let workspace_root = Utf8PathBuf::from(&workspace_root_str);
 
             // Look up the toolchain result to get the real manifest hash and toolchain ID
@@ -879,6 +916,13 @@ async fn execute_action(
             .map_err(|e| VxdError::Picante(e.to_string()))?;
 
             debug!("COMPILE: computing source closure for {}", crate_name);
+            let _ = progress
+                .send(&StoreProgress {
+                    message: format!("computing source closure for {crate_name}"),
+                    current: None,
+                    total: None,
+                })
+                .await;
             // Compute source closure and hash (for path crates)
             let (closure_paths, closure_hash) = match &source {
                 CrateSource::Path { .. } => {
@@ -1037,6 +1081,13 @@ async fn execute_action(
                     crate_name = %crate_name,
                     "cache miss, compiling"
                 );
+                let _ = progress
+                    .send(&StoreProgress {
+                        message: format!("compiling {crate_name}"),
+                        current: None,
+                        total: None,
+                    })
+                    .await;
 
                 // Build compile request based on crate source
                 let compile_request = match &source {
@@ -1230,7 +1281,7 @@ async fn execute_action(
             };
 
             let result = cas
-                .ensure_zig_toolchain(spec)
+                .ensure_zig_toolchain(spec, progress)
                 .await
                 .map_err(|e| VxdError::CasRpc(e.to_string()))?;
 
