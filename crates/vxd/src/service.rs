@@ -27,7 +27,8 @@ use vx_store_proto::{
     StoreClient, TreeFile,
 };
 use vxd_proto::{
-    ActionType, BuildRequest, BuildResult, ProgressListenerClient, VXD_PROTOCOL_VERSION, Vxd,
+    ActionType, BuildRequest, BuildResult, ProgressListenerClient, UnpublishResult,
+    VXD_PROTOCOL_VERSION, Vxd,
 };
 
 /// Toolchain information (manifest-only, no materialization)
@@ -772,6 +773,25 @@ impl Vxd for VxdService {
     async fn set_session(&self, _cx: &roam::Context, session_id: String) {
         info!(session_id = %session_id, "session ID set");
         *self.session_id.write().await = session_id;
+    }
+
+    async fn unpublish_cache_keys(
+        &self,
+        _cx: &roam::Context,
+        cache_keys: Vec<vx_store_proto::CacheKey>,
+    ) -> UnpublishResult {
+        let mut removed = 0u32;
+        let mut not_found = 0u32;
+
+        for key in cache_keys {
+            if self.cas.unpublish(key).await.unwrap_or(false) {
+                removed += 1;
+            } else {
+                not_found += 1;
+            }
+        }
+
+        UnpublishResult { removed, not_found }
     }
 
     async fn shutdown(&self, _cx: &roam::Context) {

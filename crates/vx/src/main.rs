@@ -12,7 +12,7 @@ use figue as args;
 use owo_colors::OwoColorize;
 use tui::emit_osc_progress;
 use vx_report::{CacheOutcome, ReportStore, RunDiff};
-use vx_store_proto::{Blake3Hash, StoreClient};
+use vx_store_proto::Blake3Hash;
 use vxd_proto::{ActionProgress, ActionType, BuildRequest, ProgressListener, VxdClient};
 
 /// vx - Build execution engine with deterministic caching
@@ -702,7 +702,10 @@ async fn cmd_kill(_args: KillArgs) -> Result<()> {
 }
 
 async fn cmd_clean(args: CleanArgs) -> Result<()> {
-    // Determine VX_HOME
+    if args.home && args.cache {
+        bail!("--home and --cache are mutually exclusive");
+    }
+
     let vx_home = std::env::var("VX_HOME")
         .unwrap_or_else(|_| format!("{}/.vx", std::env::var("HOME").expect("HOME not set")));
     let vx_home = Utf8PathBuf::from(&vx_home);
@@ -747,13 +750,21 @@ async fn cmd_clean(args: CleanArgs) -> Result<()> {
     Ok(())
 }
 
+/// Returns true if this node kind represents infrastructure (toolchains, registry)
+/// that should be preserved during cache invalidation.
+fn is_infrastructure_node(kind: &str) -> bool {
+    kind.starts_with("toolchain.")
+        || kind.starts_with("zig.toolchain.")
+        || kind == "registry.acquire"
+}
+
 /// Invalidate cache entries from the last build while preserving toolchains
 /// and registry crates.
 async fn cmd_clean_cache(vx_home: &Utf8PathBuf) -> Result<()> {
     let cwd = Utf8PathBuf::try_from(std::env::current_dir()?)?;
-    let store = ReportStore::new(&cwd);
+    let report_store = ReportStore::new(&cwd);
 
-    let Some(report) = store.load_latest()? else {
+    let Some(report) = report_store.load_latest()? else {
         println!(
             "{} No build reports found. Run {} first.",
             "Error:".red().bold(),
@@ -762,73 +773,36 @@ async fn cmd_clean_cache(vx_home: &Utf8PathBuf) -> Result<()> {
         return Ok(());
     };
 
-    // Collect cache keys to invalidate (skip infrastructure nodes)
-    let mut keys_to_invalidate: Vec<(String, Blake3Hash)> = Vec::new();
-    let mut skipped = 0usize;
+    // Collect cache keys for non-infrastructure nodes
+    let mut cache_keys = Vec::new();
+    let mut skipped = 0u32;
 
     for node in &report.nodes {
-        // Skip infrastructure nodes
-        if node.kind.starts_with("toolchain.")
-            || node.kind == "registry.acquire"
-            || node.kind.starts_with("zig.toolchain")
-        {
+        if is_infrastructure_node(&node.kind) {
             skipped += 1;
             continue;
         }
 
-        // Only invalidate nodes that have a CAS cache key
-        if let Some(ref hex) = node.cas_cache_key
-            && let Some(hash) = Blake3Hash::from_hex(hex)
-        {
-            keys_to_invalidate.push((node.node_id.clone(), hash));
+        // Use cas_cache_key (the actual store cache key) when available,
+        // fall back to cache_key for older reports
+        let hex = node.cas_cache_key.as_deref().unwrap_or(&node.cache_key);
+        if let Some(key) = Blake3Hash::from_hex(hex) {
+            cache_keys.push(key);
         }
     }
 
-    if keys_to_invalidate.is_empty() {
+    if cache_keys.is_empty() {
         println!(
-            "{} No cache entries to invalidate (report has no CAS cache keys).",
+            "{} No cache entries to invalidate.",
             "Note:".yellow().bold()
-        );
-        println!(
-            "{}",
-            "Rebuild with latest vxd to generate reports with CAS cache keys.".dimmed()
         );
         return Ok(());
     }
 
-    // Connect to the store daemon
-    let store_endpoint = match std::env::var("VX_STORE") {
-        Ok(v) => vx_io::net::Endpoint::parse(&v)?,
-        Err(_) => {
-            #[cfg(unix)]
-            {
-                vx_io::net::default_unix_endpoint(vx_home, "store")
-            }
-            #[cfg(not(unix))]
-            {
-                vx_io::net::Endpoint::parse("127.0.0.1:9002")?
-            }
-        }
-    };
+    // Connect to daemon (spawns it if needed), unpublish via RPC
+    let (daemon, _tui) = get_or_spawn_daemon(false, true, false).await?;
 
-    let caller = vx_io::net::reconnecting_client(store_endpoint.clone(), roam_stream::NoDispatcher);
-    caller.handle().await.map_err(|e| {
-        eyre::eyre!(
-            "failed to connect to store at {}: {}\nIs the daemon running? Try: vx build",
-            store_endpoint,
-            e
-        )
-    })?;
-    let store_client = StoreClient::new(caller);
-
-    // Unpublish each cache key
-    let mut invalidated = 0usize;
-    for (node_id, cache_key) in &keys_to_invalidate {
-        if store_client.unpublish(*cache_key).await? {
-            invalidated += 1;
-            println!("  {} {}", "Invalidated".yellow(), node_id);
-        }
-    }
+    let result = daemon.unpublish_cache_keys(cache_keys).await?;
 
     // Clear picante cache so the daemon recomputes everything on next build
     let picante_cache = vx_home.join("picante.cache");
@@ -839,14 +813,14 @@ async fn cmd_clean_cache(vx_home: &Utf8PathBuf) -> Result<()> {
         }
     }
 
-    println!();
     println!(
-        "{} Invalidated {} cache entries ({} infrastructure preserved)",
+        "{} Invalidated {} cache entries ({} infrastructure preserved, {} already absent)",
         "Done.".green().bold(),
-        invalidated,
-        skipped
+        result.removed,
+        skipped,
+        result.not_found,
     );
-    if invalidated > 0 {
+    if result.removed > 0 {
         println!(
             "{}",
             "Next build will re-execute these nodes from scratch.".dimmed()

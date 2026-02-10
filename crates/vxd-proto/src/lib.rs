@@ -10,6 +10,7 @@
 
 use camino::Utf8PathBuf;
 use facet::Facet;
+use vx_store_proto::CacheKey;
 
 /// Daemon protocol version.
 /// Bump this when making breaking changes to the daemon RPC interface.
@@ -96,6 +97,15 @@ impl ActionType {
     }
 }
 
+/// Result of unpublishing cache keys
+#[derive(Debug, Clone, Facet)]
+pub struct UnpublishResult {
+    /// Number of cache entries that were successfully removed
+    pub removed: u32,
+    /// Number of cache keys that were not found (already absent)
+    pub not_found: u32,
+}
+
 /// The daemon service trait
 #[roam::service]
 pub trait Vxd {
@@ -110,6 +120,10 @@ pub trait Vxd {
     /// isolation between concurrent sessions (e.g., parallel tests).
     /// An empty string means "session zero" (shared/global namespace).
     async fn set_session(&self, session_id: String);
+
+    /// Remove cache key mappings from the store. Used by `vx clean --cache`
+    /// to invalidate specific cache entries without deleting blobs or manifests.
+    async fn unpublish_cache_keys(&self, cache_keys: Vec<CacheKey>) -> UnpublishResult;
 
     /// Shutdown the daemon gracefully
     async fn shutdown(&self);
