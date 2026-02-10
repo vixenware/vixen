@@ -37,6 +37,8 @@ targets:
         com.apple.security.network.client: true
         com.apple.security.application-groups:
           - group.eu.bearcove.vixen
+        com.apple.security.temporary-exception.mach-lookup.global-name:
+          - "$(PRODUCT_BUNDLE_IDENTIFIER).sparkle2-auth"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: eu.bearcove.vixen
