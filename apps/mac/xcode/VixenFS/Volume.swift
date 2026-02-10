@@ -81,7 +81,7 @@ actor ReadTelemetry {
 /// FSKit Volume implementation that delegates to the VFS client.
 final class Volume: FSVolume {
 
-    private let log = Logger(subsystem: VixenFS.subsystem, category: "Volume")
+    private let log = Logger(subsystem: VixenFSConstants.subsystem, category: "Volume")
     private let readTelemetry = ReadTelemetry()
 
     /// Item cache: itemId -> Item, protected by lock for thread safety.

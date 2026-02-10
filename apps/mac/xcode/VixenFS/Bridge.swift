@@ -4,7 +4,7 @@ import Foundation
 import RoamRuntime
 import os
 
-enum VixenFS {
+enum VixenFSConstants {
     static let subsystem = "eu.bearcove.vixenfs"
     static let appGroupIdentifier = "group.eu.bearcove.vixen"
     static let shmBootstrapMaxAttempts = 1
@@ -88,7 +88,7 @@ actor VfsConnection {
     private var driverTask: Task<Void, Never>?
     private var disconnectRequested = false
     private var debugEnabled = false
-    private let log = Logger(subsystem: VixenFS.subsystem, category: "VfsConnection")
+    private let log = Logger(subsystem: VixenFSConstants.subsystem, category: "VfsConnection")
 
     func connect(url: URL) async throws {
         if client != nil {
@@ -182,13 +182,13 @@ actor VfsConnection {
     private func requestTicket(sid: String) async throws -> ShmBootstrapTicket {
         guard
             let appGroupURL = FileManager.default.containerURL(
-                forSecurityApplicationGroupIdentifier: VixenFS.appGroupIdentifier)
+                forSecurityApplicationGroupIdentifier: VixenFSConstants.appGroupIdentifier)
         else {
             throw NSError(
                 domain: "VFS", code: -1,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "Failed to resolve App Group container for \(VixenFS.appGroupIdentifier)"
+                        "Failed to resolve App Group container for \(VixenFSConstants.appGroupIdentifier)"
                 ])
         }
 
@@ -352,7 +352,7 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
     // FSKit manages concurrency - singleton is safe here
     static let shared = Bridge()
 
-    private let log = Logger(subsystem: VixenFS.subsystem, category: "Bridge")
+    private let log = Logger(subsystem: VixenFSConstants.subsystem, category: "Bridge")
 
     private override init() {
         log.info("Bridge initialized")

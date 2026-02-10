@@ -8,7 +8,7 @@ let package = Package(
     ],
     products: [
         .library(name: "VixenApp", targets: ["VixenApp"]),
-        .library(name: "VixenFSExtension", targets: ["VixenFSExtension"]),
+        .library(name: "VixenFS", targets: ["VixenFS"]),
         .executable(name: "vixenfs-mount", targets: ["vixenfs-mount"]),
     ],
     dependencies: [
@@ -30,11 +30,11 @@ let package = Package(
             ]
         ),
         .target(
-            name: "VixenFSExtension",
+            name: "VixenFS",
             dependencies: [
                 .product(name: "RoamRuntime", package: "roam")
             ],
-            path: "xcode/VixenFSExtension",
+            path: "xcode/VixenFS",
             linkerSettings: [
                 .linkedFramework("FSKit")
             ]

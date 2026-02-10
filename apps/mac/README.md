@@ -25,7 +25,7 @@ Or manual path:
    - `cd apps/mac/xcode`
    - `xcodegen generate`
 3. Open the generated project in Xcode.
-4. Build the `Vixen` scheme (this also builds `VixenFSExtension` and `vixenfs-mount`).
+4. Build the `Vixen` scheme (this also builds `VixenFS` and `vixenfs-mount`).
 
 ## Release (local macOS)
 

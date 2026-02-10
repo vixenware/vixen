@@ -16,11 +16,13 @@
 	<key>CFBundlePackageType</key>
 	<string>XPC!</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>EXAppExtensionAttributes</key>
 	<dict>
+		<key>EXExtensionPrincipalClass</key>
+		<string>VixenFS.VixenFS</string>
 		<key>EXExtensionPointIdentifier</key>
 		<string>com.apple.fskit.fsmodule</string>
 		<key>FSActivateOptionSyntax</key>

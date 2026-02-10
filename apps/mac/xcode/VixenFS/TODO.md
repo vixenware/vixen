@@ -1,4 +1,4 @@
-# VixenFSExtension TODO
+# VixenFS TODO
 
 ## Concurrency Bugs (fix now)
 
@@ -34,7 +34,7 @@
   (default 30s). Removed the manual task-group timeout wrapper entirely.
 
 - [x] **Unused Logger extensions** — `Logger.d()`, `Logger.e()`, `Logger.posixError()` are
-  defined in VixenFSExtension.swift but never called.
+  defined in VixenFS.swift but never called.
 
 - [x] **Hardcoded volumeStatistics** — Returns fictional block counts. Should at minimum
   document this or query the backend.

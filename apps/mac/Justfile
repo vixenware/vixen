@@ -7,9 +7,9 @@ list:
 # Generate the Xcode project from project.yml.
 generate:
     cd xcode && xcodegen generate
-    plutil -convert xml1 xcode/VixenFSExtension/VixenFSExtension.entitlements
+    plutil -convert xml1 xcode/VixenFS/VixenFS.entitlements
     plutil -convert xml1 xcode/Vixen/Vixen.entitlements
-    plutil -lint xcode/VixenFSExtension/VixenFSExtension.entitlements
+    plutil -lint xcode/VixenFS/VixenFS.entitlements
     plutil -lint xcode/Vixen/Vixen.entitlements
 
 # Build Vixen.app in Release configuration.

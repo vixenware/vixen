@@ -51,7 +51,7 @@ targets:
         SPARKLE_FEED_URL: ""
         SPARKLE_PUBLIC_ED_KEY: ""
     dependencies:
-      - target: VixenFS Extension
+      - target: VixenFS
         embed: true
         codeSign: true
       - target: vixenfs-mount
@@ -84,16 +84,16 @@ targets:
             codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --timestamp=none "${HELPER_DST}"
           fi
 
-  "VixenFS Extension":
+  VixenFS:
     type: extensionkit-extension
     platform: macOS
     sources:
-      - path: VixenFSExtension
+      - path: VixenFS
         excludes:
           - "*.entitlements"
           - Info.plist
     entitlements:
-      path: VixenFSExtension/VixenFSExtension.entitlements
+      path: VixenFS/VixenFS.entitlements
       properties:
         com.apple.security.app-sandbox: true
         com.apple.security.network.client: true
@@ -103,8 +103,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: eu.bearcove.vixenfs
-        PRODUCT_NAME: VixenFS Extension
-        INFOPLIST_FILE: VixenFSExtension/Info.plist
+        PRODUCT_NAME: VixenFS
+        INFOPLIST_FILE: VixenFS/Info.plist
         GENERATE_INFOPLIST_FILE: false
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     dependencies:

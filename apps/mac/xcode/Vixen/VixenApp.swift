@@ -27,7 +27,7 @@ struct VixenApp: App {
     }
 
     private func registerExtension() {
-        let name = "VixenFS Extension.appex"
+        let name = "VixenFS.appex"
         let bundleURL = Bundle.main.bundleURL
 
         // ExtensionKit extensions land in Contents/Extensions/, classic appex
@@ -323,7 +323,7 @@ struct ContentView: View {
                 ZStack(alignment: .trailing) {
                     HStack(alignment: .center, spacing: 12) {
                         settingsDiskIcon(filled: true)
-                        Text("VixenFS Extension")
+                        Text("VixenFS")
                             .font(.system(size: 13, weight: .medium))
                         Spacer()
                         MockToggle(isOn: isExtensionEnabled || demoToggleOn)
