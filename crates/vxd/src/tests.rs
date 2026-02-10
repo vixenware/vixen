@@ -7,6 +7,14 @@ fn test_db() -> Database {
     Database::new()
 }
 
+#[test]
+fn test_sanitize_id_component_replaces_non_identifier_chars() {
+    assert_eq!(
+        crate::service::sanitize_id_component("hello/world::crate@1.2.3"),
+        "hello_world__crate_1_2_3"
+    );
+}
+
 /// Set up common build configuration for C builds
 fn setup_cc_config(db: &Database) -> BuildConfig {
     let build_key = BuildConfig::compute_key("debug", "x86_64-linux-musl", "/test/workspace", "");

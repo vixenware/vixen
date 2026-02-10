@@ -17,9 +17,13 @@ use picante::HasRuntime;
 use picante::wal::WalWriter;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
 use peeps::locks::{DiagnosticAsyncMutex, DiagnosticAsyncRwLock};
-use vx_report::{BuildReport, ReportStore};
+use tracing::{debug, info, warn};
+use vx_report::{
+    BuildReport, ReportStore, RuleId, RulePlan, RulePlanEdge, RulePlanEdgeKind, RulePlanFact,
+    RulePlanFactId, RulePlanNode, RulePlanNodeId, RulePlanNodeKind, RulePlanProvenance,
+    RulePlanSource, RulePlanSourceId, RulePlanSpan, RulePlanValue,
+};
 use vx_rs::CrateGraph;
 use vx_runner_proto::RunnerClient;
 use vx_store_proto::{
@@ -99,6 +103,157 @@ pub struct VxdService {
     /// Cancellation token for the build active on this session (if any).
     /// Per-connection: when the CLI disconnects, only this session's build is cancelled.
     active_build_cancel: Arc<DiagnosticAsyncMutex<Option<CancellationToken>>>,
+}
+
+fn rule_plan_bridge_enabled() -> bool {
+    std::env::var("VX_RULE_PLAN_BRIDGE")
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn sanitize_id_component(input: &str) -> String {
+    input
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn build_rule_plan_from_crate_graph(graph: &CrateGraph) -> RulePlan {
+    let source_id = RulePlanSourceId::from("rust_planner".to_string());
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut facts = Vec::new();
+
+    let base_provenance = |rule: &str, line: u32| RulePlanProvenance {
+        rule_id: RuleId::from(rule.to_string()),
+        source_id: source_id.clone(),
+        span: RulePlanSpan {
+            line,
+            column: 1,
+            end_line: line,
+            end_column: 1,
+        },
+        comment: None,
+        metadata: std::collections::BTreeMap::new(),
+    };
+
+    let group_id = RulePlanNodeId::from("n_group_build".to_string());
+    nodes.push(RulePlanNode {
+        id: group_id.clone(),
+        kind: RulePlanNodeKind::Group,
+        label: "build".to_string(),
+        provenance: base_provenance("rule.group.build", 1),
+    });
+
+    let fact_node_id = RulePlanNodeId::from("n_fact_workspace_changed".to_string());
+    nodes.push(RulePlanNode {
+        id: fact_node_id.clone(),
+        kind: RulePlanNodeKind::Fact,
+        label: "workspace_changed".to_string(),
+        provenance: base_provenance("rule.fact.workspace_changed", 2),
+    });
+    facts.push(RulePlanFact {
+        id: RulePlanFactId::from("f_workspace_changed".to_string()),
+        node_id: fact_node_id.clone(),
+        value: RulePlanValue::from("true".to_string()),
+        provenance: base_provenance("rule.fact.workspace_changed", 3),
+    });
+
+    let mut crate_nodes = graph.nodes.values().collect::<Vec<_>>();
+    crate_nodes.sort_by(|a, b| {
+        a.crate_name
+            .cmp(&b.crate_name)
+            .then_with(|| a.crate_type.as_str().cmp(b.crate_type.as_str()))
+            .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
+    });
+
+    let mut artifact_by_crate_id = std::collections::HashMap::new();
+    let mut action_by_crate_id = std::collections::HashMap::new();
+
+    for (idx, crate_node) in crate_nodes.iter().enumerate() {
+        let key = format!(
+            "{}_{}_{}",
+            sanitize_id_component(&crate_node.crate_name),
+            crate_node.crate_type.as_str(),
+            sanitize_id_component(&crate_node.id.to_string())
+        );
+        let action_id = RulePlanNodeId::from(format!("n_action_{key}"));
+        let artifact_id = RulePlanNodeId::from(format!("n_artifact_{key}"));
+
+        nodes.push(RulePlanNode {
+            id: action_id.clone(),
+            kind: RulePlanNodeKind::Action,
+            label: format!("compile {}", crate_node.crate_name),
+            provenance: base_provenance("rule.rust.compile", 10 + idx as u32),
+        });
+        nodes.push(RulePlanNode {
+            id: artifact_id.clone(),
+            kind: RulePlanNodeKind::Artifact,
+            label: format!("artifact {}", crate_node.crate_name),
+            provenance: base_provenance("rule.rust.artifact", 30 + idx as u32),
+        });
+
+        edges.push(RulePlanEdge {
+            from: group_id.clone(),
+            to: action_id.clone(),
+            kind: RulePlanEdgeKind::Always,
+            provenance: base_provenance("rule.group.depends-on-action", 50 + idx as u32),
+        });
+        edges.push(RulePlanEdge {
+            from: fact_node_id.clone(),
+            to: action_id.clone(),
+            kind: RulePlanEdgeKind::IfChanged,
+            provenance: base_provenance("rule.fact.triggers-action", 70 + idx as u32),
+        });
+        edges.push(RulePlanEdge {
+            from: action_id.clone(),
+            to: artifact_id.clone(),
+            kind: RulePlanEdgeKind::IfWritten,
+            provenance: base_provenance("rule.action.writes-artifact", 90 + idx as u32),
+        });
+
+        artifact_by_crate_id.insert(crate_node.id, artifact_id);
+        action_by_crate_id.insert(crate_node.id, action_id);
+    }
+
+    for (idx, crate_node) in crate_nodes.iter().enumerate() {
+        if let Some(action_id) = action_by_crate_id.get(&crate_node.id) {
+            for dep in &crate_node.deps {
+                if let Some(dep_artifact_id) = artifact_by_crate_id.get(&dep.crate_id) {
+                    edges.push(RulePlanEdge {
+                        from: dep_artifact_id.clone(),
+                        to: action_id.clone(),
+                        kind: RulePlanEdgeKind::IfChanged,
+                        provenance: base_provenance(
+                            "rule.dep-artifact.triggers-action",
+                            120 + idx as u32,
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    RulePlan {
+        sources: vec![RulePlanSource {
+            id: source_id,
+            path: Utf8PathBuf::from("planner/rust-static.edn"),
+        }],
+        nodes,
+        edges,
+        facts,
+    }
 }
 
 impl VxdService {
@@ -636,52 +791,59 @@ impl VxdService {
             "resolved crate graph, building action graph"
         );
 
-        // Set up picante inputs (for cache key computation)
-        // We create placeholder toolchain/config inputs since we don't have the actual
-        // toolchain yet - it will be acquired by the action graph executor
-        // Use a placeholder toolchain_id and manifest_hash - these will be acquired dynamically
-        let placeholder_hash = Blake3Hash([0u8; 32]);
-        let toolchain = RustToolchain::new(
-            &*self.db,
-            placeholder_hash,
-            placeholder_hash,
-            target_triple.clone(),
-            target_triple.clone(),
-        )
-        .map_err(|e| VxdError::Picante(e.to_string()))?;
-
-        RustToolchainManifest::set(&*self.db, placeholder_hash)
+        use crate::action_graph::ActionGraph;
+        let action_graph = if rule_plan_bridge_enabled() {
+            info!(
+                "VX_RULE_PLAN_BRIDGE is enabled, lowering RulePlan into ActionGraph (starter bridge)"
+            );
+            let plan = build_rule_plan_from_crate_graph(&graph);
+            ActionGraph::from_rule_plan(&plan)
+                .map_err(|e| VxdError::InvalidManifest(format!("RulePlan lowering failed: {e}")))?
+        } else {
+            // Set up picante inputs (for cache key computation)
+            // We create placeholder toolchain/config inputs since we don't have the actual
+            // toolchain yet - it will be acquired by the action graph executor
+            // Use a placeholder toolchain_id and manifest_hash - these will be acquired dynamically
+            let placeholder_hash = Blake3Hash([0u8; 32]);
+            let toolchain = RustToolchain::new(
+                &*self.db,
+                placeholder_hash,
+                placeholder_hash,
+                target_triple.clone(),
+                target_triple.clone(),
+            )
             .map_err(|e| VxdError::Picante(e.to_string()))?;
 
-        let session_id = self.session_id().await;
-        let build_key = BuildConfig::compute_key(
-            profile,
-            &target_triple,
-            graph.workspace_root.as_ref(),
-            &session_id,
-        );
-        let config = BuildConfig::new(
-            &*self.db,
-            build_key,
-            profile.to_string(),
-            target_triple.clone(),
-            graph.workspace_root.to_string(),
-            session_id,
-        )
-        .map_err(|e| VxdError::Picante(e.to_string()))?;
+            RustToolchainManifest::set(&*self.db, placeholder_hash)
+                .map_err(|e| VxdError::Picante(e.to_string()))?;
 
-        // Action graph execution (Phase 2)
-        use crate::action_graph::ActionGraph;
-        use vx_store_proto::RustChannel;
+            let session_id = self.session_id().await;
+            let build_key = BuildConfig::compute_key(
+                profile,
+                &target_triple,
+                graph.workspace_root.as_ref(),
+                &session_id,
+            );
+            let config = BuildConfig::new(
+                &*self.db,
+                build_key,
+                profile.to_string(),
+                target_triple.clone(),
+                graph.workspace_root.to_string(),
+                session_id,
+            )
+            .map_err(|e| VxdError::Picante(e.to_string()))?;
 
-        let action_graph = ActionGraph::from_crate_graph(
-            &graph,
-            RustChannel::Stable,
-            target_triple.clone(),
-            toolchain,
-            config,
-            &self.db,
-        )?;
+            use vx_store_proto::RustChannel;
+            ActionGraph::from_crate_graph(
+                &graph,
+                RustChannel::Stable,
+                target_triple.clone(),
+                toolchain,
+                config,
+                &self.db,
+            )?
+        };
 
         // Dump graph for debugging
         action_graph.dump_graph();
