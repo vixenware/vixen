@@ -2,72 +2,112 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.len() < 2 {
-        eprintln!("Usage: cargo xtask <command>");
-        eprintln!("\nAvailable commands:");
-        eprintln!("  install    Install all project binaries");
-        std::process::exit(1);
-    }
-
-    match args[1].as_str() {
-        "install" => install_all(),
-        cmd => {
+    match args.first().map(|s| s.as_str()) {
+        Some("install") => install(),
+        Some(cmd) => {
             eprintln!("Unknown command: {}", cmd);
+            eprintln!("Available commands: install");
+            std::process::exit(1);
+        }
+        None => {
+            eprintln!("Usage: cargo xtask <command>");
+            eprintln!("Available commands: install");
             std::process::exit(1);
         }
     }
 }
 
-fn install_all() -> Result<(), Box<dyn std::error::Error>> {
+fn install() {
     let binaries = vec!["vx", "vx-store", "vx-runner", "vx-vfsd", "vxd"];
 
-    println!("Building all vixen binaries in release mode...\n");
+    // Find workspace root
+    let workspace_root = find_workspace_root().expect("Could not find workspace root");
 
-    // Build all binaries in one go
+    println!("Building vixen binaries...");
     let status = Command::new("cargo")
-        .arg("build")
-        .arg("--release")
-        .status()?;
+        .args(["build", "--release"])
+        .current_dir(&workspace_root)
+        .status()
+        .expect("Failed to run cargo build");
 
     if !status.success() {
-        eprintln!("Failed to build binaries");
-        std::process::exit(1);
+        std::process::exit(status.code().unwrap_or(1));
     }
 
-    println!("✓ Build completed\n");
+    let release_dir = workspace_root.join("target/release");
 
-    // Determine cargo bin directory
-    let cargo_bin = dirs::home_dir()
-        .ok_or("Could not determine home directory")?
-        .join(".cargo")
-        .join("bin");
+    // Determine installation directory
+    let home = std::env::var("HOME").expect("HOME not set");
+    let install_dir = format!("{}/.cargo/bin", home);
 
-    // Create .cargo/bin if it doesn't exist
-    if !cargo_bin.exists() {
-        fs::create_dir_all(&cargo_bin)?;
-    }
-
-    let release_dir = PathBuf::from("target/release");
-
-    println!("Installing binaries to {}...\n", cargo_bin.display());
-
-    for binary_name in &binaries {
-        let src = release_dir.join(format!("{}{}", binary_name, std::env::consts::EXE_SUFFIX));
+    for binary_name in binaries {
+        let src = release_dir.join(binary_name);
+        let dst = format!("{}/{}", install_dir, binary_name);
 
         if !src.exists() {
-            eprintln!("Warning: {} not found in target/release", binary_name);
+            eprintln!(
+                "Warning: {} not found in target/release, skipping",
+                binary_name
+            );
             continue;
         }
 
-        let dst = cargo_bin.join(format!("{}{}", binary_name, std::env::consts::EXE_SUFFIX));
+        fs::copy(&src, &dst).unwrap_or_else(|_| panic!("Failed to copy {}", binary_name));
+        println!("Copied {} to {}", binary_name, dst);
 
-        fs::copy(&src, &dst)?;
-        println!("✓ {} installed", binary_name);
+        // On macOS, codesign the installed binary to avoid AMFI issues
+        // (signing must happen AFTER copy, not before)
+        #[cfg(target_os = "macos")]
+        {
+            let status = Command::new("codesign")
+                .args(["--sign", "-", "--force", &dst])
+                .status()
+                .expect("Failed to run codesign");
+
+            if !status.success() {
+                eprintln!(
+                    "Warning: codesign failed for {}, continuing anyway",
+                    binary_name
+                );
+            }
+        }
+
+        // Verify the installed binary works
+        let output = Command::new(&dst)
+            .arg("--version")
+            .output()
+            .unwrap_or_else(|_| panic!("Failed to run {} --version", binary_name));
+
+        if !output.status.success() {
+            eprintln!("Error: {} --version failed", binary_name);
+            eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+            std::process::exit(1);
+        }
+
+        let version = String::from_utf8_lossy(&output.stdout);
+        println!("Installed: {}", version.trim());
     }
+}
 
-    println!("\nAll binaries installed successfully!");
-    Ok(())
+/// Find the workspace root by walking up from the current directory
+/// looking for a Cargo.toml with `[workspace]`.
+fn find_workspace_root() -> Option<PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+
+    loop {
+        let cargo_toml = dir.join("Cargo.toml");
+        if cargo_toml.exists()
+            && let Ok(contents) = std::fs::read_to_string(&cargo_toml)
+            && contents.contains("[workspace]")
+        {
+            return Some(dir);
+        }
+
+        if !dir.pop() {
+            return None;
+        }
+    }
 }
