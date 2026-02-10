@@ -5,13 +5,23 @@ use jiff::Timestamp;
 use std::collections::HashMap;
 use std::sync::Arc;
 use vx_store_proto::{
-    Blake3Hash, BlobHash, EnsureStatus as ToolchainEnsureStatus, EnsureToolchainResult,
-    RustChannel, RustToolchainSpec, StoreProgress, TOOLCHAIN_MANIFEST_SCHEMA_VERSION,
-    ToolchainComponentTree, ToolchainKind, ToolchainManifest, ToolchainSpecKey, ZigToolchainSpec,
+    Blake3Hash, BlobHash, EnsureRustToolchainComponentResult, EnsureStatus,
+    EnsureStatus as ToolchainEnsureStatus, EnsureToolchainResult, RustChannel, RustComponent,
+    RustToolchainSpec, StoreProgress, TOOLCHAIN_MANIFEST_SCHEMA_VERSION, ToolchainComponentTree,
+    ToolchainKind, ToolchainManifest, ToolchainSpecKey, ZigToolchainSpec,
 };
 use vx_tarball::Compression;
 
 use crate::types::StoreService;
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExtractedRustComponent {
+    pub(crate) tree_manifest: Blake3Hash,
+    pub(crate) target: String,
+    pub(crate) total_size_bytes: u64,
+    pub(crate) file_count: u32,
+    pub(crate) unique_blobs: u32,
+}
 
 // =============================================================================
 // HTTP Download Functions (Rust Toolchains)
@@ -144,6 +154,14 @@ async fn download_component(
     );
 
     Ok(bytes)
+}
+
+fn rust_component_name(component: &RustComponent) -> Option<&'static str> {
+    match component {
+        RustComponent::Rustc => Some("rustc"),
+        RustComponent::RustStd => Some("rust-std"),
+        RustComponent::Cargo => None,
+    }
 }
 
 type InflightFuture = Arc<tokio::sync::OnceCell<EnsureToolchainResult>>;
@@ -528,6 +546,517 @@ impl StoreService {
             manifest_hash = %manifest_hash,
             "stored Rust toolchain in CAS"
         );
+
+        EnsureToolchainResult {
+            spec_key: Some(spec_key),
+            toolchain_id: Some(toolchain_id.0),
+            manifest_hash: Some(manifest_hash),
+            status: ToolchainEnsureStatus::Downloaded,
+            error: None,
+        }
+    }
+
+    /// Download one Rust toolchain component tarball and store it as a blob.
+    #[tracing::instrument(skip(self, progress), fields(spec_key = tracing::field::Empty, component = ?component))]
+    pub async fn download_rust_toolchain_component(
+        &self,
+        spec: RustToolchainSpec,
+        component: RustComponent,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureRustToolchainComponentResult {
+        let component_name = match rust_component_name(&component) {
+            Some(name) => name,
+            None => {
+                return EnsureRustToolchainComponentResult {
+                    spec_key: None,
+                    component,
+                    tarball_blob: None,
+                    tree_manifest: None,
+                    status: EnsureStatus::Failed,
+                    error: Some("unsupported component for Rust toolchain acquisition".to_string()),
+                };
+            }
+        };
+
+        let spec_key = match spec.spec_key() {
+            Ok(k) => {
+                tracing::Span::current().record("spec_key", k.to_string());
+                k
+            }
+            Err(e) => {
+                return EnsureRustToolchainComponentResult {
+                    spec_key: None,
+                    component,
+                    tarball_blob: None,
+                    tree_manifest: None,
+                    status: EnsureStatus::Failed,
+                    error: Some(format!("invalid spec: {}", e)),
+                };
+            }
+        };
+
+        if self
+            .storage
+            .get_toolchain_spec(&spec_key)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return EnsureRustToolchainComponentResult {
+                spec_key: Some(spec_key),
+                component,
+                tarball_blob: None,
+                tree_manifest: None,
+                status: EnsureStatus::Hit,
+                error: None,
+            };
+        }
+
+        let key = (spec_key, component.clone());
+        if let Some(blob) = self.rust_component_tarballs.lock().await.get(&key).copied() {
+            return EnsureRustToolchainComponentResult {
+                spec_key: Some(spec_key),
+                component,
+                tarball_blob: Some(blob),
+                tree_manifest: None,
+                status: EnsureStatus::Hit,
+                error: None,
+            };
+        }
+
+        let channel = match &spec.channel {
+            RustChannel::Stable => vx_toolchain::Channel::Stable,
+            RustChannel::Beta => vx_toolchain::Channel::Beta,
+            RustChannel::Nightly { date } => vx_toolchain::Channel::Nightly { date: date.clone() },
+        };
+
+        let manifest = match fetch_channel_manifest(&channel).await {
+            Ok(m) => m,
+            Err(e) => {
+                return EnsureRustToolchainComponentResult {
+                    spec_key: Some(spec_key),
+                    component,
+                    tarball_blob: None,
+                    tree_manifest: None,
+                    status: EnsureStatus::Failed,
+                    error: Some(format!("failed to fetch channel manifest: {}", e)),
+                };
+            }
+        };
+
+        let target_manifest = match component {
+            RustComponent::Rustc => manifest.rustc_for_target(&spec.host),
+            RustComponent::RustStd => manifest.rust_std_for_target(&spec.target),
+            RustComponent::Cargo => unreachable!("cargo is filtered above"),
+        };
+
+        let target_manifest = match target_manifest {
+            Ok(t) => t,
+            Err(e) => {
+                return EnsureRustToolchainComponentResult {
+                    spec_key: Some(spec_key),
+                    component,
+                    tarball_blob: None,
+                    tree_manifest: None,
+                    status: EnsureStatus::Failed,
+                    error: Some(e.to_string()),
+                };
+            }
+        };
+
+        let tarball = match download_component(
+            &target_manifest.url,
+            &target_manifest.hash,
+            component_name,
+            &progress,
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return EnsureRustToolchainComponentResult {
+                    spec_key: Some(spec_key),
+                    component,
+                    tarball_blob: None,
+                    tree_manifest: None,
+                    status: EnsureStatus::Failed,
+                    error: Some(format!("failed to download {component_name}: {e}")),
+                };
+            }
+        };
+
+        let tarball_blob = BlobHash::from_bytes(&tarball);
+        if let Err(e) = self.storage.put_blob(&tarball_blob, &tarball).await {
+            tracing::warn!(blob_hash = %tarball_blob, error = %e, "failed to write tarball blob");
+        }
+
+        self.rust_component_tarballs
+            .lock()
+            .await
+            .insert((spec_key, component.clone()), tarball_blob);
+
+        EnsureRustToolchainComponentResult {
+            spec_key: Some(spec_key),
+            component,
+            tarball_blob: Some(tarball_blob),
+            tree_manifest: None,
+            status: EnsureStatus::Downloaded,
+            error: None,
+        }
+    }
+
+    /// Extract one Rust toolchain component tarball into a tree manifest.
+    #[tracing::instrument(skip(self, progress), fields(spec_key = tracing::field::Empty, component = ?component))]
+    pub async fn extract_rust_toolchain_component(
+        &self,
+        spec: RustToolchainSpec,
+        component: RustComponent,
+        tarball_blob: Blake3Hash,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureRustToolchainComponentResult {
+        let component_name = match rust_component_name(&component) {
+            Some(name) => name,
+            None => {
+                return EnsureRustToolchainComponentResult {
+                    spec_key: None,
+                    component,
+                    tarball_blob: None,
+                    tree_manifest: None,
+                    status: EnsureStatus::Failed,
+                    error: Some("unsupported component for Rust toolchain extraction".to_string()),
+                };
+            }
+        };
+
+        let spec_key = match spec.spec_key() {
+            Ok(k) => {
+                tracing::Span::current().record("spec_key", k.to_string());
+                k
+            }
+            Err(e) => {
+                return EnsureRustToolchainComponentResult {
+                    spec_key: None,
+                    component,
+                    tarball_blob: None,
+                    tree_manifest: None,
+                    status: EnsureStatus::Failed,
+                    error: Some(format!("invalid spec: {}", e)),
+                };
+            }
+        };
+
+        if self
+            .storage
+            .get_toolchain_spec(&spec_key)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return EnsureRustToolchainComponentResult {
+                spec_key: Some(spec_key),
+                component,
+                tarball_blob: Some(tarball_blob),
+                tree_manifest: None,
+                status: EnsureStatus::Hit,
+                error: None,
+            };
+        }
+
+        let extracted_key = (spec_key, component.clone());
+        if let Some(existing) = self
+            .rust_component_trees
+            .lock()
+            .await
+            .get(&extracted_key)
+            .cloned()
+        {
+            return EnsureRustToolchainComponentResult {
+                spec_key: Some(spec_key),
+                component,
+                tarball_blob: Some(tarball_blob),
+                tree_manifest: Some(existing.tree_manifest),
+                status: EnsureStatus::Hit,
+                error: None,
+            };
+        }
+
+        let tarball = match self.storage.get_blob(&tarball_blob).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                return EnsureRustToolchainComponentResult {
+                    spec_key: Some(spec_key),
+                    component,
+                    tarball_blob: Some(tarball_blob),
+                    tree_manifest: None,
+                    status: EnsureStatus::Failed,
+                    error: Some(format!("tarball blob {} not found", tarball_blob)),
+                };
+            }
+            Err(e) => {
+                return EnsureRustToolchainComponentResult {
+                    spec_key: Some(spec_key),
+                    component,
+                    tarball_blob: Some(tarball_blob),
+                    tree_manifest: None,
+                    status: EnsureStatus::Failed,
+                    error: Some(format!(
+                        "failed reading tarball blob {}: {}",
+                        tarball_blob, e
+                    )),
+                };
+            }
+        };
+
+        let _ = progress
+            .send(&StoreProgress {
+                message: format!("extracting {component_name}"),
+                current: None,
+                total: None,
+            })
+            .await;
+
+        let strip_components = match component {
+            RustComponent::Rustc => 2,
+            RustComponent::RustStd => 2,
+            RustComponent::Cargo => unreachable!("cargo is filtered above"),
+        };
+
+        let this = self.clone();
+        let tree = match vx_tarball::extract_to_tree(
+            std::io::Cursor::new(tarball),
+            Compression::Xz,
+            strip_components,
+            async move |data: Vec<u8>| {
+                let hash = BlobHash::from_bytes(&data);
+                if let Err(e) = this.storage.put_blob(&hash, &data).await {
+                    tracing::warn!("failed to write blob: {}", e);
+                }
+                Ok(hash)
+            },
+        )
+        .await
+        {
+            Ok(tree) => tree,
+            Err(e) => {
+                return EnsureRustToolchainComponentResult {
+                    spec_key: Some(spec_key),
+                    component,
+                    tarball_blob: Some(tarball_blob),
+                    tree_manifest: None,
+                    status: EnsureStatus::Failed,
+                    error: Some(format!("failed to extract {component_name}: {}", e)),
+                };
+            }
+        };
+
+        let tree_json = facet_json::to_string(&tree).expect("tree serialization must succeed");
+        let tree_hash = BlobHash::from_bytes(tree_json.as_bytes());
+        if let Err(e) = self
+            .storage
+            .put_blob(&tree_hash, tree_json.as_bytes())
+            .await
+        {
+            tracing::warn!("failed to write {} tree blob: {}", component_name, e);
+        }
+
+        let target = match component {
+            RustComponent::Rustc => spec.host.clone(),
+            RustComponent::RustStd => spec.target.clone(),
+            RustComponent::Cargo => unreachable!("cargo is filtered above"),
+        };
+
+        self.rust_component_trees.lock().await.insert(
+            extracted_key,
+            ExtractedRustComponent {
+                tree_manifest: tree_hash,
+                target,
+                total_size_bytes: tree.total_size_bytes,
+                file_count: tree.entries.len() as u32,
+                unique_blobs: tree.unique_blobs,
+            },
+        );
+
+        EnsureRustToolchainComponentResult {
+            spec_key: Some(spec_key),
+            component,
+            tarball_blob: Some(tarball_blob),
+            tree_manifest: Some(tree_hash),
+            status: EnsureStatus::Downloaded,
+            error: None,
+        }
+    }
+
+    /// Build and publish the Rust toolchain manifest from extracted components.
+    #[tracing::instrument(skip(self), fields(spec_key = tracing::field::Empty))]
+    pub async fn finalize_rust_toolchain(&self, spec: RustToolchainSpec) -> EnsureToolchainResult {
+        let spec_key = match spec.spec_key() {
+            Ok(k) => {
+                tracing::Span::current().record("spec_key", k.to_string());
+                k
+            }
+            Err(e) => {
+                return EnsureToolchainResult {
+                    spec_key: None,
+                    toolchain_id: None,
+                    manifest_hash: None,
+                    status: ToolchainEnsureStatus::Failed,
+                    error: Some(format!("invalid spec: {}", e)),
+                };
+            }
+        };
+
+        if let Some(manifest_hash) = self
+            .storage
+            .get_toolchain_spec(&spec_key)
+            .await
+            .ok()
+            .flatten()
+        {
+            return EnsureToolchainResult {
+                spec_key: Some(spec_key),
+                toolchain_id: None,
+                manifest_hash: Some(manifest_hash),
+                status: ToolchainEnsureStatus::Hit,
+                error: None,
+            };
+        }
+
+        let rustc_component = {
+            let lock = self.rust_component_trees.lock().await;
+            lock.get(&(spec_key, RustComponent::Rustc)).cloned()
+        };
+        let rust_std_component = {
+            let lock = self.rust_component_trees.lock().await;
+            lock.get(&(spec_key, RustComponent::RustStd)).cloned()
+        };
+
+        let rustc_component = match rustc_component {
+            Some(c) => c,
+            None => {
+                return EnsureToolchainResult {
+                    spec_key: Some(spec_key),
+                    toolchain_id: None,
+                    manifest_hash: None,
+                    status: ToolchainEnsureStatus::Failed,
+                    error: Some("rustc component has not been extracted".to_string()),
+                };
+            }
+        };
+        let rust_std_component = match rust_std_component {
+            Some(c) => c,
+            None => {
+                return EnsureToolchainResult {
+                    spec_key: Some(spec_key),
+                    toolchain_id: None,
+                    manifest_hash: None,
+                    status: ToolchainEnsureStatus::Failed,
+                    error: Some("rust-std component has not been extracted".to_string()),
+                };
+            }
+        };
+
+        let channel = match &spec.channel {
+            RustChannel::Stable => vx_toolchain::Channel::Stable,
+            RustChannel::Beta => vx_toolchain::Channel::Beta,
+            RustChannel::Nightly { date } => vx_toolchain::Channel::Nightly { date: date.clone() },
+        };
+
+        let manifest = match fetch_channel_manifest(&channel).await {
+            Ok(m) => m,
+            Err(e) => {
+                return EnsureToolchainResult {
+                    spec_key: Some(spec_key),
+                    toolchain_id: None,
+                    manifest_hash: None,
+                    status: ToolchainEnsureStatus::Failed,
+                    error: Some(format!("failed to fetch channel manifest: {}", e)),
+                };
+            }
+        };
+
+        let rustc_target = match manifest.rustc_for_target(&spec.host) {
+            Ok(t) => t,
+            Err(e) => {
+                return EnsureToolchainResult {
+                    spec_key: Some(spec_key),
+                    toolchain_id: None,
+                    manifest_hash: None,
+                    status: ToolchainEnsureStatus::Failed,
+                    error: Some(e.to_string()),
+                };
+            }
+        };
+        let rust_std_target = match manifest.rust_std_for_target(&spec.target) {
+            Ok(t) => t,
+            Err(e) => {
+                return EnsureToolchainResult {
+                    spec_key: Some(spec_key),
+                    toolchain_id: None,
+                    manifest_hash: None,
+                    status: ToolchainEnsureStatus::Failed,
+                    error: Some(e.to_string()),
+                };
+            }
+        };
+
+        let toolchain_id = vx_toolchain::RustToolchainId::from_manifest_sha256s(
+            &spec.host,
+            &spec.target,
+            &rustc_target.hash,
+            &rust_std_target.hash,
+        );
+
+        let toolchain_manifest = ToolchainManifest {
+            schema_version: TOOLCHAIN_MANIFEST_SCHEMA_VERSION,
+            kind: ToolchainKind::Rust,
+            spec_key,
+            toolchain_id: toolchain_id.0,
+            created_at: Timestamp::now().in_tz("UTC").unwrap().to_string(),
+            rust_manifest_date: Some(manifest.date.clone()),
+            rust_version: Some(manifest.rustc.version.clone()),
+            zig_version: None,
+            components: vec![
+                ToolchainComponentTree {
+                    name: "rustc".to_string(),
+                    target: Some(rustc_component.target),
+                    tree_manifest: rustc_component.tree_manifest,
+                    sha256: rustc_target.hash.clone(),
+                    total_size_bytes: rustc_component.total_size_bytes,
+                    file_count: rustc_component.file_count,
+                    unique_blobs: rustc_component.unique_blobs,
+                },
+                ToolchainComponentTree {
+                    name: "rust-std".to_string(),
+                    target: Some(rust_std_component.target),
+                    tree_manifest: rust_std_component.tree_manifest,
+                    sha256: rust_std_target.hash.clone(),
+                    total_size_bytes: rust_std_component.total_size_bytes,
+                    file_count: rust_std_component.file_count,
+                    unique_blobs: rust_std_component.unique_blobs,
+                },
+            ],
+        };
+
+        let manifest_json = facet_json::to_string(&toolchain_manifest)
+            .expect("toolchain manifest serialization must succeed");
+        let manifest_hash = Blake3Hash::from_bytes(manifest_json.as_bytes());
+        if let Err(e) = self
+            .storage
+            .put_manifest(&manifest_hash, manifest_json.as_bytes())
+            .await
+        {
+            tracing::warn!(manifest_hash = %manifest_hash, error = %e, "failed to write toolchain manifest");
+        }
+
+        if let Err(e) = self
+            .storage
+            .put_toolchain_spec(&spec_key, &manifest_hash)
+            .await
+        {
+            tracing::warn!("failed to publish spec mapping for {}: {}", spec_key, e);
+        }
 
         EnsureToolchainResult {
             spec_key: Some(spec_key),

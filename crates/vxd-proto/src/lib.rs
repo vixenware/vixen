@@ -53,8 +53,12 @@ pub struct BuildResult {
 pub enum ActionType {
     /// Compiling a Rust crate
     CompileRust(String),
-    /// Acquiring Rust toolchain
+    /// Acquiring full Rust toolchain (legacy single action mode)
     AcquireToolchain,
+    /// Downloading one Rust toolchain component
+    DownloadRustToolchainComponent(String), // component name
+    /// Extracting one Rust toolchain component
+    ExtractRustToolchainComponent(String), // component name
     /// Acquiring Zig toolchain
     AcquireZigToolchain(String), // version
     /// Acquiring registry crate
@@ -73,6 +77,12 @@ impl ActionType {
         match self {
             ActionType::CompileRust(name) => format!("compile {}", name),
             ActionType::AcquireToolchain => "acquire toolchain".to_string(),
+            ActionType::DownloadRustToolchainComponent(component) => {
+                format!("download toolchain {}", component)
+            }
+            ActionType::ExtractRustToolchainComponent(component) => {
+                format!("extract toolchain {}", component)
+            }
             ActionType::AcquireZigToolchain(version) => format!("acquire zig {}", version),
             ActionType::AcquireRegistryCrate(name, version) => {
                 format!("acquire {}@{}", name, version)

@@ -7,7 +7,7 @@
 use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::HashMap;
 use vx_rs::crate_graph::{CrateGraph, CrateId, CrateSource, CrateType};
-use vx_store_proto::{Blake3Hash, RustChannel};
+use vx_store_proto::{Blake3Hash, RustChannel, RustComponent, RustToolchainSpec};
 
 use crate::inputs::{BuildConfig, RustCrate, RustToolchain};
 
@@ -26,12 +26,24 @@ pub struct ActionDep {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum Action {
-    /// Acquire Rust toolchain from static.rust-lang.org
-    AcquireToolchain {
+    /// Download a Rust toolchain component from static.rust-lang.org
+    DownloadRustToolchainComponent {
         /// Rust channel (Stable, Beta, Nightly)
         channel: RustChannel,
         /// Target triple
         target_triple: String,
+        /// Component to download
+        component: RustComponent,
+    },
+
+    /// Extract a Rust toolchain component tarball into CAS trees
+    ExtractRustToolchainComponent {
+        /// Rust channel (Stable, Beta, Nightly)
+        channel: RustChannel,
+        /// Target triple
+        target_triple: String,
+        /// Component to extract
+        component: RustComponent,
     },
 
     /// Acquire Zig toolchain for C/C++ compilation
@@ -108,8 +120,11 @@ impl Action {
     /// Get a display name for TUI tracking
     pub fn display_name(&self) -> String {
         match self {
-            Action::AcquireToolchain { channel, .. } => {
-                format!("acquire toolchain {:?}", channel)
+            Action::DownloadRustToolchainComponent { component, .. } => {
+                format!("download toolchain {:?}", component)
+            }
+            Action::ExtractRustToolchainComponent { component, .. } => {
+                format!("extract toolchain {:?}", component)
             }
             Action::AcquireZigToolchain { version } => {
                 format!("acquire zig {}", version)
@@ -132,7 +147,12 @@ impl Action {
     /// Convert to Progress ActionType
     pub fn to_progress_action_type(&self) -> vxd_proto::ActionType {
         match self {
-            Action::AcquireToolchain { .. } => vxd_proto::ActionType::AcquireToolchain,
+            Action::DownloadRustToolchainComponent { component, .. } => {
+                vxd_proto::ActionType::DownloadRustToolchainComponent(format!("{:?}", component))
+            }
+            Action::ExtractRustToolchainComponent { component, .. } => {
+                vxd_proto::ActionType::ExtractRustToolchainComponent(format!("{:?}", component))
+            }
             Action::AcquireZigToolchain { version } => {
                 vxd_proto::ActionType::AcquireZigToolchain(version.clone())
             }
@@ -167,8 +187,11 @@ pub struct ActionGraph {
     /// Map from CrateId to its action node (for resolving dependencies)
     pub crate_to_node: HashMap<CrateId, NodeIndex>,
 
-    /// Toolchain acquisition node (all compilations depend on this)
-    pub toolchain_node: Option<NodeIndex>,
+    /// Rust toolchain extract nodes by component.
+    pub rust_toolchain_extract_nodes: HashMap<RustComponent, NodeIndex>,
+
+    /// Rust toolchain spec used for finalization during compile.
+    pub rust_toolchain_spec: Option<RustToolchainSpec>,
 
     /// Map from (name, version) to registry crate acquisition node
     pub registry_nodes: HashMap<(String, String), NodeIndex>,
@@ -180,7 +203,8 @@ impl ActionGraph {
         Self {
             graph: DiGraph::new(),
             crate_to_node: HashMap::new(),
-            toolchain_node: None,
+            rust_toolchain_extract_nodes: HashMap::new(),
+            rust_toolchain_spec: None,
             registry_nodes: HashMap::new(),
         }
     }
@@ -198,7 +222,8 @@ impl ActionGraph {
 
     /// Build action graph from a CrateGraph
     ///
-    /// This creates AcquireToolchain, AcquireRegistryCrate, and CompileRustCrate
+    /// This creates Rust toolchain component actions, AcquireRegistryCrate, and
+    /// CompileRustCrate actions with proper dependency edges.
     /// actions with proper dependency edges.
     pub fn from_crate_graph(
         crate_graph: &CrateGraph,
@@ -215,15 +240,40 @@ impl ActionGraph {
         let mut crate_to_node = HashMap::new();
         let mut registry_nodes = HashMap::new();
 
-        // 1. Create toolchain acquisition action (all compilations depend on this)
-        debug!("Creating toolchain acquisition action");
-        let toolchain_node = graph.add_node(ActionNode {
-            action: Action::AcquireToolchain {
-                channel: rust_channel,
+        // 1. Create per-component toolchain actions.
+        debug!("Creating toolchain component actions");
+        let download_rustc_node = graph.add_node(ActionNode {
+            action: Action::DownloadRustToolchainComponent {
+                channel: rust_channel.clone(),
                 target_triple: target_triple.clone(),
+                component: RustComponent::Rustc,
             },
         });
-        debug!(node = ?toolchain_node, "Toolchain node created");
+        let download_rust_std_node = graph.add_node(ActionNode {
+            action: Action::DownloadRustToolchainComponent {
+                channel: rust_channel.clone(),
+                target_triple: target_triple.clone(),
+                component: RustComponent::RustStd,
+            },
+        });
+        let extract_rustc_node = graph.add_node(ActionNode {
+            action: Action::ExtractRustToolchainComponent {
+                channel: rust_channel.clone(),
+                target_triple: target_triple.clone(),
+                component: RustComponent::Rustc,
+            },
+        });
+        let extract_rust_std_node = graph.add_node(ActionNode {
+            action: Action::ExtractRustToolchainComponent {
+                channel: rust_channel.clone(),
+                target_triple: target_triple.clone(),
+                component: RustComponent::RustStd,
+            },
+        });
+
+        // Extraction depends on matching download.
+        graph.add_edge(extract_rustc_node, download_rustc_node, ());
+        graph.add_edge(extract_rust_std_node, download_rust_std_node, ());
 
         // 2. Create registry crate acquisition actions
         debug!(
@@ -319,8 +369,9 @@ impl ActionGraph {
         for crate_node in crate_graph.nodes.values() {
             let compile_idx = crate_to_node[&crate_node.id];
 
-            // Every compilation depends on toolchain acquisition
-            graph.add_edge(compile_idx, toolchain_node, ());
+            // Every compilation depends on both extracted toolchain components.
+            graph.add_edge(compile_idx, extract_rustc_node, ());
+            graph.add_edge(compile_idx, extract_rust_std_node, ());
 
             // Registry crates also depend on their registry acquisition
             if let CrateSource::Registry { name, version, .. } = &crate_node.source
@@ -346,7 +397,16 @@ impl ActionGraph {
         Ok(Self {
             graph,
             crate_to_node,
-            toolchain_node: Some(toolchain_node),
+            rust_toolchain_extract_nodes: HashMap::from([
+                (RustComponent::Rustc, extract_rustc_node),
+                (RustComponent::RustStd, extract_rust_std_node),
+            ]),
+            rust_toolchain_spec: Some(RustToolchainSpec {
+                channel: rust_channel,
+                host: target_triple.clone(),
+                target: target_triple,
+                components: vec![RustComponent::Rustc, RustComponent::RustStd],
+            }),
             registry_nodes,
         })
     }

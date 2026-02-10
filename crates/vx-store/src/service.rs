@@ -1,12 +1,12 @@
 use jiff::Timestamp;
 use vx_store_proto::Store;
 use vx_store_proto::{
-    Blake3Hash, BlobHash, CacheKey, EnsureRegistryCrateResult, EnsureStatus, EnsureToolchainResult,
-    IngestTreeRequest, IngestTreeResult, ManifestHash, MaterializationPlan, MaterializeStep,
-    NodeManifest, PublishResult, RegistryCrateManifest, RegistrySpec, RegistrySpecKey,
-    RustToolchainSpec, STORE_PROTOCOL_VERSION, ServiceVersion, StoreProgress,
-    TREE_MANIFEST_SCHEMA_VERSION, ToolchainKind, ToolchainManifest, ToolchainSpecKey, TreeManifest,
-    ZigToolchainSpec,
+    Blake3Hash, BlobHash, CacheKey, EnsureRegistryCrateResult, EnsureRustToolchainComponentResult,
+    EnsureStatus, EnsureToolchainResult, IngestTreeRequest, IngestTreeResult, ManifestHash,
+    MaterializationPlan, MaterializeStep, NodeManifest, PublishResult, RegistryCrateManifest,
+    RegistrySpec, RegistrySpecKey, RustComponent, RustToolchainSpec, STORE_PROTOCOL_VERSION,
+    ServiceVersion, StoreProgress, TREE_MANIFEST_SCHEMA_VERSION, ToolchainKind, ToolchainManifest,
+    ToolchainSpecKey, TreeManifest, ZigToolchainSpec,
 };
 
 use crate::registry::download_crate;
@@ -308,6 +308,42 @@ impl Store for StoreService {
         progress: roam::Tx<StoreProgress>,
     ) -> EnsureToolchainResult {
         StoreService::ensure_rust_toolchain(self, spec, progress).await
+    }
+
+    async fn download_rust_toolchain_component(
+        &self,
+        _cx: &roam::Context,
+        spec: RustToolchainSpec,
+        component: RustComponent,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureRustToolchainComponentResult {
+        StoreService::download_rust_toolchain_component(self, spec, component, progress).await
+    }
+
+    async fn extract_rust_toolchain_component(
+        &self,
+        _cx: &roam::Context,
+        spec: RustToolchainSpec,
+        component: RustComponent,
+        tarball_blob: Blake3Hash,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureRustToolchainComponentResult {
+        StoreService::extract_rust_toolchain_component(
+            self,
+            spec,
+            component,
+            tarball_blob,
+            progress,
+        )
+        .await
+    }
+
+    async fn finalize_rust_toolchain(
+        &self,
+        _cx: &roam::Context,
+        spec: RustToolchainSpec,
+    ) -> EnsureToolchainResult {
+        StoreService::finalize_rust_toolchain(self, spec).await
     }
 
     async fn ensure_zig_toolchain(

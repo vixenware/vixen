@@ -146,6 +146,8 @@ impl StoreService {
                 toolchain_manager: ToolchainManager::new(),
                 registry_manager: RegistryManager::new(),
                 download_semaphore: Arc::new(tokio::sync::Semaphore::new(32)),
+                rust_component_tarballs: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+                rust_component_trees: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             }),
         }
     }

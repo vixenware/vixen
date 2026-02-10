@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
 use camino::Utf8PathBuf;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
+use vx_store_proto::{Blake3Hash, RustComponent, ToolchainSpecKey};
 
-use crate::{RegistryManager, toolchain::ToolchainManager};
+use crate::{
+    RegistryManager,
+    toolchain::{ExtractedRustComponent, ToolchainManager},
+};
 
 /// CAS service implementation
 #[derive(Clone)]
@@ -37,4 +41,12 @@ pub(crate) struct StoreServiceInner {
 
     /// Semaphore to limit concurrent download/extract operations
     pub(crate) download_semaphore: Arc<Semaphore>,
+
+    /// Downloaded Rust toolchain component tarballs by (spec_key, component)
+    pub(crate) rust_component_tarballs:
+        Mutex<std::collections::HashMap<(ToolchainSpecKey, RustComponent), Blake3Hash>>,
+
+    /// Extracted Rust toolchain components by (spec_key, component)
+    pub(crate) rust_component_trees:
+        Mutex<std::collections::HashMap<(ToolchainSpecKey, RustComponent), ExtractedRustComponent>>,
 }

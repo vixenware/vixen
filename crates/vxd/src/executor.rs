@@ -15,7 +15,7 @@ use crate::action_graph::{Action, ActionGraph};
 use crate::error::VxdError;
 use vx_rs::CrateId;
 use vx_runner_proto::RunnerClient;
-use vx_store_proto::{Blake3Hash, StoreClient, StoreProgress};
+use vx_store_proto::{Blake3Hash, RustComponent, RustToolchainSpec, StoreClient, StoreProgress};
 use vxd_proto::{ActionProgress, ProgressListenerClient};
 
 /// State of an individual action
@@ -31,12 +31,22 @@ pub enum ActionState {
 /// Result from executing an action
 #[derive(Debug, Clone)]
 pub enum ActionResult {
-    /// Toolchain acquired successfully
-    ToolchainAcquired {
-        /// Toolchain ID
-        toolchain_id: Blake3Hash,
-        /// Toolchain manifest hash
-        manifest_hash: Blake3Hash,
+    /// Rust toolchain component tarball downloaded successfully.
+    RustToolchainComponentDownloaded {
+        /// Component that was downloaded.
+        component: RustComponent,
+        /// Tarball blob hash (None if full toolchain was already cached).
+        tarball_blob: Option<Blake3Hash>,
+        /// Whether this was a cache hit
+        was_cached: bool,
+    },
+
+    /// Rust toolchain component extracted successfully.
+    RustToolchainComponentExtracted {
+        /// Component that was extracted.
+        component: RustComponent,
+        /// Tree manifest hash (None if full toolchain was already cached).
+        tree_manifest: Option<Blake3Hash>,
         /// Whether this was a cache hit
         was_cached: bool,
     },
@@ -357,10 +367,10 @@ impl Executor {
             let action = &self.graph.graph[*node_idx].action;
 
             match result {
-                ActionResult::ToolchainAcquired {
+                ActionResult::RustToolchainComponentDownloaded {
+                    component,
+                    tarball_blob,
                     was_cached,
-                    manifest_hash,
-                    ..
                 } => {
                     if *was_cached {
                         cache_hits += 1;
@@ -368,14 +378,16 @@ impl Executor {
                         rebuilt += 1;
                     }
 
-                    // Generate node report for toolchain acquisition
+                    let cache_key = tarball_blob
+                        .map(|h| h.to_hex())
+                        .unwrap_or_else(|| format!("rust-toolchain-download:{:?}", component));
                     node_reports.push(vx_report::NodeReport {
                         node_id: action.display_name(),
-                        kind: "toolchain.acquire".to_string(),
-                        cache_key: manifest_hash.to_hex(),
+                        kind: "toolchain.component.download".to_string(),
+                        cache_key: cache_key.clone(),
                         cache: if *was_cached {
                             vx_report::CacheOutcome::Hit {
-                                manifest: manifest_hash.to_hex(),
+                                manifest: cache_key,
                             }
                         } else {
                             vx_report::CacheOutcome::Miss {
@@ -386,8 +398,48 @@ impl Executor {
                         inputs: vec![],
                         deps: vec![],
                         outputs: vec![vx_report::OutputRecord {
-                            logical: "toolchain".to_string(),
-                            manifest: Some(manifest_hash.to_hex()),
+                            logical: format!("tarball_{:?}", component).to_lowercase(),
+                            manifest: tarball_blob.map(|h| h.to_hex()),
+                            blob: None,
+                            path: None,
+                        }],
+                        invocation: None,
+                        diagnostics: vx_report::DiagnosticsRecord::default(),
+                    });
+                }
+                ActionResult::RustToolchainComponentExtracted {
+                    component,
+                    tree_manifest,
+                    was_cached,
+                } => {
+                    if *was_cached {
+                        cache_hits += 1;
+                    } else {
+                        rebuilt += 1;
+                    }
+
+                    let cache_key = tree_manifest
+                        .map(|h| h.to_hex())
+                        .unwrap_or_else(|| format!("rust-toolchain-extract:{:?}", component));
+                    node_reports.push(vx_report::NodeReport {
+                        node_id: action.display_name(),
+                        kind: "toolchain.component.extract".to_string(),
+                        cache_key: cache_key.clone(),
+                        cache: if *was_cached {
+                            vx_report::CacheOutcome::Hit {
+                                manifest: cache_key,
+                            }
+                        } else {
+                            vx_report::CacheOutcome::Miss {
+                                reason: vx_report::MissReason::FirstBuild,
+                            }
+                        },
+                        timing: vx_report::NodeTiming::default(),
+                        inputs: vec![],
+                        deps: vec![],
+                        outputs: vec![vx_report::OutputRecord {
+                            logical: format!("tree_{:?}", component).to_lowercase(),
+                            manifest: tree_manifest.map(|h| h.to_hex()),
                             blob: None,
                             path: None,
                         }],
@@ -641,7 +693,7 @@ impl Executor {
         let target_triple = self.target_triple.clone();
         let profile = self.profile.clone();
         let results = self.results.clone(); // Cloned Arc for execute_action
-        let toolchain_node_idx = self.graph.toolchain_node; // For looking up toolchain result
+        let rust_toolchain_spec = self.graph.rust_toolchain_spec.clone();
         let macos_commandlinetools_version = self.macos_commandlinetools_version.clone();
 
         tokio::spawn(async move {
@@ -691,7 +743,7 @@ impl Executor {
                 &workspace_root,
                 &target_triple,
                 &profile,
-                toolchain_node_idx,
+                rust_toolchain_spec,
                 store_progress_tx,
                 macos_commandlinetools_version,
             )
@@ -732,7 +784,7 @@ async fn execute_action(
     workspace_root: &camino::Utf8PathBuf,
     _target_triple: &str,
     _profile: &str,
-    toolchain_node_idx: Option<NodeIndex>,
+    rust_toolchain_spec: Option<RustToolchainSpec>,
     progress: roam::Tx<StoreProgress>,
     macos_commandlinetools_version: Option<String>,
 ) -> Result<ActionResult, VxdError> {
@@ -745,11 +797,12 @@ async fn execute_action(
     debug!("processing action {}", action.display_name());
 
     match action {
-        Action::AcquireToolchain {
+        Action::DownloadRustToolchainComponent {
             channel,
             target_triple,
+            component,
         } => {
-            use vx_store_proto::{EnsureStatus, RustComponent, RustToolchainSpec};
+            use vx_store_proto::{EnsureStatus, RustToolchainSpec};
             let started = Instant::now();
 
             let spec = RustToolchainSpec {
@@ -760,7 +813,7 @@ async fn execute_action(
             };
 
             let result = cas
-                .ensure_rust_toolchain(spec, progress)
+                .download_rust_toolchain_component(spec, component.clone(), progress)
                 .await
                 .map_err(|e| VxdError::CasRpc(e.to_string()))?;
 
@@ -770,27 +823,67 @@ async fn execute_action(
                 ));
             }
 
-            let manifest_hash = result.manifest_hash.ok_or(VxdError::NoManifestHash)?;
-
-            // Get manifest for version info (and toolchain_id on cache hit)
-            let manifest = cas
-                .get_toolchain_manifest(manifest_hash)
-                .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
-                .ok_or(VxdError::ToolchainManifestNotFound(manifest_hash))?;
-
-            // On cache hit, toolchain_id comes from manifest; on download, it's in the result
-            let toolchain_id = result.toolchain_id.unwrap_or(manifest.toolchain_id);
-
             info!(
-                version = %manifest.rust_version.as_deref().unwrap_or("unknown"),
+                component = ?component,
                 elapsed_ms = started.elapsed().as_millis() as u64,
-                "toolchain acquired"
+                "toolchain component downloaded"
             );
 
-            Ok(ActionResult::ToolchainAcquired {
-                toolchain_id,
-                manifest_hash,
+            Ok(ActionResult::RustToolchainComponentDownloaded {
+                component,
+                tarball_blob: result.tarball_blob,
+                was_cached: result.status == EnsureStatus::Hit,
+            })
+        }
+        Action::ExtractRustToolchainComponent {
+            channel,
+            target_triple,
+            component,
+        } => {
+            use vx_store_proto::{EnsureStatus, RustToolchainSpec};
+            let spec = RustToolchainSpec {
+                channel,
+                host: target_triple.clone(),
+                target: target_triple.clone(),
+                components: vec![RustComponent::Rustc, RustComponent::RustStd],
+            };
+
+            // Locate corresponding download result for this component.
+            let tarball_blob = {
+                let results_lock = results.read().await;
+                results_lock.values().find_map(|r| match r {
+                    ActionResult::RustToolchainComponentDownloaded {
+                        component: downloaded_component,
+                        tarball_blob: Some(blob),
+                        ..
+                    } if *downloaded_component == component => Some(*blob),
+                    _ => None,
+                })
+            };
+
+            let tarball_blob = match tarball_blob {
+                Some(blob) => blob,
+                None => {
+                    // If full toolchain is already cached, extraction call can still return Hit
+                    // with a placeholder blob value that won't be used.
+                    Blake3Hash([0; 32])
+                }
+            };
+
+            let result = cas
+                .extract_rust_toolchain_component(spec, component.clone(), tarball_blob, progress)
+                .await
+                .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+
+            if result.status == EnsureStatus::Failed {
+                return Err(VxdError::ToolchainAcquisition(
+                    result.error.unwrap_or_else(|| "unknown error".to_string()),
+                ));
+            }
+
+            Ok(ActionResult::RustToolchainComponentExtracted {
+                component,
+                tree_manifest: result.tree_manifest,
                 was_cached: result.status == EnsureStatus::Hit,
             })
         }
@@ -878,35 +971,40 @@ async fn execute_action(
                 .await;
             let workspace_root = Utf8PathBuf::from(&workspace_root_str);
 
-            // Look up the toolchain result to get the real manifest hash and toolchain ID
-            let (toolchain_manifest, toolchain_id) = if let Some(toolchain_idx) = toolchain_node_idx
-            {
-                let results_lock = results.read().await;
-                match results_lock.get(&toolchain_idx) {
-                    Some(ActionResult::ToolchainAcquired {
-                        toolchain_id,
-                        manifest_hash,
-                        ..
-                    }) => {
-                        debug!(
-                            "COMPILE: using acquired toolchain manifest_hash={} toolchain_id={}",
-                            manifest_hash, toolchain_id
-                        );
-                        (*manifest_hash, *toolchain_id)
-                    }
-                    _ => {
-                        return Err(VxdError::Compilation {
-                            crate_name: crate_name.clone(),
-                            message: "toolchain not acquired before compilation".to_string(),
-                        });
-                    }
-                }
-            } else {
+            // Finalize toolchain manifest from extracted components.
+            let spec = rust_toolchain_spec
+                .clone()
+                .ok_or_else(|| VxdError::Compilation {
+                    crate_name: crate_name.clone(),
+                    message: "missing rust toolchain spec".to_string(),
+                })?;
+            let finalize_result = cas
+                .finalize_rust_toolchain(spec)
+                .await
+                .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+            if finalize_result.status == vx_store_proto::EnsureStatus::Failed {
                 return Err(VxdError::Compilation {
                     crate_name: crate_name.clone(),
-                    message: "no toolchain node found".to_string(),
+                    message: finalize_result
+                        .error
+                        .unwrap_or_else(|| "toolchain finalization failed".to_string()),
                 });
-            };
+            }
+            let toolchain_manifest =
+                finalize_result
+                    .manifest_hash
+                    .ok_or_else(|| VxdError::Compilation {
+                        crate_name: crate_name.clone(),
+                        message: "toolchain manifest missing after finalization".to_string(),
+                    })?;
+            let manifest = cas
+                .get_toolchain_manifest(toolchain_manifest)
+                .await
+                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .ok_or(VxdError::ToolchainManifestNotFound(toolchain_manifest))?;
+            let toolchain_id = finalize_result
+                .toolchain_id
+                .unwrap_or(manifest.toolchain_id);
 
             // Update the RustToolchainManifest and RustToolchain in the database with real values
             use crate::inputs::{RustToolchain as RustToolchainInput, RustToolchainManifest};

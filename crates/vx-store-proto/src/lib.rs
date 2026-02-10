@@ -303,6 +303,26 @@ pub trait Store {
         progress: roam::Tx<StoreProgress>,
     ) -> EnsureToolchainResult;
 
+    /// Download a single Rust toolchain component tarball.
+    async fn download_rust_toolchain_component(
+        &self,
+        spec: RustToolchainSpec,
+        component: RustComponent,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureRustToolchainComponentResult;
+
+    /// Extract a single Rust toolchain component tarball into a tree manifest.
+    async fn extract_rust_toolchain_component(
+        &self,
+        spec: RustToolchainSpec,
+        component: RustComponent,
+        tarball_blob: Blake3Hash,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureRustToolchainComponentResult;
+
+    /// Finalize a Rust toolchain manifest from already extracted components.
+    async fn finalize_rust_toolchain(&self, spec: RustToolchainSpec) -> EnsureToolchainResult;
+
     /// Ensure a Zig toolchain exists in the store. Downloads if needed.
     /// Progress updates are streamed to `progress`.
     async fn ensure_zig_toolchain(
@@ -579,6 +599,25 @@ pub struct EnsureToolchainResult {
 
     /// Hash of the ToolchainManifest in CAS
     pub manifest_hash: Option<Blake3Hash>,
+
+    pub status: EnsureStatus,
+
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct EnsureRustToolchainComponentResult {
+    /// None if spec was invalid and couldn't be hashed
+    pub spec_key: Option<ToolchainSpecKey>,
+
+    /// Component this result belongs to
+    pub component: RustComponent,
+
+    /// Hash of downloaded component tarball blob (download step)
+    pub tarball_blob: Option<Blake3Hash>,
+
+    /// Hash of extracted component tree manifest blob (extract step)
+    pub tree_manifest: Option<Blake3Hash>,
 
     pub status: EnsureStatus,
 
