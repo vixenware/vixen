@@ -267,4 +267,89 @@ mod tests {
         assert_eq!(hash1.len(), 64);
         assert_eq!(hash2.len(), 64);
     }
+
+    // =========================================================================
+    // GOLDEN-FILE TESTS: Cache Key Stability
+    // =========================================================================
+    //
+    // These tests pin exact hash values for known inputs. If any test fails,
+    // it means the hash computation changed — which silently invalidates
+    // every user's cache. That's either:
+    //   (a) intentional: update the golden value and note what changed
+    //   (b) accidental: revert whatever broke it
+    //
+    // See: https://github.com/bearcove/vixen/issues/131
+
+    #[test]
+    fn golden_compute_cache_key_minimal() {
+        let key = compute_cache_key("toolchain-abc", &[], &InputSet::new(), &BTreeMap::new());
+        assert_eq!(
+            key, "8148dac04924e872e81574f61a02eeef105fed2c9ffb1b9c24a25b1f75fb1ef4",
+            "compute_cache_key (minimal) golden value changed! \
+             This invalidates all user caches. If intentional, update this value."
+        );
+    }
+
+    #[test]
+    fn golden_compute_cache_key_full() {
+        let toolchain = "deadbeef01234567890abcdef0123456789abcdef0123456789abcdef01234567";
+        let args = vec![
+            "--crate-type".to_string(),
+            "lib".to_string(),
+            "--edition".to_string(),
+            "2021".to_string(),
+        ];
+
+        let mut input_set = InputSet::new();
+        input_set.add_workspace_file("src/lib.rs".to_string());
+        input_set.add_workspace_file("src/util.rs".to_string());
+
+        let mut file_hashes = BTreeMap::new();
+        file_hashes.insert(
+            "src/lib.rs".to_string(),
+            "aaaa0000bbbb1111cccc2222dddd3333eeee4444ffff5555aaaa0000bbbb1111".to_string(),
+        );
+        file_hashes.insert(
+            "src/util.rs".to_string(),
+            "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff".to_string(),
+        );
+
+        let key = compute_cache_key(toolchain, &args, &input_set, &file_hashes);
+        assert_eq!(
+            key, "b2926159d30ec957ec09e2e568671468a2373eb5a96fcfb5c04e305150032889",
+            "compute_cache_key (full) golden value changed! \
+             This invalidates all user caches. If intentional, update this value."
+        );
+    }
+
+    #[test]
+    fn golden_compute_snapshot_hash() {
+        let files = vec![
+            (
+                "src/lib.rs".to_string(),
+                "aaaa0000bbbb1111cccc2222dddd3333eeee4444ffff5555aaaa0000bbbb1111".to_string(),
+            ),
+            (
+                "src/util.rs".to_string(),
+                "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff".to_string(),
+            ),
+        ];
+
+        let hash = compute_snapshot_hash(&files);
+        assert_eq!(
+            hash, "7c215a3c68d093d7ec6d5e81ac507d602500b22ab7bfa4741d322cf3fcf74693",
+            "compute_snapshot_hash golden value changed! \
+             If intentional, update this value."
+        );
+    }
+
+    #[test]
+    fn golden_hash_file_content() {
+        let hash = hash_file_content(b"fn main() { println!(\"hello\"); }");
+        assert_eq!(
+            hash, "6cc293606a4f7598b7c1764062dbc9dd895dd3454b7e2a6fb6df4980e6d3dd1c",
+            "hash_file_content golden value changed! \
+             If intentional, update this value."
+        );
+    }
 }

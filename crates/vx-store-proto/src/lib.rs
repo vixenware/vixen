@@ -967,4 +967,98 @@ mod tests {
         let decoded: [u8; 32] = from_slice(&bytes).expect("deserialize");
         assert_eq!(decoded, arr);
     }
+
+    // =========================================================================
+    // GOLDEN-FILE TESTS: Spec Key Stability
+    // =========================================================================
+    //
+    // These tests pin exact spec key values for known inputs. If any test fails,
+    // it means spec key computation changed — which causes toolchain re-downloads
+    // and cache misses. That's either:
+    //   (a) intentional: update the golden value and note what changed
+    //   (b) accidental: revert whatever broke it
+    //
+    // See: https://github.com/bearcove/vixen/issues/131
+
+    #[test]
+    fn golden_rust_toolchain_spec_key_stable() {
+        let spec = RustToolchainSpec {
+            channel: RustChannel::Stable,
+            host: "x86_64-unknown-linux-gnu".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            components: vec![RustComponent::Rustc, RustComponent::RustStd],
+        };
+        let key = spec.spec_key().unwrap();
+        assert_eq!(
+            key.to_hex(),
+            "e7f69f74b135f66fd7e7d1c4f0e90106c42f8d15f931ff81df6952140fa52d2a",
+            "RustToolchainSpec::spec_key (stable) golden value changed! \
+             This causes toolchain re-downloads. If intentional, update this value."
+        );
+    }
+
+    #[test]
+    fn golden_rust_toolchain_spec_key_nightly() {
+        let spec = RustToolchainSpec {
+            channel: RustChannel::Nightly {
+                date: "2025-01-15".to_string(),
+            },
+            host: "aarch64-apple-darwin".to_string(),
+            target: "aarch64-apple-darwin".to_string(),
+            components: vec![
+                RustComponent::Rustc,
+                RustComponent::RustStd,
+                RustComponent::Cargo,
+            ],
+        };
+        let key = spec.spec_key().unwrap();
+        assert_eq!(
+            key.to_hex(),
+            "b1aa790ac77e55296bcceaf9e1bb1a4e0cdb11a0f0fab457d1fc6be93f416cff",
+            "RustToolchainSpec::spec_key (nightly) golden value changed! \
+             This causes toolchain re-downloads. If intentional, update this value."
+        );
+    }
+
+    #[test]
+    fn golden_zig_toolchain_spec_key() {
+        let spec = ZigToolchainSpec {
+            version: "0.13.0".to_string(),
+            host_platform: "x86_64-linux".to_string(),
+        };
+        let key = spec.spec_key().unwrap();
+        assert_eq!(
+            key.to_hex(),
+            "b303dc7b65d5f177c92dbd92bdca5a8fbd74e8806017bc29fcbd0ffd52b3c837",
+            "ZigToolchainSpec::spec_key golden value changed! \
+             This causes toolchain re-downloads. If intentional, update this value."
+        );
+    }
+
+    #[test]
+    fn golden_registry_spec_key() {
+        let spec = RegistrySpec::crates_io(
+            "serde",
+            "1.0.197",
+            "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+        );
+        let key = spec.spec_key().unwrap();
+        assert_eq!(
+            key.to_hex(),
+            "ef622bfb7aabcd2fdd23f734c072faec8df1904b40308221f0618bfb29a1c5ee",
+            "RegistrySpec::spec_key golden value changed! \
+             This causes crate re-downloads. If intentional, update this value."
+        );
+    }
+
+    #[test]
+    fn golden_blake3hash_from_bytes() {
+        let hash = Blake3Hash::from_bytes(b"golden-test-input");
+        assert_eq!(
+            hash.to_hex(),
+            "96a1166154903a02c7ee757746e587b8ca48ad5c6305383cdbb683f4fcfbf30d",
+            "Blake3Hash::from_bytes golden value changed! \
+             If intentional, update this value."
+        );
+    }
 }
