@@ -48,14 +48,9 @@ Ordering-sensitive structures (`Map`, `Set`) are tree-backed for stable iteratio
 
 ## Builtins and Capabilities
 
-Initial builtins:
+The builtin surface and policy are specified in [`/planner-builtins/`](/planner-builtins/).
 
-- `emit-node`
-- `emit-edge`
-- `emit-fact`
-- `clock-now` (used to validate capability denial)
-
-Capabilities are explicit (`emit-graph`, `time`, `random`, `network`, `filesystem`, `process`).
+Capabilities are explicit (`emit-graph`, `transform`, `time`, `random`, `network`, `filesystem`, `process`).
 Runtime checks capability before invoking host builtins.
 
 ## Diagnostics Contract

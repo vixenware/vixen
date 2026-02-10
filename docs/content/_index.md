@@ -26,6 +26,7 @@ vx build
 - [Internals](/internals/) - How vixen builds things under the hood
 - [RulePlan Schema](/rule-plan/) - Typed planning IR and validation rules
 - [Planner Runtime Boundary](/planner-runtime/) - In-process host/interpreter contract
+- [Planner Builtins and Capability Policy](/planner-builtins/) - Deterministic builtin catalog and guardrails
 - [GitHub](https://github.com/bearcove/vixen)
 
 ## Overview
