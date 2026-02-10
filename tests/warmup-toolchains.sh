@@ -37,7 +37,7 @@ mkdir -p "${VX_HOME}"
 # vx kill handles all cases: graceful RPC shutdown if vxd is alive, PID-file
 # cleanup if vxd is dead but children survived, and socket/pidfile removal.
 "${VX_BIN}" kill || echo "NOTE: vx kill reported no daemon running (clean slate)"
-pkill "vxd" # Actually still useful
+pkill "vxd" || true # Actually still useful
 
 # Spawn shared daemon. VX_TEST skips die_with_parent() so the daemon
 # outlives this setup script.
