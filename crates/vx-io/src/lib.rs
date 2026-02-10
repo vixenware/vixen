@@ -40,7 +40,7 @@ pub async fn atomic_write(path: &Utf8Path, contents: &[u8]) -> Result<(), std::i
 pub async fn atomic_write_executable(
     path: &Utf8Path,
     contents: &[u8],
-    executable: bool,
+    _executable: bool,
 ) -> Result<(), std::io::Error> {
     let parent_dir = path.parent().unwrap_or_else(|| Utf8Path::new("."));
 
@@ -58,7 +58,7 @@ pub async fn atomic_write_executable(
 
     // Set executable bit if requested
     #[cfg(unix)]
-    if executable {
+    if _executable {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = tokio::fs::metadata(&temp_path).await?.permissions();
         perms.set_mode(perms.mode() | 0o111);
@@ -131,7 +131,7 @@ pub mod sync {
     pub fn atomic_write_executable(
         path: &Utf8Path,
         contents: &[u8],
-        executable: bool,
+        _executable: bool,
     ) -> Result<(), std::io::Error> {
         let parent_dir = path.parent().unwrap_or_else(|| Utf8Path::new("."));
         std::fs::create_dir_all(parent_dir)?;
@@ -147,7 +147,7 @@ pub mod sync {
         drop(file);
 
         #[cfg(unix)]
-        if executable {
+        if _executable {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(&temp_path)?.permissions();
             perms.set_mode(perms.mode() | 0o111);

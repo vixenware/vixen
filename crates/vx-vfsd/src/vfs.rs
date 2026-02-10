@@ -363,12 +363,20 @@ impl CasVfs {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         let diagnostics = {
-            #[cfg(feature = "diagnostics")]
+            #[cfg(all(feature = "diagnostics", unix))]
             {
                 DiagnosticsState {
                     enabled: true,
                     shm: Some(roam_shm::dump_all_state()),
                     message: None,
+                }
+            }
+            #[cfg(all(feature = "diagnostics", not(unix)))]
+            {
+                DiagnosticsState {
+                    enabled: true,
+                    shm: None,
+                    message: Some("SHM diagnostics not available on this platform".to_string()),
                 }
             }
             #[cfg(not(feature = "diagnostics"))]
@@ -1470,6 +1478,7 @@ impl CasVfs {
     }
 
     /// Dump VFS state for debugging
+    #[cfg(unix)]
     pub fn dump_all_state(&self) {
         let items = self.items.read();
         let prefixes = self.prefixes.read();

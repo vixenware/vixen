@@ -521,15 +521,15 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
 async fn cmd_kill(_args: KillArgs) -> Result<()> {
     use vx_io::net::Endpoint;
 
-    let vx_home = std::env::var("VX_HOME")
-        .unwrap_or_else(|_| format!("{}/.vx", std::env::var("HOME").expect("HOME not set")));
-    let vx_home = camino::Utf8PathBuf::from(&vx_home);
-
     let endpoint = match std::env::var("VXD") {
         Ok(v) => Endpoint::parse(&v)?,
         Err(_) => {
             #[cfg(unix)]
             {
+                let vx_home = std::env::var("VX_HOME").unwrap_or_else(|_| {
+                    format!("{}/.vx", std::env::var("HOME").expect("HOME not set"))
+                });
+                let vx_home = camino::Utf8PathBuf::from(&vx_home);
                 vx_io::net::default_unix_endpoint(&vx_home, "vxd")
             }
             #[cfg(not(unix))]

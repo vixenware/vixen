@@ -55,14 +55,14 @@ fn install_all() -> Result<(), Box<dyn std::error::Error>> {
     println!("Installing binaries to {}...\n", cargo_bin.display());
 
     for binary_name in &binaries {
-        let src = release_dir.join(binary_name);
+        let src = release_dir.join(format!("{}{}", binary_name, std::env::consts::EXE_SUFFIX));
 
         if !src.exists() {
             eprintln!("Warning: {} not found in target/release", binary_name);
             continue;
         }
 
-        let dst = cargo_bin.join(binary_name);
+        let dst = cargo_bin.join(format!("{}{}", binary_name, std::env::consts::EXE_SUFFIX));
 
         fs::copy(&src, &dst)?;
         println!("✓ {} installed", binary_name);

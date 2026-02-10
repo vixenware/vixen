@@ -300,6 +300,7 @@ pub async fn run_sandboxed_command(
 }
 
 /// How long to wait between SIGTERM and SIGKILL when terminating a process group.
+#[cfg(unix)]
 const SIGTERM_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 /// Gracefully terminate a process group: SIGTERM first, then SIGKILL after a grace period.

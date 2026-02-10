@@ -396,7 +396,7 @@ pub async fn materialize_tree(
 
         match &entry.kind {
             TreeEntryKind::File {
-                blob, executable, ..
+                blob, executable: _executable, ..
             } => {
                 // Ensure parent directory exists
                 if let Some(parent) = target_path.parent() {
@@ -421,7 +421,7 @@ pub async fn materialize_tree(
 
                 // Set executable bit if needed
                 #[cfg(unix)]
-                if *executable {
+                if *_executable {
                     use std::os::unix::fs::PermissionsExt;
                     let perms = std::fs::Permissions::from_mode(0o755);
                     tokio::fs::set_permissions(&target_path, perms)

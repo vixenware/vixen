@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use camino::Utf8Path;
 use eyre::Result;
 use std::io;
@@ -96,6 +97,10 @@ impl std::fmt::Display for Endpoint {
 pub enum Stream {
     Tcp(tokio::net::TcpStream),
     Local(roam_local::LocalStream),
+    /// On Windows, the server side of a named pipe is a different type
+    /// (`NamedPipeServer`) than the client side (`NamedPipeClient`).
+    #[cfg(windows)]
+    LocalServer(roam_local::LocalServerStream),
 }
 
 impl AsyncRead for Stream {
@@ -107,6 +112,8 @@ impl AsyncRead for Stream {
         match self.get_mut() {
             Stream::Tcp(s) => Pin::new(s).poll_read(cx, buf),
             Stream::Local(s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(windows)]
+            Stream::LocalServer(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -120,6 +127,8 @@ impl AsyncWrite for Stream {
         match self.get_mut() {
             Stream::Tcp(s) => Pin::new(s).poll_write(cx, buf),
             Stream::Local(s) => Pin::new(s).poll_write(cx, buf),
+            #[cfg(windows)]
+            Stream::LocalServer(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
@@ -127,6 +136,8 @@ impl AsyncWrite for Stream {
         match self.get_mut() {
             Stream::Tcp(s) => Pin::new(s).poll_flush(cx),
             Stream::Local(s) => Pin::new(s).poll_flush(cx),
+            #[cfg(windows)]
+            Stream::LocalServer(s) => Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -134,6 +145,8 @@ impl AsyncWrite for Stream {
         match self.get_mut() {
             Stream::Tcp(s) => Pin::new(s).poll_shutdown(cx),
             Stream::Local(s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(windows)]
+            Stream::LocalServer(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }
@@ -230,9 +243,12 @@ impl Listener {
                 Ok((Stream::Tcp(stream), addr.to_string()))
             }
             Listener::Local { listener, .. } => {
-                let guard = listener.lock().await;
+                let mut guard = listener.lock().await;
                 let stream = guard.accept().await?;
-                Ok((Stream::Local(stream), "local".to_string()))
+                #[cfg(unix)]
+                return Ok((Stream::Local(stream), "local".to_string()));
+                #[cfg(windows)]
+                return Ok((Stream::LocalServer(stream), "local".to_string()));
             }
         }
     }
