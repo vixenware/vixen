@@ -17,6 +17,16 @@ else
   SUBMIT_OUTPUT="$(xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" 2>&1)" || true
   echo "$SUBMIT_OUTPUT"
 
+  if echo "$SUBMIT_OUTPUT" | grep -qi 'Error:'; then
+    echo "Submission failed. Output above contains an error." >&2
+    exit 1
+  fi
+
+  if ! echo "$SUBMIT_OUTPUT" | grep -q 'Successfully uploaded file'; then
+    echo "Submission did not complete successfully (missing 'Successfully uploaded file')." >&2
+    exit 1
+  fi
+
   SUBMISSION_ID="$(echo "$SUBMIT_OUTPUT" | awk '/  id:/{print $2; exit}')"
 
   if [[ -z "${SUBMISSION_ID:-}" ]]; then
