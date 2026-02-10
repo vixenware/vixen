@@ -608,36 +608,36 @@ impl Vfs for CasVfs {
     ) -> ReadResult {
         tracing::trace!(item_id, offset, len, "VFS read");
 
-        // Get item info — prefer write_buffer over CAS for locally-written files
-        let (item_type, cas_hash, buffered_data) = {
+        // Extract what we need while holding the read lock — slice the write buffer
+        // in-place instead of cloning the entire Vec<u8>.
+        let cas_hash = {
             let items = self.items.read();
-            match items.get(&item_id) {
-                Some(item) => (item.item_type, item.cas_hash, item.write_buffer.clone()),
-                None => {
-                    return ReadResult {
-                        data: Vec::new(),
-                        error: errno::ENOENT,
-                    };
-                }
+            let Some(item) = items.get(&item_id) else {
+                return ReadResult {
+                    data: Vec::new(),
+                    error: errno::ENOENT,
+                };
+            };
+
+            if item.item_type != ItemType::File {
+                return ReadResult {
+                    data: Vec::new(),
+                    error: errno::EISDIR,
+                };
             }
+
+            // If there's buffered write data, serve from that (it's newer than CAS)
+            if let Some(ref data) = item.write_buffer {
+                let start = (offset as usize).min(data.len());
+                let end = ((offset + len) as usize).min(data.len());
+                return ReadResult {
+                    data: data[start..end].to_vec(),
+                    error: errno::OK,
+                };
+            }
+
+            item.cas_hash
         };
-
-        if item_type != ItemType::File {
-            return ReadResult {
-                data: Vec::new(),
-                error: errno::EISDIR,
-            };
-        }
-
-        // If there's buffered write data, serve from that (it's newer than CAS)
-        if let Some(data) = buffered_data {
-            let start = (offset as usize).min(data.len());
-            let end = ((offset + len) as usize).min(data.len());
-            return ReadResult {
-                data: data[start..end].to_vec(),
-                error: errno::OK,
-            };
-        }
 
         // Fetch from CAS if we have a hash
         let Some(hash) = cas_hash else {

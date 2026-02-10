@@ -7,6 +7,9 @@
 //! - put/get manifests (structured build outputs)
 //! - lookup/publish cache keys (mapping inputs → outputs)
 
+use std::collections::HashMap;
+use std::hash::{BuildHasher, Hasher};
+
 use facet::Facet;
 
 /// Current cache key schema version.
@@ -54,6 +57,41 @@ impl std::fmt::Display for Blake3Hash {
         write!(f, "{}", self.to_hex())
     }
 }
+
+/// Passthrough hasher for Blake3Hash — the hash is already cryptographic, so re-hashing
+/// with SipHash is pure waste. Extracts the first 8 bytes of the Blake3 digest as the
+/// HashMap bucket selector.
+#[derive(Default, Clone)]
+pub struct Blake3HashBuilder;
+
+impl BuildHasher for Blake3HashBuilder {
+    type Hasher = Blake3Hasher;
+    fn build_hasher(&self) -> Self::Hasher {
+        Blake3Hasher(0)
+    }
+}
+
+pub struct Blake3Hasher(u64);
+
+impl Hasher for Blake3Hasher {
+    fn write(&mut self, bytes: &[u8]) {
+        // Blake3Hash.hash() writes the 32-byte array. We take the first 8 bytes as u64.
+        // If fewer than 8 bytes are written (shouldn't happen for Blake3Hash), we still
+        // accumulate what we get.
+        for chunk in bytes.chunks(8) {
+            let mut buf = [0u8; 8];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            self.0 ^= u64::from_ne_bytes(buf);
+        }
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// A HashMap using the passthrough hasher for Blake3Hash keys.
+pub type Blake3HashMap<V> = HashMap<Blake3Hash, V, Blake3HashBuilder>;
 
 /// Hash of a blob (raw bytes)
 pub type BlobHash = Blake3Hash;
