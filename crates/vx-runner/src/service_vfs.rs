@@ -227,6 +227,7 @@ impl RunnerService {
             &ActionKind::RustCompile,
             &action_desc,
             progress,
+            None,
         )
         .await
         {
@@ -265,6 +266,21 @@ impl RunnerService {
                         timeout.as_secs(),
                         timeout.as_secs()
                     )),
+                };
+            }
+            Err(CommandError::Cancelled {
+                action_desc,
+                partial_output,
+            }) => {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return RustCompileResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: partial_output,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!("action '{}' cancelled", action_desc)),
                 };
             }
         };
@@ -493,6 +509,7 @@ impl RunnerService {
             &ActionKind::CcCompile,
             &action_desc,
             progress,
+            None,
         )
         .await
         {
@@ -531,6 +548,22 @@ impl RunnerService {
                         timeout.as_secs(),
                         timeout.as_secs()
                     )),
+                };
+            }
+            Err(CommandError::Cancelled {
+                action_desc,
+                partial_output,
+            }) => {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return CcCompileResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: partial_output,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    discovered_deps: vec![],
+                    error: Some(format!("action '{}' cancelled", action_desc)),
                 };
             }
         };
@@ -802,6 +835,7 @@ impl RunnerService {
             &ActionKind::CcLink,
             &action_desc,
             progress,
+            None,
         )
         .await
         {
@@ -838,6 +872,21 @@ impl RunnerService {
                         timeout.as_secs(),
                         timeout.as_secs()
                     )),
+                };
+            }
+            Err(CommandError::Cancelled {
+                action_desc,
+                partial_output,
+            }) => {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return CcLinkResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: partial_output,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!("action '{}' was cancelled", action_desc)),
                 };
             }
         };

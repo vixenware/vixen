@@ -45,6 +45,8 @@ pub struct BuildResult {
     pub cache_hits: usize,
     /// Number of actions that were actually executed
     pub rebuilt: usize,
+    /// Number of actions that were cancelled
+    pub cancelled: usize,
 }
 
 /// Action type being tracked
@@ -163,6 +165,7 @@ mod tests {
             total_actions: 5,
             cache_hits: 2,
             rebuilt: 3,
+            cancelled: 0,
         };
 
         let bytes = to_vec(&result).expect("serialize");

@@ -77,18 +77,26 @@ pub enum CommandError {
         timeout: Duration,
         partial_output: String,
     },
+    /// The action was cancelled via a cancellation token.
+    Cancelled {
+        action_desc: String,
+        partial_output: String,
+    },
 }
 
 /// Spawn a sandboxed command, stream merged stdout/stderr with 250ms progress
-/// ticks, and enforce a timeout. Kills the process group on timeout.
+/// ticks, and enforce a timeout. Kills the process group on timeout or cancellation.
 ///
 /// `action_desc` is a human-readable description like "rustc foo" for error messages.
 /// `progress` receives the latest output line every 250ms (if changed).
+/// `cancel` is an optional cancellation token — if provided and triggered, the process
+/// group is gracefully terminated (SIGTERM, then SIGKILL after 2s).
 pub async fn run_sandboxed_command(
     mut cmd: Command,
     kind: &ActionKind,
     action_desc: &str,
     progress: roam::Tx<StoreProgress>,
+    cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<CommandOutput, CommandError> {
     let timeout = action_timeout(kind);
 
@@ -191,14 +199,36 @@ pub async fn run_sandboxed_command(
     // Grab the PID before wait (child.id() returns None after exit)
     let pid = child.id();
 
-    // Wait for child with timeout
-    let result = tokio::time::timeout(timeout, child.wait()).await;
+    // Wait for child with timeout, plus optional cancellation
+    enum Outcome {
+        Exited(Result<ExitStatus, std::io::Error>),
+        TimedOut,
+        Cancelled,
+    }
+
+    let outcome = if let Some(ref cancel_token) = cancel {
+        tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => Outcome::Cancelled,
+            result = tokio::time::timeout(timeout, child.wait()) => {
+                match result {
+                    Ok(r) => Outcome::Exited(r),
+                    Err(_) => Outcome::TimedOut,
+                }
+            }
+        }
+    } else {
+        match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(r) => Outcome::Exited(r),
+            Err(_) => Outcome::TimedOut,
+        }
+    };
 
     // Stop the tick task
     tick_task.abort();
 
-    match result {
-        Ok(Ok(exit_status)) => {
+    match outcome {
+        Outcome::Exited(Ok(exit_status)) => {
             // Child exited — kill any orphaned children in the process group.
             // No-op if all children already exited.
             if let Some(pid) = pid {
@@ -212,7 +242,7 @@ pub async fn run_sandboxed_command(
                 combined_output: output,
             })
         }
-        Ok(Err(io_err)) => {
+        Outcome::Exited(Err(io_err)) => {
             if let Some(pid) = pid {
                 reap_process_group(pid);
             }
@@ -220,7 +250,7 @@ pub async fn run_sandboxed_command(
             let _ = stderr_task.await;
             Err(CommandError::SpawnFailed(io_err))
         }
-        Err(_elapsed) => {
+        Outcome::TimedOut => {
             // Timeout — gracefully terminate the process group (SIGTERM → SIGKILL)
             tracing::error!(
                 action_desc,
@@ -232,10 +262,8 @@ pub async fn run_sandboxed_command(
             if let Some(pid) = pid {
                 terminate_process_group(pid).await;
             }
-            // Also try the tokio kill as a fallback
             let _ = child.kill().await;
 
-            // Drain whatever output we got
             let _ = stdout_task.await;
             let _ = stderr_task.await;
             let partial = combined_output.lock().await.clone();
@@ -243,6 +271,28 @@ pub async fn run_sandboxed_command(
             Err(CommandError::TimedOut {
                 action_desc: action_desc.to_string(),
                 timeout,
+                partial_output: partial,
+            })
+        }
+        Outcome::Cancelled => {
+            // Cancellation — graceful shutdown: SIGTERM → grace period → SIGKILL
+            tracing::info!(
+                action_desc,
+                ?pid,
+                "action cancelled, terminating process group"
+            );
+
+            if let Some(pid) = pid {
+                terminate_process_group(pid).await;
+            }
+            let _ = child.kill().await;
+
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            let partial = combined_output.lock().await.clone();
+
+            Err(CommandError::Cancelled {
+                action_desc: action_desc.to_string(),
                 partial_output: partial,
             })
         }

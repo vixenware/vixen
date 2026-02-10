@@ -459,14 +459,28 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         println!("{} {}", "Duration:".dimmed(), duration_str.yellow());
 
         // Show action stats
-        let executed = result.total_actions.saturating_sub(result.cache_hits);
-        println!(
-            "{} {} total, {} cached, {} executed",
-            "Actions:".dimmed(),
-            result.total_actions.to_string().yellow(),
-            result.cache_hits.to_string().cyan(),
-            executed.to_string().green()
-        );
+        let executed = result
+            .total_actions
+            .saturating_sub(result.cache_hits)
+            .saturating_sub(result.cancelled);
+        if result.cancelled > 0 {
+            println!(
+                "{} {} total, {} cached, {} executed, {} cancelled",
+                "Actions:".dimmed(),
+                result.total_actions.to_string().yellow(),
+                result.cache_hits.to_string().cyan(),
+                executed.to_string().green(),
+                result.cancelled.to_string().red()
+            );
+        } else {
+            println!(
+                "{} {} total, {} cached, {} executed",
+                "Actions:".dimmed(),
+                result.total_actions.to_string().yellow(),
+                result.cache_hits.to_string().cyan(),
+                executed.to_string().green()
+            );
+        }
 
         if let Some(output_path) = &result.output_path {
             // Make path relative to cwd if possible

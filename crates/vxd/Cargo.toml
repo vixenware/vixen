@@ -22,6 +22,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
 petgraph = { workspace = true }
+tokio-util = { workspace = true }
 
 vx-store-proto = { workspace = true }
 vx-runner-proto = { workspace = true }

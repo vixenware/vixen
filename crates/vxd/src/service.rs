@@ -532,6 +532,7 @@ impl VxdService {
                     total_actions,
                     cache_hits: exec_stats.cache_hits,
                     rebuilt: exec_stats.rebuilt,
+                    cancelled: exec_stats.cancelled,
                 })
             }
             Language::Rust => {
@@ -710,6 +711,7 @@ impl VxdService {
             total_actions,
             cache_hits: exec_stats.cache_hits,
             rebuilt: exec_stats.rebuilt,
+            cancelled: exec_stats.cancelled,
         })
     }
 }
@@ -729,6 +731,7 @@ impl Vxd for VxdService {
                 total_actions: 0,
                 cache_hits: 0,
                 rebuilt: 0,
+                cancelled: 0,
             },
         }
     }

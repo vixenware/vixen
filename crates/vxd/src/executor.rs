@@ -9,6 +9,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{RwLock, Semaphore};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use crate::action_graph::{Action, ActionGraph};
@@ -26,6 +28,7 @@ pub enum ActionState {
     Running,
     Completed,
     Failed,
+    Cancelled,
 }
 
 /// Result from executing an action
@@ -111,6 +114,8 @@ pub struct ExecutionStats {
     pub cache_hits: usize,
     /// Number of crates rebuilt
     pub rebuilt: usize,
+    /// Number of actions cancelled
+    pub cancelled: usize,
     /// Path to final bin output (if any)
     pub bin_output: Option<camino::Utf8PathBuf>,
     /// Per-node reports for build report generation
@@ -123,6 +128,33 @@ enum ExecutorMessage {
         node_idx: NodeIndex,
         result: Result<ActionResult, VxdError>,
     },
+}
+
+/// Drop guard that sends a Cancelled result if the task is aborted without sending a result.
+///
+/// If JoinSet::abort_all() kills a task, the normal send at the end of spawn_action never
+/// fires. This guard ensures the executor always receives a completion message.
+struct CompletionGuard {
+    node_idx: NodeIndex,
+    tx: Option<tokio::sync::mpsc::UnboundedSender<ExecutorMessage>>,
+}
+
+impl CompletionGuard {
+    /// Disarm the guard (call this right before the normal send).
+    fn disarm(&mut self) {
+        self.tx = None;
+    }
+}
+
+impl Drop for CompletionGuard {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(ExecutorMessage::ActionCompleted {
+                node_idx: self.node_idx,
+                result: Err(VxdError::Cancelled),
+            });
+        }
+    }
 }
 
 /// Executor for action graph
@@ -148,6 +180,12 @@ pub struct Executor {
     /// Channel for messages from spawned tasks
     message_tx: tokio::sync::mpsc::UnboundedSender<ExecutorMessage>,
     message_rx: tokio::sync::mpsc::UnboundedReceiver<ExecutorMessage>,
+
+    /// In-flight action tasks (for waiting on cancellation)
+    in_flight: JoinSet<()>,
+
+    /// Cancellation token — cancel all in-flight actions
+    cancel_token: CancellationToken,
 
     /// Progress listener client (for reporting progress to vx CLI)
     progress_listener: Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>,
@@ -267,6 +305,8 @@ impl Executor {
             concurrency_limit: Arc::new(Semaphore::new(max_concurrency)),
             message_tx,
             message_rx,
+            in_flight: JoinSet::new(),
+            cancel_token: CancellationToken::new(),
             progress_listener,
             cas,
             exec,
@@ -285,15 +325,87 @@ impl Executor {
         self.stats.clone()
     }
 
+    /// Get the cancellation token for this executor.
+    ///
+    /// External code (e.g. signal handlers) can call `.cancel()` on this token
+    /// to request cancellation of all in-flight actions.
+    #[allow(dead_code)]
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
+    }
+
+    /// Wait for all in-flight tasks to finish after cancellation.
+    ///
+    /// Gives tasks a brief window to observe the cancellation token and exit.
+    /// After the timeout, remaining tasks are aborted.
+    async fn drain_in_flight(&mut self) {
+        const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+        if self.in_flight.is_empty() {
+            return;
+        }
+
+        let in_flight_count = self.in_flight.len();
+        debug!(
+            count = in_flight_count,
+            "draining in-flight tasks after cancellation"
+        );
+
+        // Wait for tasks to finish, with a timeout
+        let drain_result = tokio::time::timeout(DRAIN_TIMEOUT, async {
+            while self.in_flight.join_next().await.is_some() {}
+        })
+        .await;
+
+        if drain_result.is_err() {
+            let remaining = self.in_flight.len();
+            warn!(remaining, "timed out waiting for in-flight tasks, aborting");
+            self.in_flight.abort_all();
+        }
+
+        // Mark any still-Running actions as Cancelled
+        let mut newly_cancelled = 0usize;
+        for (_, state) in self.states.iter_mut() {
+            if *state == ActionState::Running {
+                *state = ActionState::Cancelled;
+                newly_cancelled += 1;
+            }
+        }
+        if newly_cancelled > 0 {
+            info!(newly_cancelled, "marked in-flight actions as cancelled");
+        }
+
+        // Count all cancelled actions (those cancelled via token + those just force-cancelled)
+        self.stats.cancelled = self
+            .states
+            .values()
+            .filter(|s| **s == ActionState::Cancelled)
+            .count();
+    }
+
     /// Main execution loop
     pub async fn execute(&mut self) -> Result<(), VxdError> {
         info!("starting action graph execution");
 
+        let result = self.execute_inner().await;
+
+        if result.is_err() {
+            // Signal all in-flight tasks to stop
+            self.cancel_token.cancel();
+            // Wait for them to finish (or abort after timeout)
+            self.drain_in_flight().await;
+        }
+
+        result
+    }
+
+    /// Inner execution loop (separated so cancellation cleanup always runs)
+    async fn execute_inner(&mut self) -> Result<(), VxdError> {
         loop {
-            // Check if any action has failed
-            if let Some(ref error) = self.first_error {
-                warn!("error detected, aborting");
-                return Err(error.clone());
+            // Check if cancellation was requested externally
+            if self.cancel_token.is_cancelled() {
+                warn!("cancellation requested");
+                return Err(VxdError::Cancelled);
             }
 
             // Spawn all ready actions
@@ -342,8 +454,13 @@ impl Executor {
                                 }
                             }
                         }
+                        Err(ref error) if matches!(error, VxdError::Cancelled) => {
+                            debug!("action {:?} cancelled", node_idx);
+                            self.states.insert(node_idx, ActionState::Cancelled);
+                        }
                         Err(error) => {
                             debug!("action {:?} failed: {}", node_idx, error);
+                            self.states.insert(node_idx, ActionState::Failed);
                             self.first_error = Some(error.clone());
                             return Err(error);
                         }
@@ -680,7 +797,7 @@ impl Executor {
     }
 
     /// Spawn an action for execution
-    fn spawn_action(&self, node_idx: NodeIndex, _permit: tokio::sync::OwnedSemaphorePermit) {
+    fn spawn_action(&mut self, node_idx: NodeIndex, _permit: tokio::sync::OwnedSemaphorePermit) {
         // Get action before spawning (we own the graph, no lock needed)
         let action = self.graph.graph[node_idx].action.clone();
 
@@ -695,8 +812,17 @@ impl Executor {
         let results = self.results.clone(); // Cloned Arc for execute_action
         let rust_toolchain_spec = self.graph.rust_toolchain_spec.clone();
         let macos_commandlinetools_version = self.macos_commandlinetools_version.clone();
+        let cancel_token = self.cancel_token.clone();
 
-        tokio::spawn(async move {
+        self.in_flight.spawn(async move {
+            // Drop guard: if this task is aborted (e.g. by JoinSet::abort_all), send
+            // a Cancelled result back so the executor doesn't lose track of this action.
+            let guard_tx = message_tx.clone();
+            let mut _completion_guard = CompletionGuard {
+                node_idx,
+                tx: Some(guard_tx),
+            };
+
             debug!("started for {:?}", node_idx);
 
             // Start progress tracking
@@ -733,21 +859,28 @@ impl Executor {
             });
 
             debug!("calling execute_action for {:?}", node_idx);
-            // Execute action - pass results as immutable ref
-            let result = execute_action(
-                action,
-                &cas,
-                &exec,
-                &db,
-                &results,
-                &workspace_root,
-                &target_triple,
-                &profile,
-                rust_toolchain_spec,
-                store_progress_tx,
-                macos_commandlinetools_version,
-            )
-            .await;
+
+            // Execute action with cancellation support
+            let result = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    debug!("action {:?} cancelled via token", node_idx);
+                    Err(VxdError::Cancelled)
+                }
+                result = execute_action(
+                    action,
+                    &cas,
+                    &exec,
+                    &db,
+                    &results,
+                    &workspace_root,
+                    &target_triple,
+                    &profile,
+                    rust_toolchain_spec,
+                    store_progress_tx,
+                    macos_commandlinetools_version,
+                ) => result,
+            };
 
             debug!(
                 "execute_action returned for {:?}: {:?}",
@@ -764,7 +897,8 @@ impl Executor {
             }
 
             debug!("sending completion message for {:?}", node_idx);
-            // Send result back to executor
+            // Send result back to executor — disarm the drop guard since we're sending explicitly
+            _completion_guard.disarm();
             let _ = message_tx.send(ExecutorMessage::ActionCompleted { node_idx, result });
 
             debug!("done for {:?}", node_idx);

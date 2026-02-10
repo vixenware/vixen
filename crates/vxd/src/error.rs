@@ -90,6 +90,10 @@ pub enum VxdError {
     #[error("dependency node not found: {dep_name}")]
     DependencyNodeNotFound { dep_name: String },
 
+    // === Cancellation ===
+    #[error("action cancelled")]
+    Cancelled,
+
     // === Cache/Picante Errors ===
     #[error("picante error: {0}")]
     Picante(String),
