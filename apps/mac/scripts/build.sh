@@ -37,6 +37,9 @@ if [[ ! -d "$APP_BUNDLE_PATH" ]]; then
   exit 1
 fi
 
+echo "Stripping embedded provisioning profiles (not valid for Developer ID)..."
+find "$APP_BUNDLE_PATH" -name "embedded.provisionprofile" -print -delete
+
 echo "Re-signing app bundle with '$SIGNING_IDENTITY' (inside-out)..."
 
 # Sign nested components first (inside-out), each with hardened runtime + timestamp
