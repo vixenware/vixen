@@ -344,6 +344,12 @@ pub struct NodeTiming {
     pub queued_ms: u64,
     /// Time spent executing
     pub execute_ms: u64,
+    /// Milliseconds from build start to when execution began
+    #[facet(default)]
+    pub start_offset_ms: u64,
+    /// Concurrency lane this action ran on (0-indexed)
+    #[facet(default)]
+    pub lane: u32,
 }
 
 // =============================================================================

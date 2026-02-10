@@ -78,6 +78,33 @@ svg .edge.highlight { stroke: var(--cyan); stroke-width: 2; }
 .legend { display: flex; gap: 12px; font-size: 11px; color: var(--fg3); }
 .legend .legend-item { display: flex; align-items: center; gap: 4px; }
 .legend .legend-swatch { width: 12px; height: 12px; border-radius: 2px; border: 1px solid; }
+
+.view-toggle { display: flex; gap: 0; }
+.view-toggle button { border-radius: 0; border-right-width: 0; }
+.view-toggle button:first-child { border-radius: 4px 0 0 4px; }
+.view-toggle button:last-child { border-radius: 0 4px 4px 0; border-right-width: 1px; }
+.view-toggle button.active { background: var(--blue); color: var(--bg); border-color: var(--blue); z-index: 1; position: relative; }
+
+.timeline-container { flex: 1; overflow: hidden; position: relative; }
+.timeline-container svg { width: 100%; height: 100%; }
+
+svg .lane-label { fill: var(--fg3); font-size: 11px; font-family: "SF Mono", "Fira Code", monospace; }
+svg .time-axis-text { fill: var(--fg3); font-size: 9px; font-family: "SF Mono", "Fira Code", monospace; }
+svg .time-axis-line { stroke: var(--border); stroke-width: 1; }
+svg .timeline-bar { cursor: pointer; }
+svg .timeline-bar rect { rx: 3; ry: 3; stroke-width: 1.5; }
+svg .timeline-bar rect.hit { fill: #1a2e1a; stroke: var(--green); }
+svg .timeline-bar rect.miss { fill: #2e1a1a; stroke: var(--red); }
+svg .timeline-bar rect.first { fill: #1a1a2e; stroke: var(--blue); }
+svg .timeline-bar rect.cancelled { fill: #1a1a1a; stroke: var(--fg3); }
+svg .timeline-bar rect.unknown { fill: var(--bg2); stroke: var(--fg3); }
+svg .timeline-bar rect.selected { stroke-width: 3; filter: brightness(1.3); }
+svg .timeline-bar rect.dimmed { opacity: 0.25; }
+svg .timeline-bar text { fill: var(--fg); font-size: 10px; font-family: "SF Mono", "Fira Code", monospace; }
+svg .timeline-bar text.dimmed { opacity: 0.25; }
+svg .timeline-bar .bar-duration { fill: var(--fg3); font-size: 9px; }
+svg .lane-stripe { fill: var(--bg); }
+svg .lane-stripe.alt { fill: var(--bg2); }
 </style>
 </head>
 <body>
@@ -88,6 +115,11 @@ svg .edge.highlight { stroke: var(--cyan); stroke-width: 2; }
 </header>
 
 <div class="toolbar">
+  <div class="view-toggle">
+    <button id="btn-view-graph" class="active" title="DAG graph view">Graph</button>
+    <button id="btn-view-timeline" title="Timeline / Gantt view">Timeline</button>
+  </div>
+  <div class="sep"></div>
   <input type="text" id="search" placeholder="Search nodes...">
   <div class="sep"></div>
   <button id="btn-critical" title="Highlight critical path">Critical path</button>
@@ -119,6 +151,11 @@ svg .edge.highlight { stroke: var(--cyan); stroke-width: 2; }
       <g id="graph-root"></g>
     </svg>
   </div>
+  <div class="timeline-container" id="timeline-container" style="display:none">
+    <svg id="timeline-svg">
+      <g id="timeline-root"></g>
+    </svg>
+  </div>
 
   <div class="sidebar" id="sidebar">
     <div class="detail-header" id="detail-header">
@@ -132,9 +169,9 @@ svg .edge.highlight { stroke: var(--cyan); stroke-width: 2; }
 
 <div class="tooltip" id="tooltip"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/elkjs@0.9.3/lib/elk.bundled.js"></script>
 <script type="module">
-// ELK.js loaded from CDN
-import ELK from 'https://cdn.jsdelivr.net/npm/elkjs@0.9.3/lib/elk.bundled.js';
+// ELK.js is loaded as a UMD global above
 
 const REPORT_DATA = __REPORT_DATA__;
 
@@ -715,12 +752,326 @@ document.getElementById('btn-zoom-out').addEventListener('click', () => {
   updateTransform();
 });
 
+// =====================================================
+// Timeline view
+// =====================================================
+
+const tlContainer = document.getElementById('timeline-container');
+const tlSvg = document.getElementById('timeline-svg');
+const tlRoot = document.getElementById('timeline-root');
+
+const ROW_HEIGHT = 40;
+const LANE_LABEL_WIDTH = 80;
+const TIME_HEADER_HEIGHT = 30;
+
+// Collect timeline data from node reports
+const timelineEntries = [];
+let maxLane = 0;
+let totalDuration = 0;
+for (const nr of report.nodes) {
+  if (nr.timing && nr.timing.start_offset_ms !== undefined && nr.timing.lane !== undefined) {
+    const endMs = nr.timing.start_offset_ms + nr.timing.execute_ms;
+    if (nr.timing.lane > maxLane) maxLane = nr.timing.lane;
+    if (endMs > totalDuration) totalDuration = endMs;
+    timelineEntries.push(nr);
+  }
+}
+// Ensure totalDuration is at least 1 to avoid division by zero
+if (totalDuration < 1) totalDuration = 1;
+
+// Compute timeline dimensions
+const timelineContentWidth = Math.max(2000, totalDuration * 0.5);
+const timelineFullWidth = LANE_LABEL_WIDTH + timelineContentWidth + 40;
+const timelineFullHeight = TIME_HEADER_HEIGHT + (maxLane + 1) * ROW_HEIGHT + 20;
+
+// Timeline bar elements for search/interaction
+const tlBarElements = new Map(); // nodeId -> { g, rect, label, durText }
+
+function renderTimeline() {
+  // Clear
+  while (tlRoot.firstChild) tlRoot.removeChild(tlRoot.firstChild);
+  tlBarElements.clear();
+
+  // Background: lane stripes
+  for (let lane = 0; lane <= maxLane; lane++) {
+    const stripe = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    stripe.setAttribute('x', 0);
+    stripe.setAttribute('y', TIME_HEADER_HEIGHT + lane * ROW_HEIGHT);
+    stripe.setAttribute('width', timelineFullWidth);
+    stripe.setAttribute('height', ROW_HEIGHT);
+    stripe.classList.add('lane-stripe');
+    if (lane % 2 === 1) stripe.classList.add('alt');
+    tlRoot.appendChild(stripe);
+  }
+
+  // Time axis ticks
+  let tickInterval;
+  if (totalDuration < 2000) tickInterval = 100;
+  else if (totalDuration < 10000) tickInterval = 500;
+  else tickInterval = 1000;
+
+  for (let t = 0; t <= totalDuration; t += tickInterval) {
+    const x = LANE_LABEL_WIDTH + (t / totalDuration) * timelineContentWidth;
+    // Tick line
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', x);
+    line.setAttribute('y1', TIME_HEADER_HEIGHT - 5);
+    line.setAttribute('x2', x);
+    line.setAttribute('y2', TIME_HEADER_HEIGHT + (maxLane + 1) * ROW_HEIGHT);
+    line.classList.add('time-axis-line');
+    tlRoot.appendChild(line);
+    // Tick label
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text.setAttribute('x', x);
+    text.setAttribute('y', TIME_HEADER_HEIGHT - 10);
+    text.setAttribute('text-anchor', 'middle');
+    text.classList.add('time-axis-text');
+    text.textContent = formatDuration(t);
+    tlRoot.appendChild(text);
+  }
+
+  // Axis baseline
+  const axisLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  axisLine.setAttribute('x1', LANE_LABEL_WIDTH);
+  axisLine.setAttribute('y1', TIME_HEADER_HEIGHT);
+  axisLine.setAttribute('x2', timelineFullWidth);
+  axisLine.setAttribute('y2', TIME_HEADER_HEIGHT);
+  axisLine.classList.add('time-axis-line');
+  tlRoot.appendChild(axisLine);
+
+  // Lane labels
+  for (let lane = 0; lane <= maxLane; lane++) {
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text.setAttribute('x', LANE_LABEL_WIDTH - 8);
+    text.setAttribute('y', TIME_HEADER_HEIGHT + lane * ROW_HEIGHT + ROW_HEIGHT / 2 + 4);
+    text.setAttribute('text-anchor', 'end');
+    text.classList.add('lane-label');
+    text.textContent = 'Lane ' + lane;
+    tlRoot.appendChild(text);
+  }
+
+  // Action bars
+  for (const nr of timelineEntries) {
+    const cc = cacheClass(nr);
+    const barX = LANE_LABEL_WIDTH + (nr.timing.start_offset_ms / totalDuration) * timelineContentWidth;
+    const barY = TIME_HEADER_HEIGHT + nr.timing.lane * ROW_HEIGHT + 4;
+    const barW = Math.max(2, (nr.timing.execute_ms / totalDuration) * timelineContentWidth);
+    const barH = ROW_HEIGHT - 8;
+
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.classList.add('timeline-bar');
+    g.dataset.nodeId = nr.node_id;
+
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', barX);
+    rect.setAttribute('y', barY);
+    rect.setAttribute('width', barW);
+    rect.setAttribute('height', barH);
+    rect.classList.add(cc);
+
+    // Clip path for text inside bar
+    const clipId = 'clip-' + nr.node_id.replace(/[^a-zA-Z0-9]/g, '_');
+    const clipPath = document.createElementNS('http://www.w3.org/2000/svg', 'clipPath');
+    clipPath.setAttribute('id', clipId);
+    const clipRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    clipRect.setAttribute('x', barX + 4);
+    clipRect.setAttribute('y', barY);
+    clipRect.setAttribute('width', Math.max(0, barW - 8));
+    clipRect.setAttribute('height', barH);
+    clipPath.appendChild(clipRect);
+    g.appendChild(clipPath);
+
+    // Label inside bar
+    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    label.setAttribute('x', barX + 6);
+    label.setAttribute('y', barY + barH / 2 + 1);
+    label.setAttribute('dominant-baseline', 'middle');
+    label.setAttribute('clip-path', `url(#${clipId})`);
+    label.textContent = nr.node_id;
+
+    // Duration text to the right of the bar
+    const durText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    durText.setAttribute('x', barX + barW + 4);
+    durText.setAttribute('y', barY + barH / 2 + 1);
+    durText.setAttribute('dominant-baseline', 'middle');
+    durText.classList.add('bar-duration');
+    durText.textContent = formatDuration(nr.timing.execute_ms);
+
+    g.appendChild(rect);
+    g.appendChild(label);
+    g.appendChild(durText);
+    tlRoot.appendChild(g);
+
+    tlBarElements.set(nr.node_id, { g, rect, label, durText });
+
+    // Tooltip
+    g.addEventListener('pointerenter', e => {
+      const cc2 = cacheClass(nr);
+      const cacheStr = cc2 === 'hit' ? 'cache hit' : cc2 === 'first' ? 'first build' : cc2 === 'miss' ? 'cache miss' : cc2;
+      tooltip.innerHTML = `
+        <div class="tt-title">${nr.node_id}</div>
+        <div class="tt-row">cache: <span class="tt-val">${cacheStr}</span></div>
+        <div class="tt-row">time: <span class="tt-val">${formatDuration(nr.timing.execute_ms)}</span></div>
+        <div class="tt-row">lane: <span class="tt-val">${nr.timing.lane}</span></div>
+        <div class="tt-row">start: <span class="tt-val">${formatDuration(nr.timing.start_offset_ms)}</span></div>
+      `;
+      tooltip.style.display = 'block';
+      positionTooltip(e);
+    });
+    g.addEventListener('pointermove', e => positionTooltip(e));
+    g.addEventListener('pointerleave', () => { tooltip.style.display = 'none'; });
+    g.addEventListener('click', () => selectNode(nr.node_id));
+  }
+}
+
+renderTimeline();
+
+// Timeline pan/zoom (separate state from DAG)
+let tlViewX = 0, tlViewY = 0, tlViewScale = 1;
+function updateTlTransform() {
+  tlRoot.setAttribute('transform', `translate(${tlViewX},${tlViewY}) scale(${tlViewScale})`);
+}
+
+function fitTimelineToViewport() {
+  if (timelineEntries.length === 0) return;
+  const pad = 40;
+  const cw = tlContainer.clientWidth;
+  const ch = tlContainer.clientHeight;
+  tlViewScale = Math.min((cw - 2 * pad) / timelineFullWidth, (ch - 2 * pad) / timelineFullHeight, 1.5);
+  tlViewX = (cw - timelineFullWidth * tlViewScale) / 2;
+  tlViewY = (ch - timelineFullHeight * tlViewScale) / 2;
+  updateTlTransform();
+}
+
+let tlIsPanning = false, tlPanStartX = 0, tlPanStartY = 0;
+tlSvg.addEventListener('pointerdown', e => {
+  if (e.target === tlSvg || e.target === tlRoot || e.target.classList.contains('lane-stripe')) {
+    tlIsPanning = true;
+    tlPanStartX = e.clientX - tlViewX;
+    tlPanStartY = e.clientY - tlViewY;
+    tlSvg.setPointerCapture(e.pointerId);
+  }
+});
+tlSvg.addEventListener('pointermove', e => {
+  if (tlIsPanning) {
+    tlViewX = e.clientX - tlPanStartX;
+    tlViewY = e.clientY - tlPanStartY;
+    updateTlTransform();
+  }
+});
+tlSvg.addEventListener('pointerup', () => { tlIsPanning = false; });
+tlSvg.addEventListener('wheel', e => {
+  e.preventDefault();
+  const rect = tlContainer.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const factor = e.deltaY < 0 ? 1.1 : 0.9;
+  const newScale = Math.max(0.05, Math.min(5, tlViewScale * factor));
+  tlViewX = mx - (mx - tlViewX) * (newScale / tlViewScale);
+  tlViewY = my - (my - tlViewY) * (newScale / tlViewScale);
+  tlViewScale = newScale;
+  updateTlTransform();
+}, { passive: false });
+
+// =====================================================
+// View switching
+// =====================================================
+
+let activeView = 'graph'; // 'graph' | 'timeline'
+const btnViewGraph = document.getElementById('btn-view-graph');
+const btnViewTimeline = document.getElementById('btn-view-timeline');
+const btnCritical = document.getElementById('btn-critical');
+const graphContainer = document.getElementById('graph-container');
+
+function switchView(view) {
+  activeView = view;
+  if (view === 'graph') {
+    graphContainer.style.display = '';
+    tlContainer.style.display = 'none';
+    btnViewGraph.classList.add('active');
+    btnViewTimeline.classList.remove('active');
+    btnCritical.style.display = '';
+  } else {
+    graphContainer.style.display = 'none';
+    tlContainer.style.display = '';
+    btnViewGraph.classList.remove('active');
+    btnViewTimeline.classList.add('active');
+    btnCritical.style.display = 'none';
+    fitTimelineToViewport();
+  }
+}
+
+btnViewGraph.addEventListener('click', () => switchView('graph'));
+btnViewTimeline.addEventListener('click', () => switchView('timeline'));
+
+// Override fit/zoom buttons to work for both views
+document.getElementById('btn-fit').addEventListener('click', () => {
+  if (activeView === 'timeline') fitTimelineToViewport();
+  // DAG fitToViewport is already bound and fires first; that's fine,
+  // it's harmless when graph-container is hidden
+});
+document.getElementById('btn-zoom-in').addEventListener('click', () => {
+  if (activeView === 'timeline') {
+    const cx = tlContainer.clientWidth / 2;
+    const cy = tlContainer.clientHeight / 2;
+    const factor = 1.3;
+    const newScale = Math.min(5, tlViewScale * factor);
+    tlViewX = cx - (cx - tlViewX) * (newScale / tlViewScale);
+    tlViewY = cy - (cy - tlViewY) * (newScale / tlViewScale);
+    tlViewScale = newScale;
+    updateTlTransform();
+  }
+});
+document.getElementById('btn-zoom-out').addEventListener('click', () => {
+  if (activeView === 'timeline') {
+    const cx = tlContainer.clientWidth / 2;
+    const cy = tlContainer.clientHeight / 2;
+    const factor = 0.77;
+    const newScale = Math.max(0.05, tlViewScale * factor);
+    tlViewX = cx - (cx - tlViewX) * (newScale / tlViewScale);
+    tlViewY = cy - (cy - tlViewY) * (newScale / tlViewScale);
+    tlViewScale = newScale;
+    updateTlTransform();
+  }
+});
+
+// Extend search to also handle timeline bars
+searchInput.addEventListener('input', () => {
+  if (activeView !== 'timeline') return;
+  const q = searchInput.value.toLowerCase().trim();
+  if (!q) {
+    for (const [, entry] of tlBarElements) {
+      entry.rect.classList.remove('dimmed');
+      entry.label.classList.remove('dimmed');
+      entry.durText.classList.remove('dimmed');
+    }
+    return;
+  }
+  for (const [nodeId, entry] of tlBarElements) {
+    if (nodeId.toLowerCase().includes(q)) {
+      entry.rect.classList.remove('dimmed');
+      entry.label.classList.remove('dimmed');
+      entry.durText.classList.remove('dimmed');
+    } else {
+      entry.rect.classList.add('dimmed');
+      entry.label.classList.add('dimmed');
+      entry.durText.classList.add('dimmed');
+    }
+  }
+});
+
 // Keyboard shortcuts
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     sidebar.classList.remove('open');
     selectedNodeId = null;
     highlightNode(null);
+    // Also clear timeline dimming
+    for (const [, entry] of tlBarElements) {
+      entry.rect.classList.remove('dimmed', 'selected');
+      entry.label.classList.remove('dimmed');
+      entry.durText.classList.remove('dimmed');
+    }
     searchInput.value = '';
     searchInput.dispatchEvent(new Event('input'));
   }

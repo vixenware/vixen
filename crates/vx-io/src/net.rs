@@ -243,7 +243,7 @@ impl Listener {
                 Ok((Stream::Tcp(stream), addr.to_string()))
             }
             Listener::Local { listener, .. } => {
-                let mut guard = listener.lock().await;
+                let guard = listener.lock().await;
                 let stream = guard.accept().await?;
                 #[cfg(unix)]
                 return Ok((Stream::Local(stream), "local".to_string()));

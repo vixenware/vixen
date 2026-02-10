@@ -129,6 +129,9 @@ enum ExecutorMessage {
     ActionCompleted {
         node_idx: NodeIndex,
         result: Result<ActionResult, VxdError>,
+        execute_ms: u64,
+        start_offset_ms: u64,
+        lane: u32,
     },
 }
 
@@ -154,6 +157,9 @@ impl Drop for CompletionGuard {
             let _ = tx.send(ExecutorMessage::ActionCompleted {
                 node_idx: self.node_idx,
                 result: Err(VxdError::Cancelled),
+                execute_ms: 0,
+                start_offset_ms: 0,
+                lane: 0,
             });
         }
     }
@@ -200,6 +206,15 @@ pub struct Executor {
 
     /// Picante database (Arc-shareable with internal synchronization)
     db: Arc<crate::db::Database>,
+
+    /// Per-node timing data: (execute_ms, start_offset_ms, lane)
+    node_timings: HashMap<NodeIndex, (u64, u64, u32)>,
+
+    /// Build start instant for computing start_offset_ms
+    build_start: std::time::Instant,
+
+    /// Free-list of concurrency lane IDs (0..max_concurrency)
+    free_lanes: Arc<tokio::sync::Mutex<Vec<u32>>>,
 
     /// Execution statistics (owned by executor)
     stats: ExecutionStats,
@@ -313,6 +328,11 @@ impl Executor {
             cas,
             exec,
             db,
+            node_timings: HashMap::new(),
+            build_start: std::time::Instant::now(),
+            free_lanes: Arc::new(tokio::sync::Mutex::new(
+                (0..max_concurrency as u32).collect(),
+            )),
             stats: ExecutionStats::default(),
             first_error: None,
             workspace_root,
@@ -387,6 +407,7 @@ impl Executor {
     /// Main execution loop
     pub async fn execute(&mut self) -> Result<(), VxdError> {
         info!("starting action graph execution");
+        self.build_start = std::time::Instant::now();
 
         let result = self.execute_inner().await;
 
@@ -436,10 +457,21 @@ impl Executor {
 
             // Wait for a completion message
             match self.message_rx.recv().await {
-                Some(ExecutorMessage::ActionCompleted { node_idx, result }) => {
+                Some(ExecutorMessage::ActionCompleted {
+                    node_idx,
+                    result,
+                    execute_ms,
+                    start_offset_ms,
+                    lane,
+                }) => {
+                    self.node_timings
+                        .insert(node_idx, (execute_ms, start_offset_ms, lane));
                     match result {
                         Ok(action_result) => {
-                            debug!("action {:?} completed successfully", node_idx);
+                            debug!(
+                                "action {:?} completed successfully ({execute_ms}ms)",
+                                node_idx
+                            );
                             self.states.insert(node_idx, ActionState::Completed);
                             self.results.write().await.insert(node_idx, action_result);
 
@@ -480,6 +512,7 @@ impl Executor {
         let mut rebuilt = 0;
         let mut bin_output = None;
         let mut node_reports = Vec::new();
+        let node_timings = &self.node_timings;
 
         for (node_idx, result) in results_lock.iter() {
             let action = &self.graph.graph[*node_idx].action;
@@ -512,7 +545,16 @@ impl Executor {
                                 reason: vx_report::MissReason::FirstBuild,
                             }
                         },
-                        timing: vx_report::NodeTiming::default(),
+                        timing: {
+                            let &(exec, start, ln) =
+                                node_timings.get(node_idx).unwrap_or(&(0, 0, 0));
+                            vx_report::NodeTiming {
+                                execute_ms: exec,
+                                start_offset_ms: start,
+                                lane: ln,
+                                ..Default::default()
+                            }
+                        },
                         inputs: vec![],
                         deps: vec![],
                         outputs: vec![vx_report::OutputRecord {
@@ -552,7 +594,16 @@ impl Executor {
                                 reason: vx_report::MissReason::FirstBuild,
                             }
                         },
-                        timing: vx_report::NodeTiming::default(),
+                        timing: {
+                            let &(exec, start, ln) =
+                                node_timings.get(node_idx).unwrap_or(&(0, 0, 0));
+                            vx_report::NodeTiming {
+                                execute_ms: exec,
+                                start_offset_ms: start,
+                                lane: ln,
+                                ..Default::default()
+                            }
+                        },
                         inputs: vec![],
                         deps: vec![],
                         outputs: vec![vx_report::OutputRecord {
@@ -591,7 +642,16 @@ impl Executor {
                                 reason: vx_report::MissReason::FirstBuild,
                             }
                         },
-                        timing: vx_report::NodeTiming::default(),
+                        timing: {
+                            let &(exec, start, ln) =
+                                node_timings.get(node_idx).unwrap_or(&(0, 0, 0));
+                            vx_report::NodeTiming {
+                                execute_ms: exec,
+                                start_offset_ms: start,
+                                lane: ln,
+                                ..Default::default()
+                            }
+                        },
                         inputs: vec![vx_report::InputRecord {
                             label: "crate".to_string(),
                             value: format!("{}:{}", name, version),
@@ -655,7 +715,16 @@ impl Executor {
                                 reason: vx_report::MissReason::KeyNotFound,
                             }
                         },
-                        timing: vx_report::NodeTiming::default(),
+                        timing: {
+                            let &(exec, start, ln) =
+                                node_timings.get(node_idx).unwrap_or(&(0, 0, 0));
+                            vx_report::NodeTiming {
+                                execute_ms: exec,
+                                start_offset_ms: start,
+                                lane: ln,
+                                ..Default::default()
+                            }
+                        },
                         inputs: vec![vx_report::InputRecord {
                             label: "source_closure".to_string(),
                             value: crate_id.to_string(),
@@ -696,7 +765,16 @@ impl Executor {
                                 reason: vx_report::MissReason::FirstBuild,
                             }
                         },
-                        timing: vx_report::NodeTiming::default(),
+                        timing: {
+                            let &(exec, start, ln) =
+                                node_timings.get(node_idx).unwrap_or(&(0, 0, 0));
+                            vx_report::NodeTiming {
+                                execute_ms: exec,
+                                start_offset_ms: start,
+                                lane: ln,
+                                ..Default::default()
+                            }
+                        },
                         inputs: vec![],
                         deps: vec![],
                         outputs: vec![vx_report::OutputRecord {
@@ -733,7 +811,16 @@ impl Executor {
                                 reason: vx_report::MissReason::KeyNotFound,
                             }
                         },
-                        timing: vx_report::NodeTiming::default(),
+                        timing: {
+                            let &(exec, start, ln) =
+                                node_timings.get(node_idx).unwrap_or(&(0, 0, 0));
+                            vx_report::NodeTiming {
+                                execute_ms: exec,
+                                start_offset_ms: start,
+                                lane: ln,
+                                ..Default::default()
+                            }
+                        },
                         inputs: vec![],
                         deps: vec![],
                         outputs: vec![vx_report::OutputRecord {
@@ -773,7 +860,16 @@ impl Executor {
                                 reason: vx_report::MissReason::KeyNotFound,
                             }
                         },
-                        timing: vx_report::NodeTiming::default(),
+                        timing: {
+                            let &(exec, start, ln) =
+                                node_timings.get(node_idx).unwrap_or(&(0, 0, 0));
+                            vx_report::NodeTiming {
+                                execute_ms: exec,
+                                start_offset_ms: start,
+                                lane: ln,
+                                ..Default::default()
+                            }
+                        },
                         inputs: vec![],
                         deps: vec![],
                         outputs: vec![vx_report::OutputRecord {
@@ -815,6 +911,8 @@ impl Executor {
         let rust_toolchain_spec = self.graph.rust_toolchain_spec.clone();
         let macos_commandlinetools_version = self.macos_commandlinetools_version.clone();
         let cancel_token = self.cancel_token.clone();
+        let free_lanes = self.free_lanes.clone();
+        let build_start = self.build_start;
 
         self.in_flight.spawn(async move {
             // Drop guard: if this task is aborted (e.g. by JoinSet::abort_all), send
@@ -860,9 +958,14 @@ impl Executor {
                 }
             });
 
-            debug!("calling execute_action for {:?}", node_idx);
+            // Acquire a lane ID for timeline tracking
+            let lane = free_lanes.lock().await.pop().unwrap_or(0);
 
-            // Execute action with cancellation support
+            debug!("calling execute_action for {:?} on lane {}", node_idx, lane);
+
+            // Execute action with cancellation support, measuring wall-clock time
+            let execute_start = std::time::Instant::now();
+            let start_offset_ms = execute_start.duration_since(build_start).as_millis() as u64;
             let result = tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => {
@@ -898,10 +1001,21 @@ impl Executor {
                 let _ = listener.complete_action(id).await;
             }
 
+            let execute_ms = execute_start.elapsed().as_millis() as u64;
+
+            // Release the lane back to the pool
+            free_lanes.lock().await.push(lane);
+
             debug!("sending completion message for {:?}", node_idx);
             // Send result back to executor — disarm the drop guard since we're sending explicitly
             _completion_guard.disarm();
-            let _ = message_tx.send(ExecutorMessage::ActionCompleted { node_idx, result });
+            let _ = message_tx.send(ExecutorMessage::ActionCompleted {
+                node_idx,
+                result,
+                execute_ms,
+                start_offset_ms,
+                lane,
+            });
 
             debug!("done for {:?}", node_idx);
             // Permit dropped here, allowing next action to run

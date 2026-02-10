@@ -162,7 +162,7 @@ impl TuiHandle {
     /// Background task that updates the display at ~15fps
     async fn display_task(state: Arc<RwLock<TuiState>>, shutdown_tx: oneshot::Sender<()>) {
         let multi = MultiProgress::new();
-        multi.set_move_cursor(true);
+        multi.set_move_cursor(false); // can't set it to true, we add/remove tasks dynamically
 
         // Main progress bar
         let progress_bar = multi.add(ProgressBar::new(100));
