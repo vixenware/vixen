@@ -43,8 +43,8 @@ targets:
         INFOPLIST_FILE: Vixen/Info.plist
         GENERATE_INFOPLIST_FILE: false
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: 0.2.0
-        CURRENT_PROJECT_VERSION: 0.2.0
+        MARKETING_VERSION: 0.3.0
+        CURRENT_PROJECT_VERSION: 0.3.0
         SPARKLE_FEED_URL: ""
         SPARKLE_PUBLIC_ED_KEY: ""
     dependencies:
