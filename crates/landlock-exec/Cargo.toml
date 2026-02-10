@@ -12,3 +12,4 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.4"
+libc = { workspace = true }

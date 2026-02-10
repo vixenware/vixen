@@ -102,6 +102,12 @@ pub async fn run_sandboxed_command(
     unsafe {
         cmd.pre_exec(|| {
             libc::setpgid(0, 0);
+            // On Linux: if vx-runner dies, kernel sends SIGKILL to this child.
+            // Survives exec() through landlock-exec → rustc.
+            #[cfg(target_os = "linux")]
+            {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            }
             Ok(())
         });
     }
@@ -182,6 +188,9 @@ pub async fn run_sandboxed_command(
         }
     });
 
+    // Grab the PID before wait (child.id() returns None after exit)
+    let pid = child.id();
+
     // Wait for child with timeout
     let result = tokio::time::timeout(timeout, child.wait()).await;
 
@@ -190,8 +199,11 @@ pub async fn run_sandboxed_command(
 
     match result {
         Ok(Ok(exit_status)) => {
-            // Child exited normally (possibly with non-zero exit code).
-            // Wait for readers to drain.
+            // Child exited — kill any orphaned children in the process group.
+            // No-op if all children already exited.
+            if let Some(pid) = pid {
+                reap_process_group(pid);
+            }
             let _ = stdout_task.await;
             let _ = stderr_task.await;
             let output = combined_output.lock().await.clone();
@@ -201,23 +213,24 @@ pub async fn run_sandboxed_command(
             })
         }
         Ok(Err(io_err)) => {
-            // IO error waiting for child — treat like spawn failure
+            if let Some(pid) = pid {
+                reap_process_group(pid);
+            }
             let _ = stdout_task.await;
             let _ = stderr_task.await;
             Err(CommandError::SpawnFailed(io_err))
         }
         Err(_elapsed) => {
-            // Timeout — kill the process group
-            let pid = child.id();
+            // Timeout — gracefully terminate the process group (SIGTERM → SIGKILL)
             tracing::error!(
                 action_desc,
                 ?pid,
                 timeout_secs = timeout.as_secs(),
-                "action timed out, killing process group"
+                "action timed out, terminating process group"
             );
 
             if let Some(pid) = pid {
-                kill_process_group(pid);
+                terminate_process_group(pid).await;
             }
             // Also try the tokio kill as a fallback
             let _ = child.kill().await;
@@ -236,24 +249,59 @@ pub async fn run_sandboxed_command(
     }
 }
 
-/// Kill an entire process group by sending SIGKILL to the negative PID.
+/// How long to wait between SIGTERM and SIGKILL when terminating a process group.
+const SIGTERM_GRACE_PERIOD: Duration = Duration::from_secs(5);
+
+/// Gracefully terminate a process group: SIGTERM first, then SIGKILL after a grace period.
 #[cfg(unix)]
-fn kill_process_group(pid: u32) {
+async fn terminate_process_group(pid: u32) {
     let pgid = pid as libc::pid_t;
-    // Kill the entire process group (negative PID)
+
+    // Phase 1: SIGTERM — give the process group a chance to clean up
     unsafe {
-        libc::kill(-pgid, libc::SIGKILL);
+        libc::killpg(pgid, libc::SIGTERM);
     }
-    // Also kill the process itself in case setpgid didn't take effect
+
+    // Wait for the grace period, checking if the group leader is still alive
+    let deadline = tokio::time::Instant::now() + SIGTERM_GRACE_PERIOD;
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let alive = unsafe { libc::kill(pgid, 0) };
+        if alive != 0 {
+            // Process is gone (ESRCH), no need for SIGKILL
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+    }
+
+    // Phase 2: SIGKILL — force kill the entire group
+    tracing::warn!(
+        pgid,
+        "process group did not exit after SIGTERM, sending SIGKILL"
+    );
     unsafe {
-        libc::kill(pgid, libc::SIGKILL);
+        libc::killpg(pgid, libc::SIGKILL);
+    }
+}
+
+/// Send SIGKILL to a process group immediately (no grace period).
+/// Used after normal exit to reap any orphaned children.
+#[cfg(unix)]
+fn reap_process_group(pid: u32) {
+    let pgid = pid as libc::pid_t;
+    // Best-effort: kill any lingering children. Returns ESRCH if already gone.
+    unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
     }
 }
 
 #[cfg(not(unix))]
-fn kill_process_group(_pid: u32) {
-    // On non-unix, rely on tokio's child.kill() fallback
-}
+async fn terminate_process_group(_pid: u32) {}
+
+#[cfg(not(unix))]
+fn reap_process_group(_pid: u32) {}
 
 /// The seatbelt profile (SBPL) used for all sandboxed subprocesses.
 ///
@@ -379,9 +427,7 @@ pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
     // Try to find landlock-exec in the same directory as the current executable
     let landlock_exec = std::env::current_exe()
         .ok()
-        .and_then(|exe| {
-            exe.parent().map(|dir| dir.join("landlock-exec"))
-        })
+        .and_then(|exe| exe.parent().map(|dir| dir.join("landlock-exec")))
         .filter(|path| path.exists())
         .unwrap_or_else(|| "landlock-exec".into());
 
@@ -412,6 +458,9 @@ pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn sandboxed_command(program: &str, _action: &ActionContext) -> Command {
-    tracing::trace!(program, "sandboxed_command: no sandbox (unsupported platform)");
+    tracing::trace!(
+        program,
+        "sandboxed_command: no sandbox (unsupported platform)"
+    );
     Command::new(program)
 }

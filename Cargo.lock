@@ -1430,6 +1430,7 @@ name = "landlock-exec"
 version = "0.1.0"
 dependencies = [
  "landlock",
+ "libc",
 ]
 
 [[package]]

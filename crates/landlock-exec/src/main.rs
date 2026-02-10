@@ -186,6 +186,13 @@ fn run() -> Result<(), String> {
         return Err(format!("sandbox not fully enforced: {:?}", status.ruleset));
     }
 
+    // Defense-in-depth: re-set PR_SET_PDEATHSIG right before exec.
+    // vx-runner's pre_exec already sets this, and it survives exec(), but
+    // re-setting it here guards against anything that might have cleared it.
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+    }
+
     eprintln!("landlock-exec: exec'ing {}", args.program);
 
     // Replace this process with the target program
