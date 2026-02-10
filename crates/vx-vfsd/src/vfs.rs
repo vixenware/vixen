@@ -30,7 +30,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use camino::Utf8PathBuf;
 use vixenfs_proto::{
@@ -83,6 +84,153 @@ pub struct PrefixEntry {
 
 /// Block size for L2 disk cache. 64 KiB matches typical FUSE read sizes.
 const BLOCK_SIZE: u64 = 64 * 1024;
+const ROOT_ITEM_ID: ItemId = 1;
+const VIXENFS_DIR_ID: ItemId = 2;
+const STATS_JSON_ID: ItemId = 3;
+const VIXENFS_DIR_NAME: &str = ".vixenfs";
+const STATS_JSON_NAME: &str = "stats.json";
+const RECORDING_NAME: &str = "recording";
+
+struct OpStats {
+    count: AtomicU64,
+    errors: AtomicU64,
+    total_latency_ns: AtomicU64,
+    max_latency_ns: AtomicU64,
+}
+
+impl OpStats {
+    const fn new() -> Self {
+        Self {
+            count: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            total_latency_ns: AtomicU64::new(0),
+            max_latency_ns: AtomicU64::new(0),
+        }
+    }
+
+    fn snapshot(&self) -> OpStatsSnapshot {
+        OpStatsSnapshot {
+            count: self.count.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
+            total_latency_ns: self.total_latency_ns.load(Ordering::Relaxed),
+            max_latency_ns: self.max_latency_ns.load(Ordering::Relaxed),
+        }
+    }
+
+    fn record(&self, latency: std::time::Duration, is_error: bool) {
+        let latency_ns = latency.as_nanos() as u64;
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.total_latency_ns
+            .fetch_add(latency_ns, Ordering::Relaxed);
+        if is_error {
+            self.errors.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let _ = self
+            .max_latency_ns
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                if latency_ns > current {
+                    Some(latency_ns)
+                } else {
+                    None
+                }
+            });
+    }
+}
+
+impl Default for OpStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Default)]
+struct VfsStats {
+    lookup: OpStats,
+    get_attributes: OpStats,
+    read_dir: OpStats,
+    read: OpStats,
+    write: OpStats,
+    read_requested_bytes: AtomicU64,
+    read_returned_bytes: AtomicU64,
+    write_bytes: AtomicU64,
+    l2_hits: AtomicU64,
+    l2_misses: AtomicU64,
+    cas_read_ops: AtomicU64,
+    cas_read_bytes: AtomicU64,
+}
+
+impl VfsStats {
+    fn snapshot(&self) -> VfsStatsSnapshot {
+        VfsStatsSnapshot {
+            lookup: self.lookup.snapshot(),
+            get_attributes: self.get_attributes.snapshot(),
+            read_dir: self.read_dir.snapshot(),
+            read: self.read.snapshot(),
+            write: self.write.snapshot(),
+            read_requested_bytes: self.read_requested_bytes.load(Ordering::Relaxed),
+            read_returned_bytes: self.read_returned_bytes.load(Ordering::Relaxed),
+            write_bytes: self.write_bytes.load(Ordering::Relaxed),
+            l2_hits: self.l2_hits.load(Ordering::Relaxed),
+            l2_misses: self.l2_misses.load(Ordering::Relaxed),
+            cas_read_ops: self.cas_read_ops.load(Ordering::Relaxed),
+            cas_read_bytes: self.cas_read_bytes.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone, facet::Facet)]
+struct OpStatsSnapshot {
+    count: u64,
+    errors: u64,
+    total_latency_ns: u64,
+    max_latency_ns: u64,
+}
+
+#[derive(Debug, Clone, facet::Facet)]
+struct VfsStatsSnapshot {
+    lookup: OpStatsSnapshot,
+    get_attributes: OpStatsSnapshot,
+    read_dir: OpStatsSnapshot,
+    read: OpStatsSnapshot,
+    write: OpStatsSnapshot,
+    read_requested_bytes: u64,
+    read_returned_bytes: u64,
+    write_bytes: u64,
+    l2_hits: u64,
+    l2_misses: u64,
+    cas_read_ops: u64,
+    cas_read_bytes: u64,
+}
+
+#[derive(Debug, Clone, facet::Facet)]
+struct RecordingInstructions {
+    enable: String,
+    disable: String,
+    status: String,
+}
+
+#[derive(Debug, Clone, facet::Facet)]
+struct RecordingState {
+    enabled: bool,
+    instructions: RecordingInstructions,
+}
+
+#[derive(Debug, Clone, facet::Facet)]
+struct DiagnosticsState {
+    enabled: bool,
+    shm: Option<String>,
+    message: Option<String>,
+}
+
+#[derive(Debug, Clone, facet::Facet)]
+struct StatsSnapshot {
+    unix_time_s: u64,
+    uptime_ms: u64,
+    recording: RecordingState,
+    stats: VfsStatsSnapshot,
+    diagnostics: DiagnosticsState,
+}
 
 /// CAS-backed VFS implementation
 pub struct CasVfs {
@@ -98,6 +246,9 @@ pub struct CasVfs {
     /// Stores fixed-size blocks: `{cache_dir}/{hex[..2]}/{hex}.{block_idx}`.
     /// None if VX_HOME is not set.
     disk_cache_dir: Option<Utf8PathBuf>,
+    recording_enabled: AtomicBool,
+    stats: VfsStats,
+    started_at: Instant,
 }
 
 impl CasVfs {
@@ -113,9 +264,9 @@ impl CasVfs {
 
         // Create root directory (ID 1)
         items.insert(
-            1,
+            ROOT_ITEM_ID,
             VfsItem {
-                id: 1,
+                id: ROOT_ITEM_ID,
                 parent_id: 0, // root has no parent
                 name: String::new(),
                 item_type: ItemType::Directory,
@@ -126,18 +277,132 @@ impl CasVfs {
             },
         );
 
+        items.insert(
+            VIXENFS_DIR_ID,
+            VfsItem {
+                id: VIXENFS_DIR_ID,
+                parent_id: ROOT_ITEM_ID,
+                name: VIXENFS_DIR_NAME.to_string(),
+                item_type: ItemType::Directory,
+                mode: mode::DIRECTORY,
+                cas_hash: None,
+                size: 0,
+                write_buffer: None,
+            },
+        );
+        items.insert(
+            STATS_JSON_ID,
+            VfsItem {
+                id: STATS_JSON_ID,
+                parent_id: VIXENFS_DIR_ID,
+                name: STATS_JSON_NAME.to_string(),
+                item_type: ItemType::File,
+                mode: mode::FILE_REGULAR,
+                cas_hash: None,
+                size: 0,
+                write_buffer: None,
+            },
+        );
+
         Self {
             cas,
             items: DiagnosticRwLock::new("CasVfs::items", items),
             prefixes: DiagnosticRwLock::new("CasVfs::prefixes", HashMap::new()),
-            next_id: AtomicU64::new(2), // 1 is root
+            next_id: AtomicU64::new(4), // 1=root, 2=.vixenfs, 3=stats.json
             disk_cache_dir,
+            recording_enabled: AtomicBool::new(false),
+            stats: VfsStats::default(),
+            started_at: Instant::now(),
         }
     }
 
     /// Allocate a new ItemId
     fn alloc_id(&self) -> ItemId {
         self.next_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn recording_instructions() -> RecordingInstructions {
+        RecordingInstructions {
+            enable: format!("touch /{VIXENFS_DIR_NAME}/{RECORDING_NAME}"),
+            disable: format!("rm /{VIXENFS_DIR_NAME}/{RECORDING_NAME}"),
+            status: format!("stat /{VIXENFS_DIR_NAME}/{RECORDING_NAME}"),
+        }
+    }
+
+    fn should_record(&self) -> bool {
+        self.recording_enabled.load(Ordering::Relaxed)
+    }
+
+    fn record_op(&self, stats: &OpStats, started_at: Instant, error: i32) {
+        if !self.should_record() {
+            return;
+        }
+        stats.record(started_at.elapsed(), error != errno::OK);
+    }
+
+    fn recording_item_id(&self, items: &HashMap<ItemId, VfsItem>) -> Option<ItemId> {
+        items
+            .values()
+            .find(|item| item.parent_id == VIXENFS_DIR_ID && item.name == RECORDING_NAME)
+            .map(|item| item.id)
+    }
+
+    fn is_virtual_protected_item(&self, item_id: ItemId) -> bool {
+        item_id == ROOT_ITEM_ID || item_id == VIXENFS_DIR_ID || item_id == STATS_JSON_ID
+    }
+
+    fn virtual_size(&self, item_id: ItemId) -> Option<u64> {
+        match item_id {
+            STATS_JSON_ID => Some(self.render_stats_json().len() as u64),
+            _ => None,
+        }
+    }
+
+    fn render_stats_json(&self) -> Vec<u8> {
+        let unix_time_s = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let diagnostics = {
+            #[cfg(feature = "diagnostics")]
+            {
+                DiagnosticsState {
+                    enabled: true,
+                    shm: Some(roam_shm::dump_all_state()),
+                    message: None,
+                }
+            }
+            #[cfg(not(feature = "diagnostics"))]
+            {
+                DiagnosticsState {
+                    enabled: false,
+                    shm: None,
+                    message: Some(
+                        "diagnostics unavailable (build without diagnostics feature)".to_string(),
+                    ),
+                }
+            }
+        };
+
+        let snapshot = StatsSnapshot {
+            unix_time_s,
+            uptime_ms: self.started_at.elapsed().as_millis() as u64,
+            recording: RecordingState {
+                enabled: self.should_record(),
+                instructions: Self::recording_instructions(),
+            },
+            stats: self.stats.snapshot(),
+            diagnostics,
+        };
+
+        let json = facet_json::to_string_pretty(&snapshot).unwrap_or_else(|error| {
+            format!(
+                "{{\"error\":\"failed to render stats\",\"details\":\"{}\"}}",
+                error
+            )
+        });
+        let mut bytes = json.into_bytes();
+        bytes.push(b'\n');
+        bytes
     }
 
     /// Compute the disk cache path for a block of a blob.
@@ -158,6 +423,7 @@ impl CasVfs {
         hash: Blake3Hash,
         offset: u64,
         len: u64,
+        record_metrics: bool,
     ) -> Result<Vec<u8>, String> {
         let first_block = offset / BLOCK_SIZE;
         let last_block = (offset + len).saturating_sub(1) / BLOCK_SIZE;
@@ -171,6 +437,9 @@ impl CasVfs {
             let block_data = if let Some(path) = self.block_cache_path(&hash, block_idx) {
                 match tokio::fs::read(path.as_std_path()).await {
                     Ok(data) => {
+                        if record_metrics {
+                            self.stats.l2_hits.fetch_add(1, Ordering::Relaxed);
+                        }
                         tracing::trace!(%hash, block_idx, "L2 block cache hit");
                         Some(data)
                     }
@@ -188,11 +457,20 @@ impl CasVfs {
             let block_data = match block_data {
                 Some(data) => data,
                 None => {
+                    if record_metrics {
+                        self.stats.l2_misses.fetch_add(1, Ordering::Relaxed);
+                    }
                     let data = match self.cas.get_blob_range(hash, block_start, BLOCK_SIZE).await {
                         Ok(Some(data)) => data,
                         Ok(None) => return Err(format!("blob {hash} not found in CAS")),
                         Err(e) => return Err(format!("CAS range read error: {e}")),
                     };
+                    if record_metrics {
+                        self.stats.cas_read_ops.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .cas_read_bytes
+                            .fetch_add(data.len() as u64, Ordering::Relaxed);
+                    }
 
                     // Write-through to L2 disk cache
                     if let Some(path) = self.block_cache_path(&hash, block_idx)
@@ -480,23 +758,27 @@ impl CasVfs {
 
 impl Vfs for CasVfs {
     async fn lookup(&self, _cx: &roam::Context, parent_id: ItemId, name: String) -> LookupResult {
+        let started_at = Instant::now();
         tracing::trace!(parent_id, name = %name, "VFS lookup");
 
         let items = self.items.read();
         for item in items.values() {
             if item.parent_id == parent_id && item.name == name {
                 tracing::trace!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found");
-                return LookupResult {
+                let result = LookupResult {
                     attrs: ItemAttributes {
                         item_id: item.id,
                         item_type: item.item_type,
-                        size: item.size,
+                        size: self.virtual_size(item.id).unwrap_or(item.size),
                         modified_time: 0,
                         created_time: 0,
                         mode: item.mode,
                     },
                     error: errno::OK,
                 };
+                drop(items);
+                self.record_op(&self.stats.lookup, started_at, result.error);
+                return result;
             }
         }
 
@@ -507,7 +789,7 @@ impl Vfs for CasVfs {
             .map(|i| i.name.as_str())
             .collect();
         tracing::debug!(parent_id, name = %name, ?children, "VFS lookup -> NOT FOUND");
-        LookupResult {
+        let result = LookupResult {
             attrs: ItemAttributes {
                 item_id: 0,
                 item_type: ItemType::File,
@@ -517,19 +799,23 @@ impl Vfs for CasVfs {
                 mode: 0,
             },
             error: errno::ENOENT,
-        }
+        };
+        drop(items);
+        self.record_op(&self.stats.lookup, started_at, result.error);
+        result
     }
 
     async fn get_attributes(&self, _cx: &roam::Context, item_id: ItemId) -> GetAttributesResult {
+        let started_at = Instant::now();
         tracing::trace!(item_id, "VFS get_attributes");
 
         let items = self.items.read();
-        match items.get(&item_id) {
+        let result = match items.get(&item_id) {
             Some(item) => GetAttributesResult {
                 attrs: ItemAttributes {
                     item_id: item.id,
                     item_type: item.item_type,
-                    size: item.size,
+                    size: self.virtual_size(item.id).unwrap_or(item.size),
                     modified_time: 0,
                     created_time: 0,
                     mode: item.mode,
@@ -547,14 +833,18 @@ impl Vfs for CasVfs {
                 },
                 error: errno::ENOENT,
             },
-        }
+        };
+        drop(items);
+        self.record_op(&self.stats.get_attributes, started_at, result.error);
+        result
     }
 
     async fn read_dir(&self, _cx: &roam::Context, item_id: ItemId, cursor: u64) -> ReadDirResult {
+        let started_at = Instant::now();
         tracing::trace!(item_id, cursor, "VFS read_dir");
 
         let items = self.items.read();
-        match items.get(&item_id) {
+        let result = match items.get(&item_id) {
             Some(item) if item.item_type == ItemType::Directory => {
                 let children: Vec<_> = items.values().filter(|i| i.parent_id == item_id).collect();
 
@@ -566,7 +856,7 @@ impl Vfs for CasVfs {
                         name: child.name.clone(),
                         item_id: child.id,
                         item_type: child.item_type,
-                        size: child.size,
+                        size: self.virtual_size(child.id).unwrap_or(child.size),
                         modified_time: 0,
                         created_time: 0,
                         mode: child.mode,
@@ -596,7 +886,10 @@ impl Vfs for CasVfs {
                 next_cursor: 0,
                 error: errno::ENOENT,
             },
-        }
+        };
+        drop(items);
+        self.record_op(&self.stats.read_dir, started_at, result.error);
+        result
     }
 
     async fn read(
@@ -606,34 +899,74 @@ impl Vfs for CasVfs {
         offset: u64,
         len: u64,
     ) -> ReadResult {
+        let started_at = Instant::now();
+        let record_metrics = self.should_record();
         tracing::trace!(item_id, offset, len, "VFS read");
+
+        if item_id == STATS_JSON_ID {
+            let data = self.render_stats_json();
+            let start = (offset as usize).min(data.len());
+            let end = ((offset + len) as usize).min(data.len());
+            let sliced = data[start..end].to_vec();
+            if record_metrics {
+                self.stats
+                    .read_requested_bytes
+                    .fetch_add(len, Ordering::Relaxed);
+                self.stats
+                    .read_returned_bytes
+                    .fetch_add(sliced.len() as u64, Ordering::Relaxed);
+            }
+            let result = ReadResult {
+                data: sliced,
+                error: errno::OK,
+            };
+            self.record_op(&self.stats.read, started_at, result.error);
+            return result;
+        }
 
         // Extract what we need while holding the read lock — slice the write buffer
         // in-place instead of cloning the entire Vec<u8>.
         let cas_hash = {
             let items = self.items.read();
             let Some(item) = items.get(&item_id) else {
-                return ReadResult {
+                let result = ReadResult {
                     data: Vec::new(),
                     error: errno::ENOENT,
                 };
+                drop(items);
+                self.record_op(&self.stats.read, started_at, result.error);
+                return result;
             };
 
             if item.item_type != ItemType::File {
-                return ReadResult {
+                let result = ReadResult {
                     data: Vec::new(),
                     error: errno::EISDIR,
                 };
+                drop(items);
+                self.record_op(&self.stats.read, started_at, result.error);
+                return result;
             }
 
             // If there's buffered write data, serve from that (it's newer than CAS)
             if let Some(ref data) = item.write_buffer {
                 let start = (offset as usize).min(data.len());
                 let end = ((offset + len) as usize).min(data.len());
-                return ReadResult {
+                let result = ReadResult {
                     data: data[start..end].to_vec(),
                     error: errno::OK,
                 };
+                if record_metrics {
+                    self.stats
+                        .read_requested_bytes
+                        .fetch_add(len, Ordering::Relaxed);
+                    self.stats
+                        .read_returned_bytes
+                        .fetch_add(result.data.len() as u64, Ordering::Relaxed);
+                }
+                drop(items);
+                self.record_op(&self.stats.read, started_at, result.error);
+                return result;
             }
 
             item.cas_hash
@@ -642,14 +975,24 @@ impl Vfs for CasVfs {
         // Fetch from CAS if we have a hash
         let Some(hash) = cas_hash else {
             // Empty file
-            return ReadResult {
+            let result = ReadResult {
                 data: Vec::new(),
                 error: errno::OK,
             };
+            if record_metrics {
+                self.stats
+                    .read_requested_bytes
+                    .fetch_add(len, Ordering::Relaxed);
+            }
+            self.record_op(&self.stats.read, started_at, result.error);
+            return result;
         };
 
         // Fetch via L2 block cache → CAS range read
-        match self.read_blob_range(hash, offset, len).await {
+        let result = match self
+            .read_blob_range(hash, offset, len, record_metrics)
+            .await
+        {
             Ok(data) => ReadResult {
                 data,
                 error: errno::OK,
@@ -661,7 +1004,17 @@ impl Vfs for CasVfs {
                     error: errno::EIO,
                 }
             }
+        };
+        if record_metrics {
+            self.stats
+                .read_requested_bytes
+                .fetch_add(len, Ordering::Relaxed);
+            self.stats
+                .read_returned_bytes
+                .fetch_add(result.data.len() as u64, Ordering::Relaxed);
         }
+        self.record_op(&self.stats.read, started_at, result.error);
+        result
     }
 
     async fn write(
@@ -671,21 +1024,37 @@ impl Vfs for CasVfs {
         offset: u64,
         data: Vec<u8>,
     ) -> WriteResult {
+        let started_at = Instant::now();
         tracing::trace!(item_id, offset, len = data.len(), "write");
+
+        if item_id == STATS_JSON_ID {
+            let result = WriteResult {
+                bytes_written: 0,
+                error: errno::EACCES,
+            };
+            self.record_op(&self.stats.write, started_at, result.error);
+            return result;
+        }
 
         let mut items = self.items.write();
         let Some(item) = items.get_mut(&item_id) else {
-            return WriteResult {
+            let result = WriteResult {
                 bytes_written: 0,
                 error: errno::ENOENT,
             };
+            drop(items);
+            self.record_op(&self.stats.write, started_at, result.error);
+            return result;
         };
 
         if item.item_type != ItemType::File {
-            return WriteResult {
+            let result = WriteResult {
                 bytes_written: 0,
                 error: errno::EISDIR,
             };
+            drop(items);
+            self.record_op(&self.stats.write, started_at, result.error);
+            return result;
         }
 
         // Initialize or extend write buffer
@@ -701,10 +1070,18 @@ impl Vfs for CasVfs {
         buffer[offset as usize..end].copy_from_slice(&data);
         item.size = buffer.len() as u64;
 
-        WriteResult {
+        let result = WriteResult {
             bytes_written: data.len() as u64,
             error: errno::OK,
+        };
+        drop(items);
+        if self.should_record() {
+            self.stats
+                .write_bytes
+                .fetch_add(result.bytes_written, Ordering::Relaxed);
         }
+        self.record_op(&self.stats.write, started_at, result.error);
+        result
     }
 
     async fn create(
@@ -714,7 +1091,55 @@ impl Vfs for CasVfs {
         name: String,
         item_type: ItemType,
     ) -> CreateResult {
+        let started_at = Instant::now();
         tracing::trace!(parent_id, name = %name, ?item_type, "create");
+
+        if parent_id == VIXENFS_DIR_ID {
+            if name != RECORDING_NAME || item_type != ItemType::File {
+                let result = CreateResult {
+                    item_id: 0,
+                    error: errno::EACCES,
+                };
+                self.record_op(&self.stats.write, started_at, result.error);
+                return result;
+            }
+
+            let mut items = self.items.write();
+            if let Some(existing) = self.recording_item_id(&items) {
+                let result = CreateResult {
+                    item_id: existing,
+                    error: errno::OK,
+                };
+                drop(items);
+                self.recording_enabled.store(true, Ordering::Relaxed);
+                self.record_op(&self.stats.write, started_at, result.error);
+                return result;
+            }
+
+            let new_id = self.alloc_id();
+            items.insert(
+                new_id,
+                VfsItem {
+                    id: new_id,
+                    parent_id: VIXENFS_DIR_ID,
+                    name: RECORDING_NAME.to_string(),
+                    item_type: ItemType::File,
+                    mode: mode::FILE_REGULAR,
+                    cas_hash: None,
+                    size: 0,
+                    write_buffer: None,
+                },
+            );
+            drop(items);
+            self.recording_enabled.store(true, Ordering::Relaxed);
+
+            let result = CreateResult {
+                item_id: new_id,
+                error: errno::OK,
+            };
+            self.record_op(&self.stats.write, started_at, result.error);
+            return result;
+        }
 
         // Verify parent exists and is a directory
         {
@@ -722,16 +1147,22 @@ impl Vfs for CasVfs {
             match items.get(&parent_id) {
                 Some(item) if item.item_type == ItemType::Directory => {}
                 Some(_) => {
-                    return CreateResult {
+                    let result = CreateResult {
                         item_id: 0,
                         error: errno::ENOTDIR,
                     };
+                    drop(items);
+                    self.record_op(&self.stats.write, started_at, result.error);
+                    return result;
                 }
                 None => {
-                    return CreateResult {
+                    let result = CreateResult {
                         item_id: 0,
                         error: errno::ENOENT,
                     };
+                    drop(items);
+                    self.record_op(&self.stats.write, started_at, result.error);
+                    return result;
                 }
             }
 
@@ -740,10 +1171,13 @@ impl Vfs for CasVfs {
                 .values()
                 .any(|i| i.parent_id == parent_id && i.name == name)
             {
-                return CreateResult {
+                let result = CreateResult {
                     item_id: 0,
                     error: errno::EEXIST,
                 };
+                drop(items);
+                self.record_op(&self.stats.write, started_at, result.error);
+                return result;
             }
         }
 
@@ -772,44 +1206,60 @@ impl Vfs for CasVfs {
             );
         }
 
-        CreateResult {
+        let result = CreateResult {
             item_id: new_id,
             error: errno::OK,
-        }
+        };
+        self.record_op(&self.stats.write, started_at, result.error);
+        result
     }
 
     async fn delete(&self, _cx: &roam::Context, item_id: ItemId) -> VfsResult {
+        let started_at = Instant::now();
         tracing::trace!(item_id, "delete");
 
         // Don't allow deleting root
-        if item_id == 1 {
-            return VfsResult {
+        if self.is_virtual_protected_item(item_id) {
+            let result = VfsResult {
                 error: errno::EACCES,
             };
+            self.record_op(&self.stats.write, started_at, result.error);
+            return result;
         }
 
         let mut items = self.items.write();
 
         // Check if item exists
         let Some(item) = items.get(&item_id) else {
-            return VfsResult {
+            let result = VfsResult {
                 error: errno::ENOENT,
             };
+            drop(items);
+            self.record_op(&self.stats.write, started_at, result.error);
+            return result;
         };
 
         // If directory, check if empty
         if item.item_type == ItemType::Directory {
             let has_children = items.values().any(|i| i.parent_id == item_id);
             if has_children {
-                return VfsResult {
+                let result = VfsResult {
                     error: errno::ENOTEMPTY,
                 };
+                drop(items);
+                self.record_op(&self.stats.write, started_at, result.error);
+                return result;
             }
         }
 
         items.remove(&item_id);
-
-        VfsResult { error: errno::OK }
+        let recording_item_id = self.recording_item_id(&items);
+        drop(items);
+        self.recording_enabled
+            .store(recording_item_id.is_some(), Ordering::Relaxed);
+        let result = VfsResult { error: errno::OK };
+        self.record_op(&self.stats.write, started_at, result.error);
+        result
     }
 
     async fn rename(
@@ -819,29 +1269,47 @@ impl Vfs for CasVfs {
         new_parent_id: ItemId,
         new_name: String,
     ) -> VfsResult {
+        let started_at = Instant::now();
         tracing::trace!(item_id, new_parent_id, new_name = %new_name, "rename");
+
+        if self.is_virtual_protected_item(item_id) || new_parent_id == VIXENFS_DIR_ID {
+            let result = VfsResult {
+                error: errno::EACCES,
+            };
+            self.record_op(&self.stats.write, started_at, result.error);
+            return result;
+        }
 
         let mut items = self.items.write();
 
         // Check item exists
         if !items.contains_key(&item_id) {
-            return VfsResult {
+            let result = VfsResult {
                 error: errno::ENOENT,
             };
+            drop(items);
+            self.record_op(&self.stats.write, started_at, result.error);
+            return result;
         }
 
         // Check new parent exists and is directory
         match items.get(&new_parent_id) {
             Some(p) if p.item_type == ItemType::Directory => {}
             Some(_) => {
-                return VfsResult {
+                let result = VfsResult {
                     error: errno::ENOTDIR,
                 };
+                drop(items);
+                self.record_op(&self.stats.write, started_at, result.error);
+                return result;
             }
             None => {
-                return VfsResult {
+                let result = VfsResult {
                     error: errno::ENOENT,
                 };
+                drop(items);
+                self.record_op(&self.stats.write, started_at, result.error);
+                return result;
             }
         }
 
@@ -850,9 +1318,12 @@ impl Vfs for CasVfs {
             .values()
             .any(|i| i.parent_id == new_parent_id && i.name == new_name && i.id != item_id)
         {
-            return VfsResult {
+            let result = VfsResult {
                 error: errno::EEXIST,
             };
+            drop(items);
+            self.record_op(&self.stats.write, started_at, result.error);
+            return result;
         }
 
         // Perform rename
@@ -861,7 +1332,10 @@ impl Vfs for CasVfs {
             item.name = new_name;
         }
 
-        VfsResult { error: errno::OK }
+        drop(items);
+        let result = VfsResult { error: errno::OK };
+        self.record_op(&self.stats.write, started_at, result.error);
+        result
     }
 
     async fn set_attributes(
@@ -870,14 +1344,31 @@ impl Vfs for CasVfs {
         item_id: ItemId,
         params: SetAttributesParams,
     ) -> VfsResult {
+        let started_at = Instant::now();
         tracing::trace!(item_id, ?params, "set_attributes");
+
+        if item_id == STATS_JSON_ID
+            || item_id == VIXENFS_DIR_ID
+            || item_id == ROOT_ITEM_ID
+            || item_id == {
+                let items = self.items.read();
+                self.recording_item_id(&items).unwrap_or(0)
+            }
+        {
+            let result = VfsResult { error: errno::OK };
+            self.record_op(&self.stats.write, started_at, result.error);
+            return result;
+        }
 
         let mut items = self.items.write();
 
         let Some(item) = items.get_mut(&item_id) else {
-            return VfsResult {
+            let result = VfsResult {
                 error: errno::ENOENT,
             };
+            drop(items);
+            self.record_op(&self.stats.write, started_at, result.error);
+            return result;
         };
 
         if let Some(mode) = params.mode {
@@ -892,7 +1383,10 @@ impl Vfs for CasVfs {
 
         // modified_time is ignored for now (we don't track times)
 
-        VfsResult { error: errno::OK }
+        drop(items);
+        let result = VfsResult { error: errno::OK };
+        self.record_op(&self.stats.write, started_at, result.error);
+        result
     }
 
     async fn ping(&self, _cx: &roam::Context) -> String {

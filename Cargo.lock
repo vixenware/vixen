@@ -3138,6 +3138,7 @@ dependencies = [
  "figue",
  "libc",
  "roam",
+ "roam-shm",
  "roam-stream",
  "tokio",
  "tracing",

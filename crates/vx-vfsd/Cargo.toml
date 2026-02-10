@@ -26,6 +26,7 @@ vx-vfs = { workspace = true }
 # RPC
 roam = { workspace = true }
 roam-stream = { workspace = true }
+roam-shm = { workspace = true }
 vx-io = { workspace = true }
 
 # Async runtime
@@ -47,4 +48,4 @@ libc = { workspace = true }
 
 [features]
 default = []
-diagnostics = ["vx-locks/diagnostics"]
+diagnostics = ["vx-locks/diagnostics", "roam-shm/diagnostics"]
