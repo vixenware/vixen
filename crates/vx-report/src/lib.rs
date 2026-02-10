@@ -81,6 +81,9 @@ impl std::fmt::Display for RunId {
 /// This schema is designed for deterministic explain/diff/caching workflows.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct RulePlan {
+    /// Interned source table shared by all provenance references.
+    #[facet(default)]
+    pub sources: Vec<RulePlanSource>,
     /// Typed graph nodes.
     pub nodes: Vec<RulePlanNode>,
     /// Typed graph edges.
@@ -106,52 +109,69 @@ impl RulePlan {
         let mut diagnostics = Vec::new();
         let mut node_ids = HashSet::new();
         let mut node_kind_by_id = HashMap::new();
+        let mut source_ids = HashSet::new();
+
+        for source in &self.sources {
+            if source.id.0.trim().is_empty() {
+                diagnostics.push("source has empty id".to_string());
+            }
+            if !source_ids.insert(source.id.clone()) {
+                diagnostics.push(format!("duplicate source id: {}", source.id.0));
+            }
+            if source.path.as_str().trim().is_empty() {
+                diagnostics.push(format!("source {} has empty path", source.id.0));
+            }
+        }
 
         for node in &self.nodes {
-            if node.id.trim().is_empty() {
+            if node.id.0.trim().is_empty() {
                 diagnostics.push("node has empty id".to_string());
             }
             if !node_ids.insert(node.id.clone()) {
-                diagnostics.push(format!("duplicate node id: {}", node.id));
+                diagnostics.push(format!("duplicate node id: {}", node.id.0));
             }
-            if let Some(issue) = validate_provenance(&node.provenance, "node", &node.id) {
+            if let Some(issue) =
+                validate_provenance(&node.provenance, "node", &node.id.0, &source_ids)
+            {
                 diagnostics.push(issue);
             }
-            node_kind_by_id.insert(node.id.clone(), node.kind.clone());
+            node_kind_by_id.insert(node.id.clone(), node.kind);
         }
 
         let mut fact_ids = HashSet::new();
         for fact in &self.facts {
-            if fact.id.trim().is_empty() {
+            if fact.id.0.trim().is_empty() {
                 diagnostics.push("fact has empty id".to_string());
             }
             if !fact_ids.insert(fact.id.clone()) {
-                diagnostics.push(format!("duplicate fact id: {}", fact.id));
+                diagnostics.push(format!("duplicate fact id: {}", fact.id.0));
             }
-            if fact.node_id.trim().is_empty() {
-                diagnostics.push(format!("fact {} has empty node_id", fact.id));
+            if fact.node_id.0.trim().is_empty() {
+                diagnostics.push(format!("fact {} has empty node_id", fact.id.0));
             }
             match node_kind_by_id.get(&fact.node_id) {
                 Some(RulePlanNodeKind::Fact) => {}
                 Some(kind) => diagnostics.push(format!(
                     "fact {} references node {} with incompatible kind {:?}",
-                    fact.id, fact.node_id, kind
+                    fact.id.0, fact.node_id.0, kind
                 )),
                 None => diagnostics.push(format!(
                     "fact {} references unknown node_id {}",
-                    fact.id, fact.node_id
+                    fact.id.0, fact.node_id.0
                 )),
             }
-            if let Some(issue) = validate_provenance(&fact.provenance, "fact", &fact.id) {
+            if let Some(issue) =
+                validate_provenance(&fact.provenance, "fact", &fact.id.0, &source_ids)
+            {
                 diagnostics.push(issue);
             }
         }
 
         for edge in &self.edges {
-            if edge.from.trim().is_empty() || edge.to.trim().is_empty() {
+            if edge.from.0.trim().is_empty() || edge.to.0.trim().is_empty() {
                 diagnostics.push(format!(
                     "edge {} -> {} has empty endpoint id",
-                    edge.from, edge.to
+                    edge.from.0, edge.to.0
                 ));
                 continue;
             }
@@ -162,13 +182,13 @@ impl RulePlan {
             if from_kind.is_none() {
                 diagnostics.push(format!(
                     "edge {} -> {} references unknown from node {}",
-                    edge.from, edge.to, edge.from
+                    edge.from.0, edge.to.0, edge.from.0
                 ));
             }
             if to_kind.is_none() {
                 diagnostics.push(format!(
                     "edge {} -> {} references unknown to node {}",
-                    edge.from, edge.to, edge.to
+                    edge.from.0, edge.to.0, edge.to.0
                 ));
             }
 
@@ -177,11 +197,13 @@ impl RulePlan {
             {
                 diagnostics.push(format!(
                     "edge {} -> {} with kind {:?} is invalid between {:?} and {:?}",
-                    edge.from, edge.to, edge.kind, from_kind, to_kind
+                    edge.from.0, edge.to.0, edge.kind, from_kind, to_kind
                 ));
             }
 
-            if let Some(issue) = validate_provenance(&edge.provenance, "edge", &edge.from) {
+            if let Some(issue) =
+                validate_provenance(&edge.provenance, "edge", &edge.from.0, &source_ids)
+            {
                 diagnostics.push(issue);
             }
         }
@@ -195,20 +217,29 @@ impl RulePlan {
 
     fn canonicalized(&self) -> Self {
         let mut canonical = self.clone();
+        canonical.sources.sort_by(|a, b| {
+            a.id.0
+                .cmp(&b.id.0)
+                .then_with(|| a.path.as_str().cmp(b.path.as_str()))
+        });
         canonical.nodes.sort_by(|a, b| {
-            a.id.cmp(&b.id)
+            a.id.0
+                .cmp(&b.id.0)
                 .then_with(|| a.kind.canonical_name().cmp(b.kind.canonical_name()))
                 .then_with(|| a.label.cmp(&b.label))
         });
         canonical.edges.sort_by(|a, b| {
             a.from
-                .cmp(&b.from)
-                .then_with(|| a.to.cmp(&b.to))
+                .0
+                .cmp(&b.from.0)
+                .then_with(|| a.to.0.cmp(&b.to.0))
                 .then_with(|| a.kind.canonical_name().cmp(b.kind.canonical_name()))
         });
-        canonical
-            .facts
-            .sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.node_id.cmp(&b.node_id)));
+        canonical.facts.sort_by(|a, b| {
+            a.id.0
+                .cmp(&b.id.0)
+                .then_with(|| a.node_id.0.cmp(&b.node_id.0))
+        });
         canonical
     }
 }
@@ -230,9 +261,30 @@ impl std::fmt::Display for RulePlanValidationError {
 
 impl std::error::Error for RulePlanValidationError {}
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Facet)]
+pub struct RulePlanNodeId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Facet)]
+pub struct RulePlanFactId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Facet)]
+pub struct RulePlanSourceId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Facet)]
+pub struct RuleId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct RulePlanValue(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct RulePlanSource {
+    pub id: RulePlanSourceId,
+    pub path: Utf8PathBuf,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct RulePlanNode {
-    pub id: String,
+    pub id: RulePlanNodeId,
     pub kind: RulePlanNodeKind,
     pub label: String,
     pub provenance: RulePlanProvenance,
@@ -240,14 +292,11 @@ pub struct RulePlanNode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
 #[repr(u8)]
+#[facet(rename_all = "lowercase")]
 pub enum RulePlanNodeKind {
-    #[facet(rename = "action")]
     Action,
-    #[facet(rename = "artifact")]
     Artifact,
-    #[facet(rename = "fact")]
     Fact,
-    #[facet(rename = "group")]
     Group,
 }
 
@@ -264,24 +313,20 @@ impl RulePlanNodeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct RulePlanEdge {
-    pub from: String,
-    pub to: String,
+    pub from: RulePlanNodeId,
+    pub to: RulePlanNodeId,
     pub kind: RulePlanEdgeKind,
     pub provenance: RulePlanProvenance,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
 #[repr(u8)]
+#[facet(rename_all = "lowercase")]
 pub enum RulePlanEdgeKind {
-    #[facet(rename = "ifchanged")]
     IfChanged,
-    #[facet(rename = "ifwritten")]
     IfWritten,
-    #[facet(rename = "ifcreate")]
     IfCreate,
-    #[facet(rename = "ifdeleted")]
     IfDeleted,
-    #[facet(rename = "always")]
     Always,
 }
 
@@ -299,48 +344,61 @@ impl RulePlanEdgeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct RulePlanFact {
-    pub id: String,
-    pub node_id: String,
-    pub value: String,
+    pub id: RulePlanFactId,
+    pub node_id: RulePlanNodeId,
+    pub value: RulePlanValue,
     pub provenance: RulePlanProvenance,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct RulePlanProvenance {
-    pub rule_id: String,
-    pub source: RulePlanSourceLocation,
+    pub rule_id: RuleId,
+    pub source_id: RulePlanSourceId,
+    pub span: RulePlanSpan,
+    #[facet(default)]
+    pub comment: Option<String>,
     #[facet(default)]
     pub metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
-pub struct RulePlanSourceLocation {
-    pub file: String,
+pub struct RulePlanSpan {
     pub line: u32,
     pub column: u32,
+    #[facet(default)]
+    pub end_line: u32,
+    #[facet(default)]
+    pub end_column: u32,
 }
 
 fn validate_provenance(
     provenance: &RulePlanProvenance,
     owner_kind: &str,
     owner_id: &str,
+    source_ids: &HashSet<RulePlanSourceId>,
 ) -> Option<String> {
-    if provenance.rule_id.trim().is_empty() {
+    if provenance.rule_id.0.trim().is_empty() {
         return Some(format!(
             "{} {} has empty provenance.rule_id",
             owner_kind, owner_id
         ));
     }
-    if provenance.source.file.trim().is_empty() {
+    if provenance.source_id.0.trim().is_empty() {
         return Some(format!(
-            "{} {} has empty provenance.source.file",
+            "{} {} has empty provenance.source_id",
             owner_kind, owner_id
         ));
     }
-    if provenance.source.line == 0 || provenance.source.column == 0 {
+    if !source_ids.contains(&provenance.source_id) {
+        return Some(format!(
+            "{} {} references unknown provenance.source_id {}",
+            owner_kind, owner_id, provenance.source_id.0
+        ));
+    }
+    if provenance.span.line == 0 || provenance.span.column == 0 {
         return Some(format!(
             "{} {} has invalid provenance source position {}:{}",
-            owner_kind, owner_id, provenance.source.line, provenance.source.column
+            owner_kind, owner_id, provenance.span.line, provenance.span.column
         ));
     }
     None
@@ -1670,14 +1728,24 @@ mod tests {
         assert!(parsed.graph.is_none());
     }
 
+    fn sample_sources() -> Vec<RulePlanSource> {
+        vec![RulePlanSource {
+            id: RulePlanSourceId("src_0".to_string()),
+            path: Utf8PathBuf::from("fixtures/rules/sample.edn"),
+        }]
+    }
+
     fn sample_provenance(rule_id: &str, line: u32) -> RulePlanProvenance {
         RulePlanProvenance {
-            rule_id: rule_id.to_string(),
-            source: RulePlanSourceLocation {
-                file: "fixtures/rules/sample.edn".to_string(),
+            rule_id: RuleId(rule_id.to_string()),
+            source_id: RulePlanSourceId("src_0".to_string()),
+            span: RulePlanSpan {
                 line,
                 column: 1,
+                end_line: line,
+                end_column: 10,
             },
+            comment: Some("fixture".to_string()),
             metadata: BTreeMap::from([
                 ("phase".to_string(), "planner".to_string()),
                 ("fixture".to_string(), "true".to_string()),
@@ -1687,27 +1755,28 @@ mod tests {
 
     fn sample_rule_plan() -> RulePlan {
         RulePlan {
+            sources: sample_sources(),
             nodes: vec![
                 RulePlanNode {
-                    id: "n_group_build".to_string(),
+                    id: RulePlanNodeId("n_group_build".to_string()),
                     kind: RulePlanNodeKind::Group,
                     label: "group build".to_string(),
                     provenance: sample_provenance("rule.group.build", 1),
                 },
                 RulePlanNode {
-                    id: "n_action_compile".to_string(),
+                    id: RulePlanNodeId("n_action_compile".to_string()),
                     kind: RulePlanNodeKind::Action,
                     label: "compile app".to_string(),
                     provenance: sample_provenance("rule.compile.app", 5),
                 },
                 RulePlanNode {
-                    id: "n_artifact_bin".to_string(),
+                    id: RulePlanNodeId("n_artifact_bin".to_string()),
                     kind: RulePlanNodeKind::Artifact,
                     label: "target/app".to_string(),
                     provenance: sample_provenance("rule.compile.app", 8),
                 },
                 RulePlanNode {
-                    id: "n_fact_src_changed".to_string(),
+                    id: RulePlanNodeId("n_fact_src_changed".to_string()),
                     kind: RulePlanNodeKind::Fact,
                     label: "src_changed".to_string(),
                     provenance: sample_provenance("rule.detect.src", 12),
@@ -1715,28 +1784,28 @@ mod tests {
             ],
             edges: vec![
                 RulePlanEdge {
-                    from: "n_group_build".to_string(),
-                    to: "n_action_compile".to_string(),
+                    from: RulePlanNodeId("n_group_build".to_string()),
+                    to: RulePlanNodeId("n_action_compile".to_string()),
                     kind: RulePlanEdgeKind::Always,
                     provenance: sample_provenance("rule.group.build", 2),
                 },
                 RulePlanEdge {
-                    from: "n_action_compile".to_string(),
-                    to: "n_artifact_bin".to_string(),
+                    from: RulePlanNodeId("n_action_compile".to_string()),
+                    to: RulePlanNodeId("n_artifact_bin".to_string()),
                     kind: RulePlanEdgeKind::IfWritten,
                     provenance: sample_provenance("rule.compile.app", 9),
                 },
                 RulePlanEdge {
-                    from: "n_fact_src_changed".to_string(),
-                    to: "n_action_compile".to_string(),
+                    from: RulePlanNodeId("n_fact_src_changed".to_string()),
+                    to: RulePlanNodeId("n_action_compile".to_string()),
                     kind: RulePlanEdgeKind::IfChanged,
                     provenance: sample_provenance("rule.detect.src", 13),
                 },
             ],
             facts: vec![RulePlanFact {
-                id: "fact.src_changed".to_string(),
-                node_id: "n_fact_src_changed".to_string(),
-                value: "true".to_string(),
+                id: RulePlanFactId("fact.src_changed".to_string()),
+                node_id: RulePlanNodeId("n_fact_src_changed".to_string()),
+                value: RulePlanValue("true".to_string()),
                 provenance: sample_provenance("rule.detect.src", 14),
             }],
         }
@@ -1758,21 +1827,21 @@ mod tests {
     fn test_rule_plan_validation_reports_actionable_diagnostics() {
         let mut invalid = sample_rule_plan();
         invalid.nodes.push(RulePlanNode {
-            id: "n_action_compile".to_string(),
+            id: RulePlanNodeId("n_action_compile".to_string()),
             kind: RulePlanNodeKind::Action,
             label: "duplicate".to_string(),
             provenance: sample_provenance("rule.duplicate", 20),
         });
         invalid.edges.push(RulePlanEdge {
-            from: "n_artifact_bin".to_string(),
-            to: "n_action_compile".to_string(),
+            from: RulePlanNodeId("n_artifact_bin".to_string()),
+            to: RulePlanNodeId("n_action_compile".to_string()),
             kind: RulePlanEdgeKind::IfWritten,
             provenance: sample_provenance("rule.invalid.edge", 21),
         });
         invalid.facts.push(RulePlanFact {
-            id: "fact.bad_ref".to_string(),
-            node_id: "missing_node".to_string(),
-            value: "x".to_string(),
+            id: RulePlanFactId("fact.bad_ref".to_string()),
+            node_id: RulePlanNodeId("missing_node".to_string()),
+            value: RulePlanValue("x".to_string()),
             provenance: sample_provenance("rule.bad.fact", 22),
         });
 
@@ -1797,23 +1866,27 @@ mod tests {
     fn test_rule_plan_fixture_provenance_is_populated() {
         let plan = sample_rule_plan();
 
+        assert_eq!(plan.sources.len(), 1);
+        assert!(!plan.sources[0].id.0.is_empty());
+        assert!(!plan.sources[0].path.as_str().is_empty());
+
         for node in &plan.nodes {
-            assert!(!node.provenance.rule_id.is_empty());
-            assert!(!node.provenance.source.file.is_empty());
-            assert!(node.provenance.source.line > 0);
-            assert!(node.provenance.source.column > 0);
+            assert!(!node.provenance.rule_id.0.is_empty());
+            assert!(!node.provenance.source_id.0.is_empty());
+            assert!(node.provenance.span.line > 0);
+            assert!(node.provenance.span.column > 0);
         }
         for edge in &plan.edges {
-            assert!(!edge.provenance.rule_id.is_empty());
-            assert!(!edge.provenance.source.file.is_empty());
-            assert!(edge.provenance.source.line > 0);
-            assert!(edge.provenance.source.column > 0);
+            assert!(!edge.provenance.rule_id.0.is_empty());
+            assert!(!edge.provenance.source_id.0.is_empty());
+            assert!(edge.provenance.span.line > 0);
+            assert!(edge.provenance.span.column > 0);
         }
         for fact in &plan.facts {
-            assert!(!fact.provenance.rule_id.is_empty());
-            assert!(!fact.provenance.source.file.is_empty());
-            assert!(fact.provenance.source.line > 0);
-            assert!(fact.provenance.source.column > 0);
+            assert!(!fact.provenance.rule_id.0.is_empty());
+            assert!(!fact.provenance.source_id.0.is_empty());
+            assert!(fact.provenance.span.line > 0);
+            assert!(fact.provenance.span.column > 0);
         }
     }
 }

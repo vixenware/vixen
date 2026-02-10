@@ -18,10 +18,10 @@ use std::task::{Context, Poll};
 
 use async_notify::Notify;
 use futures_util::lock::Mutex;
-use futures_util::{select, FutureExt};
+use futures_util::{FutureExt, select};
 use nix::fcntl::{FcntlArg, FdFlag, OFlag};
-use nix::sys::uio;
 use nix::sys::socket::{self, AddressFamily, ControlMessageOwned, MsgFlags, SockFlag, SockType};
+use nix::sys::uio;
 use std::pin::pin;
 use tokio::io::unix::AsyncFd;
 use tokio::process::Command;
@@ -33,9 +33,8 @@ use crate::MountOptions;
 pub(crate) type CompleteIoResult<T, U> = (T, io::Result<U>);
 
 fn find_fusermount3() -> io::Result<std::path::PathBuf> {
-    which::which("fusermount3").map_err(|err| {
-        io::Error::other(format!("find fusermount3 binary failed {err:?}"))
-    })
+    which::which("fusermount3")
+        .map_err(|err| io::Error::other(format!("find fusermount3 binary failed {err:?}")))
 }
 
 #[derive(Debug)]
@@ -244,13 +243,9 @@ impl NonBlockFuseConnection {
             let mut cmsg_buf = nix::cmsg_space!([RawFd; 1]);
             let mut bufs = [IoSliceMut::new(&mut buf)];
 
-            let msg = socket::recvmsg::<()>(
-                fd1,
-                &mut bufs[..],
-                Some(&mut cmsg_buf),
-                MsgFlags::empty(),
-            )
-            .map_err(io::Error::from)?;
+            let msg =
+                socket::recvmsg::<()>(fd1, &mut bufs[..], Some(&mut cmsg_buf), MsgFlags::empty())
+                    .map_err(io::Error::from)?;
 
             let fd = if let Some(ControlMessageOwned::ScmRights(fds)) = msg.cmsgs()?.next() {
                 if fds.is_empty() {
@@ -341,10 +336,7 @@ impl Future for ReadVectoredFut<'_> {
         match guard.try_io(|fd| {
             uio::readv(
                 fd,
-                &mut [
-                    IoSliceMut::new(header_buf),
-                    IoSliceMut::new(data_buf),
-                ],
+                &mut [IoSliceMut::new(header_buf), IoSliceMut::new(data_buf)],
             )
             .map_err(io::Error::from)
         }) {
