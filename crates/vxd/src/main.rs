@@ -245,15 +245,23 @@ async fn ensure_services(
         )?;
         spawn_tracker.lock().await.store = Some(child);
 
-        match tokio::time::timeout(Duration::from_secs(5), store_caller.handle()).await {
+        let store_caller = vx_io::net::reconnecting_client_named(
+            store_endpoint.clone(),
+            NoDispatcher,
+            Some("vxd".into()),
+        );
+
+        match tokio::time::timeout(Duration::from_secs(1), store_caller.handle()).await {
             Ok(Ok(_)) => {
-                tracing::info!("Store is ready at {store_endpoint}");
+                tracing::info!("store is ready at {store_endpoint}");
             }
             Ok(Err(e)) => {
-                eyre::bail!("Store failed to start at {store_endpoint}: {e}");
+                tracing::error!("store connect error: {e}");
+                eyre::bail!("store failed to start at {store_endpoint}: {e}");
             }
             Err(_) => {
-                eyre::bail!("Store still unreachable after 30s at {store_endpoint}");
+                tracing::error!("store connect timeout");
+                eyre::bail!("store still unreachable after timeout at {store_endpoint}");
             }
         }
     }
@@ -265,7 +273,6 @@ async fn ensure_services(
     };
     let exec_display = exec_endpoint.display();
     let vfsd_endpoint = vx_io::net::default_unix_endpoint(&args.vx_home, "vfsd");
-    let vfsd_display = vfsd_endpoint.display();
 
     tracing::info!("Connecting to Runner at {exec_endpoint}");
     let exec_caller = vx_io::net::reconnecting_client_named(
@@ -298,9 +305,9 @@ async fn ensure_services(
                 "--listen",
                 &exec_display,
                 "--store",
-                &store_display,
+                &store_endpoint.to_string(),
                 "--vfsd",
-                &vfsd_display,
+                &vfsd_endpoint.to_string(),
                 "--vx-home",
                 vx_home_str,
             ],

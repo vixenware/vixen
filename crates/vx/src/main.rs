@@ -419,7 +419,7 @@ async fn get_or_spawn_daemon(
         }
     };
 
-    let backoff_ms = [10, 50, 100, 500, 1000];
+    let backoff_ms = [10, 50, 100, 500, 1000, 2000];
 
     // Try to connect first
     match try_connect_daemon(&endpoint, no_tui, json).await {
@@ -488,10 +488,12 @@ async fn get_or_spawn_daemon(
 
             // Retry with backoff
             for (attempt, delay) in backoff_ms.iter().enumerate() {
-                tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
                 if let Ok(result) = try_connect_daemon(&endpoint, no_tui, json).await {
-                    tracing::trace!("Connected to daemon after {} attempts", attempt + 1);
+                    tracing::debug!("vxd connection succeeded after {} attempts", attempt + 1);
                     return Ok(result);
+                } else {
+                    tracing::debug!("vxd connection failed, retry in {delay}ms...");
+                    tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
                 }
             }
 
@@ -700,13 +702,13 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
 async fn cmd_start(_args: StartArgs) -> Result<()> {
     let (daemon, _tui) = get_or_spawn_daemon(false, true, false).await?;
 
-    println!("{} daemon is running", "✓".green().bold());
+    tracing::info!("{} daemon is running", "✓".green().bold());
 
     // Ping to verify connection
     let version = daemon.version().await?;
 
-    println!("{} connected to vxd", "✓".green().bold());
-    println!("   {}", version);
+    tracing::info!("{} connected to vxd", "✓".green().bold());
+    tracing::info!("   {}", version);
 
     Ok(())
 }
@@ -735,7 +737,7 @@ async fn cmd_kill(_args: KillArgs) -> Result<()> {
     // Try graceful shutdown via RPC first
     match try_connect_daemon(&endpoint, true, false).await {
         Ok((daemon, _tui)) => {
-            println!("{} daemon at {}", "Stopping".green().bold(), endpoint);
+            tracing::info!("{} daemon at {}", "Stopping".green().bold(), endpoint);
             if let Err(e) = daemon.shutdown().await {
                 // shutdown() calls process::exit(0) on the daemon side, so the
                 // connection closing is expected — not an error.
@@ -743,10 +745,10 @@ async fn cmd_kill(_args: KillArgs) -> Result<()> {
             }
             // Give it a moment to finish cleanup
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            println!("{} daemon stopped", "✓".green().bold());
+            tracing::info!("{} daemon stopped", "✓".green().bold());
         }
         Err(_) => {
-            println!(
+            tracing::info!(
                 "{} daemon not reachable (child processes use die-with-parent, so they'll exit on their own)",
                 "Note:".yellow().bold()
             );

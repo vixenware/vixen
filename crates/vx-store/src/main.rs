@@ -44,12 +44,10 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    eprintln!("[vx-store] main() entered");
     peeps::threads::install_sigprof_handler();
     peeps::threads::register_thread("main");
     peeps::tasks::init_task_tracking();
 
-    eprintln!("[vx-store] building tokio runtime");
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
@@ -62,26 +60,23 @@ fn main() -> Result<()> {
             peeps::threads::deregister_thread();
         })
         .build()?;
-    eprintln!("[vx-store] entering async_main");
     rt.block_on(async_main())
 }
 
 async fn async_main() -> Result<()> {
-    eprintln!("[vx-store] async_main entered");
     // If spawned by parent, die when parent dies
     ur_taking_me_with_you::die_with_parent();
-    eprintln!("[vx-store] death pact installed");
 
     // Initialize tracing
     vx_tracing::init_service("vx_store=info");
-    eprintln!("[vx-store] tracing initialized");
+    tracing::debug!("tracing initialized");
 
     // Initialize peeps instrumentation
     peeps::init();
     peeps::install_sigusr1("vx-store");
 
     tracing::info!("hello from vixen-store");
-    eprintln!("[vx-store] parsing args");
+    tracing::debug!("parsing args");
 
     let args: Args = args::Driver::new(
         args::builder::<Args>()?
@@ -95,17 +90,17 @@ async fn async_main() -> Result<()> {
     .run()
     .unwrap();
 
-    eprintln!("[vx-store] args parsed, listen={}", args.listen);
+    tracing::debug!("args parsed, listen={}", args.listen);
     let bind = Endpoint::parse(&args.listen)?;
 
     // Build storage backend
     let storage = CasStore::new(FsStorage::new(args.root.clone()));
 
     // Initialize storage directories
-    eprintln!("[vx-store] initializing storage at {}", args.root);
+    tracing::debug!("initializing storage at {}", args.root);
     tracing::info!("Initializing store at {}", args.root);
     storage.init().await?;
-    eprintln!("[vx-store] storage initialized");
+    tracing::debug!("storage initialized");
 
     // Initialize store service
     let store = StoreService::new(storage, args.vx_home);
@@ -121,11 +116,8 @@ async fn async_main() -> Result<()> {
                 sigusr1.recv().await;
                 tracing::info!("SIGUSR1 received, dumping diagnostics");
                 let sem = &store.download_semaphore;
-                eprintln!("[vx-store] SIGUSR1 received");
-                eprintln!(
-                    "[vx-store] download_semaphore: available={}",
-                    sem.available_permits(),
-                );
+                tracing::debug!("SIGUSR1 received");
+                tracing::debug!("download_semaphore: available={}", sem.available_permits(),);
                 eprint!("{}", roam_session::diagnostic::dump_all_diagnostics());
 
                 let mut custom = std::collections::HashMap::new();
