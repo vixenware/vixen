@@ -1,6 +1,6 @@
 use vx_runner_proto::{
     CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RUNNER_PROTOCOL_VERSION,
-    Runner, RustCompileRequest, RustCompileResult,
+    RunRequest, RunResult, Runner, RustCompileRequest, RustCompileResult,
 };
 use vx_store_proto::{ServiceVersion, StoreProgress};
 
@@ -40,5 +40,14 @@ impl Runner for RunnerService {
         progress: roam::Tx<StoreProgress>,
     ) -> CcLinkResult {
         self.link_cc_vfs(request, progress).await
+    }
+
+    async fn run(
+        &self,
+        _cx: &roam::Context,
+        request: RunRequest,
+        progress: roam::Tx<StoreProgress>,
+    ) -> RunResult {
+        self.run_vfs(request, progress).await
     }
 }

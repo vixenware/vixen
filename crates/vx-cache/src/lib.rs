@@ -5,7 +5,7 @@
 //!
 //! Cache keys are blake3 hashes of all inputs that affect the build output.
 
-use vx_runner_proto::{CcCompileRequest, CcLinkRequest, RustCompileRequest};
+use vx_runner_proto::{CcCompileRequest, CcLinkRequest, RunRequest, RustCompileRequest};
 use vx_store_proto::Blake3Hash;
 
 /// Current cache key schema version for Rust compilation.
@@ -15,6 +15,9 @@ pub const RUST_CACHE_KEY_VERSION: u32 = 1;
 /// Current cache key schema version for C/C++ compilation.
 /// Version 2: Added macos_commandlinetools_version to cache key
 pub const CC_CACHE_KEY_VERSION: u32 = 2;
+
+/// Current cache key schema version for generic tool execution.
+pub const RUN_CACHE_KEY_VERSION: u32 = 1;
 
 /// Compute a cache key for a Rust compile request.
 ///
@@ -197,6 +200,108 @@ pub fn cc_link_cache_key(request: &CcLinkRequest) -> Blake3Hash {
     for lib in libs {
         hasher.update(b"lib:");
         hasher.update(lib.as_bytes());
+        hasher.update(b"\n");
+    }
+
+    Blake3Hash(*hasher.finalize().as_bytes())
+}
+
+/// Compute a cache key for a generic `run` request.
+///
+/// The cache key includes:
+/// - Toolchain manifest
+/// - Mounted tree manifests (sorted by mount path)
+/// - Mounted files (sorted by destination path)
+/// - Program + args + cwd
+/// - Environment variables (sorted by key/value)
+/// - Declared outputs (sorted by logical/path)
+pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
+    let mut hasher = blake3::Hasher::new();
+
+    hasher.update(b"run-v");
+    hasher.update(&RUN_CACHE_KEY_VERSION.to_le_bytes());
+    hasher.update(b"\n");
+
+    hasher.update(b"toolchain:");
+    hasher.update(&request.toolchain_manifest.0);
+    hasher.update(b"\n");
+
+    hasher.update(b"program:");
+    hasher.update(request.program_rel.as_bytes());
+    hasher.update(b"\n");
+
+    if let Some(cwd) = &request.cwd {
+        hasher.update(b"cwd:");
+        hasher.update(cwd.as_bytes());
+        hasher.update(b"\n");
+    }
+
+    if let Some(v) = &request.macos_commandlinetools_version {
+        hasher.update(b"macos_clt:");
+        hasher.update(v.as_bytes());
+        hasher.update(b"\n");
+    }
+
+    hasher.update(b"clear_env:");
+    hasher.update(&[request.clear_env as u8]);
+    hasher.update(b"\n");
+
+    for arg in &request.args {
+        hasher.update(b"arg:");
+        hasher.update(arg.as_bytes());
+        hasher.update(b"\n");
+    }
+
+    let mut envs: Vec<_> = request.env.iter().collect();
+    envs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    for (k, v) in envs {
+        hasher.update(b"env:");
+        hasher.update(k.as_bytes());
+        hasher.update(b"=");
+        hasher.update(v.as_bytes());
+        hasher.update(b"\n");
+    }
+
+    let mut tree_mounts: Vec<_> = request.tree_mounts.iter().collect();
+    tree_mounts.sort_by(|a, b| {
+        a.mount
+            .cmp(&b.mount)
+            .then_with(|| a.manifest.0.cmp(&b.manifest.0))
+    });
+    for m in tree_mounts {
+        hasher.update(b"tree:");
+        hasher.update(m.mount.as_bytes());
+        hasher.update(b":");
+        hasher.update(&m.manifest.0);
+        hasher.update(b"\n");
+    }
+
+    let mut file_mounts: Vec<_> = request.file_mounts.iter().collect();
+    file_mounts.sort_by(|a, b| {
+        a.path
+            .cmp(&b.path)
+            .then_with(|| a.logical.cmp(&b.logical))
+            .then_with(|| a.manifest.0.cmp(&b.manifest.0))
+    });
+    for m in file_mounts {
+        hasher.update(b"file:");
+        hasher.update(m.path.as_bytes());
+        hasher.update(b":");
+        hasher.update(m.logical.as_bytes());
+        hasher.update(b":");
+        hasher.update(&m.manifest.0);
+        hasher.update(b"\n");
+    }
+
+    let mut outputs: Vec<_> = request.outputs.iter().collect();
+    outputs.sort_by(|a, b| a.logical.cmp(&b.logical).then_with(|| a.path.cmp(&b.path)));
+    for o in outputs {
+        hasher.update(b"out:");
+        hasher.update(o.logical.as_bytes());
+        hasher.update(b":");
+        hasher.update(o.path.as_bytes());
+        hasher.update(b":");
+        hasher.update(&[o.executable as u8]);
         hasher.update(b"\n");
     }
 

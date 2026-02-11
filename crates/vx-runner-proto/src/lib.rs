@@ -23,7 +23,7 @@ use vx_store_proto::{ManifestHash, ServiceVersion, StoreProgress};
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 2;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 3;
 
 // =============================================================================
 // Rust Compilation
@@ -221,6 +221,88 @@ pub struct CcLinkResult {
 }
 
 // =============================================================================
+// Generic Sandboxed Tool Execution
+// =============================================================================
+
+/// Mount a CAS tree manifest into the action VFS prefix.
+#[derive(Debug, Clone, Facet)]
+pub struct RunTreeMount {
+    /// Mount point within the action prefix (e.g. "src" or "").
+    pub mount: String,
+    /// CAS tree manifest hash.
+    pub manifest: ManifestHash,
+}
+
+/// Materialize a single file output from a CAS node manifest into the action prefix.
+#[derive(Debug, Clone, Facet)]
+pub struct RunFileMount {
+    /// Path within the action prefix (e.g. "obj/0000.o").
+    pub path: String,
+    /// Node manifest hash containing the output blob.
+    pub manifest: ManifestHash,
+    /// Logical output name within that node manifest (e.g. "object", "rlib", "bin").
+    pub logical: String,
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct RunOutput {
+    /// Logical output name (e.g. "object", "bin").
+    pub logical: String,
+    /// Path within the action prefix (must be under "out/").
+    pub path: String,
+    /// Whether the output should be marked executable in CAS.
+    pub executable: bool,
+}
+
+/// Request to run a sandboxed toolchain command.
+///
+/// This is the generic building block that language-specific front-ends can lower into.
+#[derive(Debug, Clone, Facet)]
+pub struct RunRequest {
+    /// Toolchain manifest hash (runner materializes locally).
+    pub toolchain_manifest: ManifestHash,
+
+    /// Program path relative to the toolchain root (e.g. "zig").
+    pub program_rel: String,
+
+    /// Arguments passed to the program (no shell parsing).
+    pub args: Vec<String>,
+
+    /// CAS trees to mount into the action prefix.
+    pub tree_mounts: Vec<RunTreeMount>,
+
+    /// Individual output files from other node manifests to materialize into the action prefix.
+    pub file_mounts: Vec<RunFileMount>,
+
+    /// Outputs that must be produced (and will be flushed to CAS).
+    pub outputs: Vec<RunOutput>,
+
+    /// Optional working directory within the action prefix.
+    /// If unset, runner uses the action prefix root.
+    pub cwd: Option<String>,
+
+    /// Key/value env vars to set for the process.
+    pub env: Vec<(String, String)>,
+
+    /// Whether to clear the environment before setting `env`.
+    pub clear_env: bool,
+
+    /// Optional macOS CommandLineTools version for cache key stability (best-effort).
+    pub macos_commandlinetools_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct RunResult {
+    pub success: bool,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub duration_ms: u64,
+    pub output_manifest: Option<ManifestHash>,
+    pub error: Option<String>,
+}
+
+// =============================================================================
 // Runner Service Trait
 // =============================================================================
 
@@ -277,4 +359,7 @@ pub trait Runner {
         request: CcLinkRequest,
         progress: roam::Tx<StoreProgress>,
     ) -> CcLinkResult;
+
+    /// Run a sandboxed command with hermetic inputs/outputs via CAS/VFS.
+    async fn run(&self, request: RunRequest, progress: roam::Tx<StoreProgress>) -> RunResult;
 }
