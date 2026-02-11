@@ -83,14 +83,6 @@ struct Args {
     builtins: args::FigueBuiltins,
 }
 
-/// Check if a socket endpoint is already in use by trying to connect
-#[cfg(unix)]
-async fn is_socket_in_use(path: &Utf8PathBuf) -> bool {
-    use tokio::net::UnixStream;
-    // Try to connect - if successful, someone is listening
-    UnixStream::connect(path.as_std_path()).await.is_ok()
-}
-
 fn main() -> Result<()> {
     peeps::threads::install_sigprof_handler();
     peeps::threads::register_thread("main");
@@ -139,21 +131,6 @@ async fn async_main() -> Result<()> {
     let cas_endpoint = Endpoint::parse(&args.store)?;
     let bind_endpoint = Endpoint::parse(&args.listen)?;
     let vfsd_endpoint = Endpoint::parse(&args.vfsd)?;
-
-    // Check if another runner instance is already running
-    #[cfg(unix)]
-    {
-        if let Endpoint::Local(ref path) = bind_endpoint
-            && path.exists()
-            && is_socket_in_use(path).await
-        {
-            return Err(eyre::eyre!(
-                "Another vx-runner instance is already running (socket {} is in use).\n\
-                 Kill the existing instance or use a different --bind endpoint.",
-                path
-            ));
-        }
-    }
 
     // Connect to CAS and spawn+connect to vx-vfsd in parallel
     use vx_io::spawn::ServiceBuilder;
