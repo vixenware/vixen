@@ -146,7 +146,7 @@ impl SpawnTracker {
 
 /// Spawn a service binary and return the child process
 ///
-/// When `VX_INHERIT_STDIO` is set, stdout/stderr are inherited from the parent
+/// When `VX_TEST` is set, stdout/stderr are inherited from the parent
 /// (so daemon logs appear inline in test output). Otherwise they go to `log_path`.
 fn spawn_service(
     binary_name: &str,

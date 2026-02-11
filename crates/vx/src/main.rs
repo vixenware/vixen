@@ -465,7 +465,12 @@ async fn get_or_spawn_daemon(
                 .append(true)
                 .open(&log_path)?;
 
-            let mut cmd = std::process::Command::new("vxd");
+            let vxd_path = std::env::current_exe()?
+                .parent()
+                .ok_or_else(|| eyre::eyre!("current exe has no parent directory"))?
+                .join("vxd");
+
+            let mut cmd = std::process::Command::new(&vxd_path);
             // Pass the endpoint to the spawned daemon
             cmd.env("VX_HOME", vx_home.as_str());
             cmd.env("VXD", endpoint.display());
