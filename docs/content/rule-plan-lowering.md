@@ -48,15 +48,17 @@ When `VX_RULE_PLAN_BRIDGE=1` and `VX_RULES_FILE` is set, vxd will parse and eval
 `.vx` rules file through `PlannerRuntime` to produce a `RulePlan` (instead of using the
 hardcoded Rust `CrateGraph -> RulePlan` builder).
 
-Current `.vx` syntax is intentionally tiny: one builtin call per line with `key=value` args.
+Current `.vx` syntax is `vx-lang v0`: Rust-ish call syntax with named arguments and literals.
 
 Example:
 
 ```text
-emit-node id=n_action kind=action label="compile-bin:app"
-emit-node id=n_artifact kind=artifact label="artifact:app"
-emit-edge from=n_action to=n_artifact kind=ifwritten
+emit_node(id: n_action, kind: action, label: "compile-bin:app");
+emit_node(id: n_artifact, kind: artifact, label: "artifact:app");
+emit_edge(from: n_action, to: n_artifact, kind: ifwritten);
 ```
+
+Legacy compatibility: the previous `key=value` per-line format is still accepted for now.
 
 Note: in this migration mode, execution is still performed by the legacy action graph; the `.vx`
 rules file currently affects the report topology and parity harness, not the actual compilation steps.
