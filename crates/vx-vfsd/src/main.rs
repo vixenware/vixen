@@ -45,11 +45,14 @@ struct Canary {
     name: String,
     /// Random content to verify round-trip
     content: Vec<u8>,
-    /// Fake item ID for the canary file (u64::MAX — will never collide with real IDs)
+    /// Fake item ID for the canary file (high value that won't collide with real IDs)
     item_id: ItemId,
 }
 
-const CANARY_ITEM_ID: ItemId = u64::MAX;
+/// Canary item ID — must be high enough to never collide with real CAS item IDs
+/// (which start at 2) or the Swift-side virtual items (0xFFFF_FFFF_FFFE_xxxx),
+/// but NOT u64::MAX because FSItem.Identifier(rawValue:) returns nil for that value.
+const CANARY_ITEM_ID: ItemId = 0xFFFF_FFFF_FFFD_0001;
 const ROOT_ITEM_ID: ItemId = 1;
 
 impl SharedVfs {
