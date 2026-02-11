@@ -44,10 +44,12 @@ struct Args {
 }
 
 fn main() -> Result<()> {
+    eprintln!("[vx-store] main() entered");
     peeps::threads::install_sigprof_handler();
     peeps::threads::register_thread("main");
     peeps::tasks::init_task_tracking();
 
+    eprintln!("[vx-store] building tokio runtime");
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
@@ -60,21 +62,26 @@ fn main() -> Result<()> {
             peeps::threads::deregister_thread();
         })
         .build()?;
+    eprintln!("[vx-store] entering async_main");
     rt.block_on(async_main())
 }
 
 async fn async_main() -> Result<()> {
+    eprintln!("[vx-store] async_main entered");
     // If spawned by parent, die when parent dies
     ur_taking_me_with_you::die_with_parent();
+    eprintln!("[vx-store] death pact installed");
 
     // Initialize tracing
     vx_tracing::init_service("vx_store=info");
+    eprintln!("[vx-store] tracing initialized");
 
     // Initialize peeps instrumentation
     peeps::init();
     peeps::install_sigusr1("vx-store");
 
     tracing::info!("hello from vixen-store");
+    eprintln!("[vx-store] parsing args");
 
     let args: Args = args::Driver::new(
         args::builder::<Args>()?
@@ -88,20 +95,17 @@ async fn async_main() -> Result<()> {
     .run()
     .unwrap();
 
+    eprintln!("[vx-store] args parsed, listen={}", args.listen);
     let bind = Endpoint::parse(&args.listen)?;
 
     // Build storage backend
-    let storage = match std::env::var("VX_CAS_BASE") {
-        Ok(base) => CasStore::with_base(
-            FsStorage::new(args.root.clone()),
-            FsStorage::new(Utf8PathBuf::from(base)),
-        ),
-        Err(_) => CasStore::new(FsStorage::new(args.root.clone())),
-    };
+    let storage = CasStore::new(FsStorage::new(args.root.clone()));
 
     // Initialize storage directories
+    eprintln!("[vx-store] initializing storage at {}", args.root);
     tracing::info!("Initializing store at {}", args.root);
     storage.init().await?;
+    eprintln!("[vx-store] storage initialized");
 
     // Initialize store service
     let store = StoreService::new(storage, args.vx_home);
@@ -141,6 +145,7 @@ async fn async_main() -> Result<()> {
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
+        tracing::info!("accepted connection");
         let store = store.clone();
 
         peeps::tasks::spawn_tracked(format!("store_connection_{}", peer_addr), async move {
