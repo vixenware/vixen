@@ -93,7 +93,9 @@ All its descendants use the
 that they die when their parent dies, no matter what.
 
 When running tests, we don't actually want vxd to survive that long, so we tie its lifetime
-to the test runner, `cargo-nextest`, by setting `VXD_DEATH_PACT_PID={pid}`.
+to the test runner, `cargo-nextest`, by setting `VXD_DEATH_PACT_PID={cargo-nextest-pid}`.
+
+This is achieved by a [nextest setup script](https://nexte.st/docs/configuration/setup-scripts/?h=setup)
 
 ### Multiplexing
 
@@ -102,15 +104,25 @@ across different tests, which all run in their own processes.
 
 Therefore, there is a race for the first `vx` to spawn `vxd`.
 
-### The VFS daemon
+## The virtual filesystem
 
 The diagrams presented above are not fully accurate. They are missing the VFS
 daemon. Those handle FUSE ops, FSKit operations, ProjFS... functions? From a process
 distinct from `vx-runner`, to avoid deadlocks.
 
-`vx-vfsd` is connected to both `vx-runner` (which tells it what to mount and where)
-and to `vx-store` (since you can mount entire store trees inside the VFS without
-transferring them eagerly to vx-vfsd).
+> `vx-vfsd` is connected to both `vx-runner` (which tells it what to mount and where)
+> and to `vx-store` (since you can mount entire store trees inside the VFS without
+> transferring them eagerly to vx-vfsd).
+
+### VFS cleanup per platform
+
+On Linux, the vfs daemon forks itself to await its doppelganger's death and
+clean up the FUSE mount gracefully.
+
+On Windows uh... the ProjFS PR is not merged yet at the time of this writing.
+I'm not sure what the plan is.
+
+On macOS, the `vixenfs-mount` helper (provided by the [Vixen mac app](vixen-mac-app))
 
 ## Pending renames
 
