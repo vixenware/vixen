@@ -47,6 +47,10 @@ struct BuildArgs {
     json: bool,
 }
 
+/// Start daemons
+#[derive(Facet, Debug)]
+struct StartArgs {}
+
 /// Arguments for the `kill` subcommand
 #[derive(Facet, Debug)]
 struct KillArgs {}
@@ -134,6 +138,9 @@ enum CliCommand {
     /// Execute a build
     Build(BuildArgs),
 
+    /// Just start daemons
+    Start(StartArgs),
+
     /// Stop the daemon process
     Kill(KillArgs),
 
@@ -193,6 +200,10 @@ async fn async_main() -> Result<()> {
     match cli.command {
         // Build command gets TUI-based tracing (initialized in cmd_build)
         CliCommand::Build(args) => cmd_build(args).await,
+        CliCommand::Start(args) => {
+            vx_tracing::init_cli_stderr();
+            cmd_start(args).await
+        }
         // Other commands use stderr tracing
         CliCommand::Kill(args) => {
             vx_tracing::init_cli_stderr();
@@ -675,6 +686,20 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         }
         bail!("{}", result.message)
     }
+}
+
+async fn cmd_start(_args: StartArgs) -> Result<()> {
+    let (daemon, _tui) = get_or_spawn_daemon(false, true, false).await?;
+
+    println!("{} daemon is running", "✓".green().bold());
+
+    // Ping to verify connection
+    let version = daemon.version().await?;
+
+    println!("{} connected to vxd", "✓".green().bold());
+    println!("   {}", version);
+
+    Ok(())
 }
 
 async fn cmd_kill(_args: KillArgs) -> Result<()> {
