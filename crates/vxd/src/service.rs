@@ -1048,6 +1048,7 @@ impl VxdService {
 
                         let compile_node = graph.add_action(Action::Run {
                             label: format!("cc {source}"),
+                            kind: crate::action_graph::RunKind::Generic,
                             toolchain: crate::action_graph::RunToolchain::Zig,
                             program_rel: "zig".to_string(),
                             args,
@@ -1058,7 +1059,9 @@ impl VxdService {
                                 mount: "src".to_string(),
                                 manifest: source_manifest,
                             }],
+                            dep_tree_mounts: vec![],
                             file_mounts: vec![],
+                            dep_file_mounts: vec![],
                             collect_file_mounts: vec![],
                             outputs: vec![vx_runner_proto::RunOutput {
                                 logical: "object".to_string(),
@@ -1066,7 +1069,6 @@ impl VxdService {
                                 executable: false,
                             }],
                             materialize: vec![],
-                            rust: None,
                         });
 
                         // Depends on Zig toolchain
@@ -1095,6 +1097,7 @@ impl VxdService {
 
                     let link_node = graph.add_action(Action::Run {
                         label: format!("link {}", bin.name),
+                        kind: crate::action_graph::RunKind::Generic,
                         toolchain: crate::action_graph::RunToolchain::Zig,
                         program_rel: "zig".to_string(),
                         args,
@@ -1102,7 +1105,9 @@ impl VxdService {
                         cwd: None,
                         clear_env: true,
                         tree_mounts: vec![],
+                        dep_tree_mounts: vec![],
                         file_mounts: vec![],
+                        dep_file_mounts: vec![],
                         collect_file_mounts: vec![crate::action_graph::RunCollectInput {
                             logical: "object".to_string(),
                             path_prefix: "obj/".to_string(),
@@ -1118,7 +1123,6 @@ impl VxdService {
                             logical: "binary".to_string(),
                             workspace_rel_path: binary_output.clone(),
                         }],
-                        rust: None,
                     });
 
                     // Depends on all object files and Zig toolchain

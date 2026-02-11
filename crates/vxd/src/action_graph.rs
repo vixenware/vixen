@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use vx_report::{RulePlan, RulePlanEdge, RulePlanEdgeKind, RulePlanNode, RulePlanNodeKind};
 use vx_rs::crate_graph::{CrateGraph, CrateId, CrateSource, CrateType};
 use vx_runner_proto::{RunFileMount, RunOutput, RunTreeMount};
-use vx_store_proto::{Blake3Hash, RustChannel, RustComponent, RustToolchainSpec};
+use vx_store_proto::{RustChannel, RustComponent, RustToolchainSpec};
 
-use crate::inputs::{BuildConfig, RustCrate, RustToolchain};
+use crate::inputs::{BuildConfig, RustToolchain};
 
 /// Dependency with source information (for building RustDep at execution time)
 #[derive(Debug, Clone)]
@@ -55,8 +55,17 @@ impl PlannerSyntheticKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunToolchain {
     Zig,
-    #[allow(dead_code)]
     Rust,
+}
+
+#[derive(Debug, Clone)]
+pub enum RunKind {
+    Generic,
+    RustCompile {
+        crate_id: CrateId,
+        crate_name: String,
+        crate_type: CrateType,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +80,19 @@ pub struct RunCollectInput {
 pub struct RunMaterialize {
     pub logical: String,
     pub workspace_rel_path: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunDepTreeMount {
+    pub crate_id: CrateId,
+    pub mount: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunDepFileMount {
+    pub crate_id: CrateId,
+    pub logical: String,
+    pub path: String,
 }
 
 /// A single unit of work in the build process
@@ -143,6 +165,7 @@ pub enum Action {
     /// Run a sandboxed toolchain command with declared CAS/VFS inputs and outputs.
     Run {
         label: String,
+        kind: RunKind,
         toolchain: RunToolchain,
         program_rel: String,
         args: Vec<String>,
@@ -150,14 +173,15 @@ pub enum Action {
         cwd: Option<String>,
         clear_env: bool,
         tree_mounts: Vec<RunTreeMount>,
+        dep_tree_mounts: Vec<RunDepTreeMount>,
         file_mounts: Vec<RunFileMount>,
+        dep_file_mounts: Vec<RunDepFileMount>,
         collect_file_mounts: Vec<RunCollectInput>,
         outputs: Vec<RunOutput>,
         materialize: Vec<RunMaterialize>,
-        rust: Option<RustCompileMeta>,
     },
 
-    // NOTE: Rust compilation is represented as `Action::Run { rust: Some(...) }`.
+    // NOTE: Rust compilation is represented as `Action::Run { kind: RunKind::RustCompile { .. }, .. }`.
     /// Planner-lowered Rust compile action (metadata-backed migration step).
     PlannerCompileRustCrate {
         node_id: String,
@@ -173,19 +197,6 @@ pub enum Action {
         label: String,
         kind: PlannerSyntheticKind,
     },
-}
-
-#[derive(Debug, Clone)]
-pub struct RustCompileMeta {
-    pub crate_id: CrateId,
-    pub crate_name: String,
-    pub crate_type: CrateType,
-    pub deps: Vec<ActionDep>,
-    pub target_triple: String,
-    pub profile: String,
-    pub rust_crate: RustCrate,
-    pub toolchain: RustToolchain,
-    pub config: BuildConfig,
 }
 
 impl Action {
@@ -298,9 +309,10 @@ impl Action {
             Action::IngestRustSourceTree { .. } => "source.ingest",
             Action::ExtractRegistryCrateTree { .. } => "registry.extract",
             Action::Run {
-                rust: Some(meta), ..
+                kind: RunKind::RustCompile { crate_type, .. },
+                ..
             } => {
-                if meta.crate_type.as_str() == "bin" {
+                if crate_type.as_str() == "bin" {
                     "rust.compile_bin"
                 } else {
                     "rust.compile_rlib"
@@ -341,8 +353,9 @@ impl Action {
                 vxd_proto::ActionType::IngestSource(format!("{name}@{version}"))
             }
             Action::Run {
-                rust: Some(meta), ..
-            } => vxd_proto::ActionType::CompileRust(meta.crate_name.clone()),
+                kind: RunKind::RustCompile { crate_name, .. },
+                ..
+            } => vxd_proto::ActionType::CompileRust(crate_name.clone()),
             Action::Run { label, .. } => vxd_proto::ActionType::Run(label.clone()),
             Action::PlannerCompileRustCrate { crate_name, .. } => {
                 vxd_proto::ActionType::CompileRust(crate_name.clone())
@@ -540,19 +553,6 @@ impl ActionGraph {
 
         // Create per-crate source tree prep nodes + per-crate rustc run nodes.
         for (i, crate_node) in crate_graph.nodes.values().enumerate() {
-            // Create RustCrate input
-            let crate_id_hex = crate_node.id;
-            let rust_crate = RustCrate::new(
-                db,
-                crate_id_hex.to_string(),
-                crate_node.crate_name.clone(),
-                crate_node.edition.as_str().to_string(),
-                crate_node.crate_type.as_str().to_string(),
-                crate_node.crate_root_rel.to_string(),
-                Blake3Hash([0u8; 32]), // Placeholder, will be filled during execution
-            )
-            .map_err(|e| crate::error::VxdError::Picante(e.to_string()))?;
-
             // Build ActionDep list for --extern wiring
             let action_deps: Vec<ActionDep> = crate_node
                 .deps
@@ -659,20 +659,13 @@ impl ActionGraph {
                 executable: crate_node.crate_type.as_str() == "bin",
             }];
 
-            let rust_meta = RustCompileMeta {
-                crate_id: crate_node.id,
-                crate_name: crate_node.crate_name.clone(),
-                crate_type: crate_node.crate_type,
-                deps: action_deps,
-                target_triple: target_triple_str.clone(),
-                profile: profile_str.clone(),
-                rust_crate,
-                toolchain,
-                config,
-            };
-
             let action = Action::Run {
                 label: format!("rustc {}", crate_node.crate_name),
+                kind: RunKind::RustCompile {
+                    crate_id: crate_node.id,
+                    crate_name: crate_node.crate_name.clone(),
+                    crate_type: crate_node.crate_type,
+                },
                 toolchain: RunToolchain::Rust,
                 program_rel: "bin/rustc".to_string(),
                 args,
@@ -680,11 +673,32 @@ impl ActionGraph {
                 cwd: None,
                 clear_env: true,
                 tree_mounts: vec![],
+                dep_tree_mounts: vec![RunDepTreeMount {
+                    crate_id: crate_node.id,
+                    mount: "src".to_string(),
+                }],
                 file_mounts: vec![],
+                dep_file_mounts: action_deps
+                    .iter()
+                    .map(|dep| RunDepFileMount {
+                        crate_id: dep.crate_id,
+                        logical: "rlib".to_string(),
+                        path: format!("deps/lib{}.rlib", dep.extern_name),
+                    })
+                    .collect(),
                 collect_file_mounts: vec![],
                 outputs,
-                materialize: vec![],
-                rust: Some(rust_meta),
+                materialize: if crate_node.crate_type.as_str() == "bin" {
+                    vec![RunMaterialize {
+                        logical: "bin".to_string(),
+                        workspace_rel_path: format!(
+                            ".vx/build/{}/{}/{}",
+                            target_triple_str, profile_str, crate_node.crate_name
+                        ),
+                    }]
+                } else {
+                    vec![]
+                },
             };
 
             let node_idx = graph.add_node(ActionNode { action });
@@ -846,17 +860,6 @@ impl ActionGraph {
             }
             let crate_node = &crate_graph.nodes[crate_id];
 
-            let rust_crate = RustCrate::new(
-                db,
-                crate_node.id.to_string(),
-                crate_node.crate_name.clone(),
-                crate_node.edition.as_str().to_string(),
-                crate_node.crate_type.as_str().to_string(),
-                crate_node.crate_root_rel.to_string(),
-                Blake3Hash([0u8; 32]), // filled during execution
-            )
-            .map_err(|e| crate::error::VxdError::Picante(e.to_string()))?;
-
             let action_deps: Vec<ActionDep> = crate_node
                 .deps
                 .iter()
@@ -958,20 +961,13 @@ impl ActionGraph {
                 executable: crate_node.crate_type.as_str() == "bin",
             }];
 
-            let rust_meta = RustCompileMeta {
-                crate_id: crate_node.id,
-                crate_name: crate_node.crate_name.clone(),
-                crate_type: crate_node.crate_type,
-                deps: action_deps,
-                target_triple: target_triple_str.clone(),
-                profile: profile_str.clone(),
-                rust_crate,
-                toolchain,
-                config,
-            };
-
             let action = Action::Run {
                 label: format!("rustc {}", crate_node.crate_name),
+                kind: RunKind::RustCompile {
+                    crate_id: crate_node.id,
+                    crate_name: crate_node.crate_name.clone(),
+                    crate_type: crate_node.crate_type,
+                },
                 toolchain: RunToolchain::Rust,
                 program_rel: "bin/rustc".to_string(),
                 args,
@@ -979,11 +975,32 @@ impl ActionGraph {
                 cwd: None,
                 clear_env: true,
                 tree_mounts: vec![],
+                dep_tree_mounts: vec![RunDepTreeMount {
+                    crate_id: crate_node.id,
+                    mount: "src".to_string(),
+                }],
                 file_mounts: vec![],
+                dep_file_mounts: action_deps
+                    .iter()
+                    .map(|dep| RunDepFileMount {
+                        crate_id: dep.crate_id,
+                        logical: "rlib".to_string(),
+                        path: format!("deps/lib{}.rlib", dep.extern_name),
+                    })
+                    .collect(),
                 collect_file_mounts: vec![],
                 outputs,
-                materialize: vec![],
-                rust: Some(rust_meta),
+                materialize: if crate_node.crate_type.as_str() == "bin" {
+                    vec![RunMaterialize {
+                        logical: "bin".to_string(),
+                        workspace_rel_path: format!(
+                            ".vx/build/{}/{}/{}",
+                            target_triple_str, profile_str, crate_node.crate_name
+                        ),
+                    }]
+                } else {
+                    vec![]
+                },
             };
 
             let node_idx = graph.add_node(ActionNode { action });
@@ -1308,19 +1325,6 @@ impl ActionGraph {
             }
             let crate_node = &crate_graph.nodes[crate_id];
 
-            let rust_crate = RustCrate::new(
-                db,
-                crate_node.id.to_string(),
-                crate_node.crate_name.clone(),
-                crate_node.edition.as_str().to_string(),
-                crate_node.crate_type.as_str().to_string(),
-                crate_node.crate_root_rel.to_string(),
-                Blake3Hash([0u8; 32]), // filled during execution
-            )
-            .map_err(|e| {
-                lowering_error_for_node(plan_node_by_crate.get(crate_id).unwrap(), e.to_string())
-            })?;
-
             let action_deps: Vec<ActionDep> = crate_node
                 .deps
                 .iter()
@@ -1422,20 +1426,13 @@ impl ActionGraph {
                 executable: crate_node.crate_type.as_str() == "bin",
             }];
 
-            let rust_meta = RustCompileMeta {
-                crate_id: crate_node.id,
-                crate_name: crate_node.crate_name.clone(),
-                crate_type: crate_node.crate_type,
-                deps: action_deps,
-                target_triple: target_triple_str.clone(),
-                profile: profile_str.clone(),
-                rust_crate,
-                toolchain,
-                config,
-            };
-
             let action = Action::Run {
                 label: format!("rustc {}", crate_node.crate_name),
+                kind: RunKind::RustCompile {
+                    crate_id: crate_node.id,
+                    crate_name: crate_node.crate_name.clone(),
+                    crate_type: crate_node.crate_type,
+                },
                 toolchain: RunToolchain::Rust,
                 program_rel: "bin/rustc".to_string(),
                 args,
@@ -1443,11 +1440,32 @@ impl ActionGraph {
                 cwd: None,
                 clear_env: true,
                 tree_mounts: vec![],
+                dep_tree_mounts: vec![RunDepTreeMount {
+                    crate_id: crate_node.id,
+                    mount: "src".to_string(),
+                }],
                 file_mounts: vec![],
+                dep_file_mounts: action_deps
+                    .iter()
+                    .map(|dep| RunDepFileMount {
+                        crate_id: dep.crate_id,
+                        logical: "rlib".to_string(),
+                        path: format!("deps/lib{}.rlib", dep.extern_name),
+                    })
+                    .collect(),
                 collect_file_mounts: vec![],
                 outputs,
-                materialize: vec![],
-                rust: Some(rust_meta),
+                materialize: if crate_node.crate_type.as_str() == "bin" {
+                    vec![RunMaterialize {
+                        logical: "bin".to_string(),
+                        workspace_rel_path: format!(
+                            ".vx/build/{}/{}/{}",
+                            target_triple_str, profile_str, crate_node.crate_name
+                        ),
+                    }]
+                } else {
+                    vec![]
+                },
             };
 
             let node_idx = graph.add_node(ActionNode { action });
