@@ -39,6 +39,8 @@ vx-toolchain = { workspace = true }
 tokio-test-lite = { workspace = true }
 vx-plan = { workspace = true }
 vx-cache = { workspace = true }
+vx-tarball = { workspace = true }
+facet-json = { workspace = true }
 
 [features]
 default = []

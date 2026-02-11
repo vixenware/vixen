@@ -1066,6 +1066,7 @@ impl VxdService {
                                 executable: false,
                             }],
                             materialize: vec![],
+                            rust: None,
                         });
 
                         // Depends on Zig toolchain
@@ -1117,6 +1118,7 @@ impl VxdService {
                             logical: "binary".to_string(),
                             workspace_rel_path: binary_output.clone(),
                         }],
+                        rust: None,
                     });
 
                     // Depends on all object files and Zig toolchain

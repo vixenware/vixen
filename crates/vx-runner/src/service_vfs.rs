@@ -1102,6 +1102,8 @@ impl RunnerService {
             }
         };
         let toolchain_path = action.mount_base.join(&toolchain_prefix_id);
+        let toolchain_path_str = toolchain_path.as_str().to_string();
+        let expand = |s: &str| s.replace("${VX_TOOLCHAIN}", &toolchain_path_str);
 
         // Mount CAS trees into the prefix.
         for mount in &request.tree_mounts {
@@ -1276,7 +1278,7 @@ impl RunnerService {
         let program_path = toolchain_path.join(&request.program_rel);
         let mut cmd = crate::sandbox::sandboxed_command(program_path.as_str(), &action);
         for arg in &request.args {
-            cmd.arg(arg);
+            cmd.arg(expand(arg));
         }
 
         let cwd = request
@@ -1299,7 +1301,7 @@ impl RunnerService {
         }
 
         for (k, v) in &request.env {
-            cmd.env(k, v);
+            cmd.env(k, expand(v));
         }
 
         // Zig needs its lib dir set to locate libc and friends.

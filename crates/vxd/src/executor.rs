@@ -90,6 +90,21 @@ pub enum ActionResult {
         was_cached: bool,
     },
 
+    /// Rust toolchain finalized (ToolchainManifest ready for runner).
+    RustToolchainFinalized {
+        toolchain_id: Blake3Hash,
+        manifest_hash: Blake3Hash,
+        was_cached: bool,
+    },
+
+    /// A source tree was ingested/extracted into a CAS tree manifest.
+    RustSourceTreeReady {
+        crate_id: CrateId,
+        source_manifest: Blake3Hash,
+        was_cached: bool,
+        cas_cache_key: Blake3Hash,
+    },
+
     /// A generic `run` node completed successfully.
     RunCompleted {
         /// Output manifest hash from CAS.
@@ -686,28 +701,10 @@ impl Executor {
                         bin_output = Some(path.clone());
                     }
 
-                    // Determine crate type from action
-                    let (crate_type_str, kind) = match action {
-                        Action::CompileRustCrate { crate_type, .. } => {
-                            let type_str = crate_type.as_str();
-                            let kind = if type_str == "bin" {
-                                "rust.compile_bin"
-                            } else {
-                                "rust.compile_rlib"
-                            };
-                            (type_str.to_string(), kind.to_string())
-                        }
-                        _ => ("unknown".to_string(), "rust.compile".to_string()),
-                    };
-
                     // Generate node report for crate compilation
                     node_reports.push(vx_report::NodeReport {
-                        node_id: format!(
-                            "compile-{}:{}",
-                            crate_type_str,
-                            action.display_name().replace("compile ", "")
-                        ),
-                        kind,
+                        node_id: action.report_node_id(),
+                        kind: action.report_kind().to_string(),
                         cache_key: crate_id.to_string(),
                         cache: if *was_cached {
                             vx_report::CacheOutcome::Hit {
@@ -734,10 +731,109 @@ impl Executor {
                         }],
                         deps: vec![],
                         outputs: vec![vx_report::OutputRecord {
-                            logical: crate_type_str,
+                            logical: if bin_path.is_some() {
+                                "bin".to_string()
+                            } else {
+                                "rlib".to_string()
+                            },
                             manifest: Some(output_manifest.to_hex()),
                             blob: None,
                             path: bin_path.as_ref().map(|p| p.to_string()),
+                        }],
+                        invocation: None,
+                        diagnostics: vx_report::DiagnosticsRecord::default(),
+                        cas_cache_key: Some(cas_cache_key.to_hex()),
+                    });
+                }
+                ActionResult::RustToolchainFinalized {
+                    toolchain_id,
+                    manifest_hash,
+                    was_cached,
+                } => {
+                    if *was_cached {
+                        cache_hits += 1;
+                    } else {
+                        rebuilt += 1;
+                    }
+
+                    node_reports.push(vx_report::NodeReport {
+                        node_id: action.report_node_id(),
+                        kind: action.report_kind().to_string(),
+                        cache_key: toolchain_id.to_hex(),
+                        cache: if *was_cached {
+                            vx_report::CacheOutcome::Hit {
+                                manifest: manifest_hash.to_hex(),
+                            }
+                        } else {
+                            vx_report::CacheOutcome::Miss {
+                                reason: vx_report::MissReason::FirstBuild,
+                            }
+                        },
+                        timing: {
+                            let &(exec, start, ln) =
+                                node_timings.get(node_idx).unwrap_or(&(0, 0, 0));
+                            vx_report::NodeTiming {
+                                execute_ms: exec,
+                                start_offset_ms: start,
+                                lane: ln,
+                                ..Default::default()
+                            }
+                        },
+                        inputs: vec![],
+                        deps: vec![],
+                        outputs: vec![vx_report::OutputRecord {
+                            logical: "toolchain".to_string(),
+                            manifest: Some(manifest_hash.to_hex()),
+                            blob: None,
+                            path: None,
+                        }],
+                        invocation: None,
+                        diagnostics: vx_report::DiagnosticsRecord::default(),
+                        cas_cache_key: None,
+                    });
+                }
+                ActionResult::RustSourceTreeReady {
+                    crate_id,
+                    source_manifest,
+                    was_cached,
+                    cas_cache_key,
+                } => {
+                    if *was_cached {
+                        cache_hits += 1;
+                    } else {
+                        rebuilt += 1;
+                    }
+
+                    node_reports.push(vx_report::NodeReport {
+                        node_id: action.report_node_id(),
+                        kind: action.report_kind().to_string(),
+                        cache_key: crate_id.to_string(),
+                        cache: if *was_cached {
+                            vx_report::CacheOutcome::Hit {
+                                manifest: source_manifest.to_hex(),
+                            }
+                        } else {
+                            vx_report::CacheOutcome::Miss {
+                                reason: vx_report::MissReason::KeyNotFound,
+                            }
+                        },
+                        timing: {
+                            let &(exec, start, ln) =
+                                node_timings.get(node_idx).unwrap_or(&(0, 0, 0));
+                            vx_report::NodeTiming {
+                                execute_ms: exec,
+                                start_offset_ms: start,
+                                lane: ln,
+                                ..Default::default()
+                            }
+                        },
+                        inputs: vec![],
+                        deps: vec![],
+                        outputs: vec![vx_report::OutputRecord {
+                            logical: "source".to_string(),
+                            manifest: Some(source_manifest.to_hex()),
+                            blob: None,
+                            path: None,
                         }],
                         invocation: None,
                         diagnostics: vx_report::DiagnosticsRecord::default(),
@@ -1032,8 +1128,7 @@ async fn execute_action(
 ) -> Result<ActionResult, VxdError> {
     use crate::queries::*;
     use camino::Utf8PathBuf;
-    use vx_rs::crate_graph::CrateSource;
-    use vx_runner_proto::{RunFileMount, RunRequest, RustCompileRequest, RustDep};
+    use vx_runner_proto::{RunFileMount, RunRequest};
     use vx_store_proto::{IngestTreeRequest, TreeFile};
 
     debug!("processing action {}", action.display_name());
@@ -1188,57 +1283,25 @@ async fn execute_action(
             }
         }
 
-        Action::CompileRustCrate {
-            crate_id,
-            crate_name,
-            crate_type,
-            edition,
-            crate_root_rel,
-            source,
-            deps: action_deps,
-            workspace_root: workspace_root_str,
-            target_triple,
-            profile,
-            rust_crate: _,
-            toolchain,
-            config,
-        } => {
-            debug!("COMPILE: starting compilation for crate {}", crate_name);
-            let _ = progress
-                .send(&StoreProgress {
-                    message: format!("resolving {crate_name}"),
-                    current: None,
-                    total: None,
-                })
-                .await;
-            let workspace_root = Utf8PathBuf::from(&workspace_root_str);
+        Action::FinalizeRustToolchain { spec } => {
+            use vx_store_proto::EnsureStatus;
 
-            // Finalize toolchain manifest from extracted components.
-            let spec = rust_toolchain_spec
-                .clone()
-                .ok_or_else(|| VxdError::Compilation {
-                    crate_name: crate_name.clone(),
-                    message: "missing rust toolchain spec".to_string(),
-                })?;
             let finalize_result = cas
                 .finalize_rust_toolchain(spec)
                 .await
                 .map_err(|e| VxdError::CasRpc(e.to_string()))?;
-            if finalize_result.status == vx_store_proto::EnsureStatus::Failed {
-                return Err(VxdError::Compilation {
-                    crate_name: crate_name.clone(),
-                    message: finalize_result
+            if finalize_result.status == EnsureStatus::Failed {
+                return Err(VxdError::ToolchainAcquisition(
+                    finalize_result
                         .error
                         .unwrap_or_else(|| "toolchain finalization failed".to_string()),
-                });
+                ));
             }
-            let toolchain_manifest =
-                finalize_result
-                    .manifest_hash
-                    .ok_or_else(|| VxdError::Compilation {
-                        crate_name: crate_name.clone(),
-                        message: "toolchain manifest missing after finalization".to_string(),
-                    })?;
+
+            let toolchain_manifest = finalize_result.manifest_hash.ok_or_else(|| {
+                VxdError::ToolchainAcquisition("missing toolchain manifest".into())
+            })?;
+
             let manifest = cas
                 .get_toolchain_manifest(toolchain_manifest)
                 .await
@@ -1248,63 +1311,52 @@ async fn execute_action(
                 .toolchain_id
                 .unwrap_or(manifest.toolchain_id);
 
-            // Update the RustToolchainManifest and RustToolchain in the database with real values
+            // Update the RustToolchainManifest and RustToolchain in picante with real values.
             use crate::inputs::{RustToolchain as RustToolchainInput, RustToolchainManifest};
             RustToolchainManifest::set(&**db, toolchain_manifest)
                 .map_err(|e| VxdError::Picante(e.to_string()))?;
 
-            // Update the toolchain input with real values for cache key computation
-            let toolchain = RustToolchainInput::new(
-                &**db,
+            if let Some(toolchain) = rust_toolchain_spec {
+                let host = toolchain.host;
+                let target = toolchain.target;
+                let _ =
+                    RustToolchainInput::new(&**db, toolchain_id, toolchain_manifest, host, target)
+                        .map_err(|e| VxdError::Picante(e.to_string()))?;
+            }
+
+            Ok(ActionResult::RustToolchainFinalized {
                 toolchain_id,
-                toolchain_manifest,
-                toolchain
-                    .host(&**db)
-                    .map_err(|e| VxdError::Picante(e.to_string()))?,
-                toolchain
-                    .target(&**db)
-                    .map_err(|e| VxdError::Picante(e.to_string()))?,
-            )
-            .map_err(|e| VxdError::Picante(e.to_string()))?;
+                manifest_hash: toolchain_manifest,
+                was_cached: finalize_result.status == EnsureStatus::Hit,
+            })
+        }
 
-            debug!("COMPILE: computing source closure for {}", crate_name);
-            let _ = progress
-                .send(&StoreProgress {
-                    message: format!("computing source closure for {crate_name}"),
-                    current: None,
-                    total: None,
-                })
-                .await;
-            // Compute source closure and hash (for path crates)
-            let (closure_paths, closure_hash) = match &source {
-                CrateSource::Path { .. } => {
-                    let crate_root_abs = workspace_root.join(&crate_root_rel);
-                    let paths = vx_rs::rust_source_closure(&crate_root_abs, &workspace_root)
-                        .map_err(|e| VxdError::SourceClosure {
-                            crate_name: crate_name.clone(),
-                            message: e.to_string(),
-                        })?;
+        Action::IngestRustSourceTree {
+            crate_id,
+            crate_name,
+            edition,
+            crate_type,
+            workspace_root: workspace_root_str,
+            crate_root_rel,
+        } => {
+            let workspace_root_path = Utf8PathBuf::from(&workspace_root_str);
+            let crate_root_abs = workspace_root_path.join(&crate_root_rel);
 
-                    let hash = vx_rs::hash_source_closure(&paths, &workspace_root)
-                        .map_err(|e| VxdError::SourceHash(e.to_string()))?;
+            let paths =
+                vx_rs::rust_source_closure(&crate_root_abs, &workspace_root_path).map_err(|e| {
+                    VxdError::SourceClosure {
+                        crate_name: crate_name.clone(),
+                        message: e.to_string(),
+                    }
+                })?;
 
-                    (paths, hash)
-                }
-                CrateSource::Registry { .. } => {
-                    // Registry crates don't need source closure
-                    (vec![], Blake3Hash([0u8; 32]))
-                }
-            };
+            let closure_hash = vx_rs::hash_source_closure(&paths, &workspace_root_path)
+                .map_err(|e| VxdError::SourceHash(e.to_string()))?;
 
-            debug!(
-                "COMPILE: source closure computed for {}, updating picante",
-                crate_name
-            );
-            // Update RustCrate with actual closure hash
-            let crate_id_hex = crate_id;
-            let rust_crate = crate::inputs::RustCrate::new(
+            // Update RustCrate input with actual closure hash.
+            let _ = crate::inputs::RustCrate::new(
                 &**db,
-                crate_id_hex.to_string(),
+                crate_id.to_string(),
                 crate_name.clone(),
                 edition.clone(),
                 crate_type.as_str().to_string(),
@@ -1313,308 +1365,169 @@ async fn execute_action(
             )
             .map_err(|e| VxdError::Picante(e.to_string()))?;
 
-            // Collect dependency results from completed actions
-            let (deps, registry_crate_manifests): (
-                Vec<RustDep>,
-                HashMap<(String, String), Blake3Hash>,
-            ) = {
-                let results_lock = results.read().await;
-
-                // Build map of CrateId -> output_manifest from completed compilation actions
-                let completed_manifests: HashMap<CrateId, Blake3Hash> = results_lock
-                    .iter()
-                    .filter_map(|(_, result)| match result {
-                        ActionResult::CrateCompiled {
-                            crate_id,
-                            output_manifest,
-                            ..
-                        } => Some((*crate_id, *output_manifest)),
-                        _ => None,
-                    })
-                    .collect();
-
-                // Build map of (name, version) -> manifest_hash from registry acquisition actions
-                let registry_crate_manifests: HashMap<(String, String), Blake3Hash> = results_lock
-                    .iter()
-                    .filter_map(|(_, result)| match result {
-                        ActionResult::RegistryCrateAcquired {
-                            name,
-                            version,
-                            manifest_hash,
-                            ..
-                        } => Some(((name.clone(), version.clone()), *manifest_hash)),
-                        _ => None,
-                    })
-                    .collect();
-
-                // Build RustDep list by resolving each ActionDep
-                let deps = action_deps
-                    .iter()
-                    .map(|action_dep| {
-                        let manifest_hash = completed_manifests
-                            .get(&action_dep.crate_id)
-                            .ok_or_else(|| VxdError::DependencyNotCompiled {
-                                dep_name: action_dep.extern_name.clone(),
-                                crate_name: crate_name.clone(),
-                            })?;
-
-                        // Determine registry_crate_manifest based on source (from ActionResults)
-                        let registry_crate_manifest = match &action_dep.source {
-                            CrateSource::Registry { name, version, .. } => registry_crate_manifests
-                                .get(&(name.clone(), version.clone()))
-                                .copied(),
-                            CrateSource::Path { .. } => None,
-                        };
-
-                        Ok(RustDep {
-                            extern_name: action_dep.extern_name.clone(),
-                            manifest_hash: *manifest_hash,
-                            registry_crate_manifest,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, VxdError>>()?;
-
-                (deps, registry_crate_manifests)
-            };
-
-            let dep_rlib_hashes: Vec<(String, Blake3Hash)> = deps
-                .iter()
-                .map(|d| (d.extern_name.clone(), d.manifest_hash))
-                .collect();
-
-            // Compute cache key - tracked functions need db but don't hold lock during execution
             let cache_key = {
-                match crate_type {
-                    vx_rs::CrateType::Lib => {
-                        if dep_rlib_hashes.is_empty() {
-                            cache_key_compile_rlib(&**db, rust_crate, toolchain, config)
-                                .await
-                                .map_err(|e| VxdError::CacheKey(e.to_string()))?
-                        } else {
-                            cache_key_compile_rlib_with_deps(
-                                &**db,
-                                rust_crate,
-                                toolchain,
-                                config,
-                                dep_rlib_hashes.clone(),
-                            )
-                            .await
-                            .map_err(|e| VxdError::CacheKey(e.to_string()))?
-                        }
-                    }
-                    vx_rs::CrateType::Bin => cache_key_compile_bin_with_deps(
-                        &**db,
-                        rust_crate,
-                        toolchain,
-                        config,
-                        dep_rlib_hashes.clone(),
-                    )
-                    .await
-                    .map_err(|e| VxdError::CacheKey(e.to_string()))?,
-                }
+                let mut h = blake3::Hasher::new();
+                h.update(b"vx-ingest-rust-src-v1\n");
+                h.update(&closure_hash.0);
+                Blake3Hash(*h.finalize().as_bytes())
             };
 
-            // Check cache
-            let (output_manifest, was_cached) = if let Some(cached) = cas
+            let (source_manifest, was_cached) = if let Some(cached) = cas
                 .lookup(cache_key)
                 .await
                 .map_err(|e| VxdError::CasRpc(e.to_string()))?
             {
-                info!(
-                    crate_name = %crate_name,
-                    manifest = %cached,
-                    "cache hit"
-                );
-                // Track cache hit
                 (cached, true)
             } else {
-                // Cache miss - need to compile
-                info!(
-                    crate_name = %crate_name,
-                    "cache miss, compiling"
-                );
-                let _ = progress
-                    .send(&StoreProgress {
-                        message: format!("compiling {crate_name}"),
-                        current: None,
-                        total: None,
-                    })
-                    .await;
-
-                // Build compile request based on crate source
-                let compile_request = match &source {
-                    CrateSource::Path { .. } => {
-                        // Path crate - ingest source tree to CAS
-                        let mut files = Vec::with_capacity(closure_paths.len());
-
-                        for rel_path in &closure_paths {
-                            let abs_path = workspace_root.join(rel_path);
-                            let contents = tokio::fs::read(&abs_path).await.map_err(|e| {
-                                VxdError::FileRead {
-                                    path: abs_path.clone(),
-                                    message: e.to_string(),
-                                }
-                            })?;
-
-                            files.push(TreeFile {
-                                path: rel_path.to_string(),
-                                contents,
-                                executable: false,
-                            });
-                        }
-
-                        let ingest_req = IngestTreeRequest { files };
-                        let ingest_result = cas
-                            .ingest_tree(ingest_req)
+                let mut files = Vec::with_capacity(paths.len());
+                for rel_path in &paths {
+                    let abs_path = workspace_root_path.join(rel_path);
+                    let contents =
+                        tokio::fs::read(&abs_path)
                             .await
-                            .map_err(|e| VxdError::CasRpc(e.to_string()))?;
-
-                        if !ingest_result.success {
-                            return Err(VxdError::TreeIngestion(
-                                ingest_result
-                                    .error
-                                    .unwrap_or_else(|| "tree ingestion failed".to_string()),
-                            ));
-                        }
-
-                        let source_manifest = ingest_result.manifest_hash.ok_or_else(|| {
-                            VxdError::TreeIngestion("missing manifest hash".to_string())
-                        })?;
-
-                        RustCompileRequest {
-                            toolchain_manifest,
-                            source_manifest,
-                            crate_root: crate_root_rel.clone(),
-                            crate_name: crate_name.clone(),
-                            crate_type: crate_type.as_str().to_string(),
-                            edition: edition.clone(),
-                            target_triple: target_triple.clone(),
-                            profile: profile.clone(),
-                            deps: deps.clone(),
-                            registry_crate_manifest: None,
-                        }
-                    }
-                    CrateSource::Registry { name, version, .. } => {
-                        // Registry crate - runner will extract and determine edition/lib_path
-                        let registry_manifest = registry_crate_manifests
-                            .get(&(name.clone(), version.clone()))
-                            .copied()
-                            .ok_or_else(|| VxdError::RegistryCrateNoManifest {
-                                name: name.clone(),
-                                version: version.clone(),
+                            .map_err(|e| VxdError::FileRead {
+                                path: abs_path.clone(),
+                                message: e.to_string(),
                             })?;
-
-                        RustCompileRequest {
-                            toolchain_manifest,
-                            source_manifest: Blake3Hash([0u8; 32]), // Placeholder, runner ignores
-                            crate_root: String::new(),              // Placeholder, runner ignores
-                            crate_name: crate_name.clone(),
-                            crate_type: crate_type.as_str().to_string(),
-                            edition: String::new(), // Placeholder, runner reads from Cargo.toml
-                            target_triple: target_triple.clone(),
-                            profile: profile.clone(),
-                            deps: deps.clone(),
-                            registry_crate_manifest: Some(registry_manifest),
-                        }
-                    }
-                };
-
-                let result = exec
-                    .compile_rust(compile_request, progress)
-                    .await
-                    .map_err(|e| VxdError::ExecRpc(e.to_string()))?;
-
-                if !result.success {
-                    return Err(VxdError::Compilation {
-                        crate_name: crate_name.clone(),
-                        message: result.error.unwrap_or(result.stderr),
+                    files.push(TreeFile {
+                        path: rel_path.to_string(),
+                        contents,
+                        executable: false,
                     });
                 }
 
-                let output_manifest =
-                    result
-                        .output_manifest
-                        .ok_or_else(|| VxdError::NoOutputManifest {
-                            crate_name: crate_name.clone(),
-                        })?;
+                let ingest_result = cas
+                    .ingest_tree(IngestTreeRequest { files })
+                    .await
+                    .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                if !ingest_result.success {
+                    return Err(VxdError::TreeIngestion(
+                        ingest_result
+                            .error
+                            .unwrap_or_else(|| "tree ingestion failed".to_string()),
+                    ));
+                }
+                let source_manifest = ingest_result
+                    .manifest_hash
+                    .ok_or_else(|| VxdError::TreeIngestion("missing manifest hash".to_string()))?;
 
-                // Publish to cache
-                cas.publish(cache_key, output_manifest)
+                cas.publish(cache_key, source_manifest)
                     .await
                     .map_err(|e| VxdError::CasRpc(e.to_string()))?;
 
-                (output_manifest, false)
+                (source_manifest, false)
             };
 
-            // Materialize bin outputs (always materialize, even on cache hit)
-            let bin_output = if crate_type == vx_rs::crate_graph::CrateType::Bin {
-                let output_dir = workspace_root
-                    .join(".vx/build")
-                    .join(target_triple)
-                    .join(profile);
+            Ok(ActionResult::RustSourceTreeReady {
+                crate_id,
+                source_manifest,
+                was_cached,
+                cas_cache_key: cache_key,
+            })
+        }
 
-                tokio::fs::create_dir_all(&output_dir)
-                    .await
-                    .map_err(|e| VxdError::CreateDir {
-                        path: output_dir.clone(),
-                        message: e.to_string(),
-                    })?;
+        Action::ExtractRegistryCrateTree {
+            crate_id,
+            name,
+            version,
+            crate_name,
+            edition,
+            crate_type,
+            crate_root_rel,
+        } => {
+            use vx_tarball::{Compression, extract_to_tree};
 
-                // Ensure .vx is in .gitignore (best-effort, don't fail build if this fails)
-                match vx_io::git::ensure_vx_gitignored(&workspace_root).await {
-                    Ok(true) => {
-                        debug!("Added /.vx to .gitignore");
-                    }
-                    Ok(false) => {
-                        // Already in gitignore or not in a git repo
-                    }
-                    Err(e) => {
-                        warn!("Failed to update .gitignore: {}", e);
-                    }
-                }
+            let registry_manifest = {
+                let results_lock = results.read().await;
+                deps.iter()
+                    .find_map(|idx| match results_lock.get(idx) {
+                        Some(ActionResult::RegistryCrateAcquired {
+                            name: n,
+                            version: v,
+                            manifest_hash,
+                            ..
+                        }) if *n == name && *v == version => Some(*manifest_hash),
+                        _ => None,
+                    })
+                    .ok_or_else(|| VxdError::RegistryCrateNoManifest {
+                        name: name.clone(),
+                        version: version.clone(),
+                    })?
+            };
 
-                let output_path = output_dir.join(&crate_name);
+            let cache_key = {
+                let mut h = blake3::Hasher::new();
+                h.update(b"vx-extract-registry-v1\n");
+                h.update(&registry_manifest.0);
+                Blake3Hash(*h.finalize().as_bytes())
+            };
 
-                // Fetch manifest and materialize
+            let (source_manifest, was_cached) = if let Some(cached) = cas
+                .lookup(cache_key)
+                .await
+                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+            {
+                (cached, true)
+            } else {
                 let manifest = cas
-                    .get_manifest(output_manifest)
+                    .get_registry_manifest(registry_manifest)
                     .await
                     .map_err(|e| VxdError::CasRpc(e.to_string()))?
-                    .ok_or(VxdError::OutputManifestNotFound(output_manifest))?;
+                    .ok_or_else(|| VxdError::RegistryCrateNoManifest {
+                        name: name.clone(),
+                        version: version.clone(),
+                    })?;
 
-                let mut materialized = false;
-                for output in &manifest.outputs {
-                    if output.logical == "bin" {
-                        let blob_data = cas
-                            .get_blob(output.blob)
+                let tarball = cas
+                    .get_blob(manifest.crate_tarball_blob)
+                    .await
+                    .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                    .ok_or(VxdError::BlobNotFound(manifest.crate_tarball_blob))?;
+
+                let cas_for_blobs = cas.clone();
+                let tree = extract_to_tree(
+                    tokio::io::BufReader::new(std::io::Cursor::new(tarball)),
+                    Compression::Gzip,
+                    1,
+                    async move |data| {
+                        cas_for_blobs
+                            .put_blob(data)
                             .await
-                            .map_err(|e| VxdError::CasRpc(e.to_string()))?
-                            .ok_or(VxdError::BlobNotFound(output.blob))?;
+                            .map_err(|e| e.to_string())
+                    },
+                )
+                .await
+                .map_err(|e| VxdError::TreeIngestion(e.to_string()))?;
 
-                        vx_io::sync::atomic_write_executable(&output_path, &blob_data, true)
-                            .map_err(|e| VxdError::WriteOutput {
-                                path: output_path.clone(),
-                                message: e.to_string(),
-                            })?;
+                let manifest_json = facet_json::to_string(&tree)
+                    .map_err(|e| VxdError::TreeIngestion(e.to_string()))?;
+                let source_manifest = Blake3Hash::from_bytes(manifest_json.as_bytes());
+                cas.put_blob(manifest_json.into_bytes())
+                    .await
+                    .map_err(|e| VxdError::CasRpc(e.to_string()))?;
 
-                        materialized = true;
-                        break;
-                    }
-                }
+                cas.publish(cache_key, source_manifest)
+                    .await
+                    .map_err(|e| VxdError::CasRpc(e.to_string()))?;
 
-                if materialized {
-                    Some(output_path)
-                } else {
-                    None
-                }
-            } else {
-                None
+                (source_manifest, false)
             };
 
-            Ok(ActionResult::CrateCompiled {
+            // For registry crates, treat the extracted tree manifest hash as the source closure hash.
+            let _ = crate::inputs::RustCrate::new(
+                &**db,
+                crate_id.to_string(),
+                crate_name.clone(),
+                edition.clone(),
+                crate_type.as_str().to_string(),
+                crate_root_rel.clone(),
+                source_manifest,
+            )
+            .map_err(|e| VxdError::Picante(e.to_string()))?;
+
+            Ok(ActionResult::RustSourceTreeReady {
                 crate_id,
-                output_manifest,
-                bin_output,
+                source_manifest,
                 was_cached,
                 cas_cache_key: cache_key,
             })
@@ -1692,7 +1605,238 @@ async fn execute_action(
             collect_file_mounts,
             outputs,
             materialize,
+            rust,
         } => {
+            // Rust compilation is expressed as a `run` node with extra metadata.
+            if let Some(meta) = rust {
+                if toolchain != crate::action_graph::RunToolchain::Rust {
+                    return Err(VxdError::Compilation {
+                        crate_name: meta.crate_name.clone(),
+                        message: "rust run nodes must use RunToolchain::Rust".to_string(),
+                    });
+                }
+
+                let (toolchain_manifest, source_manifest, completed_manifests) = {
+                    let results_lock = results.read().await;
+
+                    let toolchain_manifest = deps
+                        .iter()
+                        .find_map(|idx| match results_lock.get(idx) {
+                            Some(ActionResult::RustToolchainFinalized {
+                                manifest_hash, ..
+                            }) => Some(*manifest_hash),
+                            _ => None,
+                        })
+                        .ok_or_else(|| VxdError::Compilation {
+                            crate_name: meta.crate_name.clone(),
+                            message: "Rust toolchain not finalized before rustc run".to_string(),
+                        })?;
+
+                    let source_manifest = deps
+                        .iter()
+                        .find_map(|idx| match results_lock.get(idx) {
+                            Some(ActionResult::RustSourceTreeReady {
+                                crate_id,
+                                source_manifest,
+                                ..
+                            }) if *crate_id == meta.crate_id => Some(*source_manifest),
+                            _ => None,
+                        })
+                        .ok_or_else(|| VxdError::Compilation {
+                            crate_name: meta.crate_name.clone(),
+                            message: "Rust source tree not prepared before rustc run".to_string(),
+                        })?;
+
+                    let completed_manifests: HashMap<CrateId, Blake3Hash> = results_lock
+                        .iter()
+                        .filter_map(|(_, result)| match result {
+                            ActionResult::CrateCompiled {
+                                crate_id,
+                                output_manifest,
+                                ..
+                            } => Some((*crate_id, *output_manifest)),
+                            _ => None,
+                        })
+                        .collect();
+
+                    (toolchain_manifest, source_manifest, completed_manifests)
+                };
+
+                // Resolve deps into `--extern` mounts and cache-key inputs.
+                let mut dep_rlib_hashes: Vec<(String, Blake3Hash)> = Vec::new();
+                let mut resolved_file_mounts = Vec::new();
+                for dep in &meta.deps {
+                    let manifest_hash =
+                        completed_manifests.get(&dep.crate_id).ok_or_else(|| {
+                            VxdError::DependencyNotCompiled {
+                                dep_name: dep.extern_name.clone(),
+                                crate_name: meta.crate_name.clone(),
+                            }
+                        })?;
+                    dep_rlib_hashes.push((dep.extern_name.clone(), *manifest_hash));
+                    resolved_file_mounts.push(RunFileMount {
+                        manifest: *manifest_hash,
+                        logical: "rlib".to_string(),
+                        path: format!("deps/lib{}.rlib", dep.extern_name),
+                    });
+                }
+                dep_rlib_hashes.sort_by(|a, b| a.0.cmp(&b.0));
+
+                // Compute cache key using existing tracked schema (includes session id, toolchain id, closure hash).
+                let cache_key = match meta.crate_type {
+                    vx_rs::CrateType::Lib => {
+                        if dep_rlib_hashes.is_empty() {
+                            cache_key_compile_rlib(
+                                &**db,
+                                meta.rust_crate,
+                                meta.toolchain,
+                                meta.config,
+                            )
+                            .await
+                            .map_err(|e| VxdError::CacheKey(e.to_string()))?
+                        } else {
+                            cache_key_compile_rlib_with_deps(
+                                &**db,
+                                meta.rust_crate,
+                                meta.toolchain,
+                                meta.config,
+                                dep_rlib_hashes.clone(),
+                            )
+                            .await
+                            .map_err(|e| VxdError::CacheKey(e.to_string()))?
+                        }
+                    }
+                    vx_rs::CrateType::Bin => cache_key_compile_bin_with_deps(
+                        &**db,
+                        meta.rust_crate,
+                        meta.toolchain,
+                        meta.config,
+                        dep_rlib_hashes.clone(),
+                    )
+                    .await
+                    .map_err(|e| VxdError::CacheKey(e.to_string()))?,
+                };
+
+                // Cache lookup/publish at the daemon layer.
+                let (output_manifest, was_cached) = if let Some(cached) = cas
+                    .lookup(cache_key)
+                    .await
+                    .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                {
+                    (cached, true)
+                } else {
+                    let request = RunRequest {
+                        toolchain_manifest,
+                        program_rel,
+                        args,
+                        cwd,
+                        clear_env,
+                        env,
+                        tree_mounts: {
+                            let mut m = vec![vx_runner_proto::RunTreeMount {
+                                mount: "src".to_string(),
+                                manifest: source_manifest,
+                            }];
+                            m.extend(tree_mounts);
+                            m
+                        },
+                        file_mounts: {
+                            let mut m = resolved_file_mounts;
+                            m.extend(file_mounts);
+                            m
+                        },
+                        outputs,
+                        macos_commandlinetools_version: macos_commandlinetools_version.clone(),
+                    };
+
+                    let result = exec
+                        .run(request, progress)
+                        .await
+                        .map_err(|e| VxdError::ExecRpc(e.to_string()))?;
+                    if !result.success {
+                        return Err(VxdError::Compilation {
+                            crate_name: meta.crate_name.clone(),
+                            message: result.error.unwrap_or(result.stderr),
+                        });
+                    }
+                    let output_manifest =
+                        result
+                            .output_manifest
+                            .ok_or_else(|| VxdError::NoOutputManifest {
+                                crate_name: meta.crate_name.clone(),
+                            })?;
+
+                    cas.publish(cache_key, output_manifest)
+                        .await
+                        .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+
+                    (output_manifest, false)
+                };
+
+                // Materialize bin outputs (always materialize, even on cache hit).
+                let bin_output = if meta.crate_type == vx_rs::crate_graph::CrateType::Bin {
+                    let output_dir = workspace_root
+                        .join(".vx/build")
+                        .join(&meta.target_triple)
+                        .join(&meta.profile);
+
+                    tokio::fs::create_dir_all(&output_dir).await.map_err(|e| {
+                        VxdError::CreateDir {
+                            path: output_dir.clone(),
+                            message: e.to_string(),
+                        }
+                    })?;
+
+                    match vx_io::git::ensure_vx_gitignored(workspace_root).await {
+                        Ok(true) => debug!("Added /.vx to .gitignore"),
+                        Ok(false) => {}
+                        Err(e) => warn!("Failed to update .gitignore: {}", e),
+                    }
+
+                    let output_path = output_dir.join(&meta.crate_name);
+                    let manifest = cas
+                        .get_manifest(output_manifest)
+                        .await
+                        .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                        .ok_or(VxdError::OutputManifestNotFound(output_manifest))?;
+
+                    for output in &manifest.outputs {
+                        if output.logical == "bin" {
+                            let blob_data = cas
+                                .get_blob(output.blob)
+                                .await
+                                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                                .ok_or(VxdError::BlobNotFound(output.blob))?;
+
+                            vx_io::sync::atomic_write_executable(&output_path, &blob_data, true)
+                                .map_err(|e| VxdError::WriteOutput {
+                                    path: output_path.clone(),
+                                    message: e.to_string(),
+                                })?;
+                            return Ok(ActionResult::CrateCompiled {
+                                crate_id: meta.crate_id,
+                                output_manifest,
+                                bin_output: Some(output_path),
+                                was_cached,
+                                cas_cache_key: cache_key,
+                            });
+                        }
+                    }
+
+                    None
+                } else {
+                    None
+                };
+
+                return Ok(ActionResult::CrateCompiled {
+                    crate_id: meta.crate_id,
+                    output_manifest,
+                    bin_output,
+                    was_cached,
+                    cas_cache_key: cache_key,
+                });
+            }
+
             let toolchain_manifest = match toolchain {
                 crate::action_graph::RunToolchain::Zig => {
                     let results_lock = results.read().await;
@@ -1711,8 +1855,7 @@ async fn execute_action(
                 crate::action_graph::RunToolchain::Rust => {
                     return Err(VxdError::Compilation {
                         crate_name: label.clone(),
-                        message: "rust toolchain selector not supported for Action::Run yet"
-                            .to_string(),
+                        message: "rust toolchain selector requires rust metadata".to_string(),
                     });
                 }
             };
