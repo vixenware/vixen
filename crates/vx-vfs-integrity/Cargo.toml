@@ -19,6 +19,7 @@ vx-vfsd = { workspace = true }
 vx-io = { workspace = true }
 
 # RPC
+roam = { workspace = true }
 roam-stream = { workspace = true }
 
 # Async runtime
@@ -35,5 +36,6 @@ eyre = { workspace = true }
 fastcdc = { workspace = true }
 fastrand = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
 vx-tracing = { workspace = true }

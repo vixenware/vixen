@@ -98,6 +98,9 @@ bytes = "1"
 # FUSE (Linux) — vendored
 fuse3 = { path = "crates/fuse3", features = ["telemetry"] }
 
+# ProjFS (Windows)
+windows-projfs = { version = "0.1", features = ["dynamic-import"] }
+
 # terminal
 owo-colors = { version = "4", features = ["supports-color"] }
 indicatif = "0.18"
@@ -118,6 +121,7 @@ strid = "8.0.0"
 # system
 libc = "0.2"
 cfg-if = "1"
+dirs = "6"
 
 # randomness
 fastrand = "2"

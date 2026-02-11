@@ -462,18 +462,10 @@ pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
     cmd.arg("-D").arg(format!("VFS_ROOT_ALT={}", vfs_root_alt));
     cmd.arg(program);
 
-    // Set all temp-related env vars to the action's output directory so rustc uses it
-    // for temp files instead of the system temp dir (which the sandbox blocks)
-    cmd.env("TMPDIR", action.out_path.as_str());
-    cmd.env("TMP", action.out_path.as_str());
-    cmd.env("TEMP", action.out_path.as_str());
-    cmd.env("TEMPDIR", action.out_path.as_str());
-
     tracing::trace!(
         sandbox_exec = "/usr/bin/sandbox-exec",
         write_dir = %action.out_path,
         vfs_root = %action.mount_base,
-        tmpdir = %action.out_path,
         program,
         "spawning sandboxed command"
     );

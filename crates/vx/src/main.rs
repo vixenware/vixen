@@ -34,7 +34,7 @@ struct BuildArgs {
     #[facet(args::named, args::short = 'r')]
     release: bool,
 
-    /// Don't auto-spawn daemon if not running (for tests)
+    /// Don't auto-spawn daemon if not running. (for tests)
     #[facet(args::named)]
     no_spawn: bool,
 
@@ -404,23 +404,19 @@ async fn get_or_spawn_daemon(
     use vx_io::net::Endpoint;
     use vx_io::spawn::ServiceBuilder;
 
-    let vx_home = std::env::var("VX_HOME")
-        .unwrap_or_else(|_| format!("{}/.vx", std::env::var("HOME").expect("HOME not set")));
+    let vx_home = std::env::var("VX_HOME").unwrap_or_else(|_| {
+        dirs::home_dir()
+            .expect("could not determine home directory")
+            .join(".vx")
+            .to_string_lossy()
+            .into_owned()
+    });
     let vx_home = camino::Utf8PathBuf::from(&vx_home);
 
-    // Parse endpoint (defaults to Unix socket in VX_HOME)
+    // Parse endpoint (defaults to local IPC in VX_HOME)
     let endpoint = match std::env::var("VXD") {
         Ok(v) => Endpoint::parse(&v)?,
-        Err(_) => {
-            #[cfg(unix)]
-            {
-                vx_io::net::default_unix_endpoint(&vx_home, "vxd")
-            }
-            #[cfg(not(unix))]
-            {
-                Endpoint::parse("127.0.0.1:9001")?
-            }
-        }
+        Err(_) => vx_io::net::default_local_endpoint(&vx_home, "vxd"),
     };
 
     // Create TUI and progress listener
@@ -493,8 +489,6 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
     // In JSON mode, tracing goes to stderr so stdout stays clean NDJSON.
     if let Some(ref tui) = tui {
         init_tracing_with_tui(tui.clone());
-    } else {
-        vx_tracing::init_cli_stderr();
     }
 
     // When running under the test harness, set the session ID so cache keys
@@ -658,18 +652,15 @@ async fn cmd_kill(_args: KillArgs) -> Result<()> {
     let endpoint = match std::env::var("VXD") {
         Ok(v) => Endpoint::parse(&v)?,
         Err(_) => {
-            #[cfg(unix)]
-            {
-                let vx_home = std::env::var("VX_HOME").unwrap_or_else(|_| {
-                    format!("{}/.vx", std::env::var("HOME").expect("HOME not set"))
-                });
-                let vx_home = camino::Utf8PathBuf::from(&vx_home);
-                vx_io::net::default_unix_endpoint(&vx_home, "vxd")
-            }
-            #[cfg(not(unix))]
-            {
-                Endpoint::parse("127.0.0.1:9001")?
-            }
+            let vx_home = std::env::var("VX_HOME").unwrap_or_else(|_| {
+                dirs::home_dir()
+                    .expect("could not determine home directory")
+                    .join(".vx")
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            let vx_home = camino::Utf8PathBuf::from(&vx_home);
+            vx_io::net::default_local_endpoint(&vx_home, "vxd")
         }
     };
 
@@ -839,8 +830,13 @@ async fn cmd_clean_cache(vx_home: &Utf8PathBuf) -> Result<()> {
 
 async fn cmd_doctor() -> Result<()> {
     // Daemon status — check if vxd socket exists
-    let vx_home = std::env::var("VX_HOME")
-        .unwrap_or_else(|_| format!("{}/.vx", std::env::var("HOME").expect("HOME not set")));
+    let vx_home = std::env::var("VX_HOME").unwrap_or_else(|_| {
+        dirs::home_dir()
+            .expect("could not determine home directory")
+            .join(".vx")
+            .to_string_lossy()
+            .into_owned()
+    });
     println!("{} {}", "home:".bold(), vx_home);
     let daemon_sock = std::path::PathBuf::from(&vx_home).join("vxd.sock");
     if daemon_sock.exists() {
@@ -932,6 +928,7 @@ async fn cmd_debug(args: DebugArgs) -> Result<()> {
     peeps::clean_dumps();
     std::fs::create_dir_all(peeps::DUMP_DIR)?;
 
+    #[cfg(unix)]
     for (_name, pid) in &pids {
         unsafe {
             libc::kill(*pid as i32, libc::SIGUSR1);

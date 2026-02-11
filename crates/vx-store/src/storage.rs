@@ -14,7 +14,7 @@ use std::io;
 use camino::{Utf8Path, Utf8PathBuf};
 use vx_io::atomic_write;
 use vx_store_proto::{
-    Blake3Hash, CacheKey, ChunkHash, NodeHash, RegistrySpecKey, ToolchainSpecKey,
+    Blake3Hash, CacheKey, ChunkHash, ManifestHash, NodeHash, RegistrySpecKey, ToolchainSpecKey,
 };
 
 // =============================================================================
@@ -161,6 +161,66 @@ impl CasStore {
 
     pub(crate) async fn has_node(&self, hash: &NodeHash) -> io::Result<bool> {
         self.primary.has_node(hash).await
+    }
+
+    // -- Manifests (JSON, stored in manifests/blake3/) --
+
+    fn manifest_path(root: &Utf8Path, hash: &ManifestHash) -> Utf8PathBuf {
+        let hex = hash.to_hex();
+        root.join("manifests/blake3")
+            .join(&hex[..2])
+            .join(format!("{}.json", hex))
+    }
+
+    pub(crate) async fn get_manifest(&self, hash: &ManifestHash) -> io::Result<Option<String>> {
+        let path = Self::manifest_path(self.primary.root(), hash);
+        match tokio::fs::read_to_string(&path).await {
+            Ok(json) => Ok(Some(json)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub(crate) async fn put_manifest(&self, hash: &ManifestHash, json: &[u8]) -> io::Result<()> {
+        let path = Self::manifest_path(self.primary.root(), hash);
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Ok(());
+        }
+        atomic_write(&path, json).await
+    }
+
+    // -- Tree manifests (stored in trees/blake3/) --
+
+    fn tree_manifest_path(root: &Utf8Path, hash: &ManifestHash) -> Utf8PathBuf {
+        let hex = hash.to_hex();
+        root.join("trees/blake3")
+            .join(&hex[..2])
+            .join(format!("{}.json", hex))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn get_tree_manifest(
+        &self,
+        hash: &ManifestHash,
+    ) -> io::Result<Option<String>> {
+        let path = Self::tree_manifest_path(self.primary.root(), hash);
+        match tokio::fs::read_to_string(&path).await {
+            Ok(json) => Ok(Some(json)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub(crate) async fn put_tree_manifest(
+        &self,
+        hash: &ManifestHash,
+        json: &[u8],
+    ) -> io::Result<()> {
+        let path = Self::tree_manifest_path(self.primary.root(), hash);
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Ok(());
+        }
+        atomic_write(&path, json).await
     }
 
     // -- Toolchain specs (spec_key → manifest_hash mapping) --

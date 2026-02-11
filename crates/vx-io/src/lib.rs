@@ -27,10 +27,18 @@ pub async fn atomic_write(path: &Utf8Path, contents: &[u8]) -> Result<(), std::i
     let temp_path = temp_file.into_temp_path();
     tokio::fs::write(&temp_path, contents).await?;
 
-    // Atomically persist the temporary file to the final location
-    temp_path
-        .persist(path)
-        .map_err(|e| std::io::Error::other(format!("failed to persist temp file: {}", e)))?;
+    // Atomically persist the temporary file to the final location.
+    // If rename fails (e.g. cross-filesystem or Windows access denied),
+    // fall back to copy + delete.
+    if let Err(e) = temp_path.persist(path) {
+        let temp = e.path;
+        std::fs::copy(&temp, path.as_std_path())
+            .map_err(|ce| std::io::Error::other(format!(
+                "rename failed ({}), copy fallback also failed: {}",
+                e.error, ce
+            )))?;
+        // temp is dropped here, which deletes the temp file
+    }
 
     Ok(())
 }
@@ -66,10 +74,15 @@ pub async fn atomic_write_executable(
         tokio::fs::set_permissions(&temp_path, perms).await?;
     }
 
-    // Atomically persist
-    temp_path
-        .persist(path)
-        .map_err(|e| std::io::Error::other(format!("failed to persist temp file: {}", e)))?;
+    // Atomically persist (with copy+delete fallback)
+    if let Err(e) = temp_path.persist(path) {
+        let temp = e.path;
+        std::fs::copy(&temp, path.as_std_path())
+            .map_err(|ce| std::io::Error::other(format!(
+                "rename failed ({}), copy fallback also failed: {}",
+                e.error, ce
+            )))?;
+    }
 
     Ok(())
 }
@@ -121,9 +134,14 @@ pub mod sync {
         file.sync_all()?;
         drop(file);
 
-        temp_path
-            .persist(path)
-            .map_err(|e| std::io::Error::other(format!("failed to persist temp file: {}", e)))?;
+        if let Err(e) = temp_path.persist(path) {
+            let temp = e.path;
+            std::fs::copy(&temp, path.as_std_path())
+                .map_err(|ce| std::io::Error::other(format!(
+                    "rename failed ({}), copy fallback also failed: {}",
+                    e.error, ce
+                )))?;
+        }
 
         Ok(())
     }
@@ -155,9 +173,14 @@ pub mod sync {
             std::fs::set_permissions(&temp_path, perms)?;
         }
 
-        temp_path
-            .persist(path)
-            .map_err(|e| std::io::Error::other(format!("failed to persist temp file: {}", e)))?;
+        if let Err(e) = temp_path.persist(path) {
+            let temp = e.path;
+            std::fs::copy(&temp, path.as_std_path())
+                .map_err(|ce| std::io::Error::other(format!(
+                    "rename failed ({}), copy fallback also failed: {}",
+                    e.error, ce
+                )))?;
+        }
 
         Ok(())
     }

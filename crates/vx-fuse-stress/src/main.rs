@@ -130,7 +130,12 @@ fn dump_hang_diagnostics(vx_home: &Path) {
     eprintln!("\n=== HANG DIAGNOSTICS ===\n");
 
     // Trigger peeps dumps via SIGUSR1 to all vixen processes
+    #[cfg(unix)]
     let pids = find_vixen_pids();
+    #[cfg(not(unix))]
+    let pids: Vec<(String, u32)> = Vec::new();
+
+    #[cfg(unix)]
     for (name, pid) in &pids {
         eprintln!("Sending SIGUSR1 to {name} (PID {pid})...");
         unsafe {
@@ -167,6 +172,7 @@ fn dump_hang_diagnostics(vx_home: &Path) {
     eprintln!("\n=== END DIAGNOSTICS ===\n");
 }
 
+#[cfg(unix)]
 fn find_vixen_pids() -> Vec<(String, u32)> {
     let output = std::process::Command::new("pgrep")
         .args(["-la", "(vxd|vx-store|vx-runner|vx-vfsd)"])
@@ -463,7 +469,13 @@ fn main() -> Result<()> {
     let vxd_sock = vx_home.join("vxd.sock");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if vxd_sock.exists() && std::os::unix::net::UnixStream::connect(&vxd_sock).is_ok() {
+        let ready = {
+            #[cfg(unix)]
+            { vxd_sock.exists() && std::os::unix::net::UnixStream::connect(&vxd_sock).is_ok() }
+            #[cfg(not(unix))]
+            { vxd_sock.exists() }
+        };
+        if ready {
             break;
         }
         if Instant::now() > deadline {

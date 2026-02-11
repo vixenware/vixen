@@ -35,15 +35,12 @@ pub type VfsdCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispa
 
 pub(crate) fn runner_mount_base() -> Utf8PathBuf {
     // Option 1: VX_HOME-based path (works with FSKit, but has system policy restrictions on unsigned binaries)
-    let vx_home = std::env::var("VX_HOME")
-        .ok()
-        .map(Utf8PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").expect("HOME not set");
-            Utf8PathBuf::from(format!("{}/.vx", home))
-        });
+    let vx_home = Utf8PathBuf::from(
+        std::env::var("VX_HOME")
+            .expect("VX_HOME not set — vx-runner must be launched by `vx` or with VX_HOME set"),
+    );
 
-    vx_home.join("vixen/runner")
+    vx_home.join("vixen").join("runner")
 
     // Option 2: /Volumes path (avoids system policy restrictions, but FSKit mount fails)
     // let base = if cfg!(target_os = "macos") {
@@ -117,6 +114,7 @@ async fn async_main() -> Result<()> {
 
     // Initialize peeps instrumentation
     peeps::init();
+    #[cfg(unix)]
     peeps::install_sigusr1("vx-runner");
 
     tracing::info!("hello from vixen-runner");
@@ -183,6 +181,7 @@ async fn async_main() -> Result<()> {
     tracing::info!("VFS provided by vx-vfsd at {}", runner_mount_base());
 
     // SIGUSR1: dump diagnostics
+    #[cfg(unix)]
     peeps::tasks::spawn_tracked("sigusr1_handler", async {
         use tokio::signal::unix::{SignalKind, signal};
         let mut sigusr1 =
@@ -475,11 +474,9 @@ impl RunnerService {
     }
 
     /// Add a source tree to an action prefix
-    ///
-    /// Populates `<prefix>/src/` with the source tree's files from CAS.
     pub(crate) async fn add_source_tree_to_prefix(
         &self,
-        prefix_id: &str,
+        action: &crate::service_vfs::ActionContext,
         source_manifest_hash: Blake3Hash,
     ) -> RunnerResult<()> {
         tracing::debug!(
@@ -490,7 +487,11 @@ impl RunnerService {
         // Mount the entire source tree at src/
         // source_manifest_hash is a NodeHash of a DirectoryNode
         self.vfs
-            .mount_tree(prefix_id, "src", source_manifest_hash)
+            .mount_tree(
+                &action.prefix_id,
+                crate::service_vfs::ActionContext::SOURCES_DIR,
+                source_manifest_hash,
+            )
             .await
             .map_err(|e| RunnerError::VfsMount(format!("failed to mount source tree: {}", e)))?;
 
@@ -498,11 +499,9 @@ impl RunnerService {
     }
 
     /// Add a dependency artifact to an action prefix
-    ///
-    /// Places the dependency's rlib at `<prefix>/deps/<extern_name>.rlib`
     pub(crate) async fn add_dep_to_prefix(
         &self,
-        prefix_id: &str,
+        action: &crate::service_vfs::ActionContext,
         extern_name: &str,
         manifest_hash: Blake3Hash,
     ) -> RunnerResult<()> {
@@ -548,7 +547,7 @@ impl RunnerService {
 
         let path = format!("deps/lib{}.rlib", extern_name);
         self.vfs
-            .add_file_to_prefix(prefix_id, &path, blob_hash, blob_size, false)
+            .add_file_to_prefix(&action.prefix_id, &path, blob_hash, blob_size, false)
             .await
             .map_err(|e| {
                 RunnerError::VfsMount(format!("failed to add dependency {}: {}", extern_name, e))

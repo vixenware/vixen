@@ -1,4 +1,3 @@
-#[cfg(unix)]
 use camino::Utf8Path;
 use eyre::Result;
 use std::io;
@@ -243,7 +242,7 @@ impl Listener {
                 Ok((Stream::Tcp(stream), addr.to_string()))
             }
             Listener::Local { listener, .. } => {
-                let guard = listener.lock().await;
+                let mut guard = listener.lock().await;
                 let stream = guard.accept().await?;
                 #[cfg(unix)]
                 return Ok((Stream::Local(stream), "local".to_string()));
@@ -317,9 +316,11 @@ where
     )
 }
 
-/// Create a default endpoint path for a service within VX_HOME.
-#[cfg(unix)]
-pub fn default_unix_endpoint(vx_home: &Utf8Path, service: &str) -> Endpoint {
+/// Create a default local IPC endpoint for a service within VX_HOME.
+///
+/// On Unix this resolves to a Unix domain socket; on Windows the path is
+/// mapped to a named pipe by `roam_local`.
+pub fn default_local_endpoint(vx_home: &Utf8Path, service: &str) -> Endpoint {
     Endpoint::Local(vx_home.join(format!("{}.sock", service)))
 }
 

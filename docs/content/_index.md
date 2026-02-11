@@ -29,8 +29,14 @@ Rust through:
   * A (planned) "fixup package manager" for crates with special needs (creative
     build scripts or proc macros) — but only if we can't figure out a way for
     vixen to "just magically support everything". Wouldn't that be neat.
-  
+
 The rule language is in flux, that's why you don't see it documented here.
+
+- [Prerequisites](/prerequisites/) - Platform requirements (Linux, macOS, Windows)
+- [Download](/download/) - Install vixen on macOS
+- [Specification](/spec/) - Full specification document
+- [Internals](/internals/) - How vixen builds things under the hood
+- [GitHub](https://github.com/bearcove/vixen)
 
 ## Current status
 

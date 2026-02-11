@@ -73,6 +73,7 @@ async fn async_main() -> Result<()> {
 
     // Initialize peeps instrumentation
     peeps::init();
+    #[cfg(unix)]
     peeps::install_sigusr1("vx-store");
 
     tracing::info!("hello from vixen-store");
@@ -98,7 +99,6 @@ async fn async_main() -> Result<()> {
 
     // Initialize storage directories
     tracing::debug!("initializing storage at {}", args.root);
-    tracing::info!("Initializing store at {}", args.root);
     storage.init().await?;
     tracing::debug!("storage initialized");
 
@@ -106,6 +106,7 @@ async fn async_main() -> Result<()> {
     let store = StoreService::new(storage, args.vx_home);
 
     // SIGUSR1: dump diagnostics
+    #[cfg(unix)]
     {
         let store = store.clone();
         peeps::tasks::spawn_tracked("sigusr1_handler", async move {

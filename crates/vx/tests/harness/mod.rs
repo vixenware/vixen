@@ -77,14 +77,14 @@ impl TestEnv {
 
     /// Path to the vx binary (built by cargo)
     fn vx_binary() -> PathBuf {
-        let path = Self::bindir().join("vx");
+        let path = Self::bindir().join(format!("vx{}", std::env::consts::EXE_SUFFIX));
         assert!(path.exists(), "vx binary does not exist at {:?}", path);
         path
     }
 
     /// Path to the vxd binary (built by cargo)
     fn vxd_path() -> PathBuf {
-        let path = Self::bindir().join("vxd");
+        let path = Self::bindir().join(format!("vxd{}", std::env::consts::EXE_SUFFIX));
         assert!(path.exists(), "vxd binary does not exist at {:?}", path);
         path
     }
@@ -224,15 +224,7 @@ fn dirs_next() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
         return PathBuf::from(xdg);
     }
-    let home = std::env::var("HOME").expect("HOME not set");
-    #[cfg(target_os = "macos")]
-    {
-        PathBuf::from(&home).join("Library/Caches")
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        PathBuf::from(&home).join(".cache")
-    }
+    dirs::cache_dir().expect("could not determine cache directory")
 }
 
 /// Builder for `vx build` commands

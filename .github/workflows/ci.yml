@@ -40,7 +40,7 @@ jobs:
 
       - run: cargo nextest run --workspace --lib --bins
 
-  integration-tests:
+  integration-linux:
     runs-on: depot-ubuntu-24.04-32
     steps:
       - uses: actions/checkout@v6
@@ -53,5 +53,23 @@ jobs:
 
       - name: Install FUSE
         run: sudo apt-get update && sudo apt-get install -y fuse3 libfuse3-dev
+
+      - run: cargo nextest run -E 'package(vx)' -j4 --no-fail-fast
+  
+  integration-windows:
+    runs-on: [self-hosted, Windows, X64, eggs]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Prefer Git Bash over WSL bash
+        shell: powershell
+        run: |
+          echo "C:\Program Files\Git\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@nextest
 
       - run: cargo nextest run -E 'package(vx)' -j4 --no-fail-fast

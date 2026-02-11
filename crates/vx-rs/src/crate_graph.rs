@@ -1042,10 +1042,13 @@ fn compute_lca(paths: &[Utf8PathBuf]) -> Utf8PathBuf {
 
     // Reconstruct path from common components
     if common_len == 0 {
-        Utf8PathBuf::from("/")
+        Utf8PathBuf::from(std::path::MAIN_SEPARATOR_STR)
     } else {
-        let components: Vec<&str> = component_lists[0][..common_len].to_vec();
-        Utf8PathBuf::from(components.join("/"))
+        let mut result = Utf8PathBuf::new();
+        for component in &component_lists[0][..common_len] {
+            result.push(component);
+        }
+        result
     }
 }
 
@@ -1067,9 +1070,9 @@ fn normalize_path(
             })?
     };
 
-    // Strip workspace root prefix
+    // Strip workspace root prefix and normalize to forward slashes
     path.strip_prefix(workspace_root)
-        .map(Utf8PathBuf::from)
+        .map(|p| Utf8PathBuf::from(p.as_str().replace('\\', "/")))
         .map_err(|_| CrateGraphError::PathOutsideWorkspace {
             path: path.clone(),
             workspace_root: workspace_root.to_owned(),
@@ -1298,6 +1301,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_normalize_path() {
         let workspace = Utf8PathBuf::from("/home/user/project");
         let path = Utf8PathBuf::from("/home/user/project/app/src/main.rs");
@@ -1306,6 +1310,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_normalize_path_outside_workspace() {
         let workspace = Utf8PathBuf::from("/home/user/project");
         let path = Utf8PathBuf::from("/home/other/file.rs");

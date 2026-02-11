@@ -93,6 +93,7 @@ const ROOT_ITEM_ID: ItemId = 1;
 ///
 /// All mutations must go through [`VfsItems::insert`] and [`VfsItems::remove`]
 /// to keep the children index consistent.
+#[derive(Clone)]
 pub(crate) struct VfsItems {
     /// All items keyed by ItemId.
     items: HashMap<ItemId, VfsItem>,
@@ -144,7 +145,7 @@ impl VfsItems {
     }
 
     /// Get an item by id.
-    fn get(&self, id: &ItemId) -> Option<&VfsItem> {
+    pub(crate) fn get(&self, id: &ItemId) -> Option<&VfsItem> {
         self.items.get(id)
     }
 
@@ -284,6 +285,8 @@ pub struct CasVfs {
     /// BlobNodes are immutable (content-addressed) so caching is unconditionally safe.
     /// Small: each entry is ~100 bytes × MAX_CHUNKS_PER_BLOB chunk entries.
     blobnode_cache: DiagnosticRwLock<HashMap<NodeHash, Arc<BlobNode>>>,
+    /// Mount path for reading back files written directly to disk (ProjFS on Windows).
+    mount_path: Utf8PathBuf,
 }
 
 impl CasVfs {
@@ -294,6 +297,7 @@ impl CasVfs {
     pub fn new(
         cas: Arc<StoreClient<crate::CasCaller>>,
         disk_cache_dir: Option<Utf8PathBuf>,
+        mount_path: Utf8PathBuf,
     ) -> Self {
         let mut items = VfsItems::new();
 
@@ -317,6 +321,7 @@ impl CasVfs {
             next_id: AtomicU64::new(2), // 1=root
             disk_cache_dir,
             blobnode_cache: DiagnosticRwLock::new("CasVfs::blobnode_cache", HashMap::new()),
+            mount_path,
         }
     }
 
@@ -654,7 +659,7 @@ impl CasVfs {
         };
 
         // Split path into components and create intermediate directories
-        let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let components: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
         if components.is_empty() {
             return None;
         }
@@ -1215,12 +1220,24 @@ impl CasVfs {
         }
     }
 
-    /// Flush all written files in a prefix to CAS
-    /// Returns a map of relative paths to their CAS hashes
+    /// Flush all written files in a prefix to CAS.
+    /// Returns a map of relative paths to their CAS hashes.
+    ///
+    /// On FUSE (macOS/Linux), flushes in-memory write buffers.
+    /// On ProjFS (Windows), reads files from the on-disk mount since writes
+    /// bypass the VFS entirely.
     pub async fn flush_prefix_to_cas(&self, prefix_id: &str) -> HashMap<String, (Blake3Hash, u64)> {
+        if cfg!(windows) {
+            self.flush_prefix_from_disk(prefix_id).await
+        } else {
+            self.flush_prefix_from_buffers(prefix_id).await
+        }
+    }
+
+    /// FUSE path: flush in-memory write buffers to CAS.
+    async fn flush_prefix_from_buffers(&self, prefix_id: &str) -> HashMap<String, (Blake3Hash, u64)> {
         let mut results = HashMap::new();
 
-        // Get prefix root
         let prefix_root_id = {
             let prefixes = self.prefixes.read();
             match prefixes.get(prefix_id) {
@@ -1229,7 +1246,6 @@ impl CasVfs {
             }
         };
 
-        // Find all items with write buffers under this prefix
         let items_to_flush: Vec<(ItemId, String)> = {
             let items = self.items.read();
             let descendants = Self::collect_descendants_from(&items, prefix_root_id);
@@ -1248,10 +1264,73 @@ impl CasVfs {
                 .collect()
         };
 
-        // Flush each item
         for (item_id, path) in items_to_flush {
             if let Some(hash_and_size) = self.flush_to_cas(item_id).await {
                 results.insert(path, hash_and_size);
+            }
+        }
+
+        results
+    }
+
+    /// ProjFS path: walk the on-disk prefix directory and read files into CAS.
+    async fn flush_prefix_from_disk(&self, prefix_id: &str) -> HashMap<String, (Blake3Hash, u64)> {
+        let mut results = HashMap::new();
+        let prefix_dir = self.mount_path.join(prefix_id);
+
+        let walker = match std::fs::read_dir(prefix_dir.as_std_path()) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::error!(%prefix_dir, error = %e, "failed to read prefix dir from disk");
+                return results;
+            }
+        };
+
+        // Recursively walk and collect all files
+        let mut stack: Vec<(std::path::PathBuf, String)> = vec![];
+        for entry in walker.flatten() {
+            stack.push((entry.path(), String::new()));
+        }
+
+        while let Some((path, rel_parent)) = stack.pop() {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let rel_path = if rel_parent.is_empty() {
+                name.to_string()
+            } else {
+                format!("{}/{}", rel_parent, name)
+            };
+
+            if path.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&path) {
+                    for entry in entries.flatten() {
+                        stack.push((entry.path(), rel_path.clone()));
+                    }
+                }
+            } else if path.is_file() {
+                match tokio::fs::read(&path).await {
+                    Ok(data) => {
+                        let size = data.len() as u64;
+                        let content_hash = Blake3Hash::from_bytes(&data);
+                        let chunk_hash = ChunkHash(content_hash);
+                        match self.cas.put_chunk(chunk_hash, data).await {
+                            Ok(()) => {
+                                tracing::debug!(
+                                    path = %rel_path,
+                                    size,
+                                    hash = %content_hash,
+                                    "flushed file from disk to CAS"
+                                );
+                                results.insert(rel_path, (content_hash, size));
+                            }
+                            Err(e) => {
+                                tracing::error!(path = %rel_path, error = %e, "failed to put chunk");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(path = %rel_path, error = %e, "failed to read file from disk");
+                    }
+                }
             }
         }
 

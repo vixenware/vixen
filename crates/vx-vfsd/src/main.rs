@@ -234,6 +234,7 @@ async fn async_main() -> Result<()> {
 
     // Initialize peeps instrumentation
     peeps::init();
+    #[cfg(unix)]
     peeps::install_sigusr1("vx-vfsd");
 
     let args: Args = args::Driver::new(
@@ -271,7 +272,7 @@ async fn async_main() -> Result<()> {
     if let Some(ref dir) = disk_cache_dir {
         tracing::info!(%dir, "L2 disk blob cache enabled");
     }
-    let vfs = Arc::new(CasVfs::new(cas.clone(), disk_cache_dir));
+    let vfs = Arc::new(CasVfs::new(cas.clone(), disk_cache_dir, args.mount.clone()));
 
     // 3. Bind RPC listener before FUSE mount
     let listen_endpoint = Endpoint::parse(&args.listen)?;

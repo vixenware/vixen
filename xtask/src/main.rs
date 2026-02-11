@@ -40,12 +40,22 @@ fn install() {
     let release_dir = workspace_root.join("target/release");
 
     // Determine installation directory
-    let home = std::env::var("HOME").expect("HOME not set");
-    let install_dir = format!("{}/.cargo/bin", home);
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .expect("Neither HOME nor USERPROFILE is set");
+    let install_dir = PathBuf::from(home).join(".cargo").join("bin");
 
     for binary_name in binaries {
-        let src = release_dir.join(binary_name);
-        let dst = format!("{}/{}", install_dir, binary_name);
+        let src = if cfg!(windows) {
+            release_dir.join(format!("{binary_name}.exe"))
+        } else {
+            release_dir.join(binary_name)
+        };
+        let dst = if cfg!(windows) {
+            install_dir.join(format!("{binary_name}.exe"))
+        } else {
+            install_dir.join(binary_name)
+        };
 
         if !src.exists() {
             eprintln!(
@@ -56,14 +66,15 @@ fn install() {
         }
 
         fs::copy(&src, &dst).unwrap_or_else(|_| panic!("Failed to copy {}", binary_name));
-        println!("Copied {} to {}", binary_name, dst);
+        println!("Copied {} to {}", binary_name, dst.display());
 
         // On macOS, codesign the installed binary to avoid AMFI issues
         // (signing must happen AFTER copy, not before)
         #[cfg(target_os = "macos")]
         {
+            let dst_str = dst.to_str().expect("non-UTF-8 path");
             let status = Command::new("codesign")
-                .args(["--sign", "-", "--force", &dst])
+                .args(["--sign", "-", "--force", dst_str])
                 .status()
                 .expect("Failed to run codesign");
 
@@ -75,20 +86,25 @@ fn install() {
             }
         }
 
-        // Verify the installed binary works
-        let output = Command::new(&dst)
-            .arg("--version")
-            .output()
-            .unwrap_or_else(|_| panic!("Failed to run {} --version", binary_name));
+        // Verify the installed binary works (only for binaries that support --version
+        // without needing environment variables like VX_HOME)
+        if binary_name == "vx" {
+            let output = Command::new(&dst)
+                .arg("--version")
+                .output()
+                .unwrap_or_else(|_| panic!("Failed to run {} --version", binary_name));
 
-        if !output.status.success() {
-            eprintln!("Error: {} --version failed", binary_name);
-            eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
-            std::process::exit(1);
+            if !output.status.success() {
+                eprintln!("Error: {} --version failed", binary_name);
+                eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+                std::process::exit(1);
+            }
+
+            let version = String::from_utf8_lossy(&output.stdout);
+            println!("Installed: {}", version.trim());
+        } else {
+            println!("Installed {}", binary_name);
         }
-
-        let version = String::from_utf8_lossy(&output.stdout);
-        println!("Installed: {}", version.trim());
     }
 }
 

@@ -1,7 +1,7 @@
 //! CAS service protocol definitions
 //!
 //! The store is a validated key-value store with two object types:
-//! - **Chunks**: Raw bytes (≤4MB), stored at `chunks/blake3/{xx}/{hash}`
+//! - **Chunks**: Raw bytes (<=4MB), stored at `chunks/blake3/{xx}/{hash}`
 //! - **Nodes**: Versioned postcard-encoded structures, stored at `nodes/blake3/{xx}/{hash}`
 //!
 //! All chunking, assembly, and Merkle tree construction logic lives in shared

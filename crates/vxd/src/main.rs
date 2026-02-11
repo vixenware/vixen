@@ -55,6 +55,14 @@ struct CliArgs {
     #[facet(default, args::named)]
     vx_home: Option<String>,
 
+    /// vx-store endpoint — if absent, spawns vx-store automatically
+    #[facet(default, args::named)]
+    store: Option<String>,
+
+    /// vx-runner endpoint — if absent, spawns vx-runner automatically
+    #[facet(default, args::named)]
+    runner: Option<String>,
+
     /// Standard CLI options (--help, --version, --completions)
     #[facet(flatten)]
     builtins: args::FigueBuiltins,
@@ -86,22 +94,24 @@ fn resolve_args(cli: CliArgs) -> Result<Args> {
             Utf8PathBuf::from(format!("{home}/.vx"))
         });
 
-    // VX_STORE set → connect to existing store. Unset → spawn one.
-    let store_endpoint = std::env::var("VX_STORE")
-        .ok()
+    // VX_STORE set or --store → connect to existing store. Unset → spawn one.
+    let store_endpoint = cli
+        .store
+        .or_else(|| std::env::var("VX_STORE").ok())
         .map(|v| Endpoint::parse(&v))
         .transpose()?;
 
-    // VX_RUNNER set → connect to existing runner. Unset → spawn one.
-    let exec_endpoint = std::env::var("VX_RUNNER")
-        .ok()
+    // VX_RUNNER set or --runner → connect to existing runner. Unset → spawn one.
+    let exec_endpoint = cli
+        .runner
+        .or_else(|| std::env::var("VX_RUNNER").ok())
         .map(|v| Endpoint::parse(&v))
         .transpose()?;
 
     // --listen only (no VXD env — that's for vx connect mode)
     let bind = match cli.listen {
         Some(v) => Endpoint::parse(&v)?,
-        None => vx_io::net::default_unix_endpoint(&vx_home, "vxd"),
+        None => vx_io::net::default_local_endpoint(&vx_home, "vxd"),
     };
 
     Ok(Args {
@@ -156,12 +166,12 @@ async fn ensure_services(
     let store_endpoint = args
         .store_endpoint
         .clone()
-        .unwrap_or_else(|| vx_io::net::default_unix_endpoint(&args.vx_home, "store"));
+        .unwrap_or_else(|| vx_io::net::default_local_endpoint(&args.vx_home, "store"));
     let exec_endpoint = args
         .exec_endpoint
         .clone()
-        .unwrap_or_else(|| vx_io::net::default_unix_endpoint(&args.vx_home, "runner"));
-    let vfsd_endpoint = vx_io::net::default_unix_endpoint(&args.vx_home, "vfsd");
+        .unwrap_or_else(|| vx_io::net::default_local_endpoint(&args.vx_home, "runner"));
+    let vfsd_endpoint = vx_io::net::default_local_endpoint(&args.vx_home, "vfsd");
     let store_root = args.vx_home.join("store");
 
     let mut store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone(), NoDispatcher)
@@ -233,9 +243,22 @@ async fn async_main() -> Result<()> {
 
     // The daemon outlives its parent process (vx CLI) and shuts down
     // after an idle timeout instead (2s in test mode, 2h in production).
-    // Simple and robust: no PID tracking needed.
+    // In test mode, we also watch the test harness ancestor (cargo-nextest,
+    // vx-fuse-stress, vx-vfs-integrity, etc.) and exit immediately when it dies.
+    if in_test {
+        if let Some((harness_pid, harness_name)) = nextest_watcher::find_test_harness_pid() {
+            tracing::info!(harness_pid, %harness_name, "watching test harness process");
+            peeps::tasks::spawn_tracked("nextest_watcher", async move {
+                nextest_watcher::wait_for_exit(harness_pid).await;
+                std::process::exit(0);
+            });
+        } else {
+            tracing::debug!("no test harness ancestor found (external daemon?)");
+        }
+    }
 
     // SIGUSR1: dump diagnostics
+    #[cfg(unix)]
     peeps::install_sigusr1("vxd");
 
     let cli: CliArgs = args::Driver::new(

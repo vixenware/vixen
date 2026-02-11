@@ -9,6 +9,8 @@ use vixenfs_proto::Vfs;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
 mod types;
 pub use types::{VfsConfig, VfsError, VfsStart};
 #[cfg(target_os = "macos")]
@@ -30,6 +32,9 @@ where
         } else if #[cfg(target_os = "linux")] {
             tracing::debug!(mount_path = %config.mount_path, "starting FUSE vfs");
             linux::mount(config, vfs).await
+        } else if #[cfg(target_os = "windows")] {
+            tracing::debug!(mount_path = %config.mount_path, "starting ProjFS vfs");
+            windows::mount(config, vfs).await
         } else {
             _ = (config, vfs);
             use std::env::consts::OS;
