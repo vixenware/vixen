@@ -86,7 +86,6 @@ where
     }
 
     helper_command
-        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(false)
@@ -492,10 +491,30 @@ async fn wait_for_mount_ready(
         wait_result = helper.wait() => {
             let status = wait_result
                 .map_err(|e| format!("failed to wait for vixenfs-mount process: {e}"))?;
-            Err(format!(
-                "failed to mount (status={:?})",
-                status.code()
-            ))
+            if status.success() {
+                // Helper mounted successfully and exited — wait for
+                // the SHM bootstrap (FSKit extension connecting) with
+                // the remaining timeout.
+                tokio::select! {
+                    ready = mount_ready_rx.recv() => {
+                        match ready {
+                            Some(()) => Ok(()),
+                            None => Err("mount readiness channel closed before mount became ready".to_string()),
+                        }
+                    }
+                    _ = tokio::time::sleep(timeout) => {
+                        Err(format!(
+                            "mount helper exited successfully but FSKit extension did not connect within {:?}",
+                            timeout
+                        ))
+                    }
+                }
+            } else {
+                Err(format!(
+                    "failed to mount (status={:?})",
+                    status.code()
+                ))
+            }
         }
         ready = mount_ready_rx.recv() => {
             match ready {

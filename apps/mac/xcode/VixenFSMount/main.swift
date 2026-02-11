@@ -196,16 +196,14 @@ enum MountError: Error, CustomStringConvertible {
     }
 }
 
-/// Mounts the FSKit filesystem and keeps the process alive.
+/// Mounts the FSKit filesystem and exits.
 ///
-/// Lifecycle management (unmounting, killing) is handled by vx-reaper,
-/// which watches the parent vx-runner process via kqueue and cleans up
-/// when it exits. This process just mounts and stays alive via dispatchMain().
-///
-/// Exits when stdin reaches EOF (the spawning process closed or died).
+/// The mount registers with FSKit which spawns the VixenFS appex as a
+/// separate process. Once the mount syscall succeeds, vixenfs-mount's
+/// job is done — the VFS lives independently in the FSKit extension.
+/// Lifecycle management (unmounting) is handled by vx-reaper.
 final class MountLifecycle {
     private let config: Config
-    private var stdinSource: DispatchSourceRead?
 
     init(config: Config) {
         self.config = config
@@ -221,37 +219,9 @@ final class MountLifecycle {
     func run() throws {
         try ensureMountPointExists()
         try mount()
-
-        // Ignore signals — vx-reaper is responsible for killing us
-        signal(SIGINT, SIG_IGN)
-        signal(SIGTERM, SIG_IGN)
-        signal(SIGHUP, SIG_IGN)
-
-        // Exit on stdin EOF — when the spawning process dies, the pipe closes
-        installStdinEOFWatcher()
-
         let mountedPath = self.config.mountPoint
         let mountedSource = self.config.source
         emit("mounted \(mountedPath) from \(mountedSource)")
-        dispatchMain()
-    }
-
-    private func installStdinEOFWatcher() {
-        let source = DispatchSource.makeReadSource(
-            fileDescriptor: STDIN_FILENO,
-            queue: DispatchQueue.global()
-        )
-        source.setEventHandler { [weak self] in
-            var buf = [UInt8](repeating: 0, count: 64)
-            let n = read(STDIN_FILENO, &buf, buf.count)
-            if n <= 0 {
-                self?.emit("stdin closed, exiting")
-                exit(0)
-            }
-        }
-        source.setCancelHandler {}
-        source.resume()
-        stdinSource = source
     }
 
     private func ensureMountPointExists() throws {

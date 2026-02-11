@@ -90,6 +90,7 @@ impl Vfs for SharedVfs {
                 error: vixenfs_proto::errno::OK,
             };
         }
+        tracing::trace!(parent_id, %name, "lookup");
         self.inner.lookup(cx, parent_id, name).await
     }
 
@@ -101,10 +102,12 @@ impl Vfs for SharedVfs {
                 error: vixenfs_proto::errno::OK,
             };
         }
+        tracing::trace!(item_id, "get_attributes");
         self.inner.get_attributes(cx, item_id).await
     }
 
     async fn read_dir(&self, cx: &roam::Context, item_id: ItemId, cursor: u64) -> ReadDirResult {
+        tracing::trace!(item_id, cursor, "read_dir");
         self.inner.read_dir(cx, item_id, cursor).await
     }
 
@@ -119,6 +122,7 @@ impl Vfs for SharedVfs {
                 error: vixenfs_proto::errno::OK,
             };
         }
+        tracing::trace!(item_id, offset, len, "read");
         self.inner.read(cx, item_id, offset, len).await
     }
 
@@ -129,6 +133,7 @@ impl Vfs for SharedVfs {
         offset: u64,
         data: Vec<u8>,
     ) -> WriteResult {
+        tracing::trace!(item_id, offset, len = data.len(), "write");
         self.inner.write(cx, item_id, offset, data).await
     }
 
@@ -139,10 +144,12 @@ impl Vfs for SharedVfs {
         name: String,
         item_type: vixenfs_proto::ItemType,
     ) -> CreateResult {
+        tracing::trace!(parent_id, %name, ?item_type, "create");
         self.inner.create(cx, parent_id, name, item_type).await
     }
 
     async fn delete(&self, cx: &roam::Context, item_id: ItemId) -> VfsResult {
+        tracing::trace!(item_id, "delete");
         self.inner.delete(cx, item_id).await
     }
 
@@ -153,6 +160,7 @@ impl Vfs for SharedVfs {
         new_parent_id: ItemId,
         new_name: String,
     ) -> VfsResult {
+        tracing::trace!(item_id, new_parent_id, %new_name, "rename");
         self.inner
             .rename(cx, item_id, new_parent_id, new_name)
             .await
@@ -164,10 +172,12 @@ impl Vfs for SharedVfs {
         item_id: ItemId,
         params: SetAttributesParams,
     ) -> VfsResult {
+        tracing::trace!(item_id, "set_attributes");
         self.inner.set_attributes(cx, item_id, params).await
     }
 
     async fn ping(&self, _cx: &roam::Context) -> String {
+        tracing::trace!("ping");
         "vx-vfsd".to_string()
     }
 }

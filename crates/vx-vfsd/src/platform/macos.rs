@@ -12,8 +12,11 @@ fn canonicalize_without_stat(mount_path: &Utf8PathBuf) -> Utf8PathBuf {
         && let Ok(canonical_parent) = Utf8PathBuf::try_from(canonical_parent)
         && let Some(name) = mount_path.file_name()
     {
-        return canonical_parent.join(name);
+        let result = canonical_parent.join(name);
+        tracing::debug!(%mount_path, %parent, %canonical_parent, %name, %result, "canonicalized via parent");
+        return result;
     }
+    tracing::debug!(%mount_path, "canonicalize fallback: returning mount_path as-is");
     mount_path.clone()
 }
 
@@ -34,16 +37,20 @@ fn canonicalize_without_stat(mount_path: &Utf8PathBuf) -> Utf8PathBuf {
 /// path variants: canonical, raw, and /private-prefixed (macOS /tmp symlink).
 fn mount_path_candidates(mount_path: &Utf8PathBuf) -> Vec<String> {
     let canonical = canonicalize_without_stat(mount_path);
+    tracing::debug!(%mount_path, %canonical, "resolved canonical mount path");
     let mut candidates: Vec<String> = vec![canonical.to_string()];
     let raw = mount_path.to_string();
     if raw != candidates[0] {
+        tracing::debug!(raw, "adding raw path as candidate");
         candidates.push(raw);
     }
     // /tmp → /private/tmp on macOS
     let private_prefixed = format!("/private{mount_path}");
     if !candidates.contains(&private_prefixed) {
+        tracing::debug!(private_prefixed, "adding /private-prefixed candidate");
         candidates.push(private_prefixed);
     }
+    tracing::debug!(?candidates, "mount path candidates");
     candidates
 }
 
@@ -56,6 +63,11 @@ fn mount_path_candidates(mount_path: &Utf8PathBuf) -> Vec<String> {
 async fn kill_processes_under_mount(candidates: &[String]) -> crate::Result<()> {
     use std::collections::HashMap;
     use tokio::process::Command;
+
+    tracing::debug!(
+        ?candidates,
+        "scanning for processes with files open under mount"
+    );
 
     let output = match Command::new("lsof")
         .args(["-n", "-P", "-Fpcn"])
@@ -70,6 +82,7 @@ async fn kill_processes_under_mount(candidates: &[String]) -> crate::Result<()> 
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    tracing::debug!(lsof_output_lines = stdout.lines().count(), "lsof completed");
 
     // Parse lsof -F output: p<pid>, c<command>, n<path> fields
     let mut current_pid: Option<u32> = None;
@@ -89,6 +102,7 @@ async fn kill_processes_under_mount(candidates: &[String]) -> crate::Result<()> 
                 .iter()
                 .any(|prefix| path.starts_with(prefix.as_str()))
         {
+            tracing::debug!(pid, cmd, path, "found process with file open under mount");
             to_kill
                 .entry(pid)
                 .or_insert_with(|| (cmd.to_string(), path.to_string()));
@@ -96,8 +110,14 @@ async fn kill_processes_under_mount(candidates: &[String]) -> crate::Result<()> 
     }
 
     if to_kill.is_empty() {
+        tracing::debug!("no processes found with files open under mount");
         return Ok(());
     }
+
+    tracing::debug!(
+        count = to_kill.len(),
+        "killing processes with files open under mount"
+    );
 
     let mut pids_to_wait = Vec::new();
     for (&pid, (cmd, path)) in &to_kill {
@@ -116,6 +136,10 @@ async fn kill_processes_under_mount(candidates: &[String]) -> crate::Result<()> 
 
     // Wait for killed processes to actually disappear. Once kill(pid, 0)
     // returns ESRCH, the process is gone and its file descriptors are released.
+    tracing::debug!(
+        count = pids_to_wait.len(),
+        "waiting for killed processes to exit"
+    );
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     while !pids_to_wait.is_empty() && tokio::time::Instant::now() < deadline {
         pids_to_wait.retain(|&pid| {
@@ -128,29 +152,34 @@ async fn kill_processes_under_mount(candidates: &[String]) -> crate::Result<()> 
         }
     }
 
-    if !pids_to_wait.is_empty() {
-        // These processes survived SIGKILL — they're in uninterruptible sleep (D/U state),
-        // stuck on syscalls into the dead FSKit mount. Nothing can kill them short of a
-        // reboot. The mount point is permanently unusable.
-        let unkillable: Vec<String> = pids_to_wait
-            .iter()
-            .filter_map(|&pid| {
-                to_kill
-                    .get(&pid)
-                    .map(|(cmd, path)| format!("  pid {pid} ({cmd}) stuck on {path}"))
-            })
-            .collect();
-        return Err(format!(
-            "mount point is unusable: {} process(es) are stuck in uninterruptible sleep \
-             on the dead FSKit mount and cannot be killed:\n{}\n\
-             A reboot is required to clear this state.",
-            unkillable.len(),
-            unkillable.join("\n"),
-        )
-        .into());
+    if pids_to_wait.is_empty() {
+        tracing::debug!("all killed processes have exited");
+        return Ok(());
     }
 
-    Ok(())
+    // These processes survived SIGKILL — they're in uninterruptible sleep (D/U state),
+    // stuck on syscalls into the dead FSKit mount. Nothing can kill them short of a
+    // reboot. The mount point is permanently unusable.
+    let unkillable: Vec<String> = pids_to_wait
+        .iter()
+        .filter_map(|&pid| {
+            to_kill
+                .get(&pid)
+                .map(|(cmd, path)| format!("  pid {pid} ({cmd}) stuck on {path}"))
+        })
+        .collect();
+    tracing::error!(
+        count = unkillable.len(),
+        "processes survived SIGKILL (uninterruptible sleep)"
+    );
+    Err(format!(
+        "mount point is unusable: {} process(es) are stuck in uninterruptible sleep \
+         on the dead FSKit mount and cannot be killed:\n{}\n\
+         A reboot is required to clear this state.",
+        unkillable.len(),
+        unkillable.join("\n"),
+    )
+    .into())
 }
 
 pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {

@@ -630,15 +630,22 @@ fn spawn_reaper() {
     };
 
     let mount_path = runner_mount_base();
+    let log_file = mount_path
+        .as_std_path()
+        .parent()
+        .unwrap_or(mount_path.as_std_path())
+        .join("vx-reaper.log");
 
     match Command::new(&reaper_path)
         .arg("--parent-pid")
         .arg(my_pid.to_string())
         .arg("--mount-path")
         .arg(mount_path.as_str())
+        .arg("--log-file")
+        .arg(&log_file)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::null())
         .spawn()
     {
         Ok(mut child) => {

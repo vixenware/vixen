@@ -1,6 +1,6 @@
 //! Process group reaper for macOS.
 //!
-//! Usage: vx-reaper --parent-pid <PID> --mount-path <PATH>
+//! Usage: vx-reaper --parent-pid <PID> --mount-path <PATH> [--log-file <PATH>]
 //!
 //! Reads process group IDs from stdin (one per line) as vx-runner creates
 //! them. Watches the parent PID using kqueue EVFILT_PROC (with stdin EOF
@@ -27,10 +27,36 @@ fn main() {
         Ok(v) => v,
         Err(e) => {
             eprintln!("vx-reaper: {e}");
-            eprintln!("usage: vx-reaper --parent-pid <PID> --mount-path <PATH>");
+            eprintln!(
+                "usage: vx-reaper --parent-pid <PID> --mount-path <PATH> [--log-file <PATH>]"
+            );
             std::process::exit(1);
         }
     };
+
+    // Redirect stderr to log file if specified
+    if let Some(ref log_file) = args.log_file {
+        let fd = unsafe {
+            libc::open(
+                std::ffi::CString::new(log_file.as_str()).unwrap().as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+                0o644,
+            )
+        };
+        if fd >= 0 {
+            unsafe {
+                libc::dup2(fd, libc::STDERR_FILENO);
+                libc::close(fd);
+            }
+        }
+    }
+
+    eprintln!(
+        "vx-reaper: starting (pid={}, parent-pid={}, mount-path={})",
+        std::process::id(),
+        args.parent_pid,
+        args.mount_path
+    );
 
     // Check parent is still alive before we even start
     if unsafe { libc::kill(args.parent_pid, 0) } != 0 {
@@ -135,6 +161,7 @@ fn main() {
 
         if tag == 1 {
             // Parent exited — time to reap
+            eprintln!("vx-reaper: parent exited (EVFILT_PROC), starting cleanup");
             break;
         }
 
@@ -150,6 +177,7 @@ fn main() {
 
             if bytes_read <= 0 {
                 // EOF on stdin — parent closed its end
+                eprintln!("vx-reaper: stdin EOF, starting cleanup");
                 break;
             }
 
@@ -159,6 +187,7 @@ fn main() {
             while let Some(newline_pos) = stdin_buf.find('\n') {
                 let line = &stdin_buf[..newline_pos];
                 if let Ok(pgid) = line.trim().parse::<libc::pid_t>() {
+                    eprintln!("vx-reaper: registered pgroup {pgid}");
                     pgroups.insert(pgid);
                 }
                 stdin_buf.drain(..=newline_pos);
@@ -169,7 +198,9 @@ fn main() {
     unsafe { libc::close(kq) };
 
     // Phase 1: SIGKILL all known process groups (double tap)
+    eprintln!("vx-reaper: killing {} pgroup(s)", pgroups.len());
     for &pgid in &pgroups {
+        eprintln!("vx-reaper: SIGKILL pgroup {pgid}");
         unsafe {
             libc::killpg(pgid, libc::SIGKILL);
             libc::kill(pgid, libc::SIGKILL);
@@ -182,7 +213,9 @@ fn main() {
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     // Phase 3: force-unmount with timeout
+    eprintln!("vx-reaper: unmounting {}", args.mount_path);
     force_unmount(&args.mount_path);
+    eprintln!("vx-reaper: done");
 }
 
 /// Force-unmount a path with timeout and last-resort pkill.
@@ -239,6 +272,7 @@ fn force_unmount(mount_path: &str) {
 struct Args {
     parent_pid: libc::pid_t,
     mount_path: String,
+    log_file: Option<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -246,6 +280,7 @@ fn parse_args() -> Result<Args, String> {
     let mut args = std::env::args().skip(1);
     let mut parent_pid: Option<libc::pid_t> = None;
     let mut mount_path: Option<String> = None;
+    let mut log_file: Option<String> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -259,6 +294,9 @@ fn parse_args() -> Result<Args, String> {
             "--mount-path" => {
                 mount_path = Some(args.next().ok_or("--mount-path requires a value")?);
             }
+            "--log-file" => {
+                log_file = Some(args.next().ok_or("--log-file requires a value")?);
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -266,5 +304,6 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args {
         parent_pid: parent_pid.ok_or("missing required --parent-pid")?,
         mount_path: mount_path.ok_or("missing required --mount-path")?,
+        log_file,
     })
 }
