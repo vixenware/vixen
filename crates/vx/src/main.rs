@@ -454,33 +454,37 @@ async fn get_or_spawn_daemon(
             // Spawn daemon (local-only)
             tracing::info!("Daemon not running, spawning vxd on {}", endpoint);
 
-            // Redirect daemon logs to ~/.vx/vxd.log
-            let log_path = vx_home.join("vxd.log");
-
-            // Ensure ~/.vx directory exists
-            std::fs::create_dir_all(&vx_home)?;
-
-            let log_file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)?;
-
             let vxd_path = std::env::current_exe()?
                 .parent()
                 .ok_or_else(|| eyre::eyre!("current exe has no parent directory"))?
                 .join("vxd");
 
             let mut cmd = std::process::Command::new(&vxd_path);
-            // Pass the endpoint to the spawned daemon
             cmd.env("VX_HOME", vx_home.as_str());
             cmd.env("VXD", endpoint.display());
-            cmd.stdout(std::process::Stdio::from(log_file.try_clone()?));
-            cmd.stderr(std::process::Stdio::from(log_file));
+
+            let is_test = std::env::var("VX_TEST").is_ok_and(|v| v == "1");
+            if is_test {
+                cmd.stdout(std::process::Stdio::inherit());
+                cmd.stderr(std::process::Stdio::inherit());
+            } else {
+                // Redirect daemon logs to ~/.vx/vxd.log
+                let log_path = vx_home.join("vxd.log");
+                std::fs::create_dir_all(&vx_home)?;
+                let log_file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)?;
+                cmd.stdout(std::process::Stdio::from(log_file.try_clone()?));
+                cmd.stderr(std::process::Stdio::from(log_file));
+            }
 
             ur_taking_me_with_you::spawn_dying_with_parent(cmd)
                 .map_err(|e| eyre::eyre!("failed to spawn vxd: {}", e))?;
 
-            tracing::info!("vxd logs: {}", log_path);
+            if !is_test {
+                tracing::info!("vxd logs: {}", vx_home.join("vxd.log"));
+            }
 
             // Retry with backoff
             for (attempt, delay) in backoff_ms.iter().enumerate() {
