@@ -136,203 +136,70 @@ impl SpawnTracker {
     }
 }
 
-/// Spawn a service binary and return the child process
-///
-/// When `VX_TEST` is set, stdout/stderr are inherited from the parent
-/// (so daemon logs appear inline in test output). Otherwise they go to `log_path`.
-fn spawn_service(
-    binary_name: &str,
-    log_path: &camino::Utf8Path,
-    cli_args: &[&str],
-) -> Result<Child> {
-    use std::process::Stdio;
-
-    let vx_test = std::env::var("VX_TEST").is_ok();
-
-    // Prefer spawning sibling binaries next to the currently running vxd.
-    // This keeps test runs using the same target/debug artifacts instead of any
-    // globally installed binaries found on PATH.
-    let binary_path = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(binary_name)))
-        .filter(|candidate| candidate.exists())
-        .unwrap_or_else(|| std::path::PathBuf::from(binary_name));
-
-    tracing::debug!(%vx_test, ?cli_args, "spawning {} from {}", binary_name, binary_path.display());
-
-    let mut cmd = std::process::Command::new(&binary_path);
-    cmd.args(cli_args);
-
-    if vx_test {
-        cmd.stdout(Stdio::inherit());
-        cmd.stderr(Stdio::inherit());
-    } else {
-        use std::fs::OpenOptions;
-
-        // Ensure parent directory exists for log file
-        if let Some(parent) = log_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let log_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)?;
-
-        cmd.stdout(Stdio::from(log_file.try_clone()?));
-        cmd.stderr(Stdio::from(log_file));
-    }
-
-    ur_taking_me_with_you::spawn_dying_with_parent(cmd).map_err(Into::into)
-}
-
 struct ServiceClients {
     store: Arc<StoreClient<UpstreamCaller>>,
     exec: Arc<RunnerClient<UpstreamCaller>>,
 }
 
 /// Ensure services are running (spawning them if necessary) and return
-/// connected roam clients. The clients are the *same* reconnecting sessions
-/// used for the liveness probe — no connections are created and thrown away.
+/// connected roam clients. Store and runner are started in parallel.
 async fn ensure_services(
     args: &Args,
     spawn_tracker: &Arc<DiagnosticAsyncMutex<SpawnTracker>>,
 ) -> Result<ServiceClients> {
-    let vx_home_str = args.vx_home.as_str();
+    use vx_io::spawn::ServiceBuilder;
+
+    let store_endpoint = args
+        .store_endpoint
+        .clone()
+        .unwrap_or_else(|| vx_io::net::default_unix_endpoint(&args.vx_home, "store"));
+    let exec_endpoint = args
+        .exec_endpoint
+        .clone()
+        .unwrap_or_else(|| vx_io::net::default_unix_endpoint(&args.vx_home, "runner"));
+    let vfsd_endpoint = vx_io::net::default_unix_endpoint(&args.vx_home, "vfsd");
     let store_root = args.vx_home.join("store");
 
-    // --- Store ---
-    let store_endpoint = match &args.store_endpoint {
-        Some(ep) => ep.clone(),
-        None => vx_io::net::default_unix_endpoint(&args.vx_home, "store"),
-    };
-
-    tracing::info!("Connecting to store at {store_endpoint}");
-    let store_caller = vx_io::net::reconnecting_client_named(
-        store_endpoint.clone(),
-        NoDispatcher,
-        Some("vxd".into()),
-    );
-
+    let mut store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone(), NoDispatcher)
+        .caller_name("vxd")
+        .args(&[
+            "--root",
+            store_root.as_str(),
+            "--vx-home",
+            args.vx_home.as_str(),
+        ])
+        .log_path(args.vx_home.join("store.log"));
     if args.store_endpoint.is_some() {
-        // VX_STORE was set — connect to existing store, fail if unreachable
-        match tokio::time::timeout(Duration::from_secs(5), store_caller.handle()).await {
-            Ok(Ok(_)) => {
-                tracing::info!("Store is ready at {store_endpoint}");
-            }
-            Ok(Err(e)) => {
-                eyre::bail!("failed to connect to store at {store_endpoint}: {e}");
-            }
-            Err(_) => {
-                eyre::bail!("Store unreachable after 30s at {store_endpoint}");
-            }
-        }
-    } else {
-        // No VX_STORE — spawn it
-        tracing::info!("Spawning vx-store");
-        let store_log = args.vx_home.join("store.log");
-        let child = spawn_service(
-            "vx-store",
-            &store_log,
-            &[
-                "--listen",
-                &store_endpoint.to_string(),
-                "--root",
-                store_root.as_str(),
-                "--vx-home",
-                vx_home_str,
-            ],
-        )?;
-        spawn_tracker.lock().await.store = Some(child);
-
-        let store_caller = vx_io::net::reconnecting_client_named(
-            store_endpoint.clone(),
-            NoDispatcher,
-            Some("vxd".into()),
-        );
-
-        match tokio::time::timeout(Duration::from_secs(1), store_caller.handle()).await {
-            Ok(Ok(_)) => {
-                tracing::info!("store is ready at {store_endpoint}");
-            }
-            Ok(Err(e)) => {
-                tracing::error!("store connect error: {e}");
-                eyre::bail!("store failed to start at {store_endpoint}: {e}");
-            }
-            Err(_) => {
-                tracing::error!("store connect timeout");
-                eyre::bail!("store still unreachable after timeout at {store_endpoint}");
-            }
-        }
+        store_builder = store_builder.connect_only();
     }
 
-    // --- Runner (worker) ---
-    let exec_endpoint = match &args.exec_endpoint {
-        Some(ep) => ep.clone(),
-        None => vx_io::net::default_unix_endpoint(&args.vx_home, "runner"),
-    };
-    let exec_display = exec_endpoint.display();
-    let vfsd_endpoint = vx_io::net::default_unix_endpoint(&args.vx_home, "vfsd");
-
-    tracing::info!("Connecting to Runner at {exec_endpoint}");
-    let exec_caller = vx_io::net::reconnecting_client_named(
-        exec_endpoint.clone(),
-        NoDispatcher,
-        Some("vxd".into()),
-    );
-
+    let mut runner_builder = ServiceBuilder::new("vx-runner", exec_endpoint.clone(), NoDispatcher)
+        .caller_name("vxd")
+        .args(&[
+            "--store",
+            &store_endpoint.display(),
+            "--vfsd",
+            &vfsd_endpoint.display(),
+            "--vx-home",
+            args.vx_home.as_str(),
+        ])
+        .log_path(args.vx_home.join("runner.log"))
+        .timeout(Duration::from_secs(30));
     if args.exec_endpoint.is_some() {
-        // VX_RUNNER was set — connect to existing runner, fail if unreachable
-        match tokio::time::timeout(Duration::from_secs(30), exec_caller.handle()).await {
-            Ok(Ok(_)) => {
-                tracing::info!("Runner is ready at {exec_endpoint}");
-            }
-            Ok(Err(e)) => {
-                eyre::bail!("failed to connect to Runner at {exec_endpoint}: {e}");
-            }
-            Err(_) => {
-                eyre::bail!("Runner unreachable after 30s at {exec_endpoint}");
-            }
-        }
-    } else {
-        // No VX_RUNNER — spawn it
-        tracing::info!("Spawning vx-runner");
-        let runner_log = args.vx_home.join("runner.log");
-        let child = spawn_service(
-            "vx-runner",
-            &runner_log,
-            &[
-                "--listen",
-                &exec_display,
-                "--store",
-                &store_endpoint.to_string(),
-                "--vfsd",
-                &vfsd_endpoint.to_string(),
-                "--vx-home",
-                vx_home_str,
-            ],
-        )?;
-        spawn_tracker.lock().await.runner = Some(child);
-
-        match tokio::time::timeout(Duration::from_secs(30), exec_caller.handle()).await {
-            Ok(Ok(_)) => {
-                tracing::info!("Runner is ready at {exec_endpoint}");
-            }
-            Ok(Err(e)) => {
-                eyre::bail!("Runner failed to start at {exec_endpoint}: {e}");
-            }
-            Err(_) => {
-                eyre::bail!("Runner still unreachable after 30s at {exec_endpoint}");
-            }
-        }
+        runner_builder = runner_builder.connect_only();
     }
 
-    let store_client = Arc::new(StoreClient::new(store_caller));
-    let exec_client = Arc::new(RunnerClient::new(exec_caller));
+    let (store, runner) = tokio::try_join!(store_builder.connect(), runner_builder.connect(),)?;
+
+    {
+        let mut tracker = spawn_tracker.lock().await;
+        tracker.store = store.child;
+        tracker.runner = runner.child;
+    }
 
     Ok(ServiceClients {
-        store: store_client,
-        exec: exec_client,
+        store: Arc::new(StoreClient::new(store.caller)),
+        exec: Arc::new(RunnerClient::new(runner.caller)),
     })
 }
 

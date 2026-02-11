@@ -23,7 +23,6 @@ vx-tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 roam = { workspace = true }
 roam-stream = { workspace = true }
-ur-taking-me-with-you = { workspace = true }
 indicatif = { workspace = true }
 
 vxd-proto = { workspace = true }

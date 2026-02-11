@@ -3010,7 +3010,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ulid",
- "ur-taking-me-with-you",
  "vx-io",
  "vx-report",
  "vx-store-proto",
@@ -3076,6 +3075,8 @@ dependencies = [
  "roam-stream",
  "tempfile",
  "tokio",
+ "tracing",
+ "ur-taking-me-with-you",
 ]
 
 [[package]]
@@ -3377,7 +3378,6 @@ dependencies = [
  "tokio-test-lite",
  "tokio-util",
  "tracing",
- "ur-taking-me-with-you",
  "vx-cache",
  "vx-io",
  "vx-manifest",

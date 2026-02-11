@@ -83,142 +83,6 @@ struct Args {
     builtins: args::FigueBuiltins,
 }
 
-/// Connect to CAS and return a client handle
-async fn connect_to_cas(endpoint: &Endpoint) -> Result<vx_store_proto::StoreClient<CasCaller>> {
-    let caller = vx_io::net::reconnecting_client_named(
-        endpoint.clone(),
-        NoDispatcher,
-        Some("vx-runner".into()),
-    );
-    caller
-        .handle()
-        .await
-        .map_err(|e| eyre::eyre!("failed to connect to CAS at {}: {}", endpoint, e))?;
-    Ok(vx_store_proto::StoreClient::new(caller))
-}
-
-/// Spawn vx-vfsd if not already running, return any startup errors
-async fn ensure_vfsd(
-    vfsd_endpoint: &Endpoint,
-    vx_home: &Utf8PathBuf,
-    cas_endpoint: &Endpoint,
-) -> Result<()> {
-    use std::process::Stdio;
-
-    // Check if already running
-    if vx_io::net::try_connect(vfsd_endpoint).await?.is_some() {
-        tracing::debug!("vx-vfsd already running at {}", vfsd_endpoint);
-        return Ok(());
-    }
-
-    tracing::info!("Spawning vx-vfsd.");
-
-    // Find vx-vfsd binary (sibling to vx-runner)
-    let binary_path = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("vx-vfsd")))
-        .filter(|candidate| candidate.exists())
-        .unwrap_or_else(|| std::path::PathBuf::from("vx-vfsd"));
-
-    let mount_path = runner_mount_base();
-
-    let mut cmd = std::process::Command::new(&binary_path);
-    cmd.arg("--listen").arg(vfsd_endpoint.display());
-    cmd.arg("--mount").arg(mount_path.as_str());
-    cmd.arg("--store").arg(cas_endpoint.display());
-    cmd.env("VX_HOME", vx_home.as_str());
-
-    // Capture stderr for error messages
-    if std::env::var("VX_TEST").is_ok() {
-        cmd.stdout(Stdio::inherit());
-    } else {
-        cmd.stdout(Stdio::null());
-    }
-    cmd.stderr(Stdio::piped());
-
-    let mut child = ur_taking_me_with_you::spawn_dying_with_parent(cmd)?;
-
-    // Capture stderr in background for error reporting
-    let stderr = child.stderr.take().expect("stderr was piped");
-    let stderr_buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let stderr_buffer_clone = stderr_buffer.clone();
-
-    peeps::tasks::spawn_tracked("vfsd_stderr_monitor", async move {
-        use tokio::io::AsyncBufReadExt;
-        let mut stderr =
-            tokio::io::BufReader::new(tokio::process::ChildStderr::from_std(stderr).unwrap());
-
-        // Stream line-by-line to both buffer and stderr
-        let mut buf = String::new();
-        loop {
-            buf.clear();
-            match stderr.read_line(&mut buf).await {
-                Ok(0) => break, // EOF
-                Ok(_) => {
-                    // Write to parent's stderr
-                    eprint!("[vx-vfsd] {}", buf);
-                    // Also buffer for error reporting
-                    stderr_buffer_clone
-                        .lock()
-                        .unwrap()
-                        .extend_from_slice(buf.as_bytes());
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    // Wait for vx-vfsd to be ready with exponential backoff
-    let backoff_ms = [10, 50, 100, 250, 500, 1000, 2000];
-    for (attempt, delay) in backoff_ms.iter().enumerate() {
-        tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
-
-        // Check if process died
-        if let Ok(Some(status)) = child.try_wait() {
-            let stderr_data = stderr_buffer.lock().unwrap().clone();
-            let stderr_output = String::from_utf8_lossy(&stderr_data);
-            return Err(eyre::eyre!(
-                "vx-vfsd exited with status {} during startup.\n\nStderr:\n{}",
-                status,
-                stderr_output
-            ));
-        }
-
-        // Try to connect
-        if vx_io::net::try_connect(vfsd_endpoint).await?.is_some() {
-            tracing::info!("vx-vfsd started successfully (attempt {})", attempt + 1);
-            return Ok(());
-        }
-    }
-
-    // Final check - if still not connectable, report error
-    let stderr_data = stderr_buffer.lock().unwrap().clone();
-    let stderr_output = String::from_utf8_lossy(&stderr_data);
-    Err(eyre::eyre!(
-        "vx-vfsd failed to start after {} attempts.\n\nStderr:\n{}",
-        backoff_ms.len(),
-        stderr_output
-    ))
-}
-
-/// Connect to vx-vfsd and return a client handle
-async fn connect_to_vfsd(
-    endpoint: &Endpoint,
-    cas: Arc<StoreClient<CasCaller>>,
-) -> Result<VfsClient> {
-    let caller: VfsdCaller = vx_io::net::reconnecting_client_named(
-        endpoint.clone(),
-        NoDispatcher,
-        Some("vx-runner".into()),
-    );
-    caller
-        .handle()
-        .await
-        .map_err(|e| eyre::eyre!("failed to connect to vx-vfsd at {}: {}", endpoint, e))?;
-    let protocol_client = vx_vfsd::protocol::VfsdClient::new(caller);
-    Ok(VfsClient::new(protocol_client, cas))
-}
-
 /// Check if a socket endpoint is already in use by trying to connect
 #[cfg(unix)]
 async fn is_socket_in_use(path: &Utf8PathBuf) -> bool {
@@ -291,18 +155,30 @@ async fn async_main() -> Result<()> {
         }
     }
 
-    // Connect to CAS
-    tracing::info!("Connecting to CAS at {}", cas_endpoint);
-    let cas = Arc::new(connect_to_cas(&cas_endpoint).await?);
-    tracing::info!("Connected to CAS");
+    // Connect to CAS and spawn+connect to vx-vfsd in parallel
+    use vx_io::spawn::ServiceBuilder;
 
-    // Ensure vx-vfsd is running
-    ensure_vfsd(&vfsd_endpoint, &args.vx_home, &cas_endpoint).await?;
+    let cas_builder = ServiceBuilder::new("vx-store", cas_endpoint.clone(), NoDispatcher)
+        .caller_name("vx-runner")
+        .connect_only();
 
-    // Connect to vx-vfsd
-    tracing::info!("Connecting to vx-vfsd at {}", vfsd_endpoint);
-    let vfs = connect_to_vfsd(&vfsd_endpoint, cas.clone()).await?;
-    tracing::info!("Connected to vx-vfsd");
+    let mount_path = runner_mount_base();
+    let vfsd_builder = ServiceBuilder::new("vx-vfsd", vfsd_endpoint.clone(), NoDispatcher)
+        .caller_name("vx-runner")
+        .args(&[
+            "--mount",
+            mount_path.as_str(),
+            "--store",
+            &cas_endpoint.display(),
+        ])
+        .env("VX_HOME", args.vx_home.as_str());
+
+    let (cas_handle, vfsd_handle) =
+        tokio::try_join!(cas_builder.connect(), vfsd_builder.connect())?;
+
+    let cas = Arc::new(StoreClient::new(cas_handle.caller));
+    let vfsd_protocol = vx_vfsd::protocol::VfsdClient::new(vfsd_handle.caller);
+    let vfs = VfsClient::new(vfsd_protocol, cas.clone());
 
     // Create Runner service (will use VFS via RPC)
     let exec = RunnerService::new(cas.clone(), Arc::new(vfs));
