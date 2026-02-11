@@ -66,20 +66,6 @@ pub enum ActionResult {
         was_cached: bool,
     },
 
-    /// Rust crate compiled successfully
-    CrateCompiled {
-        /// CrateId of the compiled crate
-        crate_id: CrateId,
-        /// Output manifest hash from CAS
-        output_manifest: Blake3Hash,
-        /// Path to materialized bin (if this was a bin crate)
-        bin_output: Option<camino::Utf8PathBuf>,
-        /// Whether this was a cache hit
-        was_cached: bool,
-        /// Actual CAS cache key used for publish/lookup
-        cas_cache_key: Blake3Hash,
-    },
-
     /// Zig toolchain acquired successfully
     ZigToolchainAcquired {
         /// Toolchain ID
@@ -105,8 +91,10 @@ pub enum ActionResult {
         cas_cache_key: Blake3Hash,
     },
 
-    /// A generic `run` node completed successfully.
+    /// A `run` node completed successfully.
     RunCompleted {
+        /// Classification for the run (e.g. Rust compile vs generic tool invocation).
+        kind: crate::action_graph::RunKind,
         /// Output manifest hash from CAS.
         output_manifest: Blake3Hash,
         /// Path to a materialized binary (if this run produced one).
@@ -684,67 +672,6 @@ impl Executor {
                         cas_cache_key: None,
                     });
                 }
-                ActionResult::CrateCompiled {
-                    crate_id,
-                    output_manifest,
-                    bin_output: bin_path,
-                    was_cached,
-                    cas_cache_key,
-                } => {
-                    if *was_cached {
-                        cache_hits += 1;
-                    } else {
-                        rebuilt += 1;
-                    }
-                    // Track the bin output (if any)
-                    if let Some(path) = bin_path {
-                        bin_output = Some(path.clone());
-                    }
-
-                    // Generate node report for crate compilation
-                    node_reports.push(vx_report::NodeReport {
-                        node_id: action.report_node_id(),
-                        kind: action.report_kind().to_string(),
-                        cache_key: crate_id.to_string(),
-                        cache: if *was_cached {
-                            vx_report::CacheOutcome::Hit {
-                                manifest: output_manifest.to_hex(),
-                            }
-                        } else {
-                            vx_report::CacheOutcome::Miss {
-                                reason: vx_report::MissReason::KeyNotFound,
-                            }
-                        },
-                        timing: {
-                            let &(exec, start, ln) =
-                                node_timings.get(node_idx).unwrap_or(&(0, 0, 0));
-                            vx_report::NodeTiming {
-                                execute_ms: exec,
-                                start_offset_ms: start,
-                                lane: ln,
-                                ..Default::default()
-                            }
-                        },
-                        inputs: vec![vx_report::InputRecord {
-                            label: "source_closure".to_string(),
-                            value: crate_id.to_string(),
-                        }],
-                        deps: vec![],
-                        outputs: vec![vx_report::OutputRecord {
-                            logical: if bin_path.is_some() {
-                                "bin".to_string()
-                            } else {
-                                "rlib".to_string()
-                            },
-                            manifest: Some(output_manifest.to_hex()),
-                            blob: None,
-                            path: bin_path.as_ref().map(|p| p.to_string()),
-                        }],
-                        invocation: None,
-                        diagnostics: vx_report::DiagnosticsRecord::default(),
-                        cas_cache_key: Some(cas_cache_key.to_hex()),
-                    });
-                }
                 ActionResult::RustToolchainFinalized {
                     toolchain_id,
                     manifest_hash,
@@ -889,6 +816,7 @@ impl Executor {
                     });
                 }
                 ActionResult::RunCompleted {
+                    kind,
                     output_manifest,
                     bin_output: run_bin_output,
                     was_cached,
@@ -904,36 +832,88 @@ impl Executor {
                         bin_output = Some(p.clone());
                     }
 
-                    node_reports.push(vx_report::NodeReport {
-                        node_id: action.display_name(),
-                        kind: action.report_kind().to_string(),
-                        cache_key: cas_cache_key.to_hex(),
-                        cache: if *was_cached {
-                            vx_report::CacheOutcome::Hit {
-                                manifest: output_manifest.to_hex(),
-                            }
-                        } else {
-                            vx_report::CacheOutcome::Miss {
-                                reason: vx_report::MissReason::KeyNotFound,
-                            }
-                        },
-                        timing: {
-                            let &(exec, start, ln) =
-                                node_timings.get(node_idx).unwrap_or(&(0, 0, 0));
-                            vx_report::NodeTiming {
-                                execute_ms: exec,
-                                start_offset_ms: start,
-                                lane: ln,
-                                ..Default::default()
-                            }
-                        },
-                        inputs: vec![],
-                        deps: vec![],
-                        outputs: vec![],
-                        invocation: None,
-                        diagnostics: vx_report::DiagnosticsRecord::default(),
-                        cas_cache_key: Some(cas_cache_key.to_hex()),
-                    });
+                    match kind {
+                        crate::action_graph::RunKind::RustCompile {
+                            crate_id,
+                            crate_type,
+                            ..
+                        } => {
+                            node_reports.push(vx_report::NodeReport {
+                                node_id: action.report_node_id(),
+                                kind: action.report_kind().to_string(),
+                                cache_key: crate_id.to_string(),
+                                cache: if *was_cached {
+                                    vx_report::CacheOutcome::Hit {
+                                        manifest: output_manifest.to_hex(),
+                                    }
+                                } else {
+                                    vx_report::CacheOutcome::Miss {
+                                        reason: vx_report::MissReason::KeyNotFound,
+                                    }
+                                },
+                                timing: {
+                                    let &(exec, start, ln) =
+                                        node_timings.get(node_idx).unwrap_or(&(0, 0, 0));
+                                    vx_report::NodeTiming {
+                                        execute_ms: exec,
+                                        start_offset_ms: start,
+                                        lane: ln,
+                                        ..Default::default()
+                                    }
+                                },
+                                inputs: vec![vx_report::InputRecord {
+                                    label: "source_closure".to_string(),
+                                    value: crate_id.to_string(),
+                                }],
+                                deps: vec![],
+                                outputs: vec![vx_report::OutputRecord {
+                                    logical: if crate_type.as_str() == "bin" {
+                                        "bin".to_string()
+                                    } else {
+                                        "rlib".to_string()
+                                    },
+                                    manifest: Some(output_manifest.to_hex()),
+                                    blob: None,
+                                    path: run_bin_output.as_ref().map(|p| p.to_string()),
+                                }],
+                                invocation: None,
+                                diagnostics: vx_report::DiagnosticsRecord::default(),
+                                cas_cache_key: Some(cas_cache_key.to_hex()),
+                            });
+                        }
+                        crate::action_graph::RunKind::Generic => {
+                            node_reports.push(vx_report::NodeReport {
+                                node_id: action.display_name(),
+                                kind: action.report_kind().to_string(),
+                                cache_key: cas_cache_key.to_hex(),
+                                cache: if *was_cached {
+                                    vx_report::CacheOutcome::Hit {
+                                        manifest: output_manifest.to_hex(),
+                                    }
+                                } else {
+                                    vx_report::CacheOutcome::Miss {
+                                        reason: vx_report::MissReason::KeyNotFound,
+                                    }
+                                },
+                                timing: {
+                                    let &(exec, start, ln) =
+                                        node_timings.get(node_idx).unwrap_or(&(0, 0, 0));
+                                    vx_report::NodeTiming {
+                                        execute_ms: exec,
+                                        start_offset_ms: start,
+                                        lane: ln,
+                                        ..Default::default()
+                                    }
+                                },
+                                inputs: vec![],
+                                deps: vec![],
+                                outputs: vec![],
+                                invocation: None,
+                                diagnostics: vx_report::DiagnosticsRecord::default(),
+                                cas_cache_key: Some(cas_cache_key.to_hex()),
+                            });
+                        }
+                    }
                 }
                 ActionResult::PlannerSyntheticExecuted { node_id, kind } => {
                     rebuilt += 1;
@@ -1674,8 +1654,8 @@ async fn execute_action(
                     let manifest_hash = deps
                         .iter()
                         .find_map(|idx| match results_lock.get(idx) {
-                            Some(ActionResult::CrateCompiled {
-                                crate_id,
+                            Some(ActionResult::RunCompleted {
+                                kind: crate::action_graph::RunKind::RustCompile { crate_id, .. },
                                 output_manifest,
                                 ..
                             }) if *crate_id == spec.crate_id => Some(*output_manifest),
@@ -1702,9 +1682,6 @@ async fn execute_action(
                         .iter()
                         .filter_map(|idx| match results_lock.get(idx) {
                             Some(ActionResult::RunCompleted {
-                                output_manifest, ..
-                            }) => Some(*output_manifest),
-                            Some(ActionResult::CrateCompiled {
                                 output_manifest, ..
                             }) => Some(*output_manifest),
                             _ => None,
@@ -1885,23 +1862,13 @@ async fn execute_action(
                 }
             }
 
-            match kind {
-                crate::action_graph::RunKind::RustCompile { crate_id, .. } => {
-                    Ok(ActionResult::CrateCompiled {
-                        crate_id,
-                        output_manifest,
-                        bin_output,
-                        was_cached,
-                        cas_cache_key: cache_key,
-                    })
-                }
-                crate::action_graph::RunKind::Generic => Ok(ActionResult::RunCompleted {
-                    output_manifest,
-                    bin_output,
-                    was_cached,
-                    cas_cache_key: cache_key,
-                }),
-            }
+            Ok(ActionResult::RunCompleted {
+                kind,
+                output_manifest,
+                bin_output,
+                was_cached,
+                cas_cache_key: cache_key,
+            })
         }
 
         Action::PlannerCompileRustCrate {
