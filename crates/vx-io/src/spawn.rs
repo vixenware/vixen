@@ -142,6 +142,13 @@ where
                 }
                 exit_status = child_proc.wait() => {
                     match exit_status {
+                        Ok(status) if status.success() => {
+                            // Child exited with status 0 — probably found lock held.
+                            // Another instance is likely running, so try to connect.
+                            tracing::debug!("{binary_name} exited cleanly (lock held?), trying to connect to existing instance");
+                            let caller = connect_with_backoff(&binary_name, &endpoint, &dispatcher, &caller_name, timeout).await?;
+                            Ok(ServiceHandle { child: None, caller })
+                        }
                         Ok(status) => eyre::bail!(
                             "{binary_name} exited with {status} before becoming ready at {endpoint}",
                         ),

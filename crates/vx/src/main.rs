@@ -478,6 +478,14 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
         emit_osc_progress(tui::OscProgressState::Indeterminate, None);
     }
 
+    // In JSON mode, clear VX_TEST so spawned daemons redirect output to log files
+    // instead of inheriting stdout (which would pollute the JSON output).
+    if json_mode {
+        unsafe {
+            std::env::remove_var("VX_TEST");
+        }
+    }
+
     // Connect to daemon (spawning if necessary) and set up TUI
     let (daemon, tui) = get_or_spawn_daemon(args.no_spawn, no_tui, json_mode).await?;
 
