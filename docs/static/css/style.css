@@ -109,7 +109,7 @@ body {
 
 /* Hero Section */
 .hero {
-    padding: 4rem 2rem;
+    padding: 2.5rem 2rem 2rem;
     text-align: center;
     border-bottom: 1px solid var(--border);
     background:
@@ -127,10 +127,10 @@ body {
 }
 
 .hero-mark {
-    width: 4.5rem;
-    height: 4.5rem;
+    width: 3.5rem;
+    height: 3.5rem;
     display: block;
-    margin-bottom: 0.85rem;
+    margin-bottom: 0.5rem;
     margin-left: auto;
     margin-right: auto;
     background: transparent;
@@ -138,31 +138,38 @@ body {
 }
 
 .hero-title {
-    font-size: 3.5rem;
+    font-size: 2.75rem;
     font-weight: 700;
     color: var(--fg);
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.25rem;
     letter-spacing: -0.02em;
 }
 
 .hero-tagline {
-    font-size: 1.5rem;
+    font-size: 1.2rem;
     color: var(--accent);
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.25rem;
     font-weight: 500;
 }
 
 .hero-sub {
-    font-size: 1rem;
+    font-size: 0.9rem;
     color: var(--fg-muted);
-    margin-bottom: 0.75rem;
+    margin-bottom: 0.5rem;
 }
 
 .hero-status {
-    font-size: 0.85rem;
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 600;
     color: var(--fg-muted);
-    margin-bottom: 2rem;
-    font-style: italic;
+    background: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.08));
+    border: 1px solid var(--border);
+    padding: 0.2rem 0.75rem;
+    border-radius: 99px;
+    margin-bottom: 1.25rem;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
 }
 
 .hero-actions {
