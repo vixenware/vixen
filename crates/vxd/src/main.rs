@@ -55,14 +55,6 @@ struct CliArgs {
     #[facet(default, args::named)]
     vx_home: Option<String>,
 
-    /// vx-store endpoint — if absent, spawns vx-store automatically
-    #[facet(default, args::named)]
-    store: Option<String>,
-
-    /// vx-runner endpoint — if absent, spawns vx-runner automatically
-    #[facet(default, args::named)]
-    runner: Option<String>,
-
     /// Standard CLI options (--help, --version, --completions)
     #[facet(flatten)]
     builtins: args::FigueBuiltins,
@@ -73,11 +65,11 @@ struct Args {
     /// VX_HOME directory
     vx_home: Utf8PathBuf,
 
-    /// CAS endpoint
-    cas_endpoint: Endpoint,
+    /// CAS endpoint — Some if VX_STORE is set (connect to existing), None means spawn
+    cas_endpoint: Option<Endpoint>,
 
-    /// Exec endpoint
-    exec_endpoint: Endpoint,
+    /// Exec endpoint — Some if VX_RUNNER is set (connect to existing), None means spawn
+    exec_endpoint: Option<Endpoint>,
 
     /// Bind endpoint
     bind: Endpoint,
@@ -91,23 +83,23 @@ fn resolve_args(cli: CliArgs) -> Result<Args> {
         .map(Utf8PathBuf::from)
         .unwrap_or_else(|| {
             let home = std::env::var("HOME").expect("HOME not set");
-            Utf8PathBuf::from(format!("{}/.vx", home))
+            Utf8PathBuf::from(format!("{home}/.vx"))
         });
 
-    // CAS endpoint: --store > VX_STORE > default local socket
-    let cas_endpoint = match cli.store.or_else(|| std::env::var("VX_STORE").ok()) {
-        Some(v) => Endpoint::parse(&v)?,
-        None => vx_io::net::default_unix_endpoint(&vx_home, "store"),
-    };
+    // VX_STORE set → connect to existing store. Unset → spawn one.
+    let cas_endpoint = std::env::var("VX_STORE")
+        .ok()
+        .map(|v| Endpoint::parse(&v))
+        .transpose()?;
 
-    // Runner endpoint: --runner > VX_RUNNER > default local socket
-    let exec_endpoint = match cli.runner.or_else(|| std::env::var("VX_RUNNER").ok()) {
-        Some(v) => Endpoint::parse(&v)?,
-        None => vx_io::net::default_unix_endpoint(&vx_home, "runner"),
-    };
+    // VX_RUNNER set → connect to existing runner. Unset → spawn one.
+    let exec_endpoint = std::env::var("VX_RUNNER")
+        .ok()
+        .map(|v| Endpoint::parse(&v))
+        .transpose()?;
 
-    // Bind endpoint: --listen > VXD > default local socket
-    let bind = match cli.listen.or_else(|| std::env::var("VXD").ok()) {
+    // --listen only (no VXD env — that's for vx connect mode)
+    let bind = match cli.listen {
         Some(v) => Endpoint::parse(&v)?,
         None => vx_io::net::default_unix_endpoint(&vx_home, "vxd"),
     };
@@ -208,143 +200,155 @@ async fn ensure_services(
     in_test: bool,
 ) -> Result<ServiceClients> {
     let vx_home_str = args.vx_home.as_str();
-    let cas_display = args.cas_endpoint.display();
     let store_root = args.vx_home.join("store");
 
     // --- Store (CAS) ---
-    tracing::info!("Connecting to Store at {}", args.cas_endpoint);
+    let cas_endpoint = match &args.cas_endpoint {
+        Some(ep) => ep.clone(),
+        None => vx_io::net::default_unix_endpoint(&args.vx_home, "store"),
+    };
+    let cas_display = cas_endpoint.display();
+
+    tracing::info!("Connecting to Store at {cas_endpoint}");
     let cas_caller = vx_io::net::reconnecting_client_named(
-        args.cas_endpoint.clone(),
+        cas_endpoint.clone(),
         NoDispatcher,
         Some("vxd".into()),
     );
 
-    // Quick probe: is the store already running?
-    match tokio::time::timeout(Duration::from_millis(500), cas_caller.handle()).await {
-        Ok(Ok(_)) => {
-            if in_test {
-                eyre::bail!(
-                    "Store is already running at {}. \
-                    Test daemons are supposed to die with nextest. This is a bug, report it.",
-                    args.cas_endpoint
-                );
+    if args.cas_endpoint.is_some() {
+        // VX_STORE was set — connect to existing store, fail if unreachable
+        match tokio::time::timeout(Duration::from_secs(30), cas_caller.handle()).await {
+            Ok(Ok(_)) => {
+                tracing::info!("Store is ready at {cas_endpoint}");
             }
-            tracing::info!("Store already running at {}", args.cas_endpoint);
-        }
-        Ok(Err(e)) => {
-            eyre::bail!("failed to connect to Store at {}: {}", args.cas_endpoint, e);
-        }
-        Err(_timeout) => {
-            // Not running — spawn it
-            tracing::info!("Spawning vx-store");
-            if !args.cas_endpoint.is_local() {
-                eyre::bail!(
-                    "Store is not reachable at {}. Auto-spawn is only supported for local endpoints.\n\
-                    Start vx-store on the remote host, or point VX_STORE to a local endpoint.",
-                    args.cas_endpoint
-                );
+            Ok(Err(e)) => {
+                eyre::bail!("failed to connect to Store at {cas_endpoint}: {e}");
             }
-
-            let store_log = args.vx_home.join("store.log");
-            let child = spawn_service(
-                "vx-store",
-                &store_log,
-                &[
-                    "--listen",
-                    &cas_display,
-                    "--root",
-                    store_root.as_str(),
-                    "--vx-home",
-                    vx_home_str,
-                ],
-            )?;
-            spawn_tracker.lock().await.store = Some(child);
-
-            // The reconnecting client is already retrying in the background.
-            // Wait for it to establish a connection.
-            match tokio::time::timeout(Duration::from_secs(30), cas_caller.handle()).await {
-                Ok(Ok(_)) => {
-                    tracing::info!("Store is ready at {}", args.cas_endpoint);
+            Err(_) => {
+                eyre::bail!("Store unreachable after 30s at {cas_endpoint}");
+            }
+        }
+    } else {
+        // No VX_STORE — probe and spawn if needed
+        match tokio::time::timeout(Duration::from_millis(500), cas_caller.handle()).await {
+            Ok(Ok(_)) => {
+                if in_test {
+                    eyre::bail!(
+                        "Store is already running at {cas_endpoint}. \
+                        Test daemons are supposed to die with nextest. This is a bug, report it.",
+                    );
                 }
-                Ok(Err(e)) => {
-                    eyre::bail!("Store failed to connect at {}: {}", args.cas_endpoint, e);
-                }
-                Err(_) => {
-                    eyre::bail!("Store still unreachable after 30s at {}", args.cas_endpoint);
+                tracing::info!("Store already running at {cas_endpoint}");
+            }
+            Ok(Err(e)) => {
+                eyre::bail!("failed to connect to Store at {cas_endpoint}: {e}");
+            }
+            Err(_timeout) => {
+                tracing::info!("Spawning vx-store");
+                let store_log = args.vx_home.join("store.log");
+                let child = spawn_service(
+                    "vx-store",
+                    &store_log,
+                    &[
+                        "--listen",
+                        &cas_display,
+                        "--root",
+                        store_root.as_str(),
+                        "--vx-home",
+                        vx_home_str,
+                    ],
+                )?;
+                spawn_tracker.lock().await.store = Some(child);
+
+                match tokio::time::timeout(Duration::from_secs(30), cas_caller.handle()).await {
+                    Ok(Ok(_)) => {
+                        tracing::info!("Store is ready at {cas_endpoint}");
+                    }
+                    Ok(Err(e)) => {
+                        eyre::bail!("Store failed to connect at {cas_endpoint}: {e}");
+                    }
+                    Err(_) => {
+                        eyre::bail!("Store still unreachable after 30s at {cas_endpoint}");
+                    }
                 }
             }
         }
     }
 
     // --- Runner (worker) ---
-    let exec_display = args.exec_endpoint.display();
+    let exec_endpoint = match &args.exec_endpoint {
+        Some(ep) => ep.clone(),
+        None => vx_io::net::default_unix_endpoint(&args.vx_home, "runner"),
+    };
+    let exec_display = exec_endpoint.display();
     let vfsd_endpoint = vx_io::net::default_unix_endpoint(&args.vx_home, "vfsd");
     let vfsd_display = vfsd_endpoint.display();
 
-    tracing::info!("Connecting to Runner at {}", args.exec_endpoint);
+    tracing::info!("Connecting to Runner at {exec_endpoint}");
     let exec_caller = vx_io::net::reconnecting_client_named(
-        args.exec_endpoint.clone(),
+        exec_endpoint.clone(),
         NoDispatcher,
         Some("vxd".into()),
     );
 
-    match tokio::time::timeout(Duration::from_millis(500), exec_caller.handle()).await {
-        Ok(Ok(_)) => {
-            if in_test {
-                eyre::bail!(
-                    "Runner is already running at {}. \
-                    Test daemons are supposed to die with nextest. This is a bug, report it.",
-                    args.exec_endpoint
-                );
+    if args.exec_endpoint.is_some() {
+        // VX_RUNNER was set — connect to existing runner, fail if unreachable
+        match tokio::time::timeout(Duration::from_secs(30), exec_caller.handle()).await {
+            Ok(Ok(_)) => {
+                tracing::info!("Runner is ready at {exec_endpoint}");
             }
-            tracing::info!("Runner already running at {}", args.exec_endpoint);
-        }
-        Ok(Err(e)) => {
-            eyre::bail!(
-                "failed to connect to Runner at {}: {}",
-                args.exec_endpoint,
-                e
-            );
-        }
-        Err(_timeout) => {
-            tracing::info!("Spawning vx-runner");
-            if !args.exec_endpoint.is_local() {
-                eyre::bail!(
-                    "Runner is not reachable at {}. Auto-spawn is only supported for local endpoints.\n\
-                    Start vx-runner on the remote host, or point VX_RUNNER to a local endpoint.",
-                    args.exec_endpoint
-                );
+            Ok(Err(e)) => {
+                eyre::bail!("failed to connect to Runner at {exec_endpoint}: {e}");
             }
-
-            let runner_log = args.vx_home.join("runner.log");
-            let child = spawn_service(
-                "vx-runner",
-                &runner_log,
-                &[
-                    "--listen",
-                    &exec_display,
-                    "--store",
-                    &cas_display,
-                    "--vfsd",
-                    &vfsd_display,
-                    "--vx-home",
-                    vx_home_str,
-                ],
-            )?;
-            spawn_tracker.lock().await.runner = Some(child);
-
-            match tokio::time::timeout(Duration::from_secs(30), exec_caller.handle()).await {
-                Ok(Ok(_)) => {
-                    tracing::info!("Runner is ready at {}", args.exec_endpoint);
-                }
-                Ok(Err(e)) => {
-                    eyre::bail!("Runner failed to connect at {}: {}", args.exec_endpoint, e);
-                }
-                Err(_) => {
+            Err(_) => {
+                eyre::bail!("Runner unreachable after 30s at {exec_endpoint}");
+            }
+        }
+    } else {
+        // No VX_RUNNER — probe and spawn if needed
+        match tokio::time::timeout(Duration::from_millis(500), exec_caller.handle()).await {
+            Ok(Ok(_)) => {
+                if in_test {
                     eyre::bail!(
-                        "Runner still unreachable after 30s at {}",
-                        args.exec_endpoint
+                        "Runner is already running at {exec_endpoint}. \
+                        Test daemons are supposed to die with nextest. This is a bug, report it.",
                     );
+                }
+                tracing::info!("Runner already running at {exec_endpoint}");
+            }
+            Ok(Err(e)) => {
+                eyre::bail!("failed to connect to Runner at {exec_endpoint}: {e}");
+            }
+            Err(_timeout) => {
+                tracing::info!("Spawning vx-runner");
+                let runner_log = args.vx_home.join("runner.log");
+                let child = spawn_service(
+                    "vx-runner",
+                    &runner_log,
+                    &[
+                        "--listen",
+                        &exec_display,
+                        "--store",
+                        &cas_display,
+                        "--vfsd",
+                        &vfsd_display,
+                        "--vx-home",
+                        vx_home_str,
+                    ],
+                )?;
+                spawn_tracker.lock().await.runner = Some(child);
+
+                match tokio::time::timeout(Duration::from_secs(30), exec_caller.handle()).await {
+                    Ok(Ok(_)) => {
+                        tracing::info!("Runner is ready at {exec_endpoint}");
+                    }
+                    Ok(Err(e)) => {
+                        eyre::bail!("Runner failed to connect at {exec_endpoint}: {e}");
+                    }
+                    Err(_) => {
+                        eyre::bail!("Runner still unreachable after 30s at {exec_endpoint}");
+                    }
                 }
             }
         }
@@ -415,8 +419,14 @@ async fn async_main() -> Result<()> {
     let args = resolve_args(cli)?;
     tracing::info!("Starting vxd");
     tracing::info!("  VX_HOME: {}", args.vx_home);
-    tracing::info!("  CAS:     {}", args.cas_endpoint);
-    tracing::info!("  Exec:    {}", args.exec_endpoint);
+    match &args.cas_endpoint {
+        Some(ep) => tracing::info!("  CAS:     {ep} (from VX_STORE)"),
+        None => tracing::info!("  CAS:     (will spawn)"),
+    }
+    match &args.exec_endpoint {
+        Some(ep) => tracing::info!("  Exec:    {ep} (from VX_RUNNER)"),
+        None => tracing::info!("  Exec:    (will spawn)"),
+    }
     tracing::info!("  Bind:    {}", args.bind);
 
     let spawn_tracker = Arc::new(DiagnosticAsyncMutex::new(
@@ -429,17 +439,18 @@ async fn async_main() -> Result<()> {
     let exec_host_triple = match std::env::var("VX_RUNNER_HOST_TRIPLE") {
         Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
         _ => {
-            if !args.exec_endpoint.is_local() {
-                eyre::bail!(
-                    "VX_RUNNER points to a non-local endpoint ({}) but VX_RUNNER_HOST_TRIPLE is not set.\n\
-                    vxd must know the runner host triple to request the correct Rust toolchain from CAS.\n\
-                    Set VX_RUNNER_HOST_TRIPLE (e.g. x86_64-unknown-linux-gnu) and retry.",
-                    args.exec_endpoint
-                );
+            if let Some(ep) = &args.exec_endpoint {
+                if !ep.is_local() {
+                    eyre::bail!(
+                        "VX_RUNNER points to a non-local endpoint ({ep}) but VX_RUNNER_HOST_TRIPLE is not set.\n\
+                        vxd must know the runner host triple to request the correct Rust toolchain from CAS.\n\
+                        Set VX_RUNNER_HOST_TRIPLE (e.g. x86_64-unknown-linux-gnu) and retry.",
+                    );
+                }
             }
 
             vx_toolchain::detect_host_triple()
-                .map_err(|e| eyre::eyre!("failed to detect host triple: {}", e))?
+                .map_err(|e| eyre::eyre!("failed to detect host triple: {e}"))?
         }
     };
 

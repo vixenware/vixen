@@ -461,7 +461,7 @@ async fn get_or_spawn_daemon(
 
             let mut cmd = std::process::Command::new(&vxd_path);
             cmd.env("VX_HOME", vx_home.as_str());
-            cmd.env("VXD", endpoint.display());
+            cmd.args(["--listen", &endpoint.display()]);
 
             let is_test = std::env::var("VX_TEST").is_ok_and(|v| v == "1");
             if is_test {
