@@ -14,3 +14,15 @@ Extension, and it also serves as a nice onboarding to remind you to _actually tu
 the extension:
 
 ![The vixen mac app showing settings](/static/vixen-app.png)
+
+You can build `Vixen.app` and friends yourself (`just apps/mac/install`) but you won't
+be able to do anything useful with it, because it won't be signed by the right team,
+and changing the bundle ID won't work either.
+
+Use the official build from the cask:
+
+```shell
+$ brew install --cask bearcove/tap/vixen
+```
+
+Which is hosted at <https://github.com/bearcove/vixen-mac-app>.

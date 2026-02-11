@@ -155,7 +155,14 @@ body {
 .hero-sub {
     font-size: 1rem;
     color: var(--fg-muted);
+    margin-bottom: 0.75rem;
+}
+
+.hero-status {
+    font-size: 0.85rem;
+    color: var(--fg-muted);
     margin-bottom: 2rem;
+    font-style: italic;
 }
 
 .hero-actions {
