@@ -145,6 +145,18 @@ impl RulePlanParityDiff {
     }
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct RulePlanParityEdgeDiff {
+    pub missing_in_rule_plan: Vec<String>,
+    pub extra_in_rule_plan: Vec<String>,
+}
+
+impl RulePlanParityEdgeDiff {
+    fn has_drift(&self) -> bool {
+        !self.missing_in_rule_plan.is_empty() || !self.extra_in_rule_plan.is_empty()
+    }
+}
+
 pub(crate) fn compare_rule_plan_parity(
     legacy_topology: &GraphTopology,
     rule_plan_topology: &GraphTopology,
@@ -176,6 +188,118 @@ pub(crate) fn compare_rule_plan_parity(
         rule_plan_focus_count: rule_plan_ids.len(),
         missing_in_rule_plan,
         extra_in_rule_plan,
+    }
+}
+
+pub(crate) fn compare_rule_plan_edge_parity(
+    legacy_topology: &GraphTopology,
+    rule_plan_topology: &GraphTopology,
+) -> RulePlanParityEdgeDiff {
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+    let legacy_nodes_by_index = legacy_topology
+        .nodes
+        .iter()
+        .map(|node| (node.index, node.node_id.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let legacy_focus_by_id = legacy_topology
+        .nodes
+        .iter()
+        .filter(|node| parity_focus_node_id(&node.node_id))
+        .map(|node| (node.node_id.clone(), node.index))
+        .collect::<BTreeMap<_, _>>();
+
+    let rule_nodes_by_index = rule_plan_topology
+        .nodes
+        .iter()
+        .map(|node| (node.index, node.node_id.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let rule_focus_by_id = rule_plan_topology
+        .nodes
+        .iter()
+        .filter(|node| parity_focus_node_id(&node.node_id))
+        .map(|node| (node.node_id.clone(), node.index))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut legacy_focus_deps = BTreeMap::<String, BTreeSet<String>>::new();
+    for (node_id, node_index) in &legacy_focus_by_id {
+        let mut deps = BTreeSet::new();
+        for edge in &legacy_topology.edges {
+            if edge.from == *node_index
+                && let Some(dep_id) = legacy_nodes_by_index.get(&edge.to)
+                && parity_focus_node_id(dep_id)
+            {
+                deps.insert(dep_id.clone());
+            }
+        }
+        legacy_focus_deps.insert(node_id.clone(), deps);
+    }
+
+    // In the RulePlan bridge, crate deps are expressed as: dep_compile -> dep_artifact -> compile.
+    // We treat focus nodes as terminals and allow a shallow walk through non-focus nodes.
+    let mut rule_adj = BTreeMap::<u32, Vec<u32>>::new();
+    for edge in &rule_plan_topology.edges {
+        rule_adj.entry(edge.from).or_default().push(edge.to);
+    }
+
+    let mut rule_focus_deps = BTreeMap::<String, BTreeSet<String>>::new();
+    let max_depth = 2u32;
+    for (node_id, start_index) in &rule_focus_by_id {
+        let mut deps = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        let mut queue = VecDeque::new();
+
+        visited.insert(*start_index);
+        queue.push_back((*start_index, 0u32));
+
+        while let Some((current, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+            let next_depth = depth + 1;
+            for &next in rule_adj.get(&current).into_iter().flatten() {
+                if !visited.insert(next) {
+                    continue;
+                }
+                let Some(next_id) = rule_nodes_by_index.get(&next) else {
+                    continue;
+                };
+
+                if parity_focus_node_id(next_id) {
+                    // Treat focus nodes as terminals: compare immediate focus deps only.
+                    if next_id != node_id {
+                        deps.insert(next_id.clone());
+                    }
+                    continue;
+                }
+
+                queue.push_back((next, next_depth));
+            }
+        }
+
+        rule_focus_deps.insert(node_id.clone(), deps);
+    }
+
+    let mut missing_in_rule_plan = BTreeSet::new();
+    let mut extra_in_rule_plan = BTreeSet::new();
+
+    for (node_id, legacy_deps) in legacy_focus_deps {
+        let Some(rule_deps) = rule_focus_deps.get(&node_id) else {
+            // Node parity check will already report this.
+            continue;
+        };
+
+        for dep in legacy_deps.difference(rule_deps) {
+            missing_in_rule_plan.insert(format!("{node_id} -> {dep}"));
+        }
+        for dep in rule_deps.difference(&legacy_deps) {
+            extra_in_rule_plan.insert(format!("{node_id} -> {dep}"));
+        }
+    }
+
+    RulePlanParityEdgeDiff {
+        missing_in_rule_plan: missing_in_rule_plan.into_iter().collect(),
+        extra_in_rule_plan: extra_in_rule_plan.into_iter().collect(),
     }
 }
 
@@ -1009,6 +1133,33 @@ impl VxdService {
                     focus_node_count = parity.legacy_focus_count,
                     "RulePlan parity check passed for compile/registry nodes"
                 );
+            }
+
+            let edge_parity =
+                compare_rule_plan_edge_parity(&legacy_topology, rule_plan_topology_ref);
+            if edge_parity.has_drift() {
+                let max_examples = 5;
+                warn!(
+                    missing = ?edge_parity
+                        .missing_in_rule_plan
+                        .iter()
+                        .take(max_examples)
+                        .collect::<Vec<_>>(),
+                    extra = ?edge_parity
+                        .extra_in_rule_plan
+                        .iter()
+                        .take(max_examples)
+                        .collect::<Vec<_>>(),
+                    "RulePlan edge parity drift detected for compile/registry node dependencies"
+                );
+                if rule_plan_parity_strict_enabled() {
+                    return Err(VxdError::InvalidManifest(
+                        "RulePlan edge parity drift detected (set VX_RULE_PLAN_PARITY_STRICT=0 to run non-strict)"
+                            .to_string(),
+                    ));
+                }
+            } else {
+                info!("RulePlan edge parity check passed for compile/registry node dependencies");
             }
         }
 

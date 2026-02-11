@@ -82,6 +82,97 @@ fn test_rule_plan_parity_ignores_non_focus_nodes() {
     assert!(diff.extra_in_rule_plan.is_empty());
 }
 
+#[test]
+fn test_rule_plan_edge_parity_compares_focus_deps_with_two_hop_bridge() {
+    // Legacy: compile(app) depends directly on compile(dep) and registry acquire.
+    let legacy = GraphTopology {
+        nodes: vec![
+            GraphNode {
+                index: 0,
+                node_id: "compile-bin:app".to_string(),
+                kind: "rust.compile_bin".to_string(),
+                label: "compile app".to_string(),
+            },
+            GraphNode {
+                index: 1,
+                node_id: "compile-lib:dep".to_string(),
+                kind: "rust.compile_rlib".to_string(),
+                label: "compile dep".to_string(),
+            },
+            GraphNode {
+                index: 2,
+                node_id: "acquire-registry:serde:1.0.0".to_string(),
+                kind: "registry.acquire".to_string(),
+                label: "acquire serde".to_string(),
+            },
+        ],
+        edges: vec![
+            GraphEdge {
+                from: 0,
+                to: 1,
+                kind: Some("always".to_string()),
+            },
+            GraphEdge {
+                from: 0,
+                to: 2,
+                kind: Some("always".to_string()),
+            },
+        ],
+    };
+
+    // RulePlan-lowered: compile(app) depends on dep_artifact (non-focus) and registry acquire.
+    // dep_artifact depends on compile(dep). This should still count as a focus dep via 2-hop walk.
+    let rule_plan = GraphTopology {
+        nodes: vec![
+            GraphNode {
+                index: 0,
+                node_id: "compile-bin:app".to_string(),
+                kind: "rust.compile_bin".to_string(),
+                label: "compile app".to_string(),
+            },
+            GraphNode {
+                index: 1,
+                node_id: "artifact:dep".to_string(),
+                kind: "planner.artifact".to_string(),
+                label: "artifact dep".to_string(),
+            },
+            GraphNode {
+                index: 2,
+                node_id: "compile-lib:dep".to_string(),
+                kind: "rust.compile_rlib".to_string(),
+                label: "compile dep".to_string(),
+            },
+            GraphNode {
+                index: 3,
+                node_id: "acquire-registry:serde:1.0.0".to_string(),
+                kind: "registry.acquire".to_string(),
+                label: "acquire serde".to_string(),
+            },
+        ],
+        edges: vec![
+            GraphEdge {
+                from: 0,
+                to: 1,
+                kind: Some("ifchanged".to_string()),
+            },
+            GraphEdge {
+                from: 1,
+                to: 2,
+                kind: Some("ifwritten".to_string()),
+            },
+            GraphEdge {
+                from: 0,
+                to: 3,
+                kind: Some("ifchanged".to_string()),
+            },
+        ],
+    };
+
+    let diff = crate::service::compare_rule_plan_edge_parity(&legacy, &rule_plan);
+    assert!(diff.missing_in_rule_plan.is_empty(), "{diff:?}");
+    assert!(diff.extra_in_rule_plan.is_empty(), "{diff:?}");
+}
+
 /// Set up common build configuration for C builds
 fn setup_cc_config(db: &Database) -> BuildConfig {
     let build_key = BuildConfig::compute_key("debug", "x86_64-linux-musl", "/test/workspace", "");
