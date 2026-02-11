@@ -75,8 +75,6 @@ where
         .arg(&sid)
         .arg("--mount-point")
         .arg(config.mount_path.as_str())
-        .arg("--parent-pid")
-        .arg(std::process::id().to_string())
         .arg("--log-file")
         .arg(&log_file_path);
 
@@ -90,7 +88,8 @@ where
     helper_command
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .kill_on_drop(false);
+        .kill_on_drop(false)
+        .process_group(0);
 
     let mut helper = match helper_command.spawn() {
         Ok(child) => child,

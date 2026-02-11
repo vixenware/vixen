@@ -171,9 +171,10 @@ fn main() {
         }
     }
 
-    // Phase 3: unmount
+    // Phase 3: unmount (force — the VFS server process is already dead)
     let _ = std::process::Command::new("diskutil")
         .arg("unmount")
+        .arg("force")
         .arg(&args.mount_path)
         .output();
 }
