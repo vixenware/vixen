@@ -58,10 +58,29 @@ edition = "2021"
 TOML
 echo 'fn main() {}' > "${WARMUP_DIR}/src/main.rs"
 
-(cd "${WARMUP_DIR}" && "${VX_BIN}" build --no-spawn --no-tui) || {
-    echo "Warmup build failed, this means nothing'll work. Probably FSKit, darn it."
+warmup_ok=0
+for attempt in $(seq 1 40); do
+    if warmup_output=$(cd "${WARMUP_DIR}" && "${VX_BIN}" build --no-spawn --no-tui 2>&1); then
+        warmup_ok=1
+        break
+    fi
+
+    if grep -q "failed to connect to vxd" <<<"${warmup_output}"; then
+        sleep 0.25
+        continue
+    fi
+
+    echo "${warmup_output}"
+    echo "Warmup build failed with a real build error (not a daemon startup race)."
     exit 1
-}
+done
+
+if [[ "${warmup_ok}" -ne 1 ]]; then
+    echo "Warmup build failed after waiting for daemon startup."
+    echo "Last error:"
+    echo "${warmup_output:-<none>}"
+    exit 1
+fi
 
 # Export connection info for all tests. TestEnv::new() reads these to skip
 # spawning and connect to this daemon instead.

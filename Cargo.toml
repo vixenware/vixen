@@ -161,6 +161,14 @@ facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
 # picante = { path = "../picante/crates/picante" }
 # picante-macros = { path = "../picante/crates/picante-macros" }
 
+# [patch."https://github.com/bearcove/peeps"]
+# peeps = { path = "/Users/amos/bearcove/peeps/crates/peeps" }
+# peeps-locks = { path = "/Users/amos/bearcove/peeps/crates/peeps-locks" }
+# peeps-tasks = { path = "/Users/amos/bearcove/peeps/crates/peeps-tasks" }
+# peeps-threads = { path = "/Users/amos/bearcove/peeps/crates/peeps-threads" }
+# peeps-roam = { path = "/Users/amos/bearcove/peeps/crates/peeps-roam" }
+# peeps-types = { path = "/Users/amos/bearcove/peeps/crates/peeps-types" }
+
 # [patch."https://github.com/bearcove/roam"]
 # roam = { path = "/Users/amos/bearcove/roam/rust/roam" }
 # roam-stream = { path = "/Users/amos/bearcove/roam/rust/roam-stream" }

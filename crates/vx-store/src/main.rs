@@ -147,7 +147,7 @@ async fn async_main() -> Result<()> {
             tracing::debug!("New connection from {}", peer_addr);
 
             let dispatcher = StoreDispatcher::new(store);
-            let Ok((_handle, _incoming, driver)) = accept(
+            let (_handle, _incoming, driver) = match accept(
                 stream,
                 HandshakeConfig {
                     max_payload_size: 256 * 1024 * 1024, // 256 MiB
@@ -157,9 +157,12 @@ async fn async_main() -> Result<()> {
                 dispatcher,
             )
             .await
-            else {
-                tracing::debug!("Handshake failed for {}", peer_addr);
-                return;
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::debug!("Handshake failed for {}: {e}", peer_addr);
+                    return;
+                }
             };
             if let Err(e) = driver.run().await {
                 tracing::warn!("Connection error from {}: {}", peer_addr, e);

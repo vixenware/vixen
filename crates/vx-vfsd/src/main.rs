@@ -272,7 +272,7 @@ async fn async_main() -> Result<()> {
                 peeps::tasks::spawn_tracked(format!("vfsd_connection_{}", peer_addr), async move {
                     tracing::debug!("vx-vfsd connection from {}", peer_addr);
                     let dispatcher = VfsdDispatcher::new(service);
-                    let Ok((_handle, _incoming, driver)) = accept(
+                    let (_handle, _incoming, driver) = match accept(
                         stream,
                         HandshakeConfig {
                             max_payload_size: 256 * 1024 * 1024, // 256 MiB
@@ -282,9 +282,15 @@ async fn async_main() -> Result<()> {
                         dispatcher,
                     )
                     .await
-                    else {
-                        tracing::warn!("Failed to accept vx-vfsd connection from {}", peer_addr);
-                        return;
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to accept vx-vfsd connection from {}: {e}",
+                                peer_addr
+                            );
+                            return;
+                        }
                     };
                     tracing::debug!("vx-vfsd session established with {}", peer_addr);
                     if let Err(e) = driver.run().await {

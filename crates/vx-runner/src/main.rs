@@ -351,7 +351,7 @@ async fn async_main() -> Result<()> {
                     async move {
                         tracing::debug!("Runner connection from {}", peer_addr);
                         let dispatcher = RunnerDispatcher::new(exec);
-                        let Ok((_handle, _incoming, driver)) = accept(
+                        let (_handle, _incoming, driver) = match accept(
                             stream,
                             HandshakeConfig {
                                 max_payload_size: 256 * 1024 * 1024, // 256 MiB
@@ -361,9 +361,12 @@ async fn async_main() -> Result<()> {
                             dispatcher,
                         )
                         .await
-                        else {
-                            tracing::debug!("Runner handshake error from {}", peer_addr);
-                            return;
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::debug!("Runner handshake error from {}: {e}", peer_addr);
+                                return;
+                            }
                         };
                         if let Err(e) = driver.run().await {
                             tracing::debug!("Runner connection error from {}: {}", peer_addr, e);

@@ -992,7 +992,8 @@ async fn cmd_debug(args: DebugArgs) -> Result<()> {
     }
 
     // Default: serve web dashboard
-    serve_debug_dashboard(dumps).await
+    peeps::serve_dashboard(dumps).await?;
+    Ok(())
 }
 
 /// Find running vixen processes via pgrep.
@@ -1141,64 +1142,6 @@ fn print_text_dump(dumps: &[peeps::ProcessDump]) {
 
         eprintln!();
     }
-}
-
-/// Serve a web dashboard with the collected dumps.
-async fn serve_debug_dashboard(dumps: Vec<peeps::ProcessDump>) -> Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    let dumps_json = facet_json::to_string(&dumps)?;
-
-    let html = build_dashboard_html(&dumps_json);
-
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
-    let url = format!("http://{addr}");
-
-    eprintln!("Dashboard: {url}");
-    eprintln!("Press Ctrl-C to stop.");
-
-    // Open browser
-    let _ = std::process::Command::new("open").arg(&url).status();
-
-    // Simple HTTP server — serves the dashboard HTML and API endpoints
-    loop {
-        let (mut stream, _) = listener.accept().await?;
-        let dumps_json = dumps_json.clone();
-        let html = html.clone();
-
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; 4096];
-            let n = match stream.read(&mut buf).await {
-                Ok(n) => n,
-                Err(_) => return,
-            };
-            let request = String::from_utf8_lossy(&buf[..n]);
-            let path = request
-                .lines()
-                .next()
-                .and_then(|line| line.split_whitespace().nth(1))
-                .unwrap_or("/");
-
-            let (status, content_type, body) = match path {
-                "/api/dump" => ("200 OK", "application/json", dumps_json),
-                _ => ("200 OK", "text/html; charset=utf-8", html),
-            };
-
-            let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
-            let _ = stream.write_all(body.as_bytes()).await;
-        });
-    }
-}
-
-fn build_dashboard_html(dumps_json: &str) -> String {
-    const TEMPLATE: &str = include_str!("debug_dashboard.html");
-    TEMPLATE.replace("__DUMPS_JSON__", dumps_json)
 }
 
 fn cmd_explain(args: ExplainArgs) -> Result<()> {

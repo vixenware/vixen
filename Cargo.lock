@@ -540,7 +540,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -617,7 +617,7 @@ dependencies = [
 [[package]]
 name = "facet-dessert"
 version = "0.43.2"
-source = "git+https://github.com/facet-rs/facet?branch=main#8a80c523d025667d158d21f66700b4a37735107c"
+source = "git+https://github.com/facet-rs/facet?branch=main#967e78d7ba4ba05b270996c1235f951665cd201b"
 dependencies = [
  "facet-core",
  "facet-reflect",
@@ -634,7 +634,7 @@ dependencies = [
 [[package]]
 name = "facet-format"
 version = "0.43.2"
-source = "git+https://github.com/facet-rs/facet?branch=main#8a80c523d025667d158d21f66700b4a37735107c"
+source = "git+https://github.com/facet-rs/facet?branch=main#967e78d7ba4ba05b270996c1235f951665cd201b"
 dependencies = [
  "facet-core",
  "facet-dessert",
@@ -646,7 +646,7 @@ dependencies = [
 [[package]]
 name = "facet-json"
 version = "0.43.2"
-source = "git+https://github.com/facet-rs/facet?branch=main#8a80c523d025667d158d21f66700b4a37735107c"
+source = "git+https://github.com/facet-rs/facet?branch=main#967e78d7ba4ba05b270996c1235f951665cd201b"
 dependencies = [
  "facet",
  "facet-core",
@@ -744,7 +744,7 @@ dependencies = [
 [[package]]
 name = "facet-solver"
 version = "0.43.2"
-source = "git+https://github.com/facet-rs/facet?branch=main#8a80c523d025667d158d21f66700b4a37735107c"
+source = "git+https://github.com/facet-rs/facet?branch=main#967e78d7ba4ba05b270996c1235f951665cd201b"
 dependencies = [
  "facet-core",
  "facet-reflect",
@@ -1324,7 +1324,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1360,7 +1360,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1634,7 +1634,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1709,7 +1709,7 @@ dependencies = [
 [[package]]
 name = "peeps"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/peeps?branch=main#2e00454e83aacd0a4d7e96a9f623131dc63e7985"
+source = "git+https://github.com/bearcove/peeps?branch=main#eb770af17da535f5409da6756a0c78c93fb1818f"
 dependencies = [
  "facet",
  "facet-json",
@@ -1724,7 +1724,7 @@ dependencies = [
 [[package]]
 name = "peeps-locks"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/peeps?branch=main#2e00454e83aacd0a4d7e96a9f623131dc63e7985"
+source = "git+https://github.com/bearcove/peeps?branch=main#eb770af17da535f5409da6756a0c78c93fb1818f"
 dependencies = [
  "facet",
  "parking_lot",
@@ -1735,7 +1735,7 @@ dependencies = [
 [[package]]
 name = "peeps-tasks"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/peeps?branch=main#2e00454e83aacd0a4d7e96a9f623131dc63e7985"
+source = "git+https://github.com/bearcove/peeps?branch=main#eb770af17da535f5409da6756a0c78c93fb1818f"
 dependencies = [
  "backtrace",
  "facet",
@@ -1746,7 +1746,7 @@ dependencies = [
 [[package]]
 name = "peeps-threads"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/peeps?branch=main#2e00454e83aacd0a4d7e96a9f623131dc63e7985"
+source = "git+https://github.com/bearcove/peeps?branch=main#eb770af17da535f5409da6756a0c78c93fb1818f"
 dependencies = [
  "facet",
  "libc",
@@ -1756,7 +1756,7 @@ dependencies = [
 [[package]]
 name = "peeps-types"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/peeps?branch=main#2e00454e83aacd0a4d7e96a9f623131dc63e7985"
+source = "git+https://github.com/bearcove/peeps?branch=main#eb770af17da535f5409da6756a0c78c93fb1818f"
 dependencies = [
  "facet",
  "inventory",
@@ -2237,7 +2237,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2631,7 +2631,7 @@ dependencies = [
  "getrandom 0.4.1",
  "once_cell",
  "rustix 1.1.3",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3578,7 +3578,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
