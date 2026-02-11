@@ -24,7 +24,7 @@ mod service;
 mod tests;
 
 use camino::Utf8PathBuf;
-use eyre::{Result, WrapErr};
+use eyre::Result;
 use facet::Facet;
 use figue as args;
 use peeps::locks::DiagnosticAsyncMutex;
@@ -194,123 +194,167 @@ fn spawn_service(
     ur_taking_me_with_you::spawn_dying_with_parent(cmd).map_err(Into::into)
 }
 
-/// Ensure services are running, spawning them if necessary
+struct ServiceClients {
+    cas: Arc<StoreClient<UpstreamCaller>>,
+    exec: Arc<RunnerClient<UpstreamCaller>>,
+}
+
+/// Ensure services are running (spawning them if necessary) and return
+/// connected roam clients. The clients are the *same* reconnecting sessions
+/// used for the liveness probe — no connections are created and thrown away.
 async fn ensure_services(
     args: &Args,
     spawn_tracker: &Arc<DiagnosticAsyncMutex<SpawnTracker>>,
-) -> Result<()> {
-    // Service startup can take a few seconds on cold systems (especially runner).
-    // Keep retrying long enough to avoid flaking during daemon orchestration.
-    let backoff_ms = [10, 50, 100, 250, 500, 1000, 1500, 2000, 3000];
-
+    in_test: bool,
+) -> Result<ServiceClients> {
     let vx_home_str = args.vx_home.as_str();
     let cas_display = args.cas_endpoint.display();
     let store_root = args.vx_home.join("store");
 
-    // Check Store (CAS)
-    if vx_io::net::try_connect(&args.cas_endpoint).await?.is_none() {
-        if !args.cas_endpoint.is_local() {
-            eyre::bail!(
-                "Store is not reachable at {}. Auto-spawn is only supported for local endpoints.\n\
-                Start vx-store on the remote host, or point VX_STORE to a local endpoint.",
-                args.cas_endpoint
-            );
+    // --- Store (CAS) ---
+    tracing::info!("Connecting to Store at {}", args.cas_endpoint);
+    let cas_caller = vx_io::net::reconnecting_client_named(
+        args.cas_endpoint.clone(),
+        NoDispatcher,
+        Some("vxd".into()),
+    );
+
+    // Quick probe: is the store already running?
+    match tokio::time::timeout(Duration::from_millis(500), cas_caller.handle()).await {
+        Ok(Ok(_)) => {
+            if in_test {
+                eyre::bail!(
+                    "Store is already running at {}. \
+                    Test daemons are supposed to die with nextest. This is a bug, report it.",
+                    args.cas_endpoint
+                );
+            }
+            tracing::info!("Store already running at {}", args.cas_endpoint);
         }
+        Ok(Err(e)) => {
+            eyre::bail!("failed to connect to Store at {}: {}", args.cas_endpoint, e);
+        }
+        Err(_timeout) => {
+            // Not running — spawn it
+            if !args.cas_endpoint.is_local() {
+                eyre::bail!(
+                    "Store is not reachable at {}. Auto-spawn is only supported for local endpoints.\n\
+                    Start vx-store on the remote host, or point VX_STORE to a local endpoint.",
+                    args.cas_endpoint
+                );
+            }
 
-        let store_log = args.vx_home.join("store.log");
-        let child = spawn_service(
-            "vx-store",
-            &store_log,
-            &[
-                "--listen",
-                &cas_display,
-                "--root",
-                store_root.as_str(),
-                "--vx-home",
-                vx_home_str,
-            ],
-        )?;
+            let store_log = args.vx_home.join("store.log");
+            let child = spawn_service(
+                "vx-store",
+                &store_log,
+                &[
+                    "--listen",
+                    &cas_display,
+                    "--root",
+                    store_root.as_str(),
+                    "--vx-home",
+                    vx_home_str,
+                ],
+            )?;
+            spawn_tracker.lock().await.store = Some(child);
 
-        spawn_tracker.lock().await.store = Some(child);
-
-        for (attempt, delay) in backoff_ms.iter().enumerate() {
-            tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
-            if vx_io::net::try_connect(&args.cas_endpoint).await?.is_some() {
-                tracing::trace!("Connected to Store after {} attempts", attempt + 1);
-                break;
+            // The reconnecting client is already retrying in the background.
+            // Wait for it to establish a connection.
+            match tokio::time::timeout(Duration::from_secs(30), cas_caller.handle()).await {
+                Ok(Ok(_)) => {
+                    tracing::info!("Store is ready at {}", args.cas_endpoint);
+                }
+                Ok(Err(e)) => {
+                    eyre::bail!("Store failed to connect at {}: {}", args.cas_endpoint, e);
+                }
+                Err(_) => {
+                    eyre::bail!("Store still unreachable after 30s at {}", args.cas_endpoint);
+                }
             }
         }
-
-        // Final connection attempt
-        vx_io::net::connect(&args.cas_endpoint)
-            .await
-            .wrap_err_with(|| {
-                format!("Store still unreachable after spawn: {}", args.cas_endpoint)
-            })?;
-    } else {
-        tracing::info!("Store already running at {}", args.cas_endpoint);
     }
 
+    // --- Runner (worker) ---
     let exec_display = args.exec_endpoint.display();
     let vfsd_endpoint = vx_io::net::default_unix_endpoint(&args.vx_home, "vfsd");
     let vfsd_display = vfsd_endpoint.display();
 
-    // Check Runner (worker)
-    if vx_io::net::try_connect(&args.exec_endpoint)
-        .await?
-        .is_none()
-    {
-        if !args.exec_endpoint.is_local() {
+    tracing::info!("Connecting to Runner at {}", args.exec_endpoint);
+    let exec_caller = vx_io::net::reconnecting_client_named(
+        args.exec_endpoint.clone(),
+        NoDispatcher,
+        Some("vxd".into()),
+    );
+
+    match tokio::time::timeout(Duration::from_millis(500), exec_caller.handle()).await {
+        Ok(Ok(_)) => {
+            if in_test {
+                eyre::bail!(
+                    "Runner is already running at {}. \
+                    Test daemons are supposed to die with nextest. This is a bug, report it.",
+                    args.exec_endpoint
+                );
+            }
+            tracing::info!("Runner already running at {}", args.exec_endpoint);
+        }
+        Ok(Err(e)) => {
             eyre::bail!(
-                "Runner is not reachable at {}. Auto-spawn is only supported for local endpoints.\n\
-                Start vx-runner on the remote host, or point VX_RUNNER to a local endpoint.",
-                args.exec_endpoint
+                "failed to connect to Runner at {}: {}",
+                args.exec_endpoint,
+                e
             );
         }
+        Err(_timeout) => {
+            if !args.exec_endpoint.is_local() {
+                eyre::bail!(
+                    "Runner is not reachable at {}. Auto-spawn is only supported for local endpoints.\n\
+                    Start vx-runner on the remote host, or point VX_RUNNER to a local endpoint.",
+                    args.exec_endpoint
+                );
+            }
 
-        let runner_log = args.vx_home.join("runner.log");
-        let child = spawn_service(
-            "vx-runner",
-            &runner_log,
-            &[
-                "--listen",
-                &exec_display,
-                "--store",
-                &cas_display,
-                "--vfsd",
-                &vfsd_display,
-                "--vx-home",
-                vx_home_str,
-            ],
-        )?;
+            let runner_log = args.vx_home.join("runner.log");
+            let child = spawn_service(
+                "vx-runner",
+                &runner_log,
+                &[
+                    "--listen",
+                    &exec_display,
+                    "--store",
+                    &cas_display,
+                    "--vfsd",
+                    &vfsd_display,
+                    "--vx-home",
+                    vx_home_str,
+                ],
+            )?;
+            spawn_tracker.lock().await.runner = Some(child);
 
-        spawn_tracker.lock().await.runner = Some(child);
-
-        for (attempt, delay) in backoff_ms.iter().enumerate() {
-            tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
-            if vx_io::net::try_connect(&args.exec_endpoint)
-                .await?
-                .is_some()
-            {
-                tracing::trace!("Connected to Runner after {} attempts", attempt + 1);
-                break;
+            match tokio::time::timeout(Duration::from_secs(30), exec_caller.handle()).await {
+                Ok(Ok(_)) => {
+                    tracing::info!("Runner is ready at {}", args.exec_endpoint);
+                }
+                Ok(Err(e)) => {
+                    eyre::bail!("Runner failed to connect at {}: {}", args.exec_endpoint, e);
+                }
+                Err(_) => {
+                    eyre::bail!(
+                        "Runner still unreachable after 30s at {}",
+                        args.exec_endpoint
+                    );
+                }
             }
         }
-
-        // Final connection attempt
-        vx_io::net::connect(&args.exec_endpoint)
-            .await
-            .wrap_err_with(|| {
-                format!(
-                    "Runner still unreachable after spawn: {}",
-                    args.exec_endpoint
-                )
-            })?;
-    } else {
-        tracing::info!("Runner already running at {}", args.exec_endpoint);
     }
 
-    Ok(())
+    let cas_client = Arc::new(StoreClient::new(cas_caller));
+    let exec_client = Arc::new(RunnerClient::new(exec_caller));
+
+    Ok(ServiceClients {
+        cas: cas_client,
+        exec: exec_client,
+    })
 }
 
 fn main() -> Result<()> {
@@ -378,7 +422,7 @@ async fn async_main() -> Result<()> {
         SpawnTracker::default(),
     ));
 
-    ensure_services(&args, &spawn_tracker).await?;
+    let clients = ensure_services(&args, &spawn_tracker, in_test).await?;
 
     let exec_host_triple = match std::env::var("VX_RUNNER_HOST_TRIPLE") {
         Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
@@ -397,30 +441,8 @@ async fn async_main() -> Result<()> {
         }
     };
 
-    // Create reconnecting Roam clients for CAS and Exec.
-    tracing::info!("Connecting to CAS at {}", args.cas_endpoint);
-    let cas_caller = vx_io::net::reconnecting_client_named(
-        args.cas_endpoint.clone(),
-        NoDispatcher,
-        Some("vxd".into()),
-    );
-    cas_caller
-        .handle()
-        .await
-        .map_err(|e| eyre::eyre!("failed to connect to CAS at {}: {}", args.cas_endpoint, e))?;
-    let cas_client = Arc::new(StoreClient::new(cas_caller));
-
-    tracing::info!("Connecting to Exec at {}", args.exec_endpoint);
-    let exec_caller = vx_io::net::reconnecting_client_named(
-        args.exec_endpoint.clone(),
-        NoDispatcher,
-        Some("vxd".into()),
-    );
-    exec_caller
-        .handle()
-        .await
-        .map_err(|e| eyre::eyre!("failed to connect to Exec at {}: {}", args.exec_endpoint, e))?;
-    let exec_client = Arc::new(RunnerClient::new(exec_caller));
+    let cas_client = clients.cas;
+    let exec_client = clients.exec;
 
     // Initialize daemon service (singleton shared across all connections)
     tracing::info!("Initializing daemon service");
@@ -485,7 +507,7 @@ async fn async_main() -> Result<()> {
             let session = daemon.new_session();
 
             let dispatcher = VxdDispatcher::new(session.clone());
-            let Ok((handle, _incoming, driver)) = accept(
+            let (handle, _incoming, driver) = match accept(
                 stream,
                 HandshakeConfig {
                     max_payload_size: 256 * 1024 * 1024, // 256 MiB
@@ -495,11 +517,14 @@ async fn async_main() -> Result<()> {
                 dispatcher,
             )
             .await
-            else {
-                tracing::warn!("Handshake error from {}", peer_addr);
-                active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                *last_disconnect.lock().await = Some(tokio::time::Instant::now());
-                return;
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("Handshake error from {}: {e}", peer_addr);
+                    active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    *last_disconnect.lock().await = Some(tokio::time::Instant::now());
+                    return;
+                }
             };
 
             let progress_listener =
