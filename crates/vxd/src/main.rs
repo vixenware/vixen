@@ -236,6 +236,7 @@ async fn ensure_services(
         }
         Err(_timeout) => {
             // Not running — spawn it
+            tracing::info!("Spawning vx-store");
             if !args.cas_endpoint.is_local() {
                 eyre::bail!(
                     "Store is not reachable at {}. Auto-spawn is only supported for local endpoints.\n\
@@ -306,6 +307,7 @@ async fn ensure_services(
             );
         }
         Err(_timeout) => {
+            tracing::info!("Spawning vx-runner");
             if !args.exec_endpoint.is_local() {
                 eyre::bail!(
                     "Runner is not reachable at {}. Auto-spawn is only supported for local endpoints.\n\
