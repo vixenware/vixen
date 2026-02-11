@@ -318,30 +318,57 @@ async fn async_main() -> Result<()> {
 
             // Smoke test: read the canary file through the real filesystem.
             // This proves the FUSE/FSKit mount is actually serving files.
+            // Retry up to 10 times with 250ms delay — the FSKit extension
+            // may need a moment to become ready after the mount syscall returns.
             let canary_fs_path = mount_path.join(&canary.name);
             tracing::info!("Trying to read canary from {canary_fs_path}");
-            let smoke_timeout = std::time::Duration::from_secs(5);
-            let read_result =
-                tokio::time::timeout(smoke_timeout, tokio::fs::read(canary_fs_path.as_std_path()))
-                    .await;
 
-            let smoke_err = match read_result {
-                Ok(Ok(actual)) if actual == canary.content => {
-                    tracing::info!("VFS smoke test passed");
-                    None
+            const MAX_ATTEMPTS: u32 = 10;
+            const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+            let smoke_timeout = std::time::Duration::from_secs(5);
+
+            let mut smoke_err = None;
+            for attempt in 1..=MAX_ATTEMPTS {
+                let read_result = tokio::time::timeout(
+                    smoke_timeout,
+                    tokio::fs::read(canary_fs_path.as_std_path()),
+                )
+                .await;
+
+                match read_result {
+                    Ok(Ok(actual)) if actual == canary.content => {
+                        tracing::info!(attempt, "VFS smoke test passed");
+                        smoke_err = None;
+                        break;
+                    }
+                    Ok(Ok(actual)) => {
+                        smoke_err = Some(format!(
+                            "content mismatch at {} (expected {} bytes, got {} bytes)",
+                            canary_fs_path,
+                            canary.content.len(),
+                            actual.len(),
+                        ));
+                    }
+                    Ok(Err(e)) => {
+                        smoke_err = Some(format!("failed to read {}: {e}", canary_fs_path));
+                    }
+                    Err(_) => {
+                        smoke_err = Some(format!(
+                            "timed out after {smoke_timeout:?} reading {} — mount is not responding",
+                            canary_fs_path,
+                        ));
+                    }
                 }
-                Ok(Ok(actual)) => Some(format!(
-                    "content mismatch at {} (expected {} bytes, got {} bytes)",
-                    canary_fs_path,
-                    canary.content.len(),
-                    actual.len(),
-                )),
-                Ok(Err(e)) => Some(format!("failed to read {}: {e}", canary_fs_path,)),
-                Err(_) => Some(format!(
-                    "timed out after {smoke_timeout:?} reading {} — mount is not responding",
-                    canary_fs_path,
-                )),
-            };
+
+                if attempt < MAX_ATTEMPTS {
+                    tracing::debug!(
+                        attempt,
+                        error = smoke_err.as_deref().unwrap_or("unknown"),
+                        "canary read failed, retrying"
+                    );
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+            }
 
             if let Some(reason) = smoke_err {
                 let diagnostics = platform::collect_smoke_test_diagnostics(&mount_path).await;
