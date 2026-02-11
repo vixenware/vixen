@@ -2933,6 +2933,7 @@ version = "3.0.0"
 source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
 dependencies = [
  "libc",
+ "tokio",
  "windows-sys 0.61.2",
 ]
 

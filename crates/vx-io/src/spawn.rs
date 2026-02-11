@@ -1,7 +1,7 @@
 use camino::Utf8PathBuf;
 use eyre::Result;
-use std::process::Child;
 use std::time::Duration;
+use tokio::process::Child;
 
 use crate::net::{Endpoint, EndpointConnector};
 
@@ -98,118 +98,121 @@ where
 
     /// Spawn the service (unless connect-only) and return a connected client.
     ///
-    /// When spawning, retries connection with exponential backoff until the
-    /// timeout is reached. When connect-only, makes a single attempt.
+    /// When spawning, races connection attempts (with exponential backoff)
+    /// against the child process exiting. If the child dies before we connect,
+    /// we fail immediately instead of retrying until timeout.
+    ///
+    /// When connect-only, retries with backoff until timeout.
     pub async fn connect(self) -> Result<ServiceHandle<D>> {
-        let child = if self.spawn {
-            tracing::info!("Spawning {}", self.binary_name);
+        let Self {
+            binary_name,
+            endpoint,
+            dispatcher,
+            caller_name,
+            cli_args,
+            env_vars,
+            log_path,
+            timeout,
+            spawn,
+        } = self;
+
+        let mut child = if spawn {
+            tracing::info!("Spawning {binary_name}");
             Some(spawn_binary(
-                &self.binary_name,
-                &self.endpoint,
-                &self.cli_args,
-                &self.env_vars,
-                self.log_path.as_deref(),
+                &binary_name,
+                &endpoint,
+                &cli_args,
+                &env_vars,
+                log_path.as_deref(),
             )?)
         } else {
-            tracing::info!("Connecting to {} at {}", self.binary_name, self.endpoint);
+            tracing::info!("Connecting to {binary_name} at {endpoint}");
             None
         };
 
-        if self.spawn {
-            // Retry with backoff — the spawned process needs time to start listening.
-            let deadline = tokio::time::Instant::now() + self.timeout;
-            let backoff_ms = [10, 25, 50, 100, 250, 500, 1000];
-            let mut last_err = None;
+        let connect_fut =
+            connect_with_backoff(&binary_name, &endpoint, &dispatcher, &caller_name, timeout);
 
-            for delay in backoff_ms.iter().copied().chain(std::iter::repeat(1000)) {
-                // Re-create the client each attempt — a failed handle() poisons the client.
-                let attempt_caller = crate::net::reconnecting_client_named(
-                    self.endpoint.clone(),
-                    self.dispatcher.clone(),
-                    self.caller_name.clone(),
-                );
-
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    break;
+        if let Some(ref mut child_proc) = child {
+            // Race: connect loop vs child dying.
+            tokio::select! {
+                result = connect_fut => {
+                    let caller = result?;
+                    Ok(ServiceHandle { child, caller })
                 }
-
-                match tokio::time::timeout(
-                    remaining.min(Duration::from_secs(2)),
-                    attempt_caller.handle(),
-                )
-                .await
-                {
-                    Ok(Ok(_)) => {
-                        tracing::info!("{} is ready at {}", self.binary_name, self.endpoint);
-                        return Ok(ServiceHandle {
-                            child,
-                            caller: attempt_caller,
-                        });
-                    }
-                    Ok(Err(e)) => {
-                        tracing::debug!(
-                            "{} not ready yet at {}: {e}",
-                            self.binary_name,
-                            self.endpoint,
-                        );
-                        last_err = Some(e.to_string());
-                    }
-                    Err(_) => {
-                        tracing::debug!(
-                            "{} connect attempt timed out at {}",
-                            self.binary_name,
-                            self.endpoint,
-                        );
-                        last_err = Some("connection timed out".into());
+                exit_status = child_proc.wait() => {
+                    match exit_status {
+                        Ok(status) => eyre::bail!(
+                            "{binary_name} exited with {status} before becoming ready at {endpoint}",
+                        ),
+                        Err(e) => eyre::bail!(
+                            "{binary_name} wait failed: {e}",
+                        ),
                     }
                 }
-
-                if tokio::time::Instant::now() + Duration::from_millis(delay) > deadline {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(delay)).await;
             }
-
-            let err_detail = last_err.unwrap_or_else(|| "unknown".into());
-            eyre::bail!(
-                "{} unreachable after {:?} at {}: {}",
-                self.binary_name,
-                self.timeout,
-                self.endpoint,
-                err_detail,
-            );
         } else {
-            // Connect-only: single attempt with timeout.
-            let caller = crate::net::reconnecting_client_named(
-                self.endpoint.clone(),
-                self.dispatcher,
-                self.caller_name.clone(),
-            );
-            match tokio::time::timeout(self.timeout, caller.handle()).await {
-                Ok(Ok(_)) => {
-                    tracing::info!("{} is ready at {}", self.binary_name, self.endpoint);
-                }
-                Ok(Err(e)) => {
-                    eyre::bail!(
-                        "failed to connect to {} at {}: {e}",
-                        self.binary_name,
-                        self.endpoint,
-                    );
-                }
-                Err(_) => {
-                    eyre::bail!(
-                        "{} unreachable after {:?} at {}",
-                        self.binary_name,
-                        self.timeout,
-                        self.endpoint,
-                    );
-                }
-            }
-
+            let caller = connect_fut.await?;
             Ok(ServiceHandle { child, caller })
         }
     }
+}
+
+/// Retry connection with exponential backoff until timeout.
+async fn connect_with_backoff<D>(
+    binary_name: &str,
+    endpoint: &Endpoint,
+    dispatcher: &D,
+    caller_name: &Option<String>,
+    timeout: Duration,
+) -> Result<roam_stream::Client<EndpointConnector, D>>
+where
+    D: roam_stream::ServiceDispatcher + Clone + 'static,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    let backoff_ms = [10, 25, 50, 100, 250, 500, 1000];
+    let mut last_err = None;
+
+    for delay in backoff_ms.iter().copied().chain(std::iter::repeat(1000)) {
+        let attempt_caller = crate::net::reconnecting_client_named(
+            endpoint.clone(),
+            dispatcher.clone(),
+            caller_name.clone(),
+        );
+
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+
+        match tokio::time::timeout(
+            remaining.min(Duration::from_secs(2)),
+            attempt_caller.handle(),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                tracing::info!("{binary_name} is ready at {endpoint}");
+                return Ok(attempt_caller);
+            }
+            Ok(Err(e)) => {
+                tracing::debug!("{binary_name} not ready yet at {endpoint}: {e}");
+                last_err = Some(e.to_string());
+            }
+            Err(_) => {
+                tracing::debug!("{binary_name} connect attempt timed out at {endpoint}");
+                last_err = Some("connection timed out".into());
+            }
+        }
+
+        if tokio::time::Instant::now() + Duration::from_millis(delay) > deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
+
+    let err_detail = last_err.unwrap_or_else(|| "unknown".into());
+    eyre::bail!("{binary_name} unreachable after {timeout:?} at {endpoint}: {err_detail}",);
 }
 
 /// Spawn a sibling binary with `--listen <endpoint>` prepended to args.
@@ -239,12 +242,11 @@ fn spawn_binary(
     tracing::debug!(
         %vx_test,
         ?extra_args,
-        "spawning {} from {}",
-        binary_name,
+        "spawning {binary_name} from {}",
         binary_path.display()
     );
 
-    let mut cmd = std::process::Command::new(&binary_path);
+    let mut cmd = tokio::process::Command::new(&binary_path);
     cmd.arg("--listen").arg(&endpoint_display);
     cmd.args(extra_args);
     for (key, value) in env_vars {
@@ -273,5 +275,5 @@ fn spawn_binary(
         cmd.stderr(Stdio::null());
     }
 
-    ur_taking_me_with_you::spawn_dying_with_parent(cmd).map_err(Into::into)
+    ur_taking_me_with_you::spawn_dying_with_parent_async(cmd).map_err(Into::into)
 }

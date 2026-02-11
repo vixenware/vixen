@@ -60,7 +60,7 @@ roam-session = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-shm = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-local = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-codegen = { git = "https://github.com/bearcove/roam", branch = "main" }
-ur-taking-me-with-you = { git = "https://github.com/bearcove/roam", branch = "main" }
+ur-taking-me-with-you = { git = "https://github.com/bearcove/roam", branch = "main", features = ["tokio"] }
 
 # process management
 

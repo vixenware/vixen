@@ -29,9 +29,9 @@ use facet::Facet;
 use figue as args;
 use peeps::locks::DiagnosticAsyncMutex;
 use roam_stream::{HandshakeConfig, NoDispatcher, accept};
-use std::process::Child;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::process::Child;
 use vx_io::net::{Endpoint, Listener};
 use vx_runner_proto::RunnerClient;
 use vx_store_proto::StoreClient;
@@ -121,18 +121,22 @@ pub struct SpawnTracker {
 
 impl SpawnTracker {
     pub fn kill_all(&mut self) {
-        if let Some(mut child) = self.store.take() {
-            tracing::info!("Killing spawned vx-store (pid: {})", child.id());
-            if let Err(e) = child.kill() {
-                tracing::warn!("Failed to kill vx-store (pid: {}): {e}", child.id());
+        if let Some(ref mut child) = self.store {
+            let pid = child.id().unwrap_or(0);
+            tracing::info!("Killing spawned vx-store (pid: {pid})");
+            if let Err(e) = child.start_kill() {
+                tracing::warn!("Failed to kill vx-store (pid: {pid}): {e}");
             }
         }
-        if let Some(mut child) = self.runner.take() {
-            tracing::info!("Killing spawned vx-runner (pid: {})", child.id());
-            if let Err(e) = child.kill() {
-                tracing::warn!("Failed to kill vx-runner (pid: {}): {e}", child.id());
+        self.store.take();
+        if let Some(ref mut child) = self.runner {
+            let pid = child.id().unwrap_or(0);
+            tracing::info!("Killing spawned vx-runner (pid: {pid})");
+            if let Err(e) = child.start_kill() {
+                tracing::warn!("Failed to kill vx-runner (pid: {pid}): {e}");
             }
         }
+        self.runner.take();
     }
 }
 
