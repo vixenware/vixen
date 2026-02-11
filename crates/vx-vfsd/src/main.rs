@@ -309,6 +309,7 @@ async fn async_main() -> Result<()> {
             // Smoke test: read the canary file through the real filesystem.
             // This proves the FUSE/FSKit mount is actually serving files.
             let canary_fs_path = mount_path.join(&canary.name);
+            tracing::info!("Trying to read canary from {canary_fs_path}");
             let smoke_timeout = std::time::Duration::from_secs(5);
             let read_result =
                 tokio::time::timeout(smoke_timeout, tokio::fs::read(canary_fs_path.as_std_path()))

@@ -3,12 +3,12 @@
 //! Usage: vx-reaper --parent-pid <PID> --mount-path <PATH>
 //!
 //! Reads process group IDs from stdin (one per line) as vx-runner creates
-//! them. Watches the parent PID using kqueue EVFILT_PROC. When the parent
-//! exits:
+//! them. Watches the parent PID using kqueue EVFILT_PROC (with stdin EOF
+//! as fallback if EVFILT_PROC registration fails). When the parent exits:
 //!
 //! 1. SIGKILL all known child process groups
-//! 2. Verify they're dead (kill(pid, 0) polling)
-//! 3. Unmount the VFS mount point (diskutil unmount)
+//! 2. Brief sleep to let SIGKILL propagate
+//! 3. Force-unmount the VFS mount point (with timeout + last-resort pkill)
 //!
 //! Protocol: vx-runner writes "<pgid>\n" lines to the reaper's stdin.
 //! The reaper accumulates them in a HashSet and reaps them all when the
@@ -56,32 +56,20 @@ fn main() {
         std::process::exit(1);
     }
 
-    let changes = [
-        // Watch parent PID for exit
-        libc::kevent {
-            ident: args.parent_pid as usize,
-            filter: libc::EVFILT_PROC,
-            flags: libc::EV_ADD | libc::EV_ONESHOT,
-            fflags: libc::NOTE_EXIT,
-            data: 0,
-            udata: std::ptr::without_provenance_mut(1), // tag: 1 = parent exit
-        },
-        // Watch stdin for readability (new pgid lines)
-        libc::kevent {
-            ident: libc::STDIN_FILENO as usize,
-            filter: libc::EVFILT_READ,
-            flags: libc::EV_ADD,
-            fflags: 0,
-            data: 0,
-            udata: std::ptr::without_provenance_mut(2), // tag: 2 = stdin data
-        },
-    ];
-
+    // Register stdin readability first (always works)
+    let stdin_event = libc::kevent {
+        ident: libc::STDIN_FILENO as usize,
+        filter: libc::EVFILT_READ,
+        flags: libc::EV_ADD,
+        fflags: 0,
+        data: 0,
+        udata: std::ptr::without_provenance_mut(2), // tag: 2 = stdin data
+    };
     let ret = unsafe {
         libc::kevent(
             kq,
-            changes.as_ptr(),
-            changes.len() as i32,
+            &stdin_event,
+            1,
             std::ptr::null_mut(),
             0,
             std::ptr::null(),
@@ -89,10 +77,37 @@ fn main() {
     };
     if ret < 0 {
         eprintln!(
-            "vx-reaper: kevent register failed: {}",
+            "vx-reaper: kevent register stdin failed: {}",
             std::io::Error::last_os_error()
         );
         std::process::exit(1);
+    }
+
+    // Attempt EVFILT_PROC on parent — may fail (EPERM/ESRCH), that's OK,
+    // stdin EOF is our fallback
+    let proc_event = libc::kevent {
+        ident: args.parent_pid as usize,
+        filter: libc::EVFILT_PROC,
+        flags: libc::EV_ADD | libc::EV_ONESHOT,
+        fflags: libc::NOTE_EXIT,
+        data: 0,
+        udata: std::ptr::without_provenance_mut(1), // tag: 1 = parent exit
+    };
+    let ret = unsafe {
+        libc::kevent(
+            kq,
+            &proc_event,
+            1,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+        )
+    };
+    if ret < 0 {
+        eprintln!(
+            "vx-reaper: EVFILT_PROC registration failed ({}), relying on stdin EOF",
+            std::io::Error::last_os_error()
+        );
     }
 
     let mut pgroups = std::collections::HashSet::<libc::pid_t>::new();
@@ -161,22 +176,63 @@ fn main() {
         }
     }
 
-    // Phase 2: verify they're dead
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    let mut alive: Vec<libc::pid_t> = pgroups.iter().copied().collect();
-    while !alive.is_empty() && std::time::Instant::now() < deadline {
-        alive.retain(|&pgid| unsafe { libc::kill(pgid, 0) } == 0);
-        if !alive.is_empty() {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    }
+    // Phase 2: brief sleep to let SIGKILL propagate
+    // (We can't reliably verify process group death without scanning all
+    // processes — kill(pgid, 0) checks a single PID, not the group.)
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
-    // Phase 3: unmount (force — the VFS server process is already dead)
-    let _ = std::process::Command::new("diskutil")
+    // Phase 3: force-unmount with timeout
+    force_unmount(&args.mount_path);
+}
+
+/// Force-unmount a path with timeout and last-resort pkill.
+#[cfg(target_os = "macos")]
+fn force_unmount(mount_path: &str) {
+    use std::process::Command;
+
+    let mut child = match Command::new("diskutil")
         .arg("unmount")
         .arg("force")
-        .arg(&args.mount_path)
-        .output();
+        .arg(mount_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("vx-reaper: failed to spawn diskutil: {e}");
+            return;
+        }
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => return,
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("vx-reaper: failed to wait for diskutil: {e}");
+                return;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // Timed out — kill diskutil and try killing the FSKit extension as last resort
+    eprintln!("vx-reaper: diskutil unmount force timed out, killing diskutil");
+    let _ = child.kill();
+    let _ = child.wait();
+
+    eprintln!("vx-reaper: killing VixenFS extension as last resort");
+    let _ = Command::new("pkill")
+        .arg("-x")
+        .arg("VixenFS")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 #[cfg(target_os = "macos")]

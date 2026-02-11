@@ -86,6 +86,7 @@ where
     }
 
     helper_command
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(false)
