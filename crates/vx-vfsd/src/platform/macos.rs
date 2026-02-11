@@ -53,7 +53,7 @@ fn mount_path_candidates(mount_path: &Utf8PathBuf) -> Vec<String> {
 /// open files under the mount prefix. Each matching process is killed with SIGKILL
 /// (these are typically stuck linker/debug tool processes like `dsymutil` or `ld`
 /// that prevent unmounting).
-async fn kill_processes_under_mount(candidates: &[String]) {
+async fn kill_processes_under_mount(candidates: &[String]) -> crate::Result<()> {
     use std::collections::HashMap;
     use tokio::process::Command;
 
@@ -65,7 +65,7 @@ async fn kill_processes_under_mount(candidates: &[String]) {
         Ok(output) => output,
         Err(e) => {
             tracing::debug!(error = %e, "lsof not available, skipping stuck process cleanup");
-            return;
+            return Ok(());
         }
     };
 
@@ -96,7 +96,7 @@ async fn kill_processes_under_mount(candidates: &[String]) {
     }
 
     if to_kill.is_empty() {
-        return;
+        return Ok(());
     }
 
     let mut pids_to_wait = Vec::new();
@@ -116,7 +116,7 @@ async fn kill_processes_under_mount(candidates: &[String]) {
 
     // Wait for killed processes to actually disappear. Once kill(pid, 0)
     // returns ESRCH, the process is gone and its file descriptors are released.
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     while !pids_to_wait.is_empty() && tokio::time::Instant::now() < deadline {
         pids_to_wait.retain(|&pid| {
             // SAFETY: signal 0 just checks if the process exists
@@ -127,9 +127,30 @@ async fn kill_processes_under_mount(candidates: &[String]) {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
+
     if !pids_to_wait.is_empty() {
-        tracing::warn!(pids = ?pids_to_wait, "some killed processes did not exit within 5s");
+        // These processes survived SIGKILL — they're in uninterruptible sleep (D/U state),
+        // stuck on syscalls into the dead FSKit mount. Nothing can kill them short of a
+        // reboot. The mount point is permanently unusable.
+        let unkillable: Vec<String> = pids_to_wait
+            .iter()
+            .filter_map(|&pid| {
+                to_kill
+                    .get(&pid)
+                    .map(|(cmd, path)| format!("  pid {pid} ({cmd}) stuck on {path}"))
+            })
+            .collect();
+        return Err(format!(
+            "mount point is unusable: {} process(es) are stuck in uninterruptible sleep \
+             on the dead FSKit mount and cannot be killed:\n{}\n\
+             A reboot is required to clear this state.",
+            unkillable.len(),
+            unkillable.join("\n"),
+        )
+        .into());
     }
+
+    Ok(())
 }
 
 pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
@@ -139,7 +160,7 @@ pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
 
     // Kill any processes with files open under the mount point.
     // These (typically dsymutil, ld) prevent force-unmount from succeeding.
-    kill_processes_under_mount(&candidates).await;
+    kill_processes_under_mount(&candidates).await?;
 
     // TODO: diskutil unmount force has never actually worked in practice —
     // the stuck processes were always the real blocker. Revisit once we have
