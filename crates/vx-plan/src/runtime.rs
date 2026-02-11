@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub enum PlannerCapability {
     EmitGraph,
     Transform,
+    Env,
     Time,
     Random,
     Network,
@@ -22,6 +23,7 @@ impl PlannerCapability {
         match self {
             Self::EmitGraph => "emit-graph",
             Self::Transform => "transform",
+            Self::Env => "env",
             Self::Time => "time",
             Self::Random => "random",
             Self::Network => "network",
@@ -42,7 +44,11 @@ impl PlannerPolicy {
     }
 
     pub fn deterministic() -> Self {
-        Self::with_allowed([PlannerCapability::EmitGraph, PlannerCapability::Transform])
+        Self::with_allowed([
+            PlannerCapability::EmitGraph,
+            PlannerCapability::Transform,
+            PlannerCapability::Env,
+        ])
     }
 
     pub fn with_allowed(capabilities: impl IntoIterator<Item = PlannerCapability>) -> Self {
@@ -105,7 +111,36 @@ pub struct PlannerProgram {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlannerExpr {
     Value(PlannerValue),
+    VarRef {
+        name: String,
+        provenance: RulePlanProvenance,
+    },
+    VectorLiteral {
+        items: Vec<PlannerExpr>,
+        provenance: RulePlanProvenance,
+    },
+    MapLiteral {
+        entries: BTreeMap<String, PlannerExpr>,
+        provenance: RulePlanProvenance,
+    },
     Call(PlannerCall),
+    Let {
+        name: String,
+        value: Box<PlannerExpr>,
+        provenance: RulePlanProvenance,
+    },
+    If {
+        cond: Box<PlannerExpr>,
+        then_branch: Vec<PlannerExpr>,
+        else_branch: Vec<PlannerExpr>,
+        provenance: RulePlanProvenance,
+    },
+    ForEach {
+        name: String,
+        iter: Box<PlannerExpr>,
+        body: Vec<PlannerExpr>,
+        provenance: RulePlanProvenance,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +157,8 @@ pub enum PlannerBuiltinId {
     EmitFact,
     SortMapKeys,
     SortScalars,
+    EnvProfile,
+    EnvTargetTriple,
     ClockNow,
     RandomInt,
     NetRequest,
@@ -137,6 +174,8 @@ impl PlannerBuiltinId {
             Self::EmitFact => "emit-fact",
             Self::SortMapKeys => "sort-map-keys",
             Self::SortScalars => "sort-scalars",
+            Self::EnvProfile => "env-profile",
+            Self::EnvTargetTriple => "env-target-triple",
             Self::ClockNow => "clock-now",
             Self::RandomInt => "random-int",
             Self::NetRequest => "net-request",
@@ -268,6 +307,7 @@ pub struct PlannerRuntime<H: PlannerHost> {
     policy: PlannerPolicy,
     builtins: BTreeMap<PlannerBuiltinId, PlannerCapability>,
     stack: Vec<PlannerStackFrame>,
+    scopes: Vec<BTreeMap<String, PlannerValue>>,
 }
 
 impl<H: PlannerHost> PlannerRuntime<H> {
@@ -292,6 +332,7 @@ impl<H: PlannerHost> PlannerRuntime<H> {
             policy,
             builtins: builtin_map,
             stack: Vec::new(),
+            scopes: vec![BTreeMap::new()],
         })
     }
 
@@ -313,8 +354,92 @@ impl<H: PlannerHost> PlannerRuntime<H> {
     fn evaluate_expr(&mut self, expr: &PlannerExpr) -> Result<PlannerValue, PlannerRuntimeError> {
         match expr {
             PlannerExpr::Value(value) => Ok(value.clone()),
+            PlannerExpr::VarRef { name, provenance } => self.lookup_var(name).ok_or_else(|| {
+                self.error_for_provenance(
+                    provenance,
+                    format!("unknown variable reference: ${name}"),
+                )
+            }),
+            PlannerExpr::VectorLiteral { items, .. } => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    out.push(self.evaluate_expr(item)?);
+                }
+                Ok(PlannerValue::Vector(out))
+            }
+            PlannerExpr::MapLiteral { entries, .. } => {
+                let mut out = BTreeMap::new();
+                for (k, v) in entries {
+                    out.insert(k.clone(), self.evaluate_expr(v)?);
+                }
+                Ok(PlannerValue::Map(out))
+            }
             PlannerExpr::Call(call) => self.evaluate_call(call),
+            PlannerExpr::Let {
+                name,
+                value,
+                provenance: _,
+            } => {
+                let v = self.evaluate_expr(value)?;
+                self.set_var(name.clone(), v.clone());
+                Ok(v)
+            }
+            PlannerExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                provenance,
+            } => {
+                let cond_v = self.evaluate_expr(cond)?;
+                let PlannerValue::Bool(b) = cond_v else {
+                    return Err(self.error_for_provenance(
+                        provenance,
+                        "if condition must evaluate to bool".to_string(),
+                    ));
+                };
+                if b {
+                    self.evaluate_block(then_branch)
+                } else {
+                    self.evaluate_block(else_branch)
+                }
+            }
+            PlannerExpr::ForEach {
+                name,
+                iter,
+                body,
+                provenance,
+            } => {
+                let iter_v = self.evaluate_expr(iter)?;
+                let PlannerValue::Vector(items) = iter_v else {
+                    return Err(self.error_for_provenance(
+                        provenance,
+                        "for loop iterable must evaluate to vector".to_string(),
+                    ));
+                };
+
+                let mut results = Vec::with_capacity(items.len());
+                for item in items {
+                    self.push_scope();
+                    self.set_var(name.clone(), item);
+                    let v = self.evaluate_block(body)?;
+                    results.push(v);
+                    self.pop_scope();
+                }
+
+                Ok(PlannerValue::Vector(results))
+            }
         }
+    }
+
+    fn evaluate_block(
+        &mut self,
+        exprs: &[PlannerExpr],
+    ) -> Result<PlannerValue, PlannerRuntimeError> {
+        let mut last = PlannerValue::Null;
+        for expr in exprs {
+            last = self.evaluate_expr(expr)?;
+        }
+        Ok(last)
     }
 
     fn evaluate_call(&mut self, call: &PlannerCall) -> Result<PlannerValue, PlannerRuntimeError> {
@@ -374,6 +499,49 @@ impl<H: PlannerHost> PlannerRuntime<H> {
             },
         }
     }
+
+    fn error_for_provenance(
+        &self,
+        provenance: &RulePlanProvenance,
+        message: String,
+    ) -> PlannerRuntimeError {
+        PlannerRuntimeError {
+            diagnostic: PlannerDiagnostic {
+                message,
+                rule_id: provenance.rule_id.clone(),
+                source_id: provenance.source_id.clone(),
+                line: provenance.span.line,
+                column: provenance.span.column,
+                stack: self.stack.clone(),
+            },
+        }
+    }
+
+    fn push_scope(&mut self) {
+        self.scopes.push(BTreeMap::new());
+    }
+
+    fn pop_scope(&mut self) {
+        // The outermost scope must always exist.
+        if self.scopes.len() > 1 {
+            self.scopes.pop();
+        }
+    }
+
+    fn set_var(&mut self, name: String, value: PlannerValue) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name, value);
+        }
+    }
+
+    fn lookup_var(&self, name: &str) -> Option<PlannerValue> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(v) = scope.get(name) {
+                return Some(v.clone());
+            }
+        }
+        None
+    }
 }
 
 pub const BUILTIN_EMIT_NODE: PlannerBuiltin = PlannerBuiltin {
@@ -401,6 +569,16 @@ pub const BUILTIN_SORT_SCALARS: PlannerBuiltin = PlannerBuiltin {
     capability: PlannerCapability::Transform,
 };
 
+pub const BUILTIN_ENV_PROFILE: PlannerBuiltin = PlannerBuiltin {
+    id: PlannerBuiltinId::EnvProfile,
+    capability: PlannerCapability::Env,
+};
+
+pub const BUILTIN_ENV_TARGET_TRIPLE: PlannerBuiltin = PlannerBuiltin {
+    id: PlannerBuiltinId::EnvTargetTriple,
+    capability: PlannerCapability::Env,
+};
+
 pub const BUILTIN_CLOCK_NOW: PlannerBuiltin = PlannerBuiltin {
     id: PlannerBuiltinId::ClockNow,
     capability: PlannerCapability::Time,
@@ -426,13 +604,15 @@ pub const BUILTIN_PROCESS_SPAWN: PlannerBuiltin = PlannerBuiltin {
     capability: PlannerCapability::Process,
 };
 
-pub fn planner_builtins() -> [PlannerBuiltin; 10] {
+pub fn planner_builtins() -> [PlannerBuiltin; 12] {
     [
         BUILTIN_EMIT_NODE,
         BUILTIN_EMIT_EDGE,
         BUILTIN_EMIT_FACT,
         BUILTIN_SORT_MAP_KEYS,
         BUILTIN_SORT_SCALARS,
+        BUILTIN_ENV_PROFILE,
+        BUILTIN_ENV_TARGET_TRIPLE,
         BUILTIN_CLOCK_NOW,
         BUILTIN_RANDOM_INT,
         BUILTIN_NET_REQUEST,
@@ -445,6 +625,8 @@ pub fn planner_builtins() -> [PlannerBuiltin; 10] {
 pub struct RulePlanHost {
     registered: BTreeSet<PlannerBuiltinId>,
     pub plan: RulePlan,
+    env_profile: Option<String>,
+    env_target_triple: Option<String>,
 }
 
 impl RulePlanHost {
@@ -457,7 +639,17 @@ impl RulePlanHost {
                 edges: Vec::new(),
                 facts: Vec::new(),
             },
+            env_profile: None,
+            env_target_triple: None,
         }
+    }
+
+    pub fn set_env_profile(&mut self, profile: impl Into<String>) {
+        self.env_profile = Some(profile.into());
+    }
+
+    pub fn set_env_target_triple(&mut self, target_triple: impl Into<String>) {
+        self.env_target_triple = Some(target_triple.into());
     }
 
     pub fn into_plan(self) -> RulePlan {
@@ -532,6 +724,16 @@ impl PlannerHost for RulePlanHost {
                         .collect(),
                 ))
             }
+            (PlannerBuiltinId::EnvProfile, PlannerBuiltinArgs::None) => self
+                .env_profile
+                .clone()
+                .map(PlannerValue::String)
+                .ok_or_else(|| "env.profile is not set".to_string()),
+            (PlannerBuiltinId::EnvTargetTriple, PlannerBuiltinArgs::None) => self
+                .env_target_triple
+                .clone()
+                .map(PlannerValue::String)
+                .ok_or_else(|| "env.target_triple is not set".to_string()),
             (PlannerBuiltinId::ClockNow, PlannerBuiltinArgs::None) => {
                 Ok(PlannerValue::Int(1_734_810_000))
             }
@@ -609,6 +811,17 @@ fn parse_builtin_args(
                 values.push(scalar);
             }
             Ok(PlannerBuiltinArgs::SortScalars(SortScalarsArgs { values }))
+        }
+        PlannerBuiltinId::EnvProfile | PlannerBuiltinId::EnvTargetTriple => {
+            if args.is_empty() {
+                Ok(PlannerBuiltinArgs::None)
+            } else {
+                Err(format!(
+                    "builtin '{}' expected no arguments but got {}",
+                    builtin.as_str(),
+                    args.len()
+                ))
+            }
         }
         PlannerBuiltinId::ClockNow
         | PlannerBuiltinId::RandomInt

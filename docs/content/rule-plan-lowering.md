@@ -53,12 +53,23 @@ Current `.vx` syntax is `vx-lang v0`: Rust-ish call syntax with named arguments 
 Example:
 
 ```text
+let roots = ["app"];
+
+// Builtins can be dotted (env.profile()) or underscored (env_profile()).
+let profile = env.profile();
+emit_node(id: n_profile, kind: fact, label: "profile");
+emit_fact(id: f_profile, node-id: n_profile, value: $profile);
+
+for root in $roots {
+  if true {
+    emit_node(id: n_action, kind: action, label: "compile-bin:app");
+  } else { }
+}
+
 emit_node(id: n_action, kind: action, label: "compile-bin:app");
 emit_node(id: n_artifact, kind: artifact, label: "artifact:app");
 emit_edge(from: n_action, to: n_artifact, kind: ifwritten);
 ```
-
-Legacy compatibility: the previous `key=value` per-line format is still accepted for now.
 
 Note: in this migration mode, execution is still performed by the legacy action graph; the `.vx`
 rules file currently affects the report topology and parity harness, not the actual compilation steps.

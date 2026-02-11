@@ -1217,7 +1217,9 @@ impl VxdService {
                     VxdError::InvalidManifest(format!("failed to parse {}: {}", source_rel, e))
                 })?;
 
-                let host = vx_plan::runtime::RulePlanHost::with_sources(vec![source]);
+                let mut host = vx_plan::runtime::RulePlanHost::with_sources(vec![source]);
+                host.set_env_profile(profile.to_string());
+                host.set_env_target_triple(target_triple.to_string());
                 let mut runtime = vx_plan::runtime::PlannerRuntime::new(
                     host,
                     vx_plan::runtime::PlannerPolicy::deterministic(),

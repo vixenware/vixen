@@ -1,7 +1,7 @@
 use crate::runtime::{PlannerBuiltinId, PlannerCall, PlannerExpr, PlannerProgram, PlannerValue};
 use crate::{RuleId, RulePlanProvenance, RulePlanSourceId, RulePlanSpan};
 use camino::Utf8Path;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VxParseError {
@@ -25,10 +25,6 @@ pub fn parse_vx_program(
 ) -> Result<PlannerProgram, VxParseError> {
     let _ = source_path;
 
-    if looks_like_legacy_vx(input) {
-        return parse_vx_program_legacy(source_id, input);
-    }
-
     let mut lexer = Lexer::new(input);
     let mut tokens = Vec::new();
     loop {
@@ -41,25 +37,6 @@ pub fn parse_vx_program(
     }
 
     Parser::new(tokens, source_id).parse_program()
-}
-
-fn looks_like_legacy_vx(input: &str) -> bool {
-    for raw_line in input.lines() {
-        let trimmed = strip_legacy_comment(raw_line).trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // Legacy format: `emit-node id=... kind=...`
-        // New format starts with `ident(`.
-        if trimmed.contains('(') {
-            return false;
-        }
-        if trimmed.contains('=') {
-            return true;
-        }
-        return false;
-    }
-    false
 }
 
 // =============================================================================
@@ -84,6 +61,8 @@ enum TokenKind {
     RBrace,
     LBracket,
     RBracket,
+    Dot,
+    Dollar,
     Colon,
     Comma,
     Semi,
@@ -149,6 +128,14 @@ impl<'a> Lexer<'a> {
             ']' => {
                 self.bump();
                 TokenKind::RBracket
+            }
+            '.' => {
+                self.bump();
+                TokenKind::Dot
+            }
+            '$' => {
+                self.bump();
+                TokenKind::Dollar
             }
             ':' => {
                 self.bump();
@@ -384,11 +371,71 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> Result<PlannerExpr, VxParseError> {
-        self.parse_call()
+        if self.peek_ident_is("let") {
+            return self.parse_let();
+        }
+        if self.peek_ident_is("if") {
+            return self.parse_if();
+        }
+        if self.peek_ident_is("for") {
+            return self.parse_for();
+        }
+        self.parse_expr()
+    }
+
+    fn parse_expr(&mut self) -> Result<PlannerExpr, VxParseError> {
+        if self.peek_ident_is("if") {
+            return self.parse_if();
+        }
+        if self.peek_ident_is("for") {
+            return self.parse_for();
+        }
+        self.parse_primary()
+    }
+
+    fn parse_primary(&mut self) -> Result<PlannerExpr, VxParseError> {
+        match self.peek_kind() {
+            TokenKind::String(_) => {
+                let s = match self.bump().kind {
+                    TokenKind::String(s) => s,
+                    _ => unreachable!(),
+                };
+                Ok(PlannerExpr::Value(PlannerValue::String(s)))
+            }
+            TokenKind::Int(_) => {
+                let v = match self.bump().kind {
+                    TokenKind::Int(v) => v,
+                    _ => unreachable!(),
+                };
+                Ok(PlannerExpr::Value(PlannerValue::Int(v)))
+            }
+            TokenKind::Colon => {
+                self.bump();
+                let (ident, _line, _col) = self.expect_ident("expected identifier after ':'")?;
+                Ok(PlannerExpr::Value(PlannerValue::Keyword(ident)))
+            }
+            TokenKind::Dollar => self.parse_var_ref(),
+            TokenKind::Ident(_) => {
+                if self.peek_call_like() {
+                    self.parse_call()
+                } else {
+                    let (ident, _line, _column) = self.expect_ident("expected identifier")?;
+                    match ident.as_str() {
+                        "true" => Ok(PlannerExpr::Value(PlannerValue::Bool(true))),
+                        "false" => Ok(PlannerExpr::Value(PlannerValue::Bool(false))),
+                        "null" => Ok(PlannerExpr::Value(PlannerValue::Null)),
+                        _ => Ok(PlannerExpr::Value(PlannerValue::Keyword(ident))),
+                    }
+                }
+            }
+            TokenKind::LBracket => self.parse_vector_literal(),
+            TokenKind::LBrace => self.parse_map_literal(),
+            _ => Err(self.error_here("expected expression".to_string())),
+        }
     }
 
     fn parse_call(&mut self) -> Result<PlannerExpr, VxParseError> {
-        let (name, line, column) = self.expect_ident("expected builtin name")?;
+        let (name, line, column) = self.expect_qualified_ident("expected builtin name")?;
         let builtin = builtin_from_name(&name).ok_or_else(|| VxParseError {
             message: format!("unknown builtin '{name}'"),
             line,
@@ -397,28 +444,33 @@ impl Parser {
 
         self.expect(TokenKind::LParen, "expected '(' after builtin name")?;
 
-        let map_value = if self.eat(TokenKind::RParen) {
-            PlannerValue::Map(BTreeMap::new())
+        let args = if self.eat(TokenKind::RParen) {
+            Vec::new()
         } else if self.peek_is(TokenKind::LBrace) {
-            let expr = self.parse_expr()?;
+            let expr = self.parse_map_literal()?;
             self.expect(TokenKind::RParen, "expected ')' after argument")?;
-            match expr {
-                PlannerExpr::Value(PlannerValue::Map(map)) => PlannerValue::Map(map),
-                _ => {
-                    return Err(
-                        self.error_here("expected map literal as sole argument".to_string())
-                    );
-                }
-            }
-        } else {
-            let map = self.parse_named_args()?;
+            vec![expr]
+        } else if self.peek_named_arg_list_start() {
+            let (arg_line, arg_col) = self.peek_line_col();
+            let entries = self.parse_named_arg_entries()?;
             self.expect(TokenKind::RParen, "expected ')' after argument list")?;
-            PlannerValue::Map(map)
+            vec![PlannerExpr::MapLiteral {
+                entries,
+                provenance: self.provenance_script(arg_line, arg_col),
+            }]
+        } else {
+            let expr = self.parse_expr()?;
+            if self.eat(TokenKind::Comma) {
+                return Err(self
+                    .error_here("only one positional argument is supported for now".to_string()));
+            }
+            self.expect(TokenKind::RParen, "expected ')' after argument")?;
+            vec![expr]
         };
 
         Ok(PlannerExpr::Call(PlannerCall {
             builtin,
-            args: vec![PlannerExpr::Value(map_value)],
+            args,
             provenance: RulePlanProvenance {
                 rule_id: RuleId::from(format!("rule.vx.{}", builtin.as_str())),
                 source_id: self.source_id.clone(),
@@ -434,23 +486,25 @@ impl Parser {
         }))
     }
 
-    fn parse_named_args(&mut self) -> Result<BTreeMap<String, PlannerValue>, VxParseError> {
+    fn parse_named_arg_entries(&mut self) -> Result<BTreeMap<String, PlannerExpr>, VxParseError> {
         let mut map = BTreeMap::new();
-        let mut seen = BTreeSet::new();
-
         loop {
-            let (key, _line, _col) = self.expect_ident("expected argument name")?;
-            if !seen.insert(key.clone()) {
-                return Err(self.error_here(format!("duplicate argument '{key}'")));
+            let key = match self.peek_kind() {
+                TokenKind::Ident(_) => {
+                    let (k, _line, _col) = self.expect_ident("expected argument name")?;
+                    k
+                }
+                TokenKind::String(_) => match self.bump().kind {
+                    TokenKind::String(s) => s,
+                    _ => unreachable!(),
+                },
+                _ => return Err(self.error_here("expected argument name".to_string())),
+            };
+            if self.eat(TokenKind::Eq) {
+                return Err(self.error_here("use ':' not '=' after argument name".to_string()));
             }
-
-            if self.eat(TokenKind::Colon) || self.eat(TokenKind::Eq) {
-                // ok
-            } else {
-                return Err(self.error_here("expected ':' or '=' after argument name".to_string()));
-            }
-
-            let value = self.parse_value_expr()?;
+            self.expect(TokenKind::Colon, "expected ':' after argument name")?;
+            let value = self.parse_expr()?;
             map.insert(key, value);
 
             if self.eat(TokenKind::Comma) {
@@ -461,58 +515,31 @@ impl Parser {
             }
             break;
         }
-
         Ok(map)
     }
 
-    fn parse_expr(&mut self) -> Result<PlannerExpr, VxParseError> {
-        Ok(PlannerExpr::Value(self.parse_value_expr()?))
+    fn parse_var_ref(&mut self) -> Result<PlannerExpr, VxParseError> {
+        let tok = self.bump();
+        debug_assert!(matches!(tok.kind, TokenKind::Dollar));
+        let (name, line, column) = self.expect_ident("expected identifier after '$'")?;
+        Ok(PlannerExpr::VarRef {
+            name,
+            provenance: self.provenance_script(line, column),
+        })
     }
 
-    fn parse_value_expr(&mut self) -> Result<PlannerValue, VxParseError> {
-        match self.peek_kind() {
-            TokenKind::String(_) => {
-                let s = match self.bump().kind {
-                    TokenKind::String(s) => s,
-                    _ => unreachable!(),
-                };
-                Ok(PlannerValue::String(s))
-            }
-            TokenKind::Int(_) => {
-                let v = match self.bump().kind {
-                    TokenKind::Int(v) => v,
-                    _ => unreachable!(),
-                };
-                Ok(PlannerValue::Int(v))
-            }
-            TokenKind::Colon => {
-                self.bump();
-                let (ident, _line, _col) = self.expect_ident("expected identifier after ':'")?;
-                Ok(PlannerValue::Keyword(ident))
-            }
-            TokenKind::Ident(_) => {
-                let (ident, _line, _column) = self.expect_ident("expected identifier")?;
-                match ident.as_str() {
-                    "true" => Ok(PlannerValue::Bool(true)),
-                    "false" => Ok(PlannerValue::Bool(false)),
-                    "null" => Ok(PlannerValue::Null),
-                    _ => Ok(PlannerValue::Keyword(ident)),
-                }
-            }
-            TokenKind::LBracket => self.parse_vector(),
-            TokenKind::LBrace => self.parse_map(),
-            _ => Err(self.error_here("expected value".to_string())),
-        }
-    }
-
-    fn parse_vector(&mut self) -> Result<PlannerValue, VxParseError> {
+    fn parse_vector_literal(&mut self) -> Result<PlannerExpr, VxParseError> {
+        let (line, column) = self.peek_line_col();
         self.expect(TokenKind::LBracket, "expected '['")?;
-        let mut values = Vec::new();
+        let mut items = Vec::new();
         if self.eat(TokenKind::RBracket) {
-            return Ok(PlannerValue::Vector(values));
+            return Ok(PlannerExpr::VectorLiteral {
+                items,
+                provenance: self.provenance_script(line, column),
+            });
         }
         loop {
-            values.push(self.parse_value_expr()?);
+            items.push(self.parse_expr()?);
             if self.eat(TokenKind::Comma) {
                 if self.peek_is(TokenKind::RBracket) {
                     break;
@@ -522,14 +549,21 @@ impl Parser {
             break;
         }
         self.expect(TokenKind::RBracket, "expected ']'")?;
-        Ok(PlannerValue::Vector(values))
+        Ok(PlannerExpr::VectorLiteral {
+            items,
+            provenance: self.provenance_script(line, column),
+        })
     }
 
-    fn parse_map(&mut self) -> Result<PlannerValue, VxParseError> {
+    fn parse_map_literal(&mut self) -> Result<PlannerExpr, VxParseError> {
+        let (line, column) = self.peek_line_col();
         self.expect(TokenKind::LBrace, "expected '{'")?;
-        let mut map = BTreeMap::new();
+        let mut entries = BTreeMap::new();
         if self.eat(TokenKind::RBrace) {
-            return Ok(PlannerValue::Map(map));
+            return Ok(PlannerExpr::MapLiteral {
+                entries,
+                provenance: self.provenance_script(line, column),
+            });
         }
         loop {
             let key = match self.peek_kind() {
@@ -545,8 +579,8 @@ impl Parser {
             };
 
             self.expect(TokenKind::Colon, "expected ':' after map key")?;
-            let value = self.parse_value_expr()?;
-            map.insert(key, value);
+            let value = self.parse_expr()?;
+            entries.insert(key, value);
 
             if self.eat(TokenKind::Comma) {
                 if self.peek_is(TokenKind::RBrace) {
@@ -557,7 +591,72 @@ impl Parser {
             break;
         }
         self.expect(TokenKind::RBrace, "expected '}'")?;
-        Ok(PlannerValue::Map(map))
+        Ok(PlannerExpr::MapLiteral {
+            entries,
+            provenance: self.provenance_script(line, column),
+        })
+    }
+
+    fn parse_let(&mut self) -> Result<PlannerExpr, VxParseError> {
+        let (_kw, line, column) = self.expect_ident("expected 'let'")?;
+        let (name, _l2, _c2) = self.expect_ident("expected identifier after 'let'")?;
+        self.expect(TokenKind::Eq, "expected '=' in let statement")?;
+        let value = self.parse_expr()?;
+        Ok(PlannerExpr::Let {
+            name,
+            value: Box::new(value),
+            provenance: self.provenance_script(line, column),
+        })
+    }
+
+    fn parse_if(&mut self) -> Result<PlannerExpr, VxParseError> {
+        let (_kw, line, column) = self.expect_ident("expected 'if'")?;
+        let cond = self.parse_expr()?;
+        let then_branch = self.parse_block()?;
+        let else_branch = if self.peek_ident_is("else") {
+            let _ = self.expect_ident("expected 'else'")?;
+            self.parse_block()?
+        } else {
+            Vec::new()
+        };
+
+        Ok(PlannerExpr::If {
+            cond: Box::new(cond),
+            then_branch,
+            else_branch,
+            provenance: self.provenance_script(line, column),
+        })
+    }
+
+    fn parse_for(&mut self) -> Result<PlannerExpr, VxParseError> {
+        let (_kw, line, column) = self.expect_ident("expected 'for'")?;
+        let (name, _l2, _c2) = self.expect_ident("expected loop variable name")?;
+        if !self.peek_ident_is("in") {
+            return Err(self.error_here("expected 'in' in for loop".to_string()));
+        }
+        let _ = self.expect_ident("expected 'in'")?;
+        let iter = self.parse_expr()?;
+        let body = self.parse_block()?;
+        Ok(PlannerExpr::ForEach {
+            name,
+            iter: Box::new(iter),
+            body,
+            provenance: self.provenance_script(line, column),
+        })
+    }
+
+    fn parse_block(&mut self) -> Result<Vec<PlannerExpr>, VxParseError> {
+        self.expect(TokenKind::LBrace, "expected '{' to start block")?;
+        let mut exprs = Vec::new();
+        while !self.peek_is(TokenKind::RBrace) && !self.at_eof() {
+            if self.eat(TokenKind::Semi) {
+                continue;
+            }
+            exprs.push(self.parse_stmt()?);
+            self.eat(TokenKind::Semi);
+        }
+        self.expect(TokenKind::RBrace, "expected '}' to end block")?;
+        Ok(exprs)
     }
 
     fn at_eof(&self) -> bool {
@@ -618,6 +717,72 @@ impl Parser {
         }
     }
 
+    fn expect_qualified_ident(
+        &mut self,
+        message: &str,
+    ) -> Result<(String, u32, u32), VxParseError> {
+        let (first, line, column) = self.expect_ident(message)?;
+        let mut s = first;
+        while self.eat(TokenKind::Dot) {
+            let (part, _l2, _c2) = self.expect_ident("expected identifier after '.'")?;
+            s.push('.');
+            s.push_str(&part);
+        }
+        Ok((s, line, column))
+    }
+
+    fn peek_line_col(&self) -> (u32, u32) {
+        let tok = &self.tokens[self.pos];
+        (tok.line, tok.column)
+    }
+
+    fn peek_ident_is(&self, expected: &str) -> bool {
+        match self.peek_kind() {
+            TokenKind::Ident(s) => s == expected,
+            _ => false,
+        }
+    }
+
+    fn peek_named_arg_list_start(&self) -> bool {
+        let Some(tok0) = self.tokens.get(self.pos) else {
+            return false;
+        };
+        let Some(tok1) = self.tokens.get(self.pos + 1) else {
+            return false;
+        };
+        matches!(tok0.kind, TokenKind::Ident(_) | TokenKind::String(_))
+            && matches!(tok1.kind, TokenKind::Colon)
+    }
+
+    fn peek_call_like(&self) -> bool {
+        // `foo(` or `foo.bar(`.
+        let Some(tok0) = self.tokens.get(self.pos) else {
+            return false;
+        };
+        if !matches!(tok0.kind, TokenKind::Ident(_)) {
+            return false;
+        }
+        matches!(
+            self.tokens.get(self.pos + 1).map(|t| &t.kind),
+            Some(TokenKind::LParen) | Some(TokenKind::Dot)
+        )
+    }
+
+    fn provenance_script(&self, line: u32, column: u32) -> RulePlanProvenance {
+        RulePlanProvenance {
+            rule_id: RuleId::from("rule.vx.script".to_string()),
+            source_id: self.source_id.clone(),
+            span: RulePlanSpan {
+                line,
+                column,
+                end_line: line,
+                end_column: column + 1,
+            },
+            comment: None,
+            metadata: BTreeMap::new(),
+        }
+    }
+
     fn error_here(&self, message: String) -> VxParseError {
         let tok = &self.tokens[self.pos];
         VxParseError {
@@ -629,7 +794,7 @@ impl Parser {
 }
 
 fn builtin_from_name(raw: &str) -> Option<PlannerBuiltinId> {
-    let normalized = raw.to_ascii_lowercase().replace('_', "-");
+    let normalized = raw.to_ascii_lowercase().replace(['_', '.'], "-");
     builtin_from_str(normalized.as_str())
 }
 
@@ -640,6 +805,8 @@ fn builtin_from_str(raw: &str) -> Option<PlannerBuiltinId> {
         "emit-fact" => Some(PlannerBuiltinId::EmitFact),
         "sort-map-keys" => Some(PlannerBuiltinId::SortMapKeys),
         "sort-scalars" => Some(PlannerBuiltinId::SortScalars),
+        "env-profile" => Some(PlannerBuiltinId::EnvProfile),
+        "env-target-triple" => Some(PlannerBuiltinId::EnvTargetTriple),
         "clock-now" => Some(PlannerBuiltinId::ClockNow),
         "random-int" => Some(PlannerBuiltinId::RandomInt),
         "net-request" => Some(PlannerBuiltinId::NetRequest),
@@ -647,184 +814,6 @@ fn builtin_from_str(raw: &str) -> Option<PlannerBuiltinId> {
         "process-spawn" => Some(PlannerBuiltinId::ProcessSpawn),
         _ => None,
     }
-}
-
-// =============================================================================
-// Legacy key=value parser (compat)
-// =============================================================================
-
-fn parse_vx_program_legacy(
-    source_id: RulePlanSourceId,
-    input: &str,
-) -> Result<PlannerProgram, VxParseError> {
-    let mut forms = Vec::new();
-
-    for (line_idx, raw_line) in input.lines().enumerate() {
-        let line = (line_idx + 1) as u32;
-        let trimmed = strip_legacy_comment(raw_line).trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let tokens = legacy_split_tokens(trimmed).map_err(|e| VxParseError {
-            message: e,
-            line,
-            column: 1,
-        })?;
-        let Some((builtin_raw, _col)) = tokens.first() else {
-            continue;
-        };
-
-        let builtin =
-            builtin_from_str(&builtin_raw.to_ascii_lowercase()).ok_or_else(|| VxParseError {
-                message: format!("unknown builtin '{builtin_raw}'"),
-                line,
-                column: 1,
-            })?;
-
-        let mut map = BTreeMap::new();
-        let mut seen = BTreeSet::new();
-        for (token, col) in tokens.iter().skip(1) {
-            let (key, value_raw) = token.split_once('=').ok_or_else(|| VxParseError {
-                message: format!("expected key=value token, got '{token}'"),
-                line,
-                column: *col,
-            })?;
-            if key.is_empty() {
-                return Err(VxParseError {
-                    message: "expected key=value token with non-empty key".to_string(),
-                    line,
-                    column: *col,
-                });
-            }
-            if !seen.insert(key.to_string()) {
-                return Err(VxParseError {
-                    message: format!("duplicate key '{key}'"),
-                    line,
-                    column: *col,
-                });
-            }
-
-            let value = legacy_parse_value(value_raw).map_err(|msg| VxParseError {
-                message: msg,
-                line,
-                column: *col,
-            })?;
-            map.insert(key.to_string(), value);
-        }
-
-        let provenance = RulePlanProvenance {
-            rule_id: RuleId::from(format!("rule.vx.{}", builtin.as_str())),
-            source_id: source_id.clone(),
-            span: RulePlanSpan {
-                line,
-                column: 1,
-                end_line: line,
-                end_column: raw_line.len().max(1) as u32,
-            },
-            comment: None,
-            metadata: BTreeMap::new(),
-        };
-
-        forms.push(PlannerExpr::Call(PlannerCall {
-            builtin,
-            args: vec![PlannerExpr::Value(PlannerValue::Map(map))],
-            provenance,
-        }));
-    }
-
-    Ok(PlannerProgram { forms })
-}
-
-fn strip_legacy_comment(line: &str) -> &str {
-    for (idx, ch) in line.char_indices() {
-        if ch == ';' || ch == '#' {
-            return &line[..idx];
-        }
-    }
-    line
-}
-
-fn legacy_split_tokens(input: &str) -> Result<Vec<(String, u32)>, String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut in_string = false;
-    let mut escape = false;
-    let mut token_col = 1u32;
-
-    for (idx, ch) in input.chars().enumerate() {
-        let col = (idx + 1) as u32;
-        if in_string {
-            if escape {
-                current.push(match ch {
-                    'n' => '\n',
-                    't' => '\t',
-                    'r' => '\r',
-                    '"' => '"',
-                    '\\' => '\\',
-                    other => other,
-                });
-                escape = false;
-                continue;
-            }
-            match ch {
-                '\\' => escape = true,
-                '"' => in_string = false,
-                other => current.push(other),
-            }
-            continue;
-        }
-
-        if ch.is_whitespace() {
-            if !current.is_empty() {
-                tokens.push((current.clone(), token_col));
-                current.clear();
-            }
-            continue;
-        }
-
-        if current.is_empty() {
-            token_col = col;
-        }
-
-        if ch == '"' {
-            in_string = true;
-            continue;
-        }
-
-        current.push(ch);
-    }
-
-    if escape {
-        return Err("unterminated escape sequence".to_string());
-    }
-    if in_string {
-        return Err("unterminated string literal".to_string());
-    }
-    if !current.is_empty() {
-        tokens.push((current, token_col));
-    }
-
-    Ok(tokens)
-}
-
-fn legacy_parse_value(raw: &str) -> Result<PlannerValue, String> {
-    if raw.is_empty() {
-        return Err("expected non-empty value".to_string());
-    }
-    if let Some(keyword) = raw.strip_prefix(':') {
-        return Ok(PlannerValue::Keyword(keyword.to_string()));
-    }
-    match raw {
-        "null" => return Ok(PlannerValue::Null),
-        "true" => return Ok(PlannerValue::Bool(true)),
-        "false" => return Ok(PlannerValue::Bool(false)),
-        _ => {}
-    }
-    if let Ok(value) = raw.parse::<i64>() {
-        return Ok(PlannerValue::Int(value));
-    }
-    Ok(PlannerValue::String(raw.to_string()))
 }
 
 #[cfg(test)]
@@ -858,17 +847,6 @@ emit_edge(from: n1, to: n2, kind: ifwritten)
     }
 
     #[test]
-    fn parses_legacy_key_value_format() {
-        let program = parse_vx_program(
-            Utf8Path::new(".vx/rules.vx"),
-            RulePlanSourceId::from("rules".to_string()),
-            "emit-node id=n1 kind=action label=\"compile\"",
-        )
-        .expect("parse should succeed");
-        assert_eq!(program.forms.len(), 1);
-    }
-
-    #[test]
     fn rejects_unknown_builtin() {
         let err = parse_vx_program(
             Utf8Path::new(".vx/rules.vx"),
@@ -877,5 +855,32 @@ emit_edge(from: n1, to: n2, kind: ifwritten)
         )
         .unwrap_err();
         assert!(err.message.contains("unknown builtin"));
+    }
+
+    #[test]
+    fn parses_let_if_for_and_var_refs() {
+        let program = parse_vx_program(
+            Utf8Path::new(".vx/rules.vx"),
+            RulePlanSourceId::from("rules".to_string()),
+            r#"
+let roots = ["app"];
+for c in $roots {
+  if true { emit_node(id: n1, kind: action, label: "compile"); } else { }
+}
+"#,
+        )
+        .expect("parse should succeed");
+        assert_eq!(program.forms.len(), 2);
+    }
+
+    #[test]
+    fn parses_dotted_env_builtins() {
+        let program = parse_vx_program(
+            Utf8Path::new(".vx/rules.vx"),
+            RulePlanSourceId::from("rules".to_string()),
+            r#"env.profile(); env.target_triple();"#,
+        )
+        .expect("parse should succeed");
+        assert_eq!(program.forms.len(), 2);
     }
 }
