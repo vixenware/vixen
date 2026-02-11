@@ -1779,14 +1779,6 @@ fn wants_compile_lowering(node: &RulePlanNode) -> bool {
     if node.kind != RulePlanNodeKind::Action {
         return false;
     }
-    if node
-        .provenance
-        .metadata
-        .get("legacy_node_id")
-        .is_some_and(|value| value.starts_with("compile-"))
-    {
-        return true;
-    }
     node.label.starts_with("compile-")
         || node.provenance.metadata.contains_key("crate_name")
         || node.provenance.metadata.contains_key("crate_type")

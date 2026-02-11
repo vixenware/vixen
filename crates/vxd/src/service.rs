@@ -13,11 +13,11 @@ use crate::executor::Executor;
 use crate::inputs::*;
 use camino::Utf8PathBuf;
 use facet::trace;
+use peeps::locks::{DiagnosticAsyncMutex, DiagnosticAsyncRwLock};
 use picante::HasRuntime;
 use picante::wal::WalWriter;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use peeps::locks::{DiagnosticAsyncMutex, DiagnosticAsyncRwLock};
 use tracing::{debug, info, warn};
 use vx_report::{
     BuildReport, GraphTopology, ReportStore, RuleId, RulePlan, RulePlanEdge, RulePlanEdgeKind,
@@ -851,10 +851,9 @@ impl VxdService {
 
         let manifest_hash = result.manifest_hash.ok_or_else(|| {
             let this = self.clone();
-            peeps::tasks::spawn_tracked(
-                format!("complete_action_{:?}", action_id),
-                async move { this.report_complete_action(action_id).await },
-            );
+            peeps::tasks::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
+                this.report_complete_action(action_id).await
+            });
             VxdError::NoManifestHash
         })?;
 
@@ -1145,6 +1144,7 @@ impl VxdService {
                     .unwrap_or(16);
 
                 let progress_listener = self.progress_listener.read().await.clone();
+                let session_id = self.session_id().await;
 
                 let mut executor = crate::executor::Executor::new(
                     graph,
@@ -1155,6 +1155,7 @@ impl VxdService {
                     project_dir.to_path_buf(),
                     target_triple.clone(),
                     profile.to_string(),
+                    session_id,
                     max_concurrency,
                 );
 
@@ -1603,6 +1604,7 @@ impl VxdService {
 
         // Get current progress listener (clones the Option<Arc<...>> inside the RwLock)
         let progress_listener = self.progress_listener.read().await.clone();
+        let session_id = self.session_id().await;
 
         let mut executor = Executor::new(
             action_graph,
@@ -1613,6 +1615,7 @@ impl VxdService {
             graph.workspace_root.clone(),
             target_triple.clone(),
             profile.to_string(),
+            session_id,
             max_concurrency,
         );
 

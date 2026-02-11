@@ -289,6 +289,19 @@ async fn fetch_output_blob_data(
     }
 }
 
+fn namespaced_run_cache_key(base: Blake3Hash, session_id: &str) -> Blake3Hash {
+    if session_id.is_empty() {
+        return base;
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"vx-run-session-v1\n");
+    hasher.update(b"session:");
+    hasher.update(session_id.as_bytes());
+    hasher.update(b"\nbase:");
+    hasher.update(&base.0);
+    Blake3Hash(*hasher.finalize().as_bytes())
+}
+
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
         if let Some(tx) = self.tx.take() {
@@ -369,6 +382,9 @@ pub struct Executor {
     /// Profile for bin materialization
     profile: String,
 
+    /// Session namespace for cache key isolation (tests/parallel builds).
+    session_id: String,
+
     /// CommandLineTools version on macOS (for C/C++ cache keys)
     macos_commandlinetools_version: Option<String>,
 }
@@ -385,6 +401,7 @@ impl Executor {
         workspace_root: camino::Utf8PathBuf,
         target_triple: String,
         profile: String,
+        session_id: String,
         max_concurrency: usize,
     ) -> Self {
         trace!("starting initialization");
@@ -476,6 +493,7 @@ impl Executor {
             workspace_root,
             target_triple,
             profile,
+            session_id,
             macos_commandlinetools_version,
         }
     }
@@ -1113,6 +1131,7 @@ impl Executor {
         let workspace_root = self.workspace_root.clone();
         let target_triple = self.target_triple.clone();
         let profile = self.profile.clone();
+        let session_id = self.session_id.clone();
         let results = self.results.clone(); // Cloned Arc for execute_action
         let rust_toolchain_spec = self.graph.rust_toolchain_spec.clone();
         let macos_commandlinetools_version = self.macos_commandlinetools_version.clone();
@@ -1188,6 +1207,7 @@ impl Executor {
                     &workspace_root,
                     &target_triple,
                     &profile,
+                    &session_id,
                     rust_toolchain_spec,
                     store_progress_tx,
                     macos_commandlinetools_version,
@@ -1242,6 +1262,7 @@ async fn execute_action(
     workspace_root: &camino::Utf8PathBuf,
     _target_triple: &str,
     _profile: &str,
+    session_id: &str,
     rust_toolchain_spec: Option<RustToolchainSpec>,
     progress: roam::Tx<StoreProgress>,
     macos_commandlinetools_version: Option<String>,
@@ -1894,7 +1915,7 @@ async fn execute_action(
                 macos_commandlinetools_version: macos_commandlinetools_version.clone(),
             };
 
-            let cache_key = vx_cache::run_cache_key(&request);
+            let cache_key = namespaced_run_cache_key(vx_cache::run_cache_key(&request), session_id);
             let (output_manifest, was_cached) = if let Some(cached) = cas
                 .lookup(cache_key)
                 .await
