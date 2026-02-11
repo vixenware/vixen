@@ -1,32 +1,65 @@
-//! Watch for cargo-nextest process death in test mode.
+//! Watch for test harness process death in test mode.
 //!
-//! When vxd runs under `VX_TEST=1`, this module finds the cargo-nextest
-//! ancestor process and watches for it to exit. Once nextest is gone,
+//! When vxd runs under `VX_TEST=1`, this module finds the test harness
+//! ancestor process and watches for it to exit. Once the harness is gone,
 //! there's no point keeping the daemon alive — shut down immediately
 //! instead of waiting for the idle timeout.
+//!
+//! Recognized harnesses: cargo-nextest, vx-fuse-stress, vx-vfs-integrity,
+//! vx-vfs-bench.
 
 #![allow(unsafe_code)]
 
-/// Walk up the process tree looking for a `cargo-nextest` ancestor.
-///
-/// Returns the PID if found, or `None` if we hit PID 0/1 or 32 hops
-/// without finding it.
-pub fn find_nextest_ancestor() -> Option<u32> {
-    let mut pid = std::process::id();
+/// Binaries recognized as test harnesses.
+const TEST_HARNESSES: &[&str] = &[
+    "cargo-nextest",
+    "vx-fuse-stress",
+    "vx-vfs-integrity",
+    "vx-vfs-bench",
+];
 
-    for _ in 0..32 {
+/// Find a test harness ancestor process to watch.
+///
+/// First checks `VX_NEXTEST_PID` env var (set by the setup script), then
+/// falls back to walking the process tree. The env var is needed because
+/// piping nextest output (e.g. `| tee`) changes the process tree so the
+/// ancestor walk doesn't find nextest.
+pub fn find_test_harness_pid() -> Option<(u32, String)> {
+    // Prefer explicit PID from setup script
+    if let Ok(val) = std::env::var("VX_NEXTEST_PID") {
+        if let Ok(pid) = val.parse::<u32>()
+            && pid > 1
+        {
+            tracing::info!(pid, "using VX_NEXTEST_PID from environment");
+            return Some((pid, "cargo-nextest (env)".to_string()));
+        }
+        tracing::warn!(
+            val,
+            "VX_NEXTEST_PID set but invalid, falling back to tree walk"
+        );
+    }
+
+    // Fallback: walk the process tree
+    let mut pid = std::process::id();
+    tracing::debug!(pid, "searching for test harness ancestor");
+
+    for hop in 0..32 {
         let ppid = get_parent_pid(pid)?;
         if ppid == 0 || ppid == 1 {
+            tracing::debug!(pid, ppid, hop, "hit init/kernel, no test harness found");
             return None;
         }
 
-        if is_cargo_nextest(ppid) {
-            return Some(ppid);
+        if let Some(name) = test_harness_name(ppid) {
+            tracing::debug!(pid, ppid, hop, %name, "found test harness");
+            return Some((ppid, name));
         }
 
+        tracing::debug!(pid, ppid, hop, "walked to parent");
         pid = ppid;
     }
 
+    tracing::debug!("exhausted 32 hops without finding test harness");
     None
 }
 
@@ -62,8 +95,9 @@ mod imp {
         Some(info.pbi_ppid)
     }
 
-    /// Check if a process is cargo-nextest by examining its executable path.
-    pub fn is_cargo_nextest(pid: u32) -> bool {
+    /// Check if a process is a recognized test harness by examining its executable path.
+    /// Returns the binary name if it matches.
+    pub fn test_harness_name(pid: u32) -> Option<String> {
         let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
         let ret = unsafe {
             libc::proc_pidpath(
@@ -74,14 +108,17 @@ mod imp {
         };
 
         if ret <= 0 {
-            return false;
+            return None;
         }
 
         let path = &buf[..ret as usize];
         let path = std::str::from_utf8(path).unwrap_or("");
+        let basename = path.rsplit('/').next().unwrap_or("");
 
-        // Check if the basename is "cargo-nextest"
-        path.rsplit('/').next() == Some("cargo-nextest")
+        super::TEST_HARNESSES
+            .iter()
+            .find(|&&name| name == basename)
+            .map(|&name| name.to_string())
     }
 
     /// Wait for a process to exit using kqueue EVFILT_PROC + NOTE_EXIT.
@@ -94,9 +131,12 @@ mod imp {
     }
 
     fn wait_for_exit_blocking(pid: u32) {
+        tracing::debug!(pid, "setting up kqueue for NOTE_EXIT");
+
         let kq = unsafe { libc::kqueue() };
         if kq < 0 {
-            tracing::warn!("kqueue() failed, falling back to polling");
+            let err = std::io::Error::last_os_error();
+            tracing::warn!(pid, %err, "kqueue() failed, falling back to polling");
             poll_until_dead(pid);
             return;
         }
@@ -112,6 +152,8 @@ mod imp {
 
         let mut eventlist = [unsafe { std::mem::zeroed::<libc::kevent>() }];
 
+        tracing::debug!(pid, kq, "calling kevent() to wait for process exit");
+
         // Register the event. If the process is already dead, kevent returns
         // immediately, so we don't need to pre-check.
         let ret = unsafe {
@@ -125,19 +167,28 @@ mod imp {
             )
         };
 
+        let errno = if ret < 0 {
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
+
         unsafe { libc::close(kq) };
 
-        if ret < 0 {
-            let err = std::io::Error::last_os_error();
-            tracing::warn!(%err, "kevent() failed, falling back to polling");
+        if let Some(err) = errno {
+            tracing::warn!(pid, %err, ret, "kevent() failed, falling back to polling");
             poll_until_dead(pid);
+        } else {
+            tracing::debug!(pid, ret, "kevent() returned, process exited");
         }
     }
 
     fn poll_until_dead(pid: u32) {
+        tracing::debug!(pid, "polling kill(pid, 0) until process exits");
         loop {
             let ret = unsafe { libc::kill(pid as libc::c_int, 0) };
             if ret != 0 {
+                tracing::debug!(pid, "process is gone (kill returned non-zero)");
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -162,15 +213,15 @@ mod imp {
         fields.get(1)?.parse().ok()
     }
 
-    /// Check if a process is cargo-nextest by reading /proc/{pid}/exe.
-    pub fn is_cargo_nextest(pid: u32) -> bool {
-        let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
-            return false;
-        };
-        exe.file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n == "cargo-nextest")
-            .unwrap_or(false)
+    /// Check if a process is a recognized test harness by reading /proc/{pid}/exe.
+    /// Returns the binary name if it matches.
+    pub fn test_harness_name(pid: u32) -> Option<String> {
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+        let basename = exe.file_name()?.to_str()?;
+        super::TEST_HARNESSES
+            .iter()
+            .find(|&&name| name == basename)
+            .map(|&name| name.to_string())
     }
 
     /// Wait for a process to exit using pidfd_open + poll.
@@ -208,8 +259,8 @@ mod imp {
         None
     }
 
-    pub fn is_cargo_nextest(_pid: u32) -> bool {
-        false
+    pub fn test_harness_name(_pid: u32) -> Option<String> {
+        None
     }
 
     pub async fn wait_for_exit(_pid: u32) {
@@ -224,6 +275,6 @@ fn get_parent_pid(pid: u32) -> Option<u32> {
     imp::get_parent_pid(pid)
 }
 
-fn is_cargo_nextest(pid: u32) -> bool {
-    imp::is_cargo_nextest(pid)
+fn test_harness_name(pid: u32) -> Option<String> {
+    imp::test_harness_name(pid)
 }

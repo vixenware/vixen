@@ -9,6 +9,7 @@ edition.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
+peeps = { workspace = true }
 camino = { workspace = true }
 eyre = { workspace = true }
 tokio = { workspace = true }

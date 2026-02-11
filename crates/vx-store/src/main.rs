@@ -2,6 +2,7 @@
 //!
 //! Provides CAS, toolchain, and registry services over TCP or Unix sockets using Roam.
 
+pub(crate) mod chunking;
 pub(crate) mod hash_reader;
 pub(crate) mod registry;
 pub(crate) mod service;
@@ -15,63 +16,49 @@ use crate::toolchain::ToolchainManager;
 use crate::types::{StoreService, StoreServiceInner};
 use camino::Utf8PathBuf;
 use eyre::Result;
+use facet::Facet;
+use figue as args;
 use roam_stream::{HandshakeConfig, accept};
 use std::sync::Arc;
 use vx_io::net::{Endpoint, Listener};
 use vx_store_proto::StoreDispatcher;
 
-#[derive(Debug)]
+/// vx-store - Content-Addressed Storage daemon
+#[derive(Facet, Debug)]
 struct Args {
-    /// Storage root directory (typically .vx/store)
+    /// Storage root directory
+    #[facet(args::named)]
     root: Utf8PathBuf,
 
-    /// VX home directory (typically .vx)
+    /// VX home directory
+    #[facet(args::named)]
     vx_home: Utf8PathBuf,
 
-    /// Bind endpoint (host:port or unix:/path/to/socket)
-    bind: Endpoint,
-}
+    /// Listen endpoint (host:port or unix:/path/to/socket)
+    #[facet(args::named)]
+    listen: String,
 
-impl Args {
-    fn from_env() -> Result<Self> {
-        let vx_home = std::env::var("VX_HOME").unwrap_or_else(|_| {
-            let home = std::env::var("HOME").expect("HOME not set");
-            format!("{}/.vx", home)
-        });
-        let vx_home = Utf8PathBuf::from(&vx_home);
-        let root = vx_home.join("store");
-
-        // VX_STORE can be:
-        // - host:port (TCP)
-        // - unix:/path/to/socket
-        // - /path/to/socket (Unix socket shorthand)
-        // - unset: defaults to Unix socket at $VX_HOME/store.sock
-        let bind = match std::env::var("VX_STORE") {
-            Ok(v) => Endpoint::parse(&v)?,
-            Err(_) => {
-                // Default to Unix socket in VX_HOME
-                #[cfg(unix)]
-                {
-                    vx_io::net::default_unix_endpoint(&vx_home, "store")
-                }
-                #[cfg(not(unix))]
-                {
-                    Endpoint::parse("127.0.0.1:9002")?
-                }
-            }
-        };
-
-        Ok(Args {
-            root,
-            vx_home,
-            bind,
-        })
-    }
+    /// Standard CLI options (--help, --version, --completions)
+    #[facet(flatten)]
+    builtins: args::FigueBuiltins,
 }
 
 fn main() -> Result<()> {
+    peeps::threads::install_sigprof_handler();
+    peeps::threads::register_thread("main");
+    peeps::tasks::init_task_tracking();
+
     let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
         .enable_all()
+        .on_thread_start(|| {
+            peeps::threads::register_thread(
+                std::thread::current().name().unwrap_or("tokio-worker"),
+            );
+        })
+        .on_thread_stop(|| {
+            peeps::threads::deregister_thread();
+        })
         .build()?;
     rt.block_on(async_main())
 }
@@ -83,9 +70,25 @@ async fn async_main() -> Result<()> {
     // Initialize tracing
     vx_tracing::init_service("vx_store=info");
 
+    // Initialize peeps instrumentation
+    peeps::init();
+    peeps::install_sigusr1("vx-store");
+
     tracing::info!("hello from vixen-store");
 
-    let args = Args::from_env()?;
+    let args: Args = args::Driver::new(
+        args::builder::<Args>()?
+            .cli(|cli| cli.args(std::env::args().skip(1)))
+            .help(|h| {
+                h.program_name("vx-store")
+                    .version(env!("CARGO_PKG_VERSION"))
+            })
+            .build(),
+    )
+    .run()
+    .unwrap();
+
+    let bind = Endpoint::parse(&args.listen)?;
 
     // Build storage backend
     let storage = match std::env::var("VX_CAS_BASE") {
@@ -103,15 +106,44 @@ async fn async_main() -> Result<()> {
     // Initialize store service
     let store = StoreService::new(storage, args.vx_home);
 
+    // SIGUSR1: dump diagnostics
+    {
+        let store = store.clone();
+        peeps::tasks::spawn_tracked("sigusr1_handler", async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sigusr1 =
+                signal(SignalKind::user_defined1()).expect("failed to register SIGUSR1 handler");
+            loop {
+                sigusr1.recv().await;
+                tracing::info!("SIGUSR1 received, dumping diagnostics");
+                let sem = &store.download_semaphore;
+                eprintln!("[vx-store] SIGUSR1 received");
+                eprintln!(
+                    "[vx-store] download_semaphore: available={}",
+                    sem.available_permits(),
+                );
+                eprint!("{}", roam_session::diagnostic::dump_all_diagnostics());
+
+                let mut custom = std::collections::HashMap::new();
+                custom.insert(
+                    "download_semaphore_available".into(),
+                    sem.available_permits().to_string(),
+                );
+                let dump = peeps::collect_dump("vx-store", custom);
+                peeps::write_dump(&dump);
+            }
+        });
+    }
+
     // Start server (TCP or Unix socket)
-    let listener = Listener::bind(&args.bind).await?;
-    tracing::info!("store listening on {}", args.bind);
+    let listener = Listener::bind(&bind).await?;
+    tracing::info!("store listening on {}", bind);
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
         let store = store.clone();
 
-        tokio::spawn(async move {
+        peeps::tasks::spawn_tracked(format!("store_connection_{}", peer_addr), async move {
             tracing::debug!("New connection from {}", peer_addr);
 
             let dispatcher = StoreDispatcher::new(store);
@@ -119,6 +151,7 @@ async fn async_main() -> Result<()> {
                 stream,
                 HandshakeConfig {
                     max_payload_size: 256 * 1024 * 1024, // 256 MiB
+                    name: Some("vx-store".into()),
                     ..Default::default()
                 },
                 dispatcher,
@@ -146,8 +179,14 @@ impl StoreService {
                 toolchain_manager: ToolchainManager::new(),
                 registry_manager: RegistryManager::new(),
                 download_semaphore: Arc::new(tokio::sync::Semaphore::new(32)),
-                rust_component_tarballs: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-                rust_component_trees: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+                rust_component_tarballs: peeps::locks::DiagnosticAsyncMutex::new(
+                    "store/rust_component_tarballs",
+                    std::collections::HashMap::new(),
+                ),
+                rust_component_trees: peeps::locks::DiagnosticAsyncMutex::new(
+                    "store/rust_component_trees",
+                    std::collections::HashMap::new(),
+                ),
             }),
         }
     }

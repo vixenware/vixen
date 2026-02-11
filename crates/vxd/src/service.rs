@@ -16,15 +16,15 @@ use facet::trace;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+use peeps::locks::{DiagnosticAsyncMutex, DiagnosticAsyncRwLock};
 use vx_report::{BuildReport, ReportStore};
 use vx_rs::CrateGraph;
 use vx_runner_proto::RunnerClient;
 use vx_store_proto::{
-    Blake3Hash, EnsureStatus, RustChannel, RustComponent, RustToolchainSpec, ServiceVersion,
-    StoreClient, TreeFile,
+    Blake3Hash, ChunkHash, ContentHash, DirEntryKind, EnsureStatus, NodeHash, RustChannel,
+    RustComponent, RustToolchainSpec, ServiceVersion, StoreClient,
 };
 use vxd_proto::{
     ActionType, BuildRequest, BuildResult, ProgressListenerClient, UnpublishResult,
@@ -33,8 +33,8 @@ use vxd_proto::{
 
 /// Toolchain information (manifest-only, no materialization)
 pub struct ToolchainInfo {
-    /// Hash of the ToolchainManifest in CAS
-    pub manifest_hash: Blake3Hash,
+    /// Hash of the ToolchainManifest node in CAS
+    pub manifest_hash: NodeHash,
     /// Content-derived toolchain ID (from manifest)
     pub toolchain_id: Blake3Hash,
     /// Rustc version string (for reports)
@@ -78,26 +78,27 @@ pub struct VxdService {
     picante_wal: Utf8PathBuf,
 
     /// WAL writer for incremental persistence (kept open across builds)
-    wal_writer: Arc<Mutex<Option<WalWriter>>>,
+    wal_writer: Arc<DiagnosticAsyncMutex<Option<WalWriter>>>,
 
     /// Acquired toolchains (manifest references only)
-    toolchains: Arc<Mutex<AcquiredToolchains>>,
+    toolchains: Arc<DiagnosticAsyncMutex<AcquiredToolchains>>,
 
     /// Spawn tracker for child services
-    spawn_tracker: Arc<Mutex<SpawnTracker>>,
+    spawn_tracker: Arc<DiagnosticAsyncMutex<SpawnTracker>>,
 
     /// Progress listener client (for reporting progress to vx CLI)
     /// Uses RwLock for interior mutability so it can be updated per-connection
-    progress_listener:
-        Arc<RwLock<Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>>>,
+    progress_listener: Arc<
+        DiagnosticAsyncRwLock<Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>>,
+    >,
 
     /// Session ID for cache key namespacing. Empty = session zero (shared).
     /// Per-connection state — each connection handler gets its own instance.
-    session_id: Arc<RwLock<String>>,
+    session_id: Arc<DiagnosticAsyncRwLock<String>>,
 
     /// Cancellation token for the build active on this session (if any).
     /// Per-connection: when the CLI disconnects, only this session's build is cancelled.
-    active_build_cancel: Arc<Mutex<Option<CancellationToken>>>,
+    active_build_cancel: Arc<DiagnosticAsyncMutex<Option<CancellationToken>>>,
 }
 
 impl VxdService {
@@ -131,7 +132,7 @@ impl VxdService {
         exec: Arc<RunnerClient<crate::UpstreamCaller>>,
         vx_home: Utf8PathBuf,
         exec_host_triple: String,
-        spawn_tracker: Arc<Mutex<SpawnTracker>>,
+        spawn_tracker: Arc<DiagnosticAsyncMutex<SpawnTracker>>,
     ) -> Self {
         let db = Database::new();
         let cache_path = vx_home.join("picante.cache");
@@ -190,15 +191,21 @@ impl VxdService {
             db: Arc::new(db),
             picante_cache: cache_path,
             picante_wal: wal_path,
-            wal_writer: Arc::new(Mutex::new(wal_writer)),
-            toolchains: Arc::new(Mutex::new(AcquiredToolchains {
-                rust: None,
-                zig: None,
-            })),
+            wal_writer: Arc::new(DiagnosticAsyncMutex::new("vxd/wal_writer", wal_writer)),
+            toolchains: Arc::new(DiagnosticAsyncMutex::new(
+                "vxd/toolchains",
+                AcquiredToolchains {
+                    rust: None,
+                    zig: None,
+                },
+            )),
             spawn_tracker,
-            progress_listener: Arc::new(RwLock::new(None)),
-            session_id: Arc::new(RwLock::new(String::new())),
-            active_build_cancel: Arc::new(Mutex::new(None)),
+            progress_listener: Arc::new(DiagnosticAsyncRwLock::new("vxd/progress_listener", None)),
+            session_id: Arc::new(DiagnosticAsyncRwLock::new("vxd/session_id", String::new())),
+            active_build_cancel: Arc::new(DiagnosticAsyncMutex::new(
+                "vxd/active_build_cancel",
+                None,
+            )),
         }
     }
 
@@ -218,9 +225,12 @@ impl VxdService {
             toolchains: self.toolchains.clone(),
             spawn_tracker: self.spawn_tracker.clone(),
             // Per-connection state: fresh for each session
-            progress_listener: Arc::new(RwLock::new(None)),
-            session_id: Arc::new(RwLock::new(String::new())),
-            active_build_cancel: Arc::new(Mutex::new(None)),
+            progress_listener: Arc::new(DiagnosticAsyncRwLock::new("vxd/progress_listener", None)),
+            session_id: Arc::new(DiagnosticAsyncRwLock::new("vxd/session_id", String::new())),
+            active_build_cancel: Arc::new(DiagnosticAsyncMutex::new(
+                "vxd/active_build_cancel",
+                None,
+            )),
         }
     }
 
@@ -277,22 +287,25 @@ impl VxdService {
         // Forward store progress to the CLI's ProgressListener
         let forward_listener = self.progress_listener.read().await.clone();
         let forward_action_id = action_id;
-        let forward_handle = tokio::spawn(async move {
-            while let Ok(Some(sp)) = progress_rx.recv().await {
-                if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
-                    let _ = listener
-                        .update_progress(
-                            id,
-                            vxd_proto::ActionProgress {
-                                message: sp.message,
-                                current: sp.current,
-                                total: sp.total,
-                            },
-                        )
-                        .await;
+        let forward_handle = peeps::tasks::spawn_tracked(
+            format!("toolchain_progress_fwd_{:?}", action_id),
+            async move {
+                while let Ok(Some(sp)) = progress_rx.recv().await {
+                    if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
+                        let _ = listener
+                            .update_progress(
+                                id,
+                                vxd_proto::ActionProgress {
+                                    message: sp.message,
+                                    current: sp.current,
+                                    total: sp.total,
+                                },
+                            )
+                            .await;
+                    }
                 }
-            }
-        });
+            },
+        );
 
         let result = self
             .cas
@@ -301,7 +314,10 @@ impl VxdService {
             .map_err(|e| {
                 // Complete action on error
                 let this = self.clone();
-                tokio::spawn(async move { this.report_complete_action(action_id).await });
+                peeps::tasks::spawn_tracked(
+                    format!("complete_action_{:?}", action_id),
+                    async move { this.report_complete_action(action_id).await },
+                );
                 VxdError::CasRpc(e.to_string())
             })?;
 
@@ -317,7 +333,10 @@ impl VxdService {
 
         let manifest_hash = result.manifest_hash.ok_or_else(|| {
             let this = self.clone();
-            tokio::spawn(async move { this.report_complete_action(action_id).await });
+            peeps::tasks::spawn_tracked(
+                format!("complete_action_{:?}", action_id),
+                async move { this.report_complete_action(action_id).await },
+            );
             VxdError::NoManifestHash
         })?;
 
@@ -328,12 +347,18 @@ impl VxdService {
             .await
             .map_err(|e| {
                 let this = self.clone();
-                tokio::spawn(async move { this.report_complete_action(action_id).await });
+                peeps::tasks::spawn_tracked(
+                    format!("complete_action_{:?}", action_id),
+                    async move { this.report_complete_action(action_id).await },
+                );
                 VxdError::CasRpc(e.to_string())
             })?
             .ok_or_else(|| {
                 let this = self.clone();
-                tokio::spawn(async move { this.report_complete_action(action_id).await });
+                peeps::tasks::spawn_tracked(
+                    format!("complete_action_{:?}", action_id),
+                    async move { this.report_complete_action(action_id).await },
+                );
                 VxdError::ToolchainManifestNotFound(manifest_hash)
             })?;
 
@@ -413,7 +438,9 @@ impl VxdService {
                 let project_dir = vx_styx_path.parent().unwrap();
 
                 // Collect all .c and .h files (simple approach for MVP)
-                let mut files = Vec::new();
+                // Ingest each file as a chunk and build a Merkle directory tree
+                let mut tree_files = Vec::new();
+
                 for bin in &manifest.bins {
                     let source_path = project_dir.join(&bin.sources);
                     if source_path.exists() {
@@ -423,23 +450,35 @@ impl VxdService {
                                 message: e.to_string(),
                             }
                         })?;
-                        files.push(TreeFile {
+
+                        let size = contents.len() as u64;
+                        let content_hash = ContentHash(Blake3Hash::from_bytes(&contents));
+                        let chunk_hash = ChunkHash(content_hash.0);
+
+                        // Store as chunk
+                        self.cas
+                            .put_chunk(chunk_hash, contents)
+                            .await
+                            .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+
+                        tree_files.push(crate::cas_tree::TreeFile {
                             path: bin.sources.clone(),
-                            contents,
-                            executable: false,
+                            kind: DirEntryKind::SmallFile {
+                                content_hash,
+                                size,
+                                executable: false,
+                            },
                         });
                     }
                 }
 
-                let source_manifest = self
-                    .cas
-                    .ingest_tree(vx_store_proto::IngestTreeRequest { files })
-                    .await
-                    .map_err(|e| VxdError::CasRpc(e.to_string()))?
-                    .manifest_hash
-                    .ok_or_else(|| {
-                        VxdError::TreeIngestion("no manifest hash returned".to_string())
-                    })?;
+                // Build recursive Merkle directory tree
+                let (node_hash, _total_size) =
+                    crate::cas_tree::build_merkle_tree(&self.cas, tree_files)
+                        .await
+                        .map_err(VxdError::CasRpc)?;
+
+                let source_manifest = node_hash.0;
 
                 info!(
                     source_manifest = %source_manifest,

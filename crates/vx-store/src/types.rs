@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use camino::Utf8PathBuf;
-use tokio::sync::{Mutex, Semaphore};
-use vx_store_proto::{Blake3Hash, RustComponent, ToolchainSpecKey};
+use tokio::sync::Semaphore;
+use peeps::locks::DiagnosticAsyncMutex;
+use vx_store_proto::{BlobRef, RustComponent, ToolchainSpecKey};
 
 use crate::{
     RegistryManager,
@@ -44,9 +45,10 @@ pub(crate) struct StoreServiceInner {
 
     /// Downloaded Rust toolchain component tarballs by (spec_key, component)
     pub(crate) rust_component_tarballs:
-        Mutex<std::collections::HashMap<(ToolchainSpecKey, RustComponent), Blake3Hash>>,
+        DiagnosticAsyncMutex<std::collections::HashMap<(ToolchainSpecKey, RustComponent), BlobRef>>,
 
     /// Extracted Rust toolchain components by (spec_key, component)
-    pub(crate) rust_component_trees:
-        Mutex<std::collections::HashMap<(ToolchainSpecKey, RustComponent), ExtractedRustComponent>>,
+    pub(crate) rust_component_trees: DiagnosticAsyncMutex<
+        std::collections::HashMap<(ToolchainSpecKey, RustComponent), ExtractedRustComponent>,
+    >,
 }

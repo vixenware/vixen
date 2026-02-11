@@ -1,20 +1,21 @@
 use jiff::Timestamp;
 use vx_store_proto::Store;
 use vx_store_proto::{
-    Blake3Hash, BlobHash, CacheKey, EnsureRegistryCrateResult, EnsureRustToolchainComponentResult,
-    EnsureStatus, EnsureToolchainResult, IngestTreeRequest, IngestTreeResult, ManifestHash,
-    MaterializationPlan, MaterializeStep, NodeManifest, PublishResult, RegistryCrateManifest,
-    RegistrySpec, RegistrySpecKey, RustComponent, RustToolchainSpec, STORE_PROTOCOL_VERSION,
-    ServiceVersion, StoreProgress, TREE_MANIFEST_SCHEMA_VERSION, ToolchainKind, ToolchainManifest,
-    ToolchainSpecKey, TreeManifest, ZigToolchainSpec,
+    Blake3Hash, BlobRef, CDC_MAX_CHUNK, CacheKey, CasNode, ChunkHash, DirEntryKind, DirectoryNode,
+    EnsureRegistryCrateResult, EnsureRustToolchainComponentResult, EnsureStatus,
+    EnsureToolchainResult, KNOWN_CDC_PARAMS, MAX_CHUNKS_PER_BLOB, MAX_MISSING_CHUNKS_BATCH,
+    MAX_NODE_BYTES, MaterializationPlan, MaterializeStep, NodeHash, PublishResult,
+    REGISTRY_MANIFEST_SCHEMA_VERSION, RegistryCrateManifest, RegistrySpec, RegistrySpecKey,
+    RustComponent, RustToolchainSpec, STORE_PROTOCOL_VERSION, ServiceVersion, StoreProgress,
+    ToolchainKind, ToolchainManifest, ToolchainSpecKey, ZigToolchainSpec,
 };
 
+use crate::chunking;
 use crate::registry::download_crate;
 use crate::types::StoreService;
 
 const CRATES_IO_REGISTRY: &str = "https://crates.io";
-const REGISTRY_MANIFEST_SCHEMA_VERSION: u32 = 1;
-const MATERIALIZATION_LAYOUT_VERSION: u32 = 1;
+const MATERIALIZATION_LAYOUT_VERSION: u32 = 2;
 
 impl Store for StoreService {
     async fn version(&self, _cx: &roam::Context) -> ServiceVersion {
@@ -25,29 +26,160 @@ impl Store for StoreService {
         }
     }
 
-    async fn lookup(&self, _cx: &roam::Context, cache_key: CacheKey) -> Option<ManifestHash> {
-        self.storage.get_cache(&cache_key).await.ok().flatten()
+    // =========================================================================
+    // Chunk operations
+    // =========================================================================
+
+    async fn put_chunk(
+        &self,
+        _cx: &roam::Context,
+        hash: ChunkHash,
+        data: Vec<u8>,
+    ) -> Result<(), String> {
+        // Validate size
+        if data.len() > CDC_MAX_CHUNK as usize {
+            return Err(format!(
+                "chunk too large: {} bytes (max {})",
+                data.len(),
+                CDC_MAX_CHUNK
+            ));
+        }
+
+        // Validate hash
+        let actual = Blake3Hash::from_bytes(&data);
+        if actual != hash.0 {
+            return Err(format!(
+                "hash mismatch: expected {}, got {}",
+                hash.to_hex(),
+                actual.to_hex()
+            ));
+        }
+
+        self.storage
+            .put_chunk(&hash, &data)
+            .await
+            .map_err(|e| format!("storage error: {e}"))
+    }
+
+    async fn get_chunk(&self, _cx: &roam::Context, hash: ChunkHash) -> Option<Vec<u8>> {
+        self.storage.get_chunk(&hash).await.ok().flatten()
+    }
+
+    async fn has_chunk(&self, _cx: &roam::Context, hash: ChunkHash) -> bool {
+        self.storage.has_chunk(&hash).await.unwrap_or(false)
+    }
+
+    async fn list_missing_chunks(
+        &self,
+        _cx: &roam::Context,
+        hashes: Vec<ChunkHash>,
+    ) -> Vec<ChunkHash> {
+        let hashes = if hashes.len() > MAX_MISSING_CHUNKS_BATCH {
+            tracing::warn!(
+                count = hashes.len(),
+                max = MAX_MISSING_CHUNKS_BATCH,
+                "list_missing_chunks: batch too large, truncating"
+            );
+            hashes.into_iter().take(MAX_MISSING_CHUNKS_BATCH).collect()
+        } else {
+            hashes
+        };
+
+        let mut missing = Vec::new();
+        for hash in hashes {
+            match self.storage.has_chunk(&hash).await {
+                Ok(true) => {}
+                _ => missing.push(hash),
+            }
+        }
+        missing
+    }
+
+    // =========================================================================
+    // Node operations
+    // =========================================================================
+
+    async fn put_node(
+        &self,
+        _cx: &roam::Context,
+        hash: NodeHash,
+        data: Vec<u8>,
+    ) -> Result<(), String> {
+        // Validate size
+        if data.len() > MAX_NODE_BYTES {
+            return Err(format!(
+                "node too large: {} bytes (max {})",
+                data.len(),
+                MAX_NODE_BYTES
+            ));
+        }
+
+        // Validate hash (uniform addressing for ALL node types)
+        let actual = Blake3Hash::from_bytes(&data);
+        if actual != hash.0 {
+            return Err(format!(
+                "hash mismatch: expected {}, got {}",
+                hash.to_hex(),
+                actual.to_hex()
+            ));
+        }
+
+        // Deserialize and validate structure
+        let node = CasNode::from_bytes(&data).map_err(|e| format!("invalid node: {e}"))?;
+
+        match &node {
+            CasNode::Blob(blob) => validate_blob_node(blob)?,
+            CasNode::Directory(dir) => validate_directory_node(dir)?,
+            // Other node types: basic structural validation (deserialization already covers it)
+            CasNode::Manifest(_) | CasNode::Toolchain(_) | CasNode::RegistryCrate(_) => {}
+        }
+
+        self.storage
+            .put_node(&hash, &data)
+            .await
+            .map_err(|e| format!("storage error: {e}"))
+    }
+
+    async fn get_node(&self, _cx: &roam::Context, hash: NodeHash) -> Option<Vec<u8>> {
+        self.storage.get_node(&hash).await.ok().flatten()
+    }
+
+    async fn has_node(&self, _cx: &roam::Context, hash: NodeHash) -> bool {
+        self.storage.has_node(&hash).await.unwrap_or(false)
+    }
+
+    // =========================================================================
+    // Cache key operations
+    // =========================================================================
+
+    async fn lookup(&self, _cx: &roam::Context, cache_key: CacheKey) -> Option<NodeHash> {
+        self.storage
+            .get_cache(&cache_key)
+            .await
+            .ok()
+            .flatten()
+            .map(NodeHash)
     }
 
     async fn publish(
         &self,
         _cx: &roam::Context,
         cache_key: CacheKey,
-        manifest_hash: ManifestHash,
+        manifest_hash: NodeHash,
     ) -> PublishResult {
-        // Validate manifest blob exists
-        if !self.storage.has_blob(&manifest_hash).await.unwrap_or(false) {
+        // Validate node exists
+        if !self.storage.has_node(&manifest_hash).await.unwrap_or(false) {
             return PublishResult {
                 success: false,
                 error: Some(format!(
-                    "manifest {} does not exist",
+                    "manifest node {} does not exist",
                     manifest_hash.to_hex()
                 )),
             };
         }
 
         // Write the cache mapping
-        match self.storage.put_cache(&cache_key, &manifest_hash).await {
+        match self.storage.put_cache(&cache_key, &manifest_hash.0).await {
             Ok(()) => PublishResult {
                 success: true,
                 error: None,
@@ -69,70 +201,139 @@ impl Store for StoreService {
         }
     }
 
-    // [impl axiom.cas-unified-blobs] Node manifests are stored as blobs
-    async fn put_manifest(&self, _cx: &roam::Context, manifest: NodeManifest) -> ManifestHash {
-        let json =
-            facet_json::to_string(&manifest).expect("node manifest serialization must succeed");
-        let hash = ManifestHash::from_bytes(json.as_bytes());
+    // =========================================================================
+    // Toolchain operations (delegate to inherent methods)
+    // =========================================================================
 
-        if let Err(e) = self.storage.put_blob(&hash, json.as_bytes()).await {
-            tracing::warn!(manifest_hash = %hash, error = %e, "failed to write node manifest blob");
-        }
-
-        hash
+    #[tracing::instrument(skip(self, progress), fields(name = ?spec.channel))]
+    async fn ensure_rust_toolchain(
+        &self,
+        _cx: &roam::Context,
+        spec: RustToolchainSpec,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureToolchainResult {
+        StoreService::ensure_rust_toolchain(self, spec, progress).await
     }
 
-    // [impl axiom.cas-unified-blobs] Node manifests are read from blob store
-    async fn get_manifest(&self, _cx: &roam::Context, hash: ManifestHash) -> Option<NodeManifest> {
-        tracing::debug!(manifest_hash = %hash, "get_manifest: reading from blob store");
+    async fn download_rust_toolchain_component(
+        &self,
+        _cx: &roam::Context,
+        spec: RustToolchainSpec,
+        component: RustComponent,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureRustToolchainComponentResult {
+        StoreService::download_rust_toolchain_component(self, spec, component, progress).await
+    }
 
-        let data = self.storage.get_blob(&hash).await.ok().flatten()?;
-        let json = String::from_utf8(data).ok()?;
+    async fn extract_rust_toolchain_component(
+        &self,
+        _cx: &roam::Context,
+        spec: RustToolchainSpec,
+        component: RustComponent,
+        tarball: BlobRef,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureRustToolchainComponentResult {
+        StoreService::extract_rust_toolchain_component(self, spec, component, tarball, progress)
+            .await
+    }
 
-        tracing::debug!(manifest_hash = %hash, "get_manifest: blob read successfully");
-        match facet_json::from_str(&json) {
-            Ok(manifest) => {
-                tracing::debug!(manifest_hash = %hash, "get_manifest: parsed successfully");
-                Some(manifest)
-            }
-            Err(e) => {
-                tracing::warn!(manifest_hash = %hash, error = ?e, "get_manifest: failed to parse JSON");
+    async fn finalize_rust_toolchain(
+        &self,
+        _cx: &roam::Context,
+        spec: RustToolchainSpec,
+    ) -> EnsureToolchainResult {
+        StoreService::finalize_rust_toolchain(self, spec).await
+    }
+
+    async fn ensure_zig_toolchain(
+        &self,
+        _cx: &roam::Context,
+        spec: ZigToolchainSpec,
+        progress: roam::Tx<StoreProgress>,
+    ) -> EnsureToolchainResult {
+        StoreService::ensure_zig_toolchain(self, spec, progress).await
+    }
+
+    async fn lookup_toolchain_spec(
+        &self,
+        _cx: &roam::Context,
+        spec_key: ToolchainSpecKey,
+    ) -> Option<NodeHash> {
+        self.storage
+            .get_toolchain_spec(&spec_key)
+            .await
+            .ok()
+            .flatten()
+            .map(NodeHash)
+    }
+
+    async fn get_toolchain_manifest(
+        &self,
+        _cx: &roam::Context,
+        manifest_hash: NodeHash,
+    ) -> Option<ToolchainManifest> {
+        let data = self.storage.get_node(&manifest_hash).await.ok().flatten()?;
+        let node = CasNode::from_bytes(&data).ok()?;
+        match node {
+            CasNode::Toolchain(manifest) => Some(manifest),
+            _ => {
+                tracing::warn!(
+                    manifest_hash = %manifest_hash,
+                    "get_toolchain_manifest: node is not a Toolchain variant"
+                );
                 None
             }
         }
     }
 
-    async fn put_blob(&self, _cx: &roam::Context, data: Vec<u8>) -> BlobHash {
-        let hash = BlobHash::from_bytes(&data);
-
-        if let Err(e) = self.storage.put_blob(&hash, &data).await {
-            tracing::warn!(blob_hash = %hash, error = %e, "failed to write blob");
-        }
-
-        hash
-    }
-
-    async fn get_blob(&self, _cx: &roam::Context, hash: BlobHash) -> Option<Vec<u8>> {
-        self.storage.get_blob(&hash).await.ok().flatten()
-    }
-
-    async fn get_blob_range(
+    async fn get_materialization_plan(
         &self,
         _cx: &roam::Context,
-        hash: BlobHash,
-        offset: u64,
-        len: u64,
-    ) -> Option<Vec<u8>> {
-        self.storage
-            .get_blob_range(&hash, offset, len)
-            .await
-            .ok()
-            .flatten()
+        manifest_hash: NodeHash,
+    ) -> Option<MaterializationPlan> {
+        let manifest = Store::get_toolchain_manifest(self, _cx, manifest_hash).await?;
+
+        // Pure function: manifest → plan (no heuristics, bit-for-bit stable)
+        let steps = match manifest.kind {
+            ToolchainKind::Rust => {
+                let mut steps = vec![MaterializeStep::EnsureDir {
+                    relpath: "sysroot".to_string(),
+                }];
+                steps.extend(manifest.components.iter().map(|c| {
+                    MaterializeStep::MaterializeTree {
+                        tree_root: c.tree_root,
+                        dest_subdir: "sysroot".to_string(),
+                    }
+                }));
+                steps
+            }
+            ToolchainKind::Zig => {
+                let mut steps = Vec::new();
+                for c in &manifest.components {
+                    match c.name.as_str() {
+                        "zig-exe" | "zig-lib" => {
+                            steps.push(MaterializeStep::MaterializeTree {
+                                tree_root: c.tree_root,
+                                dest_subdir: ".".to_string(),
+                            });
+                        }
+                        _ => {} // Unknown component, skip
+                    }
+                }
+                steps
+            }
+        };
+
+        Some(MaterializationPlan {
+            toolchain_id: manifest.toolchain_id,
+            layout_version: MATERIALIZATION_LAYOUT_VERSION,
+            steps,
+        })
     }
 
-    async fn has_blob(&self, _cx: &roam::Context, hash: BlobHash) -> bool {
-        self.storage.has_blob(&hash).await.unwrap_or(false)
-    }
+    // =========================================================================
+    // Registry operations
+    // =========================================================================
 
     #[tracing::instrument(skip(self, progress), fields(name = %spec.name, version = %spec.version))]
     async fn ensure_registry_crate(
@@ -173,7 +374,13 @@ impl Store for StoreService {
         self.registry_manager
             .ensure(
                 spec_key,
-                async move || this.storage.get_registry_spec(&spec_key).await.ok().flatten(),
+                async move || {
+                    this.storage
+                        .get_registry_spec(&spec_key)
+                        .await
+                        .ok()
+                        .flatten()
+                },
                 async move || {
                     let _ = progress
                         .send(&StoreProgress {
@@ -205,47 +412,62 @@ impl Store for StoreService {
                         })
                         .await;
 
-                    // Store tarball as blob
-                    let tarball_blob = BlobHash::from_bytes(&tarball_bytes);
-                    if let Err(e) = this2
-                        .storage
-                        .put_blob(&tarball_blob, &tarball_bytes)
-                        .await
-                    {
-                        tracing::warn!(blob_hash = %tarball_blob, error = %e, "failed to write tarball blob");
-                    }
+                    // Store tarball as chunks
+                    let prepared = chunking::prepare_blob(&tarball_bytes);
+                    let tarball_ref =
+                        match store_prepared_blob(&this2, &prepared, &tarball_bytes).await {
+                            Ok(r) => r,
+                            Err(e) => {
+                                return EnsureRegistryCrateResult {
+                                    spec_key: Some(spec_key),
+                                    manifest_hash: None,
+                                    status: EnsureStatus::Failed,
+                                    error: Some(format!("failed to store tarball: {e}")),
+                                };
+                            }
+                        };
 
-                    // Create manifest
+                    // Create manifest as CasNode::RegistryCrate
                     let manifest = RegistryCrateManifest {
                         schema_version: REGISTRY_MANIFEST_SCHEMA_VERSION,
                         spec: spec.clone(),
-                        crate_tarball_blob: tarball_blob,
+                        crate_tarball: tarball_ref,
                         created_at: Timestamp::now().in_tz("UTC").unwrap().to_string(),
                     };
 
-                    // Store manifest
-                    let manifest_json = facet_json::to_string(&manifest)
-                        .expect("registry manifest serialization must succeed");
-                    let manifest_hash = Blake3Hash::from_bytes(manifest_json.as_bytes());
-                    if let Err(e) = this2
-                        .storage
-                        .put_manifest(&manifest_hash, manifest_json.as_bytes())
-                        .await
-                    {
-                        tracing::warn!(manifest_hash = %manifest_hash, error = %e, "failed to write registry manifest");
+                    let node = CasNode::RegistryCrate(manifest);
+                    let (node_bytes, manifest_hash) = node.to_bytes_and_hash();
+                    if let Err(e) = this2.storage.put_node(&manifest_hash, &node_bytes).await {
+                        tracing::error!(
+                            manifest_hash = %manifest_hash,
+                            error = %e,
+                            "failed to write registry manifest node"
+                        );
+                        return EnsureRegistryCrateResult {
+                            spec_key: Some(spec_key),
+                            manifest_hash: None,
+                            status: EnsureStatus::Failed,
+                            error: Some(format!("failed to write registry manifest node: {e}")),
+                        };
                     }
 
-                    // Publish spec → manifest_hash mapping
+                    // Publish spec → manifest_hash mapping (only after node write succeeded)
                     if let Err(e) = this2
                         .storage
-                        .put_registry_spec(&spec_key, &manifest_hash)
+                        .put_registry_spec(&spec_key, &manifest_hash.0)
                         .await
                     {
-                        tracing::warn!(
+                        tracing::error!(
                             "failed to publish registry spec mapping for {}: {}",
                             spec_key,
                             e
                         );
+                        return EnsureRegistryCrateResult {
+                            spec_key: Some(spec_key),
+                            manifest_hash: None,
+                            status: EnsureStatus::Failed,
+                            error: Some(format!("failed to publish registry spec mapping: {e}")),
+                        };
                     }
 
                     tracing::info!(
@@ -270,20 +492,17 @@ impl Store for StoreService {
     async fn get_registry_manifest(
         &self,
         _cx: &roam::Context,
-        manifest_hash: Blake3Hash,
+        manifest_hash: NodeHash,
     ) -> Option<RegistryCrateManifest> {
-        let json = match self.storage.get_manifest(&manifest_hash).await {
-            Ok(Some(json)) => json,
-            Ok(None) => return None,
-            Err(e) => {
-                tracing::warn!(manifest_hash = %manifest_hash, error = %e, "get_registry_manifest: read error");
-                return None;
-            }
-        };
-        match facet_json::from_str(&json) {
-            Ok(manifest) => Some(manifest),
-            Err(e) => {
-                tracing::warn!(manifest_hash = %manifest_hash, error = ?e, "get_registry_manifest: failed to parse JSON");
+        let data = self.storage.get_node(&manifest_hash).await.ok().flatten()?;
+        let node = CasNode::from_bytes(&data).ok()?;
+        match node {
+            CasNode::RegistryCrate(manifest) => Some(manifest),
+            _ => {
+                tracing::warn!(
+                    manifest_hash = %manifest_hash,
+                    "get_registry_manifest: node is not a RegistryCrate variant"
+                );
                 None
             }
         }
@@ -293,323 +512,178 @@ impl Store for StoreService {
         &self,
         _cx: &roam::Context,
         spec_key: RegistrySpecKey,
-    ) -> Option<Blake3Hash> {
+    ) -> Option<NodeHash> {
         self.storage
             .get_registry_spec(&spec_key)
             .await
             .ok()
             .flatten()
+            .map(NodeHash)
+    }
+}
+
+// =============================================================================
+// Validation Helpers
+// =============================================================================
+
+fn validate_blob_node(blob: &vx_store_proto::BlobNode) -> Result<(), String> {
+    // chunks.len() >= 2 (single-chunk files should be SmallFile)
+    if blob.chunks.len() < 2 {
+        return Err(format!(
+            "BlobNode must have at least 2 chunks, got {}",
+            blob.chunks.len()
+        ));
     }
 
-    async fn ensure_rust_toolchain(
-        &self,
-        _cx: &roam::Context,
-        spec: RustToolchainSpec,
-        progress: roam::Tx<StoreProgress>,
-    ) -> EnsureToolchainResult {
-        StoreService::ensure_rust_toolchain(self, spec, progress).await
+    // chunks.len() <= MAX_CHUNKS_PER_BLOB
+    if blob.chunks.len() > MAX_CHUNKS_PER_BLOB {
+        return Err(format!(
+            "BlobNode has {} chunks (max {})",
+            blob.chunks.len(),
+            MAX_CHUNKS_PER_BLOB
+        ));
     }
 
-    async fn download_rust_toolchain_component(
-        &self,
-        _cx: &roam::Context,
-        spec: RustToolchainSpec,
-        component: RustComponent,
-        progress: roam::Tx<StoreProgress>,
-    ) -> EnsureRustToolchainComponentResult {
-        StoreService::download_rust_toolchain_component(self, spec, component, progress).await
+    // Validate each chunk size
+    let mut sum: u64 = 0;
+    for (i, chunk) in blob.chunks.iter().enumerate() {
+        if chunk.size == 0 || chunk.size > CDC_MAX_CHUNK {
+            return Err(format!(
+                "chunk[{i}] size {} is out of range 1..={}",
+                chunk.size, CDC_MAX_CHUNK
+            ));
+        }
+        sum += chunk.size as u64;
     }
 
-    async fn extract_rust_toolchain_component(
-        &self,
-        _cx: &roam::Context,
-        spec: RustToolchainSpec,
-        component: RustComponent,
-        tarball_blob: Blake3Hash,
-        progress: roam::Tx<StoreProgress>,
-    ) -> EnsureRustToolchainComponentResult {
-        StoreService::extract_rust_toolchain_component(
-            self,
-            spec,
-            component,
-            tarball_blob,
-            progress,
-        )
-        .await
+    // sum(chunk.size) == total_size
+    if sum != blob.total_size {
+        return Err(format!(
+            "BlobNode total_size mismatch: sum of chunks is {sum}, declared {}",
+            blob.total_size
+        ));
     }
 
-    async fn finalize_rust_toolchain(
-        &self,
-        _cx: &roam::Context,
-        spec: RustToolchainSpec,
-    ) -> EnsureToolchainResult {
-        StoreService::finalize_rust_toolchain(self, spec).await
+    // total_size > CDC_MAX_CHUNK (otherwise it should be a SmallFile)
+    if blob.total_size <= CDC_MAX_CHUNK as u64 {
+        return Err(format!(
+            "BlobNode total_size {} is <= CDC_MAX_CHUNK ({}), should be SmallFile",
+            blob.total_size, CDC_MAX_CHUNK
+        ));
     }
 
-    async fn ensure_zig_toolchain(
-        &self,
-        _cx: &roam::Context,
-        spec: ZigToolchainSpec,
-        progress: roam::Tx<StoreProgress>,
-    ) -> EnsureToolchainResult {
-        StoreService::ensure_zig_toolchain(self, spec, progress).await
+    // cdc_params_id must be known
+    if !KNOWN_CDC_PARAMS
+        .iter()
+        .any(|(id, _, _, _)| *id == blob.cdc_params_id)
+    {
+        return Err(format!("unknown cdc_params_id: {}", blob.cdc_params_id));
     }
 
-    async fn lookup_toolchain_spec(
-        &self,
-        _cx: &roam::Context,
-        spec_key: ToolchainSpecKey,
-    ) -> Option<Blake3Hash> {
-        // Delegate to the inherent method
-        self.storage
-            .get_toolchain_spec(&spec_key)
-            .await
-            .ok()
-            .flatten()
-    }
+    Ok(())
+}
 
-    async fn get_toolchain_manifest(
-        &self,
-        _cx: &roam::Context,
-        manifest_hash: Blake3Hash,
-    ) -> Option<ToolchainManifest> {
-        tracing::debug!(manifest_hash = %manifest_hash, "get_toolchain_manifest: attempting to read");
+fn validate_directory_node(dir: &DirectoryNode) -> Result<(), String> {
+    let entries = &dir.entries;
 
-        let json = match self.storage.get_manifest(&manifest_hash).await {
-            Ok(Some(json)) => json,
-            Ok(None) => {
-                tracing::warn!(manifest_hash = %manifest_hash, "get_toolchain_manifest: not found");
-                return None;
+    for (i, entry) in entries.iter().enumerate() {
+        // No empty names
+        if entry.name.is_empty() {
+            return Err(format!("entry[{i}] has empty name"));
+        }
+
+        // No "." or ".."
+        if entry.name == "." || entry.name == ".." {
+            return Err(format!("entry[{i}] has forbidden name \"{}\"", entry.name));
+        }
+
+        // No "/" in names
+        if entry.name.contains('/') {
+            return Err(format!("entry[{i}] name \"{}\" contains '/'", entry.name));
+        }
+
+        // Validate SmallFile/LargeFile size constraints
+        match &entry.kind {
+            DirEntryKind::SmallFile { size, .. } => {
+                if *size > CDC_MAX_CHUNK as u64 {
+                    return Err(format!(
+                        "entry[{i}] \"{}\" is SmallFile but size {} > CDC_MAX_CHUNK ({})",
+                        entry.name, size, CDC_MAX_CHUNK
+                    ));
+                }
             }
-            Err(e) => {
-                tracing::warn!(manifest_hash = %manifest_hash, error = %e, "get_toolchain_manifest: read error");
-                return None;
+            DirEntryKind::LargeFile { size, .. } => {
+                if *size <= CDC_MAX_CHUNK as u64 {
+                    return Err(format!(
+                        "entry[{i}] \"{}\" is LargeFile but size {} <= CDC_MAX_CHUNK ({})",
+                        entry.name, size, CDC_MAX_CHUNK
+                    ));
+                }
             }
-        };
+            DirEntryKind::Dir { .. } | DirEntryKind::Symlink { .. } => {}
+        }
 
-        tracing::debug!(manifest_hash = %manifest_hash, "get_toolchain_manifest: read successfully");
-        match facet_json::from_str(&json) {
-            Ok(manifest) => {
-                tracing::debug!(manifest_hash = %manifest_hash, "get_toolchain_manifest: parsed successfully");
-                Some(manifest)
-            }
-            Err(e) => {
-                tracing::warn!(manifest_hash = %manifest_hash, error = ?e, "get_toolchain_manifest: failed to parse JSON");
-                None
+        // Check sorted order and no duplicates
+        if i > 0 {
+            let prev = &entries[i - 1].name;
+            match prev.as_bytes().cmp(entry.name.as_bytes()) {
+                std::cmp::Ordering::Greater => {
+                    return Err(format!(
+                        "entries not sorted: \"{}\" comes after \"{}\"",
+                        entry.name, prev
+                    ));
+                }
+                std::cmp::Ordering::Equal => {
+                    return Err(format!("duplicate entry name: \"{}\"", entry.name));
+                }
+                std::cmp::Ordering::Less => {}
             }
         }
     }
 
-    async fn get_materialization_plan(
-        &self,
-        _cx: &roam::Context,
-        manifest_hash: Blake3Hash,
-    ) -> Option<MaterializationPlan> {
-        let manifest = Store::get_toolchain_manifest(self, _cx, manifest_hash).await?;
+    Ok(())
+}
 
-        // Pure function: manifest → plan (no heuristics, bit-for-bit stable)
-        let steps = match manifest.kind {
-            ToolchainKind::Rust => {
-                let mut steps = vec![MaterializeStep::EnsureDir {
-                    relpath: "sysroot".to_string(),
-                }];
-                // Materialize each component tree into sysroot
-                steps.extend(manifest.components.iter().map(|c| {
-                    MaterializeStep::MaterializeTree {
-                        tree_manifest: c.tree_manifest,
-                        dest_subdir: "sysroot".to_string(),
-                    }
-                }));
-                steps
-            }
-            ToolchainKind::Zig => {
-                let mut steps = Vec::new();
-                for c in &manifest.components {
-                    match c.name.as_str() {
-                        "zig-exe" | "zig-lib" => {
-                            steps.push(MaterializeStep::MaterializeTree {
-                                tree_manifest: c.tree_manifest,
-                                dest_subdir: ".".to_string(),
-                            });
-                        }
-                        _ => {} // Unknown component, skip
-                    }
-                }
-                steps
-            }
-        };
+// =============================================================================
+// Internal Helpers
+// =============================================================================
 
-        Some(MaterializationPlan {
-            toolchain_id: manifest.toolchain_id,
-            layout_version: MATERIALIZATION_LAYOUT_VERSION,
-            steps,
+/// Store a prepared blob (chunks + optional BlobNode) into the store.
+/// Returns a BlobRef describing how to fetch the data.
+async fn store_prepared_blob(
+    service: &StoreService,
+    prepared: &chunking::PreparedBlob,
+    data: &[u8],
+) -> Result<BlobRef, String> {
+    // Store all chunks
+    for chunk_info in &prepared.chunks {
+        let chunk_data = &data[chunk_info.offset..chunk_info.offset + chunk_info.size as usize];
+        service
+            .storage
+            .put_chunk(&chunk_info.hash, chunk_data)
+            .await
+            .map_err(|e| format!("failed to store chunk: {e}"))?;
+    }
+
+    // If multi-chunk, store the BlobNode
+    if let Some(blob_node) = &prepared.blob_node {
+        service
+            .storage
+            .put_node(&blob_node.node_hash, &blob_node.serialized_bytes)
+            .await
+            .map_err(|e| format!("failed to store BlobNode: {e}"))?;
+
+        Ok(BlobRef::Large {
+            blob_node: blob_node.node_hash,
+            content_hash: prepared.content_hash,
+            size: data.len() as u64,
         })
-    }
-
-    async fn ingest_tree(
-        &self,
-        _cx: &roam::Context,
-        request: IngestTreeRequest,
-    ) -> IngestTreeResult {
-        let mut manifest = TreeManifest {
-            schema_version: TREE_MANIFEST_SCHEMA_VERSION,
-            entries: Vec::with_capacity(request.files.len()),
-            total_size_bytes: 0,
-            unique_blobs: 0,
-        };
-
-        let mut new_blobs = 0u32;
-        let mut total_bytes = 0u64;
-
-        for file in &request.files {
-            let size = file.contents.len() as u64;
-            total_bytes += size;
-
-            // Store the blob
-            let blob_hash = BlobHash::from_bytes(&file.contents);
-
-            // Check if blob already exists (for dedup stats)
-            let exists = self.storage.has_blob(&blob_hash).await.unwrap_or(false);
-            if !exists {
-                if let Err(e) = self.storage.put_blob(&blob_hash, &file.contents).await {
-                    return IngestTreeResult {
-                        success: false,
-                        manifest_hash: None,
-                        file_count: 0,
-                        total_bytes: 0,
-                        new_blobs: 0,
-                        error: Some(format!("failed to write blob for {}: {}", file.path, e)),
-                    };
-                }
-                new_blobs += 1;
-            }
-
-            // Add to manifest
-            manifest.add_file(file.path.clone(), blob_hash, size, file.executable);
-        }
-
-        // Finalize manifest (sorts entries, computes unique blob count)
-        manifest.finalize();
-
-        // Serialize manifest to JSON
-        let manifest_json =
-            facet_json::to_string(&manifest).expect("tree manifest serialization must succeed");
-        let manifest_hash = ManifestHash::from_bytes(manifest_json.as_bytes());
-
-        // Store as blob (for runner's materialize_tree_from_cas which calls get_blob)
-        if let Err(e) = self
-            .storage
-            .put_blob(&manifest_hash, manifest_json.as_bytes())
-            .await
-        {
-            return IngestTreeResult {
-                success: false,
-                manifest_hash: None,
-                file_count: 0,
-                total_bytes: 0,
-                new_blobs: 0,
-                error: Some(format!("failed to write tree manifest blob: {}", e)),
-            };
-        }
-
-        // Also store in tree_manifests (for get_tree_manifest API)
-        if let Err(e) = self
-            .storage
-            .put_tree_manifest(&manifest_hash, manifest_json.as_bytes())
-            .await
-        {
-            return IngestTreeResult {
-                success: false,
-                manifest_hash: None,
-                file_count: 0,
-                total_bytes: 0,
-                new_blobs: 0,
-                error: Some(format!("failed to write tree manifest: {}", e)),
-            };
-        }
-
-        tracing::info!(
-            manifest_hash = %manifest_hash,
-            file_count = request.files.len(),
-            total_bytes,
-            new_blobs,
-            unique_blobs = manifest.unique_blobs,
-            "ingested tree"
-        );
-
-        IngestTreeResult {
-            success: true,
-            manifest_hash: Some(manifest_hash),
-            file_count: request.files.len() as u32,
-            total_bytes,
-            new_blobs,
-            error: None,
-        }
-    }
-
-    async fn get_tree_manifest(
-        &self,
-        _cx: &roam::Context,
-        hash: ManifestHash,
-    ) -> Option<TreeManifest> {
-        tracing::debug!(manifest_hash = %hash, "get_tree_manifest: reading from blob storage");
-
-        let data = self.storage.get_blob(&hash).await.ok().flatten()?;
-        let json = match String::from_utf8(data) {
-            Ok(json) => json,
-            Err(e) => {
-                tracing::error!(manifest_hash = %hash, error = %e, "get_tree_manifest: invalid UTF-8");
-                return None;
-            }
-        };
-
-        tracing::debug!(manifest_hash = %hash, "get_tree_manifest: blob read successfully");
-        match facet_json::from_str(&json) {
-            Ok(manifest) => {
-                tracing::debug!(manifest_hash = %hash, "get_tree_manifest: parsed successfully");
-                Some(manifest)
-            }
-            Err(e) => {
-                tracing::error!(manifest_hash = %hash, error = ?e, "get_tree_manifest: failed to parse JSON");
-                None
-            }
-        }
-    }
-
-    async fn stream_blob(
-        &self,
-        _cx: &roam::Context,
-        blob: Blake3Hash,
-        output: roam::Tx<Vec<u8>>,
-    ) -> Result<(), String> {
-        let blob_path = self
-            .storage
-            .blob_path(&blob)
-            .await
-            .map_err(|e| format!("blob lookup error: {e}"))?
-            .ok_or_else(|| "blob not found".to_string())?;
-
-        use tokio::io::AsyncReadExt;
-
-        let file = tokio::fs::File::open(&blob_path)
-            .await
-            .map_err(|e| format!("failed to open blob: {e}"))?;
-
-        let mut reader = tokio::io::BufReader::new(file);
-        let mut buf = vec![0u8; 16 * 1024 * 1024]; // 16MB chunks
-
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(0) => break, // EOF
-                Ok(n) => {
-                    if output.send(&buf[..n].to_vec()).await.is_err() {
-                        break; // Receiver dropped
-                    }
-                }
-                Err(e) => return Err(format!("read error: {e}")),
-            }
-        }
-
-        Ok(())
+    } else {
+        // Single chunk
+        assert_eq!(prepared.chunks.len(), 1);
+        Ok(BlobRef::Small {
+            chunk: prepared.chunks[0].hash,
+            size: data.len() as u64,
+        })
     }
 }

@@ -1,16 +1,23 @@
 //! CAS service protocol definitions
 //!
-//! CAS stores immutable content. Clients produce working directories.
+//! The store is a validated key-value store with two object types:
+//! - **Chunks**: Raw bytes (≤4MB), stored at `chunks/blake3/{xx}/{hash}`
+//! - **Nodes**: Versioned postcard-encoded structures, stored at `nodes/blake3/{xx}/{hash}`
 //!
-//! The store is purely about:
-//! - put/get blobs (content-addressed by blake3)
-//! - put/get manifests (structured build outputs)
-//! - lookup/publish cache keys (mapping inputs → outputs)
+//! All chunking, assembly, and Merkle tree construction logic lives in shared
+//! library code used by clients. The store validates structure but never chunks
+//! or reassembles.
+
+pub mod cas_tree;
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
 
 use facet::Facet;
+
+// =============================================================================
+// Protocol Constants
+// =============================================================================
 
 /// Current cache key schema version.
 /// Bump this when the cache key canonicalization changes.
@@ -18,9 +25,56 @@ pub const CACHE_KEY_SCHEMA_VERSION: u32 = 1;
 
 /// CAS protocol version.
 /// Bump this when making breaking changes to the CAS RPC interface.
-pub const STORE_PROTOCOL_VERSION: u32 = 2;
+pub const STORE_PROTOCOL_VERSION: u32 = 3;
 
-/// A blake3 hash, used for blobs, manifests, and cache keys.
+/// Versioned postcard node format version.
+/// Node bytes are `[version: u32 LE][postcard payload]`.
+/// The version prefix is part of the hashed content — a version bump
+/// produces different hashes for identical logical content.
+pub const CAS_NODE_VERSION: u32 = 1;
+
+// =============================================================================
+// CDC Constants
+// =============================================================================
+
+/// Content-Defined Chunking minimum chunk size (512 KB)
+pub const CDC_MIN_CHUNK: u32 = 512 * 1024;
+
+/// Content-Defined Chunking average chunk size (2 MB)
+pub const CDC_AVG_CHUNK: u32 = 2 * 1024 * 1024;
+
+/// Content-Defined Chunking maximum chunk size (4 MB)
+pub const CDC_MAX_CHUNK: u32 = 4 * 1024 * 1024;
+
+/// Current CDC parameter set ID. Identifies the combination of CDC algorithm,
+/// crate version, and parameters. Registered in KNOWN_CDC_PARAMS.
+pub const CDC_PARAMS_ID: u8 = 1;
+
+/// Known CDC parameter sets. Golden-tested.
+/// (id, min, avg, max)
+pub const KNOWN_CDC_PARAMS: &[(u8, u32, u32, u32)] =
+    &[(1, CDC_MIN_CHUNK, CDC_AVG_CHUNK, CDC_MAX_CHUNK)];
+
+// =============================================================================
+// Validation Constants
+// =============================================================================
+
+/// Maximum number of chunks in a single BlobNode.
+/// Enough for ~8TB files at 2MB avg, far beyond any reasonable file.
+pub const MAX_CHUNKS_PER_BLOB: usize = 4096;
+
+/// Maximum number of chunk hashes per list_missing_chunks call.
+pub const MAX_MISSING_CHUNKS_BATCH: usize = 4096;
+
+/// Maximum serialized node size in bytes (16 MB).
+/// Prevents OOM from huge directory nodes or adversarial payloads.
+pub const MAX_NODE_BYTES: usize = 16 * 1024 * 1024;
+
+// =============================================================================
+// Hash Types
+// =============================================================================
+
+/// A blake3 hash, the underlying 32-byte value.
 /// Internally stored as raw bytes; hex formatting is for display only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Facet)]
 pub struct Blake3Hash(#[facet(sensitive)] pub [u8; 32]);
@@ -93,14 +147,381 @@ impl Hasher for Blake3Hasher {
 /// A HashMap using the passthrough hasher for Blake3Hash keys.
 pub type Blake3HashMap<V> = HashMap<Blake3Hash, V, Blake3HashBuilder>;
 
-/// Hash of a blob (raw bytes)
-pub type BlobHash = Blake3Hash;
+// =============================================================================
+// Newtype Wrappers
+// =============================================================================
+//
+// On the wire and in storage, everything is 32 bytes. But in Rust code, we use
+// real newtype structs to prevent domain mixing at compile time.
 
-/// Hash of a manifest (JSON document)
+/// Hash of chunk bytes: blake3(raw_bytes). Used to address chunks in chunks/.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Facet)]
+#[repr(transparent)]
+pub struct ChunkHash(pub Blake3Hash);
+
+impl ChunkHash {
+    pub fn to_hex(&self) -> String {
+        self.0.to_hex()
+    }
+
+    pub fn short_hex(&self) -> String {
+        self.0.short_hex()
+    }
+
+    pub fn from_hex(s: &str) -> Option<Self> {
+        Blake3Hash::from_hex(s).map(Self)
+    }
+}
+
+impl std::fmt::Display for ChunkHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Hash of serialized node bytes: blake3(node_bytes). Used to address nodes in nodes/.
+/// ALL node types use the same addressing rule: hash of the serialized bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Facet)]
+#[repr(transparent)]
+pub struct NodeHash(pub Blake3Hash);
+
+impl NodeHash {
+    pub fn to_hex(&self) -> String {
+        self.0.to_hex()
+    }
+
+    pub fn short_hex(&self) -> String {
+        self.0.short_hex()
+    }
+
+    pub fn from_hex(s: &str) -> Option<Self> {
+        Blake3Hash::from_hex(s).map(Self)
+    }
+}
+
+impl std::fmt::Display for NodeHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Hash of full file content: blake3(file_bytes). Used for integrity verification.
+/// For single-chunk files, ContentHash.0 == ChunkHash.0 (value equality, not type).
+/// For multi-chunk files, this is NOT a storage address — the BlobNode is at a NodeHash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Facet)]
+#[repr(transparent)]
+pub struct ContentHash(pub Blake3Hash);
+
+impl ContentHash {
+    pub fn to_hex(&self) -> String {
+        self.0.to_hex()
+    }
+
+    pub fn short_hex(&self) -> String {
+        self.0.short_hex()
+    }
+
+    pub fn from_hex(s: &str) -> Option<Self> {
+        Blake3Hash::from_hex(s).map(Self)
+    }
+}
+
+impl std::fmt::Display for ContentHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// Legacy aliases — kept temporarily for compilation during migration
+/// Hash of a blob (raw bytes) — DEPRECATED, use ChunkHash/NodeHash/ContentHash
+pub type BlobHash = Blake3Hash;
+/// Hash of a manifest — DEPRECATED, use NodeHash
 pub type ManifestHash = Blake3Hash;
 
 /// Hash of all inputs (cache lookup key)
 pub type CacheKey = Blake3Hash;
+
+// =============================================================================
+// CAS Node Types
+// =============================================================================
+
+/// Top-level CAS node enum. All nodes are stored at `nodes/blake3/{xx}/{hash}`
+/// where hash = blake3(serialized_bytes).
+///
+/// Serialization format: `[CAS_NODE_VERSION: u32 LE][postcard payload]`
+#[derive(Debug, Clone, Facet)]
+#[repr(u8)]
+pub enum CasNode {
+    Blob(BlobNode),
+    Directory(DirectoryNode),
+    Manifest(NodeManifest),
+    Toolchain(ToolchainManifest),
+    RegistryCrate(RegistryCrateManifest),
+}
+
+impl CasNode {
+    /// Serialize to bytes with version prefix.
+    /// Format: `[CAS_NODE_VERSION: u32 LE][postcard payload]`
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let payload = facet_postcard::to_vec(self).expect("CasNode serialization should not fail");
+        let mut bytes = Vec::with_capacity(4 + payload.len());
+        bytes.extend_from_slice(&CAS_NODE_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        bytes
+    }
+
+    /// Deserialize from bytes with version prefix.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CasNodeError> {
+        if bytes.len() < 4 {
+            return Err(CasNodeError::TooShort);
+        }
+        let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        if version != CAS_NODE_VERSION {
+            return Err(CasNodeError::UnknownVersion(version));
+        }
+        facet_postcard::from_slice(&bytes[4..]).map_err(CasNodeError::Postcard)
+    }
+
+    /// Serialize and compute the node hash (blake3 of the complete serialized bytes).
+    pub fn to_bytes_and_hash(&self) -> (Vec<u8>, NodeHash) {
+        let bytes = self.to_bytes();
+        let hash = NodeHash(Blake3Hash(*blake3::hash(&bytes).as_bytes()));
+        (bytes, hash)
+    }
+}
+
+#[derive(Debug)]
+pub enum CasNodeError {
+    TooShort,
+    UnknownVersion(u32),
+    Postcard(facet_postcard::DeserializeError),
+}
+
+impl std::fmt::Display for CasNodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CasNodeError::TooShort => write!(
+                f,
+                "node bytes too short (need at least 4 bytes for version prefix)"
+            ),
+            CasNodeError::UnknownVersion(v) => write!(
+                f,
+                "unknown CAS node version: {v} (expected {CAS_NODE_VERSION})"
+            ),
+            CasNodeError::Postcard(e) => write!(f, "postcard deserialization failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for CasNodeError {}
+
+// =============================================================================
+// BlobNode (multi-chunk files only)
+// =============================================================================
+
+/// A multi-chunk file. Single-chunk files (≤ CDC_MAX_CHUNK) are represented
+/// as SmallFile in directory entries and don't need a BlobNode.
+///
+/// Chunks are in file order: chunk[0] is the first bytes of the file,
+/// chunk[1] immediately follows, etc. Reassembly concatenates in order.
+/// Offset computation: chunk[i] starts at sum(chunk[0..i].size).
+#[derive(Debug, Clone, Facet)]
+pub struct BlobNode {
+    /// Chunks in file order. Must have len >= 2 (single-chunk files use SmallFile).
+    /// Capped at MAX_CHUNKS_PER_BLOB.
+    pub chunks: Vec<ChunkEntry>,
+    /// Total size of the file (sum of all chunk sizes).
+    pub total_size: u64,
+    /// Blake3 of full concatenated content — used for integrity verification
+    /// when reassembling. NOT the storage key (storage key is blake3 of
+    /// the serialized BlobNode bytes, like all other nodes).
+    pub content_hash: ContentHash,
+    /// CDC parameter set ID (always 1 today). Enables future migration
+    /// if CDC parameters change.
+    pub cdc_params_id: u8,
+}
+
+/// A single chunk within a BlobNode.
+#[derive(Debug, Clone, Facet)]
+pub struct ChunkEntry {
+    /// Hash of the chunk bytes (used to fetch from chunks/).
+    pub hash: ChunkHash,
+    /// Size of this chunk in bytes. Must be in 1..=CDC_MAX_CHUNK.
+    pub size: u32,
+}
+
+// =============================================================================
+// DirectoryNode (Merkle directory)
+// =============================================================================
+
+/// A content-addressed directory node in the Merkle tree.
+/// Replaces the flat TreeManifest.
+///
+/// Entries are sorted by `name.as_bytes()` (raw byte comparison, no Unicode
+/// normalization). Two identical directories always produce the same hash.
+#[derive(Debug, Clone, Facet)]
+pub struct DirectoryNode {
+    /// Directory entries, sorted by name.as_bytes() lexicographic.
+    pub entries: Vec<DirEntry>,
+    /// Recursive sum of file content bytes in this subtree.
+    /// Symlinks contribute 0. For progress reporting only.
+    /// Validated at finalization time (not on put_node).
+    pub total_size: u64,
+}
+
+/// A single entry in a DirectoryNode.
+#[derive(Debug, Clone, Facet)]
+pub struct DirEntry {
+    /// Filename only (not full path). Must be valid UTF-8.
+    /// Must not be empty, ".", "..", or contain "/".
+    pub name: String,
+    /// Entry kind and associated data.
+    pub kind: DirEntryKind,
+}
+
+/// Kind of directory entry. The type explicitly encodes whether a file is
+/// single-chunk or multi-chunk, eliminating any "try chunks/ then nodes/" guessing.
+#[derive(Debug, Clone, Facet)]
+#[repr(u8)]
+pub enum DirEntryKind {
+    /// Regular file, single chunk (≤ CDC_MAX_CHUNK bytes).
+    /// `content_hash` is blake3 of the file content, which is also the chunk hash.
+    /// Fetch via `get_chunk(content_hash.0)`.
+    SmallFile {
+        content_hash: ContentHash,
+        size: u64,
+        executable: bool,
+    },
+    /// Regular file, multi-chunk (> CDC_MAX_CHUNK bytes).
+    /// `content_hash` is blake3 of the full file content (for verification).
+    /// `blob_node` is the NodeHash of the BlobNode in nodes/ (for fetching).
+    /// Fetch via `get_node(blob_node)` → BlobNode → get_chunk per chunk.
+    LargeFile {
+        content_hash: ContentHash,
+        blob_node: NodeHash,
+        size: u64,
+        executable: bool,
+    },
+    /// Subdirectory. hash points to a child DirectoryNode in nodes/.
+    Dir { hash: NodeHash, total_size: u64 },
+    /// Symbolic link. Target must be valid UTF-8 (same restriction as name).
+    Symlink { target: String },
+}
+
+// =============================================================================
+// BlobRef — unambiguous "some bytes" reference
+// =============================================================================
+
+/// Reference to stored blob data. Used everywhere a "some bytes" reference
+/// appears (output entries, tarball refs, etc.). Eliminates "is it a chunk
+/// or a node?" ambiguity.
+#[derive(Debug, Clone, Facet)]
+#[repr(u8)]
+pub enum BlobRef {
+    /// Single chunk (≤ CDC_MAX_CHUNK bytes). Fetch via get_chunk.
+    Small { chunk: ChunkHash, size: u64 },
+    /// Multi-chunk. Fetch via get_node → BlobNode → get_chunk per chunk.
+    Large {
+        blob_node: NodeHash,
+        content_hash: ContentHash,
+        size: u64,
+    },
+}
+
+// =============================================================================
+// FlatTreeEntry (tarball extraction output)
+// =============================================================================
+
+/// Flat file entry returned by tarball extraction.
+/// The tarball crate returns a flat list of these; the caller builds a
+/// DirectoryNode Merkle tree from them.
+#[derive(Debug, Clone)]
+pub struct FlatTreeEntry {
+    /// Full relative path within the tree (UTF-8, forward slashes).
+    pub path: String,
+    /// Entry kind.
+    pub kind: FlatTreeEntryKind,
+}
+
+/// Kind of flat tree entry.
+#[derive(Debug, Clone)]
+pub enum FlatTreeEntryKind {
+    /// Regular file.
+    File {
+        /// Blake3 of file content.
+        content_hash: ContentHash,
+        /// Size in bytes.
+        size: u64,
+        /// Whether the file is executable (unix +x).
+        executable: bool,
+        /// If the file was multi-chunk, the NodeHash of the BlobNode.
+        /// None for single-chunk files (≤ CDC_MAX_CHUNK).
+        blob_node: Option<NodeHash>,
+    },
+    /// Symbolic link.
+    Symlink { target: String },
+    /// Empty directory.
+    Directory,
+}
+
+// =============================================================================
+// Validation Error (finalization)
+// =============================================================================
+
+/// Structured validation error returned by finalization points (publish,
+/// finalize_rust_toolchain, etc.) when the object graph is incomplete.
+#[derive(Debug, Clone, Facet)]
+pub struct ValidationError {
+    pub missing_chunks: Vec<ChunkHash>,
+    pub missing_nodes: Vec<NodeHash>,
+    /// Nodes that exist but are the wrong CasNode variant
+    /// (e.g., expected "Directory", got "Blob"). Carries (hash, description).
+    pub wrong_variant: Vec<WrongVariantEntry>,
+    /// Inconsistencies like content_hash/size mismatch, bad total_size.
+    /// Carries (hash, description).
+    pub inconsistent: Vec<InconsistentEntry>,
+    /// Nodes involved in cycles.
+    pub cycles: Vec<NodeHash>,
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct WrongVariantEntry {
+    pub hash: NodeHash,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct InconsistentEntry {
+    pub hash: NodeHash,
+    pub description: String,
+}
+
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.missing_chunks.is_empty() {
+            writeln!(f, "missing chunks: {}", self.missing_chunks.len())?;
+        }
+        if !self.missing_nodes.is_empty() {
+            writeln!(f, "missing nodes: {}", self.missing_nodes.len())?;
+        }
+        for e in &self.wrong_variant {
+            writeln!(f, "wrong variant at {}: {}", e.hash, e.description)?;
+        }
+        for e in &self.inconsistent {
+            writeln!(f, "inconsistent at {}: {}", e.hash, e.description)?;
+        }
+        if !self.cycles.is_empty() {
+            writeln!(f, "cycles involving {} nodes", self.cycles.len())?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ValidationError {}
+
+// =============================================================================
+// Manifest / Output Types
+// =============================================================================
 
 /// A stable, human-readable node identifier
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Facet)]
@@ -112,6 +533,20 @@ impl std::fmt::Display for NodeId {
     }
 }
 
+/// Reference to output blob data in a manifest's OutputEntry.
+#[derive(Debug, Clone, Facet)]
+#[repr(u8)]
+pub enum OutputBlobRef {
+    /// Single-chunk output (≤ CDC_MAX_CHUNK).
+    Small { chunk: ChunkHash, size: u64 },
+    /// Multi-chunk output.
+    Large {
+        blob_node: NodeHash,
+        content_hash: ContentHash,
+        size: u64,
+    },
+}
+
 /// Output entry in a manifest
 #[derive(Debug, Clone, Facet)]
 pub struct OutputEntry {
@@ -119,10 +554,8 @@ pub struct OutputEntry {
     pub logical: String,
     /// Filename for materialization ("hello", "libfoo.rlib")
     pub filename: String,
-    /// Hash of the blob
-    pub blob: BlobHash,
-    /// Size in bytes
-    pub size: u64,
+    /// Reference to the output blob
+    pub blob: OutputBlobRef,
     /// Whether the file should be executable
     pub executable: bool,
 }
@@ -154,45 +587,6 @@ pub struct ServiceVersion {
     pub protocol_version: u32,
 }
 
-// =============================================================================
-// Tree Ingestion Types
-// =============================================================================
-
-/// A file to ingest into a tree
-#[derive(Debug, Clone, Facet)]
-pub struct TreeFile {
-    /// Relative path within the tree (UTF-8, forward slashes)
-    pub path: String,
-    /// File contents
-    pub contents: Vec<u8>,
-    /// Whether the file is executable
-    pub executable: bool,
-}
-
-/// Request to ingest a tree of files into CAS
-#[derive(Debug, Clone, Facet)]
-pub struct IngestTreeRequest {
-    /// Files to ingest
-    pub files: Vec<TreeFile>,
-}
-
-/// Result of tree ingestion
-#[derive(Debug, Clone, Facet)]
-pub struct IngestTreeResult {
-    /// Whether ingestion succeeded
-    pub success: bool,
-    /// Hash of the TreeManifest (None on failure)
-    pub manifest_hash: Option<ManifestHash>,
-    /// Number of files ingested
-    pub file_count: u32,
-    /// Total bytes ingested
-    pub total_bytes: u64,
-    /// Number of new blobs stored (vs deduplicated)
-    pub new_blobs: u32,
-    /// Error message if failed
-    pub error: Option<String>,
-}
-
 /// Progress update streamed during long-running store operations (downloads, extraction).
 #[derive(Debug, Clone, Facet)]
 pub struct StoreProgress {
@@ -204,9 +598,15 @@ pub struct StoreProgress {
     pub total: Option<u64>,
 }
 
-/// CAS service trait
+// =============================================================================
+// Store Service Trait
+// =============================================================================
+
+/// CAS service trait.
 ///
-/// CAS stores immutable content. Clients produce working directories.
+/// The store is a validated key-value store accepting chunk-shaped and
+/// node-shaped requests. All chunking, assembly, and Merkle tree construction
+/// logic lives in shared library code used by clients.
 #[roam::service]
 #[allow(async_fn_in_trait)]
 pub trait Store {
@@ -218,78 +618,61 @@ pub trait Store {
     async fn version(&self) -> ServiceVersion;
 
     // =========================================================================
+    // Chunk operations
+    // =========================================================================
+
+    /// Store a chunk. Validates: blake3(data) == hash, len(data) <= CDC_MAX_CHUNK.
+    async fn put_chunk(&self, hash: ChunkHash, data: Vec<u8>) -> Result<(), String>;
+
+    /// Get a chunk by hash. Returns None if not found.
+    async fn get_chunk(&self, hash: ChunkHash) -> Option<Vec<u8>>;
+
+    /// Check if a chunk exists.
+    async fn has_chunk(&self, hash: ChunkHash) -> bool;
+
+    /// Batch existence check: given a list of chunk hashes, return the subset
+    /// that the store does NOT have. Enables upload dedup — client only sends
+    /// chunks the store is missing.
+    /// Capped at MAX_MISSING_CHUNKS_BATCH hashes per call.
+    async fn list_missing_chunks(&self, hashes: Vec<ChunkHash>) -> Vec<ChunkHash>;
+
+    // =========================================================================
+    // Node operations
+    // =========================================================================
+
+    /// Store a node. Validates: blake3(data) == hash (uniform addressing),
+    /// well-formed CasNode, version prefix correct, data.len() <= MAX_NODE_BYTES.
+    ///
+    /// For BlobNode: validates sum(chunk.size) == total_size, chunks.len() in 2..=MAX_CHUNKS_PER_BLOB,
+    /// each chunk.size in 1..=CDC_MAX_CHUNK, total_size > CDC_MAX_CHUNK, cdc_params_id known.
+    ///
+    /// For DirectoryNode: validates sorted, no dups, no empty/dot/dotdot/slash names,
+    /// SmallFile.size <= CDC_MAX_CHUNK, LargeFile.size > CDC_MAX_CHUNK.
+    ///
+    /// Does NOT validate chunk existence — that's checked at finalization time.
+    async fn put_node(&self, hash: NodeHash, data: Vec<u8>) -> Result<(), String>;
+
+    /// Get a node by hash. Returns None if not found.
+    async fn get_node(&self, hash: NodeHash) -> Option<Vec<u8>>;
+
+    /// Check if a node exists.
+    async fn has_node(&self, hash: NodeHash) -> bool;
+
+    // =========================================================================
     // Cache key operations
     // =========================================================================
 
-    /// Look up a cache key, returns manifest hash if found
-    async fn lookup(&self, cache_key: CacheKey) -> Option<ManifestHash>;
+    /// Look up a cache key, returns manifest node hash if found
+    async fn lookup(&self, cache_key: CacheKey) -> Option<NodeHash>;
 
     /// Publish a cache entry atomically.
-    /// Validates that the manifest exists (and optionally its blobs) before
-    /// writing the cache key → manifest hash mapping.
-    async fn publish(&self, cache_key: CacheKey, manifest_hash: ManifestHash) -> PublishResult;
+    /// Validates the object graph (finalization point).
+    async fn publish(&self, cache_key: CacheKey, manifest_hash: NodeHash) -> PublishResult;
 
-    /// Remove a cache key mapping. Blobs and manifests are left intact
+    /// Remove a cache key mapping. Chunks and nodes are left intact
     /// (they're content-addressed and harmless to keep).
     /// Used by ephemeral sessions to roll back cache entries on disconnect.
     async fn unpublish(&self, cache_key: CacheKey) -> bool;
-
-    // =========================================================================
-    // Manifest operations
-    // =========================================================================
-
-    /// Store a manifest, returns its hash
-    async fn put_manifest(&self, manifest: NodeManifest) -> ManifestHash;
-
-    /// Get a manifest by hash
-    async fn get_manifest(&self, hash: ManifestHash) -> Option<NodeManifest>;
-
-    // =========================================================================
-    // Blob operations (small blobs, recommended < 10MB)
-    // =========================================================================
-
-    /// Store a blob, returns its hash.
-    /// For small blobs. Use chunked upload for large files.
-    // NOTE: Vec<u8> is not zerocopy-friendly. For v0 this is acceptable.
-    async fn put_blob(&self, data: Vec<u8>) -> BlobHash;
-
-    /// Get a blob by hash.
-    /// Returns None if not found.
-    async fn get_blob(&self, hash: BlobHash) -> Option<Vec<u8>>;
-
-    /// Get a range of bytes from a blob.
-    /// Returns None if the blob does not exist.
-    /// The returned Vec may be shorter than `len` if the range extends past EOF.
-    async fn get_blob_range(&self, hash: BlobHash, offset: u64, len: u64) -> Option<Vec<u8>>;
-
-    /// Check if a blob exists
-    async fn has_blob(&self, hash: BlobHash) -> bool;
-
-    // =========================================================================
-    // Streaming blob operations (for large files like toolchains)
-    // =========================================================================
-
-    /// Stream blob chunks for extraction.
-    ///
-    /// NOTE: This is chunked delivery (Vec<u8> per chunk), not zero-copy.
-    /// Each chunk involves allocation. Fine for v1 but don't assume this is
-    /// free for multi-GB transfers.
-    async fn stream_blob(&self, blob: Blake3Hash, output: roam::Tx<Vec<u8>>) -> Result<(), String>;
-
-    // =========================================================================
-    // Tree ingestion (for uploading source trees)
-    // =========================================================================
-
-    /// Ingest a tree of files into the store.
-    ///
-    /// Each file is stored as a blob, and a TreeManifest is created
-    /// referencing all the blobs. Returns the hash of the TreeManifest.
-    ///
-    /// This is used by the daemon to upload source files before compilation.
-    async fn ingest_tree(&self, request: IngestTreeRequest) -> IngestTreeResult;
-
-    /// Get a TreeManifest by its hash
-    async fn get_tree_manifest(&self, hash: ManifestHash) -> Option<TreeManifest>;
 
     // =========================================================================
     // Toolchain operations (called by execd/daemon)
@@ -311,16 +694,17 @@ pub trait Store {
         progress: roam::Tx<StoreProgress>,
     ) -> EnsureRustToolchainComponentResult;
 
-    /// Extract a single Rust toolchain component tarball into a tree manifest.
+    /// Extract a single Rust toolchain component tarball into a directory tree.
     async fn extract_rust_toolchain_component(
         &self,
         spec: RustToolchainSpec,
         component: RustComponent,
-        tarball_blob: Blake3Hash,
+        tarball: BlobRef,
         progress: roam::Tx<StoreProgress>,
     ) -> EnsureRustToolchainComponentResult;
 
     /// Finalize a Rust toolchain manifest from already extracted components.
+    /// This is a finalization point — validates the entire object graph.
     async fn finalize_rust_toolchain(&self, spec: RustToolchainSpec) -> EnsureToolchainResult;
 
     /// Ensure a Zig toolchain exists in the store. Downloads if needed.
@@ -331,17 +715,17 @@ pub trait Store {
         progress: roam::Tx<StoreProgress>,
     ) -> EnsureToolchainResult;
 
-    /// Get toolchain manifest by its hash
-    async fn get_toolchain_manifest(&self, manifest_hash: Blake3Hash) -> Option<ToolchainManifest>;
+    /// Get toolchain manifest by its node hash
+    async fn get_toolchain_manifest(&self, manifest_hash: NodeHash) -> Option<ToolchainManifest>;
 
     /// Get materialization plan for a toolchain
     async fn get_materialization_plan(
         &self,
-        manifest_hash: Blake3Hash,
+        manifest_hash: NodeHash,
     ) -> Option<MaterializationPlan>;
 
     /// Lookup manifest hash by toolchain spec key
-    async fn lookup_toolchain_spec(&self, spec_key: ToolchainSpecKey) -> Option<Blake3Hash>;
+    async fn lookup_toolchain_spec(&self, spec_key: ToolchainSpecKey) -> Option<NodeHash>;
 
     // =========================================================================
     // Registry operations (called by execd/daemon)
@@ -355,14 +739,12 @@ pub trait Store {
         progress: roam::Tx<StoreProgress>,
     ) -> EnsureRegistryCrateResult;
 
-    /// Get a registry crate manifest by its hash
-    async fn get_registry_manifest(
-        &self,
-        manifest_hash: Blake3Hash,
-    ) -> Option<RegistryCrateManifest>;
+    /// Get a registry crate manifest by its node hash
+    async fn get_registry_manifest(&self, manifest_hash: NodeHash)
+    -> Option<RegistryCrateManifest>;
 
     /// Lookup manifest hash by spec key
-    async fn lookup_registry_spec(&self, spec_key: Blake3Hash) -> Option<Blake3Hash>;
+    async fn lookup_registry_spec(&self, spec_key: Blake3Hash) -> Option<NodeHash>;
 }
 
 // =============================================================================
@@ -498,6 +880,9 @@ impl ZigToolchainSpec {
 
 // Toolchain Manifest (What Was Acquired)
 
+/// Schema version 4: components stored as DirectoryNode trees, manifests stored as CasNode
+pub const TOOLCHAIN_MANIFEST_SCHEMA_VERSION: u32 = 4;
+
 #[derive(Debug, Clone, Facet)]
 pub struct ToolchainManifest {
     /// Schema version for format evolution
@@ -520,30 +905,27 @@ pub struct ToolchainManifest {
     // === Zig-specific fields ===
     pub zig_version: Option<String>,
 
-    /// Components stored as trees (deduped file storage)
+    /// Components stored as DirectoryNode trees
     pub components: Vec<ToolchainComponentTree>,
 }
 
-/// Schema version 3: components stored as trees instead of tarballs
-pub const TOOLCHAIN_MANIFEST_SCHEMA_VERSION: u32 = 3;
-
-/// A toolchain component stored as a tree (deduped file storage)
+/// A toolchain component stored as a DirectoryNode tree
 #[derive(Debug, Clone, Facet)]
 pub struct ToolchainComponentTree {
     /// Component name: "rustc", "rust-std", "zig-exe", "zig-lib"
     pub name: String,
     /// Target triple (for rust-std)
     pub target: Option<String>,
-    /// Hash of the TreeManifest blob
-    pub tree_manifest: Blake3Hash,
+    /// Hash of the root DirectoryNode for this component
+    pub tree_root: NodeHash,
     /// Upstream SHA256 hex (for provenance/verification)
     pub sha256: String,
     /// Total size of all files in the tree
     pub total_size_bytes: u64,
     /// Number of files in the tree
     pub file_count: u32,
-    /// Number of unique blobs (for dedup stats)
-    pub unique_blobs: u32,
+    /// Number of unique chunks (for dedup stats)
+    pub unique_chunks: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
@@ -568,7 +950,7 @@ pub struct MaterializationPlan {
     pub steps: Vec<MaterializeStep>,
 }
 
-pub const MATERIALIZATION_LAYOUT_VERSION: u32 = 1;
+pub const MATERIALIZATION_LAYOUT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Facet)]
 #[repr(u8)]
@@ -578,10 +960,10 @@ pub enum MaterializeStep {
     EnsureDir { relpath: String },
     /// Create a symlink (target must not escape toolchain root)
     Symlink { relpath: String, target: String },
-    /// Materialize a tree from a TreeManifest
+    /// Materialize a tree from a DirectoryNode
     MaterializeTree {
-        /// Hash of the TreeManifest blob
-        tree_manifest: Blake3Hash,
+        /// Hash of the root DirectoryNode
+        tree_root: NodeHash,
         /// Destination subdirectory relative to toolchain root
         dest_subdir: String,
     },
@@ -597,8 +979,8 @@ pub struct EnsureToolchainResult {
     /// None on failure
     pub toolchain_id: Option<ToolchainId>,
 
-    /// Hash of the ToolchainManifest in CAS
-    pub manifest_hash: Option<Blake3Hash>,
+    /// Hash of the ToolchainManifest node in CAS
+    pub manifest_hash: Option<NodeHash>,
 
     pub status: EnsureStatus,
 
@@ -613,11 +995,11 @@ pub struct EnsureRustToolchainComponentResult {
     /// Component this result belongs to
     pub component: RustComponent,
 
-    /// Hash of downloaded component tarball blob (download step)
-    pub tarball_blob: Option<Blake3Hash>,
+    /// Reference to the downloaded component tarball
+    pub tarball: Option<BlobRef>,
 
-    /// Hash of extracted component tree manifest blob (extract step)
-    pub tree_manifest: Option<Blake3Hash>,
+    /// Hash of the root DirectoryNode for the extracted component
+    pub tree_root: Option<NodeHash>,
 
     pub status: EnsureStatus,
 
@@ -643,7 +1025,7 @@ pub const CRATES_IO_REGISTRY: &str = "registry+https://github.com/rust-lang/crat
 
 /// Current schema version for registry crate manifests.
 /// Bump this when the manifest format changes.
-pub const REGISTRY_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const REGISTRY_MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 // Registry Spec (What is Requested)
 
@@ -737,8 +1119,8 @@ pub struct RegistryCrateManifest {
     /// The spec that produced this manifest (includes checksum for provenance)
     pub spec: RegistrySpec,
 
-    /// Blake3 hash of the .crate tarball bytes in CAS
-    pub crate_tarball_blob: Blake3Hash,
+    /// Reference to the .crate tarball bytes in CAS
+    pub crate_tarball: BlobRef,
 
     /// When acquired (ISO 8601 string)
     pub created_at: String,
@@ -752,8 +1134,8 @@ pub struct EnsureRegistryCrateResult {
     /// The computed spec key (None if spec was invalid)
     pub spec_key: Option<RegistrySpecKey>,
 
-    /// Hash of the RegistryCrateManifest in CAS (None on failure)
-    pub manifest_hash: Option<Blake3Hash>,
+    /// Hash of the RegistryCrateManifest node in CAS (None on failure)
+    pub manifest_hash: Option<NodeHash>,
 
     /// Status of the operation
     pub status: EnsureStatus,
@@ -776,68 +1158,40 @@ pub struct RegistryMaterializationResult {
 }
 
 // =============================================================================
-// Tree Manifest (Content-Addressed Directory)
+// Legacy Types — kept temporarily during migration
 // =============================================================================
 
-/// A content-addressed directory tree stored in CAS.
-///
-/// Instead of storing tarballs as blobs, we extract them and store each file
-/// as a separate blob. This enables:
-/// - Deduplication across versions (e.g., unchanged files between Rust 1.83 and 1.84)
-/// - Deduplication across crates (LICENSE files, similar Cargo.toml structures)
-/// - Efficient partial materialization (only fetch missing blobs)
-///
-/// The tree manifest itself is stored as a blob, and its hash serves as the
-/// "tree hash" for the entire directory.
+/// DEPRECATED: Use DirectoryNode instead.
+/// A content-addressed directory tree stored in CAS (flat list format).
 #[derive(Debug, Clone, Facet)]
 pub struct TreeManifest {
-    /// Schema version for format evolution
     pub schema_version: u32,
-
-    /// Entries sorted by path for deterministic hashing
     pub entries: Vec<TreeEntry>,
-
-    /// Total size of all files (for progress reporting)
     pub total_size_bytes: u64,
-
-    /// Number of unique blobs (for dedup stats)
     pub unique_blobs: u32,
 }
 
-/// Current schema version for tree manifests
 pub const TREE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
-/// A single entry in a tree manifest
+/// DEPRECATED: Use DirEntry instead.
 #[derive(Debug, Clone, Facet)]
 pub struct TreeEntry {
-    /// Relative path within the tree (UTF-8, forward slashes)
     pub path: String,
-
-    /// Entry kind and associated data
     pub kind: TreeEntryKind,
 }
 
-/// Kind of tree entry
+/// DEPRECATED: Use DirEntryKind instead.
 #[derive(Debug, Clone, Facet)]
 #[repr(u8)]
 pub enum TreeEntryKind {
-    /// Regular file
     File {
-        /// Blake3 hash of file contents
         blob: Blake3Hash,
-
-        /// File size in bytes
         size: u64,
-
-        /// Whether the file is executable (unix +x)
         executable: bool,
     },
-    /// Symbolic link
     Symlink {
-        /// Link target (relative path)
         target: String,
     },
-    /// Directory (only needed for empty directories)
     Directory,
 }
 
@@ -848,7 +1202,6 @@ impl Default for TreeManifest {
 }
 
 impl TreeManifest {
-    /// Create a new empty tree manifest
     pub fn new() -> Self {
         Self {
             schema_version: TREE_MANIFEST_SCHEMA_VERSION,
@@ -858,7 +1211,6 @@ impl TreeManifest {
         }
     }
 
-    /// Add a file entry
     pub fn add_file(&mut self, path: String, blob: Blake3Hash, size: u64, executable: bool) {
         self.entries.push(TreeEntry {
             path,
@@ -871,7 +1223,6 @@ impl TreeManifest {
         self.total_size_bytes += size;
     }
 
-    /// Add a symlink entry
     pub fn add_symlink(&mut self, path: String, target: String) {
         self.entries.push(TreeEntry {
             path,
@@ -879,7 +1230,6 @@ impl TreeManifest {
         });
     }
 
-    /// Add an empty directory entry
     pub fn add_directory(&mut self, path: String) {
         self.entries.push(TreeEntry {
             path,
@@ -887,11 +1237,8 @@ impl TreeManifest {
         });
     }
 
-    /// Sort entries by path and compute unique blob count
     pub fn finalize(&mut self) {
         self.entries.sort_by(|a, b| a.path.cmp(&b.path));
-
-        // Count unique blobs
         let mut seen = std::collections::HashSet::new();
         for entry in &self.entries {
             if let TreeEntryKind::File { blob, .. } = &entry.kind {
@@ -901,7 +1248,6 @@ impl TreeManifest {
         self.unique_blobs = seen.len() as u32;
     }
 
-    /// Iterate over file entries (for materialization)
     pub fn files(&self) -> impl Iterator<Item = (&str, &Blake3Hash, u64, bool)> {
         self.entries.iter().filter_map(|e| match &e.kind {
             TreeEntryKind::File {
@@ -913,7 +1259,6 @@ impl TreeManifest {
         })
     }
 
-    /// Iterate over symlink entries
     pub fn symlinks(&self) -> impl Iterator<Item = (&str, &str)> {
         self.entries.iter().filter_map(|e| match &e.kind {
             TreeEntryKind::Symlink { target } => Some((e.path.as_str(), target.as_str())),
@@ -921,7 +1266,6 @@ impl TreeManifest {
         })
     }
 
-    /// Iterate over directory entries (empty dirs only)
     pub fn directories(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().filter_map(|e| match &e.kind {
             TreeEntryKind::Directory => Some(e.path.as_str()),
@@ -929,6 +1273,37 @@ impl TreeManifest {
         })
     }
 }
+
+// Legacy types that are no longer needed but kept for compilation
+
+/// DEPRECATED: Use chunk/node operations directly.
+#[derive(Debug, Clone, Facet)]
+pub struct TreeFile {
+    pub path: String,
+    pub contents: Vec<u8>,
+    pub executable: bool,
+}
+
+/// DEPRECATED: Use chunk/node operations directly.
+#[derive(Debug, Clone, Facet)]
+pub struct IngestTreeRequest {
+    pub files: Vec<TreeFile>,
+}
+
+/// DEPRECATED: Use chunk/node operations directly.
+#[derive(Debug, Clone, Facet)]
+pub struct IngestTreeResult {
+    pub success: bool,
+    pub manifest_hash: Option<ManifestHash>,
+    pub file_count: u32,
+    pub total_bytes: u64,
+    pub new_blobs: u32,
+    pub error: Option<String>,
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -966,6 +1341,306 @@ mod tests {
 
         let decoded: [u8; 32] = from_slice(&bytes).expect("deserialize");
         assert_eq!(decoded, arr);
+    }
+
+    // =========================================================================
+    // Newtype wrapper roundtrip tests
+    // =========================================================================
+
+    #[test]
+    fn test_chunk_hash_roundtrip() {
+        let hash = ChunkHash(Blake3Hash::from_bytes(b"chunk data"));
+        let bytes = to_vec(&hash).expect("serialize ChunkHash");
+        let decoded: ChunkHash = from_slice(&bytes).expect("deserialize ChunkHash");
+        assert_eq!(decoded, hash);
+    }
+
+    #[test]
+    fn test_node_hash_roundtrip() {
+        let hash = NodeHash(Blake3Hash::from_bytes(b"node data"));
+        let bytes = to_vec(&hash).expect("serialize NodeHash");
+        let decoded: NodeHash = from_slice(&bytes).expect("deserialize NodeHash");
+        assert_eq!(decoded, hash);
+    }
+
+    #[test]
+    fn test_content_hash_roundtrip() {
+        let hash = ContentHash(Blake3Hash::from_bytes(b"file content"));
+        let bytes = to_vec(&hash).expect("serialize ContentHash");
+        let decoded: ContentHash = from_slice(&bytes).expect("deserialize ContentHash");
+        assert_eq!(decoded, hash);
+    }
+
+    // =========================================================================
+    // CasNode serialization roundtrip tests
+    // =========================================================================
+
+    #[test]
+    fn test_cas_node_blob_roundtrip() {
+        let node = CasNode::Blob(BlobNode {
+            chunks: vec![
+                ChunkEntry {
+                    hash: ChunkHash(Blake3Hash([1u8; 32])),
+                    size: 2_000_000,
+                },
+                ChunkEntry {
+                    hash: ChunkHash(Blake3Hash([2u8; 32])),
+                    size: 1_500_000,
+                },
+            ],
+            total_size: 3_500_000,
+            content_hash: ContentHash(Blake3Hash([3u8; 32])),
+            cdc_params_id: 1,
+        });
+
+        let bytes = node.to_bytes();
+        let decoded = CasNode::from_bytes(&bytes).expect("deserialize CasNode::Blob");
+        match decoded {
+            CasNode::Blob(blob) => {
+                assert_eq!(blob.chunks.len(), 2);
+                assert_eq!(blob.total_size, 3_500_000);
+                assert_eq!(blob.content_hash, ContentHash(Blake3Hash([3u8; 32])));
+                assert_eq!(blob.cdc_params_id, 1);
+            }
+            other => panic!("expected Blob, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_cas_node_directory_roundtrip() {
+        let node = CasNode::Directory(DirectoryNode {
+            entries: vec![
+                DirEntry {
+                    name: "README.md".to_string(),
+                    kind: DirEntryKind::SmallFile {
+                        content_hash: ContentHash(Blake3Hash([10u8; 32])),
+                        size: 1024,
+                        executable: false,
+                    },
+                },
+                DirEntry {
+                    name: "big_binary".to_string(),
+                    kind: DirEntryKind::LargeFile {
+                        content_hash: ContentHash(Blake3Hash([20u8; 32])),
+                        blob_node: NodeHash(Blake3Hash([21u8; 32])),
+                        size: 100_000_000,
+                        executable: true,
+                    },
+                },
+                DirEntry {
+                    name: "link".to_string(),
+                    kind: DirEntryKind::Symlink {
+                        target: "../other".to_string(),
+                    },
+                },
+                DirEntry {
+                    name: "subdir".to_string(),
+                    kind: DirEntryKind::Dir {
+                        hash: NodeHash(Blake3Hash([30u8; 32])),
+                        total_size: 50_000,
+                    },
+                },
+            ],
+            total_size: 100_051_024,
+        });
+
+        let bytes = node.to_bytes();
+        let decoded = CasNode::from_bytes(&bytes).expect("deserialize CasNode::Directory");
+        match decoded {
+            CasNode::Directory(dir) => {
+                assert_eq!(dir.entries.len(), 4);
+                assert_eq!(dir.total_size, 100_051_024);
+                assert_eq!(dir.entries[0].name, "README.md");
+                assert_eq!(dir.entries[3].name, "subdir");
+            }
+            other => panic!("expected Directory, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_cas_node_version_prefix() {
+        let node = CasNode::Directory(DirectoryNode {
+            entries: vec![],
+            total_size: 0,
+        });
+        let bytes = node.to_bytes();
+
+        // First 4 bytes should be CAS_NODE_VERSION in LE
+        let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(version, CAS_NODE_VERSION);
+    }
+
+    #[test]
+    fn test_cas_node_unknown_version() {
+        let mut bytes = CasNode::Directory(DirectoryNode {
+            entries: vec![],
+            total_size: 0,
+        })
+        .to_bytes();
+
+        // Corrupt version to 99
+        bytes[0..4].copy_from_slice(&99u32.to_le_bytes());
+
+        match CasNode::from_bytes(&bytes) {
+            Err(CasNodeError::UnknownVersion(99)) => {}
+            other => panic!("expected UnknownVersion(99), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_cas_node_too_short() {
+        match CasNode::from_bytes(&[1, 2, 3]) {
+            Err(CasNodeError::TooShort) => {}
+            other => panic!("expected TooShort, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_cas_node_to_bytes_and_hash_determinism() {
+        let node = CasNode::Directory(DirectoryNode {
+            entries: vec![DirEntry {
+                name: "test.txt".to_string(),
+                kind: DirEntryKind::SmallFile {
+                    content_hash: ContentHash(Blake3Hash([42u8; 32])),
+                    size: 100,
+                    executable: false,
+                },
+            }],
+            total_size: 100,
+        });
+
+        let (bytes1, hash1) = node.to_bytes_and_hash();
+        let (bytes2, hash2) = node.to_bytes_and_hash();
+        assert_eq!(bytes1, bytes2);
+        assert_eq!(hash1, hash2);
+
+        // Hash is blake3 of the bytes
+        let expected_hash = NodeHash(Blake3Hash(*blake3::hash(&bytes1).as_bytes()));
+        assert_eq!(hash1, expected_hash);
+    }
+
+    // =========================================================================
+    // BlobRef roundtrip tests
+    // =========================================================================
+
+    #[test]
+    fn test_blob_ref_small_roundtrip() {
+        let r = BlobRef::Small {
+            chunk: ChunkHash(Blake3Hash([5u8; 32])),
+            size: 1024,
+        };
+        let bytes = to_vec(&r).expect("serialize BlobRef::Small");
+        let decoded: BlobRef = from_slice(&bytes).expect("deserialize BlobRef::Small");
+        match decoded {
+            BlobRef::Small { chunk, size } => {
+                assert_eq!(chunk, ChunkHash(Blake3Hash([5u8; 32])));
+                assert_eq!(size, 1024);
+            }
+            other => panic!("expected Small, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_blob_ref_large_roundtrip() {
+        let r = BlobRef::Large {
+            blob_node: NodeHash(Blake3Hash([6u8; 32])),
+            content_hash: ContentHash(Blake3Hash([7u8; 32])),
+            size: 100_000_000,
+        };
+        let bytes = to_vec(&r).expect("serialize BlobRef::Large");
+        let decoded: BlobRef = from_slice(&bytes).expect("deserialize BlobRef::Large");
+        match decoded {
+            BlobRef::Large {
+                blob_node,
+                content_hash,
+                size,
+            } => {
+                assert_eq!(blob_node, NodeHash(Blake3Hash([6u8; 32])));
+                assert_eq!(content_hash, ContentHash(Blake3Hash([7u8; 32])));
+                assert_eq!(size, 100_000_000);
+            }
+            other => panic!("expected Large, got {other:?}"),
+        }
+    }
+
+    // =========================================================================
+    // GOLDEN-BYTE TESTS: Serialization Stability
+    // =========================================================================
+    //
+    // These tests pin exact serialized byte output for known inputs. If any test
+    // fails, it means the serialization format changed — which invalidates ALL
+    // existing nodes in the store (because hash = blake3(serialized_bytes)).
+    //
+    // If a test fails:
+    //   (a) intentional: bump CAS_NODE_VERSION, update golden values, note what changed
+    //   (b) accidental: revert whatever broke it
+
+    #[test]
+    fn golden_empty_directory_node() {
+        let node = CasNode::Directory(DirectoryNode {
+            entries: vec![],
+            total_size: 0,
+        });
+        let bytes = node.to_bytes();
+        let (_, hash) = node.to_bytes_and_hash();
+        assert_eq!(
+            hash.to_hex(),
+            Blake3Hash::from_bytes(&bytes).to_hex(),
+            "hash should be blake3 of serialized bytes"
+        );
+        assert_eq!(
+            hex::encode(&bytes),
+            "01000000010000",
+            "Empty DirectoryNode golden bytes changed! Bump CAS_NODE_VERSION if intentional."
+        );
+        assert_eq!(
+            hash.to_hex(),
+            "a56f894b739937a2b8c1636a591f735bc34cbf401b7934d4bb3a5ba24f860ad7",
+            "Empty DirectoryNode golden hash changed!"
+        );
+    }
+
+    #[test]
+    fn golden_small_file_dir_entry() {
+        let entry = DirEntry {
+            name: "hello.txt".to_string(),
+            kind: DirEntryKind::SmallFile {
+                content_hash: ContentHash(Blake3Hash([0xAA; 32])),
+                size: 42,
+                executable: false,
+            },
+        };
+        let bytes = to_vec(&entry).expect("serialize DirEntry");
+        assert_eq!(
+            hex::encode(&bytes),
+            "0968656c6c6f2e74787400aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2a00",
+            "SmallFile DirEntry golden bytes changed!"
+        );
+    }
+
+    #[test]
+    fn golden_blob_node() {
+        let node = CasNode::Blob(BlobNode {
+            chunks: vec![
+                ChunkEntry {
+                    hash: ChunkHash(Blake3Hash([0xBB; 32])),
+                    size: 2_000_000,
+                },
+                ChunkEntry {
+                    hash: ChunkHash(Blake3Hash([0xCC; 32])),
+                    size: 1_500_000,
+                },
+            ],
+            total_size: 3_500_000,
+            content_hash: ContentHash(Blake3Hash([0xDD; 32])),
+            cdc_params_id: 1,
+        });
+        let bytes = node.to_bytes();
+        assert_eq!(
+            hex::encode(&bytes),
+            "010000000002bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb80897acccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccce0c65be0cfd501dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd01",
+            "BlobNode golden bytes changed! Bump CAS_NODE_VERSION if intentional."
+        );
     }
 
     // =========================================================================

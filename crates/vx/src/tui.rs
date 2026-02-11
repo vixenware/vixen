@@ -9,8 +9,9 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, oneshot};
+use tokio::sync::oneshot;
 use tracing_subscriber::Layer;
+use peeps::locks::DiagnosticAsyncRwLock;
 use vxd_proto::{ActionProgress, ActionType};
 
 /// Tracks a single action
@@ -99,9 +100,9 @@ impl TuiState {
 
 /// Handle for interacting with the TUI
 pub struct TuiHandle {
-    state: Arc<RwLock<TuiState>>,
+    state: Arc<DiagnosticAsyncRwLock<TuiState>>,
     /// Receiver that signals when display task has finished cleanup
-    shutdown_rx: Arc<RwLock<Option<oneshot::Receiver<()>>>>,
+    shutdown_rx: Arc<DiagnosticAsyncRwLock<Option<oneshot::Receiver<()>>>>,
 }
 
 impl Clone for TuiHandle {
@@ -116,12 +117,15 @@ impl Clone for TuiHandle {
 impl TuiHandle {
     /// Create a new TUI handle and spawn the display task
     pub fn new() -> Self {
-        let state = Arc::new(RwLock::new(TuiState::new()));
+        let state = Arc::new(DiagnosticAsyncRwLock::new("vx/tui_state", TuiState::new()));
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let handle = Self {
             state: state.clone(),
-            shutdown_rx: Arc::new(RwLock::new(Some(shutdown_rx))),
+            shutdown_rx: Arc::new(DiagnosticAsyncRwLock::new(
+                "vx/tui_shutdown",
+                Some(shutdown_rx),
+            )),
         };
 
         // Spawn the display task
@@ -201,7 +205,10 @@ impl TuiHandle {
     }
 
     /// Background task that updates the display at ~15fps
-    async fn display_task(state: Arc<RwLock<TuiState>>, shutdown_tx: oneshot::Sender<()>) {
+    async fn display_task(
+        state: Arc<DiagnosticAsyncRwLock<TuiState>>,
+        shutdown_tx: oneshot::Sender<()>,
+    ) {
         let multi = MultiProgress::new();
         multi.set_move_cursor(false); // can't set it to true, we add/remove tasks dynamically
 

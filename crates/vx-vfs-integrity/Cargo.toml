@@ -1,0 +1,41 @@
+[package]
+name = "vx-vfs-integrity"
+version.workspace = true
+edition.workspace = true
+
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+[[bin]]
+name = "vx-vfs-integrity"
+path = "src/main.rs"
+
+[dependencies]
+# Internal
+vx-store-proto = { workspace = true }
+vx-vfsd = { workspace = true }
+vx-io = { workspace = true }
+
+# RPC
+roam = { workspace = true }
+roam-stream = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# CLI
+facet = { workspace = true }
+figue = { workspace = true }
+
+# Utilities
+blake3 = { workspace = true }
+camino = { workspace = true }
+eyre = { workspace = true }
+fastcdc = { workspace = true }
+fastrand = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ur-taking-me-with-you = { workspace = true }
+vx-tracing = { workspace = true }

@@ -5,22 +5,32 @@ use jiff::Timestamp;
 use std::collections::HashMap;
 use std::sync::Arc;
 use vx_store_proto::{
-    Blake3Hash, BlobHash, EnsureRustToolchainComponentResult, EnsureStatus,
-    EnsureStatus as ToolchainEnsureStatus, EnsureToolchainResult, RustChannel, RustComponent,
-    RustToolchainSpec, StoreProgress, TOOLCHAIN_MANIFEST_SCHEMA_VERSION, ToolchainComponentTree,
-    ToolchainKind, ToolchainManifest, ToolchainSpecKey, ZigToolchainSpec,
+    Blake3Hash, BlobRef, CDC_MAX_CHUNK, CasNode, ContentHash, DirEntry, DirEntryKind,
+    DirectoryNode, EnsureRustToolchainComponentResult, EnsureStatus,
+    EnsureStatus as ToolchainEnsureStatus, EnsureToolchainResult, NodeHash, RustChannel,
+    RustComponent, RustToolchainSpec, StoreProgress, TOOLCHAIN_MANIFEST_SCHEMA_VERSION,
+    ToolchainComponentTree, ToolchainKind, ToolchainManifest, ToolchainSpecKey, ZigToolchainSpec,
 };
 use vx_tarball::Compression;
 
+use crate::chunking;
 use crate::types::StoreService;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExtractedRustComponent {
-    pub(crate) tree_manifest: Blake3Hash,
+    pub(crate) tree_root: NodeHash,
     pub(crate) target: String,
     pub(crate) total_size_bytes: u64,
     pub(crate) file_count: u32,
-    pub(crate) unique_blobs: u32,
+    pub(crate) unique_chunks: u32,
+}
+
+/// Info tracked per file during extraction — enough to build DirEntryKind later.
+struct ExtractedFileInfo {
+    content_hash: ContentHash,
+    blob_node: Option<NodeHash>,
+    size: u64,
+    executable: bool,
 }
 
 // =============================================================================
@@ -47,9 +57,6 @@ async fn fetch_channel_manifest(
 }
 
 /// Download a component with streaming checksum verification and progress reporting.
-///
-/// Reads Content-Length from the HTTP response and streams progress updates
-/// through the provided channel as bytes arrive.
 async fn download_component(
     url: &str,
     expected_hash: &str,
@@ -77,7 +84,6 @@ async fn download_component(
         });
     }
 
-    // Extract Content-Length for progress tracking
     let content_length = response
         .headers()
         .get("content-length")
@@ -92,7 +98,6 @@ async fn download_component(
         })
         .await;
 
-    // Wrap the response body in a hash-verifying reader
     let body_reader = tokio_util::io::StreamReader::new(
         response
             .into_body()
@@ -103,9 +108,8 @@ async fn download_component(
     let mut verifying_reader =
         crate::hash_reader::Sha256VerifyingReader::new(body_reader, expected_hash.to_string());
 
-    // Read in chunks, reporting progress at most every 250ms
     let mut bytes = Vec::with_capacity(content_length.unwrap_or(0) as usize);
-    let mut buf = vec![0u8; 256 * 1024]; // 256KB chunks
+    let mut buf = vec![0u8; 256 * 1024];
     let mut bytes_read: u64 = 0;
     let mut last_progress = std::time::Instant::now();
 
@@ -137,7 +141,6 @@ async fn download_component(
         }
     }
 
-    // Always send a final progress update at 100%
     let _ = progress
         .send(&StoreProgress {
             message: format!("downloading {component_name}"),
@@ -158,17 +161,11 @@ async fn download_component(
 
 /// Download and extract a component in a single streaming pipeline.
 ///
-/// Instead of buffering the entire tarball in memory, this pipes the HTTP response
-/// directly through decompression and tar extraction:
-///
-/// ```text
 /// HTTP body → StreamReader → Sha256VerifyingReader → CountingReader → extract_to_tree → CAS
-/// ```
 ///
-/// Progress is reported by polling an atomic byte counter on a 250ms interval.
-/// SHA256 verification is triggered by draining the reader to EOF after extraction
-/// (the tar reader stops at the end-of-archive marker, leaving compressed stream
-/// tail bytes unread).
+/// The store_blob callback now chunks data and stores chunks/BlobNodes.
+/// It returns a Blake3Hash (content hash) for the TreeManifest, but also
+/// records per-file info via the side channel.
 async fn download_and_extract_component(
     url: &str,
     expected_hash: &str,
@@ -176,7 +173,7 @@ async fn download_and_extract_component(
     compression: Compression,
     strip_components: u32,
     progress: &roam::Tx<StoreProgress>,
-    store_blob: impl AsyncFn(Vec<u8>) -> Result<BlobHash, String>,
+    store_blob: impl AsyncFn(Vec<u8>) -> Result<Blake3Hash, String>,
 ) -> Result<vx_store_proto::TreeManifest, vx_toolchain::ToolchainError> {
     use http_body_util::BodyExt;
     use std::sync::Arc;
@@ -207,7 +204,6 @@ async fn download_and_extract_component(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
 
-    // Build reader chain: HTTP body → StreamReader → Sha256VerifyingReader → CountingReader
     let body_reader = tokio_util::io::StreamReader::new(
         response
             .into_body()
@@ -220,10 +216,8 @@ async fn download_and_extract_component(
     let counting_reader =
         crate::hash_reader::CountingReader::new(verifying_reader, counter.clone());
 
-    // Box::pin so &mut reader satisfies AsyncRead + Unpin
     let mut reader = Box::pin(counting_reader);
 
-    // Run extraction with periodic progress reporting via tokio::select!
     let tree = {
         let extract_fut =
             vx_tarball::extract_to_tree(&mut reader, compression, strip_components, store_blob);
@@ -264,8 +258,6 @@ async fn download_and_extract_component(
     })?;
 
     // Drain remaining compressed bytes to trigger SHA256 verification on EOF.
-    // The tar reader stops at the end-of-archive marker; there may be trailing
-    // bytes in the compressed stream that haven't been read yet.
     if let Err(e) = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await {
         let msg = e.to_string();
         if msg.contains("SHA256 mismatch") {
@@ -281,18 +273,17 @@ async fn download_and_extract_component(
         });
     }
 
-    // Final progress update
     let _ = progress
         .send(&StoreProgress {
             message: format!("downloading+extracting {component_name}"),
-            current: Some(counter.load(Ordering::Relaxed)),
+            current: Some(counter.load(std::sync::atomic::Ordering::Relaxed)),
             total: content_length,
         })
         .await;
 
     tracing::debug!(
         url = %url,
-        bytes = counter.load(Ordering::Relaxed),
+        bytes = counter.load(std::sync::atomic::Ordering::Relaxed),
         hash = %expected_hash,
         files = tree.entries.len(),
         "component streamed, extracted, and verified"
@@ -312,43 +303,36 @@ fn rust_component_name(component: &RustComponent) -> Option<&'static str> {
 type InflightFuture = Arc<tokio::sync::OnceCell<EnsureToolchainResult>>;
 
 /// Manages in-flight toolchain acquisitions with deduplication.
-///
-/// Inflight entries are never removed. This is intentional:
-/// - Memory cost is negligible (one OnceCell per unique ToolchainSpecKey)
-/// - Avoids race between store lookup miss and inflight insert
-/// - Once the store has the mapping, lookup_fn fast-paths and OnceCell is never awaited
 pub(crate) struct ToolchainManager {
-    inflight: tokio::sync::Mutex<HashMap<ToolchainSpecKey, InflightFuture>>,
+    inflight: peeps::locks::DiagnosticAsyncMutex<HashMap<ToolchainSpecKey, InflightFuture>>,
 }
 
 impl ToolchainManager {
     pub(crate) fn new() -> Self {
         Self {
-            inflight: tokio::sync::Mutex::new(HashMap::new()),
+            inflight: peeps::locks::DiagnosticAsyncMutex::new(
+                "store/toolchain_inflight",
+                HashMap::new(),
+            ),
         }
     }
 
-    /// Ensure a toolchain, deduplicating concurrent requests.
-    ///
-    /// `lookup_fn` is async because the store is remote in production.
     pub(crate) async fn ensure(
         &self,
         spec_key: ToolchainSpecKey,
         lookup_fn: impl AsyncFn() -> Option<Blake3Hash>,
         acquire_fn: impl AsyncFn() -> EnsureToolchainResult,
     ) -> EnsureToolchainResult {
-        // Fast path: check if already in CAS (async RPC)
         if let Some(manifest_hash) = lookup_fn().await {
             return EnsureToolchainResult {
                 spec_key: Some(spec_key),
-                toolchain_id: None, // Caller should read manifest for ID
-                manifest_hash: Some(manifest_hash),
+                toolchain_id: None,
+                manifest_hash: Some(NodeHash(manifest_hash)),
                 status: ToolchainEnsureStatus::Hit,
                 error: None,
             };
         }
 
-        // Get or create inflight entry
         let cell = {
             let mut inflight = self.inflight.lock().await;
             inflight
@@ -357,9 +341,253 @@ impl ToolchainManager {
                 .clone()
         };
 
-        // Initialize if we're first, otherwise wait
-        #[allow(clippy::redundant_closure)] // it's not
+        #[allow(clippy::redundant_closure)]
         cell.get_or_init(|| acquire_fn()).await.clone()
+    }
+}
+
+// =============================================================================
+// Internal helpers for chunk-based storage
+// =============================================================================
+
+/// Store blob data as chunks, return a BlobRef.
+async fn store_blob_chunked(service: &StoreService, data: &[u8]) -> Result<BlobRef, String> {
+    let prepared = chunking::prepare_blob(data);
+
+    // Store all chunks
+    for chunk_info in &prepared.chunks {
+        let chunk_data = &data[chunk_info.offset..chunk_info.offset + chunk_info.size as usize];
+        service
+            .storage
+            .put_chunk(&chunk_info.hash, chunk_data)
+            .await
+            .map_err(|e| format!("failed to store chunk: {e}"))?;
+    }
+
+    if let Some(blob_node) = &prepared.blob_node {
+        service
+            .storage
+            .put_node(&blob_node.node_hash, &blob_node.serialized_bytes)
+            .await
+            .map_err(|e| format!("failed to store BlobNode: {e}"))?;
+
+        Ok(BlobRef::Large {
+            blob_node: blob_node.node_hash,
+            content_hash: prepared.content_hash,
+            size: data.len() as u64,
+        })
+    } else {
+        assert_eq!(prepared.chunks.len(), 1);
+        Ok(BlobRef::Small {
+            chunk: prepared.chunks[0].hash,
+            size: data.len() as u64,
+        })
+    }
+}
+
+/// Build a DirectoryNode Merkle tree from a flat list of (path, info) pairs.
+/// Returns the root NodeHash after storing all directory nodes.
+async fn build_merkle_tree(
+    service: &StoreService,
+    files: &[(String, ExtractedFileInfo)],
+    symlinks: &[(String, String)],
+) -> Result<(NodeHash, u64), String> {
+    // Group entries by their parent directory path.
+    // We process deepest directories first (bottom-up) so child dir hashes
+    // are available when building parent directories.
+    use std::collections::BTreeMap;
+
+    // Collect all directory paths that need nodes
+    let mut dir_entries: BTreeMap<String, Vec<DirEntry>> = BTreeMap::new();
+    let mut dir_sizes: BTreeMap<String, u64> = BTreeMap::new();
+
+    // Add files
+    for (path, info) in files {
+        let (parent, name) = split_path(path);
+        let kind = if info.size <= CDC_MAX_CHUNK as u64 {
+            DirEntryKind::SmallFile {
+                content_hash: info.content_hash,
+                size: info.size,
+                executable: info.executable,
+            }
+        } else {
+            DirEntryKind::LargeFile {
+                content_hash: info.content_hash,
+                blob_node: info.blob_node.unwrap(),
+                size: info.size,
+                executable: info.executable,
+            }
+        };
+        dir_entries
+            .entry(parent.to_string())
+            .or_default()
+            .push(DirEntry {
+                name: name.to_string(),
+                kind,
+            });
+        *dir_sizes.entry(parent.to_string()).or_default() += info.size;
+    }
+
+    // Add symlinks
+    for (path, target) in symlinks {
+        let (parent, name) = split_path(path);
+        dir_entries
+            .entry(parent.to_string())
+            .or_default()
+            .push(DirEntry {
+                name: name.to_string(),
+                kind: DirEntryKind::Symlink {
+                    target: target.clone(),
+                },
+            });
+    }
+
+    // Ensure intermediate directories exist in our map
+    let all_dirs: Vec<String> = dir_entries.keys().cloned().collect();
+    for dir in &all_dirs {
+        ensure_parent_dirs(&mut dir_entries, dir);
+    }
+
+    // Process directories bottom-up (longest paths first)
+    let mut dir_list: Vec<String> = dir_entries.keys().cloned().collect();
+    dir_list.sort_by(|a, b| {
+        // Sort by depth (deepest first), then lexicographically
+        let a_depth = if a.is_empty() {
+            0
+        } else {
+            a.matches('/').count() + 1
+        };
+        let b_depth = if b.is_empty() {
+            0
+        } else {
+            b.matches('/').count() + 1
+        };
+        b_depth.cmp(&a_depth).then_with(|| a.cmp(b))
+    });
+
+    let mut dir_hashes: HashMap<String, (NodeHash, u64)> = HashMap::new();
+
+    for dir_path in &dir_list {
+        let entries = dir_entries.get_mut(dir_path).unwrap();
+
+        // Sort entries by name (raw byte comparison)
+        entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+
+        // Compute total_size for this directory
+        let mut total_size: u64 = 0;
+        for entry in entries.iter() {
+            match &entry.kind {
+                DirEntryKind::SmallFile { size, .. } => total_size += size,
+                DirEntryKind::LargeFile { size, .. } => total_size += size,
+                DirEntryKind::Dir { total_size: ts, .. } => total_size += ts,
+                DirEntryKind::Symlink { .. } => {}
+            }
+        }
+
+        let dir_node = CasNode::Directory(DirectoryNode {
+            entries: entries.clone(),
+            total_size,
+        });
+
+        let (node_bytes, node_hash) = dir_node.to_bytes_and_hash();
+        service
+            .storage
+            .put_node(&node_hash, &node_bytes)
+            .await
+            .map_err(|e| format!("failed to store DirectoryNode for '{}': {e}", dir_path))?;
+
+        dir_hashes.insert(dir_path.clone(), (node_hash, total_size));
+
+        // Add this directory as a Dir entry in the parent
+        if !dir_path.is_empty() {
+            let (parent, name) = split_path(dir_path);
+            dir_entries
+                .entry(parent.to_string())
+                .or_default()
+                .push(DirEntry {
+                    name: name.to_string(),
+                    kind: DirEntryKind::Dir {
+                        hash: node_hash,
+                        total_size,
+                    },
+                });
+        }
+    }
+
+    dir_hashes
+        .get("")
+        .copied()
+        .ok_or_else(|| "no root directory".to_string())
+}
+
+/// Split "foo/bar/baz" into ("foo/bar", "baz"). Root entries: ("", "name").
+fn split_path(path: &str) -> (&str, &str) {
+    match path.rfind('/') {
+        Some(pos) => (&path[..pos], &path[pos + 1..]),
+        None => ("", path),
+    }
+}
+
+/// Ensure all parent directories of `dir` exist in the map.
+fn ensure_parent_dirs(
+    dir_entries: &mut std::collections::BTreeMap<String, Vec<DirEntry>>,
+    dir: &str,
+) {
+    let mut current = dir.to_string();
+    while let Some(pos) = current.rfind('/') {
+        current = current[..pos].to_string();
+        dir_entries.entry(current.clone()).or_default();
+    }
+    if !current.is_empty() {
+        dir_entries.entry(String::new()).or_default();
+    }
+}
+
+/// Read blob data from a BlobRef.
+async fn read_blob_from_ref(service: &StoreService, blob_ref: &BlobRef) -> Result<Vec<u8>, String> {
+    match blob_ref {
+        BlobRef::Small { chunk, size: _ } => {
+            let data = service
+                .storage
+                .get_chunk(chunk)
+                .await
+                .map_err(|e| format!("failed to read chunk: {e}"))?
+                .ok_or_else(|| format!("chunk {} not found", chunk.to_hex()))?;
+            Ok(data)
+        }
+        BlobRef::Large {
+            blob_node,
+            content_hash: _,
+            size: _,
+        } => {
+            let node_data = service
+                .storage
+                .get_node(blob_node)
+                .await
+                .map_err(|e| format!("failed to read BlobNode: {e}"))?
+                .ok_or_else(|| format!("BlobNode {} not found", blob_node.to_hex()))?;
+
+            let node = CasNode::from_bytes(&node_data)
+                .map_err(|e| format!("failed to deserialize BlobNode: {e}"))?;
+
+            let blob = match node {
+                CasNode::Blob(b) => b,
+                _ => return Err(format!("node {} is not a BlobNode", blob_node.to_hex())),
+            };
+
+            let mut result = Vec::with_capacity(blob.total_size as usize);
+            for chunk_entry in &blob.chunks {
+                let chunk_data = service
+                    .storage
+                    .get_chunk(&chunk_entry.hash)
+                    .await
+                    .map_err(|e| format!("failed to read chunk: {e}"))?
+                    .ok_or_else(|| format!("chunk {} not found", chunk_entry.hash.to_hex()))?;
+                result.extend_from_slice(&chunk_data);
+            }
+
+            Ok(result)
+        }
     }
 }
 
@@ -375,7 +603,6 @@ impl StoreService {
         spec: RustToolchainSpec,
         progress: roam::Tx<StoreProgress>,
     ) -> EnsureToolchainResult {
-        // Validate and compute spec_key first
         let spec_key = match spec.spec_key() {
             Ok(k) => {
                 tracing::Span::current().record("spec_key", k.to_string());
@@ -420,14 +647,12 @@ impl StoreService {
         spec: &RustToolchainSpec,
         progress: &roam::Tx<StoreProgress>,
     ) -> EnsureToolchainResult {
-        // Convert proto spec to vx_toolchain types
         let channel = match &spec.channel {
             RustChannel::Stable => vx_toolchain::Channel::Stable,
             RustChannel::Beta => vx_toolchain::Channel::Beta,
             RustChannel::Nightly { date } => vx_toolchain::Channel::Nightly { date: date.clone() },
         };
 
-        // Fetch channel manifest to get download URLs
         let manifest = match fetch_channel_manifest(&channel).await {
             Ok(m) => m,
             Err(e) => {
@@ -467,7 +692,6 @@ impl StoreService {
             }
         };
 
-        // Compute toolchain ID from manifest SHA256s
         let toolchain_id = vx_toolchain::RustToolchainId::from_manifest_sha256s(
             &spec.host,
             &spec.target,
@@ -475,16 +699,31 @@ impl StoreService {
             &rust_std_target.hash,
         );
 
-        // Download AND extract both components in parallel (streaming pipeline).
-        // Each component streams: HTTP → SHA256 verify → decompress → tar → CAS.
         let rustc_url = rustc_target.url.clone();
         let rustc_hash = rustc_target.hash.clone();
         let rust_std_url = rust_std_target.url.clone();
         let rust_std_hash = rust_std_target.hash.clone();
         let sem = self.download_semaphore.clone();
 
+        // Track per-file info: content_hash -> (blob_node, size)
+        // This lets us build DirectoryNode entries after extraction.
+        let rustc_file_info: Arc<
+            peeps::locks::DiagnosticAsyncMutex<HashMap<Blake3Hash, ExtractedFileInfo>>,
+        > = Arc::new(peeps::locks::DiagnosticAsyncMutex::new(
+            "store/rustc_file_info",
+            HashMap::new(),
+        ));
+        let std_file_info: Arc<
+            peeps::locks::DiagnosticAsyncMutex<HashMap<Blake3Hash, ExtractedFileInfo>>,
+        > = Arc::new(peeps::locks::DiagnosticAsyncMutex::new(
+            "store/std_file_info",
+            HashMap::new(),
+        ));
+
         let this1 = self.clone();
         let this2 = self.clone();
+        let rustc_info = rustc_file_info.clone();
+        let std_info = std_file_info.clone();
 
         let (rustc_result, rust_std_result) = join(
             async {
@@ -497,11 +736,39 @@ impl StoreService {
                     2,
                     progress,
                     async move |data: Vec<u8>| {
-                        let hash = BlobHash::from_bytes(&data);
-                        if let Err(e) = this1.storage.put_blob(&hash, &data).await {
-                            tracing::warn!("failed to write blob: {}", e);
+                        let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
+                        let prepared = chunking::prepare_blob(&data);
+                        // Store chunks
+                        for ci in &prepared.chunks {
+                            let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
+                            if let Err(e) = this1.storage.put_chunk(&ci.hash, chunk_data).await {
+                                tracing::warn!("failed to write chunk: {}", e);
+                            }
                         }
-                        Ok(hash)
+                        // Store blob node if multi-chunk
+                        let blob_node = if let Some(bn) = &prepared.blob_node {
+                            if let Err(e) = this1
+                                .storage
+                                .put_node(&bn.node_hash, &bn.serialized_bytes)
+                                .await
+                            {
+                                tracing::warn!("failed to write BlobNode: {}", e);
+                            }
+                            Some(bn.node_hash)
+                        } else {
+                            None
+                        };
+                        // Track info
+                        rustc_info.lock().await.insert(
+                            content_hash.0,
+                            ExtractedFileInfo {
+                                content_hash,
+                                blob_node,
+                                size: data.len() as u64,
+                                executable: false, // will be set from tree manifest
+                            },
+                        );
+                        Ok(content_hash.0)
                     },
                 )
                 .await
@@ -516,11 +783,36 @@ impl StoreService {
                     2,
                     progress,
                     async move |data: Vec<u8>| {
-                        let hash = BlobHash::from_bytes(&data);
-                        if let Err(e) = this2.storage.put_blob(&hash, &data).await {
-                            tracing::warn!("failed to write blob: {}", e);
+                        let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
+                        let prepared = chunking::prepare_blob(&data);
+                        for ci in &prepared.chunks {
+                            let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
+                            if let Err(e) = this2.storage.put_chunk(&ci.hash, chunk_data).await {
+                                tracing::warn!("failed to write chunk: {}", e);
+                            }
                         }
-                        Ok(hash)
+                        let blob_node = if let Some(bn) = &prepared.blob_node {
+                            if let Err(e) = this2
+                                .storage
+                                .put_node(&bn.node_hash, &bn.serialized_bytes)
+                                .await
+                            {
+                                tracing::warn!("failed to write BlobNode: {}", e);
+                            }
+                            Some(bn.node_hash)
+                        } else {
+                            None
+                        };
+                        std_info.lock().await.insert(
+                            content_hash.0,
+                            ExtractedFileInfo {
+                                content_hash,
+                                blob_node,
+                                size: data.len() as u64,
+                                executable: false,
+                            },
+                        );
+                        Ok(content_hash.0)
                     },
                 )
                 .await
@@ -554,47 +846,59 @@ impl StoreService {
             }
         };
 
-        // Store rustc tree manifest
-        let rustc_tree_json =
-            facet_json::to_string(&rustc_tree).expect("rustc tree serialization must succeed");
-        let rustc_tree_hash = BlobHash::from_bytes(rustc_tree_json.as_bytes());
-        if let Err(e) = self
-            .storage
-            .put_blob(&rustc_tree_hash, rustc_tree_json.as_bytes())
-            .await
-        {
-            tracing::warn!("failed to write rustc tree blob: {}", e);
-        }
+        // Build DirectoryNode trees from the flat TreeManifests
+        let rustc_root = match tree_manifest_to_merkle(self, &rustc_tree, &rustc_file_info).await {
+            Ok(r) => r,
+            Err(e) => {
+                return EnsureToolchainResult {
+                    spec_key: Some(spec_key),
+                    toolchain_id: None,
+                    manifest_hash: None,
+                    status: ToolchainEnsureStatus::Failed,
+                    error: Some(format!("failed to build rustc merkle tree: {e}")),
+                };
+            }
+        };
+
+        let rust_std_root =
+            match tree_manifest_to_merkle(self, &rust_std_tree, &std_file_info).await {
+                Ok(r) => r,
+                Err(e) => {
+                    return EnsureToolchainResult {
+                        spec_key: Some(spec_key),
+                        toolchain_id: None,
+                        manifest_hash: None,
+                        status: ToolchainEnsureStatus::Failed,
+                        error: Some(format!("failed to build rust-std merkle tree: {e}")),
+                    };
+                }
+            };
 
         tracing::info!(
-            rustc_tree = %rustc_tree_hash,
-            files = rustc_tree.entries.len(),
-            unique_blobs = rustc_tree.unique_blobs,
-            total_bytes = rustc_tree.total_size_bytes,
+            rustc_root = %rustc_root.0,
+            rustc_files = rustc_tree.entries.len(),
+            rustc_bytes = rustc_root.1,
             "stored rustc tree"
         );
 
-        // Store rust-std tree manifest
-        let rust_std_tree_json = facet_json::to_string(&rust_std_tree)
-            .expect("rust-std tree serialization must succeed");
-        let rust_std_tree_hash = BlobHash::from_bytes(rust_std_tree_json.as_bytes());
-        if let Err(e) = self
-            .storage
-            .put_blob(&rust_std_tree_hash, rust_std_tree_json.as_bytes())
-            .await
-        {
-            tracing::warn!("failed to write rust-std tree blob: {}", e);
-        }
-
         tracing::info!(
-            rust_std_tree = %rust_std_tree_hash,
-            files = rust_std_tree.entries.len(),
-            unique_blobs = rust_std_tree.unique_blobs,
-            total_bytes = rust_std_tree.total_size_bytes,
+            rust_std_root = %rust_std_root.0,
+            rust_std_files = rust_std_tree.entries.len(),
+            rust_std_bytes = rust_std_root.1,
             "stored rust-std tree"
         );
 
-        // Build toolchain manifest
+        // Count unique chunks
+        let rustc_unique_chunks = {
+            let info = rustc_file_info.lock().await;
+            info.len() as u32
+        };
+        let std_unique_chunks = {
+            let info = std_file_info.lock().await;
+            info.len() as u32
+        };
+
+        // Build toolchain manifest as CasNode::Toolchain
         let toolchain_manifest = ToolchainManifest {
             schema_version: TOOLCHAIN_MANIFEST_SCHEMA_VERSION,
             kind: ToolchainKind::Rust,
@@ -608,40 +912,35 @@ impl StoreService {
                 ToolchainComponentTree {
                     name: "rustc".to_string(),
                     target: Some(spec.host.clone()),
-                    tree_manifest: rustc_tree_hash,
+                    tree_root: rustc_root.0,
                     sha256: rustc_target.hash.clone(),
-                    total_size_bytes: rustc_tree.total_size_bytes,
+                    total_size_bytes: rustc_root.1,
                     file_count: rustc_tree.entries.len() as u32,
-                    unique_blobs: rustc_tree.unique_blobs,
+                    unique_chunks: rustc_unique_chunks,
                 },
                 ToolchainComponentTree {
                     name: "rust-std".to_string(),
                     target: Some(spec.target.clone()),
-                    tree_manifest: rust_std_tree_hash,
+                    tree_root: rust_std_root.0,
                     sha256: rust_std_target.hash.clone(),
-                    total_size_bytes: rust_std_tree.total_size_bytes,
+                    total_size_bytes: rust_std_root.1,
                     file_count: rust_std_tree.entries.len() as u32,
-                    unique_blobs: rust_std_tree.unique_blobs,
+                    unique_chunks: std_unique_chunks,
                 },
             ],
         };
 
-        // Store manifest
-        let manifest_json = facet_json::to_string(&toolchain_manifest)
-            .expect("toolchain manifest serialization must succeed");
-        let manifest_hash = Blake3Hash::from_bytes(manifest_json.as_bytes());
-        if let Err(e) = self
-            .storage
-            .put_manifest(&manifest_hash, manifest_json.as_bytes())
-            .await
-        {
+        // Store manifest as CasNode::Toolchain
+        let node = CasNode::Toolchain(toolchain_manifest);
+        let (node_bytes, manifest_hash) = node.to_bytes_and_hash();
+        if let Err(e) = self.storage.put_node(&manifest_hash, &node_bytes).await {
             tracing::warn!("failed to write toolchain manifest: {}", e);
         }
 
         // Publish spec → manifest_hash mapping
         if let Err(e) = self
             .storage
-            .put_toolchain_spec(&spec_key, &manifest_hash)
+            .put_toolchain_spec(&spec_key, &manifest_hash.0)
             .await
         {
             tracing::warn!("failed to publish spec mapping for {}: {}", spec_key, e);
@@ -663,7 +962,7 @@ impl StoreService {
         }
     }
 
-    /// Download one Rust toolchain component tarball and store it as a blob.
+    /// Download one Rust toolchain component tarball and store it as chunks.
     #[tracing::instrument(skip(self, progress), fields(spec_key = tracing::field::Empty, component = ?component))]
     pub async fn download_rust_toolchain_component(
         &self,
@@ -677,8 +976,8 @@ impl StoreService {
                 return EnsureRustToolchainComponentResult {
                     spec_key: None,
                     component,
-                    tarball_blob: None,
-                    tree_manifest: None,
+                    tarball: None,
+                    tree_root: None,
                     status: EnsureStatus::Failed,
                     error: Some("unsupported component for Rust toolchain acquisition".to_string()),
                 };
@@ -694,8 +993,8 @@ impl StoreService {
                 return EnsureRustToolchainComponentResult {
                     spec_key: None,
                     component,
-                    tarball_blob: None,
-                    tree_manifest: None,
+                    tarball: None,
+                    tree_root: None,
                     status: EnsureStatus::Failed,
                     error: Some(format!("invalid spec: {}", e)),
                 };
@@ -713,20 +1012,20 @@ impl StoreService {
             return EnsureRustToolchainComponentResult {
                 spec_key: Some(spec_key),
                 component,
-                tarball_blob: None,
-                tree_manifest: None,
+                tarball: None,
+                tree_root: None,
                 status: EnsureStatus::Hit,
                 error: None,
             };
         }
 
         let key = (spec_key, component.clone());
-        if let Some(blob) = self.rust_component_tarballs.lock().await.get(&key).copied() {
+        if let Some(blob_ref) = self.rust_component_tarballs.lock().await.get(&key).cloned() {
             return EnsureRustToolchainComponentResult {
                 spec_key: Some(spec_key),
                 component,
-                tarball_blob: Some(blob),
-                tree_manifest: None,
+                tarball: Some(blob_ref),
+                tree_root: None,
                 status: EnsureStatus::Hit,
                 error: None,
             };
@@ -744,8 +1043,8 @@ impl StoreService {
                 return EnsureRustToolchainComponentResult {
                     spec_key: Some(spec_key),
                     component,
-                    tarball_blob: None,
-                    tree_manifest: None,
+                    tarball: None,
+                    tree_root: None,
                     status: EnsureStatus::Failed,
                     error: Some(format!("failed to fetch channel manifest: {}", e)),
                 };
@@ -764,8 +1063,8 @@ impl StoreService {
                 return EnsureRustToolchainComponentResult {
                     spec_key: Some(spec_key),
                     component,
-                    tarball_blob: None,
-                    tree_manifest: None,
+                    tarball: None,
+                    tree_root: None,
                     status: EnsureStatus::Failed,
                     error: Some(e.to_string()),
                 };
@@ -785,41 +1084,50 @@ impl StoreService {
                 return EnsureRustToolchainComponentResult {
                     spec_key: Some(spec_key),
                     component,
-                    tarball_blob: None,
-                    tree_manifest: None,
+                    tarball: None,
+                    tree_root: None,
                     status: EnsureStatus::Failed,
                     error: Some(format!("failed to download {component_name}: {e}")),
                 };
             }
         };
 
-        let tarball_blob = BlobHash::from_bytes(&tarball);
-        if let Err(e) = self.storage.put_blob(&tarball_blob, &tarball).await {
-            tracing::warn!(blob_hash = %tarball_blob, error = %e, "failed to write tarball blob");
-        }
+        let tarball_ref = match store_blob_chunked(self, &tarball).await {
+            Ok(r) => r,
+            Err(e) => {
+                return EnsureRustToolchainComponentResult {
+                    spec_key: Some(spec_key),
+                    component,
+                    tarball: None,
+                    tree_root: None,
+                    status: EnsureStatus::Failed,
+                    error: Some(format!("failed to store tarball: {e}")),
+                };
+            }
+        };
 
         self.rust_component_tarballs
             .lock()
             .await
-            .insert((spec_key, component.clone()), tarball_blob);
+            .insert((spec_key, component.clone()), tarball_ref.clone());
 
         EnsureRustToolchainComponentResult {
             spec_key: Some(spec_key),
             component,
-            tarball_blob: Some(tarball_blob),
-            tree_manifest: None,
+            tarball: Some(tarball_ref),
+            tree_root: None,
             status: EnsureStatus::Downloaded,
             error: None,
         }
     }
 
-    /// Extract one Rust toolchain component tarball into a tree manifest.
+    /// Extract one Rust toolchain component tarball into a DirectoryNode tree.
     #[tracing::instrument(skip(self, progress), fields(spec_key = tracing::field::Empty, component = ?component))]
     pub async fn extract_rust_toolchain_component(
         &self,
         spec: RustToolchainSpec,
         component: RustComponent,
-        tarball_blob: Blake3Hash,
+        tarball_ref: BlobRef,
         progress: roam::Tx<StoreProgress>,
     ) -> EnsureRustToolchainComponentResult {
         let component_name = match rust_component_name(&component) {
@@ -828,8 +1136,8 @@ impl StoreService {
                 return EnsureRustToolchainComponentResult {
                     spec_key: None,
                     component,
-                    tarball_blob: None,
-                    tree_manifest: None,
+                    tarball: None,
+                    tree_root: None,
                     status: EnsureStatus::Failed,
                     error: Some("unsupported component for Rust toolchain extraction".to_string()),
                 };
@@ -845,8 +1153,8 @@ impl StoreService {
                 return EnsureRustToolchainComponentResult {
                     spec_key: None,
                     component,
-                    tarball_blob: None,
-                    tree_manifest: None,
+                    tarball: None,
+                    tree_root: None,
                     status: EnsureStatus::Failed,
                     error: Some(format!("invalid spec: {}", e)),
                 };
@@ -864,8 +1172,8 @@ impl StoreService {
             return EnsureRustToolchainComponentResult {
                 spec_key: Some(spec_key),
                 component,
-                tarball_blob: Some(tarball_blob),
-                tree_manifest: None,
+                tarball: Some(tarball_ref),
+                tree_root: None,
                 status: EnsureStatus::Hit,
                 error: None,
             };
@@ -882,36 +1190,24 @@ impl StoreService {
             return EnsureRustToolchainComponentResult {
                 spec_key: Some(spec_key),
                 component,
-                tarball_blob: Some(tarball_blob),
-                tree_manifest: Some(existing.tree_manifest),
+                tarball: Some(tarball_ref),
+                tree_root: Some(existing.tree_root),
                 status: EnsureStatus::Hit,
                 error: None,
             };
         }
 
-        let tarball = match self.storage.get_blob(&tarball_blob).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
-                return EnsureRustToolchainComponentResult {
-                    spec_key: Some(spec_key),
-                    component,
-                    tarball_blob: Some(tarball_blob),
-                    tree_manifest: None,
-                    status: EnsureStatus::Failed,
-                    error: Some(format!("tarball blob {} not found", tarball_blob)),
-                };
-            }
+        // Read tarball from CAS
+        let tarball = match read_blob_from_ref(self, &tarball_ref).await {
+            Ok(bytes) => bytes,
             Err(e) => {
                 return EnsureRustToolchainComponentResult {
                     spec_key: Some(spec_key),
                     component,
-                    tarball_blob: Some(tarball_blob),
-                    tree_manifest: None,
+                    tarball: Some(tarball_ref),
+                    tree_root: None,
                     status: EnsureStatus::Failed,
-                    error: Some(format!(
-                        "failed reading tarball blob {}: {}",
-                        tarball_blob, e
-                    )),
+                    error: Some(format!("failed to read tarball: {e}")),
                 };
             }
         };
@@ -930,17 +1226,50 @@ impl StoreService {
             RustComponent::Cargo => unreachable!("cargo is filtered above"),
         };
 
+        // Track per-file info during extraction
+        let file_info: Arc<peeps::locks::DiagnosticAsyncMutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
+            Arc::new(peeps::locks::DiagnosticAsyncMutex::new(
+                "store/file_info",
+                HashMap::new(),
+            ));
+        let file_info_clone = file_info.clone();
         let this = self.clone();
+
         let tree = match vx_tarball::extract_to_tree(
             std::io::Cursor::new(tarball),
             Compression::Xz,
             strip_components,
             async move |data: Vec<u8>| {
-                let hash = BlobHash::from_bytes(&data);
-                if let Err(e) = this.storage.put_blob(&hash, &data).await {
-                    tracing::warn!("failed to write blob: {}", e);
+                let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
+                let prepared = chunking::prepare_blob(&data);
+                for ci in &prepared.chunks {
+                    let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
+                    if let Err(e) = this.storage.put_chunk(&ci.hash, chunk_data).await {
+                        tracing::warn!("failed to write chunk: {}", e);
+                    }
                 }
-                Ok(hash)
+                let blob_node = if let Some(bn) = &prepared.blob_node {
+                    if let Err(e) = this
+                        .storage
+                        .put_node(&bn.node_hash, &bn.serialized_bytes)
+                        .await
+                    {
+                        tracing::warn!("failed to write BlobNode: {}", e);
+                    }
+                    Some(bn.node_hash)
+                } else {
+                    None
+                };
+                file_info_clone.lock().await.insert(
+                    content_hash.0,
+                    ExtractedFileInfo {
+                        content_hash,
+                        blob_node,
+                        size: data.len() as u64,
+                        executable: false,
+                    },
+                );
+                Ok(content_hash.0)
             },
         )
         .await
@@ -950,23 +1279,28 @@ impl StoreService {
                 return EnsureRustToolchainComponentResult {
                     spec_key: Some(spec_key),
                     component,
-                    tarball_blob: Some(tarball_blob),
-                    tree_manifest: None,
+                    tarball: Some(tarball_ref),
+                    tree_root: None,
                     status: EnsureStatus::Failed,
                     error: Some(format!("failed to extract {component_name}: {}", e)),
                 };
             }
         };
 
-        let tree_json = facet_json::to_string(&tree).expect("tree serialization must succeed");
-        let tree_hash = BlobHash::from_bytes(tree_json.as_bytes());
-        if let Err(e) = self
-            .storage
-            .put_blob(&tree_hash, tree_json.as_bytes())
-            .await
-        {
-            tracing::warn!("failed to write {} tree blob: {}", component_name, e);
-        }
+        // Build DirectoryNode tree from the flat TreeManifest
+        let (tree_root, total_size) = match tree_manifest_to_merkle(self, &tree, &file_info).await {
+            Ok(r) => r,
+            Err(e) => {
+                return EnsureRustToolchainComponentResult {
+                    spec_key: Some(spec_key),
+                    component,
+                    tarball: Some(tarball_ref),
+                    tree_root: None,
+                    status: EnsureStatus::Failed,
+                    error: Some(format!("failed to build merkle tree: {e}")),
+                };
+            }
+        };
 
         let target = match component {
             RustComponent::Rustc => spec.host.clone(),
@@ -974,22 +1308,24 @@ impl StoreService {
             RustComponent::Cargo => unreachable!("cargo is filtered above"),
         };
 
+        let unique_chunks = file_info.lock().await.len() as u32;
+
         self.rust_component_trees.lock().await.insert(
             extracted_key,
             ExtractedRustComponent {
-                tree_manifest: tree_hash,
+                tree_root,
                 target,
-                total_size_bytes: tree.total_size_bytes,
+                total_size_bytes: total_size,
                 file_count: tree.entries.len() as u32,
-                unique_blobs: tree.unique_blobs,
+                unique_chunks,
             },
         );
 
         EnsureRustToolchainComponentResult {
             spec_key: Some(spec_key),
             component,
-            tarball_blob: Some(tarball_blob),
-            tree_manifest: Some(tree_hash),
+            tarball: Some(tarball_ref),
+            tree_root: Some(tree_root),
             status: EnsureStatus::Downloaded,
             error: None,
         }
@@ -1024,7 +1360,7 @@ impl StoreService {
             return EnsureToolchainResult {
                 spec_key: Some(spec_key),
                 toolchain_id: None,
-                manifest_hash: Some(manifest_hash),
+                manifest_hash: Some(NodeHash(manifest_hash)),
                 status: ToolchainEnsureStatus::Hit,
                 error: None,
             };
@@ -1128,38 +1464,33 @@ impl StoreService {
                 ToolchainComponentTree {
                     name: "rustc".to_string(),
                     target: Some(rustc_component.target),
-                    tree_manifest: rustc_component.tree_manifest,
+                    tree_root: rustc_component.tree_root,
                     sha256: rustc_target.hash.clone(),
                     total_size_bytes: rustc_component.total_size_bytes,
                     file_count: rustc_component.file_count,
-                    unique_blobs: rustc_component.unique_blobs,
+                    unique_chunks: rustc_component.unique_chunks,
                 },
                 ToolchainComponentTree {
                     name: "rust-std".to_string(),
                     target: Some(rust_std_component.target),
-                    tree_manifest: rust_std_component.tree_manifest,
+                    tree_root: rust_std_component.tree_root,
                     sha256: rust_std_target.hash.clone(),
                     total_size_bytes: rust_std_component.total_size_bytes,
                     file_count: rust_std_component.file_count,
-                    unique_blobs: rust_std_component.unique_blobs,
+                    unique_chunks: rust_std_component.unique_chunks,
                 },
             ],
         };
 
-        let manifest_json = facet_json::to_string(&toolchain_manifest)
-            .expect("toolchain manifest serialization must succeed");
-        let manifest_hash = Blake3Hash::from_bytes(manifest_json.as_bytes());
-        if let Err(e) = self
-            .storage
-            .put_manifest(&manifest_hash, manifest_json.as_bytes())
-            .await
-        {
+        let node = CasNode::Toolchain(toolchain_manifest);
+        let (node_bytes, manifest_hash) = node.to_bytes_and_hash();
+        if let Err(e) = self.storage.put_node(&manifest_hash, &node_bytes).await {
             tracing::warn!(manifest_hash = %manifest_hash, error = %e, "failed to write toolchain manifest");
         }
 
         if let Err(e) = self
             .storage
-            .put_toolchain_spec(&spec_key, &manifest_hash)
+            .put_toolchain_spec(&spec_key, &manifest_hash.0)
             .await
         {
             tracing::warn!("failed to publish spec mapping for {}: {}", spec_key, e);
@@ -1181,7 +1512,6 @@ impl StoreService {
         spec: ZigToolchainSpec,
         progress: roam::Tx<StoreProgress>,
     ) -> EnsureToolchainResult {
-        // Compute spec_key
         let spec_key = match spec.spec_key() {
             Ok(k) => {
                 tracing::Span::current().record("spec_key", k.to_string());
@@ -1226,7 +1556,6 @@ impl StoreService {
         spec: &ZigToolchainSpec,
         progress: &roam::Tx<StoreProgress>,
     ) -> EnsureToolchainResult {
-        // Convert spec to vx_toolchain types
         let version = vx_toolchain::zig::ZigVersion::new(&spec.version);
         let platform = vx_toolchain::zig::HostPlatform {
             os: if spec.host_platform.contains("macos") {
@@ -1269,7 +1598,6 @@ impl StoreService {
             })
             .await;
 
-        // Download and extract Zig toolchain
         let acquired =
             match vx_toolchain::zig::acquire_zig_toolchain(version.clone(), platform.clone()).await
             {
@@ -1293,100 +1621,126 @@ impl StoreService {
             })
             .await;
 
-        // Store zig executable as tree manifest (single-file tree)
-        let zig_exe_blob_hash = BlobHash::from_bytes(&acquired.zig_exe_contents);
-        if let Err(e) = self
-            .storage
-            .put_blob(&zig_exe_blob_hash, &acquired.zig_exe_contents)
-            .await
-        {
-            tracing::warn!("failed to write zig exe blob: {}", e);
-        }
-        let mut zig_exe_tree = vx_store_proto::TreeManifest::new();
-        zig_exe_tree.add_file(
-            "zig".to_string(),
-            zig_exe_blob_hash,
-            acquired.zig_exe_contents.len() as u64,
-            true, // executable
-        );
-        zig_exe_tree.finalize();
-        let zig_exe_tree_json = facet_json::to_string(&zig_exe_tree)
-            .expect("zig executable tree serialization must succeed");
-        let zig_exe_hash = BlobHash::from_bytes(zig_exe_tree_json.as_bytes());
-        if let Err(e) = self
-            .storage
-            .put_blob(&zig_exe_hash, zig_exe_tree_json.as_bytes())
-            .await
-        {
-            tracing::warn!("failed to write zig exe tree blob: {}", e);
+        // Store zig executable as a single-file DirectoryNode
+        let zig_exe_ref = match store_blob_chunked(self, &acquired.zig_exe_contents).await {
+            Ok(r) => r,
+            Err(e) => {
+                return EnsureToolchainResult {
+                    spec_key: Some(spec_key),
+                    toolchain_id: None,
+                    manifest_hash: None,
+                    status: ToolchainEnsureStatus::Failed,
+                    error: Some(format!("failed to store zig executable: {e}")),
+                };
+            }
+        };
+
+        let zig_exe_entry = match &zig_exe_ref {
+            BlobRef::Small { chunk, size } => DirEntry {
+                name: "zig".to_string(),
+                kind: DirEntryKind::SmallFile {
+                    content_hash: ContentHash(chunk.0),
+                    size: *size,
+                    executable: true,
+                },
+            },
+            BlobRef::Large {
+                blob_node,
+                content_hash,
+                size,
+            } => DirEntry {
+                name: "zig".to_string(),
+                kind: DirEntryKind::LargeFile {
+                    content_hash: *content_hash,
+                    blob_node: *blob_node,
+                    size: *size,
+                    executable: true,
+                },
+            },
+        };
+
+        let zig_exe_dir = CasNode::Directory(DirectoryNode {
+            entries: vec![zig_exe_entry],
+            total_size: acquired.zig_exe_contents.len() as u64,
+        });
+        let (zig_exe_bytes, zig_exe_hash) = zig_exe_dir.to_bytes_and_hash();
+        if let Err(e) = self.storage.put_node(&zig_exe_hash, &zig_exe_bytes).await {
+            tracing::warn!("failed to write zig exe DirectoryNode: {}", e);
         }
 
-        // Extract lib tarball to tree manually
-        // First collect all entries synchronously (tar::Archive is not Send)
-        // Note: Paths in the tarball are relative (e.g. "std/std.zig"), but Zig expects them under "lib/"
-        let mut lib_files: Vec<(String, Vec<u8>)> = Vec::new();
-        {
+        // Extract lib tarball — first pass: read all entries synchronously (tar
+        // iterator is !Send), then store blobs asynchronously.
+        let lib_raw_entries: Vec<(String, Vec<u8>)> = {
+            let mut entries = Vec::new();
             let mut archive = tar::Archive::new(std::io::Cursor::new(&acquired.lib_tarball));
-
             for entry_result in archive
                 .entries()
-                .map_err(|e| format!("tar entries: {}", e))
+                .map_err(|e| format!("tar entries: {e}"))
                 .unwrap()
             {
-                let mut entry = entry_result
-                    .map_err(|e| format!("tar entry: {}", e))
-                    .unwrap();
+                let mut entry = entry_result.map_err(|e| format!("tar entry: {e}")).unwrap();
                 let path = entry
                     .path()
-                    .map_err(|e| format!("entry path: {}", e))
+                    .map_err(|e| format!("entry path: {e}"))
                     .unwrap();
                 let path_str = path.to_string_lossy().to_string();
+                let full_path = format!("lib/{path_str}");
 
-                // Prepend "lib/" to all paths since Zig expects lib directory
-                let full_path = format!("lib/{}", path_str);
-
-                // Read entry data
                 let mut data = Vec::new();
                 std::io::Read::read_to_end(&mut entry, &mut data)
-                    .map_err(|e| format!("read entry: {}", e))
+                    .map_err(|e| format!("read entry: {e}"))
                     .unwrap();
 
                 if !data.is_empty() {
-                    lib_files.push((full_path, data));
+                    entries.push((full_path, data));
                 }
             }
-        } // archive dropped here
+            entries
+        };
 
-        // Now upload blobs asynchronously and build tree
-        let mut lib_tree = vx_store_proto::TreeManifest::new();
-        for (path_str, data) in lib_files {
-            let blob_hash = BlobHash::from_bytes(&data);
-            if let Err(e) = self.storage.put_blob(&blob_hash, &data).await {
-                tracing::warn!("failed to write zig lib blob: {}", e);
+        let mut lib_files: Vec<(String, ExtractedFileInfo)> = Vec::new();
+        for (full_path, data) in &lib_raw_entries {
+            let blob_ref = match store_blob_chunked(self, data).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("failed to store zig lib blob: {e}");
+                    continue;
+                }
+            };
+
+            let (content_hash, blob_node, size) = match &blob_ref {
+                BlobRef::Small { chunk, size } => (ContentHash(chunk.0), None, *size),
+                BlobRef::Large {
+                    blob_node,
+                    content_hash,
+                    size,
+                } => (*content_hash, Some(*blob_node), *size),
+            };
+
+            lib_files.push((
+                full_path.clone(),
+                ExtractedFileInfo {
+                    content_hash,
+                    blob_node,
+                    size,
+                    executable: false,
+                },
+            ));
+        }
+
+        let (lib_hash, lib_total_size) = match build_merkle_tree(self, &lib_files, &[]).await {
+            Ok(r) => r,
+            Err(e) => {
+                return EnsureToolchainResult {
+                    spec_key: Some(spec_key),
+                    toolchain_id: None,
+                    manifest_hash: None,
+                    status: ToolchainEnsureStatus::Failed,
+                    error: Some(format!("failed to build zig lib merkle tree: {e}")),
+                };
             }
-            lib_tree.add_file(
-                path_str,
-                blob_hash,
-                data.len() as u64,
-                false, // lib files are not executable
-            );
-        }
+        };
 
-        lib_tree.finalize();
-
-        // Store lib tree manifest
-        let lib_tree_json =
-            facet_json::to_string(&lib_tree).expect("zig lib tree serialization must succeed");
-        let lib_hash = BlobHash::from_bytes(lib_tree_json.as_bytes());
-        if let Err(e) = self
-            .storage
-            .put_blob(&lib_hash, lib_tree_json.as_bytes())
-            .await
-        {
-            tracing::warn!("failed to write zig lib tree blob: {}", e);
-        }
-
-        // Cleanup extraction directory
         if let Err(e) = acquired.cleanup() {
             tracing::warn!("failed to cleanup Zig extraction directory: {}", e);
         }
@@ -1397,10 +1751,9 @@ impl StoreService {
             zig_exe = %zig_exe_hash,
             lib = %lib_hash,
             toolchain_id = %toolchain_id,
-            "stored Zig toolchain blobs in CAS"
+            "stored Zig toolchain in CAS"
         );
 
-        // Create toolchain manifest
         let toolchain_manifest = ToolchainManifest {
             schema_version: TOOLCHAIN_MANIFEST_SCHEMA_VERSION,
             kind: ToolchainKind::Zig,
@@ -1414,40 +1767,33 @@ impl StoreService {
                 ToolchainComponentTree {
                     name: "zig-exe".to_string(),
                     target: Some(platform.to_string()),
-                    tree_manifest: zig_exe_hash,
-                    sha256: String::new(), // Zig doesn't provide checksums
+                    tree_root: zig_exe_hash,
+                    sha256: String::new(),
                     total_size_bytes: acquired.zig_exe_contents.len() as u64,
                     file_count: 1,
-                    unique_blobs: 1,
+                    unique_chunks: 1,
                 },
                 ToolchainComponentTree {
                     name: "zig-lib".to_string(),
                     target: Some(platform.to_string()),
-                    tree_manifest: lib_hash,
+                    tree_root: lib_hash,
                     sha256: String::new(),
-                    total_size_bytes: acquired.lib_tarball.len() as u64,
-                    file_count: 1, // It's a tarball, many files inside
-                    unique_blobs: 1,
+                    total_size_bytes: lib_total_size,
+                    file_count: lib_files.len() as u32,
+                    unique_chunks: lib_files.len() as u32,
                 },
             ],
         };
 
-        // Store manifest
-        let manifest_json = facet_json::to_string(&toolchain_manifest)
-            .expect("toolchain manifest serialization must succeed");
-        let manifest_hash = Blake3Hash::from_bytes(manifest_json.as_bytes());
-        if let Err(e) = self
-            .storage
-            .put_manifest(&manifest_hash, manifest_json.as_bytes())
-            .await
-        {
+        let node = CasNode::Toolchain(toolchain_manifest);
+        let (node_bytes, manifest_hash) = node.to_bytes_and_hash();
+        if let Err(e) = self.storage.put_node(&manifest_hash, &node_bytes).await {
             tracing::warn!("failed to write toolchain manifest: {}", e);
         }
 
-        // Publish spec → manifest_hash mapping
         if let Err(e) = self
             .storage
-            .put_toolchain_spec(&spec_key, &manifest_hash)
+            .put_toolchain_spec(&spec_key, &manifest_hash.0)
             .await
         {
             tracing::warn!("failed to publish spec mapping for {}: {}", spec_key, e);
@@ -1468,4 +1814,53 @@ impl StoreService {
             error: None,
         }
     }
+}
+
+/// Convert a flat TreeManifest + per-file info into a DirectoryNode Merkle tree.
+/// This is the bridge between the old tarball extraction API and the new CAS.
+async fn tree_manifest_to_merkle(
+    service: &StoreService,
+    tree: &vx_store_proto::TreeManifest,
+    file_info: &Arc<peeps::locks::DiagnosticAsyncMutex<HashMap<Blake3Hash, ExtractedFileInfo>>>,
+) -> Result<(NodeHash, u64), String> {
+    use vx_store_proto::TreeEntryKind;
+
+    let info = file_info.lock().await;
+
+    let mut files: Vec<(String, ExtractedFileInfo)> = Vec::new();
+    let mut symlinks: Vec<(String, String)> = Vec::new();
+
+    for entry in &tree.entries {
+        match &entry.kind {
+            TreeEntryKind::File {
+                blob,
+                size,
+                executable,
+            } => {
+                let extracted = info
+                    .get(blob)
+                    .ok_or_else(|| format!("file info not found for blob {}", blob.to_hex()))?;
+                files.push((
+                    entry.path.clone(),
+                    ExtractedFileInfo {
+                        content_hash: extracted.content_hash,
+                        blob_node: extracted.blob_node,
+                        size: *size,
+                        executable: *executable,
+                    },
+                ));
+            }
+            TreeEntryKind::Symlink { target } => {
+                symlinks.push((entry.path.clone(), target.clone()));
+            }
+            TreeEntryKind::Directory => {
+                // Empty directories — these become empty DirectoryNode children
+                // if they have no files. The build_merkle_tree function handles
+                // this naturally by creating empty entry lists.
+            }
+        }
+    }
+
+    drop(info);
+    build_merkle_tree(service, &files, &symlinks).await
 }

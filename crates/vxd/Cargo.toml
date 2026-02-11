@@ -11,8 +11,10 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 vx-tracing = { workspace = true }
 facet = { workspace = true }
+figue = { workspace = true }
 picante = { workspace = true }
 roam = { workspace = true }
+peeps = { workspace = true }
 roam-stream = { workspace = true }
 tokio = { workspace = true }
 blake3 = { workspace = true }
@@ -35,3 +37,7 @@ vx-report = { workspace = true }
 vx-rs = { workspace = true }
 vx-toolchain = { workspace = true }
 tokio-test-lite = { workspace = true }
+
+[features]
+default = []
+diagnostics = ["peeps/diagnostics", "roam-stream/diagnostics"]

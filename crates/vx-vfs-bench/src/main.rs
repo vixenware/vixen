@@ -186,9 +186,6 @@ mod macos_bench {
 
             match config.mode {
                 BenchMode::RandomRead => {
-                    if config.reads == 0 {
-                        return Err("--reads must be > 0".to_string());
-                    }
                     if config.min_read_bytes == 0 {
                         return Err("--min-read-bytes must be > 0".to_string());
                     }
@@ -225,7 +222,7 @@ mod macos_bench {
              Options:\n\
              --mode <random-read|exec|toolchain-build|mount-and-wait>\n\
              --mount-path <path>\n\
-             --reads <n>\n\
+             --reads <n>              (0 = infinite)\n\
              --min-read-bytes <n>\n\
              --max-read-bytes <n>\n\
              --files-mb <a,b,c>\n\
@@ -975,7 +972,7 @@ mod macos_bench {
     enum BenchSummary {
         RandomRead {
             elapsed: Duration,
-            checksum: u64,
+            total_reads: u64,
             client_stats: StatsSnapshot,
             backend_stats: StatsSnapshot,
         },
@@ -1061,57 +1058,194 @@ mod macos_bench {
             let name = format!("file-{}mb.bin", mb);
             let path = mount_path.join(&name);
             let file = wait_for_file_open(&path, Duration::from_secs(5))?;
+            // Get reference data from the VFS backend for integrity verification
+            let item_id = vfs
+                .child_lookup
+                .get(&(ROOT_ID, name.clone()))
+                .copied()
+                .ok_or_else(|| format!("synthetic file {name} not found in VFS"))?;
+            let reference_data = vfs
+                .nodes
+                .get(&item_id)
+                .and_then(|n| n.data.clone())
+                .ok_or_else(|| format!("synthetic file {name} has no data"))?;
             open_files.push((
                 name,
                 mb.saturating_mul(1024).saturating_mul(1024),
                 Arc::new(file),
+                reference_data,
             ));
         }
 
         let client_stats = Arc::new(ReadStats::new());
-        let mut buffer = vec![0_u8; config.max_read_bytes as usize];
-        let mut rng = SplitMix64::new(config.seed ^ 0xD00D_F00D_1234_5678);
-        let mut checksum: u64 = 0;
+        let num_workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let infinite = config.reads == 0;
+        let reads_per_worker = if infinite {
+            0
+        } else {
+            config.reads.div_ceil(num_workers as u64)
+        };
+
+        // Shared progress counters
+        let total_reads = Arc::new(AtomicU64::new(0));
+        let total_bytes = Arc::new(AtomicU64::new(0));
+        let error_msg: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
         let start = Instant::now();
-        for _ in 0..config.reads {
-            let idx = (rng.next_u64() % open_files.len() as u64) as usize;
-            let (_name, file_size, file) = &open_files[idx];
 
-            let requested =
-                random_range_inclusive(&mut rng, config.min_read_bytes, config.max_read_bytes)
-                    .min((*file_size).max(1));
-            let max_offset = file_size.saturating_sub(requested);
-            let offset = if max_offset == 0 {
-                0
-            } else {
-                rng.next_u64() % (max_offset + 1)
-            };
+        let workers: Vec<_> = (0..num_workers)
+            .map(|worker_id| {
+                let open_files = open_files.clone();
+                let client_stats = client_stats.clone();
+                let total_reads = total_reads.clone();
+                let total_bytes = total_bytes.clone();
+                let error_msg = error_msg.clone();
+                let min_read = config.min_read_bytes;
+                let max_read = config.max_read_bytes;
+                let seed = config.seed ^ 0xD00D_F00D_1234_5678 ^ (worker_id as u64).wrapping_mul(0x517cc1b727220a95);
 
-            let read_start = Instant::now();
-            let bytes_read = file.read_at(&mut buffer[..requested as usize], offset)?;
-            let elapsed = read_start.elapsed();
+                std::thread::spawn(move || {
+                    let mut buffer = vec![0_u8; max_read as usize];
+                    let mut rng = SplitMix64::new(seed);
+                    let mut local_reads: u64 = 0;
 
-            if bytes_read > 0 {
-                checksum = checksum.wrapping_add(buffer[0] as u64);
+                    loop {
+                        if !infinite && local_reads >= reads_per_worker {
+                            break;
+                        }
+                        // Check if another worker hit corruption
+                        if error_msg.lock().expect("mutex").is_some() {
+                            break;
+                        }
+
+                        let idx = (rng.next_u64() % open_files.len() as u64) as usize;
+                        let (ref name, file_size, ref file, ref reference_data) = open_files[idx];
+
+                        let requested =
+                            random_range_inclusive(&mut rng, min_read, max_read)
+                                .min(file_size.max(1));
+                        let max_offset = file_size.saturating_sub(requested);
+                        let offset = if max_offset == 0 {
+                            0
+                        } else {
+                            rng.next_u64() % (max_offset + 1)
+                        };
+
+                        let read_start = Instant::now();
+                        let bytes_read = match file.read_at(&mut buffer[..requested as usize], offset) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                *error_msg.lock().expect("mutex") = Some(format!(
+                                    "worker {worker_id}: read_at failed on {name} offset={offset} len={requested}: {e}"
+                                ));
+                                break;
+                            }
+                        };
+                        let elapsed = read_start.elapsed();
+
+                        // Verify data integrity against reference
+                        let expected = &reference_data[offset as usize..(offset as usize + bytes_read)];
+                        let actual = &buffer[..bytes_read];
+                        if actual != expected {
+                            let mismatch_offset = actual
+                                .iter()
+                                .zip(expected.iter())
+                                .position(|(a, e)| a != e)
+                                .unwrap_or(0);
+                            *error_msg.lock().expect("mutex") = Some(format!(
+                                "CORRUPTION: worker {worker_id} file={name} offset={offset} len={bytes_read} \
+                                 first_mismatch=+{mismatch_offset} (file offset {}) \
+                                 expected=0x{:02x} got=0x{:02x}",
+                                offset as usize + mismatch_offset,
+                                expected[mismatch_offset],
+                                actual[mismatch_offset],
+                            ));
+                            break;
+                        }
+
+                        client_stats.record(
+                            requested,
+                            bytes_read as u64,
+                            elapsed,
+                            bytes_read as u64 != requested,
+                        );
+                        total_reads.fetch_add(1, Ordering::Relaxed);
+                        total_bytes.fetch_add(bytes_read as u64, Ordering::Relaxed);
+                        local_reads += 1;
+                    }
+                })
+            })
+            .collect();
+
+        // Progress reporter on the main thread
+        let progress_error_msg = error_msg.clone();
+        let progress_total_reads = total_reads.clone();
+        let progress_total_bytes = total_bytes.clone();
+        let target_reads = config.reads;
+        let progress_thread = std::thread::spawn(move || {
+            let mut last_reads = 0u64;
+            let mut last_bytes = 0u64;
+            let mut last_tick = Instant::now();
+            loop {
+                std::thread::sleep(Duration::from_secs(5));
+                if progress_error_msg.lock().expect("mutex").is_some() {
+                    break;
+                }
+                let now = Instant::now();
+                let tick_secs = now.duration_since(last_tick).as_secs_f64().max(1e-9);
+                let reads = progress_total_reads.load(Ordering::Relaxed);
+                let bytes = progress_total_bytes.load(Ordering::Relaxed);
+                let delta_bytes = bytes.saturating_sub(last_bytes);
+                let delta_reads = reads.saturating_sub(last_reads);
+                let throughput = delta_bytes as f64 / tick_secs;
+                let elapsed = start.elapsed();
+                let (throughput_val, throughput_unit) = if throughput >= 1024.0 * 1024.0 * 1024.0 {
+                    (throughput / (1024.0 * 1024.0 * 1024.0), "GB/s")
+                } else {
+                    (throughput / (1024.0 * 1024.0), "MB/s")
+                };
+                eprintln!(
+                    "[{:.1}s] {reads} reads verified OK (+{delta_reads}) | {throughput_val:.1} {throughput_unit} | {num_workers} workers",
+                    elapsed.as_secs_f64(),
+                );
+                last_reads = reads;
+                last_bytes = bytes;
+                last_tick = now;
+                if !infinite && reads >= target_reads {
+                    break;
+                }
             }
+        });
 
-            client_stats.record(
-                requested,
-                bytes_read as u64,
-                elapsed,
-                bytes_read as u64 != requested,
-            );
+        for w in workers {
+            w.join().expect("worker thread panicked");
         }
+        // Signal progress thread to stop
+        if error_msg.lock().expect("mutex").is_none() {
+            // Set a sentinel so the progress thread exits on next check
+            // (it'll exit naturally once workers are joined and reads >= target)
+        }
+        let _ = progress_thread.join();
 
         let elapsed = start.elapsed();
         let client = client_stats.snapshot();
         let backend = vfs.backend_stats();
 
+        // Check if any worker hit an error
+        if let Some(err) = error_msg.lock().expect("mutex").take() {
+            println!("elapsed: {:.6}s", elapsed.as_secs_f64());
+            println!("reads completed: {}", total_reads.load(Ordering::Relaxed));
+            return Err(err.into());
+        }
+
         println!("mode: {}", config.mode.as_str());
         println!("mount path: {}", mount_path);
         println!("elapsed: {:.6}s", elapsed.as_secs_f64());
-        println!("checksum: {}", checksum);
+        println!("reads: {}", total_reads.load(Ordering::Relaxed));
+        println!("workers: {}", num_workers);
+        println!("integrity: all reads verified OK");
         println!(
             "throughput (returned): {:.2} MB/s",
             (client.total_returned_bytes as f64 / (1024.0 * 1024.0))
@@ -1121,7 +1255,7 @@ mod macos_bench {
 
         Ok(BenchSummary::RandomRead {
             elapsed,
-            checksum,
+            total_reads: total_reads.load(Ordering::Relaxed),
             client_stats: client,
             backend_stats: backend,
         })
@@ -1563,13 +1697,13 @@ mod macos_bench {
         let summary_json = match summary {
             BenchSummary::RandomRead {
                 elapsed,
-                checksum,
+                total_reads,
                 client_stats,
                 backend_stats,
             } => format!(
-                "{{\"kind\":\"random-read\",\"elapsed_seconds\":{},\"checksum\":{},\"client_stats\":{},\"backend_stats\":{}}}",
+                "{{\"kind\":\"random-read\",\"elapsed_seconds\":{},\"total_reads\":{},\"client_stats\":{},\"backend_stats\":{}}}",
                 elapsed.as_secs_f64(),
-                checksum,
+                total_reads,
                 client_stats.to_json_object(),
                 backend_stats.to_json_object()
             ),

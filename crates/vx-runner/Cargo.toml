@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 default = []
-diagnostics = []
+diagnostics = ["peeps/diagnostics", "roam-session/diagnostics"]
 
 [package.metadata]
 
@@ -13,12 +13,10 @@ diagnostics = []
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-# VFS protocol
-vixenfs-proto = { workspace = true }
 
 vx-tracing = { workspace = true }
 facet = { workspace = true }
-facet-json = { workspace = true }
+figue = { workspace = true }
 thiserror = { workspace = true }
 roam = { workspace = true }
 roam-stream = { workspace = true }
@@ -36,5 +34,6 @@ vx-store-proto = { workspace = true }
 vx-runner-proto = { workspace = true }
 vx-vfsd = { path = "../vx-vfsd" }
 vx-io = { workspace = true }
-vx-locks = { workspace = true }
 libc = { workspace = true }
+roam-session = { workspace = true }
+peeps = { workspace = true }

@@ -6,7 +6,7 @@ import os
 
 enum VixenFSConstants {
     static let subsystem = "eu.bearcove.vixenfs"
-    static let appGroupIdentifier = "group.eu.bearcove.vixen"
+    static let appGroupIdentifier = "B2N6FSRTPV.vixenfs"
     static let shmBootstrapMaxAttempts = 1
     static let shmBootstrapRetryDelayNs: UInt64 = 0
 }

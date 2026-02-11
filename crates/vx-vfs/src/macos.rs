@@ -7,6 +7,7 @@
 //! - `vx-vfs`, which serves VFS connections over SHM.
 
 use crate::types::{VfsConfig, VfsError, VfsStart};
+use peeps::locks::DiagnosticAsyncMutex;
 use roam_shm::bootstrap::{SessionId, SessionPaths, unix as shm_bootstrap};
 use roam_shm::driver::MultiPeerHostDriver;
 use roam_shm::{AddPeerOptions, SegmentConfig, ShmHost};
@@ -16,7 +17,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 use vixenfs_proto::{Vfs, VfsDispatcher};
 use vx_vfs_types::{
     VIXEN_APP_PATH, VIXEN_DOWNLOAD_URL, VIXEN_EXTENSION_IDENTIFIER, VIXEN_MOUNT_HELPER_PATH,
@@ -55,13 +56,29 @@ where
 
     tracing::debug!(%sid, mount_path = %config.mount_path, "starting vixenfs-mount helper");
 
-    let helper_output = Arc::new(Mutex::new(VecDeque::new()));
+    let helper_output = Arc::new(DiagnosticAsyncMutex::new(
+        "vfs/helper_output",
+        VecDeque::new(),
+    ));
+
+    // Log file lives next to the mount point (under VX_HOME, not the App Group container)
+    let log_file_path = config
+        .mount_path
+        .as_std_path()
+        .parent()
+        .unwrap()
+        .join("vixenfs-mount.log");
+
     let mut helper_command = Command::new(VIXEN_MOUNT_HELPER_PATH);
     helper_command
         .arg("--sid")
         .arg(&sid)
         .arg("--mount-point")
-        .arg(config.mount_path.as_str());
+        .arg(config.mount_path.as_str())
+        .arg("--parent-pid")
+        .arg(std::process::id().to_string())
+        .arg("--log-file")
+        .arg(&log_file_path);
 
     if std::env::var("VIXENFS_PRELOAD").as_deref() == Ok("1") {
         helper_command.arg("--preload");
@@ -71,8 +88,8 @@ where
     }
 
     helper_command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .kill_on_drop(false);
 
     let mut helper = match helper_command.spawn() {
@@ -92,39 +109,35 @@ where
         }
     };
 
-    // Stream helper stdout/stderr to tracing and capture for error reporting
-    let stdout_task = if let Some(stdout) = helper.stdout.take() {
+    // Tail the helper's log file, forwarding lines to tracing and capturing for error reporting
+    let log_tail_task = {
         let output_clone = helper_output.clone();
-        Some(tokio::spawn(async move {
+        let log_path = log_file_path.clone();
+        peeps::tasks::spawn_tracked("fskit_helper_log_tail", async move {
             use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "vixenfs-mount", "stdout: {}", line);
-                output_clone
-                    .lock()
-                    .await
-                    .push_back(format!("stdout: {}", line));
-            }
-        }))
-    } else {
-        None
-    };
 
-    let stderr_task = if let Some(stderr) = helper.stderr.take() {
-        let output_clone = helper_output.clone();
-        Some(tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "vixenfs-mount", "stderr: {}", line);
-                output_clone
-                    .lock()
-                    .await
-                    .push_back(format!("stderr: {}", line));
+            // Wait for the log file to appear (helper creates it on startup)
+            let file = loop {
+                match tokio::fs::File::open(&log_path).await {
+                    Ok(f) => break f,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+                }
+            };
+            let mut lines = BufReader::new(file).lines();
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        tracing::debug!(target: "vixenfs-mount", "{}", line);
+                        output_clone.lock().await.push_back(line);
+                    }
+                    Ok(None) => {
+                        // EOF — file may still be written to, poll again
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    Err(_) => break,
+                }
             }
-        }))
-    } else {
-        None
+        })
     };
 
     match wait_for_mount_ready(&mut helper, &mut mount_ready_rx, MOUNT_TIMEOUT).await {
@@ -141,13 +154,9 @@ where
             let _ = helper.kill().await;
             let _ = helper.wait().await;
 
-            // Wait for stdout/stderr readers to finish draining
-            if let Some(task) = stdout_task {
-                let _ = task.await;
-            }
-            if let Some(task) = stderr_task {
-                let _ = task.await;
-            }
+            // Wait for the log tail task to finish draining
+            log_tail_task.abort();
+            let _ = log_tail_task.await;
 
             let helper_output = snapshot_lines(&helper_output).await;
 
@@ -182,10 +191,19 @@ where
     std::thread::Builder::new()
         .name("vfs-runtime".into())
         .spawn(move || {
+            peeps::threads::register_thread("vfs-runtime");
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(4)
                 .thread_name("vfs-worker")
                 .enable_all()
+                .on_thread_start(|| {
+                    peeps::threads::register_thread(
+                        std::thread::current().name().unwrap_or("vfs-worker"),
+                    );
+                })
+                .on_thread_stop(|| {
+                    peeps::threads::deregister_thread();
+                })
                 .build()
                 .expect("failed to create VFS tokio runtime");
             rt.block_on(async move {
@@ -278,7 +296,7 @@ where
                 let _ = sid_tx.send(Ok(sid.clone()));
 
                 let vfs_dead_tx_for_driver = vfs_dead_tx.clone();
-                tokio::spawn(async move {
+                peeps::tasks::spawn_tracked("shm_host_driver", async move {
                     if let Err(error) = driver.run().await {
                         tracing::debug!(%error, "SHM host driver exited with error");
                     } else {
@@ -615,7 +633,7 @@ pub async fn resolve_app_group_path() -> Result<PathBuf, String> {
     Ok(PathBuf::from(path))
 }
 
-async fn snapshot_lines(lines: &Arc<Mutex<VecDeque<String>>>) -> String {
+async fn snapshot_lines(lines: &Arc<DiagnosticAsyncMutex<VecDeque<String>>>) -> String {
     lines
         .lock()
         .await

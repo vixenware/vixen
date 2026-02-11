@@ -63,6 +63,50 @@ actor ReadTelemetry {
         )
     }
 
+    func toJSON() -> Data {
+        var json = "{\n"
+        json += "  \"read_count\": \(readCount),\n"
+        json += "  \"error_count\": \(errorCount),\n"
+        json += "  \"requested_bytes\": {\n"
+        json += "    \"total\": \(totalRequestedBytes),\n"
+        if readCount > 0 {
+            json += "    \"min\": \(minRequestedBytes),\n"
+            json += "    \"max\": \(maxRequestedBytes),\n"
+            json += "    \"avg\": \(Double(totalRequestedBytes) / Double(readCount))\n"
+        } else {
+            json += "    \"min\": 0,\n"
+            json += "    \"max\": 0,\n"
+            json += "    \"avg\": 0\n"
+        }
+        json += "  },\n"
+        json += "  \"returned_bytes\": {\n"
+        json += "    \"total\": \(totalBytes),\n"
+        if readCount > 0 {
+            json += "    \"min\": \(minBytes),\n"
+            json += "    \"max\": \(maxBytes),\n"
+            json += "    \"avg\": \(Double(totalBytes) / Double(readCount))\n"
+        } else {
+            json += "    \"min\": 0,\n"
+            json += "    \"max\": 0,\n"
+            json += "    \"avg\": 0\n"
+        }
+        json += "  },\n"
+        json += "  \"latency_ns\": {\n"
+        json += "    \"total\": \(totalLatencyNs),\n"
+        if readCount > 0 {
+            json += "    \"min\": \(minLatencyNs),\n"
+            json += "    \"max\": \(maxLatencyNs),\n"
+            json += "    \"avg\": \(Double(totalLatencyNs) / Double(readCount))\n"
+        } else {
+            json += "    \"min\": 0,\n"
+            json += "    \"max\": 0,\n"
+            json += "    \"avg\": 0\n"
+        }
+        json += "  }\n"
+        json += "}\n"
+        return Data(json.utf8)
+    }
+
     func reset() {
         readCount = 0
         errorCount = 0
@@ -94,6 +138,42 @@ final class Volume: FSVolume {
     /// Root item ID (always 1 in our VFS protocol)
     private let rootId: UInt64 = 1
     private static let mutableAttributesTTLNs: UInt64 = 2_000_000_000
+
+    // Virtual items served entirely from the Swift side (never hit vx-vfsd).
+    // IDs chosen high to avoid collision with vx-vfsd's allocator (starts at 2).
+    private static let vixenfsDirId: UInt64 = 0xFFFF_FFFF_FFFE_0001
+    private static let statsJsonId: UInt64 = 0xFFFF_FFFF_FFFE_0002
+    private static let vixenfsDirName = ".vixenfs"
+    private static let statsJsonName = "stats.json"
+
+    private func isVirtualItem(_ itemId: UInt64) -> Bool {
+        itemId == Volume.vixenfsDirId || itemId == Volume.statsJsonId
+    }
+
+    private func vixenfsDirAttributes() -> FSItem.Attributes {
+        FSItem.Attributes.fromVfs(
+            itemId: Volume.vixenfsDirId,
+            parentId: rootId,
+            itemType: .directory,
+            size: 0,
+            modifiedTime: 0,
+            createdTime: 0,
+            mode: 0o755
+        )
+    }
+
+    private func statsJsonAttributes() async -> FSItem.Attributes {
+        let data = await readTelemetry.toJSON()
+        return FSItem.Attributes.fromVfs(
+            itemId: Volume.statsJsonId,
+            parentId: Volume.vixenfsDirId,
+            itemType: .file,
+            size: UInt64(data.count),
+            modifiedTime: 0,
+            createdTime: 0,
+            mode: 0o444
+        )
+    }
 
     init() {
         let volumeId = FSVolume.Identifier(uuid: UUID())
@@ -247,6 +327,19 @@ extension Volume: FSVolume.Operations {
         of fsItem: FSItem
     ) async throws -> FSItem.Attributes {
         let item = try getItem(fsItem)
+
+        // Virtual items: always fresh from Swift side
+        if item.itemId == Volume.vixenfsDirId {
+            let attrs = vixenfsDirAttributes()
+            item.updateAttributes(attrs)
+            return attrs
+        }
+        if item.itemId == Volume.statsJsonId {
+            let attrs = await statsJsonAttributes()
+            item.updateAttributes(attrs)
+            return attrs
+        }
+
         let nowNs = DispatchTime.now().uptimeNanoseconds
         let snapshot = item.attributesSnapshot()
         let cachedAttrs = snapshot.attrs
@@ -286,6 +379,11 @@ extension Volume: FSVolume.Operations {
     ) async throws -> FSItem.Attributes {
         let item = try getItem(fsItem)
         log.debug("setAttributes: itemId=\(item.itemId)")
+
+        // Virtual items are read-only
+        if isVirtualItem(item.itemId) {
+            return item.cachedAttributes
+        }
 
         // Only forward attributes the kernel actually requested to change.
         // Reading unset fields returns zero, which would clobber real values
@@ -347,6 +445,37 @@ extension Volume: FSVolume.Operations {
         let nameStr = name.string ?? ""
         log.debug("lookupItem: name=\(nameStr) in dir=\(dirItem.itemId)")
 
+        // Virtual .vixenfs directory under root
+        if dirItem.itemId == rootId && nameStr == Volume.vixenfsDirName {
+            let attrs = vixenfsDirAttributes()
+            if let existing = getCachedItem(Volume.vixenfsDirId) {
+                existing.updateAttributes(attrs)
+                return (existing, existing.name)
+            }
+            let item = Item(
+                itemId: Volume.vixenfsDirId, name: Volume.vixenfsDirName, attributes: attrs)
+            cacheItem(item)
+            return (item, item.name)
+        }
+
+        // Virtual stats.json under .vixenfs
+        if dirItem.itemId == Volume.vixenfsDirId && nameStr == Volume.statsJsonName {
+            let attrs = await statsJsonAttributes()
+            if let existing = getCachedItem(Volume.statsJsonId) {
+                existing.updateAttributes(attrs)
+                return (existing, existing.name)
+            }
+            let item = Item(
+                itemId: Volume.statsJsonId, name: Volume.statsJsonName, attributes: attrs)
+            cacheItem(item)
+            return (item, item.name)
+        }
+
+        // Items under .vixenfs that aren't stats.json → ENOENT
+        if dirItem.itemId == Volume.vixenfsDirId {
+            throw fs_errorForPOSIXError(POSIXError.ENOENT.rawValue)
+        }
+
         let dirId = dirItem.itemId
         let client = try await getClient()
         let result = try await client.lookup(parentId: dirId, name: nameStr)
@@ -402,6 +531,11 @@ extension Volume: FSVolume.Operations {
         let nameStr = name.string ?? ""
         log.debug("createItem: name=\(nameStr) in dir=\(dirItem.itemId)")
 
+        // Cannot create items under .vixenfs
+        if dirItem.itemId == Volume.vixenfsDirId {
+            throw fs_errorForPOSIXError(POSIXError.EACCES.rawValue)
+        }
+
         let vfsType: ItemType = (type == .directory) ? .directory : .file
         let dirId = dirItem.itemId
         let client = try await getClient()
@@ -456,6 +590,11 @@ extension Volume: FSVolume.Operations {
         let item = try getItem(fsItem)
         log.debug("removeItem: itemId=\(item.itemId)")
 
+        // Virtual items cannot be deleted
+        if isVirtualItem(item.itemId) {
+            throw fs_errorForPOSIXError(POSIXError.EACCES.rawValue)
+        }
+
         let itemId = item.itemId
         let result = try await getClient().delete(itemId: itemId)
 
@@ -479,6 +618,11 @@ extension Volume: FSVolume.Operations {
         let destName = destinationName.string ?? ""
         log.debug("renameItem: itemId=\(item.itemId) -> \(destName) in \(destDir.itemId)")
 
+        // Virtual items cannot be renamed
+        if isVirtualItem(item.itemId) || isVirtualItem(destDir.itemId) {
+            throw fs_errorForPOSIXError(POSIXError.EACCES.rawValue)
+        }
+
         let itemId = item.itemId
         let destDirId = destDir.itemId
         let result = try await getClient().rename(
@@ -500,6 +644,24 @@ extension Volume: FSVolume.Operations {
     ) async throws -> FSDirectoryVerifier {
         let dirItem = try getItem(directory)
         log.debug("enumerateDirectory: itemId=\(dirItem.itemId) cookie=\(cookie.rawValue)")
+
+        // Virtual .vixenfs directory: list stats.json
+        if dirItem.itemId == Volume.vixenfsDirId {
+            if cookie.rawValue == 0 {
+                let attrs = await statsJsonAttributes()
+                let statsItem = Item(
+                    itemId: Volume.statsJsonId, name: Volume.statsJsonName, attributes: attrs)
+                cacheItem(statsItem)
+                _ = packer.packEntry(
+                    name: FSFileName(string: Volume.statsJsonName),
+                    itemType: .file,
+                    itemID: attrs.fileID,
+                    nextCookie: FSDirectoryCookie(1),
+                    attributes: attributes != nil ? attrs : nil
+                )
+            }
+            return FSDirectoryVerifier(0)
+        }
 
         let dirId = dirItem.itemId
         let cursor = cookie.rawValue
@@ -553,6 +715,24 @@ extension Volume: FSVolume.ReadWriteOperations {
     ) async throws -> Int {
         let item = try getItem(fsItem)
         log.debug("read: itemId=\(item.itemId) offset=\(offset) length=\(length)")
+
+        // Virtual stats.json: serve from ReadTelemetry
+        if item.itemId == Volume.statsJsonId {
+            let data = await readTelemetry.toJSON()
+            let start = min(Int(offset), data.count)
+            let end = min(start + max(length, 0), data.count)
+            let slice = data[start..<end]
+            let copyLen = min(buffer.length, slice.count)
+            if copyLen > 0 {
+                slice.withUnsafeBytes { src in
+                    buffer.withUnsafeMutableBytes { dst in
+                        dst.copyBytes(
+                            from: UnsafeRawBufferPointer(start: src.baseAddress!, count: copyLen))
+                    }
+                }
+            }
+            return copyLen
+        }
 
         let startNs = DispatchTime.now().uptimeNanoseconds
         let requestedBytes = max(length, 0)
@@ -614,6 +794,11 @@ extension Volume: FSVolume.ReadWriteOperations {
 
         let item = try getItem(fsItem)
         log.debug("write: itemId=\(item.itemId) offset=\(offset) length=\(bytes.count)")
+
+        // Virtual items are read-only
+        if isVirtualItem(item.itemId) {
+            throw fs_errorForPOSIXError(POSIXError.EACCES.rawValue)
+        }
 
         let itemId = item.itemId
 

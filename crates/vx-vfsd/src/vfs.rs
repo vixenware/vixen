@@ -30,16 +30,15 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use camino::Utf8PathBuf;
 use vixenfs_proto::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
     ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
 };
-use vx_locks::DiagnosticRwLock;
-use vx_store_proto::{Blake3Hash, StoreClient};
+use peeps::locks::DiagnosticRwLock;
+use vx_store_proto::{Blake3Hash, BlobNode, CasNode, ChunkHash, NodeHash, StoreClient};
 
 /// A virtual filesystem item
 #[derive(Debug, Clone)]
@@ -49,8 +48,12 @@ pub struct VfsItem {
     pub name: String,
     pub item_type: ItemType,
     pub mode: u32,
-    /// For files: CAS blob hash (None means empty/new file)
+    /// For files: CAS content hash (None means empty/new file).
+    /// For SmallFile: this is also the ChunkHash. For LargeFile: see blob_node.
     pub cas_hash: Option<Blake3Hash>,
+    /// For LargeFile entries: the NodeHash of the BlobNode in CAS.
+    /// None for SmallFile entries (single chunk, fetched via cas_hash).
+    pub blob_node: Option<NodeHash>,
     /// For files: size in bytes
     pub size: u64,
     /// For files being written: buffered data
@@ -74,181 +77,212 @@ pub struct ActionPrefix {
 #[derive(Debug, Clone)]
 pub struct PrefixEntry {
     pub item_type: ItemType,
-    /// For files: the CAS blob hash
+    /// For files: the CAS content hash
     pub cas_hash: Option<Blake3Hash>,
+    /// For LargeFile entries: the NodeHash of the BlobNode
+    pub blob_node: Option<NodeHash>,
     /// For files: size in bytes
     pub size: u64,
     /// File mode (permissions)
     pub mode: u32,
 }
 
-/// Block size for L2 disk cache. 64 KiB matches typical FUSE read sizes.
-const BLOCK_SIZE: u64 = 64 * 1024;
 const ROOT_ITEM_ID: ItemId = 1;
-const VIXENFS_DIR_ID: ItemId = 2;
-const STATS_JSON_ID: ItemId = 3;
-const VIXENFS_DIR_NAME: &str = ".vixenfs";
-const STATS_JSON_NAME: &str = "stats.json";
-const RECORDING_NAME: &str = "recording";
 
-struct OpStats {
-    count: AtomicU64,
-    errors: AtomicU64,
-    total_latency_ns: AtomicU64,
-    max_latency_ns: AtomicU64,
+/// VFS item storage with parent→children adjacency index.
+///
+/// All mutations must go through [`VfsItems::insert`] and [`VfsItems::remove`]
+/// to keep the children index consistent.
+pub(crate) struct VfsItems {
+    /// All items keyed by ItemId.
+    items: HashMap<ItemId, VfsItem>,
+    /// parent_id → { child_name → child_id }
+    children: HashMap<ItemId, HashMap<String, ItemId>>,
 }
 
-impl OpStats {
-    const fn new() -> Self {
+impl VfsItems {
+    fn new() -> Self {
         Self {
-            count: AtomicU64::new(0),
-            errors: AtomicU64::new(0),
-            total_latency_ns: AtomicU64::new(0),
-            max_latency_ns: AtomicU64::new(0),
+            items: HashMap::new(),
+            children: HashMap::new(),
         }
     }
 
-    fn snapshot(&self) -> OpStatsSnapshot {
-        OpStatsSnapshot {
-            count: self.count.load(Ordering::Relaxed),
-            errors: self.errors.load(Ordering::Relaxed),
-            total_latency_ns: self.total_latency_ns.load(Ordering::Relaxed),
-            max_latency_ns: self.max_latency_ns.load(Ordering::Relaxed),
+    /// Insert an item, updating the children index.
+    fn insert(&mut self, item: VfsItem) {
+        let id = item.id;
+        let parent_id = item.parent_id;
+        let name = item.name.clone();
+        self.items.insert(id, item);
+        if parent_id != 0 {
+            self.children.entry(parent_id).or_default().insert(name, id);
         }
     }
 
-    fn record(&self, latency: std::time::Duration, is_error: bool) {
-        let latency_ns = latency.as_nanos() as u64;
-        self.count.fetch_add(1, Ordering::Relaxed);
-        self.total_latency_ns
-            .fetch_add(latency_ns, Ordering::Relaxed);
-        if is_error {
-            self.errors.fetch_add(1, Ordering::Relaxed);
-        }
-
-        let _ = self
-            .max_latency_ns
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                if latency_ns > current {
-                    Some(latency_ns)
-                } else {
-                    None
+    /// Remove an item by id, updating the children index.
+    pub(crate) fn remove(&mut self, id: ItemId) -> Option<VfsItem> {
+        let item = self.items.remove(&id)?;
+        // Remove from parent's children map
+        if item.parent_id != 0
+            && let Some(siblings) = self.children.get_mut(&item.parent_id) {
+                siblings.remove(&item.name);
+                if siblings.is_empty() {
+                    self.children.remove(&item.parent_id);
                 }
-            });
+            }
+        // Remove this item's children entry (even if non-empty — caller is
+        // responsible for removing descendants first)
+        self.children.remove(&id);
+        Some(item)
     }
-}
 
-impl Default for OpStats {
-    fn default() -> Self {
-        Self::new()
+    /// Look up a child by parent_id + name. O(1).
+    pub(crate) fn lookup_child(&self, parent_id: ItemId, name: &str) -> Option<&VfsItem> {
+        let child_id = self.children.get(&parent_id)?.get(name)?;
+        self.items.get(child_id)
     }
-}
 
-#[derive(Default)]
-struct VfsStats {
-    lookup: OpStats,
-    get_attributes: OpStats,
-    read_dir: OpStats,
-    read: OpStats,
-    write: OpStats,
-    read_requested_bytes: AtomicU64,
-    read_returned_bytes: AtomicU64,
-    write_bytes: AtomicU64,
-    l2_hits: AtomicU64,
-    l2_misses: AtomicU64,
-    cas_read_ops: AtomicU64,
-    cas_read_bytes: AtomicU64,
-}
+    /// Get an item by id.
+    fn get(&self, id: &ItemId) -> Option<&VfsItem> {
+        self.items.get(id)
+    }
 
-impl VfsStats {
-    fn snapshot(&self) -> VfsStatsSnapshot {
-        VfsStatsSnapshot {
-            lookup: self.lookup.snapshot(),
-            get_attributes: self.get_attributes.snapshot(),
-            read_dir: self.read_dir.snapshot(),
-            read: self.read.snapshot(),
-            write: self.write.snapshot(),
-            read_requested_bytes: self.read_requested_bytes.load(Ordering::Relaxed),
-            read_returned_bytes: self.read_returned_bytes.load(Ordering::Relaxed),
-            write_bytes: self.write_bytes.load(Ordering::Relaxed),
-            l2_hits: self.l2_hits.load(Ordering::Relaxed),
-            l2_misses: self.l2_misses.load(Ordering::Relaxed),
-            cas_read_ops: self.cas_read_ops.load(Ordering::Relaxed),
-            cas_read_bytes: self.cas_read_bytes.load(Ordering::Relaxed),
+    /// Get a mutable item by id.
+    fn get_mut(&mut self, id: &ItemId) -> Option<&mut VfsItem> {
+        self.items.get_mut(id)
+    }
+
+    /// Iterate over children of a parent. O(children count).
+    fn children_of(&self, parent_id: ItemId) -> impl Iterator<Item = &VfsItem> {
+        self.children
+            .get(&parent_id)
+            .into_iter()
+            .flat_map(|kids| kids.values())
+            .filter_map(|id| self.items.get(id))
+    }
+
+    /// Check if a parent has any children.
+    fn has_children(&self, parent_id: ItemId) -> bool {
+        self.children
+            .get(&parent_id)
+            .is_some_and(|kids| !kids.is_empty())
+    }
+
+    /// Check if a child name exists under parent.
+    fn child_exists(&self, parent_id: ItemId, name: &str) -> bool {
+        self.children
+            .get(&parent_id)
+            .is_some_and(|kids| kids.contains_key(name))
+    }
+
+    /// Rename an item: update the children index for old and new parent.
+    fn rename(&mut self, item_id: ItemId, new_parent_id: ItemId, new_name: String) {
+        if let Some(item) = self.items.get(&item_id) {
+            let old_parent = item.parent_id;
+            let old_name = item.name.clone();
+            // Remove from old parent
+            if let Some(siblings) = self.children.get_mut(&old_parent) {
+                siblings.remove(&old_name);
+            }
+        }
+        // Update the item
+        if let Some(item) = self.items.get_mut(&item_id) {
+            item.parent_id = new_parent_id;
+            item.name = new_name.clone();
+        }
+        // Add to new parent
+        self.children
+            .entry(new_parent_id)
+            .or_default()
+            .insert(new_name, item_id);
+    }
+
+    /// Total number of items.
+    fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Check if the map contains an item.
+    fn contains_key(&self, id: &ItemId) -> bool {
+        self.items.contains_key(id)
+    }
+
+    /// Build a minimal snapshot for flush: no write_buffers, includes children index.
+    /// Single pass over items, O(N) where N = total items.
+    pub(crate) fn snapshot_for_flush(&self) -> FlushSnapshot {
+        let mut mini_items = HashMap::with_capacity(self.items.len());
+        let mut children: HashMap<ItemId, Vec<(String, ItemId)>> = HashMap::new();
+
+        for (id, item) in &self.items {
+            mini_items.insert(
+                *id,
+                MiniItem {
+                    id: item.id,
+                    name: item.name.clone(),
+                    item_type: item.item_type,
+                    mode: item.mode,
+                    cas_hash: item.cas_hash,
+                    blob_node: item.blob_node,
+                    size: item.size,
+                },
+            );
+            if item.parent_id != 0 {
+                children
+                    .entry(item.parent_id)
+                    .or_default()
+                    .push((item.name.clone(), *id));
+            }
+        }
+
+        // Sort children by name for deterministic DirectoryNode hashing
+        for kids in children.values_mut() {
+            kids.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        }
+
+        FlushSnapshot {
+            items: mini_items,
+            children,
         }
     }
 }
 
-#[derive(Debug, Clone, facet::Facet)]
-struct OpStatsSnapshot {
-    count: u64,
-    errors: u64,
-    total_latency_ns: u64,
-    max_latency_ns: u64,
+/// Minimal item for flush snapshots — no write_buffer, no heap-heavy fields.
+pub(crate) struct MiniItem {
+    pub id: ItemId,
+    pub name: String,
+    pub item_type: ItemType,
+    pub mode: u32,
+    pub cas_hash: Option<Blake3Hash>,
+    pub blob_node: Option<NodeHash>,
+    pub size: u64,
 }
 
-#[derive(Debug, Clone, facet::Facet)]
-struct VfsStatsSnapshot {
-    lookup: OpStatsSnapshot,
-    get_attributes: OpStatsSnapshot,
-    read_dir: OpStatsSnapshot,
-    read: OpStatsSnapshot,
-    write: OpStatsSnapshot,
-    read_requested_bytes: u64,
-    read_returned_bytes: u64,
-    write_bytes: u64,
-    l2_hits: u64,
-    l2_misses: u64,
-    cas_read_ops: u64,
-    cas_read_bytes: u64,
-}
-
-#[derive(Debug, Clone, facet::Facet)]
-struct RecordingInstructions {
-    enable: String,
-    disable: String,
-    status: String,
-}
-
-#[derive(Debug, Clone, facet::Facet)]
-struct RecordingState {
-    enabled: bool,
-    instructions: RecordingInstructions,
-}
-
-#[derive(Debug, Clone, facet::Facet)]
-struct DiagnosticsState {
-    enabled: bool,
-    shm: Option<String>,
-    message: Option<String>,
-}
-
-#[derive(Debug, Clone, facet::Facet)]
-struct StatsSnapshot {
-    unix_time_s: u64,
-    uptime_ms: u64,
-    recording: RecordingState,
-    stats: VfsStatsSnapshot,
-    diagnostics: DiagnosticsState,
+/// Snapshot of VFS state for tree-building during flush.
+/// Built in a single O(N) pass, no write_buffers included.
+pub(crate) struct FlushSnapshot {
+    pub items: HashMap<ItemId, MiniItem>,
+    /// parent_id → sorted Vec of (child_name, child_id)
+    pub children: HashMap<ItemId, Vec<(String, ItemId)>>,
 }
 
 /// CAS-backed VFS implementation
 pub struct CasVfs {
     /// CAS client for fetching blobs
     pub(crate) cas: Arc<StoreClient<crate::CasCaller>>,
-    /// All items in the VFS (keyed by ItemId)
-    pub(crate) items: DiagnosticRwLock<HashMap<ItemId, VfsItem>>,
+    /// All items in the VFS with adjacency index
+    pub(crate) items: DiagnosticRwLock<VfsItems>,
     /// Active action prefixes (keyed by prefix ID like "build-01JFX...")
     pub(crate) prefixes: DiagnosticRwLock<HashMap<String, ActionPrefix>>,
     /// Next available ItemId
     next_id: AtomicU64,
-    /// L2 blob block cache (disk): persistent across vx-vfsd restarts.
-    /// Stores fixed-size blocks: `{cache_dir}/{hex[..2]}/{hex}.{block_idx}`.
+    /// L2 chunk cache (disk): persistent across vx-vfsd restarts.
+    /// Layout: `{cache_dir}/{hex[..2]}/{hex}`.
     /// None if VX_HOME is not set.
     disk_cache_dir: Option<Utf8PathBuf>,
-    recording_enabled: AtomicBool,
-    stats: VfsStats,
-    started_at: Instant,
+    /// BlobNode metadata cache: NodeHash → parsed BlobNode.
+    /// BlobNodes are immutable (content-addressed) so caching is unconditionally safe.
+    /// Small: each entry is ~100 bytes × MAX_CHUNKS_PER_BLOB chunk entries.
+    blobnode_cache: DiagnosticRwLock<HashMap<NodeHash, Arc<BlobNode>>>,
 }
 
 impl CasVfs {
@@ -260,59 +294,28 @@ impl CasVfs {
         cas: Arc<StoreClient<crate::CasCaller>>,
         disk_cache_dir: Option<Utf8PathBuf>,
     ) -> Self {
-        let mut items = HashMap::new();
+        let mut items = VfsItems::new();
 
         // Create root directory (ID 1)
-        items.insert(
-            ROOT_ITEM_ID,
-            VfsItem {
-                id: ROOT_ITEM_ID,
-                parent_id: 0, // root has no parent
-                name: String::new(),
-                item_type: ItemType::Directory,
-                mode: mode::DIRECTORY,
-                cas_hash: None,
-                size: 0,
-                write_buffer: None,
-            },
-        );
-
-        items.insert(
-            VIXENFS_DIR_ID,
-            VfsItem {
-                id: VIXENFS_DIR_ID,
-                parent_id: ROOT_ITEM_ID,
-                name: VIXENFS_DIR_NAME.to_string(),
-                item_type: ItemType::Directory,
-                mode: mode::DIRECTORY,
-                cas_hash: None,
-                size: 0,
-                write_buffer: None,
-            },
-        );
-        items.insert(
-            STATS_JSON_ID,
-            VfsItem {
-                id: STATS_JSON_ID,
-                parent_id: VIXENFS_DIR_ID,
-                name: STATS_JSON_NAME.to_string(),
-                item_type: ItemType::File,
-                mode: mode::FILE_REGULAR,
-                cas_hash: None,
-                size: 0,
-                write_buffer: None,
-            },
-        );
+        items.insert(VfsItem {
+            id: ROOT_ITEM_ID,
+            parent_id: 0, // root has no parent
+            name: String::new(),
+            item_type: ItemType::Directory,
+            mode: mode::DIRECTORY,
+            cas_hash: None,
+            blob_node: None,
+            size: 0,
+            write_buffer: None,
+        });
 
         Self {
             cas,
             items: DiagnosticRwLock::new("CasVfs::items", items),
             prefixes: DiagnosticRwLock::new("CasVfs::prefixes", HashMap::new()),
-            next_id: AtomicU64::new(4), // 1=root, 2=.vixenfs, 3=stats.json
+            next_id: AtomicU64::new(2), // 1=root
             disk_cache_dir,
-            recording_enabled: AtomicBool::new(false),
-            stats: VfsStats::default(),
-            started_at: Instant::now(),
+            blobnode_cache: DiagnosticRwLock::new("CasVfs::blobnode_cache", HashMap::new()),
         }
     }
 
@@ -321,196 +324,206 @@ impl CasVfs {
         self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
-    fn recording_instructions() -> RecordingInstructions {
-        RecordingInstructions {
-            enable: format!("touch /{VIXENFS_DIR_NAME}/{RECORDING_NAME}"),
-            disable: format!("rm /{VIXENFS_DIR_NAME}/{RECORDING_NAME}"),
-            status: format!("stat /{VIXENFS_DIR_NAME}/{RECORDING_NAME}"),
-        }
-    }
-
-    fn should_record(&self) -> bool {
-        self.recording_enabled.load(Ordering::Relaxed)
-    }
-
-    fn record_op(&self, stats: &OpStats, started_at: Instant, error: i32) {
-        if !self.should_record() {
-            return;
-        }
-        stats.record(started_at.elapsed(), error != errno::OK);
-    }
-
-    fn recording_item_id(&self, items: &HashMap<ItemId, VfsItem>) -> Option<ItemId> {
-        items
-            .values()
-            .find(|item| item.parent_id == VIXENFS_DIR_ID && item.name == RECORDING_NAME)
-            .map(|item| item.id)
-    }
-
-    fn is_virtual_protected_item(&self, item_id: ItemId) -> bool {
-        item_id == ROOT_ITEM_ID || item_id == VIXENFS_DIR_ID || item_id == STATS_JSON_ID
-    }
-
-    fn virtual_size(&self, item_id: ItemId) -> Option<u64> {
-        match item_id {
-            STATS_JSON_ID => Some(self.render_stats_json().len() as u64),
-            _ => None,
-        }
-    }
-
-    fn render_stats_json(&self) -> Vec<u8> {
-        let unix_time_s = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        let diagnostics = {
-            #[cfg(all(feature = "diagnostics", unix))]
-            {
-                DiagnosticsState {
-                    enabled: true,
-                    shm: Some(roam_shm::dump_all_state()),
-                    message: None,
-                }
-            }
-            #[cfg(all(feature = "diagnostics", not(unix)))]
-            {
-                DiagnosticsState {
-                    enabled: true,
-                    shm: None,
-                    message: Some("SHM diagnostics not available on this platform".to_string()),
-                }
-            }
-            #[cfg(not(feature = "diagnostics"))]
-            {
-                DiagnosticsState {
-                    enabled: false,
-                    shm: None,
-                    message: Some(
-                        "diagnostics unavailable (build without diagnostics feature)".to_string(),
-                    ),
-                }
-            }
-        };
-
-        let snapshot = StatsSnapshot {
-            unix_time_s,
-            uptime_ms: self.started_at.elapsed().as_millis() as u64,
-            recording: RecordingState {
-                enabled: self.should_record(),
-                instructions: Self::recording_instructions(),
-            },
-            stats: self.stats.snapshot(),
-            diagnostics,
-        };
-
-        let json = facet_json::to_string_pretty(&snapshot).unwrap_or_else(|error| {
-            format!(
-                "{{\"error\":\"failed to render stats\",\"details\":\"{}\"}}",
-                error
-            )
-        });
-        let mut bytes = json.into_bytes();
-        bytes.push(b'\n');
-        bytes
-    }
-
-    /// Compute the disk cache path for a block of a blob.
-    /// Layout: `{cache_dir}/{hex[..2]}/{hex}.{block_idx}`
-    fn block_cache_path(&self, hash: &Blake3Hash, block_idx: u64) -> Option<Utf8PathBuf> {
+    /// Compute the disk cache path for a chunk.
+    /// Layout: `{cache_dir}/{hex[..2]}/{hex}`
+    fn chunk_cache_path(&self, hash: &Blake3Hash) -> Option<Utf8PathBuf> {
         let dir = self.disk_cache_dir.as_ref()?;
         let hex = hash.to_hex();
-        Some(dir.join(&hex[..2]).join(format!("{hex}.{block_idx}")))
+        Some(dir.join(&hex[..2]).join(hex))
     }
 
-    /// Read a range from a blob, using L2 block cache with write-through.
-    ///
-    /// Splits the request into BLOCK_SIZE-aligned blocks, reads cached blocks from disk,
-    /// fetches missing blocks from CAS via `get_blob_range`, writes them through to L2,
-    /// then assembles the response.
-    async fn read_blob_range(
-        &self,
-        hash: Blake3Hash,
-        offset: u64,
-        len: u64,
-        record_metrics: bool,
-    ) -> Result<Vec<u8>, String> {
-        let first_block = offset / BLOCK_SIZE;
-        let last_block = (offset + len).saturating_sub(1) / BLOCK_SIZE;
-
-        let mut result = Vec::with_capacity(len as usize);
-
-        for block_idx in first_block..=last_block {
-            let block_start = block_idx * BLOCK_SIZE;
-
-            // Try L2 disk cache
-            let block_data = if let Some(path) = self.block_cache_path(&hash, block_idx) {
-                match tokio::fs::read(path.as_std_path()).await {
-                    Ok(data) => {
-                        if record_metrics {
-                            self.stats.l2_hits.fetch_add(1, Ordering::Relaxed);
-                        }
-                        tracing::trace!(%hash, block_idx, "L2 block cache hit");
-                        Some(data)
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(e) => {
-                        tracing::warn!(%hash, block_idx, error = %e, "L2 block cache read error");
-                        None
-                    }
+    /// Fetch a chunk with L2 disk cache. On miss, fetches from CAS and writes through.
+    async fn read_chunk_cached(&self, chunk_hash: ChunkHash) -> Result<Vec<u8>, String> {
+        // Try L2 disk cache first
+        if let Some(path) = self.chunk_cache_path(&chunk_hash.0) {
+            match tokio::fs::read(path.as_std_path()).await {
+                Ok(data) => return Ok(data),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Cache miss — fall through to RPC
                 }
-            } else {
-                None
-            };
-
-            // L2 miss → fetch from CAS via range read
-            let block_data = match block_data {
-                Some(data) => data,
-                None => {
-                    if record_metrics {
-                        self.stats.l2_misses.fetch_add(1, Ordering::Relaxed);
-                    }
-                    let data = match self.cas.get_blob_range(hash, block_start, BLOCK_SIZE).await {
-                        Ok(Some(data)) => data,
-                        Ok(None) => return Err(format!("blob {hash} not found in CAS")),
-                        Err(e) => return Err(format!("CAS range read error: {e}")),
-                    };
-                    if record_metrics {
-                        self.stats.cas_read_ops.fetch_add(1, Ordering::Relaxed);
-                        self.stats
-                            .cas_read_bytes
-                            .fetch_add(data.len() as u64, Ordering::Relaxed);
-                    }
-
-                    // Write-through to L2 disk cache
-                    if let Some(path) = self.block_cache_path(&hash, block_idx)
-                        && let Err(e) = vx_io::atomic_write(&path, &data).await
-                    {
-                        tracing::warn!(%hash, block_idx, error = %e, "L2 block cache write-through failed");
-                    }
-
-                    data
+                Err(e) => {
+                    tracing::warn!(hash = %chunk_hash.0, error = %e, "L2 cache read error");
+                    // Fall through to RPC
                 }
-            };
-
-            // Slice out the portion of this block that overlaps with the request
-            let slice_start = if block_idx == first_block {
-                (offset - block_start) as usize
-            } else {
-                0
-            };
-            let slice_end = if block_idx == last_block {
-                let request_end = offset + len;
-                (request_end - block_start) as usize
-            } else {
-                BLOCK_SIZE as usize
-            };
-            let slice_end = slice_end.min(block_data.len());
-
-            if slice_start < block_data.len() {
-                result.extend_from_slice(&block_data[slice_start..slice_end]);
             }
         }
 
-        Ok(result)
+        // Fetch from CAS
+        let data = self
+            .cas
+            .get_chunk(chunk_hash)
+            .await
+            .map_err(|e| format!("CAS chunk read error: {e}"))?
+            .ok_or_else(|| format!("chunk {} not found", chunk_hash.to_hex()))?;
+
+        // Write-through to L2
+        if let Some(path) = self.chunk_cache_path(&chunk_hash.0)
+            && let Err(e) = vx_io::atomic_write(&path, &data).await
+        {
+            tracing::warn!(hash = %chunk_hash.0, error = %e, "L2 cache write-through failed");
+        }
+
+        Ok(data)
+    }
+
+    /// Get a cached BlobNode, fetching and parsing from CAS on miss.
+    async fn get_blobnode_cached(&self, blob_node_hash: NodeHash) -> Result<Arc<BlobNode>, String> {
+        // Check cache
+        {
+            let cache = self.blobnode_cache.read();
+            if let Some(blob) = cache.get(&blob_node_hash) {
+                return Ok(Arc::clone(blob));
+            }
+        }
+
+        // Cache miss — fetch from CAS
+        let node_data = self
+            .cas
+            .get_node(blob_node_hash)
+            .await
+            .map_err(|e| format!("failed to read BlobNode: {e}"))?
+            .ok_or_else(|| format!("BlobNode {} not found", blob_node_hash.to_hex()))?;
+
+        let node = CasNode::from_bytes(&node_data)
+            .map_err(|e| format!("failed to deserialize BlobNode: {e}"))?;
+
+        let blob = match node {
+            CasNode::Blob(b) => b,
+            other => {
+                return Err(format!(
+                    "expected BlobNode, got {:?}",
+                    std::mem::discriminant(&other)
+                ));
+            }
+        };
+
+        let blob = Arc::new(blob);
+
+        // Insert into cache
+        {
+            let mut cache = self.blobnode_cache.write();
+            cache.insert(blob_node_hash, Arc::clone(&blob));
+        }
+
+        Ok(blob)
+    }
+
+    /// Read a range from a file stored in CAS.
+    ///
+    /// For SmallFile entries (blob_node is None): fetch single chunk via get_chunk.
+    /// For LargeFile entries: fetch BlobNode (cached), then relevant chunks
+    /// (disk-cached, fetched in parallel).
+    async fn read_cas_range(
+        &self,
+        hash: Blake3Hash,
+        blob_node: Option<NodeHash>,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, String> {
+        match blob_node {
+            None => {
+                // SmallFile: single chunk, content_hash == chunk_hash
+                let data = self.read_chunk_cached(ChunkHash(hash)).await?;
+
+                // Slice to requested range
+                let start = (offset as usize).min(data.len());
+                let end = ((offset + len) as usize).min(data.len());
+                Ok(data[start..end].to_vec())
+            }
+            Some(blob_node_hash) => {
+                // LargeFile: get cached BlobNode metadata
+                let blob = self.get_blobnode_cached(blob_node_hash).await?;
+
+                // Identify which chunks intersect [offset, offset+len)
+                let end = offset + len;
+                let mut needed_chunks: Vec<(usize, ChunkHash, u64)> = Vec::new(); // (index, hash, chunk_offset)
+                let mut chunk_offset: u64 = 0;
+
+                for (idx, chunk_entry) in blob.chunks.iter().enumerate() {
+                    let chunk_end = chunk_offset + chunk_entry.size as u64;
+
+                    if chunk_end <= offset {
+                        chunk_offset = chunk_end;
+                        continue;
+                    }
+                    if chunk_offset >= end {
+                        break;
+                    }
+
+                    needed_chunks.push((idx, chunk_entry.hash, chunk_offset));
+                    chunk_offset = chunk_end;
+                }
+
+                if needed_chunks.len() == 1 {
+                    // Single chunk — no need for parallel machinery
+                    let (_, ch, co) = needed_chunks[0];
+                    let chunk_data = self.read_chunk_cached(ch).await?;
+                    let slice_start = if offset > co {
+                        (offset - co) as usize
+                    } else {
+                        0
+                    };
+                    let chunk_end = co + chunk_data.len() as u64;
+                    let slice_end = if end < chunk_end {
+                        (end - co) as usize
+                    } else {
+                        chunk_data.len()
+                    };
+                    return Ok(chunk_data[slice_start..slice_end.min(chunk_data.len())].to_vec());
+                }
+
+                // Multiple chunks — fetch in parallel (bounded concurrency)
+                use futures_util::stream::{self, StreamExt};
+
+                let fetches: Vec<_> = needed_chunks
+                    .iter()
+                    .map(|&(idx, ch, co)| async move {
+                        let data = self.read_chunk_cached(ch).await?;
+                        Ok::<_, String>((idx, data, co))
+                    })
+                    .collect();
+
+                let mut results: Vec<Option<(Vec<u8>, u64)>> = vec![None; needed_chunks.len()];
+
+                // buffer_unordered(8): up to 8 concurrent chunk fetches
+                let mut stream = stream::iter(fetches).buffer_unordered(8);
+                while let Some(result) = stream.next().await {
+                    let (idx, data, co) = result?;
+                    // Map idx back to position in needed_chunks
+                    let pos = needed_chunks
+                        .iter()
+                        .position(|&(i, _, _)| i == idx)
+                        .unwrap();
+                    results[pos] = Some((data, co));
+                }
+
+                // Assemble result in order
+                let mut result = Vec::with_capacity(len as usize);
+                for slot in &results {
+                    let (chunk_data, co) = slot.as_ref().unwrap();
+                    let chunk_end = *co + chunk_data.len() as u64;
+
+                    let slice_start = if offset > *co {
+                        (offset - co) as usize
+                    } else {
+                        0
+                    };
+                    let slice_end = if end < chunk_end {
+                        (end - co) as usize
+                    } else {
+                        chunk_data.len()
+                    };
+
+                    if slice_start < chunk_data.len() {
+                        result.extend_from_slice(
+                            &chunk_data[slice_start..slice_end.min(chunk_data.len())],
+                        );
+                    }
+                }
+
+                Ok(result)
+            }
+        }
     }
     /// Check if a prefix already exists
     pub async fn has_prefix(&self, prefix_id: &str) -> bool {
@@ -526,19 +539,17 @@ impl CasVfs {
         // Create the prefix directory under root
         {
             let mut items = self.items.write();
-            items.insert(
-                prefix_root_id,
-                VfsItem {
-                    id: prefix_root_id,
-                    parent_id: 1, // under root
-                    name: prefix_id.clone(),
-                    item_type: ItemType::Directory,
-                    mode: mode::DIRECTORY,
-                    cas_hash: None,
-                    size: 0,
-                    write_buffer: None,
-                },
-            );
+            items.insert(VfsItem {
+                id: prefix_root_id,
+                parent_id: 1, // under root
+                name: prefix_id.clone(),
+                item_type: ItemType::Directory,
+                mode: mode::DIRECTORY,
+                cas_hash: None,
+                blob_node: None,
+                size: 0,
+                write_buffer: None,
+            });
         }
 
         // Register the prefix
@@ -566,6 +577,7 @@ impl CasVfs {
         prefix_id: &str,
         path: &str,
         cas_hash: Blake3Hash,
+        blob_node: Option<NodeHash>,
         size: u64,
         executable: bool,
     ) -> Option<ItemId> {
@@ -591,6 +603,7 @@ impl CasVfs {
                 PrefixEntry {
                     item_type: ItemType::File,
                     cas_hash: Some(cas_hash),
+                    blob_node,
                     size,
                     mode: file_mode,
                 },
@@ -615,6 +628,7 @@ impl CasVfs {
             PrefixEntry {
                 item_type: ItemType::Directory,
                 cas_hash: None,
+                blob_node: None,
                 size: 0,
                 mode: mode::DIRECTORY,
             },
@@ -622,7 +636,10 @@ impl CasVfs {
         .await
     }
 
-    /// Internal: add an entry (file or dir) to a prefix
+    /// Internal: add an entry (file or dir) to a prefix.
+    ///
+    /// Creates intermediate directories as needed. Check-and-create happens
+    /// under a single write lock to avoid TOCTOU races.
     async fn add_entry_to_prefix(
         &self,
         prefix_id: &str,
@@ -641,24 +658,18 @@ impl CasVfs {
             return None;
         }
 
+        // Single write lock for the entire check+create sequence
+        let mut items = self.items.write();
         let mut current_parent = prefix_root_id;
 
-        // Create intermediate directories
         for (i, component) in components.iter().enumerate() {
             let is_last = i == components.len() - 1;
 
-            // Check if this component already exists
-            let existing = {
-                let items = self.items.read();
-                items
-                    .values()
-                    .find(|item| item.parent_id == current_parent && item.name == *component)
-                    .map(|item| (item.id, item.item_type))
-            };
-
-            if let Some((existing_id, existing_type)) = existing {
+            // Check if this component already exists (O(1) via children index)
+            if let Some(existing) = items.lookup_child(current_parent, component) {
+                let existing_id = existing.id;
+                let existing_type = existing.item_type;
                 if is_last {
-                    // This is the target - already exists
                     return Some(existing_id);
                 } else if existing_type == ItemType::Directory {
                     current_parent = existing_id;
@@ -671,30 +682,32 @@ impl CasVfs {
 
             // Create the component
             let new_id = self.alloc_id();
-            let (item_type, mode, cas_hash, size) = if is_last {
-                (entry.item_type, entry.mode, entry.cas_hash, entry.size)
+            let (item_type, item_mode, cas_hash, blob_node, size) = if is_last {
+                (
+                    entry.item_type,
+                    entry.mode,
+                    entry.cas_hash,
+                    entry.blob_node,
+                    entry.size,
+                )
             } else {
-                (ItemType::Directory, mode::DIRECTORY, None, 0)
+                (ItemType::Directory, mode::DIRECTORY, None, None, 0)
             };
 
-            {
-                let mut items = self.items.write();
-                items.insert(
-                    new_id,
-                    VfsItem {
-                        id: new_id,
-                        parent_id: current_parent,
-                        name: component.to_string(),
-                        item_type,
-                        mode,
-                        cas_hash,
-                        size,
-                        write_buffer: None,
-                    },
-                );
-            }
+            items.insert(VfsItem {
+                id: new_id,
+                parent_id: current_parent,
+                name: component.to_string(),
+                item_type,
+                mode: item_mode,
+                cas_hash,
+                blob_node,
+                size,
+                write_buffer: None,
+            });
 
             if is_last {
+                drop(items);
                 // Update prefix mappings
                 let mut prefixes = self.prefixes.write();
                 if let Some(prefix) = prefixes.get_mut(prefix_id) {
@@ -711,23 +724,21 @@ impl CasVfs {
 
     /// Remove an action prefix and all its contents
     pub async fn remove_prefix(&self, prefix_id: &str) {
-        // Get items to remove
-        let items_to_remove: Vec<ItemId> = {
+        let prefix_root_id = {
             let prefixes = self.prefixes.read();
             let Some(prefix) = prefixes.get(prefix_id) else {
                 return;
             };
-
-            let items = self.items.read();
-            // Collect all items under this prefix (including the prefix root)
-            self.collect_descendants(&items, prefix.root_item_id)
+            prefix.root_item_id
         };
 
-        // Remove items
+        // Collect then remove under one write lock
         {
             let mut items = self.items.write();
-            for id in items_to_remove {
-                items.remove(&id);
+            let to_remove = Self::collect_descendants_from(&items, prefix_root_id);
+            // Remove in reverse (leaves first) to keep children index clean
+            for &id in to_remove.iter().rev() {
+                items.remove(id);
             }
         }
 
@@ -740,22 +751,17 @@ impl CasVfs {
         tracing::debug!(prefix_id = %prefix_id, "removed action prefix");
     }
 
-    /// Collect all descendant ItemIds (including the item itself)
-    pub(crate) fn collect_descendants(
-        &self,
-        items: &HashMap<ItemId, VfsItem>,
-        root_id: ItemId,
-    ) -> Vec<ItemId> {
+    /// Collect all descendant ItemIds (including the item itself).
+    /// O(number of descendants) via children index.
+    pub(crate) fn collect_descendants_from(items: &VfsItems, root_id: ItemId) -> Vec<ItemId> {
         let mut result = vec![root_id];
         let mut queue = vec![root_id];
 
         while let Some(parent_id) = queue.pop() {
-            for item in items.values() {
-                if item.parent_id == parent_id {
-                    result.push(item.id);
-                    if item.item_type == ItemType::Directory {
-                        queue.push(item.id);
-                    }
+            for child in items.children_of(parent_id) {
+                result.push(child.id);
+                if child.item_type == ItemType::Directory {
+                    queue.push(child.id);
                 }
             }
         }
@@ -766,38 +772,26 @@ impl CasVfs {
 
 impl Vfs for CasVfs {
     async fn lookup(&self, _cx: &roam::Context, parent_id: ItemId, name: String) -> LookupResult {
-        let started_at = Instant::now();
         tracing::trace!(parent_id, name = %name, "VFS lookup");
 
         let items = self.items.read();
-        for item in items.values() {
-            if item.parent_id == parent_id && item.name == name {
-                tracing::trace!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found");
-                let result = LookupResult {
-                    attrs: ItemAttributes {
-                        item_id: item.id,
-                        item_type: item.item_type,
-                        size: self.virtual_size(item.id).unwrap_or(item.size),
-                        modified_time: 0,
-                        created_time: 0,
-                        mode: item.mode,
-                    },
-                    error: errno::OK,
-                };
-                drop(items);
-                self.record_op(&self.stats.lookup, started_at, result.error);
-                return result;
-            }
+        if let Some(item) = items.lookup_child(parent_id, &name) {
+            tracing::trace!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found");
+            return LookupResult {
+                attrs: ItemAttributes {
+                    item_id: item.id,
+                    item_type: item.item_type,
+                    size: item.size,
+                    modified_time: 0,
+                    created_time: 0,
+                    mode: item.mode,
+                },
+                error: errno::OK,
+            };
         }
 
-        // Log what items ARE children of this parent to help debug
-        let children: Vec<_> = items
-            .values()
-            .filter(|i| i.parent_id == parent_id)
-            .map(|i| i.name.as_str())
-            .collect();
-        tracing::debug!(parent_id, name = %name, ?children, "VFS lookup -> NOT FOUND");
-        let result = LookupResult {
+        tracing::debug!(parent_id, name = %name, "VFS lookup -> NOT FOUND");
+        LookupResult {
             attrs: ItemAttributes {
                 item_id: 0,
                 item_type: ItemType::File,
@@ -807,23 +801,19 @@ impl Vfs for CasVfs {
                 mode: 0,
             },
             error: errno::ENOENT,
-        };
-        drop(items);
-        self.record_op(&self.stats.lookup, started_at, result.error);
-        result
+        }
     }
 
     async fn get_attributes(&self, _cx: &roam::Context, item_id: ItemId) -> GetAttributesResult {
-        let started_at = Instant::now();
         tracing::trace!(item_id, "VFS get_attributes");
 
         let items = self.items.read();
-        let result = match items.get(&item_id) {
+        match items.get(&item_id) {
             Some(item) => GetAttributesResult {
                 attrs: ItemAttributes {
                     item_id: item.id,
                     item_type: item.item_type,
-                    size: self.virtual_size(item.id).unwrap_or(item.size),
+                    size: item.size,
                     modified_time: 0,
                     created_time: 0,
                     mode: item.mode,
@@ -841,20 +831,16 @@ impl Vfs for CasVfs {
                 },
                 error: errno::ENOENT,
             },
-        };
-        drop(items);
-        self.record_op(&self.stats.get_attributes, started_at, result.error);
-        result
+        }
     }
 
     async fn read_dir(&self, _cx: &roam::Context, item_id: ItemId, cursor: u64) -> ReadDirResult {
-        let started_at = Instant::now();
         tracing::trace!(item_id, cursor, "VFS read_dir");
 
         let items = self.items.read();
-        let result = match items.get(&item_id) {
+        match items.get(&item_id) {
             Some(item) if item.item_type == ItemType::Directory => {
-                let children: Vec<_> = items.values().filter(|i| i.parent_id == item_id).collect();
+                let children: Vec<_> = items.children_of(item_id).collect();
 
                 let entries: Vec<DirEntry> = children
                     .iter()
@@ -864,7 +850,7 @@ impl Vfs for CasVfs {
                         name: child.name.clone(),
                         item_id: child.id,
                         item_type: child.item_type,
-                        size: self.virtual_size(child.id).unwrap_or(child.size),
+                        size: child.size,
                         modified_time: 0,
                         created_time: 0,
                         mode: child.mode,
@@ -894,10 +880,7 @@ impl Vfs for CasVfs {
                 next_cursor: 0,
                 error: errno::ENOENT,
             },
-        };
-        drop(items);
-        self.record_op(&self.stats.read_dir, started_at, result.error);
-        result
+        }
     }
 
     async fn read(
@@ -907,100 +890,50 @@ impl Vfs for CasVfs {
         offset: u64,
         len: u64,
     ) -> ReadResult {
-        let started_at = Instant::now();
-        let record_metrics = self.should_record();
         tracing::trace!(item_id, offset, len, "VFS read");
-
-        if item_id == STATS_JSON_ID {
-            let data = self.render_stats_json();
-            let start = (offset as usize).min(data.len());
-            let end = ((offset + len) as usize).min(data.len());
-            let sliced = data[start..end].to_vec();
-            if record_metrics {
-                self.stats
-                    .read_requested_bytes
-                    .fetch_add(len, Ordering::Relaxed);
-                self.stats
-                    .read_returned_bytes
-                    .fetch_add(sliced.len() as u64, Ordering::Relaxed);
-            }
-            let result = ReadResult {
-                data: sliced,
-                error: errno::OK,
-            };
-            self.record_op(&self.stats.read, started_at, result.error);
-            return result;
-        }
 
         // Extract what we need while holding the read lock — slice the write buffer
         // in-place instead of cloning the entire Vec<u8>.
-        let cas_hash = {
+        let (cas_hash, blob_node) = {
             let items = self.items.read();
             let Some(item) = items.get(&item_id) else {
-                let result = ReadResult {
+                return ReadResult {
                     data: Vec::new(),
                     error: errno::ENOENT,
                 };
-                drop(items);
-                self.record_op(&self.stats.read, started_at, result.error);
-                return result;
             };
 
             if item.item_type != ItemType::File {
-                let result = ReadResult {
+                return ReadResult {
                     data: Vec::new(),
                     error: errno::EISDIR,
                 };
-                drop(items);
-                self.record_op(&self.stats.read, started_at, result.error);
-                return result;
             }
 
             // If there's buffered write data, serve from that (it's newer than CAS)
             if let Some(ref data) = item.write_buffer {
                 let start = (offset as usize).min(data.len());
                 let end = ((offset + len) as usize).min(data.len());
-                let result = ReadResult {
+                return ReadResult {
                     data: data[start..end].to_vec(),
                     error: errno::OK,
                 };
-                if record_metrics {
-                    self.stats
-                        .read_requested_bytes
-                        .fetch_add(len, Ordering::Relaxed);
-                    self.stats
-                        .read_returned_bytes
-                        .fetch_add(result.data.len() as u64, Ordering::Relaxed);
-                }
-                drop(items);
-                self.record_op(&self.stats.read, started_at, result.error);
-                return result;
             }
 
-            item.cas_hash
+            (item.cas_hash, item.blob_node)
         };
 
         // Fetch from CAS if we have a hash
         let Some(hash) = cas_hash else {
             // Empty file
-            let result = ReadResult {
+            return ReadResult {
                 data: Vec::new(),
                 error: errno::OK,
             };
-            if record_metrics {
-                self.stats
-                    .read_requested_bytes
-                    .fetch_add(len, Ordering::Relaxed);
-            }
-            self.record_op(&self.stats.read, started_at, result.error);
-            return result;
         };
 
-        // Fetch via L2 block cache → CAS range read
-        let result = match self
-            .read_blob_range(hash, offset, len, record_metrics)
-            .await
-        {
+        // Fetch via chunk-based CAS reads (SmallFile → single chunk, LargeFile → BlobNode)
+        match self.read_cas_range(hash, blob_node, offset, len).await {
             Ok(data) => ReadResult {
                 data,
                 error: errno::OK,
@@ -1012,17 +945,7 @@ impl Vfs for CasVfs {
                     error: errno::EIO,
                 }
             }
-        };
-        if record_metrics {
-            self.stats
-                .read_requested_bytes
-                .fetch_add(len, Ordering::Relaxed);
-            self.stats
-                .read_returned_bytes
-                .fetch_add(result.data.len() as u64, Ordering::Relaxed);
         }
-        self.record_op(&self.stats.read, started_at, result.error);
-        result
     }
 
     async fn write(
@@ -1032,37 +955,21 @@ impl Vfs for CasVfs {
         offset: u64,
         data: Vec<u8>,
     ) -> WriteResult {
-        let started_at = Instant::now();
         tracing::trace!(item_id, offset, len = data.len(), "write");
-
-        if item_id == STATS_JSON_ID {
-            let result = WriteResult {
-                bytes_written: 0,
-                error: errno::EACCES,
-            };
-            self.record_op(&self.stats.write, started_at, result.error);
-            return result;
-        }
 
         let mut items = self.items.write();
         let Some(item) = items.get_mut(&item_id) else {
-            let result = WriteResult {
+            return WriteResult {
                 bytes_written: 0,
                 error: errno::ENOENT,
             };
-            drop(items);
-            self.record_op(&self.stats.write, started_at, result.error);
-            return result;
         };
 
         if item.item_type != ItemType::File {
-            let result = WriteResult {
+            return WriteResult {
                 bytes_written: 0,
                 error: errno::EISDIR,
             };
-            drop(items);
-            self.record_op(&self.stats.write, started_at, result.error);
-            return result;
         }
 
         // Initialize or extend write buffer
@@ -1078,18 +985,10 @@ impl Vfs for CasVfs {
         buffer[offset as usize..end].copy_from_slice(&data);
         item.size = buffer.len() as u64;
 
-        let result = WriteResult {
+        WriteResult {
             bytes_written: data.len() as u64,
             error: errno::OK,
-        };
-        drop(items);
-        if self.should_record() {
-            self.stats
-                .write_bytes
-                .fetch_add(result.bytes_written, Ordering::Relaxed);
         }
-        self.record_op(&self.stats.write, started_at, result.error);
-        result
     }
 
     async fn create(
@@ -1099,175 +998,87 @@ impl Vfs for CasVfs {
         name: String,
         item_type: ItemType,
     ) -> CreateResult {
-        let started_at = Instant::now();
         tracing::trace!(parent_id, name = %name, ?item_type, "create");
 
-        if parent_id == VIXENFS_DIR_ID {
-            if name != RECORDING_NAME || item_type != ItemType::File {
-                let result = CreateResult {
-                    item_id: 0,
-                    error: errno::EACCES,
-                };
-                self.record_op(&self.stats.write, started_at, result.error);
-                return result;
-            }
-
-            let mut items = self.items.write();
-            if let Some(existing) = self.recording_item_id(&items) {
-                let result = CreateResult {
-                    item_id: existing,
-                    error: errno::OK,
-                };
-                drop(items);
-                self.recording_enabled.store(true, Ordering::Relaxed);
-                self.record_op(&self.stats.write, started_at, result.error);
-                return result;
-            }
-
-            let new_id = self.alloc_id();
-            items.insert(
-                new_id,
-                VfsItem {
-                    id: new_id,
-                    parent_id: VIXENFS_DIR_ID,
-                    name: RECORDING_NAME.to_string(),
-                    item_type: ItemType::File,
-                    mode: mode::FILE_REGULAR,
-                    cas_hash: None,
-                    size: 0,
-                    write_buffer: None,
-                },
-            );
-            drop(items);
-            self.recording_enabled.store(true, Ordering::Relaxed);
-
-            let result = CreateResult {
-                item_id: new_id,
-                error: errno::OK,
-            };
-            self.record_op(&self.stats.write, started_at, result.error);
-            return result;
-        }
-
-        // Verify parent exists and is a directory
-        {
-            let items = self.items.read();
-            match items.get(&parent_id) {
-                Some(item) if item.item_type == ItemType::Directory => {}
-                Some(_) => {
-                    let result = CreateResult {
-                        item_id: 0,
-                        error: errno::ENOTDIR,
-                    };
-                    drop(items);
-                    self.record_op(&self.stats.write, started_at, result.error);
-                    return result;
-                }
-                None => {
-                    let result = CreateResult {
-                        item_id: 0,
-                        error: errno::ENOENT,
-                    };
-                    drop(items);
-                    self.record_op(&self.stats.write, started_at, result.error);
-                    return result;
-                }
-            }
-
-            // Check if name already exists
-            if items
-                .values()
-                .any(|i| i.parent_id == parent_id && i.name == name)
-            {
-                let result = CreateResult {
-                    item_id: 0,
-                    error: errno::EEXIST,
-                };
-                drop(items);
-                self.record_op(&self.stats.write, started_at, result.error);
-                return result;
-            }
-        }
-
-        // Create the new item
+        // Single write lock for check+create (no TOCTOU)
         let new_id = self.alloc_id();
-        let mode = match item_type {
+        let item_mode = match item_type {
             ItemType::Directory => mode::DIRECTORY,
             ItemType::File => mode::FILE_REGULAR,
             ItemType::Symlink => mode::FILE_REGULAR,
         };
 
-        {
-            let mut items = self.items.write();
-            items.insert(
-                new_id,
-                VfsItem {
-                    id: new_id,
-                    parent_id,
-                    name,
-                    item_type,
-                    mode,
-                    cas_hash: None,
-                    size: 0,
-                    write_buffer: None,
-                },
-            );
+        let mut items = self.items.write();
+
+        // Verify parent exists and is a directory
+        match items.get(&parent_id) {
+            Some(item) if item.item_type == ItemType::Directory => {}
+            Some(_) => {
+                return CreateResult {
+                    item_id: 0,
+                    error: errno::ENOTDIR,
+                };
+            }
+            None => {
+                return CreateResult {
+                    item_id: 0,
+                    error: errno::ENOENT,
+                };
+            }
         }
 
-        let result = CreateResult {
+        // Check if name already exists (O(1) via index)
+        if items.child_exists(parent_id, &name) {
+            return CreateResult {
+                item_id: 0,
+                error: errno::EEXIST,
+            };
+        }
+
+        items.insert(VfsItem {
+            id: new_id,
+            parent_id,
+            name,
+            item_type,
+            mode: item_mode,
+            cas_hash: None,
+            blob_node: None,
+            size: 0,
+            write_buffer: None,
+        });
+
+        CreateResult {
             item_id: new_id,
             error: errno::OK,
-        };
-        self.record_op(&self.stats.write, started_at, result.error);
-        result
+        }
     }
 
     async fn delete(&self, _cx: &roam::Context, item_id: ItemId) -> VfsResult {
-        let started_at = Instant::now();
         tracing::trace!(item_id, "delete");
 
-        // Don't allow deleting root
-        if self.is_virtual_protected_item(item_id) {
-            let result = VfsResult {
+        if item_id == ROOT_ITEM_ID {
+            return VfsResult {
                 error: errno::EACCES,
             };
-            self.record_op(&self.stats.write, started_at, result.error);
-            return result;
         }
 
         let mut items = self.items.write();
 
-        // Check if item exists
         let Some(item) = items.get(&item_id) else {
-            let result = VfsResult {
+            return VfsResult {
                 error: errno::ENOENT,
             };
-            drop(items);
-            self.record_op(&self.stats.write, started_at, result.error);
-            return result;
         };
 
-        // If directory, check if empty
-        if item.item_type == ItemType::Directory {
-            let has_children = items.values().any(|i| i.parent_id == item_id);
-            if has_children {
-                let result = VfsResult {
-                    error: errno::ENOTEMPTY,
-                };
-                drop(items);
-                self.record_op(&self.stats.write, started_at, result.error);
-                return result;
-            }
+        // If directory, check if empty (O(1) via index)
+        if item.item_type == ItemType::Directory && items.has_children(item_id) {
+            return VfsResult {
+                error: errno::ENOTEMPTY,
+            };
         }
 
-        items.remove(&item_id);
-        let recording_item_id = self.recording_item_id(&items);
-        drop(items);
-        self.recording_enabled
-            .store(recording_item_id.is_some(), Ordering::Relaxed);
-        let result = VfsResult { error: errno::OK };
-        self.record_op(&self.stats.write, started_at, result.error);
-        result
+        items.remove(item_id);
+        VfsResult { error: errno::OK }
     }
 
     async fn rename(
@@ -1277,73 +1088,50 @@ impl Vfs for CasVfs {
         new_parent_id: ItemId,
         new_name: String,
     ) -> VfsResult {
-        let started_at = Instant::now();
         tracing::trace!(item_id, new_parent_id, new_name = %new_name, "rename");
 
-        if self.is_virtual_protected_item(item_id) || new_parent_id == VIXENFS_DIR_ID {
-            let result = VfsResult {
+        if item_id == ROOT_ITEM_ID {
+            return VfsResult {
                 error: errno::EACCES,
             };
-            self.record_op(&self.stats.write, started_at, result.error);
-            return result;
         }
 
         let mut items = self.items.write();
 
-        // Check item exists
         if !items.contains_key(&item_id) {
-            let result = VfsResult {
+            return VfsResult {
                 error: errno::ENOENT,
             };
-            drop(items);
-            self.record_op(&self.stats.write, started_at, result.error);
-            return result;
         }
 
         // Check new parent exists and is directory
         match items.get(&new_parent_id) {
             Some(p) if p.item_type == ItemType::Directory => {}
             Some(_) => {
-                let result = VfsResult {
+                return VfsResult {
                     error: errno::ENOTDIR,
                 };
-                drop(items);
-                self.record_op(&self.stats.write, started_at, result.error);
-                return result;
             }
             None => {
-                let result = VfsResult {
+                return VfsResult {
                     error: errno::ENOENT,
                 };
-                drop(items);
-                self.record_op(&self.stats.write, started_at, result.error);
-                return result;
             }
         }
 
-        // Check name doesn't exist in new parent
-        if items
-            .values()
-            .any(|i| i.parent_id == new_parent_id && i.name == new_name && i.id != item_id)
-        {
-            let result = VfsResult {
-                error: errno::EEXIST,
-            };
-            drop(items);
-            self.record_op(&self.stats.write, started_at, result.error);
-            return result;
+        // Check name doesn't exist in new parent (O(1) via index)
+        if items.child_exists(new_parent_id, &new_name) {
+            // Could be ourselves moving to same parent with same name — check
+            if let Some(existing) = items.lookup_child(new_parent_id, &new_name)
+                && existing.id != item_id {
+                    return VfsResult {
+                        error: errno::EEXIST,
+                    };
+                }
         }
 
-        // Perform rename
-        if let Some(item) = items.get_mut(&item_id) {
-            item.parent_id = new_parent_id;
-            item.name = new_name;
-        }
-
-        drop(items);
-        let result = VfsResult { error: errno::OK };
-        self.record_op(&self.stats.write, started_at, result.error);
-        result
+        items.rename(item_id, new_parent_id, new_name);
+        VfsResult { error: errno::OK }
     }
 
     async fn set_attributes(
@@ -1352,31 +1140,18 @@ impl Vfs for CasVfs {
         item_id: ItemId,
         params: SetAttributesParams,
     ) -> VfsResult {
-        let started_at = Instant::now();
         tracing::trace!(item_id, ?params, "set_attributes");
 
-        if item_id == STATS_JSON_ID
-            || item_id == VIXENFS_DIR_ID
-            || item_id == ROOT_ITEM_ID
-            || item_id == {
-                let items = self.items.read();
-                self.recording_item_id(&items).unwrap_or(0)
-            }
-        {
-            let result = VfsResult { error: errno::OK };
-            self.record_op(&self.stats.write, started_at, result.error);
-            return result;
+        if item_id == ROOT_ITEM_ID {
+            return VfsResult { error: errno::OK };
         }
 
         let mut items = self.items.write();
 
         let Some(item) = items.get_mut(&item_id) else {
-            let result = VfsResult {
+            return VfsResult {
                 error: errno::ENOENT,
             };
-            drop(items);
-            self.record_op(&self.stats.write, started_at, result.error);
-            return result;
         };
 
         if let Some(mode) = params.mode {
@@ -1391,10 +1166,7 @@ impl Vfs for CasVfs {
 
         // modified_time is ignored for now (we don't track times)
 
-        drop(items);
-        let result = VfsResult { error: errno::OK };
-        self.record_op(&self.stats.write, started_at, result.error);
-        result
+        VfsResult { error: errno::OK }
     }
 
     async fn ping(&self, _cx: &roam::Context) -> String {
@@ -1416,18 +1188,26 @@ impl CasVfs {
         }
 
         let size = data.len() as u64;
-        match self.cas.put_blob(data).await {
-            Ok(hash) => {
-                // Update the item's cas_hash and size
+        let content_hash = Blake3Hash::from_bytes(&data);
+        let chunk_hash = ChunkHash(content_hash);
+        match self.cas.put_chunk(chunk_hash, data.clone()).await {
+            Ok(()) => {
                 let mut items = self.items.write();
                 if let Some(item) = items.get_mut(&item_id) {
-                    item.cas_hash = Some(hash);
+                    item.cas_hash = Some(content_hash);
+                    item.blob_node = None; // single chunk
                     item.size = size;
                 }
-                Some((hash, size))
+                Some((content_hash, size))
             }
             Err(e) => {
-                tracing::error!(item_id, error = %e, "failed to flush to CAS");
+                tracing::error!(item_id, error = %e, "failed to flush to CAS, restoring write buffer");
+                // Restore the write buffer so data isn't lost
+                let mut items = self.items.write();
+                if let Some(item) = items.get_mut(&item_id) {
+                    item.size = data.len() as u64;
+                    item.write_buffer = Some(data);
+                }
                 None
             }
         }
@@ -1450,14 +1230,13 @@ impl CasVfs {
         // Find all items with write buffers under this prefix
         let items_to_flush: Vec<(ItemId, String)> = {
             let items = self.items.read();
-            let descendants = self.collect_descendants(&items, prefix_root_id);
+            let descendants = Self::collect_descendants_from(&items, prefix_root_id);
 
             descendants
                 .into_iter()
                 .filter_map(|id| {
                     let item = items.get(&id)?;
                     if item.write_buffer.is_some() {
-                        // Build the path from root
                         let path = self.build_path(&items, id, prefix_root_id);
                         Some((id, path))
                     } else {
@@ -1494,8 +1273,7 @@ impl CasVfs {
             );
 
             let children: Vec<_> = items
-                .values()
-                .filter(|i| i.parent_id == prefix.root_item_id)
+                .children_of(prefix.root_item_id)
                 .map(|i| format!("{} (type={:?})", i.name, i.item_type))
                 .collect();
             eprintln!("  Children: {:?}", children);
@@ -1512,8 +1290,7 @@ impl CasVfs {
 
         // Show root children
         let root_children: Vec<_> = items
-            .values()
-            .filter(|i| i.parent_id == 1)
+            .children_of(ROOT_ITEM_ID)
             .map(|i| format!("{} (id={})", i.name, i.id))
             .collect();
         tracing::debug!("Root children: {:?}", root_children);
@@ -1526,34 +1303,23 @@ impl CasVfs {
                 prefix.root_item_id
             );
 
-            // Show first-level children of prefix
             let prefix_children: Vec<_> = items
-                .values()
-                .filter(|i| i.parent_id == prefix.root_item_id)
+                .children_of(prefix.root_item_id)
                 .map(|i| format!("{} (id={}, type={:?})", i.name, i.id, i.item_type))
                 .collect();
             tracing::debug!("Prefix children: {:?}", prefix_children);
 
-            // Find toolchain directory and show its children
-            if let Some(toolchain) = items
-                .values()
-                .find(|i| i.parent_id == prefix.root_item_id && i.name == "toolchain")
-            {
+            if let Some(toolchain) = items.lookup_child(prefix.root_item_id, "toolchain") {
+                let tc_id = toolchain.id;
                 let tc_children: Vec<_> = items
-                    .values()
-                    .filter(|i| i.parent_id == toolchain.id)
+                    .children_of(tc_id)
                     .map(|i| format!("{} (id={})", i.name, i.id))
                     .collect();
                 tracing::debug!("toolchain/ children: {:?}", tc_children);
 
-                // Find bin directory
-                if let Some(bin) = items
-                    .values()
-                    .find(|i| i.parent_id == toolchain.id && i.name == "bin")
-                {
+                if let Some(bin) = items.lookup_child(tc_id, "bin") {
                     let bin_children: Vec<_> = items
-                        .values()
-                        .filter(|i| i.parent_id == bin.id)
+                        .children_of(bin.id)
                         .map(|i| format!("{} (id={})", i.name, i.id))
                         .collect();
                     tracing::debug!("toolchain/bin/ children: {:?}", bin_children);
@@ -1566,12 +1332,7 @@ impl CasVfs {
     }
 
     /// Build the path from an item up to (but not including) a root
-    pub(crate) fn build_path(
-        &self,
-        items: &HashMap<ItemId, VfsItem>,
-        item_id: ItemId,
-        root_id: ItemId,
-    ) -> String {
+    pub(crate) fn build_path(&self, items: &VfsItems, item_id: ItemId, root_id: ItemId) -> String {
         let mut components = Vec::new();
         let mut current = item_id;
 

@@ -8,16 +8,20 @@ use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
+use peeps::locks::{DiagnosticAsyncMutex, DiagnosticAsyncRwLock};
 
 use crate::action_graph::{Action, ActionGraph};
 use crate::error::VxdError;
 use vx_rs::CrateId;
 use vx_runner_proto::RunnerClient;
-use vx_store_proto::{Blake3Hash, RustComponent, RustToolchainSpec, StoreClient, StoreProgress};
+use vx_store_proto::{
+    Blake3Hash, BlobRef, CasNode, ChunkHash, ContentHash, DirEntryKind, NodeHash, OutputBlobRef,
+    RustComponent, RustToolchainSpec, StoreClient, StoreProgress,
+};
 use vxd_proto::{ActionProgress, ProgressListenerClient};
 
 /// State of an individual action
@@ -38,8 +42,8 @@ pub enum ActionResult {
     RustToolchainComponentDownloaded {
         /// Component that was downloaded.
         component: RustComponent,
-        /// Tarball blob hash (None if full toolchain was already cached).
-        tarball_blob: Option<Blake3Hash>,
+        /// Tarball blob ref (None if full toolchain was already cached).
+        tarball: Option<BlobRef>,
         /// Whether this was a cache hit
         was_cached: bool,
     },
@@ -48,8 +52,8 @@ pub enum ActionResult {
     RustToolchainComponentExtracted {
         /// Component that was extracted.
         component: RustComponent,
-        /// Tree manifest hash (None if full toolchain was already cached).
-        tree_manifest: Option<Blake3Hash>,
+        /// Tree root node hash (None if full toolchain was already cached).
+        tree_root: Option<NodeHash>,
         /// Whether this was a cache hit
         was_cached: bool,
     },
@@ -60,8 +64,8 @@ pub enum ActionResult {
         name: String,
         /// Crate version
         version: String,
-        /// Manifest hash
-        manifest_hash: Blake3Hash,
+        /// Manifest node hash
+        manifest_hash: NodeHash,
         /// Whether this was a cache hit
         was_cached: bool,
     },
@@ -70,8 +74,8 @@ pub enum ActionResult {
     CrateCompiled {
         /// CrateId of the compiled crate
         crate_id: CrateId,
-        /// Output manifest hash from CAS
-        output_manifest: Blake3Hash,
+        /// Output manifest node hash from CAS
+        output_manifest: NodeHash,
         /// Path to materialized bin (if this was a bin crate)
         bin_output: Option<camino::Utf8PathBuf>,
         /// Whether this was a cache hit
@@ -84,8 +88,8 @@ pub enum ActionResult {
     ZigToolchainAcquired {
         /// Toolchain ID
         toolchain_id: Blake3Hash,
-        /// Toolchain manifest hash
-        manifest_hash: Blake3Hash,
+        /// Toolchain manifest node hash
+        manifest_hash: NodeHash,
         /// Whether this was a cache hit
         was_cached: bool,
     },
@@ -176,7 +180,7 @@ pub struct Executor {
     states: HashMap<NodeIndex, ActionState>,
 
     /// Results from completed actions (shared read-only with spawned tasks)
-    results: Arc<RwLock<HashMap<NodeIndex, ActionResult>>>,
+    results: Arc<DiagnosticAsyncRwLock<HashMap<NodeIndex, ActionResult>>>,
 
     /// Remaining dependency count for each action (owned by executor)
     remaining_deps: HashMap<NodeIndex, usize>,
@@ -216,7 +220,7 @@ pub struct Executor {
     build_start: std::time::Instant,
 
     /// Free-list of concurrency lane IDs (0..max_concurrency)
-    free_lanes: Arc<tokio::sync::Mutex<Vec<u32>>>,
+    free_lanes: Arc<DiagnosticAsyncMutex<Vec<u32>>>,
 
     /// Execution statistics (owned by executor)
     stats: ExecutionStats,
@@ -318,7 +322,10 @@ impl Executor {
         Self {
             graph,
             states: HashMap::new(),
-            results: Arc::new(RwLock::new(HashMap::new())),
+            results: Arc::new(DiagnosticAsyncRwLock::new(
+                "vxd/executor_results",
+                HashMap::new(),
+            )),
             remaining_deps,
             ready_queue,
             concurrency_limit: Arc::new(Semaphore::new(max_concurrency)),
@@ -332,7 +339,8 @@ impl Executor {
             db,
             node_timings: HashMap::new(),
             build_start: std::time::Instant::now(),
-            free_lanes: Arc::new(tokio::sync::Mutex::new(
+            free_lanes: Arc::new(DiagnosticAsyncMutex::new(
+                "vxd/executor_free_lanes",
                 (0..max_concurrency as u32).collect(),
             )),
             stats: ExecutionStats::default(),
@@ -522,7 +530,7 @@ impl Executor {
             match result {
                 ActionResult::RustToolchainComponentDownloaded {
                     component,
-                    tarball_blob,
+                    tarball,
                     was_cached,
                 } => {
                     if *was_cached {
@@ -531,8 +539,12 @@ impl Executor {
                         rebuilt += 1;
                     }
 
-                    let cache_key = tarball_blob
-                        .map(|h| h.to_hex())
+                    let tarball_hex = tarball.as_ref().map(|r| match r {
+                        BlobRef::Small { chunk, .. } => chunk.to_hex(),
+                        BlobRef::Large { blob_node, .. } => blob_node.to_hex(),
+                    });
+                    let cache_key = tarball_hex
+                        .clone()
                         .unwrap_or_else(|| format!("rust-toolchain-download:{:?}", component));
                     node_reports.push(vx_report::NodeReport {
                         node_id: action.display_name(),
@@ -561,7 +573,7 @@ impl Executor {
                         deps: vec![],
                         outputs: vec![vx_report::OutputRecord {
                             logical: format!("tarball_{:?}", component).to_lowercase(),
-                            manifest: tarball_blob.map(|h| h.to_hex()),
+                            manifest: tarball_hex,
                             blob: None,
                             path: None,
                         }],
@@ -572,7 +584,7 @@ impl Executor {
                 }
                 ActionResult::RustToolchainComponentExtracted {
                     component,
-                    tree_manifest,
+                    tree_root,
                     was_cached,
                 } => {
                     if *was_cached {
@@ -581,7 +593,7 @@ impl Executor {
                         rebuilt += 1;
                     }
 
-                    let cache_key = tree_manifest
+                    let cache_key = tree_root
                         .map(|h| h.to_hex())
                         .unwrap_or_else(|| format!("rust-toolchain-extract:{:?}", component));
                     node_reports.push(vx_report::NodeReport {
@@ -611,7 +623,7 @@ impl Executor {
                         deps: vec![],
                         outputs: vec![vx_report::OutputRecord {
                             logical: format!("tree_{:?}", component).to_lowercase(),
-                            manifest: tree_manifest.map(|h| h.to_hex()),
+                            manifest: tree_root.map(|h| h.to_hex()),
                             blob: None,
                             path: None,
                         }],
@@ -951,22 +963,25 @@ impl Executor {
             // Spawn a task to forward StoreProgress → ActionProgress
             let forward_listener = progress_listener.clone();
             let forward_action_id = action_id;
-            let forward_handle = tokio::spawn(async move {
-                while let Ok(Some(sp)) = store_progress_rx.recv().await {
-                    if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
-                        let _ = listener
-                            .update_progress(
-                                id,
-                                ActionProgress {
-                                    message: sp.message,
-                                    current: sp.current,
-                                    total: sp.total,
-                                },
-                            )
-                            .await;
+            let forward_handle = peeps::tasks::spawn_tracked(
+                format!("registry_progress_fwd_{:?}", action_id),
+                async move {
+                    while let Ok(Some(sp)) = store_progress_rx.recv().await {
+                        if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
+                            let _ = listener
+                                .update_progress(
+                                    id,
+                                    ActionProgress {
+                                        message: sp.message,
+                                        current: sp.current,
+                                        total: sp.total,
+                                    },
+                                )
+                                .await;
+                        }
                     }
-                }
-            });
+                },
+            );
 
             // Acquire a lane ID for timeline tracking
             let lane = free_lanes.lock().await.pop().unwrap_or(0);
@@ -1040,7 +1055,7 @@ async fn execute_action(
     cas: &Arc<StoreClient<crate::UpstreamCaller>>,
     exec: &Arc<RunnerClient<crate::UpstreamCaller>>,
     db: &Arc<crate::db::Database>,
-    results: &Arc<RwLock<HashMap<NodeIndex, ActionResult>>>,
+    results: &Arc<DiagnosticAsyncRwLock<HashMap<NodeIndex, ActionResult>>>,
     workspace_root: &camino::Utf8PathBuf,
     _target_triple: &str,
     _profile: &str,
@@ -1052,8 +1067,6 @@ async fn execute_action(
     use camino::Utf8PathBuf;
     use vx_rs::crate_graph::CrateSource;
     use vx_runner_proto::{RustCompileRequest, RustDep};
-    use vx_store_proto::{IngestTreeRequest, TreeFile};
-
     debug!("processing action {}", action.display_name());
 
     match action {
@@ -1091,7 +1104,7 @@ async fn execute_action(
 
             Ok(ActionResult::RustToolchainComponentDownloaded {
                 component,
-                tarball_blob: result.tarball_blob,
+                tarball: result.tarball,
                 was_cached: result.status == EnsureStatus::Hit,
             })
         }
@@ -1109,29 +1122,32 @@ async fn execute_action(
             };
 
             // Locate corresponding download result for this component.
-            let tarball_blob = {
+            let tarball_ref = {
                 let results_lock = results.read().await;
                 results_lock.values().find_map(|r| match r {
                     ActionResult::RustToolchainComponentDownloaded {
                         component: downloaded_component,
-                        tarball_blob: Some(blob),
+                        tarball: Some(blob_ref),
                         ..
-                    } if *downloaded_component == component => Some(*blob),
+                    } if *downloaded_component == component => Some(blob_ref.clone()),
                     _ => None,
                 })
             };
 
-            let tarball_blob = match tarball_blob {
-                Some(blob) => blob,
+            let tarball_ref = match tarball_ref {
+                Some(r) => r,
                 None => {
                     // If full toolchain is already cached, extraction call can still return Hit
-                    // with a placeholder blob value that won't be used.
-                    Blake3Hash([0; 32])
+                    // with a placeholder blob ref that won't be used.
+                    BlobRef::Small {
+                        chunk: ChunkHash(Blake3Hash([0; 32])),
+                        size: 0,
+                    }
                 }
             };
 
             let result = cas
-                .extract_rust_toolchain_component(spec, component.clone(), tarball_blob, progress)
+                .extract_rust_toolchain_component(spec, component.clone(), tarball_ref, progress)
                 .await
                 .map_err(|e| VxdError::CasRpc(e.to_string()))?;
 
@@ -1143,7 +1159,7 @@ async fn execute_action(
 
             Ok(ActionResult::RustToolchainComponentExtracted {
                 component,
-                tree_manifest: result.tree_manifest,
+                tree_root: result.tree_root,
                 was_cached: result.status == EnsureStatus::Hit,
             })
         }
@@ -1268,14 +1284,14 @@ async fn execute_action(
 
             // Update the RustToolchainManifest and RustToolchain in the database with real values
             use crate::inputs::{RustToolchain as RustToolchainInput, RustToolchainManifest};
-            RustToolchainManifest::set(&**db, toolchain_manifest)
+            RustToolchainManifest::set(&**db, toolchain_manifest.0)
                 .map_err(|e| VxdError::Picante(e.to_string()))?;
 
             // Update the toolchain input with real values for cache key computation
             let toolchain = RustToolchainInput::new(
                 &**db,
                 toolchain_id,
-                toolchain_manifest,
+                toolchain_manifest.0,
                 toolchain
                     .host(&**db)
                     .map_err(|e| VxdError::Picante(e.to_string()))?,
@@ -1332,14 +1348,16 @@ async fn execute_action(
             .map_err(|e| VxdError::Picante(e.to_string()))?;
 
             // Collect dependency results from completed actions
+            // Note: RustDep.manifest_hash and registry_crate_manifest expect ManifestHash (= Blake3Hash)
+            // but CAS now returns NodeHash, so we extract .0 when building RustDep
             let (deps, registry_crate_manifests): (
                 Vec<RustDep>,
-                HashMap<(String, String), Blake3Hash>,
+                HashMap<(String, String), NodeHash>,
             ) = {
                 let results_lock = results.read().await;
 
                 // Build map of CrateId -> output_manifest from completed compilation actions
-                let completed_manifests: HashMap<CrateId, Blake3Hash> = results_lock
+                let completed_manifests: HashMap<CrateId, NodeHash> = results_lock
                     .iter()
                     .filter_map(|(_, result)| match result {
                         ActionResult::CrateCompiled {
@@ -1352,7 +1370,7 @@ async fn execute_action(
                     .collect();
 
                 // Build map of (name, version) -> manifest_hash from registry acquisition actions
-                let registry_crate_manifests: HashMap<(String, String), Blake3Hash> = results_lock
+                let registry_crate_manifests: HashMap<(String, String), NodeHash> = results_lock
                     .iter()
                     .filter_map(|(_, result)| match result {
                         ActionResult::RegistryCrateAcquired {
@@ -1380,13 +1398,13 @@ async fn execute_action(
                         let registry_crate_manifest = match &action_dep.source {
                             CrateSource::Registry { name, version, .. } => registry_crate_manifests
                                 .get(&(name.clone(), version.clone()))
-                                .copied(),
+                                .map(|h| h.0),
                             CrateSource::Path { .. } => None,
                         };
 
                         Ok(RustDep {
                             extern_name: action_dep.extern_name.clone(),
-                            manifest_hash: *manifest_hash,
+                            manifest_hash: manifest_hash.0,
                             registry_crate_manifest,
                         })
                     })
@@ -1462,8 +1480,8 @@ async fn execute_action(
                 // Build compile request based on crate source
                 let compile_request = match &source {
                     CrateSource::Path { .. } => {
-                        // Path crate - ingest source tree to CAS
-                        let mut files = Vec::with_capacity(closure_paths.len());
+                        // Path crate - ingest source tree to CAS as chunks + DirectoryNode
+                        let mut tree_files = Vec::with_capacity(closure_paths.len());
 
                         for rel_path in &closure_paths {
                             let abs_path = workspace_root.join(rel_path);
@@ -1474,33 +1492,36 @@ async fn execute_action(
                                 }
                             })?;
 
-                            files.push(TreeFile {
+                            let size = contents.len() as u64;
+                            let content_hash = ContentHash(Blake3Hash::from_bytes(&contents));
+                            let chunk_hash = ChunkHash(content_hash.0);
+
+                            // Store as chunk (files in source closures are always < CDC_MAX_CHUNK)
+                            cas.put_chunk(chunk_hash, contents)
+                                .await
+                                .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+
+                            tree_files.push(crate::cas_tree::TreeFile {
                                 path: rel_path.to_string(),
-                                contents,
-                                executable: false,
+                                kind: DirEntryKind::SmallFile {
+                                    content_hash,
+                                    size,
+                                    executable: false,
+                                },
                             });
                         }
 
-                        let ingest_req = IngestTreeRequest { files };
-                        let ingest_result = cas
-                            .ingest_tree(ingest_req)
-                            .await
-                            .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                        // Build recursive Merkle directory tree
+                        let (source_node_hash, _total_size) =
+                            crate::cas_tree::build_merkle_tree(cas, tree_files)
+                                .await
+                                .map_err(VxdError::CasRpc)?;
 
-                        if !ingest_result.success {
-                            return Err(VxdError::TreeIngestion(
-                                ingest_result
-                                    .error
-                                    .unwrap_or_else(|| "tree ingestion failed".to_string()),
-                            ));
-                        }
-
-                        let source_manifest = ingest_result.manifest_hash.ok_or_else(|| {
-                            VxdError::TreeIngestion("missing manifest hash".to_string())
-                        })?;
+                        // Runner expects ManifestHash (= Blake3Hash), extract inner hash
+                        let source_manifest = source_node_hash.0;
 
                         RustCompileRequest {
-                            toolchain_manifest,
+                            toolchain_manifest: toolchain_manifest.0,
                             source_manifest,
                             crate_root: crate_root_rel.clone(),
                             crate_name: crate_name.clone(),
@@ -1516,14 +1537,14 @@ async fn execute_action(
                         // Registry crate - runner will extract and determine edition/lib_path
                         let registry_manifest = registry_crate_manifests
                             .get(&(name.clone(), version.clone()))
-                            .copied()
+                            .map(|h| h.0)
                             .ok_or_else(|| VxdError::RegistryCrateNoManifest {
                                 name: name.clone(),
                                 version: version.clone(),
                             })?;
 
                         RustCompileRequest {
-                            toolchain_manifest,
+                            toolchain_manifest: toolchain_manifest.0,
                             source_manifest: Blake3Hash([0u8; 32]), // Placeholder, runner ignores
                             crate_root: String::new(),              // Placeholder, runner ignores
                             crate_name: crate_name.clone(),
@@ -1549,12 +1570,14 @@ async fn execute_action(
                     });
                 }
 
-                let output_manifest =
+                let output_manifest_raw =
                     result
                         .output_manifest
                         .ok_or_else(|| VxdError::NoOutputManifest {
                             crate_name: crate_name.clone(),
                         })?;
+                // Wrap in NodeHash for publish and for consistent typing
+                let output_manifest = NodeHash(output_manifest_raw);
 
                 // Publish to cache
                 cas.publish(cache_key, output_manifest)
@@ -1593,21 +1616,29 @@ async fn execute_action(
 
                 let output_path = output_dir.join(&crate_name);
 
-                // Fetch manifest and materialize
-                let manifest = cas
-                    .get_manifest(output_manifest)
+                // Fetch manifest node and deserialize
+                let node_bytes = cas
+                    .get_node(output_manifest)
                     .await
                     .map_err(|e| VxdError::CasRpc(e.to_string()))?
                     .ok_or(VxdError::OutputManifestNotFound(output_manifest))?;
+                let manifest = match CasNode::from_bytes(&node_bytes) {
+                    Ok(CasNode::Manifest(m)) => m,
+                    Ok(_other) => {
+                        return Err(VxdError::OutputManifestNotFound(output_manifest));
+                    }
+                    Err(e) => {
+                        return Err(VxdError::CasRpc(format!(
+                            "failed to deserialize manifest node {}: {}",
+                            output_manifest, e
+                        )));
+                    }
+                };
 
                 let mut materialized = false;
                 for output in &manifest.outputs {
                     if output.logical == "bin" {
-                        let blob_data = cas
-                            .get_blob(output.blob)
-                            .await
-                            .map_err(|e| VxdError::CasRpc(e.to_string()))?
-                            .ok_or(VxdError::BlobNotFound(output.blob))?;
+                        let blob_data = fetch_output_blob_data(cas, &output.blob).await?;
 
                         vx_io::sync::atomic_write_executable(&output_path, &blob_data, true)
                             .map_err(|e| VxdError::WriteOutput {
@@ -1724,7 +1755,7 @@ async fn execute_action(
             };
 
             let request = CcCompileRequest {
-                toolchain_manifest: zig_toolchain_manifest,
+                toolchain_manifest: zig_toolchain_manifest.0,
                 source_manifest,
                 source_path: source.clone(),
                 target_triple: target_triple.clone(),
@@ -1813,7 +1844,7 @@ async fn execute_action(
             };
 
             let request = CcLinkRequest {
-                toolchain_manifest: zig_toolchain_manifest,
+                toolchain_manifest: zig_toolchain_manifest.0,
                 object_manifests,
                 binary_name: name.clone(),
                 target_triple: target_triple.clone(),
@@ -1864,9 +1895,10 @@ async fn execute_action(
                     message: format!("Failed to create binary output directory: {}", e),
                 })?;
 
-            // Fetch manifest to get the binary blob hash
-            let manifest = cas
-                .get_manifest(binary_hash)
+            // Fetch manifest node to get the binary blob ref
+            let manifest_node_hash = NodeHash(binary_hash);
+            let node_bytes = cas
+                .get_node(manifest_node_hash)
                 .await
                 .map_err(|e| VxdError::Compilation {
                     crate_name: name.clone(),
@@ -1876,6 +1908,25 @@ async fn execute_action(
                     crate_name: name.clone(),
                     message: format!("Binary manifest not found in CAS: {}", binary_hash.to_hex()),
                 })?;
+            let manifest = match CasNode::from_bytes(&node_bytes) {
+                Ok(CasNode::Manifest(m)) => m,
+                Ok(_) => {
+                    return Err(VxdError::Compilation {
+                        crate_name: name.clone(),
+                        message: format!("Node {} is not a Manifest", binary_hash.to_hex()),
+                    });
+                }
+                Err(e) => {
+                    return Err(VxdError::Compilation {
+                        crate_name: name.clone(),
+                        message: format!(
+                            "Failed to deserialize manifest node {}: {}",
+                            binary_hash.to_hex(),
+                            e
+                        ),
+                    });
+                }
+            };
 
             // Find the binary output entry
             let binary_entry = manifest
@@ -1888,19 +1939,11 @@ async fn execute_action(
                 })?;
 
             // Fetch binary blob from CAS and write to file
-            let binary_data = cas
-                .get_blob(binary_entry.blob)
+            let binary_data = fetch_output_blob_data(cas, &binary_entry.blob)
                 .await
                 .map_err(|e| VxdError::Compilation {
                     crate_name: name.clone(),
                     message: format!("Failed to fetch binary blob from CAS: {}", e),
-                })?
-                .ok_or_else(|| VxdError::Compilation {
-                    crate_name: name.clone(),
-                    message: format!(
-                        "Binary blob not found in CAS: {}",
-                        binary_entry.blob.to_hex()
-                    ),
                 })?;
 
             tokio::fs::write(&binary_path, &binary_data)
@@ -1940,6 +1983,65 @@ async fn execute_action(
                 binary_path,
                 was_cached: false, // TODO: Check cache
             })
+        }
+    }
+}
+
+/// Fetch blob data from CAS given an OutputBlobRef.
+///
+/// For Small blobs, fetches a single chunk.
+/// For Large blobs, fetches the BlobNode, then each chunk, and concatenates them.
+async fn fetch_output_blob_data(
+    cas: &Arc<StoreClient<crate::UpstreamCaller>>,
+    blob_ref: &OutputBlobRef,
+) -> Result<Vec<u8>, VxdError> {
+    match blob_ref {
+        OutputBlobRef::Small { chunk, size: _ } => {
+            let data = cas
+                .get_chunk(*chunk)
+                .await
+                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .ok_or_else(|| VxdError::BlobNotFound(format!("chunk {}", chunk)))?;
+            Ok(data)
+        }
+        OutputBlobRef::Large {
+            blob_node,
+            content_hash: _,
+            size: _,
+        } => {
+            // Fetch the BlobNode
+            let node_bytes = cas
+                .get_node(*blob_node)
+                .await
+                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .ok_or_else(|| VxdError::BlobNotFound(format!("blob node {}", blob_node)))?;
+            let blob_node_data = match CasNode::from_bytes(&node_bytes) {
+                Ok(CasNode::Blob(b)) => b,
+                Ok(_) => {
+                    return Err(VxdError::BlobNotFound(format!(
+                        "node {} is not a BlobNode",
+                        blob_node
+                    )));
+                }
+                Err(e) => {
+                    return Err(VxdError::CasRpc(format!(
+                        "failed to deserialize blob node {}: {}",
+                        blob_node, e
+                    )));
+                }
+            };
+
+            // Fetch each chunk and concatenate
+            let mut result = Vec::with_capacity(blob_node_data.total_size as usize);
+            for chunk_entry in &blob_node_data.chunks {
+                let chunk_data = cas
+                    .get_chunk(chunk_entry.hash)
+                    .await
+                    .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                    .ok_or_else(|| VxdError::BlobNotFound(format!("chunk {}", chunk_entry.hash)))?;
+                result.extend_from_slice(&chunk_data);
+            }
+            Ok(result)
         }
     }
 }

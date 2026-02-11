@@ -63,6 +63,18 @@ struct CleanArgs {
     cache: bool,
 }
 
+/// Arguments for the `debug` subcommand
+#[derive(Facet, Debug)]
+struct DebugArgs {
+    /// Print aggregated text dump to stderr (no web dashboard)
+    #[facet(args::named)]
+    dump: bool,
+
+    /// Print aggregated JSON to stdout (no web dashboard)
+    #[facet(args::named)]
+    json: bool,
+}
+
 /// Arguments for the `doctor` subcommand
 #[derive(Facet, Debug)]
 struct DoctorArgs {}
@@ -133,6 +145,9 @@ enum CliCommand {
 
     /// Quick health check
     Doctor(DoctorArgs),
+
+    /// Collect diagnostic dumps from all vixen processes
+    Debug(DebugArgs),
 }
 
 /// Initialize tracing with TUI layer
@@ -147,6 +162,7 @@ fn init_tracing_with_tui(tui: tui::TuiHandle) {
 
 fn main() {
     let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
         .enable_all()
         .build()
         .expect("failed to build tokio runtime");
@@ -193,6 +209,10 @@ async fn async_main() -> Result<()> {
         CliCommand::Doctor(_args) => {
             vx_tracing::init_cli_stderr();
             cmd_doctor().await
+        }
+        CliCommand::Debug(args) => {
+            vx_tracing::init_cli_stderr();
+            cmd_debug(args).await
         }
     }
 }
@@ -475,7 +495,8 @@ async fn try_connect_daemon(
     let progress_listener = ProgressListenerImpl::new(tui.clone(), json);
     let dispatcher = vxd_proto::ProgressListenerDispatcher::new(progress_listener);
 
-    let caller = vx_io::net::reconnecting_client(endpoint.clone(), dispatcher);
+    let caller =
+        vx_io::net::reconnecting_client_named(endpoint.clone(), dispatcher, Some("vx".into()));
     if let Err(e) = caller.handle().await {
         // If the connection attempt fails, ensure we tear down the display task.
         if let Some(tui) = tui {
@@ -903,6 +924,283 @@ async fn cmd_doctor() -> Result<()> {
 
     Ok(())
 }
+async fn cmd_debug(args: DebugArgs) -> Result<()> {
+    // 1. Find vixen process PIDs
+    let pids = find_vixen_pids()?;
+    if pids.is_empty() {
+        eprintln!("No vixen processes found. Is the daemon running?");
+        eprintln!("Start it with: vx build");
+        std::process::exit(1);
+    }
+
+    eprintln!(
+        "Found {} vixen process(es): {}",
+        pids.len(),
+        pids.iter()
+            .map(|(name, pid)| format!("{name}({pid})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    // 2. Clean stale dumps, send SIGUSR1 to each
+    peeps::clean_dumps();
+    std::fs::create_dir_all(peeps::DUMP_DIR)?;
+
+    for (_name, pid) in &pids {
+        unsafe {
+            libc::kill(*pid as i32, libc::SIGUSR1);
+        }
+    }
+
+    // 3. Poll for JSON dumps to appear
+    let expected = pids.len();
+    let mut collected = 0;
+    for _ in 0..20 {
+        // 100ms intervals, 2s max
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        collected = count_dump_files();
+        if collected >= expected {
+            break;
+        }
+    }
+
+    if collected == 0 {
+        eprintln!("No dumps collected. Processes may not have the dump handler yet.");
+        std::process::exit(1);
+    }
+
+    if collected < expected {
+        eprintln!(
+            "Warning: only collected {collected}/{expected} dumps (some processes may lack the handler)"
+        );
+    }
+
+    // 4. Read all dumps
+    let dumps = peeps::read_all_dumps();
+
+    if args.json {
+        // --json: raw JSON array to stdout
+        let json = facet_json::to_string(&dumps)?;
+        println!("{json}");
+        return Ok(());
+    }
+
+    if args.dump {
+        // --dump: human-readable text to stderr
+        print_text_dump(&dumps);
+        return Ok(());
+    }
+
+    // Default: serve web dashboard
+    serve_debug_dashboard(dumps).await
+}
+
+/// Find running vixen processes via pgrep.
+fn find_vixen_pids() -> Result<Vec<(String, u32)>> {
+    let output = std::process::Command::new("pgrep")
+        .args(["-l", "-f", "vxd|vx-store|vx-runner|vx-vfsd"])
+        .output()?;
+
+    let mut pids = Vec::new();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+        if parts.len() == 2
+            && let Ok(pid) = parts[0].parse::<u32>()
+        {
+            let name = parts[1].to_string();
+            // Filter out ourselves and grep itself
+            if !name.contains("pgrep") && !name.contains("vx debug") {
+                pids.push((name, pid));
+            }
+        }
+    }
+    Ok(pids)
+}
+
+/// Count JSON files in the dump directory.
+fn count_dump_files() -> usize {
+    let dir = std::path::Path::new(peeps::DUMP_DIR);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .count()
+}
+
+/// Print a human-readable text dump of all process diagnostics.
+fn print_text_dump(dumps: &[peeps::ProcessDump]) {
+    for dump in dumps {
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!("Process: {} (pid {})", dump.process_name, dump.pid);
+        eprintln!("Timestamp: {}", dump.timestamp);
+        eprintln!();
+
+        // Roam connections
+        if let Some(ref roam) = dump.roam {
+            if roam.connections.is_empty() {
+                eprintln!("  Connections: (none)");
+            } else {
+                eprintln!("  Connections ({}):", roam.connections.len());
+                for conn in &roam.connections {
+                    let peer = conn.peer_name.as_deref().unwrap_or("unknown");
+                    eprintln!(
+                        "    {} ↔ {} (age {:.1}s, {} completed, {} in-flight)",
+                        conn.name,
+                        peer,
+                        conn.age_secs,
+                        conn.total_completed,
+                        conn.in_flight.len()
+                    );
+
+                    for req in &conn.in_flight {
+                        let method = req.method_name.as_deref().unwrap_or("?");
+                        let dir = match req.direction {
+                            peeps::types::Direction::Outgoing => "→",
+                            peeps::types::Direction::Incoming => "←",
+                        };
+                        eprintln!(
+                            "      {dir} {method} (id={}, {:.3}s)",
+                            req.request_id, req.elapsed_secs
+                        );
+                    }
+                }
+            }
+        }
+
+        // SHM
+        if let Some(shm) = &dump.shm {
+            eprintln!();
+            eprintln!("  SHM segments ({}):", shm.segments.len());
+            for seg in &shm.segments {
+                let path = seg.segment_path.as_deref().unwrap_or("?");
+                eprintln!(
+                    "    {} ({}/{} bytes, {} peers)",
+                    path,
+                    seg.current_size,
+                    seg.total_size,
+                    seg.peers.len()
+                );
+            }
+        }
+
+        // Locks
+        if let Some(locks) = &dump.locks {
+            eprintln!();
+            eprintln!("  Locks ({}):", locks.locks.len());
+            for lock in &locks.locks {
+                eprintln!(
+                    "    \"{}\" (acquires={}, releases={}, {} holders, {} waiters)",
+                    lock.name,
+                    lock.acquires,
+                    lock.releases,
+                    lock.holders.len(),
+                    lock.waiters.len()
+                );
+            }
+        }
+
+        // Thread stacks
+        if !dump.threads.is_empty() {
+            eprintln!();
+            eprintln!("  Threads ({}):", dump.threads.len());
+            for t in &dump.threads {
+                let status = if t.responded == 0 {
+                    "UNRESPONSIVE"
+                } else if t.samples > 1
+                    && t.same_location_count as f64 / (t.samples - 1) as f64 >= 0.7
+                {
+                    "STUCK"
+                } else {
+                    "active"
+                };
+                eprintln!(
+                    "    {} [{status}] (responded {}/{}, same_loc {}/{})",
+                    t.name,
+                    t.responded,
+                    t.samples,
+                    t.same_location_count,
+                    t.samples.saturating_sub(1)
+                );
+                if let Some(ref frame) = t.dominant_frame {
+                    eprintln!("      dominant: {frame}");
+                }
+            }
+        }
+
+        // Custom
+        if !dump.custom.is_empty() {
+            eprintln!();
+            eprintln!("  Custom:");
+            for (k, v) in &dump.custom {
+                eprintln!("    {k}: {v}");
+            }
+        }
+
+        eprintln!();
+    }
+}
+
+/// Serve a web dashboard with the collected dumps.
+async fn serve_debug_dashboard(dumps: Vec<peeps::ProcessDump>) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let dumps_json = facet_json::to_string(&dumps)?;
+
+    let html = build_dashboard_html(&dumps_json);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let url = format!("http://{addr}");
+
+    eprintln!("Dashboard: {url}");
+    eprintln!("Press Ctrl-C to stop.");
+
+    // Open browser
+    let _ = std::process::Command::new("open").arg(&url).status();
+
+    // Simple HTTP server — serves the dashboard HTML and API endpoints
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        let dumps_json = dumps_json.clone();
+        let html = html.clone();
+
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            let n = match stream.read(&mut buf).await {
+                Ok(n) => n,
+                Err(_) => return,
+            };
+            let request = String::from_utf8_lossy(&buf[..n]);
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("/");
+
+            let (status, content_type, body) = match path {
+                "/api/dump" => ("200 OK", "application/json", dumps_json),
+                _ => ("200 OK", "text/html; charset=utf-8", html),
+            };
+
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.write_all(body.as_bytes()).await;
+        });
+    }
+}
+
+fn build_dashboard_html(dumps_json: &str) -> String {
+    const TEMPLATE: &str = include_str!("debug_dashboard.html");
+    TEMPLATE.replace("__DUMPS_JSON__", dumps_json)
+}
+
 fn cmd_explain(args: ExplainArgs) -> Result<()> {
     let cwd = Utf8PathBuf::try_from(std::env::current_dir()?)?;
     let store = ReportStore::new(&cwd);

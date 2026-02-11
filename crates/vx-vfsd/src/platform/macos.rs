@@ -2,157 +2,75 @@ use camino::Utf8PathBuf;
 
 use crate::Result;
 
+/// Resolve the canonical form of a mount path without touching the mount point
+/// itself — which may be a dead FSKit mount that hangs on any access (stat, readdir).
+///
+/// Strategy: canonicalize the parent directory and append the final component.
+fn canonicalize_without_stat(mount_path: &Utf8PathBuf) -> Utf8PathBuf {
+    if let Some(parent) = mount_path.parent()
+        && let Ok(canonical_parent) = std::fs::canonicalize(parent.as_std_path())
+        && let Ok(canonical_parent) = Utf8PathBuf::try_from(canonical_parent)
+        && let Some(name) = mount_path.file_name()
+    {
+        return canonical_parent.join(name);
+    }
+    mount_path.clone()
+}
+
 /// Clean up stuck FSKit mount if needed.
+///
+/// IMPORTANT: This function must never call stat/canonicalize/metadata on the
+/// mount path itself. If the previous VFS session died, the mount point becomes
+/// a dead FSKit mount — any filesystem access (stat, readdir, canonicalize) to
+/// it hangs forever because the kernel waits for a reply from the (dead) FSKit
+/// extension.
+///
+/// Dead FSKit mounts may not appear in `df` output, so we always attempt
+/// `diskutil unmount force` on all candidate paths unconditionally. If nothing
+/// is mounted, diskutil fails and we move on.
 pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
     use std::process::Command;
 
-    tracing::debug!(mount_path = %mount_path, "checking for stuck FSKit mount");
+    tracing::debug!(mount_path = %mount_path, "cleaning up any stale FSKit mount");
 
-    // Canonicalize the mount path
-    // If it doesn't exist, canonicalize the parent and append the final component
-    let canonical_mount_path = match tokio::fs::canonicalize(mount_path.as_std_path()).await {
-        Ok(p) => {
-            let canonical = Utf8PathBuf::try_from(p).unwrap_or_else(|_| mount_path.clone());
-            tracing::debug!(
-                mount_path = %mount_path,
-                canonical_mount_path = %canonical,
-                "canonicalized mount path directly"
-            );
-            canonical
-        }
-        Err(_) => {
-            // Path doesn't exist, try canonicalizing parent
-            if let Some(parent) = mount_path.parent() {
-                match tokio::fs::canonicalize(parent.as_std_path()).await {
-                    Ok(canonical_parent) => {
-                        let canonical_parent = Utf8PathBuf::try_from(canonical_parent)
-                            .unwrap_or_else(|_| parent.to_path_buf());
-                        let canonical = canonical_parent.join(mount_path.file_name().unwrap());
-                        tracing::debug!(
-                            mount_path = %mount_path,
-                            canonical_mount_path = %canonical,
-                            "canonicalized via parent directory"
-                        );
-                        canonical
-                    }
-                    Err(e) => {
-                        tracing::debug!(
-                            mount_path = %mount_path,
-                            error = %e,
-                            "parent does not exist, using mount path as-is"
-                        );
-                        mount_path.clone()
-                    }
-                }
-            } else {
-                tracing::debug!(
-                    mount_path = %mount_path,
-                    "no parent directory, using mount path as-is"
-                );
-                mount_path.clone()
-            }
-        }
-    };
+    let canonical = canonicalize_without_stat(mount_path);
 
-    // Run `df` to check for existing mounts
-    tracing::debug!("running df to check for existing mounts");
-    let output = Command::new("df")
-        .output()
-        .map_err(|e| format!("failed to run df: {}", e))?;
-
-    if !output.status.success() {
-        tracing::warn!("df command failed, skipping mount cleanup");
-        return Ok(()); // df failed, skip cleanup
+    // Collect all candidate paths to try unmounting. Dead FSKit mounts don't
+    // always show up in `df`, so we just try all plausible paths.
+    let mut candidates: Vec<String> = vec![canonical.to_string()];
+    let raw = mount_path.to_string();
+    if raw != candidates[0] {
+        candidates.push(raw.clone());
+    }
+    // /tmp → /private/tmp on macOS
+    let private_prefixed = format!("/private{}", mount_path);
+    if !candidates.contains(&private_prefixed) {
+        candidates.push(private_prefixed);
     }
 
-    let df_output = String::from_utf8_lossy(&output.stdout);
-    tracing::trace!(df_output = %df_output, "df output");
+    for path in &candidates {
+        let status = Command::new("diskutil")
+            .arg("unmount")
+            .arg("force")
+            .arg(path)
+            .output();
 
-    // Look for a mount at our target path
-    let mut is_mounted = false;
-    let mut found_mount_at: Option<String> = None;
-    for line in df_output.lines().skip(1) {
-        // Last field is the mount point
-        if let Some(mounted_on) = line.split_whitespace().last() {
-            // Canonicalize both paths for comparison (handles /tmp -> /private/tmp, symlinks, etc.)
-            let canonical_df_path = match std::fs::canonicalize(mounted_on) {
-                Ok(p) => Utf8PathBuf::try_from(p).ok(),
-                Err(_) => None,
-            };
-
-            if let Some(df_path) = canonical_df_path {
-                if df_path == canonical_mount_path {
-                    tracing::info!(
-                        mount_path = %mount_path,
-                        canonical_mount_path = %canonical_mount_path,
-                        df_entry = %mounted_on,
-                        "found existing mount (matched via canonicalization)"
-                    );
-                    is_mounted = true;
-                    found_mount_at = Some(mounted_on.to_string());
-                    break;
-                }
-            } else {
-                // If canonicalization fails, fall back to string comparison
-                if mounted_on == mount_path.as_str() || mounted_on == canonical_mount_path.as_str()
-                {
-                    tracing::info!(
-                        mount_path = %mount_path,
-                        df_entry = %mounted_on,
-                        "found existing mount (matched via string comparison)"
-                    );
-                    is_mounted = true;
-                    found_mount_at = Some(mounted_on.to_string());
-                    break;
-                }
+        match status {
+            Ok(output) if output.status.success() => {
+                tracing::info!(path = %path, "force-unmounted stale FSKit mount");
+                return Ok(());
+            }
+            Ok(_) => {
+                tracing::debug!(path = %path, "no mount to clean up at this path");
+            }
+            Err(e) => {
+                tracing::warn!(path = %path, error = %e, "failed to run diskutil");
             }
         }
     }
 
-    if !is_mounted {
-        tracing::debug!(mount_path = %mount_path, "no existing mount found");
-        return Ok(()); // Not mounted, nothing to clean up
-    }
-
-    let found_at = found_mount_at.as_deref().unwrap_or("unknown");
-    tracing::info!(mount_path = %mount_path, found_at = %found_at, "proceeding with unmount");
-
-    // Try to stat the mount point to see if it's responsive
-    match tokio::fs::metadata(mount_path.as_std_path()).await {
-        Ok(_) => {
-            // Mount is responsive, but we still need to unmount to re-mount
-            tracing::warn!(
-                mount_path = %mount_path,
-                "found existing mount, attempting unmount"
-            );
-        }
-        Err(_) => {
-            // Mount is stuck/unresponsive
-            tracing::warn!(
-                mount_path = %mount_path,
-                "detected stuck FSKit mount, attempting cleanup"
-            );
-        }
-    }
-
-    // Use diskutil to unmount
-    tracing::info!(mount_path = %mount_path, "attempting unmount: diskutil unmount");
-    let status = Command::new("diskutil")
-        .arg("unmount")
-        .arg(canonical_mount_path.as_str())
-        .status()
-        .map_err(|e| format!("failed to run diskutil: {}", e))?;
-
-    if status.success() {
-        tracing::info!("successfully unmounted existing mount");
-        Ok(())
-    } else {
-        Err(format!(
-            "failed to unmount existing mount at {}",
-            canonical_mount_path
-        )
-        .into())
-    }
+    tracing::debug!(mount_path = %mount_path, "no stale mount found (tried all candidates)");
+    Ok(())
 }
 
 /// Unmount an FSKit filesystem using diskutil.

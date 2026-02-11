@@ -195,7 +195,7 @@ pub async fn try_connect(endpoint: &Endpoint) -> Result<Option<Stream>> {
 pub enum Listener {
     Tcp(tokio::net::TcpListener),
     Local {
-        listener: tokio::sync::Mutex<roam_local::LocalListener>,
+        listener: peeps::locks::DiagnosticAsyncMutex<roam_local::LocalListener>,
         endpoint: camino::Utf8PathBuf,
     },
 }
@@ -228,7 +228,7 @@ impl Listener {
 
                 let listener = roam_local::LocalListener::bind(bind_target)?;
                 Ok(Listener::Local {
-                    listener: tokio::sync::Mutex::new(listener),
+                    listener: peeps::locks::DiagnosticAsyncMutex::new("io/local_listener", listener),
                     endpoint: path.clone(),
                 })
             }
@@ -293,10 +293,23 @@ pub fn reconnecting_client<D>(
 where
     D: roam_stream::ServiceDispatcher + Clone,
 {
+    reconnecting_client_named(endpoint, dispatcher, None)
+}
+
+/// Create a reconnecting roam-stream client for an endpoint with a diagnostic name.
+pub fn reconnecting_client_named<D>(
+    endpoint: Endpoint,
+    dispatcher: D,
+    name: Option<String>,
+) -> roam_stream::Client<EndpointConnector, D>
+where
+    D: roam_stream::ServiceDispatcher + Clone,
+{
     roam_stream::connect_with_policy(
         EndpointConnector::new(endpoint),
         roam_stream::HandshakeConfig {
             max_payload_size: 256 * 1024 * 1024, // 256 MiB
+            name,
             ..Default::default()
         },
         dispatcher,

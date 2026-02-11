@@ -36,7 +36,7 @@ targets:
         com.apple.security.app-sandbox: true
         com.apple.security.network.client: true
         com.apple.security.application-groups:
-          - group.eu.bearcove.vixen
+          - B2N6FSRTPV.vixenfs
         com.apple.security.temporary-exception.mach-lookup.global-name:
           - "eu.bearcove.vixen-spks"
           - "eu.bearcove.vixen-spki"
@@ -99,7 +99,7 @@ targets:
         com.apple.security.network.client: true
         com.apple.developer.fskit.fsmodule: true
         com.apple.security.application-groups:
-          - group.eu.bearcove.vixen
+          - B2N6FSRTPV.vixenfs
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: eu.bearcove.vixenfs

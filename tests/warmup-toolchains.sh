@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Build vx-store, vx-runner, vxd, vx
-cargo build --verbose
+cargo build --verbose --features diagnostics
 
 # HTTP download cache persists across runs (regular files, safe in ~/Library/Caches)
 if [[ "$(uname)" == "Darwin" ]]; then
@@ -39,22 +39,11 @@ mkdir -p "${VX_HOME}"
 "${VX_BIN}" kill || echo "NOTE: vx kill reported no daemon running (clean slate)"
 pkill "vxd" || true # Actually still useful
 
-# Wait for old daemon to fully release the socket (up to 3s).
-# With the nextest watcher (#203), old daemons die fast — but there's
-# a brief window where the socket file still exists.
-SOCKET="${VX_HOME}/vxd.sock"
-for i in $(seq 1 15); do
-    [ -S "${SOCKET}" ] || break
-    sleep 0.2
-done
-
 # Spawn shared daemon. VX_TEST skips die_with_parent() so the daemon
-# outlives this setup script.
-"${VXD_BIN}" &
+# outlives this setup script. VX_NEXTEST_PID is needed because the
+# process tree walk can't find nextest through pipe subshells.
+VX_NEXTEST_PID="${PPID}" "${VXD_BIN}" &
 DAEMON_PID=$!
-
-# Give daemon time to initialize (spawn store, runner, bind sockets)
-sleep 2
 
 # Build a warmup project to trigger toolchain download + materialization
 WARMUP_DIR=$(mktemp -d)

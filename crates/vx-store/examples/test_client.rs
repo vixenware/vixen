@@ -2,7 +2,7 @@
 
 use eyre::Result;
 use roam_stream::NoDispatcher;
-use vx_store_proto::StoreClient;
+use vx_store_proto::{ChunkHash, StoreClient};
 
 fn main() -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -30,30 +30,34 @@ async fn async_main() -> Result<()> {
     // Create CAS client
     let client = StoreClient::new(caller.clone());
 
-    // Test: put a blob
-    tracing::info!("Testing put_blob...");
+    // Test: put a chunk
+    tracing::info!("Testing put_chunk...");
     let test_data = b"Hello from vx-store test client!";
-    let blob_hash = client.put_blob(test_data.to_vec()).await?;
-    tracing::info!("Put blob: {}", blob_hash.to_hex());
+    let chunk_hash = ChunkHash(vx_store_proto::Blake3Hash::from_bytes(test_data));
+    client
+        .put_chunk(chunk_hash, test_data.to_vec())
+        .await
+        .map_err(|e| eyre::eyre!("put_chunk failed: {e}"))?;
+    tracing::info!("Put chunk: {}", chunk_hash.to_hex());
 
-    // Test: get the blob back
-    tracing::info!("Testing get_blob...");
-    let retrieved = client.get_blob(blob_hash).await?;
+    // Test: get the chunk back
+    tracing::info!("Testing get_chunk...");
+    let retrieved = client.get_chunk(chunk_hash).await?;
     match retrieved {
         Some(data) => {
-            assert_eq!(data, test_data);
-            tracing::info!("Retrieved blob: {}", String::from_utf8_lossy(&data));
+            assert_eq!(data.as_slice(), test_data);
+            tracing::info!("Retrieved chunk: {}", String::from_utf8_lossy(&data));
         }
         None => {
-            tracing::error!("Failed to retrieve blob!");
-            return Err(eyre::eyre!("Blob not found"));
+            tracing::error!("Failed to retrieve chunk!");
+            return Err(eyre::eyre!("Chunk not found"));
         }
     }
 
-    // Test: has_blob
-    tracing::info!("Testing has_blob...");
-    let exists = client.has_blob(blob_hash).await?;
-    tracing::info!("Blob exists: {}", exists);
+    // Test: has_chunk
+    tracing::info!("Testing has_chunk...");
+    let exists = client.has_chunk(chunk_hash).await?;
+    tracing::info!("Chunk exists: {}", exists);
 
     // Close connection by dropping the caller
     drop(caller);

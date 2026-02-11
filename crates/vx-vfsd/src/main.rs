@@ -122,12 +122,35 @@ struct Args {
     builtins: args::FigueBuiltins,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    peeps::threads::install_sigprof_handler();
+    peeps::threads::register_thread("main");
+    peeps::tasks::init_task_tracking();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .on_thread_start(|| {
+            peeps::threads::register_thread(
+                std::thread::current().name().unwrap_or("tokio-worker"),
+            );
+        })
+        .on_thread_stop(|| {
+            peeps::threads::deregister_thread();
+        })
+        .build()?;
+    rt.block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     vx_tracing::init_service("vx-vfsd=debug");
 
     // Die when parent dies
     ur_taking_me_with_you::die_with_parent();
+
+    // Initialize peeps instrumentation
+    peeps::init();
+    peeps::install_sigusr1("vx-vfsd");
 
     let args: Args = args::Driver::new(
         args::builder::<Args>()?
@@ -212,7 +235,7 @@ async fn main() -> Result<()> {
 
             // Spawn watcher for VFS death
             let vfs_mount_path = mount_path.clone();
-            tokio::spawn(async move {
+            peeps::tasks::spawn_tracked("vfs_death_watcher", async move {
                 // Wait for VFS to report death
                 loop {
                     if vfs_dead.changed().await.is_err() || *vfs_dead.borrow() {
@@ -246,13 +269,14 @@ async fn main() -> Result<()> {
         match vfsd_listener.accept().await {
             Ok((stream, peer_addr)) => {
                 let service = vfsd_service.clone();
-                tokio::spawn(async move {
+                peeps::tasks::spawn_tracked(format!("vfsd_connection_{}", peer_addr), async move {
                     tracing::debug!("vx-vfsd connection from {}", peer_addr);
                     let dispatcher = VfsdDispatcher::new(service);
                     let Ok((_handle, _incoming, driver)) = accept(
                         stream,
                         HandshakeConfig {
                             max_payload_size: 256 * 1024 * 1024, // 256 MiB
+                            name: Some("vx-vfsd".into()),
                             ..Default::default()
                         },
                         dispatcher,
@@ -278,7 +302,11 @@ async fn main() -> Result<()> {
 
 async fn connect_to_store(endpoint_str: &str) -> Result<StoreClient<CasCaller>> {
     let endpoint = Endpoint::parse(endpoint_str)?;
-    let caller = vx_io::net::reconnecting_client(endpoint.clone(), NoDispatcher);
+    let caller = vx_io::net::reconnecting_client_named(
+        endpoint.clone(),
+        NoDispatcher,
+        Some("vx-vfsd".into()),
+    );
 
     // Wait for initial connection
     caller
@@ -288,4 +316,3 @@ async fn connect_to_store(endpoint_str: &str) -> Result<StoreClient<CasCaller>> 
 
     Ok(StoreClient::new(caller))
 }
-

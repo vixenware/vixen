@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use vx_store_proto::{Blake3Hash, StoreClient};
+use vx_store_proto::{
+    Blake3Hash, CasNode, ContentHash, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient,
+};
 
 type RpcClient = vx_vfsd::protocol::VfsdClient<crate::VfsdCaller>;
 
@@ -47,7 +49,7 @@ impl VfsdClient {
 
     /// Add a file to a prefix from CAS
     ///
-    /// Implemented by creating a single-file tree manifest and mounting it.
+    /// Implemented by creating a DirectoryNode tree and mounting it.
     pub async fn add_file_to_prefix(
         &self,
         prefix_id: &str,
@@ -56,26 +58,56 @@ impl VfsdClient {
         size: u64,
         executable: bool,
     ) -> Result<(), String> {
-        use vx_store_proto::TreeManifest;
+        // Split path into directory components and filename
+        let components: Vec<&str> = path.split('/').collect();
+        let filename = components
+            .last()
+            .ok_or_else(|| format!("empty path: {}", path))?;
 
-        // Create a tree manifest with just this one file
-        let mut manifest = TreeManifest::new();
-        manifest.add_file(path.to_string(), cas_hash, size, executable);
-        manifest.finalize();
+        // Build leaf DirectoryNode containing just this file
+        let file_entry = DirEntry {
+            name: filename.to_string(),
+            kind: DirEntryKind::SmallFile {
+                content_hash: ContentHash(cas_hash),
+                size,
+                executable,
+            },
+        };
 
-        // Serialize and hash the manifest
-        let manifest_json = facet_json::to_string(&manifest)
-            .map_err(|e| format!("failed to serialize tree manifest for {}: {}", path, e))?;
-        let manifest_hash = Blake3Hash::from_bytes(manifest_json.as_bytes());
-
-        // Store manifest in CAS
+        let leaf_node = CasNode::Directory(DirectoryNode {
+            entries: vec![file_entry],
+            total_size: size,
+        });
+        let (leaf_bytes, leaf_hash) = leaf_node.to_bytes_and_hash();
         self.cas
-            .put_blob(manifest_json.into_bytes())
+            .put_node(leaf_hash, leaf_bytes)
             .await
-            .map_err(|e| format!("failed to store tree manifest for {}: {:?}", path, e))?;
+            .map_err(|e| format!("failed to store DirectoryNode for {}: {}", path, e))?;
+
+        // Build parent directories from inside out (skip the filename)
+        let mut current_hash = leaf_hash;
+        let current_size = size;
+        for &dir_name in components[..components.len() - 1].iter().rev() {
+            let dir_node = CasNode::Directory(DirectoryNode {
+                entries: vec![DirEntry {
+                    name: dir_name.to_string(),
+                    kind: DirEntryKind::Dir {
+                        hash: current_hash,
+                        total_size: current_size,
+                    },
+                }],
+                total_size: current_size,
+            });
+            let (dir_bytes, dir_hash) = dir_node.to_bytes_and_hash();
+            self.cas
+                .put_node(dir_hash, dir_bytes)
+                .await
+                .map_err(|e| format!("failed to store parent DirectoryNode for {}: {}", path, e))?;
+            current_hash = dir_hash;
+        }
 
         // Mount at prefix root (empty rel_path)
-        self.mount_tree(prefix_id, "", manifest_hash)
+        self.mount_tree(prefix_id, "", current_hash.0)
             .await
             .map_err(|e| format!("failed to mount file {}: {}", path, e))?;
 
@@ -94,12 +126,15 @@ impl VfsdClient {
         } else {
             format!("/{}/{}", prefix_id, rel_path)
         };
-        self.client.mount(path, tree_hash).await.map_err(|e| e.to_string())
+        self.client
+            .mount(path, tree_hash)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Flush all written files in a prefix to CAS
     pub async fn flush_prefix_to_cas(&self, prefix_id: &str) -> HashMap<String, (Blake3Hash, u64)> {
-        // Call vx-vfsd's flush to get tree manifest hash
+        // Call vx-vfsd's flush to get the root DirectoryNode hash
         let tree_hash = match self.flush_prefix_manifest(prefix_id, "").await {
             Ok(hash) => hash,
             Err(e) => {
@@ -108,32 +143,82 @@ impl VfsdClient {
             }
         };
 
-        // Fetch the tree manifest from CAS
-        let manifest = match self.cas.get_tree_manifest(tree_hash).await {
-            Ok(Some(m)) => m,
-            Ok(None) => {
-                tracing::error!("tree manifest {} not found after flush", tree_hash);
-                return HashMap::new();
-            }
-            Err(e) => {
-                tracing::error!("failed to fetch tree manifest {}: {:?}", tree_hash, e);
-                return HashMap::new();
-            }
-        };
-
-        // Build HashMap of file paths to (hash, size)
+        // Walk the DirectoryNode tree recursively to collect all files
         let mut result = HashMap::new();
-        for entry in &manifest.entries {
-            if let vx_store_proto::TreeEntryKind::File { blob, size, .. } = &entry.kind {
-                result.insert(entry.path.clone(), (*blob, *size));
-            }
+        if let Err(e) = self
+            .collect_files_from_directory_node(NodeHash(tree_hash), "", &mut result)
+            .await
+        {
+            tracing::error!("failed to walk DirectoryNode tree {}: {}", tree_hash, e);
         }
 
         result
     }
 
+    /// Recursively walk a DirectoryNode tree and collect file entries
+    async fn collect_files_from_directory_node(
+        &self,
+        node_hash: NodeHash,
+        prefix: &str,
+        result: &mut HashMap<String, (Blake3Hash, u64)>,
+    ) -> Result<(), String> {
+        let node_data = self
+            .cas
+            .get_node(node_hash)
+            .await
+            .map_err(|e| format!("failed to fetch DirectoryNode: {:?}", e))?
+            .ok_or_else(|| format!("DirectoryNode {} not found in CAS", node_hash))?;
+
+        let node = CasNode::from_bytes(&node_data)
+            .map_err(|e| format!("failed to deserialize DirectoryNode: {}", e))?;
+
+        let dir = match node {
+            CasNode::Directory(d) => d,
+            _ => {
+                return Err(format!(
+                    "expected DirectoryNode at {}, got different variant",
+                    node_hash
+                ));
+            }
+        };
+
+        for entry in &dir.entries {
+            let entry_path = if prefix.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{}/{}", prefix, entry.name)
+            };
+
+            match &entry.kind {
+                DirEntryKind::SmallFile {
+                    content_hash, size, ..
+                } => {
+                    result.insert(entry_path, (content_hash.0, *size));
+                }
+                DirEntryKind::LargeFile {
+                    content_hash, size, ..
+                } => {
+                    result.insert(entry_path, (content_hash.0, *size));
+                }
+                DirEntryKind::Dir { hash, .. } => {
+                    Box::pin(self.collect_files_from_directory_node(*hash, &entry_path, result))
+                        .await?;
+                }
+                DirEntryKind::Symlink { .. } => {
+                    // Skip symlinks
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Flush a prefix and return the tree manifest hash
-    pub async fn flush_prefix_manifest(&self, prefix_id: &str, subpath: &str) -> Result<Blake3Hash, String> {
+    pub async fn flush_prefix_manifest(
+        &self,
+        prefix_id: &str,
+        subpath: &str,
+    ) -> Result<Blake3Hash, String> {
         let path = if subpath.is_empty() {
             format!("/{}", prefix_id)
         } else {

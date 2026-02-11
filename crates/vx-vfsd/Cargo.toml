@@ -19,12 +19,13 @@ path = "src/main.rs"
 [dependencies]
 # Internal
 vx-store-proto = { workspace = true }
-vx-locks = { workspace = true }
 vixenfs-proto = { workspace = true }
 vx-vfs = { workspace = true }
 
 # RPC
 roam = { workspace = true }
+roam-session = { workspace = true }
+peeps = { workspace = true }
 roam-stream = { workspace = true }
 vx-io = { workspace = true }
 
@@ -33,13 +34,13 @@ tokio = { workspace = true }
 
 # Serialization
 facet = { workspace = true }
-facet-json = { workspace = true }
 
 # CLI
 figue = { workspace = true }
 
 # Utilities
 camino = { workspace = true }
+futures-util = { workspace = true }
 cfg-if = { workspace = true }
 tracing = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
@@ -53,4 +54,4 @@ roam-shm = { workspace = true }
 
 [features]
 default = []
-diagnostics = ["vx-locks/diagnostics"]
+diagnostics = ["peeps/diagnostics", "roam-session/diagnostics", "roam-shm/diagnostics"]

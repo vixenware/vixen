@@ -19,6 +19,8 @@ use error::{Result as RunnerResult, RunnerError};
 
 use camino::Utf8PathBuf;
 use eyre::Result;
+use facet::Facet;
+use figue as args;
 use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -57,86 +59,37 @@ pub(crate) fn runner_mount_base() -> Utf8PathBuf {
     // Utf8PathBuf::from(format!("{}/{}", base, suffix))
 }
 
-#[derive(Debug)]
+/// vx-runner - Worker daemon
+#[derive(Facet, Debug)]
 struct Args {
-    /// VX_HOME directory
+    /// VX home directory
+    #[facet(args::named)]
     vx_home: Utf8PathBuf,
 
-    /// CAS endpoint
-    cas_endpoint: Endpoint,
+    /// CAS (vx-store) endpoint
+    #[facet(args::named)]
+    store: String,
 
-    /// Bind endpoint for Runner RPC service
-    bind: Endpoint,
+    /// Listen endpoint for Runner RPC service
+    #[facet(args::named)]
+    listen: String,
 
     /// vx-vfsd endpoint
-    vfsd_endpoint: Endpoint,
-}
+    #[facet(args::named)]
+    vfsd: String,
 
-impl Args {
-    fn from_env() -> Result<Self> {
-        let vx_home = std::env::var("VX_HOME").unwrap_or_else(|_| {
-            let home = std::env::var("HOME").expect("HOME not set");
-            format!("{}/.vx", home)
-        });
-        let vx_home = Utf8PathBuf::from(vx_home);
-
-        // Parse CAS endpoint (defaults to Unix socket)
-        let cas_endpoint = match std::env::var("VX_STORE") {
-            Ok(v) => Endpoint::parse(&v)?,
-            Err(_) => {
-                #[cfg(unix)]
-                {
-                    vx_io::net::default_unix_endpoint(&vx_home, "store")
-                }
-                #[cfg(not(unix))]
-                {
-                    Endpoint::parse("127.0.0.1:9002")?
-                }
-            }
-        };
-
-        // Parse bind endpoint (defaults to Unix socket)
-        let bind = match std::env::var("VX_RUNNER") {
-            Ok(v) => Endpoint::parse(&v)?,
-            Err(_) => {
-                #[cfg(unix)]
-                {
-                    vx_io::net::default_unix_endpoint(&vx_home, "runner")
-                }
-                #[cfg(not(unix))]
-                {
-                    Endpoint::parse("127.0.0.1:9003")?
-                }
-            }
-        };
-
-        // Parse vfsd endpoint (defaults to Unix socket)
-        let vfsd_endpoint = match std::env::var("VX_VFSD") {
-            Ok(v) => Endpoint::parse(&v)?,
-            Err(_) => {
-                #[cfg(unix)]
-                {
-                    vx_io::net::default_unix_endpoint(&vx_home, "vfsd")
-                }
-                #[cfg(not(unix))]
-                {
-                    Endpoint::parse("127.0.0.1:9004")?
-                }
-            }
-        };
-
-        Ok(Args {
-            vx_home,
-            cas_endpoint,
-            bind,
-            vfsd_endpoint,
-        })
-    }
+    /// Standard CLI options (--help, --version, --completions)
+    #[facet(flatten)]
+    builtins: args::FigueBuiltins,
 }
 
 /// Connect to CAS and return a client handle
 async fn connect_to_cas(endpoint: &Endpoint) -> Result<vx_store_proto::StoreClient<CasCaller>> {
-    let caller = vx_io::net::reconnecting_client(endpoint.clone(), NoDispatcher);
+    let caller = vx_io::net::reconnecting_client_named(
+        endpoint.clone(),
+        NoDispatcher,
+        Some("vx-runner".into()),
+    );
     caller
         .handle()
         .await
@@ -190,7 +143,7 @@ async fn ensure_vfsd(
     let stderr_buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
     let stderr_buffer_clone = stderr_buffer.clone();
 
-    tokio::spawn(async move {
+    peeps::tasks::spawn_tracked("vfsd_stderr_monitor", async move {
         use tokio::io::AsyncBufReadExt;
         let mut stderr =
             tokio::io::BufReader::new(tokio::process::ChildStderr::from_std(stderr).unwrap());
@@ -253,7 +206,11 @@ async fn connect_to_vfsd(
     endpoint: &Endpoint,
     cas: Arc<StoreClient<CasCaller>>,
 ) -> Result<VfsClient> {
-    let caller: VfsdCaller = vx_io::net::reconnecting_client(endpoint.clone(), NoDispatcher);
+    let caller: VfsdCaller = vx_io::net::reconnecting_client_named(
+        endpoint.clone(),
+        NoDispatcher,
+        Some("vx-runner".into()),
+    );
     caller
         .handle()
         .await
@@ -270,65 +227,118 @@ async fn is_socket_in_use(path: &Utf8PathBuf) -> bool {
     UnixStream::connect(path.as_std_path()).await.is_ok()
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    peeps::threads::install_sigprof_handler();
+    peeps::threads::register_thread("main");
+    peeps::tasks::init_task_tracking();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .on_thread_start(|| {
+            peeps::threads::register_thread(
+                std::thread::current().name().unwrap_or("tokio-worker"),
+            );
+        })
+        .on_thread_stop(|| {
+            peeps::threads::deregister_thread();
+        })
+        .build()?;
+    rt.block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     // If spawned by parent, die when parent dies
     ur_taking_me_with_you::die_with_parent();
 
     // Initialize tracing
     vx_tracing::init_service("vx_runner=info");
 
+    // Initialize peeps instrumentation
+    peeps::init();
+    peeps::install_sigusr1("vx-runner");
+
     tracing::info!("hello from vixen-runner");
 
-    let args = Args::from_env()?;
+    let args: Args = args::Driver::new(
+        args::builder::<Args>()?
+            .cli(|cli| cli.args(std::env::args().skip(1)))
+            .help(|h| {
+                h.program_name("vx-runner")
+                    .version(env!("CARGO_PKG_VERSION"))
+            })
+            .build(),
+    )
+    .run()
+    .unwrap();
+
+    let cas_endpoint = Endpoint::parse(&args.store)?;
+    let bind_endpoint = Endpoint::parse(&args.listen)?;
+    let vfsd_endpoint = Endpoint::parse(&args.vfsd)?;
 
     // Check if another runner instance is already running
     #[cfg(unix)]
     {
-        if let Endpoint::Local(ref path) = args.bind
+        if let Endpoint::Local(ref path) = bind_endpoint
             && path.exists()
             && is_socket_in_use(path).await
         {
             return Err(eyre::eyre!(
                 "Another vx-runner instance is already running (socket {} is in use).\n\
-                 Kill the existing instance or use a different VX_RUNNER endpoint.",
+                 Kill the existing instance or use a different --bind endpoint.",
                 path
             ));
         }
     }
 
     // Connect to CAS
-    tracing::info!("Connecting to CAS at {}", args.cas_endpoint);
-    let cas = Arc::new(connect_to_cas(&args.cas_endpoint).await?);
+    tracing::info!("Connecting to CAS at {}", cas_endpoint);
+    let cas = Arc::new(connect_to_cas(&cas_endpoint).await?);
     tracing::info!("Connected to CAS");
 
     // Ensure vx-vfsd is running
-    ensure_vfsd(&args.vfsd_endpoint, &args.vx_home, &args.cas_endpoint).await?;
+    ensure_vfsd(&vfsd_endpoint, &args.vx_home, &cas_endpoint).await?;
 
     // Connect to vx-vfsd
-    tracing::info!("Connecting to vx-vfsd at {}", args.vfsd_endpoint);
-    let vfs = connect_to_vfsd(&args.vfsd_endpoint, cas.clone()).await?;
+    tracing::info!("Connecting to vx-vfsd at {}", vfsd_endpoint);
+    let vfs = connect_to_vfsd(&vfsd_endpoint, cas.clone()).await?;
     tracing::info!("Connected to vx-vfsd");
 
     // Create Runner service (will use VFS via RPC)
     let exec = RunnerService::new(cas.clone(), Arc::new(vfs));
 
     // Bind Runner RPC socket before VFS mount attempt.
-    let runner_listener = match Listener::bind(&args.bind).await {
+    let runner_listener = match Listener::bind(&bind_endpoint).await {
         Ok(l) => l,
         Err(e) => {
             return Err(eyre::eyre!(
                 "Failed to bind Runner RPC socket at {}: {}\n\
                  Another instance may be running, or the socket file is stale.",
-                args.bind,
+                bind_endpoint,
                 e
             ));
         }
     };
-    tracing::info!("Runner RPC bound on {}", args.bind);
+    tracing::info!("Runner RPC bound on {}", bind_endpoint);
 
     // VFS is now mounted by vx-vfsd, not by vx-runner
     tracing::info!("VFS provided by vx-vfsd at {}", runner_mount_base());
+
+    // SIGUSR1: dump diagnostics
+    peeps::tasks::spawn_tracked("sigusr1_handler", async {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigusr1 =
+            signal(SignalKind::user_defined1()).expect("failed to register SIGUSR1 handler");
+        loop {
+            sigusr1.recv().await;
+            tracing::info!("SIGUSR1 received, dumping diagnostics");
+            eprintln!("[vx-runner] SIGUSR1 received");
+            eprint!("{}", roam_session::diagnostic::dump_all_diagnostics());
+
+            let dump = peeps::collect_dump("vx-runner", Default::default());
+            peeps::write_dump(&dump);
+        }
+    });
 
     // Start accepting Runner RPC connections
     tracing::info!("Starting Runner RPC server");
@@ -336,27 +346,31 @@ async fn main() -> Result<()> {
         match runner_listener.accept().await {
             Ok((stream, peer_addr)) => {
                 let exec = exec.clone();
-                tokio::spawn(async move {
-                    tracing::debug!("Runner connection from {}", peer_addr);
-                    let dispatcher = RunnerDispatcher::new(exec);
-                    let Ok((_handle, _incoming, driver)) = accept(
-                        stream,
-                        HandshakeConfig {
-                            max_payload_size: 256 * 1024 * 1024, // 256 MiB
-                            ..Default::default()
-                        },
-                        dispatcher,
-                    )
-                    .await
-                    else {
-                        tracing::debug!("Runner handshake error from {}", peer_addr);
-                        return;
-                    };
-                    if let Err(e) = driver.run().await {
-                        tracing::debug!("Runner connection error from {}: {}", peer_addr, e);
-                    }
-                    tracing::debug!("Runner connection from {} closed", peer_addr);
-                });
+                peeps::tasks::spawn_tracked(
+                    format!("runner_connection_{}", peer_addr),
+                    async move {
+                        tracing::debug!("Runner connection from {}", peer_addr);
+                        let dispatcher = RunnerDispatcher::new(exec);
+                        let Ok((_handle, _incoming, driver)) = accept(
+                            stream,
+                            HandshakeConfig {
+                                max_payload_size: 256 * 1024 * 1024, // 256 MiB
+                                name: Some("vx-runner".into()),
+                                ..Default::default()
+                            },
+                            dispatcher,
+                        )
+                        .await
+                        else {
+                            tracing::debug!("Runner handshake error from {}", peer_addr);
+                            return;
+                        };
+                        if let Err(e) = driver.run().await {
+                            tracing::debug!("Runner connection error from {}: {}", peer_addr, e);
+                        }
+                        tracing::debug!("Runner connection from {} closed", peer_addr);
+                    },
+                );
             }
             Err(e) => {
                 tracing::debug!("Runner accept error: {}", e);
@@ -378,8 +392,9 @@ pub struct RunnerServiceInner {
     /// Stores Ok(prefix_id) or Err(message) — errors are cached too, since a missing
     /// toolchain manifest won't fix itself without a new runner session.
     #[allow(clippy::type_complexity)]
-    toolchain_flights:
-        tokio::sync::Mutex<HashMap<Blake3Hash, Arc<tokio::sync::OnceCell<Result<String, String>>>>>,
+    toolchain_flights: peeps::locks::DiagnosticAsyncMutex<
+        HashMap<Blake3Hash, Arc<tokio::sync::OnceCell<Result<String, String>>>>,
+    >,
 
     /// Track created prefix IDs to avoid collisions
     created_prefixes: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -405,7 +420,10 @@ impl RunnerService {
             inner: Arc::new(RunnerServiceInner {
                 cas,
                 vfs,
-                toolchain_flights: tokio::sync::Mutex::new(HashMap::new()),
+                toolchain_flights: peeps::locks::DiagnosticAsyncMutex::new(
+                    "runner/toolchain_flights",
+                    HashMap::new(),
+                ),
                 created_prefixes: std::sync::Mutex::new(std::collections::HashSet::new()),
             }),
         }
@@ -506,7 +524,7 @@ impl RunnerService {
         // Get the toolchain manifest from CAS
         let toolchain_manifest = self
             .cas
-            .get_toolchain_manifest(toolchain_manifest_hash)
+            .get_toolchain_manifest(vx_store_proto::NodeHash(toolchain_manifest_hash))
             .await?
             .ok_or(RunnerError::ToolchainManifestNotFound(
                 toolchain_manifest_hash,
@@ -524,7 +542,7 @@ impl RunnerService {
         for component in &toolchain_manifest.components {
             tracing::debug!(
                 component_name = %component.name,
-                tree_manifest = %component.tree_manifest,
+                tree_root = %component.tree_root,
                 "mounting component tree in VFS"
             );
 
@@ -543,7 +561,7 @@ impl RunnerService {
 
             // Mount the entire component tree at once
             self.vfs
-                .mount_tree(&prefix_id, mount_path, component.tree_manifest)
+                .mount_tree(&prefix_id, mount_path, component.tree_root.0)
                 .await
                 .map_err(|e| {
                     RunnerError::VfsMount(format!(
@@ -559,6 +577,39 @@ impl RunnerService {
             "toolchain prefix created"
         );
 
+        // Verify the toolchain is actually visible at the VFS mount point.
+        // FSKit mounts can be flaky; catch the problem early with a clear error.
+        let has_rustc = toolchain_manifest
+            .components
+            .iter()
+            .any(|c| c.name == "rustc");
+        if has_rustc {
+            let rustc_vfs_path = runner_mount_base().join(&prefix_id).join("bin/rustc");
+            if !rustc_vfs_path.as_std_path().exists() {
+                let mount_base = runner_mount_base();
+                let mount_exists = mount_base.as_std_path().exists();
+                let prefix_exists = mount_base.join(&prefix_id).as_std_path().exists();
+                let bin_exists = mount_base
+                    .join(&prefix_id)
+                    .join("bin")
+                    .as_std_path()
+                    .exists();
+                tracing::error!(
+                    %rustc_vfs_path,
+                    %mount_base,
+                    mount_exists,
+                    prefix_exists,
+                    bin_exists,
+                    "toolchain mounted but bin/rustc not visible at VFS path"
+                );
+                return Err(RunnerError::VfsMount(format!(
+                    "toolchain prefix {} created but bin/rustc not found at {} \
+                     (mount_base exists={}, prefix exists={}, bin/ exists={})",
+                    prefix_id, rustc_vfs_path, mount_exists, prefix_exists, bin_exists,
+                )));
+            }
+        }
+
         Ok(prefix_id)
     }
 
@@ -572,40 +623,11 @@ impl RunnerService {
     ) -> RunnerResult<()> {
         tracing::debug!(
             source_manifest = %source_manifest_hash,
-            "loading source tree manifest"
-        );
-
-        // Get the source tree manifest from CAS (source trees are stored via ingest_tree)
-        let manifest = self
-            .cas
-            .get_tree_manifest(source_manifest_hash)
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    source_manifest = %source_manifest_hash,
-                    error = ?e,
-                    "failed to fetch source tree manifest"
-                );
-                RunnerError::CasFetch(format!("{:?}", e))
-            })?
-            .ok_or_else(|| {
-                tracing::error!(
-                    source_manifest = %source_manifest_hash,
-                    "source tree manifest missing"
-                );
-                RunnerError::CasFetch(format!(
-                    "source manifest {} not found",
-                    source_manifest_hash
-                ))
-            })?;
-
-        tracing::debug!(
-            source_manifest = %source_manifest_hash,
-            entry_count = manifest.entries.len(),
             "mounting source tree in VFS"
         );
 
         // Mount the entire source tree at src/
+        // source_manifest_hash is a NodeHash of a DirectoryNode
         self.vfs
             .mount_tree(prefix_id, "src", source_manifest_hash)
             .await
@@ -623,12 +645,28 @@ impl RunnerService {
         extern_name: &str,
         manifest_hash: Blake3Hash,
     ) -> RunnerResult<()> {
-        // Get the dependency manifest
-        let manifest = self
+        // Get the dependency manifest from CAS (stored as CasNode::Manifest)
+        let node_data = self
             .cas
-            .get_manifest(manifest_hash)
+            .get_node(vx_store_proto::NodeHash(manifest_hash))
             .await?
             .ok_or(RunnerError::DependencyManifestNotFound(manifest_hash))?;
+
+        let manifest = match vx_store_proto::CasNode::from_bytes(&node_data) {
+            Ok(vx_store_proto::CasNode::Manifest(m)) => m,
+            Ok(_) => {
+                return Err(RunnerError::CasFetch(format!(
+                    "node {} is not a Manifest",
+                    manifest_hash
+                )));
+            }
+            Err(e) => {
+                return Err(RunnerError::CasFetch(format!(
+                    "failed to deserialize manifest {}: {}",
+                    manifest_hash, e
+                )));
+            }
+        };
 
         // Find the rlib output
         let rlib = manifest
@@ -639,9 +677,17 @@ impl RunnerService {
                 RunnerError::CasFetch(format!("no rlib in manifest for {}", extern_name))
             })?;
 
+        // Extract blob hash and size from OutputBlobRef
+        let (blob_hash, blob_size) = match &rlib.blob {
+            vx_store_proto::OutputBlobRef::Small { chunk, size } => (chunk.0, *size),
+            vx_store_proto::OutputBlobRef::Large {
+                content_hash, size, ..
+            } => (content_hash.0, *size),
+        };
+
         let path = format!("deps/lib{}.rlib", extern_name);
         self.vfs
-            .add_file_to_prefix(prefix_id, &path, rlib.blob, rlib.size, false)
+            .add_file_to_prefix(prefix_id, &path, blob_hash, blob_size, false)
             .await
             .map_err(|e| {
                 RunnerError::VfsMount(format!("failed to add dependency {}: {}", extern_name, e))

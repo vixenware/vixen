@@ -8,7 +8,7 @@
 	<true/>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.eu.bearcove.vixen</string>
+		<string>B2N6FSRTPV.vixenfs</string>
 	</array>
 	<key>com.apple.security.network.client</key>
 	<true/>

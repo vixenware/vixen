@@ -11,7 +11,9 @@ use vx_runner_proto::{
     CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RustCompileRequest,
     RustCompileResult,
 };
-use vx_store_proto::{Blake3Hash, NodeId, NodeManifest, OutputEntry, StoreProgress};
+use vx_store_proto::{
+    CasNode, ChunkHash, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry, StoreProgress,
+};
 
 use crate::RunnerService;
 use crate::sandbox::{ActionKind, CommandError};
@@ -289,12 +291,36 @@ impl RunnerService {
         let exit_code = output.exit_status.code().unwrap_or(-1);
 
         if !output.exit_status.success() {
+            let mut stderr = output.combined_output;
+
+            // When sandbox-exec wraps the compiler, it can exit non-zero with no
+            // output if the inner program is missing. Add diagnostics so the
+            // error message is never empty.
+            if stderr.trim().is_empty() {
+                let rustc_exists = rustc_path.as_std_path().exists();
+                let crate_root_exists = crate_root.as_std_path().exists();
+                stderr = format!(
+                    "rustc exited with code {} but produced no output.\n\
+                     rustc_path={} (exists={})\n\
+                     crate_root={} (exists={})",
+                    exit_code, rustc_path, rustc_exists, crate_root, crate_root_exists,
+                );
+                tracing::error!(
+                    %rustc_path,
+                    rustc_exists,
+                    %crate_root,
+                    crate_root_exists,
+                    exit_code,
+                    "compilation failed with empty output"
+                );
+            }
+
             self.remove_action_prefix(&action.prefix_id).await;
             return RustCompileResult {
                 success: false,
                 exit_code,
                 stdout: String::new(),
-                stderr: output.combined_output,
+                stderr,
                 duration_ms,
                 output_manifest: None,
                 error: None,
@@ -342,23 +368,26 @@ impl RunnerService {
             outputs: vec![OutputEntry {
                 logical: logical.to_string(),
                 filename: output_filename,
-                blob: blob_hash,
-                size: blob_size,
+                blob: OutputBlobRef::Small {
+                    chunk: ChunkHash(blob_hash),
+                    size: blob_size,
+                },
                 executable: request.crate_type == "bin",
             }],
         };
 
-        let manifest_hash = match self.cas.put_manifest(manifest).await {
-            Ok(h) => h,
-            Err(e) => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return cleanup_and_error(
-                    &action.prefix_id,
-                    format!("failed to store manifest: {:?}", e),
-                    start,
-                );
-            }
-        };
+        let cas_node = CasNode::Manifest(manifest);
+        let (node_bytes, node_hash) = cas_node.to_bytes_and_hash();
+        let manifest_hash = node_hash.0;
+
+        if let Err(e) = self.cas.put_node(node_hash, node_bytes).await {
+            self.remove_action_prefix(&action.prefix_id).await;
+            return cleanup_and_error(
+                &action.prefix_id,
+                format!("failed to store manifest: {:?}", e),
+                start,
+            );
+        }
 
         // 10. Cleanup
         self.remove_action_prefix(&action.prefix_id).await;
@@ -621,28 +650,31 @@ impl RunnerService {
             outputs: vec![OutputEntry {
                 logical: "object".to_string(),
                 filename: object_filename,
-                blob: blob_hash,
-                size: blob_size,
+                blob: OutputBlobRef::Small {
+                    chunk: ChunkHash(blob_hash),
+                    size: blob_size,
+                },
                 executable: false,
             }],
         };
 
-        let manifest_hash = match self.cas.put_manifest(manifest).await {
-            Ok(h) => h,
-            Err(e) => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return CcCompileResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: output.combined_output,
-                    duration_ms,
-                    output_manifest: None,
-                    discovered_deps: vec![],
-                    error: Some(format!("failed to store manifest: {:?}", e)),
-                };
-            }
-        };
+        let cas_node = CasNode::Manifest(manifest);
+        let (node_bytes, node_hash) = cas_node.to_bytes_and_hash();
+        let manifest_hash = node_hash.0;
+
+        if let Err(e) = self.cas.put_node(node_hash, node_bytes).await {
+            self.remove_action_prefix(&action.prefix_id).await;
+            return CcCompileResult {
+                success: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: output.combined_output,
+                duration_ms,
+                output_manifest: None,
+                discovered_deps: vec![],
+                error: Some(format!("failed to store manifest: {:?}", e)),
+            };
+        }
 
         // 9. Cleanup
         self.remove_action_prefix(&action.prefix_id).await;
@@ -698,14 +730,47 @@ impl RunnerService {
         self.vfs.add_dir_to_prefix(&action.prefix_id, "obj").await;
         self.create_output_dir_in_prefix(&action.prefix_id).await;
 
-        // Build tree manifest with all object files
-        use vx_store_proto::TreeManifest;
-        let mut tree_manifest = TreeManifest::new();
+        // Build directory node with all object files
+        use vx_store_proto::{ContentHash, DirEntry, DirEntryKind, DirectoryNode};
+        let mut dir_entries = Vec::with_capacity(request.object_manifests.len());
+        let mut dir_total_size: u64 = 0;
         let mut object_paths = Vec::with_capacity(request.object_manifests.len());
 
         for (idx, manifest_hash) in request.object_manifests.iter().enumerate() {
-            let manifest = match self.cas.get_manifest(*manifest_hash).await {
-                Ok(Some(m)) => m,
+            let manifest = match self.cas.get_node(NodeHash(*manifest_hash)).await {
+                Ok(Some(data)) => match CasNode::from_bytes(&data) {
+                    Ok(CasNode::Manifest(m)) => m,
+                    Ok(_) => {
+                        self.remove_action_prefix(&action.prefix_id).await;
+                        return CcLinkResult {
+                            success: false,
+                            exit_code: -1,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            output_manifest: None,
+                            error: Some(format!(
+                                "object manifest {} is not a Manifest node",
+                                manifest_hash
+                            )),
+                        };
+                    }
+                    Err(e) => {
+                        self.remove_action_prefix(&action.prefix_id).await;
+                        return CcLinkResult {
+                            success: false,
+                            exit_code: -1,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            output_manifest: None,
+                            error: Some(format!(
+                                "failed to deserialize object manifest {}: {}",
+                                manifest_hash, e
+                            )),
+                        };
+                    }
+                },
                 Ok(None) => {
                     self.remove_action_prefix(&action.prefix_id).await;
                     return CcLinkResult {
@@ -751,29 +816,37 @@ impl RunnerService {
                 }
             };
 
-            let obj_rel_path = format!("obj/{idx:04}.o");
-            tree_manifest.add_file(
-                obj_rel_path.clone(),
-                object_entry.blob,
-                object_entry.size,
-                false,
-            );
+            let obj_filename = format!("{idx:04}.o");
+            let obj_rel_path = format!("obj/{}", obj_filename);
+            let (blob_hash, blob_size) = match &object_entry.blob {
+                OutputBlobRef::Small { chunk, size } => (chunk.0, *size),
+                OutputBlobRef::Large {
+                    content_hash, size, ..
+                } => (content_hash.0, *size),
+            };
+            dir_entries.push(DirEntry {
+                name: obj_filename,
+                kind: DirEntryKind::SmallFile {
+                    content_hash: ContentHash(blob_hash),
+                    size: blob_size,
+                    executable: false,
+                },
+            });
+            dir_total_size += blob_size;
             object_paths.push(action.prefix_path.join(obj_rel_path));
         }
 
-        // Upload tree manifest and mount it
-        tree_manifest.finalize();
-        let manifest_json = facet_json::to_string(&tree_manifest)
-            .map_err(|e| {
-                format!(
-                    "failed to serialize object files tree manifest for linking: {}",
-                    e
-                )
-            })
-            .unwrap();
-        let manifest_hash = Blake3Hash::from_bytes(manifest_json.as_bytes());
+        // Sort entries by name for deterministic hashing
+        dir_entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
 
-        if let Err(e) = self.cas.put_blob(manifest_json.into_bytes()).await {
+        // Wrap in an "obj" subdirectory node
+        let obj_dir_node = CasNode::Directory(DirectoryNode {
+            entries: dir_entries,
+            total_size: dir_total_size,
+        });
+        let (obj_node_bytes, obj_node_hash) = obj_dir_node.to_bytes_and_hash();
+
+        if let Err(e) = self.cas.put_node(obj_node_hash, obj_node_bytes).await {
             self.remove_action_prefix(&action.prefix_id).await;
             return CcLinkResult {
                 success: false,
@@ -783,15 +856,41 @@ impl RunnerService {
                 duration_ms: start.elapsed().as_millis() as u64,
                 output_manifest: None,
                 error: Some(format!(
-                    "failed to store object files tree manifest to CAS: {}",
+                    "failed to store object files directory node to CAS: {}",
                     e
                 )),
             };
         }
 
+        // Build root directory node containing "obj" subdirectory
+        let root_dir_node = CasNode::Directory(DirectoryNode {
+            entries: vec![DirEntry {
+                name: "obj".to_string(),
+                kind: DirEntryKind::Dir {
+                    hash: obj_node_hash,
+                    total_size: dir_total_size,
+                },
+            }],
+            total_size: dir_total_size,
+        });
+        let (root_node_bytes, root_node_hash) = root_dir_node.to_bytes_and_hash();
+
+        if let Err(e) = self.cas.put_node(root_node_hash, root_node_bytes).await {
+            self.remove_action_prefix(&action.prefix_id).await;
+            return CcLinkResult {
+                success: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                output_manifest: None,
+                error: Some(format!("failed to store root directory node to CAS: {}", e)),
+            };
+        }
+
         if let Err(e) = self
             .vfs
-            .mount_tree(&action.prefix_id, "", manifest_hash)
+            .mount_tree(&action.prefix_id, "", root_node_hash.0)
             .await
         {
             self.remove_action_prefix(&action.prefix_id).await;
@@ -936,27 +1035,30 @@ impl RunnerService {
             outputs: vec![OutputEntry {
                 logical: "binary".to_string(),
                 filename: request.binary_name,
-                blob: blob_hash,
-                size: blob_size,
+                blob: OutputBlobRef::Small {
+                    chunk: ChunkHash(blob_hash),
+                    size: blob_size,
+                },
                 executable: true,
             }],
         };
 
-        let manifest_hash = match self.cas.put_manifest(manifest).await {
-            Ok(h) => h,
-            Err(e) => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return CcLinkResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: output.combined_output,
-                    duration_ms,
-                    output_manifest: None,
-                    error: Some(format!("failed to store manifest: {:?}", e)),
-                };
-            }
-        };
+        let cas_node = CasNode::Manifest(manifest);
+        let (node_bytes, node_hash) = cas_node.to_bytes_and_hash();
+        let manifest_hash = node_hash.0;
+
+        if let Err(e) = self.cas.put_node(node_hash, node_bytes).await {
+            self.remove_action_prefix(&action.prefix_id).await;
+            return CcLinkResult {
+                success: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: output.combined_output,
+                duration_ms,
+                output_manifest: None,
+                error: Some(format!("failed to store manifest: {:?}", e)),
+            };
+        }
 
         self.remove_action_prefix(&action.prefix_id).await;
 

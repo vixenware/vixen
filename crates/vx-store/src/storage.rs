@@ -1,57 +1,24 @@
-//! Storage abstraction for CAS blob operations.
+//! Storage abstraction for CAS chunk and node operations.
 //!
-//! The `CasStorage` trait covers only blob-level operations — the fundamental
-//! content-addressed primitive. Everything else (manifests, specs, cache) is
-//! built on top as methods on the concrete `CasStore` type.
+//! Two object types:
+//! - **Chunks**: Raw bytes (≤4MB), stored at `chunks/blake3/{xx}/{hash}`
+//! - **Nodes**: Versioned postcard-encoded structures, stored at `nodes/blake3/{xx}/{hash}`
 //!
-//! Two blob backends:
-//! - `FsStorage`: single filesystem directory
-//! - `LayeredStorage`: reads fall through from primary to base, writes go to primary only
+//! Plus ancillary storage for cache mappings, toolchain specs, and registry specs.
 //!
-//! `CasStore` wraps a primary `FsStorage` with an optional read-only base, providing
-//! layered access for all storage categories (blobs, manifests, specs, cache).
+//! `FsStorage` is the single filesystem backend. `CasStore` wraps a primary
+//! `FsStorage` with an optional read-only base for layered access.
 
 use std::io;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use vx_io::atomic_write;
 use vx_store_proto::{
-    Blake3Hash, BlobHash, CacheKey, ManifestHash, RegistrySpecKey, ToolchainSpecKey,
+    Blake3Hash, CacheKey, ChunkHash, NodeHash, RegistrySpecKey, ToolchainSpecKey,
 };
 
 // =============================================================================
-// CasStorage trait — blobs only
-// =============================================================================
-
-/// Content-addressed blob storage.
-///
-/// All blob paths use a two-level directory scheme: `blobs/blake3/{hex[..2]}/{hex}`.
-pub(crate) trait CasStorage: Send + Sync {
-    /// Read a blob by hash. Returns `None` if the blob does not exist.
-    async fn get_blob(&self, hash: &BlobHash) -> io::Result<Option<Vec<u8>>>;
-
-    /// Read a range of bytes from a blob. Returns `None` if the blob does not exist.
-    /// The returned Vec may be shorter than `len` if the range extends past EOF.
-    async fn get_blob_range(
-        &self,
-        hash: &BlobHash,
-        offset: u64,
-        len: u64,
-    ) -> io::Result<Option<Vec<u8>>>;
-
-    /// Write a blob. Idempotent — writing the same hash twice is a no-op.
-    async fn put_blob(&self, hash: &BlobHash, data: &[u8]) -> io::Result<()>;
-
-    /// Check whether a blob exists.
-    async fn has_blob(&self, hash: &BlobHash) -> io::Result<bool>;
-
-    /// Return the filesystem path to a blob, for streaming reads.
-    /// Returns `None` if the blob does not exist at any layer.
-    async fn blob_path(&self, hash: &BlobHash) -> io::Result<Option<Utf8PathBuf>>;
-}
-
-// =============================================================================
-// FsStorage — single-directory blob backend
+// FsStorage — single-directory storage backend
 // =============================================================================
 
 pub(crate) struct FsStorage {
@@ -63,23 +30,36 @@ impl FsStorage {
         Self { root }
     }
 
-    fn blobs_dir(&self) -> Utf8PathBuf {
-        self.root.join("blobs/blake3")
-    }
-
-    fn blob_path_for(&self, hash: &BlobHash) -> Utf8PathBuf {
-        let hex = hash.to_hex();
-        self.blobs_dir().join(&hex[..2]).join(&hex)
-    }
-
     pub(crate) fn root(&self) -> &Utf8Path {
         &self.root
     }
-}
 
-impl CasStorage for FsStorage {
-    async fn get_blob(&self, hash: &BlobHash) -> io::Result<Option<Vec<u8>>> {
-        let path = self.blob_path_for(hash);
+    // -- Chunk paths --
+
+    fn chunks_dir(&self) -> Utf8PathBuf {
+        self.root.join("chunks/blake3")
+    }
+
+    fn chunk_path_for(&self, hash: &ChunkHash) -> Utf8PathBuf {
+        let hex = hash.to_hex();
+        self.chunks_dir().join(&hex[..2]).join(&hex)
+    }
+
+    // -- Node paths --
+
+    fn nodes_dir(&self) -> Utf8PathBuf {
+        self.root.join("nodes/blake3")
+    }
+
+    fn node_path_for(&self, hash: &NodeHash) -> Utf8PathBuf {
+        let hex = hash.to_hex();
+        self.nodes_dir().join(&hex[..2]).join(&hex)
+    }
+
+    // -- Chunk operations --
+
+    pub(crate) async fn get_chunk(&self, hash: &ChunkHash) -> io::Result<Option<Vec<u8>>> {
+        let path = self.chunk_path_for(hash);
         match tokio::fs::read(&path).await {
             Ok(data) => Ok(Some(data)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -87,50 +67,37 @@ impl CasStorage for FsStorage {
         }
     }
 
-    async fn get_blob_range(
-        &self,
-        hash: &BlobHash,
-        offset: u64,
-        len: u64,
-    ) -> io::Result<Option<Vec<u8>>> {
-        use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
-        let path = self.blob_path_for(hash);
-        let mut file = match tokio::fs::File::open(&path).await {
-            Ok(f) => f,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e),
-        };
-
-        let file_len = file.metadata().await?.len();
-        if offset >= file_len {
-            return Ok(Some(Vec::new()));
-        }
-
-        let actual_len = len.min(file_len - offset) as usize;
-        file.seek(io::SeekFrom::Start(offset)).await?;
-        let mut buf = vec![0u8; actual_len];
-        file.read_exact(&mut buf).await?;
-        Ok(Some(buf))
+    pub(crate) async fn put_chunk(&self, hash: &ChunkHash, data: &[u8]) -> io::Result<()> {
+        atomic_write(&self.chunk_path_for(hash), data).await
     }
 
-    async fn put_blob(&self, hash: &BlobHash, data: &[u8]) -> io::Result<()> {
-        atomic_write(&self.blob_path_for(hash), data).await
-    }
-
-    async fn has_blob(&self, hash: &BlobHash) -> io::Result<bool> {
-        let path = self.blob_path_for(hash);
+    pub(crate) async fn has_chunk(&self, hash: &ChunkHash) -> io::Result<bool> {
+        let path = self.chunk_path_for(hash);
         match tokio::fs::try_exists(&path).await {
             Ok(exists) => Ok(exists),
             Err(e) => Err(e),
         }
     }
 
-    async fn blob_path(&self, hash: &BlobHash) -> io::Result<Option<Utf8PathBuf>> {
-        let path = self.blob_path_for(hash);
+    // -- Node operations --
+
+    pub(crate) async fn get_node(&self, hash: &NodeHash) -> io::Result<Option<Vec<u8>>> {
+        let path = self.node_path_for(hash);
+        match tokio::fs::read(&path).await {
+            Ok(data) => Ok(Some(data)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub(crate) async fn put_node(&self, hash: &NodeHash, data: &[u8]) -> io::Result<()> {
+        atomic_write(&self.node_path_for(hash), data).await
+    }
+
+    pub(crate) async fn has_node(&self, hash: &NodeHash) -> io::Result<bool> {
+        let path = self.node_path_for(hash);
         match tokio::fs::try_exists(&path).await {
-            Ok(true) => Ok(Some(path)),
-            Ok(false) => Ok(None),
+            Ok(exists) => Ok(exists),
             Err(e) => Err(e),
         }
     }
@@ -140,8 +107,9 @@ impl CasStorage for FsStorage {
 // CasStore — concrete storage with layered access for everything
 // =============================================================================
 
-/// Complete CAS storage: blobs via `CasStorage` trait, plus manifests, specs,
-/// cache as inherent methods. Optionally layers a read-only base under the primary.
+/// Complete CAS storage: chunks and nodes, plus ancillary mappings (cache,
+/// toolchain specs, registry specs). Optionally layers a read-only base
+/// under the primary.
 pub(crate) struct CasStore {
     primary: FsStorage,
     base: Option<FsStorage>,
@@ -165,9 +133,8 @@ impl CasStore {
     /// Create all required subdirectories (primary only — base is read-only).
     pub(crate) async fn init(&self) -> io::Result<()> {
         let root = self.primary.root();
-        tokio::fs::create_dir_all(root.join("blobs/blake3")).await?;
-        tokio::fs::create_dir_all(root.join("manifests/blake3")).await?;
-        tokio::fs::create_dir_all(root.join("trees/blake3")).await?;
+        tokio::fs::create_dir_all(root.join("chunks/blake3")).await?;
+        tokio::fs::create_dir_all(root.join("nodes/blake3")).await?;
         tokio::fs::create_dir_all(root.join("cache/blake3")).await?;
         tokio::fs::create_dir_all(root.join("tmp")).await?;
         tokio::fs::create_dir_all(root.join("toolchains")).await?;
@@ -180,130 +147,56 @@ impl CasStore {
         self.primary.root().join("tmp")
     }
 
-    // -- Blob operations (delegated to CasStorage trait) --
+    // -- Chunk operations (layered: primary → base) --
 
-    pub(crate) async fn get_blob(&self, hash: &BlobHash) -> io::Result<Option<Vec<u8>>> {
-        if let Some(data) = self.primary.get_blob(hash).await? {
+    pub(crate) async fn get_chunk(&self, hash: &ChunkHash) -> io::Result<Option<Vec<u8>>> {
+        if let Some(data) = self.primary.get_chunk(hash).await? {
             return Ok(Some(data));
         }
         if let Some(base) = &self.base {
-            return base.get_blob(hash).await;
+            return base.get_chunk(hash).await;
         }
         Ok(None)
     }
 
-    pub(crate) async fn get_blob_range(
-        &self,
-        hash: &BlobHash,
-        offset: u64,
-        len: u64,
-    ) -> io::Result<Option<Vec<u8>>> {
-        if let Some(data) = self.primary.get_blob_range(hash, offset, len).await? {
-            return Ok(Some(data));
-        }
-        if let Some(base) = &self.base {
-            return base.get_blob_range(hash, offset, len).await;
-        }
-        Ok(None)
+    pub(crate) async fn put_chunk(&self, hash: &ChunkHash, data: &[u8]) -> io::Result<()> {
+        self.primary.put_chunk(hash, data).await
     }
 
-    pub(crate) async fn put_blob(&self, hash: &BlobHash, data: &[u8]) -> io::Result<()> {
-        self.primary.put_blob(hash, data).await
-    }
-
-    pub(crate) async fn has_blob(&self, hash: &BlobHash) -> io::Result<bool> {
-        if self.primary.has_blob(hash).await? {
+    pub(crate) async fn has_chunk(&self, hash: &ChunkHash) -> io::Result<bool> {
+        if self.primary.has_chunk(hash).await? {
             return Ok(true);
         }
         if let Some(base) = &self.base {
-            return base.has_blob(hash).await;
+            return base.has_chunk(hash).await;
         }
         Ok(false)
     }
 
-    pub(crate) async fn blob_path(&self, hash: &BlobHash) -> io::Result<Option<Utf8PathBuf>> {
-        if let Some(path) = self.primary.blob_path(hash).await? {
-            return Ok(Some(path));
+    // -- Node operations (layered: primary → base) --
+
+    pub(crate) async fn get_node(&self, hash: &NodeHash) -> io::Result<Option<Vec<u8>>> {
+        if let Some(data) = self.primary.get_node(hash).await? {
+            return Ok(Some(data));
         }
         if let Some(base) = &self.base {
-            return base.blob_path(hash).await;
+            return base.get_node(hash).await;
         }
         Ok(None)
     }
 
-    // -- Manifests (JSON, stored in manifests/blake3/) --
-
-    fn manifest_path(root: &Utf8Path, hash: &ManifestHash) -> Utf8PathBuf {
-        let hex = hash.to_hex();
-        root.join("manifests/blake3")
-            .join(&hex[..2])
-            .join(format!("{}.json", hex))
+    pub(crate) async fn put_node(&self, hash: &NodeHash, data: &[u8]) -> io::Result<()> {
+        self.primary.put_node(hash, data).await
     }
 
-    pub(crate) async fn get_manifest(&self, hash: &ManifestHash) -> io::Result<Option<String>> {
-        let path = Self::manifest_path(self.primary.root(), hash);
-        match tokio::fs::read_to_string(&path).await {
-            Ok(json) => return Ok(Some(json)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+    pub(crate) async fn has_node(&self, hash: &NodeHash) -> io::Result<bool> {
+        if self.primary.has_node(hash).await? {
+            return Ok(true);
         }
         if let Some(base) = &self.base {
-            let path = Self::manifest_path(base.root(), hash);
-            match tokio::fs::read_to_string(&path).await {
-                Ok(json) => return Ok(Some(json)),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
+            return base.has_node(hash).await;
         }
-        Ok(None)
-    }
-
-    pub(crate) async fn put_manifest(&self, hash: &ManifestHash, json: &[u8]) -> io::Result<()> {
-        let path = Self::manifest_path(self.primary.root(), hash);
-        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return Ok(());
-        }
-        atomic_write(&path, json).await
-    }
-
-    // -- Tree manifests (stored in trees/blake3/) --
-
-    fn tree_manifest_path(root: &Utf8Path, hash: &ManifestHash) -> Utf8PathBuf {
-        let hex = hash.to_hex();
-        root.join("trees/blake3")
-            .join(&hex[..2])
-            .join(format!("{}.json", hex))
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn get_tree_manifest(
-        &self,
-        hash: &ManifestHash,
-    ) -> io::Result<Option<String>> {
-        let path = Self::tree_manifest_path(self.primary.root(), hash);
-        match tokio::fs::read_to_string(&path).await {
-            Ok(json) => return Ok(Some(json)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-        if let Some(base) = &self.base {
-            let path = Self::tree_manifest_path(base.root(), hash);
-            match tokio::fs::read_to_string(&path).await {
-                Ok(json) => return Ok(Some(json)),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(None)
-    }
-
-    pub(crate) async fn put_tree_manifest(
-        &self,
-        hash: &ManifestHash,
-        json: &[u8],
-    ) -> io::Result<()> {
-        let path = Self::tree_manifest_path(self.primary.root(), hash);
-        atomic_write(&path, json).await
+        Ok(false)
     }
 
     // -- Toolchain specs (spec_key → manifest_hash mapping) --
@@ -403,21 +296,21 @@ impl CasStore {
         .expect("spawn_blocking join failed")
     }
 
-    // -- Cache (cache_key → manifest_hash mapping) --
+    // -- Cache (cache_key → node_hash mapping) --
 
     fn cache_path(root: &Utf8Path, key: &CacheKey) -> Utf8PathBuf {
         let hex = key.to_hex();
         root.join("cache/blake3").join(&hex[..2]).join(&hex)
     }
 
-    pub(crate) async fn get_cache(&self, key: &CacheKey) -> io::Result<Option<ManifestHash>> {
+    pub(crate) async fn get_cache(&self, key: &CacheKey) -> io::Result<Option<Blake3Hash>> {
         let path = Self::cache_path(self.primary.root(), key);
-        if let Some(hash) = read_manifest_hash_mapping(&path).await? {
+        if let Some(hash) = read_hash_mapping(&path).await? {
             return Ok(Some(hash));
         }
         if let Some(base) = &self.base {
             let path = Self::cache_path(base.root(), key);
-            return read_manifest_hash_mapping(&path).await;
+            return read_hash_mapping(&path).await;
         }
         Ok(None)
     }
@@ -425,7 +318,7 @@ impl CasStore {
     pub(crate) async fn put_cache(
         &self,
         key: &CacheKey,
-        manifest_hash: &ManifestHash,
+        manifest_hash: &Blake3Hash,
     ) -> io::Result<()> {
         let dest = Self::cache_path(self.primary.root(), key);
         atomic_write(&dest, manifest_hash.to_hex().as_bytes()).await
@@ -448,14 +341,6 @@ impl CasStore {
 async fn read_hash_mapping(path: &Utf8Path) -> io::Result<Option<Blake3Hash>> {
     match tokio::fs::read_to_string(path).await {
         Ok(content) => Ok(Blake3Hash::from_hex(content.trim())),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
-}
-
-async fn read_manifest_hash_mapping(path: &Utf8Path) -> io::Result<Option<ManifestHash>> {
-    match tokio::fs::read_to_string(path).await {
-        Ok(content) => Ok(ManifestHash::from_hex(content.trim())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }

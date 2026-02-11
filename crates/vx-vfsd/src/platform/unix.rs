@@ -31,7 +31,7 @@ pub async fn run_sentinel(mount_path: &Utf8PathBuf) -> Result<()> {
 
 /// Register SIGUSR1 handler that dumps diagnostics.
 pub fn setup_diagnostics_signal(vfs: Arc<CasVfs>) {
-    tokio::spawn(async move {
+    peeps::tasks::spawn_tracked("sigusr1_handler", async move {
         use tokio::signal::unix::{SignalKind, signal};
         let mut sigusr1 =
             signal(SignalKind::user_defined1()).expect("failed to register SIGUSR1 handler");
@@ -40,6 +40,15 @@ pub fn setup_diagnostics_signal(vfs: Arc<CasVfs>) {
             tracing::info!("SIGUSR1 received, dumping diagnostics");
             super::os::dump_platform_diagnostics();
             vfs.dump_all_state();
+            eprint!("{}", roam_session::diagnostic::dump_all_diagnostics());
+            #[cfg(target_os = "macos")]
+            {
+                eprintln!("\n=== SHM STATE ===");
+                eprintln!("{}", roam_shm::dump_all_state());
+            }
+
+            let dump = peeps::collect_dump("vx-vfsd", Default::default());
+            peeps::write_dump(&dump);
         }
     });
 }

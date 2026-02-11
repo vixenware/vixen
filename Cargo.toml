@@ -9,6 +9,10 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/bearcove/vx"
 
 [workspace.dependencies]
+# instrumentation
+peeps = { git = "https://github.com/bearcove/peeps", branch = "main", features = ["locks"] }
+
+
 # internal crates
 vx-cache = { path = "crates/vx-cache" }
 vixenfs-proto = { path = "crates/vixenfs-proto" }
@@ -25,8 +29,8 @@ vx-toolchain = { path = "crates/vx-toolchain" }
 vx-tracing = { path = "crates/vx-tracing" }
 vx-rs = { path = "crates/vx-rs" }
 vx-vfs = { path = "crates/vx-vfs" }
+vx-vfsd = { path = "crates/vx-vfsd" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
-vx-locks = { path = "crates/vx-locks", features = ["diagnostics"] }
 parking_lot = "0.12"
 
 # facet ecosystem
@@ -49,20 +53,22 @@ facet-cargo-toml = { git = "https://github.com/bearcove/facet-cargo-toml", branc
 picante = { git = "https://github.com/bearcove/picante", branch = "main", features = ["macros"] }
 
 # RPC
-roam = { git = "https://github.com/bearcove/roam", rev = "bda700bd2126e7cd3c4b0cfb2c10e43d3b3edd94" }
-roam-stream = { git = "https://github.com/bearcove/roam", rev = "bda700bd2126e7cd3c4b0cfb2c10e43d3b3edd94", features = [
-  "diagnostics",
-] }
-roam-shm = { git = "https://github.com/bearcove/roam", rev = "bda700bd2126e7cd3c4b0cfb2c10e43d3b3edd94" }
-roam-local = { git = "https://github.com/bearcove/roam", rev = "bda700bd2126e7cd3c4b0cfb2c10e43d3b3edd94" }
-roam-codegen = { git = "https://github.com/bearcove/roam", rev = "bda700bd2126e7cd3c4b0cfb2c10e43d3b3edd94" }
-ur-taking-me-with-you = { git = "https://github.com/bearcove/roam", rev = "bda700bd2126e7cd3c4b0cfb2c10e43d3b3edd94" }
+roam = { git = "https://github.com/bearcove/roam", branch = "main" }
+roam-stream = { git = "https://github.com/bearcove/roam", branch = "main" }
+roam-session = { git = "https://github.com/bearcove/roam", branch = "main" }
+roam-shm = { git = "https://github.com/bearcove/roam", branch = "main" }
+roam-local = { git = "https://github.com/bearcove/roam", branch = "main" }
+roam-codegen = { git = "https://github.com/bearcove/roam", branch = "main" }
+ur-taking-me-with-you = { git = "https://github.com/bearcove/roam", branch = "main" }
 
 # process management
 
 # hashing
 blake3 = "1"
 hex = "0.4"
+
+# content-defined chunking (pin version for CDC boundary stability)
+fastcdc = "3"
 
 # error handling
 eyre = "0.6"
@@ -149,24 +155,18 @@ strip = "none"
 # facet-format = { git = "https://github.com/facet-rs/facet", branch = "main" }
 # facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
 
-[patch."https://github.com/bearcove/facet"]
-facet = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-core = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-macros = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-macros-impl = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-macro-parse = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-macro-types = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-reflect = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-json = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-toml = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-postcard = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-value = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-format = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
-
 # [patch."https://github.com/bearcove/picante"]
 # picante = { path = "../picante/crates/picante" }
 # picante-macros = { path = "../picante/crates/picante-macros" }
+
+# [patch."https://github.com/bearcove/roam"]
+# roam = { path = "/Users/amos/bearcove/roam/rust/roam" }
+# roam-stream = { path = "/Users/amos/bearcove/roam/rust/roam-stream" }
+# roam-session = { path = "/Users/amos/bearcove/roam/rust/roam-session" }
+# roam-shm = { path = "/Users/amos/bearcove/roam/rust/roam-shm" }
+# roam-local = { path = "/Users/amos/bearcove/roam/rust/roam-local" }
+# roam-codegen = { path = "/Users/amos/bearcove/roam/rust/roam-codegen" }
+# ur-taking-me-with-you = { path = "/Users/amos/bearcove/roam/rust/ur-taking-me-with-you" }
 
 [profile.samply]
 inherits = "release"

@@ -10,7 +10,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use thiserror::Error;
 use vx_store_proto::Blake3Hash;
-use vx_store_proto::{EnsureRegistryCrateResult, EnsureStatus, RegistrySpecKey};
+use vx_store_proto::{EnsureRegistryCrateResult, EnsureStatus, NodeHash, RegistrySpecKey};
 
 /// Maximum retry attempts for transient failures
 const MAX_RETRIES: u32 = 3;
@@ -49,13 +49,16 @@ type InflightFuture = Arc<tokio::sync::OnceCell<EnsureRegistryCrateResult>>;
 ///
 /// Same design as ToolchainManager: inflight entries are never removed.
 pub struct RegistryManager {
-    inflight: tokio::sync::Mutex<HashMap<RegistrySpecKey, InflightFuture>>,
+    inflight: peeps::locks::DiagnosticAsyncMutex<HashMap<RegistrySpecKey, InflightFuture>>,
 }
 
 impl RegistryManager {
     pub fn new() -> Self {
         Self {
-            inflight: tokio::sync::Mutex::new(HashMap::new()),
+            inflight: peeps::locks::DiagnosticAsyncMutex::new(
+                "store/registry_inflight",
+                HashMap::new(),
+            ),
         }
     }
 
@@ -70,7 +73,7 @@ impl RegistryManager {
         if let Some(manifest_hash) = lookup_fn().await {
             return EnsureRegistryCrateResult {
                 spec_key: Some(spec_key),
-                manifest_hash: Some(manifest_hash),
+                manifest_hash: Some(NodeHash(manifest_hash)),
                 status: EnsureStatus::Hit,
                 error: None,
             };

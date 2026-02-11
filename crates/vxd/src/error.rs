@@ -3,7 +3,7 @@
 use camino::Utf8PathBuf;
 use facet::Facet;
 use thiserror::Error;
-use vx_store_proto::Blake3Hash;
+use vx_store_proto::NodeHash;
 
 /// Errors that can occur during daemon operations.
 #[derive(Debug, Clone, Error, Facet)]
@@ -27,7 +27,7 @@ pub enum VxdError {
     NoToolchainId,
 
     #[error("toolchain manifest not found: {0}")]
-    ToolchainManifestNotFound(Blake3Hash),
+    ToolchainManifestNotFound(NodeHash),
 
     // === Registry Crate Errors ===
     #[error("registry crate {name}@{version} acquisition failed: {reason}")]
@@ -68,10 +68,10 @@ pub enum VxdError {
     TreeIngestion(String),
 
     #[error("output manifest not found: {0}")]
-    OutputManifestNotFound(Blake3Hash),
+    OutputManifestNotFound(NodeHash),
 
     #[error("blob not found: {0}")]
-    BlobNotFound(Blake3Hash),
+    BlobNotFound(String),
 
     // === Compilation Errors ===
     #[error("compilation failed for {crate_name}: {message}")]
