@@ -3,13 +3,10 @@
 # Enable experimental setup scripts feature
 experimental = ["setup-scripts"]
 
-# Warmup script: prime a shared CAS with toolchains so per-test
-# materializations can read from it via LayeredStorage (VX_CAS_BASE).
-# Runs after build-daemons (needs the built binaries).
-[scripts.setup.warmup-toolchains]
-command = 'bash tests/warmup-toolchains.sh'
+[scripts.setup.start-vxd-for-tests]
+command = 'bash tests/start-vxd-for-tests.sh'
 
 # Run setup scripts for all tests (order matters: build first, then warmup)
 [[profile.default.scripts]]
 filter = 'all()'
-setup = ['warmup-toolchains']
+setup = ['start-vxd-for-tests']
