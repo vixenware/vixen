@@ -128,51 +128,42 @@ async fn async_main() -> Result<()> {
     .run()
     .unwrap();
 
-    let cas_endpoint = Endpoint::parse(&args.store)?;
+    let store_endpoint = Endpoint::parse(&args.store)?;
     let bind_endpoint = Endpoint::parse(&args.listen)?;
     let vfsd_endpoint = Endpoint::parse(&args.vfsd)?;
 
-    // Connect to CAS and spawn+connect to vx-vfsd in parallel
+    // Bind listener, connect to store, and spawn+connect to vx-vfsd — all in parallel
     use vx_io::spawn::ServiceBuilder;
 
-    let cas_builder = ServiceBuilder::new("vx-store", cas_endpoint.clone(), NoDispatcher)
+    let mount_path = runner_mount_base();
+
+    let store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone(), NoDispatcher)
         .caller_name("vx-runner")
         .connect_only();
 
-    let mount_path = runner_mount_base();
     let vfsd_builder = ServiceBuilder::new("vx-vfsd", vfsd_endpoint.clone(), NoDispatcher)
         .caller_name("vx-runner")
         .args(&[
             "--mount",
             mount_path.as_str(),
             "--store",
-            &cas_endpoint.display(),
+            &store_endpoint.display(),
         ])
         .env("VX_HOME", args.vx_home.as_str());
 
-    let (cas_handle, vfsd_handle) =
-        tokio::try_join!(cas_builder.connect(), vfsd_builder.connect())?;
-
-    let cas = Arc::new(StoreClient::new(cas_handle.caller));
-    let vfsd_protocol = vx_vfsd::protocol::VfsdClient::new(vfsd_handle.caller);
-    let vfs = VfsClient::new(vfsd_protocol, cas.clone());
-
-    // Create Runner service (will use VFS via RPC)
-    let exec = RunnerService::new(cas.clone(), Arc::new(vfs));
-
-    // Bind Runner RPC socket before VFS mount attempt.
-    let runner_listener = match Listener::bind(&bind_endpoint).await {
-        Ok(l) => l,
-        Err(e) => {
-            return Err(eyre::eyre!(
-                "Failed to bind Runner RPC socket at {}: {}\n\
-                 Another instance may be running, or the socket file is stale.",
-                bind_endpoint,
-                e
-            ));
-        }
-    };
+    let (runner_listener, store_handle, vfsd_handle) = tokio::try_join!(
+        async { Listener::bind(&bind_endpoint).await },
+        store_builder.connect(),
+        vfsd_builder.connect(),
+    )?;
     tracing::info!("Runner RPC bound on {}", bind_endpoint);
+
+    let store = Arc::new(StoreClient::new(store_handle.caller));
+    let vfsd_protocol = vx_vfsd::protocol::VfsdClient::new(vfsd_handle.caller);
+    let vfs = VfsClient::new(vfsd_protocol, store.clone());
+
+    // Create Runner service
+    let exec = RunnerService::new(store.clone(), Arc::new(vfs));
 
     // VFS is now mounted by vx-vfsd, not by vx-runner
     tracing::info!("VFS provided by vx-vfsd at {}", runner_mount_base());
