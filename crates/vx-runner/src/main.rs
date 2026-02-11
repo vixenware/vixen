@@ -629,9 +629,13 @@ fn spawn_reaper() {
         return;
     };
 
+    let mount_path = runner_mount_base();
+
     match Command::new(&reaper_path)
         .arg("--parent-pid")
         .arg(my_pid.to_string())
+        .arg("--mount-path")
+        .arg(mount_path.as_str())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
