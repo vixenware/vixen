@@ -3186,6 +3186,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-shim"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "vx-store"
 version = "0.1.0"
 dependencies = [
