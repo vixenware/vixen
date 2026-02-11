@@ -22,7 +22,6 @@ camino = { workspace = true }
 eyre = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-ur-taking-me-with-you = { workspace = true }
 libc = { workspace = true }
 petgraph = { workspace = true }
 tokio-util = { workspace = true }
@@ -37,6 +36,9 @@ vx-report = { workspace = true }
 vx-rs = { workspace = true }
 vx-toolchain = { workspace = true }
 tokio-test-lite = { workspace = true }
+vx-plan = { workspace = true }
+vx-cache = { workspace = true }
+vx-tarball = { workspace = true }
 
 [features]
 default = []

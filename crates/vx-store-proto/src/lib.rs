@@ -10,6 +10,7 @@
 
 pub mod cas_tree;
 
+use core::fmt;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
 
@@ -585,6 +586,16 @@ pub struct ServiceVersion {
     pub version: String,
     /// Protocol/schema version (bump on breaking changes)
     pub protocol_version: u32,
+}
+
+impl fmt::Display for ServiceVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} v{} (proto {})",
+            self.service, self.version, self.protocol_version
+        )
+    }
 }
 
 /// Progress update streamed during long-running store operations (downloads, extraction).

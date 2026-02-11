@@ -1,90 +1,49 @@
 +++
 title = "vixen"
-description = "A Rust build engine with correct caching"
+description = "The best build system that doesn't exist yet"
 +++
 
-vixen (`vx`) is a build engine for Rust with correct caching.
+## Why? {#why}
 
-## Getting Started
+There's an unexplored middleground between the "spell it all out" Bazel/Buck2
+universe, and the "caching is best-effort" of cargo. Vixen aims to reconcile
+the properties of hermetic build systems with the user experience of cargo.
 
-```
-cargo xtask install
-```
+To this end, vixen:
 
-This installs `vx` and `vxd`. On Linux, you also need `libfuse3` and `fusermount`.
+  * Treats orchestration, storage, action execution as separate concerns
+    that do not necessarily occur on the same node.
+  * Enforces use of a virtual filesystem, and a sandboxing mechanism, on all
+    three supported platforms (macOS, Linux, Windows)
 
-Then try it on your project:
+This set of constraints alone makes it impossible for vixen to be a _successor_
+to cargo. cargo must work everywhere, for everyone, on every platform, without
+any additional requirements.
 
-```
-vx build
-```
+Compared to other hermetic build system, vixen aims to have better support for
+Rust through:
 
-## Quick Links
+  * A rule language designed to accomodate Rust's peculiar build system needs
+    (without requiring pre-build file generation)
+  * Support for a "Cargo.toml only" mode of operation
+  * A (planned) "fixup package manager" for crates with special needs (creative
+    build scripts or proc macros) — but only if we can't figure out a way for
+    vixen to "just magically support everything". Wouldn't that be neat.
+  
+The rule language is in flux, that's why you don't see it documented here.
 
-- [Download](/download/) - Install vixen on macOS
-- [Specification](/spec/) - Full specification document
-- [Internals](/internals/) - How vixen builds things under the hood
-- [GitHub](https://github.com/bearcove/vixen)
+## Current status
 
-## Overview
+vixen is in early development. It can build single-crate Rust projects with no
+dependencies, no proc macros, no build scripts, and a single binary target.
 
-vixen builds single-crate Rust projects using content-addressed storage and incremental computation. If inputs haven't changed, the second build is instant — zero compiler invocations.
+It will certainly not build your project at this stage.
 
-```
-vx build           # debug build
-vx build --release # release build
-vx clean           # remove .vx/ directory
-```
+However, important foundations are here (CAS, vfs, sandboxing) and the rest will
+fall into place over time. You're welcome to hang out in [the discord](https://discord.gg/GJadP5ggXs)
+if you want to chat about the progress.
 
-## Architecture
+## Documentation
 
-vixen uses a daemon-based multi-process architecture:
-
-- **vx** — Thin CLI client. Connects to the daemon via roam RPC over a Unix socket.
-- **vxd** — The daemon. Orchestrates builds using picante incremental queries. Parses manifests, constructs action graphs, executes actions.
-- **vx-runner** — Remote compilation worker. Executes compile and link actions in isolated environments using CAS.
-- **vx-store** — Content-addressable storage. Stores toolchains, sources, and build artifacts as blake3-hashed blobs.
-
-## Key Properties
-
-- **Correct caching** — Cache keys are computed from the full set of inputs (source content, compiler flags, toolchain version). Changed inputs always trigger a rebuild; unchanged inputs never do.
-- **Hermetic toolchains** — Rust and Zig toolchains are downloaded and stored in the global CAS. No system dependencies beyond a linker.
-- **Content-addressed storage** — All artifacts are identified by their blake3 hash. Enables deduplication and integrity verification.
-- **Incremental computation** — Uses picante for dependency tracking and single-flight memoization. Only affected queries re-run on changes.
-
-## Multi-Language Support
-
-vixen supports C/C++ compilation via hermetic Zig toolchains, configured through `vx.styx` project manifests:
-
-```styx
-project {
-    name hello
-    lang c
-}
-bins ({
-    name hello
-    sources main.c
-})
-```
-
-## FAQ
-
-### Why so many processes?
-
-vixen is designed for remote execution. Each component can run on a different machine:
-
-- `vx-store` could be in the cloud — a shared cache for your whole team
-- `vx-runner` could be on a beefy VM somewhere, doing the actual compilation
-- `vxd` is the local daemon that orchestrates everything
-
-When you develop locally, all of these just happen to run on the same machine. But the separation means that when you run `vx install somecrate` and someone else on your team has already built it, vixen just downloads the result from the shared store instead of compiling it again.
-
-## Current Scope (v0)
-
-vixen deliberately limits scope in v0 to get the foundations right:
-
-- Single-crate Rust projects (no workspaces)
-- No external dependencies, features, build scripts, or proc macros
-- No tests, benches, or examples
-- Single binary target
-- C/C++ via vx.styx manifests (pure C MVP)
+- [Internals](/internals/) — How vixen builds things under the hood
+- [Daemon Topologies](/daemons/) — Local vs distributed daemon lifecycle model

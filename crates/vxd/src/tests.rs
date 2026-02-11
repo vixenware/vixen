@@ -1,10 +1,271 @@
 use super::*;
 use tokio_test_lite::test as vx_test;
+use vx_report::{GraphEdge, GraphNode, GraphTopology};
 use vx_store_proto::Blake3Hash;
 
 /// Create a fresh database for testing
 fn test_db() -> Database {
     Database::new()
+}
+
+#[test]
+fn test_sanitize_id_component_replaces_non_identifier_chars() {
+    assert_eq!(
+        crate::service::sanitize_id_component("hello/world::crate@1.2.3"),
+        "hello_world__crate_1_2_3"
+    );
+}
+
+#[test]
+fn test_legacy_compile_node_id_format() {
+    assert_eq!(
+        crate::service::legacy_compile_node_id("my-crate", "bin"),
+        "compile-bin:my-crate"
+    );
+}
+
+#[test]
+fn test_rule_plan_parity_detects_missing_focus_nodes() {
+    let legacy = GraphTopology {
+        nodes: vec![GraphNode {
+            index: 0,
+            node_id: "compile-bin:app".to_string(),
+            kind: "rust.compile_bin".to_string(),
+            label: "compile app".to_string(),
+        }],
+        edges: vec![],
+    };
+    let rule_plan = GraphTopology {
+        nodes: vec![],
+        edges: vec![],
+    };
+
+    let diff = crate::service::compare_rule_plan_parity(&legacy, &rule_plan);
+    assert_eq!(diff.legacy_focus_count, 1);
+    assert_eq!(diff.rule_plan_focus_count, 0);
+    assert_eq!(
+        diff.missing_in_rule_plan,
+        vec!["compile-bin:app".to_string()]
+    );
+    assert!(diff.extra_in_rule_plan.is_empty());
+}
+
+#[test]
+fn test_rule_plan_parity_ignores_non_focus_nodes() {
+    let legacy = GraphTopology {
+        nodes: vec![GraphNode {
+            index: 0,
+            node_id: "download toolchain Rustc".to_string(),
+            kind: "toolchain.component.download".to_string(),
+            label: "download toolchain Rustc".to_string(),
+        }],
+        edges: vec![GraphEdge {
+            from: 0,
+            to: 0,
+            kind: Some("always".to_string()),
+        }],
+    };
+    let rule_plan = GraphTopology {
+        nodes: vec![GraphNode {
+            index: 0,
+            node_id: "planner-action:n_action".to_string(),
+            kind: "planner.action".to_string(),
+            label: "planner action".to_string(),
+        }],
+        edges: vec![],
+    };
+
+    let diff = crate::service::compare_rule_plan_parity(&legacy, &rule_plan);
+    assert_eq!(diff.legacy_focus_count, 0);
+    assert_eq!(diff.rule_plan_focus_count, 0);
+    assert!(diff.missing_in_rule_plan.is_empty());
+    assert!(diff.extra_in_rule_plan.is_empty());
+}
+
+#[test]
+fn test_rule_plan_edge_parity_compares_focus_deps_with_two_hop_bridge() {
+    // Legacy: compile(app) depends directly on compile(dep) and registry acquire.
+    let legacy = GraphTopology {
+        nodes: vec![
+            GraphNode {
+                index: 0,
+                node_id: "compile-bin:app".to_string(),
+                kind: "rust.compile_bin".to_string(),
+                label: "compile app".to_string(),
+            },
+            GraphNode {
+                index: 1,
+                node_id: "compile-lib:dep".to_string(),
+                kind: "rust.compile_rlib".to_string(),
+                label: "compile dep".to_string(),
+            },
+            GraphNode {
+                index: 2,
+                node_id: "acquire-registry:serde:1.0.0".to_string(),
+                kind: "registry.acquire".to_string(),
+                label: "acquire serde".to_string(),
+            },
+        ],
+        edges: vec![
+            GraphEdge {
+                from: 0,
+                to: 1,
+                kind: Some("always".to_string()),
+            },
+            GraphEdge {
+                from: 0,
+                to: 2,
+                kind: Some("always".to_string()),
+            },
+        ],
+    };
+
+    // RulePlan-lowered: compile(app) depends on dep_artifact (non-focus) and registry acquire.
+    // dep_artifact depends on compile(dep). This should still count as a focus dep via 2-hop walk.
+    let rule_plan = GraphTopology {
+        nodes: vec![
+            GraphNode {
+                index: 0,
+                node_id: "compile-bin:app".to_string(),
+                kind: "rust.compile_bin".to_string(),
+                label: "compile app".to_string(),
+            },
+            GraphNode {
+                index: 1,
+                node_id: "artifact:dep".to_string(),
+                kind: "planner.artifact".to_string(),
+                label: "artifact dep".to_string(),
+            },
+            GraphNode {
+                index: 2,
+                node_id: "compile-lib:dep".to_string(),
+                kind: "rust.compile_rlib".to_string(),
+                label: "compile dep".to_string(),
+            },
+            GraphNode {
+                index: 3,
+                node_id: "acquire-registry:serde:1.0.0".to_string(),
+                kind: "registry.acquire".to_string(),
+                label: "acquire serde".to_string(),
+            },
+        ],
+        edges: vec![
+            GraphEdge {
+                from: 0,
+                to: 1,
+                kind: Some("ifchanged".to_string()),
+            },
+            GraphEdge {
+                from: 1,
+                to: 2,
+                kind: Some("ifwritten".to_string()),
+            },
+            GraphEdge {
+                from: 0,
+                to: 3,
+                kind: Some("ifchanged".to_string()),
+            },
+        ],
+    };
+
+    let diff = crate::service::compare_rule_plan_edge_parity(&legacy, &rule_plan);
+    assert!(diff.missing_in_rule_plan.is_empty(), "{diff:?}");
+    assert!(diff.extra_in_rule_plan.is_empty(), "{diff:?}");
+}
+
+#[test]
+fn test_rule_plan_execution_selects_crate_subset_and_closure() {
+    use std::collections::{BTreeMap, HashMap, HashSet};
+    use vx_manifest::Edition;
+    use vx_report::{RuleId, RulePlan, RulePlanNode, RulePlanNodeId, RulePlanNodeKind};
+    use vx_rs::crate_graph::{CrateGraph, CrateId, CrateNode, CrateSource, CrateType, DepEdge};
+
+    let workspace_root = camino::Utf8PathBuf::from("/workspace");
+
+    let dep_source = CrateSource::Path {
+        workspace_rel: camino::Utf8PathBuf::from("dep"),
+    };
+    let dep_id = CrateId::from_source(&dep_source, "dep");
+    let dep_node = CrateNode {
+        id: dep_id,
+        package_name: "dep".to_string(),
+        crate_name: "dep".to_string(),
+        source: dep_source,
+        workspace_rel: camino::Utf8PathBuf::from("dep"),
+        crate_root_rel: camino::Utf8PathBuf::from("dep/src/lib.rs"),
+        edition: Edition::E2021,
+        crate_type: CrateType::Lib,
+        deps: vec![],
+        build_script_rel: None,
+        build_script_output: None,
+    };
+
+    let app_source = CrateSource::Path {
+        workspace_rel: camino::Utf8PathBuf::from("app"),
+    };
+    let app_id = CrateId::from_source(&app_source, "app");
+    let app_node = CrateNode {
+        id: app_id,
+        package_name: "app".to_string(),
+        crate_name: "app".to_string(),
+        source: app_source,
+        workspace_rel: camino::Utf8PathBuf::from("app"),
+        crate_root_rel: camino::Utf8PathBuf::from("app/src/main.rs"),
+        edition: Edition::E2021,
+        crate_type: CrateType::Bin,
+        deps: vec![DepEdge {
+            extern_name: "dep".to_string(),
+            crate_id: dep_id,
+        }],
+        build_script_rel: None,
+        build_script_output: None,
+    };
+
+    let graph = CrateGraph {
+        workspace_root: workspace_root.clone(),
+        nodes: HashMap::from([(dep_id, dep_node), (app_id, app_node)]),
+        topo_order: vec![dep_id, app_id],
+        root_crate: app_id,
+        registry_crates: vec![],
+        reachable_packages: None,
+    };
+
+    let provenance = vx_report::RulePlanProvenance {
+        rule_id: RuleId::from("rule.test".to_string()),
+        source_id: vx_report::RulePlanSourceId::from("src".to_string()),
+        span: vx_report::RulePlanSpan {
+            line: 1,
+            column: 1,
+            end_line: 1,
+            end_column: 1,
+        },
+        comment: None,
+        metadata: {
+            let mut m = BTreeMap::new();
+            m.insert("crate_name".to_string(), "app".to_string());
+            m.insert("crate_type".to_string(), "bin".to_string());
+            m
+        },
+    };
+
+    let plan = RulePlan {
+        sources: vec![],
+        nodes: vec![RulePlanNode {
+            id: RulePlanNodeId::from("n_action_app".to_string()),
+            kind: RulePlanNodeKind::Action,
+            label: "compile-bin:app".to_string(),
+            provenance,
+        }],
+        edges: vec![],
+        facts: vec![],
+    };
+
+    let selected = crate::service::selected_crates_from_rule_plan(&plan, &graph).unwrap();
+    assert_eq!(selected.len(), 1);
+    assert!(selected.contains(&app_id));
+
+    let closure = crate::service::transitive_closure_crates(&graph, &selected);
+    assert_eq!(closure, HashSet::from([app_id, dep_id]));
 }
 
 /// Set up common build configuration for C builds

@@ -6,9 +6,9 @@
 //! Responsibilities:
 //! - Own the picante incremental computation database
 //! - Compute cache keys
-//! - Check CAS for cache hits
+//! - Check store for cache hits
 //! - Send compile requests to execd
-//! - Materialize final outputs locally (via execd or direct CAS fetch)
+//! - Materialize final outputs locally (via execd or direct store fetch)
 
 mod action_graph;
 mod cas_tree;
@@ -24,14 +24,14 @@ mod service;
 mod tests;
 
 use camino::Utf8PathBuf;
-use eyre::{Result, WrapErr};
+use eyre::Result;
 use facet::Facet;
 use figue as args;
 use peeps::locks::DiagnosticAsyncMutex;
 use roam_stream::{HandshakeConfig, NoDispatcher, accept};
-use std::process::Child;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::process::Child;
 use vx_io::net::{Endpoint, Listener};
 use vx_runner_proto::RunnerClient;
 use vx_store_proto::StoreClient;
@@ -55,14 +55,6 @@ struct CliArgs {
     #[facet(default, args::named)]
     vx_home: Option<String>,
 
-    /// vx-store endpoint — if absent, spawns vx-store automatically
-    #[facet(default, args::named)]
-    store: Option<String>,
-
-    /// vx-runner endpoint — if absent, spawns vx-runner automatically
-    #[facet(default, args::named)]
-    runner: Option<String>,
-
     /// Standard CLI options (--help, --version, --completions)
     #[facet(flatten)]
     builtins: args::FigueBuiltins,
@@ -73,11 +65,11 @@ struct Args {
     /// VX_HOME directory
     vx_home: Utf8PathBuf,
 
-    /// CAS endpoint
-    cas_endpoint: Endpoint,
+    /// Store endpoint — Some if VX_STORE is set (connect to existing), None means spawn
+    store_endpoint: Option<Endpoint>,
 
-    /// Exec endpoint
-    exec_endpoint: Endpoint,
+    /// Exec endpoint — Some if VX_RUNNER is set (connect to existing), None means spawn
+    exec_endpoint: Option<Endpoint>,
 
     /// Bind endpoint
     bind: Endpoint,
@@ -91,30 +83,30 @@ fn resolve_args(cli: CliArgs) -> Result<Args> {
         .map(Utf8PathBuf::from)
         .unwrap_or_else(|| {
             let home = std::env::var("HOME").expect("HOME not set");
-            Utf8PathBuf::from(format!("{}/.vx", home))
+            Utf8PathBuf::from(format!("{home}/.vx"))
         });
 
-    // CAS endpoint: --store > VX_STORE > default local socket
-    let cas_endpoint = match cli.store.or_else(|| std::env::var("VX_STORE").ok()) {
-        Some(v) => Endpoint::parse(&v)?,
-        None => vx_io::net::default_unix_endpoint(&vx_home, "store"),
-    };
+    // VX_STORE set → connect to existing store. Unset → spawn one.
+    let store_endpoint = std::env::var("VX_STORE")
+        .ok()
+        .map(|v| Endpoint::parse(&v))
+        .transpose()?;
 
-    // Runner endpoint: --runner > VX_RUNNER > default local socket
-    let exec_endpoint = match cli.runner.or_else(|| std::env::var("VX_RUNNER").ok()) {
-        Some(v) => Endpoint::parse(&v)?,
-        None => vx_io::net::default_unix_endpoint(&vx_home, "runner"),
-    };
+    // VX_RUNNER set → connect to existing runner. Unset → spawn one.
+    let exec_endpoint = std::env::var("VX_RUNNER")
+        .ok()
+        .map(|v| Endpoint::parse(&v))
+        .transpose()?;
 
-    // Bind endpoint: --listen > VXD > default local socket
-    let bind = match cli.listen.or_else(|| std::env::var("VXD").ok()) {
+    // --listen only (no VXD env — that's for vx connect mode)
+    let bind = match cli.listen {
         Some(v) => Endpoint::parse(&v)?,
         None => vx_io::net::default_unix_endpoint(&vx_home, "vxd"),
     };
 
     Ok(Args {
         vx_home,
-        cas_endpoint,
+        store_endpoint,
         exec_endpoint,
         bind,
     })
@@ -129,188 +121,90 @@ pub struct SpawnTracker {
 
 impl SpawnTracker {
     pub fn kill_all(&mut self) {
-        if let Some(mut child) = self.store.take() {
-            tracing::info!("Killing spawned vx-store (pid: {})", child.id());
-            if let Err(e) = child.kill() {
-                tracing::warn!("Failed to kill vx-store (pid: {}): {e}", child.id());
+        if let Some(ref mut child) = self.store {
+            let pid = child.id().unwrap_or(0);
+            tracing::info!("Killing spawned vx-store (pid: {pid})");
+            if let Err(e) = child.start_kill() {
+                tracing::warn!("Failed to kill vx-store (pid: {pid}): {e}");
             }
         }
-        if let Some(mut child) = self.runner.take() {
-            tracing::info!("Killing spawned vx-runner (pid: {})", child.id());
-            if let Err(e) = child.kill() {
-                tracing::warn!("Failed to kill vx-runner (pid: {}): {e}", child.id());
+        self.store.take();
+        if let Some(ref mut child) = self.runner {
+            let pid = child.id().unwrap_or(0);
+            tracing::info!("Killing spawned vx-runner (pid: {pid})");
+            if let Err(e) = child.start_kill() {
+                tracing::warn!("Failed to kill vx-runner (pid: {pid}): {e}");
             }
         }
+        self.runner.take();
     }
 }
 
-/// Spawn a service binary and return the child process
-///
-/// When `VX_INHERIT_STDIO` is set, stdout/stderr are inherited from the parent
-/// (so daemon logs appear inline in test output). Otherwise they go to `log_path`.
-fn spawn_service(
-    binary_name: &str,
-    log_path: &camino::Utf8Path,
-    cli_args: &[&str],
-) -> Result<Child> {
-    use std::process::Stdio;
-
-    let vx_test = std::env::var("VX_TEST").is_ok();
-
-    // Prefer spawning sibling binaries next to the currently running vxd.
-    // This keeps test runs using the same target/debug artifacts instead of any
-    // globally installed binaries found on PATH.
-    let binary_path = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(binary_name)))
-        .filter(|candidate| candidate.exists())
-        .unwrap_or_else(|| std::path::PathBuf::from(binary_name));
-
-    tracing::debug!(%vx_test, ?cli_args, "spawning {} from {}", binary_name, binary_path.display());
-
-    let mut cmd = std::process::Command::new(&binary_path);
-    cmd.args(cli_args);
-
-    if vx_test {
-        cmd.stdout(Stdio::inherit());
-        cmd.stderr(Stdio::inherit());
-    } else {
-        use std::fs::OpenOptions;
-
-        // Ensure parent directory exists for log file
-        if let Some(parent) = log_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let log_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)?;
-
-        cmd.stdout(Stdio::from(log_file.try_clone()?));
-        cmd.stderr(Stdio::from(log_file));
-    }
-
-    ur_taking_me_with_you::spawn_dying_with_parent(cmd).map_err(Into::into)
+struct ServiceClients {
+    store: Arc<StoreClient<UpstreamCaller>>,
+    exec: Arc<RunnerClient<UpstreamCaller>>,
 }
 
-/// Ensure services are running, spawning them if necessary
+/// Ensure services are running (spawning them if necessary) and return
+/// connected roam clients. Store and runner are started in parallel.
 async fn ensure_services(
     args: &Args,
     spawn_tracker: &Arc<DiagnosticAsyncMutex<SpawnTracker>>,
-) -> Result<()> {
-    // Service startup can take a few seconds on cold systems (especially runner).
-    // Keep retrying long enough to avoid flaking during daemon orchestration.
-    let backoff_ms = [10, 50, 100, 250, 500, 1000, 1500, 2000, 3000];
+) -> Result<ServiceClients> {
+    use vx_io::spawn::ServiceBuilder;
 
-    let vx_home_str = args.vx_home.as_str();
-    let cas_display = args.cas_endpoint.display();
+    let store_endpoint = args
+        .store_endpoint
+        .clone()
+        .unwrap_or_else(|| vx_io::net::default_unix_endpoint(&args.vx_home, "store"));
+    let exec_endpoint = args
+        .exec_endpoint
+        .clone()
+        .unwrap_or_else(|| vx_io::net::default_unix_endpoint(&args.vx_home, "runner"));
+    let vfsd_endpoint = vx_io::net::default_unix_endpoint(&args.vx_home, "vfsd");
     let store_root = args.vx_home.join("store");
 
-    // Check Store (CAS)
-    if vx_io::net::try_connect(&args.cas_endpoint).await?.is_none() {
-        if !args.cas_endpoint.is_local() {
-            eyre::bail!(
-                "Store is not reachable at {}. Auto-spawn is only supported for local endpoints.\n\
-                Start vx-store on the remote host, or point VX_STORE to a local endpoint.",
-                args.cas_endpoint
-            );
-        }
-
-        let store_log = args.vx_home.join("store.log");
-        let child = spawn_service(
-            "vx-store",
-            &store_log,
-            &[
-                "--listen",
-                &cas_display,
-                "--root",
-                store_root.as_str(),
-                "--vx-home",
-                vx_home_str,
-            ],
-        )?;
-
-        spawn_tracker.lock().await.store = Some(child);
-
-        for (attempt, delay) in backoff_ms.iter().enumerate() {
-            tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
-            if vx_io::net::try_connect(&args.cas_endpoint).await?.is_some() {
-                tracing::trace!("Connected to Store after {} attempts", attempt + 1);
-                break;
-            }
-        }
-
-        // Final connection attempt
-        vx_io::net::connect(&args.cas_endpoint)
-            .await
-            .wrap_err_with(|| {
-                format!("Store still unreachable after spawn: {}", args.cas_endpoint)
-            })?;
-    } else {
-        tracing::info!("Store already running at {}", args.cas_endpoint);
+    let mut store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone(), NoDispatcher)
+        .caller_name("vxd")
+        .args(&[
+            "--root",
+            store_root.as_str(),
+            "--vx-home",
+            args.vx_home.as_str(),
+        ])
+        .log_path(args.vx_home.join("store.log"));
+    if args.store_endpoint.is_some() {
+        store_builder = store_builder.connect_only();
     }
 
-    let exec_display = args.exec_endpoint.display();
-    let vfsd_endpoint = vx_io::net::default_unix_endpoint(&args.vx_home, "vfsd");
-    let vfsd_display = vfsd_endpoint.display();
+    let mut runner_builder = ServiceBuilder::new("vx-runner", exec_endpoint.clone(), NoDispatcher)
+        .caller_name("vxd")
+        .args(&[
+            "--store",
+            &store_endpoint.display(),
+            "--vfsd",
+            &vfsd_endpoint.display(),
+            "--vx-home",
+            args.vx_home.as_str(),
+        ])
+        .log_path(args.vx_home.join("runner.log"))
+        .timeout(Duration::from_secs(30));
+    if args.exec_endpoint.is_some() {
+        runner_builder = runner_builder.connect_only();
+    }
 
-    // Check Runner (worker)
-    if vx_io::net::try_connect(&args.exec_endpoint)
-        .await?
-        .is_none()
+    let (store, runner) = tokio::try_join!(store_builder.connect(), runner_builder.connect(),)?;
+
     {
-        if !args.exec_endpoint.is_local() {
-            eyre::bail!(
-                "Runner is not reachable at {}. Auto-spawn is only supported for local endpoints.\n\
-                Start vx-runner on the remote host, or point VX_RUNNER to a local endpoint.",
-                args.exec_endpoint
-            );
-        }
-
-        let runner_log = args.vx_home.join("runner.log");
-        let child = spawn_service(
-            "vx-runner",
-            &runner_log,
-            &[
-                "--listen",
-                &exec_display,
-                "--store",
-                &cas_display,
-                "--vfsd",
-                &vfsd_display,
-                "--vx-home",
-                vx_home_str,
-            ],
-        )?;
-
-        spawn_tracker.lock().await.runner = Some(child);
-
-        for (attempt, delay) in backoff_ms.iter().enumerate() {
-            tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
-            if vx_io::net::try_connect(&args.exec_endpoint)
-                .await?
-                .is_some()
-            {
-                tracing::trace!("Connected to Runner after {} attempts", attempt + 1);
-                break;
-            }
-        }
-
-        // Final connection attempt
-        vx_io::net::connect(&args.exec_endpoint)
-            .await
-            .wrap_err_with(|| {
-                format!(
-                    "Runner still unreachable after spawn: {}",
-                    args.exec_endpoint
-                )
-            })?;
-    } else {
-        tracing::info!("Runner already running at {}", args.exec_endpoint);
+        let mut tracker = spawn_tracker.lock().await;
+        tracker.store = store.child;
+        tracker.runner = runner.child;
     }
 
-    Ok(())
+    Ok(ServiceClients {
+        store: Arc::new(StoreClient::new(store.caller)),
+        exec: Arc::new(RunnerClient::new(runner.caller)),
+    })
 }
 
 fn main() -> Result<()> {
@@ -338,22 +232,8 @@ async fn async_main() -> Result<()> {
     let in_test = std::env::var("VX_TEST").is_ok();
 
     // The daemon outlives its parent process (vx CLI) and shuts down
-    // after an idle timeout instead (5s in test mode, 2h in production).
-    // In test mode, we also watch the test harness ancestor (cargo-nextest,
-    // vx-fuse-stress, vx-vfs-integrity, etc.) and exit immediately when it dies.
-    if in_test {
-        if let Some((harness_pid, harness_name)) = nextest_watcher::find_test_harness_pid() {
-            tracing::info!(harness_pid, %harness_name, "watching test harness process");
-            peeps::tasks::spawn_tracked("nextest_watcher", async move {
-                nextest_watcher::wait_for_exit(harness_pid).await;
-                // Use libc::_exit — tracing/stdout/stderr may be broken pipes
-                // after ctrl-c kills the pipeline, and writing to them blocks.
-                unsafe { libc::_exit(0) };
-            });
-        } else {
-            tracing::debug!("no test harness ancestor found (external daemon?)");
-        }
-    }
+    // after an idle timeout instead (2s in test mode, 2h in production).
+    // Simple and robust: no PID tracking needed.
 
     // SIGUSR1: dump diagnostics
     peeps::install_sigusr1("vxd");
@@ -369,64 +249,79 @@ async fn async_main() -> Result<()> {
     let args = resolve_args(cli)?;
     tracing::info!("Starting vxd");
     tracing::info!("  VX_HOME: {}", args.vx_home);
-    tracing::info!("  CAS:     {}", args.cas_endpoint);
-    tracing::info!("  Exec:    {}", args.exec_endpoint);
+    match &args.store_endpoint {
+        Some(ep) => tracing::info!("  Store:   {ep} (from VX_STORE)"),
+        None => tracing::info!("  Store:   (will spawn)"),
+    }
+    match &args.exec_endpoint {
+        Some(ep) => tracing::info!("  Exec:    {ep} (from VX_RUNNER)"),
+        None => tracing::info!("  Exec:    (will spawn)"),
+    }
     tracing::info!("  Bind:    {}", args.bind);
+
+    // Acquire exclusive lock to prevent multiple vxd instances from racing.
+    // The lock is held for the daemon's lifetime and released on exit.
+    let lock_path = args.vx_home.join("vxd.lock");
+    std::fs::create_dir_all(&args.vx_home)?;
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = lock_file.as_raw_fd();
+        // Try to acquire exclusive lock (non-blocking)
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::WouldBlock {
+                tracing::debug!("Another vxd is already running (lock held)");
+                std::process::exit(0);
+            }
+            eyre::bail!("Failed to acquire lock on {}: {}", lock_path, err);
+        }
+        tracing::debug!("Acquired exclusive lock on {}", lock_path);
+    }
+
+    // Keep lock_file alive for the daemon's lifetime
+    let _lock_guard = lock_file;
 
     let spawn_tracker = Arc::new(DiagnosticAsyncMutex::new(
         "vxd/spawn_tracker",
         SpawnTracker::default(),
     ));
 
-    ensure_services(&args, &spawn_tracker).await?;
+    let clients = ensure_services(&args, &spawn_tracker).await?;
 
     let exec_host_triple = match std::env::var("VX_RUNNER_HOST_TRIPLE") {
         Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
         _ => {
-            if !args.exec_endpoint.is_local() {
+            if let Some(ep) = &args.exec_endpoint
+                && !ep.is_local()
+            {
                 eyre::bail!(
-                    "VX_RUNNER points to a non-local endpoint ({}) but VX_RUNNER_HOST_TRIPLE is not set.\n\
-                    vxd must know the runner host triple to request the correct Rust toolchain from CAS.\n\
-                    Set VX_RUNNER_HOST_TRIPLE (e.g. x86_64-unknown-linux-gnu) and retry.",
-                    args.exec_endpoint
+                    "VX_RUNNER points to a non-local endpoint ({ep}) but VX_RUNNER_HOST_TRIPLE is not set.\n\
+                        vxd must know the runner host triple to request the correct Rust toolchain from store.\n\
+                        Set VX_RUNNER_HOST_TRIPLE (e.g. x86_64-unknown-linux-gnu) and retry.",
                 );
             }
 
             vx_toolchain::detect_host_triple()
-                .map_err(|e| eyre::eyre!("failed to detect host triple: {}", e))?
+                .map_err(|e| eyre::eyre!("failed to detect host triple: {e}"))?
         }
     };
 
-    // Create reconnecting Roam clients for CAS and Exec.
-    tracing::info!("Connecting to CAS at {}", args.cas_endpoint);
-    let cas_caller = vx_io::net::reconnecting_client_named(
-        args.cas_endpoint.clone(),
-        NoDispatcher,
-        Some("vxd".into()),
-    );
-    cas_caller
-        .handle()
-        .await
-        .map_err(|e| eyre::eyre!("failed to connect to CAS at {}: {}", args.cas_endpoint, e))?;
-    let cas_client = Arc::new(StoreClient::new(cas_caller));
-
-    tracing::info!("Connecting to Exec at {}", args.exec_endpoint);
-    let exec_caller = vx_io::net::reconnecting_client_named(
-        args.exec_endpoint.clone(),
-        NoDispatcher,
-        Some("vxd".into()),
-    );
-    exec_caller
-        .handle()
-        .await
-        .map_err(|e| eyre::eyre!("failed to connect to Exec at {}: {}", args.exec_endpoint, e))?;
-    let exec_client = Arc::new(RunnerClient::new(exec_caller));
+    let store_client = clients.store;
+    let exec_client = clients.exec;
 
     // Initialize daemon service (singleton shared across all connections)
     tracing::info!("Initializing daemon service");
     let daemon = Arc::new(
         VxdService::new(
-            cas_client,
+            store_client,
             exec_client,
             args.vx_home,
             exec_host_triple,
@@ -440,7 +335,7 @@ async fn async_main() -> Result<()> {
     tracing::info!("Daemon listening on {}", args.bind);
 
     // Track active connections and shut down after idle timeout.
-    // Test mode: 5s, production: 2 hours.
+    // Test mode: 2s, production: 2 hours.
     let active_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let last_disconnect = Arc::new(DiagnosticAsyncMutex::new(
         "vxd/last_disconnect",
@@ -449,7 +344,7 @@ async fn async_main() -> Result<()> {
 
     {
         let idle_timeout = if in_test {
-            Duration::from_secs(5)
+            Duration::from_secs(2)
         } else {
             Duration::from_secs(2 * 60 * 60)
         };
@@ -485,7 +380,7 @@ async fn async_main() -> Result<()> {
             let session = daemon.new_session();
 
             let dispatcher = VxdDispatcher::new(session.clone());
-            let Ok((handle, _incoming, driver)) = accept(
+            let (handle, _incoming, driver) = match accept(
                 stream,
                 HandshakeConfig {
                     max_payload_size: 256 * 1024 * 1024, // 256 MiB
@@ -495,11 +390,14 @@ async fn async_main() -> Result<()> {
                 dispatcher,
             )
             .await
-            else {
-                tracing::warn!("Handshake error from {}", peer_addr);
-                active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                *last_disconnect.lock().await = Some(tokio::time::Instant::now());
-                return;
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("Handshake error from {}: {e}", peer_addr);
+                    active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    *last_disconnect.lock().await = Some(tokio::time::Instant::now());
+                    return;
+                }
             };
 
             let progress_listener =

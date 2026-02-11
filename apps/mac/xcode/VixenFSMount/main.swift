@@ -19,7 +19,6 @@ struct Config {
     let sid: String
     let scheme: String
     let fsType: String
-    let parentPID: pid_t  // explicitly passed via --parent-pid
     let preload: Bool
     let debug: Bool
     let logFile: String?  // if set, redirect stdout/stderr to this file
@@ -47,7 +46,6 @@ struct Config {
         var sid: String?
         var scheme = "vixen"
         let fsType = "vixenfs"
-        var parentPID: pid_t?
         var preload = false
         var debug = false
         var logFile: String?
@@ -79,14 +77,6 @@ struct Config {
             case "--preload":
                 mountArgumentsProvided = true
                 preload = true
-            case "--parent-pid":
-                mountArgumentsProvided = true
-                index += 1
-                let value = try valueArg(args, index: index, name: "--parent-pid")
-                guard let pid = pid_t(value), pid > 0 else {
-                    throw MountError.invalidArgument("--parent-pid must be a positive integer")
-                }
-                parentPID = pid
             case "--debug":
                 mountArgumentsProvided = true
                 debug = true
@@ -134,9 +124,6 @@ struct Config {
         guard let sid else {
             throw MountError.invalidArgument("Missing required --sid argument")
         }
-        guard let parentPID else {
-            throw MountError.invalidArgument("Missing required --parent-pid argument")
-        }
 
         return .mount(
             Config(
@@ -144,7 +131,6 @@ struct Config {
                 sid: sid,
                 scheme: scheme,
                 fsType: fsType,
-                parentPID: parentPID,
                 preload: preload,
                 debug: debug,
                 logFile: logFile
@@ -188,7 +174,6 @@ enum MountError: Error, CustomStringConvertible {
     case invalidArgument(String)
     case mountLaunchFailed(String)
     case mountCommandFailed(exitCode: Int32, stdout: String, stderr: String)
-    case unmountFailed(String)
     case usage
 
     var description: String {
@@ -200,62 +185,25 @@ enum MountError: Error, CustomStringConvertible {
         case .mountCommandFailed(let exitCode, let stdout, let stderr):
             return
                 "mount failed: exit=\(exitCode) stdout=\(stdout) stderr=\(stderr)"
-        case .unmountFailed(let message):
-            return "unmount failed: \(message)"
         case .usage:
             return """
                 Usage:
                   vixenfs-mount --health [--json]
                   vixenfs-mount --app-group-path
-                  vixenfs-mount --sid <sid> --mount-point <path> --parent-pid <pid> [--scheme <scheme>] [--debug] [--log-file <path>]
+                  vixenfs-mount --sid <sid> --mount-point <path> [--scheme <scheme>] [--debug] [--log-file <path>]
                 """
         }
     }
 }
 
-final class ParentExitWatcher {
-    private let pid: pid_t
-    private let queue: DispatchQueue
-    private var source: DispatchSourceProcess?
-    private let onExit: () -> Void
-
-    init(pid: pid_t, queue: DispatchQueue, onExit: @escaping () -> Void) {
-        self.pid = pid
-        self.queue = queue
-        self.onExit = onExit
-    }
-
-    func start() {
-        guard pid > 1 else {
-            onExit()
-            return
-        }
-        if kill(pid, 0) != 0, errno == ESRCH {
-            onExit()
-            return
-        }
-        let source = DispatchSource.makeProcessSource(
-            identifier: pid, eventMask: .exit, queue: queue)
-        source.setEventHandler { [onExit] in
-            onExit()
-        }
-        source.setCancelHandler {}
-        source.resume()
-        self.source = source
-    }
-
-    func stop() {
-        source?.cancel()
-        source = nil
-    }
-}
-
+/// Mounts the FSKit filesystem and exits.
+///
+/// The mount registers with FSKit which spawns the VixenFS appex as a
+/// separate process. Once the mount syscall succeeds, vixenfs-mount's
+/// job is done — the VFS lives independently in the FSKit extension.
+/// Lifecycle management (unmounting) is handled by vx-reaper.
 final class MountLifecycle {
     private let config: Config
-    private let queue = DispatchQueue(label: "eu.bearcove.vixenfs.mount.lifecycle")
-    private var cleanupStarted = false
-    private var signalSources: [DispatchSourceSignal] = []
-    private var parentWatcher: ParentExitWatcher?
 
     init(config: Config) {
         self.config = config
@@ -271,12 +219,9 @@ final class MountLifecycle {
     func run() throws {
         try ensureMountPointExists()
         try mount()
-        installSignalHandlers()
-        installParentWatcher()
         let mountedPath = self.config.mountPoint
         let mountedSource = self.config.source
         emit("mounted \(mountedPath) from \(mountedSource)")
-        dispatchMain()
     }
 
     private func ensureMountPointExists() throws {
@@ -327,94 +272,6 @@ final class MountLifecycle {
         guard process.terminationStatus == 0 else {
             throw MountError.mountCommandFailed(
                 exitCode: process.terminationStatus, stdout: stdout, stderr: stderr)
-        }
-    }
-
-    private func installSignalHandlers() {
-        for signalNumber in [SIGINT, SIGTERM, SIGHUP] {
-            signal(signalNumber, SIG_IGN)
-            let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: queue)
-            source.setEventHandler { [weak self] in
-                self?.emit("received signal \(signalNumber), unmounting")
-                self?.performCleanupAndExit(status: 0)
-            }
-            source.resume()
-            signalSources.append(source)
-        }
-    }
-
-    private func installParentWatcher() {
-        let parentPID = self.config.parentPID
-        let queue = self.queue
-        let lifecycle = self
-
-        // If we've already been reparented (parent died between spawn and now),
-        // clean up immediately.
-        let currentParent = getppid()
-        if currentParent != parentPID {
-            emit(
-                "parent already gone (expected \(parentPID), getppid()=\(currentParent)), unmounting"
-            )
-            performCleanupAndExit(status: 0)
-            return
-        }
-
-        let watcher = ParentExitWatcher(pid: parentPID, queue: queue) {
-            lifecycle.emit("parent pid \(parentPID) exited, unmounting")
-            lifecycle.performCleanupAndExit(status: 0)
-        }
-        watcher.start()
-        parentWatcher = watcher
-    }
-
-    private func performCleanupAndExit(status: Int32) {
-        guard !cleanupStarted else { return }
-        cleanupStarted = true
-        parentWatcher?.stop()
-        unmount()
-        exit(status)
-    }
-
-    private func unmount() {
-        let mountPoint = config.mountPoint
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
-        process.arguments = ["unmount", "force", mountPoint]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-        } catch {
-            emit("failed to spawn diskutil: \(error)")
-            return
-        }
-
-        let timeoutSeconds: Double = 5
-        let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            process.waitUntilExit()
-            done.signal()
-        }
-        if done.wait(timeout: .now() + timeoutSeconds) == .timedOut {
-            emit("diskutil unmount force timed out after \(timeoutSeconds)s, killing diskutil")
-            process.terminate()
-            // Last resort: kill the FSKit extension process so the kernel can clean up
-            emit("killing VixenFS extension process as last resort")
-            let pkill = Process()
-            pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            pkill.arguments = ["-x", "VixenFS"]
-            pkill.standardOutput = FileHandle.nullDevice
-            pkill.standardError = FileHandle.nullDevice
-            try? pkill.run()
-            pkill.waitUntilExit()
-            return
-        }
-
-        if process.terminationStatus == 0 {
-            emit("unmounted \(mountPoint)")
-        } else {
-            emit("diskutil unmount force failed (status \(process.terminationStatus))")
         }
     }
 }
@@ -516,7 +373,7 @@ do {
         }
         let lifecycle = MountLifecycle(config: config)
         lifecycle.emit(
-            "starting (pid=\(ProcessInfo.processInfo.processIdentifier), parent-pid=\(config.parentPID), mount-point=\(config.mountPoint))"
+            "starting (pid=\(ProcessInfo.processInfo.processIdentifier), mount-point=\(config.mountPoint))"
         )
         try lifecycle.run()
     }

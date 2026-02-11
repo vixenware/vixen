@@ -108,29 +108,17 @@ impl FsStorage {
 // =============================================================================
 
 /// Complete CAS storage: chunks and nodes, plus ancillary mappings (cache,
-/// toolchain specs, registry specs). Optionally layers a read-only base
-/// under the primary.
+/// toolchain specs, registry specs).
 pub(crate) struct CasStore {
     primary: FsStorage,
-    base: Option<FsStorage>,
 }
 
 impl CasStore {
     pub(crate) fn new(primary: FsStorage) -> Self {
-        Self {
-            primary,
-            base: None,
-        }
+        Self { primary }
     }
 
-    pub(crate) fn with_base(primary: FsStorage, base: FsStorage) -> Self {
-        Self {
-            primary,
-            base: Some(base),
-        }
-    }
-
-    /// Create all required subdirectories (primary only — base is read-only).
+    /// Create all required subdirectories.
     pub(crate) async fn init(&self) -> io::Result<()> {
         let root = self.primary.root();
         tokio::fs::create_dir_all(root.join("chunks/blake3")).await?;
@@ -147,16 +135,10 @@ impl CasStore {
         self.primary.root().join("tmp")
     }
 
-    // -- Chunk operations (layered: primary → base) --
+    // -- Chunk operations --
 
     pub(crate) async fn get_chunk(&self, hash: &ChunkHash) -> io::Result<Option<Vec<u8>>> {
-        if let Some(data) = self.primary.get_chunk(hash).await? {
-            return Ok(Some(data));
-        }
-        if let Some(base) = &self.base {
-            return base.get_chunk(hash).await;
-        }
-        Ok(None)
+        self.primary.get_chunk(hash).await
     }
 
     pub(crate) async fn put_chunk(&self, hash: &ChunkHash, data: &[u8]) -> io::Result<()> {
@@ -164,25 +146,13 @@ impl CasStore {
     }
 
     pub(crate) async fn has_chunk(&self, hash: &ChunkHash) -> io::Result<bool> {
-        if self.primary.has_chunk(hash).await? {
-            return Ok(true);
-        }
-        if let Some(base) = &self.base {
-            return base.has_chunk(hash).await;
-        }
-        Ok(false)
+        self.primary.has_chunk(hash).await
     }
 
-    // -- Node operations (layered: primary → base) --
+    // -- Node operations --
 
     pub(crate) async fn get_node(&self, hash: &NodeHash) -> io::Result<Option<Vec<u8>>> {
-        if let Some(data) = self.primary.get_node(hash).await? {
-            return Ok(Some(data));
-        }
-        if let Some(base) = &self.base {
-            return base.get_node(hash).await;
-        }
-        Ok(None)
+        self.primary.get_node(hash).await
     }
 
     pub(crate) async fn put_node(&self, hash: &NodeHash, data: &[u8]) -> io::Result<()> {
@@ -190,13 +160,7 @@ impl CasStore {
     }
 
     pub(crate) async fn has_node(&self, hash: &NodeHash) -> io::Result<bool> {
-        if self.primary.has_node(hash).await? {
-            return Ok(true);
-        }
-        if let Some(base) = &self.base {
-            return base.has_node(hash).await;
-        }
-        Ok(false)
+        self.primary.has_node(hash).await
     }
 
     // -- Toolchain specs (spec_key → manifest_hash mapping) --
@@ -211,14 +175,7 @@ impl CasStore {
         key: &ToolchainSpecKey,
     ) -> io::Result<Option<Blake3Hash>> {
         let path = Self::toolchain_spec_path(self.primary.root(), key);
-        if let Some(hash) = read_hash_mapping(&path).await? {
-            return Ok(Some(hash));
-        }
-        if let Some(base) = &self.base {
-            let path = Self::toolchain_spec_path(base.root(), key);
-            return read_hash_mapping(&path).await;
-        }
-        Ok(None)
+        read_hash_mapping(&path).await
     }
 
     pub(crate) async fn put_toolchain_spec(
@@ -249,14 +206,7 @@ impl CasStore {
         key: &RegistrySpecKey,
     ) -> io::Result<Option<Blake3Hash>> {
         let path = Self::registry_spec_path(self.primary.root(), key);
-        if let Some(hash) = read_hash_mapping(&path).await? {
-            return Ok(Some(hash));
-        }
-        if let Some(base) = &self.base {
-            let path = Self::registry_spec_path(base.root(), key);
-            return read_hash_mapping(&path).await;
-        }
-        Ok(None)
+        read_hash_mapping(&path).await
     }
 
     pub(crate) async fn put_registry_spec(
@@ -305,14 +255,7 @@ impl CasStore {
 
     pub(crate) async fn get_cache(&self, key: &CacheKey) -> io::Result<Option<Blake3Hash>> {
         let path = Self::cache_path(self.primary.root(), key);
-        if let Some(hash) = read_hash_mapping(&path).await? {
-            return Ok(Some(hash));
-        }
-        if let Some(base) = &self.base {
-            let path = Self::cache_path(base.root(), key);
-            return read_hash_mapping(&path).await;
-        }
-        Ok(None)
+        read_hash_mapping(&path).await
     }
 
     pub(crate) async fn put_cache(

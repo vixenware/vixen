@@ -8,8 +8,8 @@ use jiff::Zoned;
 use std::time::Instant;
 use tracing::{debug, info};
 use vx_runner_proto::{
-    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RustCompileRequest,
-    RustCompileResult,
+    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RunRequest, RunResult,
+    RustCompileRequest, RustCompileResult,
 };
 use vx_store_proto::{
     CasNode, ChunkHash, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry, StoreProgress,
@@ -1063,6 +1063,423 @@ impl RunnerService {
         self.remove_action_prefix(&action.prefix_id).await;
 
         CcLinkResult {
+            success: true,
+            exit_code,
+            stdout: String::new(),
+            stderr: output.combined_output,
+            duration_ms,
+            output_manifest: Some(manifest_hash),
+            error: None,
+        }
+    }
+
+    /// Run a sandboxed toolchain command with declared CAS/VFS inputs and outputs.
+    pub async fn run_vfs(
+        &self,
+        request: RunRequest,
+        progress: roam::Tx<StoreProgress>,
+    ) -> RunResult {
+        let start = Instant::now();
+
+        let action = self.create_action_context().await;
+
+        let toolchain_prefix_id = match self
+            .ensure_toolchain_prefix(request.toolchain_manifest)
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return RunResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!("failed to ensure toolchain: {e}")),
+                };
+            }
+        };
+        let toolchain_path = action.mount_base.join(&toolchain_prefix_id);
+        let toolchain_path_str = toolchain_path.as_str().to_string();
+        let expand = |s: &str| s.replace("${VX_TOOLCHAIN}", &toolchain_path_str);
+
+        // Mount CAS trees into the prefix.
+        for mount in &request.tree_mounts {
+            match self.cas.get_node(NodeHash(mount.manifest)).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    self.remove_action_prefix(&action.prefix_id).await;
+                    return RunResult {
+                        success: false,
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        output_manifest: None,
+                        error: Some(format!(
+                            "tree manifest {} not found in CAS (mount '{}')",
+                            mount.manifest, mount.mount
+                        )),
+                    };
+                }
+                Err(e) => {
+                    self.remove_action_prefix(&action.prefix_id).await;
+                    return RunResult {
+                        success: false,
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        output_manifest: None,
+                        error: Some(format!("failed to fetch tree manifest: {e:?}")),
+                    };
+                }
+            }
+
+            if let Err(e) = self
+                .vfs
+                .mount_tree(&action.prefix_id, &mount.mount, mount.manifest)
+                .await
+            {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return RunResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!("failed to mount tree '{}': {e}", mount.mount)),
+                };
+            }
+        }
+
+        // Materialize individual files from node manifests into a tree and mount it.
+        if !request.file_mounts.is_empty() {
+            for fm in &request.file_mounts {
+                let manifest = match self.cas.get_node(NodeHash(fm.manifest)).await {
+                    Ok(Some(node_data)) => match CasNode::from_bytes(&node_data) {
+                        Ok(CasNode::Manifest(m)) => m,
+                        Ok(_) => {
+                            self.remove_action_prefix(&action.prefix_id).await;
+                            return RunResult {
+                                success: false,
+                                exit_code: -1,
+                                stdout: String::new(),
+                                stderr: String::new(),
+                                duration_ms: start.elapsed().as_millis() as u64,
+                                output_manifest: None,
+                                error: Some(format!(
+                                    "input manifest {} is not a Manifest node",
+                                    fm.manifest
+                                )),
+                            };
+                        }
+                        Err(e) => {
+                            self.remove_action_prefix(&action.prefix_id).await;
+                            return RunResult {
+                                success: false,
+                                exit_code: -1,
+                                stdout: String::new(),
+                                stderr: String::new(),
+                                duration_ms: start.elapsed().as_millis() as u64,
+                                output_manifest: None,
+                                error: Some(format!(
+                                    "failed to decode input manifest {}: {}",
+                                    fm.manifest, e
+                                )),
+                            };
+                        }
+                    },
+                    Ok(None) => {
+                        self.remove_action_prefix(&action.prefix_id).await;
+                        return RunResult {
+                            success: false,
+                            exit_code: -1,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            output_manifest: None,
+                            error: Some(format!("input manifest {} not found in CAS", fm.manifest)),
+                        };
+                    }
+                    Err(e) => {
+                        self.remove_action_prefix(&action.prefix_id).await;
+                        return RunResult {
+                            success: false,
+                            exit_code: -1,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            output_manifest: None,
+                            error: Some(format!("failed to fetch input manifest: {e:?}")),
+                        };
+                    }
+                };
+
+                let entry = match manifest.outputs.iter().find(|o| o.logical == fm.logical) {
+                    Some(e) => e,
+                    None => {
+                        self.remove_action_prefix(&action.prefix_id).await;
+                        return RunResult {
+                            success: false,
+                            exit_code: -1,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            output_manifest: None,
+                            error: Some(format!(
+                                "input manifest {} missing logical output '{}'",
+                                fm.manifest, fm.logical
+                            )),
+                        };
+                    }
+                };
+
+                let (blob_hash, blob_size) = match &entry.blob {
+                    OutputBlobRef::Small { chunk, size } => (chunk.0, *size),
+                    OutputBlobRef::Large {
+                        content_hash, size, ..
+                    } => (content_hash.0, *size),
+                };
+                if let Err(e) = self
+                    .vfs
+                    .add_file_to_prefix(
+                        &action.prefix_id,
+                        &fm.path,
+                        blob_hash,
+                        blob_size,
+                        entry.executable,
+                    )
+                    .await
+                {
+                    self.remove_action_prefix(&action.prefix_id).await;
+                    return RunResult {
+                        success: false,
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        output_manifest: None,
+                        error: Some(format!(
+                            "failed to materialize file mount '{}': {e}",
+                            fm.path
+                        )),
+                    };
+                }
+            }
+        }
+
+        // Ensure out/ exists.
+        self.create_output_dir_in_prefix(&action.prefix_id).await;
+
+        // Validate outputs are under out/.
+        for out in &request.outputs {
+            if !out.path.starts_with("out/") {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return RunResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!(
+                        "output '{}' must be under 'out/' (got '{}')",
+                        out.logical, out.path
+                    )),
+                };
+            }
+        }
+
+        let program_path = toolchain_path.join(&request.program_rel);
+        let mut cmd = crate::sandbox::sandboxed_command(program_path.as_str(), &action);
+        for arg in &request.args {
+            cmd.arg(expand(arg));
+        }
+
+        let cwd = request
+            .cwd
+            .as_deref()
+            .map(|p| action.prefix_path.join(p))
+            .unwrap_or_else(|| action.prefix_path.clone());
+        cmd.current_dir(cwd.as_str());
+
+        if request.clear_env {
+            cmd.env_clear();
+        }
+
+        // Preserve a couple host env vars (useful for sandbox wrappers).
+        if let Ok(path) = std::env::var("PATH") {
+            cmd.env("PATH", path);
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            cmd.env("HOME", home);
+        }
+
+        for (k, v) in &request.env {
+            cmd.env(k, expand(v));
+        }
+
+        // Zig needs its lib dir set to locate libc and friends.
+        if request.program_rel == "zig" {
+            cmd.env("ZIG_LIB_DIR", toolchain_path.join("lib").as_str());
+        }
+
+        let action_desc = format!(
+            "{} {}",
+            request.program_rel,
+            request.args.first().cloned().unwrap_or_default()
+        );
+
+        let action_kind = if request.args.iter().any(|a| a == "-c") {
+            ActionKind::CcCompile
+        } else {
+            ActionKind::CcLink
+        };
+
+        let output = match crate::sandbox::run_sandboxed_command(
+            cmd,
+            &action_kind,
+            &action_desc,
+            progress,
+            None,
+        )
+        .await
+        {
+            Ok(o) => o,
+            Err(CommandError::SpawnFailed(e)) => {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return RunResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!("failed to execute command: {e}")),
+                };
+            }
+            Err(CommandError::TimedOut {
+                action_desc,
+                timeout,
+                partial_output,
+                ..
+            }) => {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return RunResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: partial_output,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!(
+                        "action '{}' timed out after {}s (limit: {}s)",
+                        action_desc,
+                        timeout.as_secs(),
+                        timeout.as_secs()
+                    )),
+                };
+            }
+            Err(CommandError::Cancelled {
+                action_desc,
+                partial_output,
+            }) => {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return RunResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: partial_output,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!("action '{}' cancelled", action_desc)),
+                };
+            }
+        };
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let exit_code = output.exit_status.code().unwrap_or(-1);
+        if !output.exit_status.success() {
+            self.remove_action_prefix(&action.prefix_id).await;
+            return RunResult {
+                success: false,
+                exit_code,
+                stdout: String::new(),
+                stderr: output.combined_output,
+                duration_ms,
+                output_manifest: None,
+                error: None,
+            };
+        }
+
+        let flushed = self.flush_prefix_outputs(&action.prefix_id).await;
+
+        let mut outputs = Vec::new();
+        for out in &request.outputs {
+            let (blob, size) = match flushed.get(&out.path) {
+                Some(&(h, s)) => (h, s),
+                None => {
+                    self.remove_action_prefix(&action.prefix_id).await;
+                    return RunResult {
+                        success: false,
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: output.combined_output,
+                        duration_ms,
+                        output_manifest: None,
+                        error: Some(format!("output {} not found in VFS", out.path)),
+                    };
+                }
+            };
+
+            let filename = out
+                .path
+                .rsplit_once('/')
+                .map(|(_, f)| f.to_string())
+                .unwrap_or_else(|| out.path.clone());
+
+            outputs.push(OutputEntry {
+                logical: out.logical.clone(),
+                filename,
+                blob: OutputBlobRef::Small {
+                    chunk: ChunkHash(blob),
+                    size,
+                },
+                executable: out.executable,
+            });
+        }
+
+        let cache_key = vx_cache::run_cache_key(&request);
+        let manifest = NodeManifest {
+            node_id: NodeId(format!("run:{}", request.program_rel)),
+            cache_key,
+            produced_at: Zoned::now().to_string(),
+            outputs,
+        };
+
+        let cas_node = CasNode::Manifest(manifest);
+        let (node_bytes, node_hash) = cas_node.to_bytes_and_hash();
+        let manifest_hash = node_hash.0;
+        if let Err(e) = self.cas.put_node(node_hash, node_bytes).await {
+            self.remove_action_prefix(&action.prefix_id).await;
+            return RunResult {
+                success: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: output.combined_output,
+                duration_ms,
+                output_manifest: None,
+                error: Some(format!("failed to store manifest: {:?}", e)),
+            };
+        }
+
+        self.remove_action_prefix(&action.prefix_id).await;
+
+        RunResult {
             success: true,
             exit_code,
             stdout: String::new(),

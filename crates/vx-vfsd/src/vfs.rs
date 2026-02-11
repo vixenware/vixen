@@ -33,11 +33,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use camino::Utf8PathBuf;
+use peeps::locks::DiagnosticRwLock;
 use vixenfs_proto::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
     ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
 };
-use peeps::locks::DiagnosticRwLock;
 use vx_store_proto::{Blake3Hash, BlobNode, CasNode, ChunkHash, NodeHash, StoreClient};
 
 /// A virtual filesystem item
@@ -124,12 +124,13 @@ impl VfsItems {
         let item = self.items.remove(&id)?;
         // Remove from parent's children map
         if item.parent_id != 0
-            && let Some(siblings) = self.children.get_mut(&item.parent_id) {
-                siblings.remove(&item.name);
-                if siblings.is_empty() {
-                    self.children.remove(&item.parent_id);
-                }
+            && let Some(siblings) = self.children.get_mut(&item.parent_id)
+        {
+            siblings.remove(&item.name);
+            if siblings.is_empty() {
+                self.children.remove(&item.parent_id);
             }
+        }
         // Remove this item's children entry (even if non-empty — caller is
         // responsible for removing descendants first)
         self.children.remove(&id);
@@ -1123,11 +1124,12 @@ impl Vfs for CasVfs {
         if items.child_exists(new_parent_id, &new_name) {
             // Could be ourselves moving to same parent with same name — check
             if let Some(existing) = items.lookup_child(new_parent_id, &new_name)
-                && existing.id != item_id {
-                    return VfsResult {
-                        error: errno::EEXIST,
-                    };
-                }
+                && existing.id != item_id
+            {
+                return VfsResult {
+                    error: errno::EEXIST,
+                };
+            }
         }
 
         items.rename(item_id, new_parent_id, new_name);

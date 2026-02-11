@@ -605,6 +605,7 @@ version = "0.43.2"
 source = "git+https://github.com/facet-rs/facet?branch=main#967e78d7ba4ba05b270996c1235f951665cd201b"
 dependencies = [
  "autocfg",
+ "bytes",
  "camino",
  "const-fnv1a-hash",
  "iddqd",
@@ -616,7 +617,7 @@ dependencies = [
 [[package]]
 name = "facet-dessert"
 version = "0.43.2"
-source = "git+https://github.com/facet-rs/facet?branch=main#8a80c523d025667d158d21f66700b4a37735107c"
+source = "git+https://github.com/facet-rs/facet?branch=main#967e78d7ba4ba05b270996c1235f951665cd201b"
 dependencies = [
  "facet-core",
  "facet-reflect",
@@ -633,7 +634,7 @@ dependencies = [
 [[package]]
 name = "facet-format"
 version = "0.43.2"
-source = "git+https://github.com/facet-rs/facet?branch=main#8a80c523d025667d158d21f66700b4a37735107c"
+source = "git+https://github.com/facet-rs/facet?branch=main#967e78d7ba4ba05b270996c1235f951665cd201b"
 dependencies = [
  "facet-core",
  "facet-dessert",
@@ -645,7 +646,7 @@ dependencies = [
 [[package]]
 name = "facet-json"
 version = "0.43.2"
-source = "git+https://github.com/facet-rs/facet?branch=main#8a80c523d025667d158d21f66700b4a37735107c"
+source = "git+https://github.com/facet-rs/facet?branch=main#967e78d7ba4ba05b270996c1235f951665cd201b"
 dependencies = [
  "facet",
  "facet-core",
@@ -743,7 +744,7 @@ dependencies = [
 [[package]]
 name = "facet-solver"
 version = "0.43.2"
-source = "git+https://github.com/facet-rs/facet?branch=main#8a80c523d025667d158d21f66700b4a37735107c"
+source = "git+https://github.com/facet-rs/facet?branch=main#967e78d7ba4ba05b270996c1235f951665cd201b"
 dependencies = [
  "facet-core",
  "facet-reflect",
@@ -1708,7 +1709,7 @@ dependencies = [
 [[package]]
 name = "peeps"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/peeps?branch=main#2e00454e83aacd0a4d7e96a9f623131dc63e7985"
+source = "git+https://github.com/bearcove/peeps?branch=main#eb770af17da535f5409da6756a0c78c93fb1818f"
 dependencies = [
  "facet",
  "facet-json",
@@ -1723,7 +1724,7 @@ dependencies = [
 [[package]]
 name = "peeps-locks"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/peeps?branch=main#2e00454e83aacd0a4d7e96a9f623131dc63e7985"
+source = "git+https://github.com/bearcove/peeps?branch=main#eb770af17da535f5409da6756a0c78c93fb1818f"
 dependencies = [
  "facet",
  "parking_lot",
@@ -1734,7 +1735,7 @@ dependencies = [
 [[package]]
 name = "peeps-tasks"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/peeps?branch=main#2e00454e83aacd0a4d7e96a9f623131dc63e7985"
+source = "git+https://github.com/bearcove/peeps?branch=main#eb770af17da535f5409da6756a0c78c93fb1818f"
 dependencies = [
  "backtrace",
  "facet",
@@ -1745,7 +1746,7 @@ dependencies = [
 [[package]]
 name = "peeps-threads"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/peeps?branch=main#2e00454e83aacd0a4d7e96a9f623131dc63e7985"
+source = "git+https://github.com/bearcove/peeps?branch=main#eb770af17da535f5409da6756a0c78c93fb1818f"
 dependencies = [
  "facet",
  "libc",
@@ -1755,7 +1756,7 @@ dependencies = [
 [[package]]
 name = "peeps-types"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/peeps?branch=main#2e00454e83aacd0a4d7e96a9f623131dc63e7985"
+source = "git+https://github.com/bearcove/peeps?branch=main#eb770af17da535f5409da6756a0c78c93fb1818f"
 dependencies = [
  "facet",
  "inventory",
@@ -2492,6 +2493,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "strid"
+version = "8.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a776194b07def83043ed2c0f690ce82366973370f647f7de4d4b2ef54a1b5ef"
+dependencies = [
+ "facet",
+ "strid-macros",
+]
+
+[[package]]
+name = "strid-macros"
+version = "8.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27efbaec5b763ecc98b1bb4c12150c71c7d104ff628363086052abaf9fed29ed"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unsynn",
+]
+
+[[package]]
 name = "strip-ansi-escapes"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2911,6 +2933,7 @@ version = "3.0.0"
 source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
 dependencies = [
  "libc",
+ "tokio",
  "windows-sys 0.61.2",
 ]
 
@@ -2988,7 +3011,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ulid",
- "ur-taking-me-with-you",
  "vx-io",
  "vx-report",
  "vx-store-proto",
@@ -3054,6 +3076,8 @@ dependencies = [
  "roam-stream",
  "tempfile",
  "tokio",
+ "tracing",
+ "ur-taking-me-with-you",
 ]
 
 [[package]]
@@ -3077,6 +3101,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-plan"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "facet",
+ "facet-json",
+ "strid",
+]
+
+[[package]]
 name = "vx-project"
 version = "0.1.0"
 dependencies = [
@@ -3087,6 +3121,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-reaper"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "vx-report"
 version = "0.1.0"
 dependencies = [
@@ -3094,6 +3135,7 @@ dependencies = [
  "facet",
  "facet-json",
  "ulid",
+ "vx-plan",
 ]
 
 [[package]]
@@ -3282,11 +3324,9 @@ dependencies = [
  "fastcdc",
  "fastrand",
  "figue",
- "roam",
  "roam-stream",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "ur-taking-me-with-you",
  "vx-io",
  "vx-store-proto",
@@ -3308,9 +3348,11 @@ dependencies = [
  "camino",
  "cfg-if",
  "facet",
+ "fastrand",
  "figue",
  "futures-util",
  "libc",
+ "owo-colors",
  "peeps",
  "roam",
  "roam-session",
@@ -3346,14 +3388,16 @@ dependencies = [
  "tokio-test-lite",
  "tokio-util",
  "tracing",
- "ur-taking-me-with-you",
+ "vx-cache",
  "vx-io",
  "vx-manifest",
+ "vx-plan",
  "vx-project",
  "vx-report",
  "vx-rs",
  "vx-runner-proto",
  "vx-store-proto",
+ "vx-tarball",
  "vx-toolchain",
  "vx-tracing",
  "vxd-proto",

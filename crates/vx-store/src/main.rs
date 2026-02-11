@@ -69,12 +69,14 @@ async fn async_main() -> Result<()> {
 
     // Initialize tracing
     vx_tracing::init_service("vx_store=info");
+    tracing::debug!("tracing initialized");
 
     // Initialize peeps instrumentation
     peeps::init();
     peeps::install_sigusr1("vx-store");
 
     tracing::info!("hello from vixen-store");
+    tracing::debug!("parsing args");
 
     let args: Args = args::Driver::new(
         args::builder::<Args>()?
@@ -88,20 +90,17 @@ async fn async_main() -> Result<()> {
     .run()
     .unwrap();
 
+    tracing::debug!("args parsed, listen={}", args.listen);
     let bind = Endpoint::parse(&args.listen)?;
 
     // Build storage backend
-    let storage = match std::env::var("VX_CAS_BASE") {
-        Ok(base) => CasStore::with_base(
-            FsStorage::new(args.root.clone()),
-            FsStorage::new(Utf8PathBuf::from(base)),
-        ),
-        Err(_) => CasStore::new(FsStorage::new(args.root.clone())),
-    };
+    let storage = CasStore::new(FsStorage::new(args.root.clone()));
 
     // Initialize storage directories
+    tracing::debug!("initializing storage at {}", args.root);
     tracing::info!("Initializing store at {}", args.root);
     storage.init().await?;
+    tracing::debug!("storage initialized");
 
     // Initialize store service
     let store = StoreService::new(storage, args.vx_home);
@@ -117,11 +116,8 @@ async fn async_main() -> Result<()> {
                 sigusr1.recv().await;
                 tracing::info!("SIGUSR1 received, dumping diagnostics");
                 let sem = &store.download_semaphore;
-                eprintln!("[vx-store] SIGUSR1 received");
-                eprintln!(
-                    "[vx-store] download_semaphore: available={}",
-                    sem.available_permits(),
-                );
+                tracing::debug!("SIGUSR1 received");
+                tracing::debug!("download_semaphore: available={}", sem.available_permits(),);
                 eprint!("{}", roam_session::diagnostic::dump_all_diagnostics());
 
                 let mut custom = std::collections::HashMap::new();
@@ -141,13 +137,14 @@ async fn async_main() -> Result<()> {
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
+        tracing::info!("accepted connection");
         let store = store.clone();
 
         peeps::tasks::spawn_tracked(format!("store_connection_{}", peer_addr), async move {
             tracing::debug!("New connection from {}", peer_addr);
 
             let dispatcher = StoreDispatcher::new(store);
-            let Ok((_handle, _incoming, driver)) = accept(
+            let (_handle, _incoming, driver) = match accept(
                 stream,
                 HandshakeConfig {
                     max_payload_size: 256 * 1024 * 1024, // 256 MiB
@@ -157,9 +154,12 @@ async fn async_main() -> Result<()> {
                 dispatcher,
             )
             .await
-            else {
-                tracing::debug!("Handshake failed for {}", peer_addr);
-                return;
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::debug!("Handshake failed for {}: {e}", peer_addr);
+                    return;
+                }
             };
             if let Err(e) = driver.run().await {
                 tracing::warn!("Connection error from {}: {}", peer_addr, e);

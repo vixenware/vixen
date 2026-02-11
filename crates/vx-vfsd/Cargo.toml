@@ -40,11 +40,13 @@ figue = { workspace = true }
 
 # Utilities
 camino = { workspace = true }
+fastrand = { workspace = true }
 futures-util = { workspace = true }
 cfg-if = { workspace = true }
 tracing = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
 vx-tracing.workspace = true
+owo-colors.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

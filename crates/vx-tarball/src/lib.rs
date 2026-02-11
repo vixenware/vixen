@@ -396,7 +396,9 @@ pub async fn materialize_tree(
 
         match &entry.kind {
             TreeEntryKind::File {
-                blob, executable: _executable, ..
+                blob,
+                executable: _executable,
+                ..
             } => {
                 // Ensure parent directory exists
                 if let Some(parent) = target_path.parent() {

@@ -122,10 +122,13 @@ impl TelemetryState {
     pub fn request_start(&self, unique: u64, opcode: u32) {
         let mut inner = self.inner.lock().unwrap();
         inner.total_dispatched += 1;
-        inner.in_flight.insert(unique, InFlightOp {
-            opcode,
-            start: Instant::now(),
-        });
+        inner.in_flight.insert(
+            unique,
+            InFlightOp {
+                opcode,
+                start: Instant::now(),
+            },
+        );
     }
 
     /// Record that a FUSE response has been sent.

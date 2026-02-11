@@ -139,3 +139,80 @@ pub fn dump_platform_diagnostics() {
 pub fn should_create_mount_dir(_mount_path: &Utf8PathBuf) -> bool {
     true
 }
+
+/// Collect diagnostics when the VFS smoke test fails.
+/// Returns all diagnostics as a single string so the caller can print it atomically.
+pub async fn collect_smoke_test_diagnostics(mount_path: &Utf8PathBuf) -> String {
+    use owo_colors::OwoColorize;
+    use std::fmt::Write;
+
+    let mut out = String::new();
+
+    writeln!(
+        out,
+        "\n{}\n",
+        "=== VFS SMOKE TEST DIAGNOSTICS ===".red().bold()
+    )
+    .unwrap();
+
+    // Check /proc/mounts for FUSE entries
+    writeln!(out, "{}", "--- FUSE mounts ---".yellow().bold()).unwrap();
+    match std::fs::read_to_string("/proc/mounts") {
+        Ok(mounts) => {
+            let fuse_lines: Vec<&str> = mounts
+                .lines()
+                .filter(|l| l.contains("fuse") || l.contains("vixen"))
+                .collect();
+            if fuse_lines.is_empty() {
+                writeln!(out, "  No FUSE/vixen mounts found").unwrap();
+            } else {
+                for line in &fuse_lines {
+                    writeln!(out, "  {line}").unwrap();
+                }
+            }
+        }
+        Err(e) => writeln!(out, "  Could not read /proc/mounts: {e}").unwrap(),
+    }
+
+    // FUSE connection state
+    writeln!(out, "\n{}", "--- FUSE connections ---".yellow().bold()).unwrap();
+    if let Ok(entries) = std::fs::read_dir("/sys/fs/fuse/connections") {
+        for entry in entries.flatten() {
+            let waiting_path = entry.path().join("waiting");
+            if let Ok(val) = std::fs::read_to_string(&waiting_path) {
+                writeln!(out, "  {}: waiting={}", entry.path().display(), val.trim()).unwrap();
+            }
+        }
+    }
+
+    // Process inventory
+    writeln!(out, "\n{}", "--- Vixen processes ---".yellow().bold()).unwrap();
+    match tokio::process::Command::new("pgrep")
+        .args(["-la", "(vx-|vixen)"])
+        .output()
+        .await
+    {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.trim().is_empty() {
+                writeln!(out, "  No vixen-related processes found").unwrap();
+            } else {
+                for line in stdout.lines() {
+                    writeln!(out, "  {line}").unwrap();
+                }
+            }
+        }
+        Err(e) => writeln!(out, "  pgrep failed: {e}").unwrap(),
+    }
+
+    // Mount point stat
+    writeln!(out, "\n{}", "--- Mount point ---".yellow().bold()).unwrap();
+    writeln!(out, "  Expected: {mount_path}").unwrap();
+    match std::fs::symlink_metadata(mount_path.as_std_path()) {
+        Ok(meta) => writeln!(out, "  stat: exists, is_dir={}", meta.is_dir()).unwrap(),
+        Err(e) => writeln!(out, "  stat: {e}").unwrap(),
+    }
+
+    writeln!(out, "\n{}", "=== END DIAGNOSTICS ===".red().bold()).unwrap();
+    out
+}

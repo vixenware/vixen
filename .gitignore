@@ -18,3 +18,8 @@ profile.json.gz
 
 # swift build
 .build/
+
+# playwright
+.playwright-mcp
+
+fdprefix*

@@ -47,6 +47,10 @@ struct BuildArgs {
     json: bool,
 }
 
+/// Start daemons
+#[derive(Facet, Debug)]
+struct StartArgs {}
+
 /// Arguments for the `kill` subcommand
 #[derive(Facet, Debug)]
 struct KillArgs {}
@@ -134,6 +138,9 @@ enum CliCommand {
     /// Execute a build
     Build(BuildArgs),
 
+    /// Just start daemons
+    Start(StartArgs),
+
     /// Stop the daemon process
     Kill(KillArgs),
 
@@ -193,6 +200,10 @@ async fn async_main() -> Result<()> {
     match cli.command {
         // Build command gets TUI-based tracing (initialized in cmd_build)
         CliCommand::Build(args) => cmd_build(args).await,
+        CliCommand::Start(args) => {
+            vx_tracing::init_cli_stderr();
+            cmd_start(args).await
+        }
         // Other commands use stderr tracing
         CliCommand::Kill(args) => {
             vx_tracing::init_cli_stderr();
@@ -381,13 +392,17 @@ impl ProgressListener for ProgressListenerImpl {
     }
 }
 
-/// Connect to the daemon, spawning it if necessary
+/// Connect to the daemon, spawning it if necessary.
+///
+/// The TUI and progress dispatcher are created here because they're
+/// tightly coupled to the vx CLI's display logic.
 async fn get_or_spawn_daemon(
     no_spawn: bool,
     no_tui: bool,
     json: bool,
 ) -> Result<(VxdClient<VxdCaller>, Option<tui::TuiHandle>)> {
     use vx_io::net::Endpoint;
+    use vx_io::spawn::ServiceBuilder;
 
     let vx_home = std::env::var("VX_HOME")
         .unwrap_or_else(|_| format!("{}/.vx", std::env::var("HOME").expect("HOME not set")));
@@ -408,85 +423,7 @@ async fn get_or_spawn_daemon(
         }
     };
 
-    let backoff_ms = [10, 50, 100, 500, 1000];
-
-    // Try to connect first
-    match try_connect_daemon(&endpoint, no_tui, json).await {
-        Ok(result) => Ok(result),
-        Err(e) => {
-            // If no_spawn is set, don't try to spawn - just fail
-            if no_spawn {
-                // Allow daemon startup races in tests and external orchestration:
-                // retry connection a few times, but still never auto-spawn.
-                for delay in backoff_ms {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
-                    if let Ok(result) = try_connect_daemon(&endpoint, no_tui, json).await {
-                        return Ok(result);
-                    }
-                }
-                eyre::bail!(
-                    "failed to connect to vxd at {} (--no-spawn prevents auto-spawning): {}",
-                    endpoint,
-                    e
-                );
-            }
-
-            if !endpoint.is_local() {
-                eyre::bail!(
-                    "failed to connect to vxd at {}.\n\
-                    Auto-spawn is only supported for local endpoints.\n\
-                    Start vxd on the remote host, or point VXD to a local endpoint.",
-                    endpoint
-                );
-            }
-
-            // Spawn daemon (local-only)
-            tracing::info!("Daemon not running, spawning vxd on {}", endpoint);
-
-            // Redirect daemon logs to ~/.vx/vxd.log
-            let log_path = vx_home.join("vxd.log");
-
-            // Ensure ~/.vx directory exists
-            std::fs::create_dir_all(&vx_home)?;
-
-            let log_file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)?;
-
-            let mut cmd = std::process::Command::new("vxd");
-            // Pass the endpoint to the spawned daemon
-            cmd.env("VX_HOME", vx_home.as_str());
-            cmd.env("VXD", endpoint.display());
-            cmd.stdout(std::process::Stdio::from(log_file.try_clone()?));
-            cmd.stderr(std::process::Stdio::from(log_file));
-
-            ur_taking_me_with_you::spawn_dying_with_parent(cmd)
-                .map_err(|e| eyre::eyre!("failed to spawn vxd: {}", e))?;
-
-            tracing::info!("vxd logs: {}", log_path);
-
-            // Retry with backoff
-            for (attempt, delay) in backoff_ms.iter().enumerate() {
-                tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
-                if let Ok(result) = try_connect_daemon(&endpoint, no_tui, json).await {
-                    tracing::trace!("Connected to daemon after {} attempts", attempt + 1);
-                    return Ok(result);
-                }
-            }
-
-            // Final attempt
-            try_connect_daemon(&endpoint, no_tui, json).await
-        }
-    }
-}
-
-async fn try_connect_daemon(
-    endpoint: &vx_io::net::Endpoint,
-    no_tui: bool,
-    json: bool,
-) -> Result<(VxdClient<VxdCaller>, Option<tui::TuiHandle>)> {
-    // Create TUI and progress listener (only if TUI is enabled)
+    // Create TUI and progress listener
     let tui = if no_tui {
         None
     } else {
@@ -495,22 +432,38 @@ async fn try_connect_daemon(
     let progress_listener = ProgressListenerImpl::new(tui.clone(), json);
     let dispatcher = vxd_proto::ProgressListenerDispatcher::new(progress_listener);
 
-    let caller =
-        vx_io::net::reconnecting_client_named(endpoint.clone(), dispatcher, Some("vx".into()));
-    if let Err(e) = caller.handle().await {
-        // If the connection attempt fails, ensure we tear down the display task.
+    let mut builder = ServiceBuilder::new("vxd", endpoint.clone(), dispatcher)
+        .caller_name("vx")
+        .env("VX_HOME", vx_home.as_str())
+        .log_path(vx_home.join("vxd.log"));
+
+    if no_spawn || std::env::var("VXD").is_ok() {
+        builder = builder.connect_only();
+    } else if !endpoint.is_local() {
+        // Shut down TUI before bailing
         if let Some(tui) = tui {
             tui.shutdown().await;
         }
-        return Err(eyre::eyre!(
-            "failed to connect to daemon at {}: {}",
-            endpoint,
-            e
-        ));
+        eyre::bail!(
+            "failed to connect to vxd at {}.\n\
+            Auto-spawn is only supported for local endpoints.\n\
+            Start vxd on the remote host, or point VXD to a local endpoint.",
+            endpoint
+        );
     }
-    let client = VxdClient::new(caller);
 
-    Ok((client, tui))
+    match builder.connect().await {
+        Ok(handle) => {
+            let client = VxdClient::new(handle.caller);
+            Ok((client, tui))
+        }
+        Err(e) => {
+            if let Some(tui) = tui {
+                tui.shutdown().await;
+            }
+            Err(e)
+        }
+    }
 }
 
 async fn cmd_build(args: BuildArgs) -> Result<()> {
@@ -523,6 +476,14 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
     // Skip in JSON mode — CI doesn't need terminal progress sequences.
     if no_tui && !json_mode {
         emit_osc_progress(tui::OscProgressState::Indeterminate, None);
+    }
+
+    // In JSON mode, clear VX_TEST so spawned daemons redirect output to log files
+    // instead of inheriting stdout (which would pollute the JSON output).
+    if json_mode {
+        unsafe {
+            std::env::remove_var("VX_TEST");
+        }
     }
 
     // Connect to daemon (spawning if necessary) and set up TUI
@@ -677,6 +638,20 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
     }
 }
 
+async fn cmd_start(_args: StartArgs) -> Result<()> {
+    let (daemon, _tui) = get_or_spawn_daemon(false, true, false).await?;
+
+    tracing::info!("{} daemon is running", "✓".green().bold());
+
+    // Ping to verify connection
+    let version = daemon.version().await?;
+
+    tracing::info!("{} connected to vxd", "✓".green().bold());
+    tracing::info!("   {}", version);
+
+    Ok(())
+}
+
 async fn cmd_kill(_args: KillArgs) -> Result<()> {
     use vx_io::net::Endpoint;
 
@@ -699,9 +674,20 @@ async fn cmd_kill(_args: KillArgs) -> Result<()> {
     };
 
     // Try graceful shutdown via RPC first
-    match try_connect_daemon(&endpoint, true, false).await {
-        Ok((daemon, _tui)) => {
-            println!("{} daemon at {}", "Stopping".green().bold(), endpoint);
+    let kill_result = {
+        use vx_io::spawn::ServiceBuilder;
+        let progress_listener = ProgressListenerImpl::new(None, false);
+        let dispatcher = vxd_proto::ProgressListenerDispatcher::new(progress_listener);
+        ServiceBuilder::new("vxd", endpoint.clone(), dispatcher)
+            .caller_name("vx")
+            .connect_only()
+            .connect()
+            .await
+    };
+    match kill_result {
+        Ok(handle) => {
+            let daemon = VxdClient::new(handle.caller);
+            tracing::info!("{} daemon at {}", "Stopping".green().bold(), endpoint);
             if let Err(e) = daemon.shutdown().await {
                 // shutdown() calls process::exit(0) on the daemon side, so the
                 // connection closing is expected — not an error.
@@ -709,10 +695,10 @@ async fn cmd_kill(_args: KillArgs) -> Result<()> {
             }
             // Give it a moment to finish cleanup
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            println!("{} daemon stopped", "✓".green().bold());
+            tracing::info!("{} daemon stopped", "✓".green().bold());
         }
         Err(_) => {
-            println!(
+            tracing::info!(
                 "{} daemon not reachable (child processes use die-with-parent, so they'll exit on their own)",
                 "Note:".yellow().bold()
             );
@@ -992,7 +978,8 @@ async fn cmd_debug(args: DebugArgs) -> Result<()> {
     }
 
     // Default: serve web dashboard
-    serve_debug_dashboard(dumps).await
+    peeps::serve_dashboard(dumps).await?;
+    Ok(())
 }
 
 /// Find running vixen processes via pgrep.
@@ -1141,64 +1128,6 @@ fn print_text_dump(dumps: &[peeps::ProcessDump]) {
 
         eprintln!();
     }
-}
-
-/// Serve a web dashboard with the collected dumps.
-async fn serve_debug_dashboard(dumps: Vec<peeps::ProcessDump>) -> Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    let dumps_json = facet_json::to_string(&dumps)?;
-
-    let html = build_dashboard_html(&dumps_json);
-
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
-    let url = format!("http://{addr}");
-
-    eprintln!("Dashboard: {url}");
-    eprintln!("Press Ctrl-C to stop.");
-
-    // Open browser
-    let _ = std::process::Command::new("open").arg(&url).status();
-
-    // Simple HTTP server — serves the dashboard HTML and API endpoints
-    loop {
-        let (mut stream, _) = listener.accept().await?;
-        let dumps_json = dumps_json.clone();
-        let html = html.clone();
-
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; 4096];
-            let n = match stream.read(&mut buf).await {
-                Ok(n) => n,
-                Err(_) => return,
-            };
-            let request = String::from_utf8_lossy(&buf[..n]);
-            let path = request
-                .lines()
-                .next()
-                .and_then(|line| line.split_whitespace().nth(1))
-                .unwrap_or("/");
-
-            let (status, content_type, body) = match path {
-                "/api/dump" => ("200 OK", "application/json", dumps_json),
-                _ => ("200 OK", "text/html; charset=utf-8", html),
-            };
-
-            let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
-            let _ = stream.write_all(body.as_bytes()).await;
-        });
-    }
-}
-
-fn build_dashboard_html(dumps_json: &str) -> String {
-    const TEMPLATE: &str = include_str!("debug_dashboard.html");
-    TEMPLATE.replace("__DUMPS_JSON__", dumps_json)
 }
 
 fn cmd_explain(args: ExplainArgs) -> Result<()> {

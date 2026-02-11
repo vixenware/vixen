@@ -83,151 +83,12 @@ struct Args {
     builtins: args::FigueBuiltins,
 }
 
-/// Connect to CAS and return a client handle
-async fn connect_to_cas(endpoint: &Endpoint) -> Result<vx_store_proto::StoreClient<CasCaller>> {
-    let caller = vx_io::net::reconnecting_client_named(
-        endpoint.clone(),
-        NoDispatcher,
-        Some("vx-runner".into()),
-    );
-    caller
-        .handle()
-        .await
-        .map_err(|e| eyre::eyre!("failed to connect to CAS at {}: {}", endpoint, e))?;
-    Ok(vx_store_proto::StoreClient::new(caller))
-}
-
-/// Spawn vx-vfsd if not already running, return any startup errors
-async fn ensure_vfsd(
-    vfsd_endpoint: &Endpoint,
-    vx_home: &Utf8PathBuf,
-    cas_endpoint: &Endpoint,
-) -> Result<()> {
-    use std::process::Stdio;
-
-    // Check if already running
-    if vx_io::net::try_connect(vfsd_endpoint).await?.is_some() {
-        tracing::debug!("vx-vfsd already running at {}", vfsd_endpoint);
-        return Ok(());
-    }
-
-    tracing::info!("Spawning vx-vfsd.");
-
-    // Find vx-vfsd binary (sibling to vx-runner)
-    let binary_path = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("vx-vfsd")))
-        .filter(|candidate| candidate.exists())
-        .unwrap_or_else(|| std::path::PathBuf::from("vx-vfsd"));
-
-    let mount_path = runner_mount_base();
-
-    let mut cmd = std::process::Command::new(&binary_path);
-    cmd.arg("--listen").arg(vfsd_endpoint.display());
-    cmd.arg("--mount").arg(mount_path.as_str());
-    cmd.arg("--store").arg(cas_endpoint.display());
-    cmd.env("VX_HOME", vx_home.as_str());
-
-    // Capture stderr for error messages
-    if std::env::var("VX_TEST").is_ok() {
-        cmd.stdout(Stdio::inherit());
-    } else {
-        cmd.stdout(Stdio::null());
-    }
-    cmd.stderr(Stdio::piped());
-
-    let mut child = ur_taking_me_with_you::spawn_dying_with_parent(cmd)?;
-
-    // Capture stderr in background for error reporting
-    let stderr = child.stderr.take().expect("stderr was piped");
-    let stderr_buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let stderr_buffer_clone = stderr_buffer.clone();
-
-    peeps::tasks::spawn_tracked("vfsd_stderr_monitor", async move {
-        use tokio::io::AsyncBufReadExt;
-        let mut stderr =
-            tokio::io::BufReader::new(tokio::process::ChildStderr::from_std(stderr).unwrap());
-
-        // Stream line-by-line to both buffer and stderr
-        let mut buf = String::new();
-        loop {
-            buf.clear();
-            match stderr.read_line(&mut buf).await {
-                Ok(0) => break, // EOF
-                Ok(_) => {
-                    // Write to parent's stderr
-                    eprint!("[vx-vfsd] {}", buf);
-                    // Also buffer for error reporting
-                    stderr_buffer_clone
-                        .lock()
-                        .unwrap()
-                        .extend_from_slice(buf.as_bytes());
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    // Wait for vx-vfsd to be ready with exponential backoff
-    let backoff_ms = [10, 50, 100, 250, 500, 1000, 2000];
-    for (attempt, delay) in backoff_ms.iter().enumerate() {
-        tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
-
-        // Check if process died
-        if let Ok(Some(status)) = child.try_wait() {
-            let stderr_data = stderr_buffer.lock().unwrap().clone();
-            let stderr_output = String::from_utf8_lossy(&stderr_data);
-            return Err(eyre::eyre!(
-                "vx-vfsd exited with status {} during startup.\n\nStderr:\n{}",
-                status,
-                stderr_output
-            ));
-        }
-
-        // Try to connect
-        if vx_io::net::try_connect(vfsd_endpoint).await?.is_some() {
-            tracing::info!("vx-vfsd started successfully (attempt {})", attempt + 1);
-            return Ok(());
-        }
-    }
-
-    // Final check - if still not connectable, report error
-    let stderr_data = stderr_buffer.lock().unwrap().clone();
-    let stderr_output = String::from_utf8_lossy(&stderr_data);
-    Err(eyre::eyre!(
-        "vx-vfsd failed to start after {} attempts.\n\nStderr:\n{}",
-        backoff_ms.len(),
-        stderr_output
-    ))
-}
-
-/// Connect to vx-vfsd and return a client handle
-async fn connect_to_vfsd(
-    endpoint: &Endpoint,
-    cas: Arc<StoreClient<CasCaller>>,
-) -> Result<VfsClient> {
-    let caller: VfsdCaller = vx_io::net::reconnecting_client_named(
-        endpoint.clone(),
-        NoDispatcher,
-        Some("vx-runner".into()),
-    );
-    caller
-        .handle()
-        .await
-        .map_err(|e| eyre::eyre!("failed to connect to vx-vfsd at {}: {}", endpoint, e))?;
-    let protocol_client = vx_vfsd::protocol::VfsdClient::new(caller);
-    Ok(VfsClient::new(protocol_client, cas))
-}
-
-/// Check if a socket endpoint is already in use by trying to connect
-#[cfg(unix)]
-async fn is_socket_in_use(path: &Utf8PathBuf) -> bool {
-    use tokio::net::UnixStream;
-    // Try to connect - if successful, someone is listening
-    UnixStream::connect(path.as_std_path()).await.is_ok()
-}
-
 fn main() -> Result<()> {
+    // Create a new process group for vx-runner and all its children.
+    // The reaper watches our PID and kills this entire group if we die.
+    #[cfg(target_os = "macos")]
+    spawn_reaper();
+
     peeps::threads::install_sigprof_handler();
     peeps::threads::register_thread("main");
     peeps::tasks::init_task_tracking();
@@ -272,54 +133,51 @@ async fn async_main() -> Result<()> {
     .run()
     .unwrap();
 
-    let cas_endpoint = Endpoint::parse(&args.store)?;
+    let store_endpoint = Endpoint::parse(&args.store)?;
     let bind_endpoint = Endpoint::parse(&args.listen)?;
     let vfsd_endpoint = Endpoint::parse(&args.vfsd)?;
 
-    // Check if another runner instance is already running
-    #[cfg(unix)]
-    {
-        if let Endpoint::Local(ref path) = bind_endpoint
-            && path.exists()
-            && is_socket_in_use(path).await
-        {
-            return Err(eyre::eyre!(
-                "Another vx-runner instance is already running (socket {} is in use).\n\
-                 Kill the existing instance or use a different --bind endpoint.",
-                path
-            ));
-        }
+    // Bind listener, connect to store, and spawn+connect to vx-vfsd — all in parallel
+    use vx_io::spawn::ServiceBuilder;
+
+    let mount_path = runner_mount_base();
+
+    let store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone(), NoDispatcher)
+        .caller_name("vx-runner")
+        .connect_only();
+
+    let vfsd_builder = ServiceBuilder::new("vx-vfsd", vfsd_endpoint.clone(), NoDispatcher)
+        .caller_name("vx-runner")
+        .args(&[
+            "--mount",
+            mount_path.as_str(),
+            "--store",
+            &store_endpoint.display(),
+        ])
+        .env("VX_HOME", args.vx_home.as_str());
+
+    let (runner_listener, store_handle, mut vfsd_handle) = tokio::try_join!(
+        async { Listener::bind(&bind_endpoint).await },
+        store_builder.connect(),
+        vfsd_builder.connect(),
+    )?;
+    tracing::info!("Runner RPC bound on {}", bind_endpoint);
+
+    // Watch for vx-vfsd dying — if it does, we're useless.
+    if let Some(mut vfsd_child) = vfsd_handle.child.take() {
+        peeps::tasks::spawn_tracked("vfsd_death_watcher", async move {
+            let status = vfsd_child.wait().await;
+            tracing::error!(?status, "vx-vfsd exited unexpectedly");
+            std::process::exit(1);
+        });
     }
 
-    // Connect to CAS
-    tracing::info!("Connecting to CAS at {}", cas_endpoint);
-    let cas = Arc::new(connect_to_cas(&cas_endpoint).await?);
-    tracing::info!("Connected to CAS");
+    let store = Arc::new(StoreClient::new(store_handle.caller));
+    let vfsd_protocol = vx_vfsd::protocol::VfsdClient::new(vfsd_handle.caller);
+    let vfs = VfsClient::new(vfsd_protocol, store.clone());
 
-    // Ensure vx-vfsd is running
-    ensure_vfsd(&vfsd_endpoint, &args.vx_home, &cas_endpoint).await?;
-
-    // Connect to vx-vfsd
-    tracing::info!("Connecting to vx-vfsd at {}", vfsd_endpoint);
-    let vfs = connect_to_vfsd(&vfsd_endpoint, cas.clone()).await?;
-    tracing::info!("Connected to vx-vfsd");
-
-    // Create Runner service (will use VFS via RPC)
-    let exec = RunnerService::new(cas.clone(), Arc::new(vfs));
-
-    // Bind Runner RPC socket before VFS mount attempt.
-    let runner_listener = match Listener::bind(&bind_endpoint).await {
-        Ok(l) => l,
-        Err(e) => {
-            return Err(eyre::eyre!(
-                "Failed to bind Runner RPC socket at {}: {}\n\
-                 Another instance may be running, or the socket file is stale.",
-                bind_endpoint,
-                e
-            ));
-        }
-    };
-    tracing::info!("Runner RPC bound on {}", bind_endpoint);
+    // Create Runner service
+    let exec = RunnerService::new(store.clone(), Arc::new(vfs));
 
     // VFS is now mounted by vx-vfsd, not by vx-runner
     tracing::info!("VFS provided by vx-vfsd at {}", runner_mount_base());
@@ -351,7 +209,7 @@ async fn async_main() -> Result<()> {
                     async move {
                         tracing::debug!("Runner connection from {}", peer_addr);
                         let dispatcher = RunnerDispatcher::new(exec);
-                        let Ok((_handle, _incoming, driver)) = accept(
+                        let (_handle, _incoming, driver) = match accept(
                             stream,
                             HandshakeConfig {
                                 max_payload_size: 256 * 1024 * 1024, // 256 MiB
@@ -361,9 +219,12 @@ async fn async_main() -> Result<()> {
                             dispatcher,
                         )
                         .await
-                        else {
-                            tracing::debug!("Runner handshake error from {}", peer_addr);
-                            return;
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::debug!("Runner handshake error from {}: {e}", peer_addr);
+                                return;
+                            }
                         };
                         if let Err(e) = driver.run().await {
                             tracing::debug!("Runner connection error from {}: {}", peer_addr, e);
@@ -723,5 +584,78 @@ impl RunnerService {
     #[allow(dead_code)] // Will be used for sandbox integration
     pub(crate) fn get_prefix_mount_path(&self, prefix_id: &str) -> Utf8PathBuf {
         runner_mount_base().join(prefix_id)
+    }
+}
+
+/// Global handle to the reaper's stdin pipe.
+/// `run_sandboxed_command` writes child pgids here after spawning.
+#[cfg(target_os = "macos")]
+static REAPER_STDIN: std::sync::OnceLock<std::sync::Mutex<std::process::ChildStdin>> =
+    std::sync::OnceLock::new();
+
+/// Notify the reaper about a new child process group.
+#[cfg(target_os = "macos")]
+pub(crate) fn register_child_pgroup(pgid: u32) {
+    if let Some(stdin) = REAPER_STDIN.get() {
+        use std::io::Write;
+        if let Ok(mut guard) = stdin.lock() {
+            let _ = writeln!(guard, "{pgid}");
+            let _ = guard.flush();
+        }
+    }
+}
+
+/// Spawn the vx-reaper sidecar process.
+///
+/// Spawns vx-reaper which watches our PID via kqueue. vx-runner writes
+/// child process group IDs to the reaper's stdin as it spawns them.
+/// If vx-runner dies for any reason (including SIGKILL), the reaper
+/// kills all known child process groups, preventing orphaned compiler
+/// subprocesses from getting stuck on a dead FSKit mount.
+#[cfg(target_os = "macos")]
+fn spawn_reaper() {
+    use std::process::Command;
+
+    let my_pid = std::process::id();
+
+    // Find vx-reaper next to our own binary
+    let reaper_path = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("vx-reaper")))
+        .filter(|path| path.exists());
+
+    let Some(reaper_path) = reaper_path else {
+        // Not a hard error — just means orphan protection is disabled
+        return;
+    };
+
+    let mount_path = runner_mount_base();
+    let log_file = mount_path
+        .as_std_path()
+        .parent()
+        .unwrap_or(mount_path.as_std_path())
+        .join("vx-reaper.log");
+
+    match Command::new(&reaper_path)
+        .arg("--parent-pid")
+        .arg(my_pid.to_string())
+        .arg("--mount-path")
+        .arg(mount_path.as_str())
+        .arg("--log-file")
+        .arg(&log_file)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(mut child) => {
+            if let Some(stdin) = child.stdin.take() {
+                let _ = REAPER_STDIN.set(std::sync::Mutex::new(stdin));
+            }
+            // Don't wait on it — fire-and-forget sidecar.
+        }
+        Err(_) => {
+            // Not a hard error — just means orphan protection is disabled
+        }
     }
 }

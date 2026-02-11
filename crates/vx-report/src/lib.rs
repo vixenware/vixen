@@ -75,6 +75,8 @@ impl std::fmt::Display for RunId {
 // GRAPH TOPOLOGY
 // =============================================================================
 
+pub use vx_plan::*;
+
 /// Serialized build graph topology (DAG of action nodes and dependency edges).
 #[derive(Debug, Clone, Facet)]
 pub struct GraphTopology {
@@ -104,6 +106,9 @@ pub struct GraphEdge {
     pub from: u32,
     /// Index of the dependency node.
     pub to: u32,
+    /// Typed edge kind (for current plans this is always "always").
+    #[facet(default)]
+    pub kind: Option<String>,
 }
 
 // =============================================================================
@@ -1328,7 +1333,11 @@ mod tests {
                     label: "compile app".to_string(),
                 },
             ],
-            edges: vec![GraphEdge { from: 1, to: 0 }],
+            edges: vec![GraphEdge {
+                from: 1,
+                to: 0,
+                kind: Some("always".to_string()),
+            }],
         };
 
         let mut report = BuildReport::new(
@@ -1349,6 +1358,7 @@ mod tests {
         assert_eq!(g.nodes[1].node_id, "compile-bin:app");
         assert_eq!(g.edges[0].from, 1);
         assert_eq!(g.edges[0].to, 0);
+        assert_eq!(g.edges[0].kind.as_deref(), Some("always"));
     }
 
     #[test]
