@@ -90,22 +90,16 @@ pub enum ActionResult {
         was_cached: bool,
     },
 
-    /// C object file compiled successfully
-    CObjectCompiled {
-        /// Output object file hash
-        object_hash: Blake3Hash,
-        /// Whether this was a cache hit
+    /// A generic `run` node completed successfully.
+    RunCompleted {
+        /// Output manifest hash from CAS.
+        output_manifest: Blake3Hash,
+        /// Path to a materialized binary (if this run produced one).
+        bin_output: Option<camino::Utf8PathBuf>,
+        /// Whether this was a cache hit.
         was_cached: bool,
-    },
-
-    /// C binary linked successfully
-    CBinaryLinked {
-        /// Output binary hash
-        binary_hash: Blake3Hash,
-        /// Path to materialized binary
-        binary_path: camino::Utf8PathBuf,
-        /// Whether this was a cache hit
-        was_cached: bool,
+        /// Actual CAS cache key used for publish/lookup.
+        cas_cache_key: Blake3Hash,
     },
 
     /// Synthetic planner node executed by the RulePlan lowering bridge.
@@ -798,9 +792,11 @@ impl Executor {
                         cas_cache_key: None,
                     });
                 }
-                ActionResult::CObjectCompiled {
-                    object_hash,
+                ActionResult::RunCompleted {
+                    output_manifest,
+                    bin_output: run_bin_output,
                     was_cached,
+                    cas_cache_key,
                 } => {
                     if *was_cached {
                         cache_hits += 1;
@@ -808,14 +804,17 @@ impl Executor {
                         rebuilt += 1;
                     }
 
-                    // Generate node report for C object compilation
+                    if let Some(p) = run_bin_output {
+                        bin_output = Some(p.clone());
+                    }
+
                     node_reports.push(vx_report::NodeReport {
                         node_id: action.display_name(),
-                        kind: "c.compile_obj".to_string(),
-                        cache_key: object_hash.to_hex(),
+                        kind: action.report_kind().to_string(),
+                        cache_key: cas_cache_key.to_hex(),
                         cache: if *was_cached {
                             vx_report::CacheOutcome::Hit {
-                                manifest: object_hash.to_hex(),
+                                manifest: output_manifest.to_hex(),
                             }
                         } else {
                             vx_report::CacheOutcome::Miss {
@@ -834,65 +833,10 @@ impl Executor {
                         },
                         inputs: vec![],
                         deps: vec![],
-                        outputs: vec![vx_report::OutputRecord {
-                            logical: "object".to_string(),
-                            manifest: Some(object_hash.to_hex()),
-                            blob: None,
-                            path: None,
-                        }],
+                        outputs: vec![],
                         invocation: None,
                         diagnostics: vx_report::DiagnosticsRecord::default(),
-                        cas_cache_key: None,
-                    });
-                }
-                ActionResult::CBinaryLinked {
-                    binary_hash,
-                    binary_path,
-                    was_cached,
-                } => {
-                    if *was_cached {
-                        cache_hits += 1;
-                    } else {
-                        rebuilt += 1;
-                    }
-                    // Track the bin output
-                    bin_output = Some(binary_path.clone());
-
-                    // Generate node report for C binary linking
-                    node_reports.push(vx_report::NodeReport {
-                        node_id: action.display_name(),
-                        kind: "c.link_bin".to_string(),
-                        cache_key: binary_hash.to_hex(),
-                        cache: if *was_cached {
-                            vx_report::CacheOutcome::Hit {
-                                manifest: binary_hash.to_hex(),
-                            }
-                        } else {
-                            vx_report::CacheOutcome::Miss {
-                                reason: vx_report::MissReason::KeyNotFound,
-                            }
-                        },
-                        timing: {
-                            let &(exec, start, ln) =
-                                node_timings.get(node_idx).unwrap_or(&(0, 0, 0));
-                            vx_report::NodeTiming {
-                                execute_ms: exec,
-                                start_offset_ms: start,
-                                lane: ln,
-                                ..Default::default()
-                            }
-                        },
-                        inputs: vec![],
-                        deps: vec![],
-                        outputs: vec![vx_report::OutputRecord {
-                            logical: "binary".to_string(),
-                            manifest: Some(binary_hash.to_hex()),
-                            blob: None,
-                            path: Some(binary_path.to_string()),
-                        }],
-                        invocation: None,
-                        diagnostics: vx_report::DiagnosticsRecord::default(),
-                        cas_cache_key: None,
+                        cas_cache_key: Some(cas_cache_key.to_hex()),
                     });
                 }
                 ActionResult::PlannerSyntheticExecuted { node_id, kind } => {
@@ -938,6 +882,12 @@ impl Executor {
     fn spawn_action(&mut self, node_idx: NodeIndex, _permit: tokio::sync::OwnedSemaphorePermit) {
         // Get action before spawning (we own the graph, no lock needed)
         let action = self.graph.graph[node_idx].action.clone();
+        let mut deps: Vec<NodeIndex> = self
+            .graph
+            .graph
+            .neighbors_directed(node_idx, petgraph::Direction::Outgoing)
+            .collect();
+        deps.sort();
 
         let message_tx = self.message_tx.clone();
         let cas = self.cas.clone();
@@ -1014,6 +964,7 @@ impl Executor {
                 }
                 result = execute_action(
                     action,
+                    deps,
                     &cas,
                     &exec,
                     &db,
@@ -1067,6 +1018,7 @@ impl Executor {
 #[allow(clippy::too_many_arguments)]
 async fn execute_action(
     action: Action,
+    deps: Vec<NodeIndex>,
     cas: &Arc<StoreClient<crate::UpstreamCaller>>,
     exec: &Arc<RunnerClient<crate::UpstreamCaller>>,
     db: &Arc<crate::db::Database>,
@@ -1081,7 +1033,7 @@ async fn execute_action(
     use crate::queries::*;
     use camino::Utf8PathBuf;
     use vx_rs::crate_graph::CrateSource;
-    use vx_runner_proto::{RustCompileRequest, RustDep};
+    use vx_runner_proto::{RunFileMount, RunRequest, RustCompileRequest, RustDep};
     use vx_store_proto::{IngestTreeRequest, TreeFile};
 
     debug!("processing action {}", action.display_name());
@@ -1727,316 +1679,229 @@ async fn execute_action(
             })
         }
 
-        Action::CompileCObject {
-            source,
-            output,
-            source_manifest,
-            target_triple,
-            profile,
+        Action::Run {
+            label,
+            toolchain,
+            program_rel,
+            args,
+            env,
+            cwd,
+            clear_env,
+            tree_mounts,
+            file_mounts,
+            collect_file_mounts,
+            outputs,
+            materialize,
         } => {
-            use vx_runner_proto::{RunOutput, RunRequest, RunTreeMount};
-
-            // Find Zig toolchain from results (must be acquired first)
-            let zig_toolchain_manifest = {
-                let results_lock = results.read().await;
-                results_lock
-                    .values()
-                    .find_map(|result| match result {
-                        ActionResult::ZigToolchainAcquired { manifest_hash, .. } => {
-                            Some(*manifest_hash)
-                        }
-                        _ => None,
-                    })
-                    .ok_or_else(|| VxdError::Compilation {
-                        crate_name: source.clone(),
-                        message: "Zig toolchain not acquired before C compilation".to_string(),
-                    })?
-            };
-
-            let object_filename = output
-                .rsplit_once('/')
-                .map(|(_, f)| f.to_string())
-                .unwrap_or_else(|| output.clone());
-            let object_out_rel = format!("out/{object_filename}");
-
-            let mut args = vec![
-                "cc".to_string(),
-                "-c".to_string(),
-                format!("src/{source}"),
-                "-o".to_string(),
-                object_out_rel.clone(),
-            ];
-
-            // Target selection (matters on macOS and for cross builds).
-            args.push("-target".to_string());
-            args.push(target_triple.clone());
-
-            // Profile-specific flags
-            if profile == "release" {
-                args.push("-O3".to_string());
-            } else {
-                args.push("-O0".to_string());
-                args.push("-g".to_string());
-            }
-
-            let request = RunRequest {
-                toolchain_manifest: zig_toolchain_manifest,
-                program_rel: "zig".to_string(),
-                args,
-                cwd: None,
-                clear_env: true,
-                env: vec![],
-                tree_mounts: vec![RunTreeMount {
-                    mount: "src".to_string(),
-                    manifest: source_manifest,
-                }],
-                file_mounts: vec![],
-                outputs: vec![RunOutput {
-                    logical: "object".to_string(),
-                    path: object_out_rel,
-                    executable: false,
-                }],
-                macos_commandlinetools_version: macos_commandlinetools_version.clone(),
-            };
-
-            let result = exec
-                .run(request, progress)
-                .await
-                .map_err(|e| VxdError::ExecRpc(e.to_string()))?;
-
-            if !result.success {
-                return Err(VxdError::Compilation {
-                    crate_name: source.clone(),
-                    message: format!(
-                        "C compilation failed:\nstdout: {}\nstderr: {}",
-                        result.stdout, result.stderr
-                    ),
-                });
-            }
-
-            let object_hash = result
-                .output_manifest
-                .ok_or_else(|| VxdError::NoOutputManifest {
-                    crate_name: source.clone(),
-                })?;
-
-            info!(
-                source = %source,
-                output = %output,
-                object_hash = %object_hash,
-                "C object compiled"
-            );
-
-            Ok(ActionResult::CObjectCompiled {
-                object_hash,
-                was_cached: false, // TODO: Check cache
-            })
-        }
-
-        Action::LinkCBinary {
-            name,
-            objects: _,
-            output,
-            target_triple,
-        } => {
-            use vx_runner_proto::{RunFileMount, RunOutput, RunRequest};
-
-            // Find Zig toolchain and all compiled object files from results
-            let (zig_toolchain_manifest, object_manifests) = {
-                let results_lock = results.read().await;
-
-                let zig_toolchain_manifest = results_lock
-                    .values()
-                    .find_map(|result| match result {
-                        ActionResult::ZigToolchainAcquired { manifest_hash, .. } => {
-                            Some(*manifest_hash)
-                        }
-                        _ => None,
-                    })
-                    .ok_or_else(|| VxdError::Compilation {
-                        crate_name: name.clone(),
-                        message: "Zig toolchain not acquired before C linking".to_string(),
-                    })?;
-
-                // Collect all compiled object files
-                let object_manifests: Vec<_> = results_lock
-                    .values()
-                    .filter_map(|result| match result {
-                        ActionResult::CObjectCompiled { object_hash, .. } => Some(*object_hash),
-                        _ => None,
-                    })
-                    .collect();
-
-                if object_manifests.is_empty() {
+            let toolchain_manifest = match toolchain {
+                crate::action_graph::RunToolchain::Zig => {
+                    let results_lock = results.read().await;
+                    deps.iter()
+                        .find_map(|idx| match results_lock.get(idx) {
+                            Some(ActionResult::ZigToolchainAcquired { manifest_hash, .. }) => {
+                                Some(*manifest_hash)
+                            }
+                            _ => None,
+                        })
+                        .ok_or_else(|| VxdError::Compilation {
+                            crate_name: label.clone(),
+                            message: "Zig toolchain not acquired before run".to_string(),
+                        })?
+                }
+                crate::action_graph::RunToolchain::Rust => {
                     return Err(VxdError::Compilation {
-                        crate_name: name.clone(),
-                        message: "no object files compiled before linking".to_string(),
+                        crate_name: label.clone(),
+                        message: "rust toolchain selector not supported for Action::Run yet"
+                            .to_string(),
                     });
                 }
-
-                (zig_toolchain_manifest, object_manifests)
             };
 
-            let binary_filename = output
-                .rsplit_once('/')
-                .map(|(_, f)| f.to_string())
-                .unwrap_or_else(|| output.clone());
-            let binary_out_rel = format!("out/{binary_filename}");
+            let mut resolved_file_mounts = file_mounts.clone();
+            if !collect_file_mounts.is_empty() {
+                let results_lock = results.read().await;
+                for spec in &collect_file_mounts {
+                    let dep_manifests: Vec<Blake3Hash> = deps
+                        .iter()
+                        .filter_map(|idx| match results_lock.get(idx) {
+                            Some(ActionResult::RunCompleted {
+                                output_manifest, ..
+                            }) => Some(*output_manifest),
+                            Some(ActionResult::CrateCompiled {
+                                output_manifest, ..
+                            }) => Some(*output_manifest),
+                            _ => None,
+                        })
+                        .collect();
 
-            let mut args = vec!["cc".to_string()];
-            args.push("-target".to_string());
-            args.push(target_triple.clone());
-            for idx in 0..object_manifests.len() {
-                args.push(format!("obj/{idx:04}.o"));
+                    let mut i = 0usize;
+                    for mh in dep_manifests {
+                        let manifest = cas
+                            .get_manifest(mh)
+                            .await
+                            .map_err(|e| VxdError::Compilation {
+                                crate_name: label.clone(),
+                                message: format!("Failed to fetch dep manifest from CAS: {e}"),
+                            })?
+                            .ok_or_else(|| VxdError::Compilation {
+                                crate_name: label.clone(),
+                                message: format!("Dep manifest not found in CAS: {mh}"),
+                            })?;
+
+                        if manifest.outputs.iter().any(|o| o.logical == spec.logical) {
+                            let path = format!(
+                                "{}{:0width$}{}",
+                                spec.path_prefix,
+                                i,
+                                spec.path_suffix,
+                                width = spec.pad_width
+                            );
+                            resolved_file_mounts.push(RunFileMount {
+                                manifest: mh,
+                                logical: spec.logical.clone(),
+                                path,
+                            });
+                            i += 1;
+                        }
+                    }
+                }
             }
-            args.push("-o".to_string());
-            args.push(binary_out_rel.clone());
-
-            let file_mounts = object_manifests
-                .iter()
-                .enumerate()
-                .map(|(idx, manifest)| RunFileMount {
-                    manifest: *manifest,
-                    logical: "object".to_string(),
-                    path: format!("obj/{idx:04}.o"),
-                })
-                .collect();
 
             let request = RunRequest {
-                toolchain_manifest: zig_toolchain_manifest,
-                program_rel: "zig".to_string(),
+                toolchain_manifest,
+                program_rel,
                 args,
-                cwd: None,
-                clear_env: true,
-                env: vec![],
-                tree_mounts: vec![],
-                file_mounts,
-                outputs: vec![RunOutput {
-                    logical: "binary".to_string(),
-                    path: binary_out_rel,
-                    executable: true,
-                }],
+                cwd,
+                clear_env,
+                env,
+                tree_mounts,
+                file_mounts: resolved_file_mounts,
+                outputs,
                 macos_commandlinetools_version: macos_commandlinetools_version.clone(),
             };
 
-            let result = exec
-                .run(request, progress)
+            let cache_key = vx_cache::run_cache_key(&request);
+            let (output_manifest, was_cached) = if let Some(cached) = cas
+                .lookup(cache_key)
                 .await
-                .map_err(|e| VxdError::ExecRpc(e.to_string()))?;
-
-            if !result.success {
-                return Err(VxdError::Compilation {
-                    crate_name: name.clone(),
-                    message: format!(
-                        "C linking failed:\nstdout: {}\nstderr: {}",
-                        result.stdout, result.stderr
-                    ),
-                });
-            }
-
-            let binary_hash = result
-                .output_manifest
-                .ok_or_else(|| VxdError::NoOutputManifest {
-                    crate_name: name.clone(),
-                })?;
-
-            info!(
-                name = %name,
-                output = %output,
-                binary_hash = %binary_hash,
-                "C binary linked"
-            );
-
-            // Materialize binary to workspace
-            let binary_path = workspace_root.join(output);
-            let binary_parent = binary_path.parent().ok_or_else(|| VxdError::Compilation {
-                crate_name: name.clone(),
-                message: format!("Invalid binary output path: {}", binary_path),
-            })?;
-
-            // Create output directory
-            tokio::fs::create_dir_all(binary_parent)
-                .await
-                .map_err(|e| VxdError::Compilation {
-                    crate_name: name.clone(),
-                    message: format!("Failed to create binary output directory: {}", e),
-                })?;
-
-            // Fetch manifest to get the binary blob hash
-            let manifest = cas
-                .get_manifest(binary_hash)
-                .await
-                .map_err(|e| VxdError::Compilation {
-                    crate_name: name.clone(),
-                    message: format!("Failed to fetch binary manifest from CAS: {}", e),
-                })?
-                .ok_or_else(|| VxdError::Compilation {
-                    crate_name: name.clone(),
-                    message: format!("Binary manifest not found in CAS: {}", binary_hash.to_hex()),
-                })?;
-
-            // Find the binary output entry
-            let binary_entry = manifest
-                .outputs
-                .iter()
-                .find(|o| o.logical == "binary")
-                .ok_or_else(|| VxdError::Compilation {
-                    crate_name: name.clone(),
-                    message: "Binary output not found in manifest".to_string(),
-                })?;
-
-            // Fetch binary blob from CAS and write to file
-            let binary_data = cas
-                .get_blob(binary_entry.blob)
-                .await
-                .map_err(|e| VxdError::Compilation {
-                    crate_name: name.clone(),
-                    message: format!("Failed to fetch binary blob from CAS: {}", e),
-                })?
-                .ok_or_else(|| VxdError::Compilation {
-                    crate_name: name.clone(),
-                    message: format!(
-                        "Binary blob not found in CAS: {}",
-                        binary_entry.blob.to_hex()
-                    ),
-                })?;
-
-            tokio::fs::write(&binary_path, &binary_data)
-                .await
-                .map_err(|e| VxdError::Compilation {
-                    crate_name: name.clone(),
-                    message: format!("Failed to write binary to {}: {}", binary_path, e),
-                })?;
-
-            // Make binary executable
-            #[cfg(unix)]
+                .map_err(|e| VxdError::CasRpc(e.to_string()))?
             {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = tokio::fs::metadata(&binary_path)
+                (cached, true)
+            } else {
+                let result = exec
+                    .run(request, progress)
+                    .await
+                    .map_err(|e| VxdError::ExecRpc(e.to_string()))?;
+                if !result.success {
+                    return Err(VxdError::Compilation {
+                        crate_name: label.clone(),
+                        message: result.error.unwrap_or(result.stderr),
+                    });
+                }
+                let output_manifest =
+                    result
+                        .output_manifest
+                        .ok_or_else(|| VxdError::NoOutputManifest {
+                            crate_name: label.clone(),
+                        })?;
+
+                cas.publish(cache_key, output_manifest)
+                    .await
+                    .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+
+                (output_manifest, false)
+            };
+
+            let mut bin_output = None;
+            if !materialize.is_empty() {
+                let manifest = cas
+                    .get_manifest(output_manifest)
                     .await
                     .map_err(|e| VxdError::Compilation {
-                        crate_name: name.clone(),
-                        message: format!("Failed to get binary metadata: {}", e),
+                        crate_name: label.clone(),
+                        message: format!("Failed to fetch output manifest from CAS: {e}"),
                     })?
-                    .permissions();
-                perms.set_mode(0o755);
-                tokio::fs::set_permissions(&binary_path, perms)
-                    .await
-                    .map_err(|e| VxdError::Compilation {
-                        crate_name: name.clone(),
-                        message: format!("Failed to set binary permissions: {}", e),
+                    .ok_or_else(|| VxdError::Compilation {
+                        crate_name: label.clone(),
+                        message: format!(
+                            "Output manifest not found in CAS: {}",
+                            output_manifest.to_hex()
+                        ),
                     })?;
+
+                for m in &materialize {
+                    let entry = manifest
+                        .outputs
+                        .iter()
+                        .find(|o| o.logical == m.logical)
+                        .ok_or_else(|| VxdError::Compilation {
+                            crate_name: label.clone(),
+                            message: format!("Output '{}' not found in manifest", m.logical),
+                        })?;
+
+                    let out_path = workspace_root.join(&m.workspace_rel_path);
+                    let parent = out_path.parent().ok_or_else(|| VxdError::Compilation {
+                        crate_name: label.clone(),
+                        message: format!("Invalid output path: {out_path}"),
+                    })?;
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| VxdError::Compilation {
+                            crate_name: label.clone(),
+                            message: format!("Failed to create output directory: {e}"),
+                        })?;
+
+                    let data = cas
+                        .get_blob(entry.blob)
+                        .await
+                        .map_err(|e| VxdError::Compilation {
+                            crate_name: label.clone(),
+                            message: format!("Failed to fetch output blob from CAS: {e}"),
+                        })?
+                        .ok_or_else(|| VxdError::Compilation {
+                            crate_name: label.clone(),
+                            message: format!("Output blob not found in CAS: {}", entry.blob),
+                        })?;
+
+                    tokio::fs::write(&out_path, &data).await.map_err(|e| {
+                        VxdError::Compilation {
+                            crate_name: label.clone(),
+                            message: format!("Failed to write output to {out_path}: {e}"),
+                        }
+                    })?;
+
+                    if entry.executable {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let mut perms = tokio::fs::metadata(&out_path)
+                                .await
+                                .map_err(|e| VxdError::Compilation {
+                                    crate_name: label.clone(),
+                                    message: format!("Failed to get output metadata: {e}"),
+                                })?
+                                .permissions();
+                            perms.set_mode(0o755);
+                            tokio::fs::set_permissions(&out_path, perms)
+                                .await
+                                .map_err(|e| VxdError::Compilation {
+                                    crate_name: label.clone(),
+                                    message: format!("Failed to set output permissions: {e}"),
+                                })?;
+                        }
+                    }
+
+                    if m.logical == "binary" {
+                        bin_output = Some(out_path);
+                    }
+                }
             }
 
-            info!(
-                path = %binary_path,
-                "C binary materialized to workspace"
-            );
-
-            Ok(ActionResult::CBinaryLinked {
-                binary_hash,
-                binary_path,
-                was_cached: false, // TODO: Check cache
+            Ok(ActionResult::RunCompleted {
+                output_manifest,
+                bin_output,
+                was_cached,
+                cas_cache_key: cache_key,
             })
         }
 

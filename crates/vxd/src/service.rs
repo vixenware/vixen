@@ -1018,37 +1018,108 @@ impl VxdService {
                     // Parse source files (simple glob for now - just one file)
                     let sources = vec![bin.sources.clone()];
 
-                    // Add CompileCObject actions for each source file
+                    // Add run actions for each source file -> produces logical "object"
                     let mut object_nodes = Vec::new();
                     for source in &sources {
                         let output =
                             format!(".vx/obj/{}.o", source.replace('/', "_").replace(".c", ""));
-                        let compile_node = graph.add_action(Action::CompileCObject {
-                            source: source.clone(),
-                            output: output.clone(),
-                            source_manifest,
-                            target_triple: target_triple.clone(),
-                            profile: profile.to_string(),
+                        let object_filename = output
+                            .rsplit_once('/')
+                            .map(|(_, f)| f.to_string())
+                            .unwrap_or_else(|| output.clone());
+                        let out_rel = format!("out/{object_filename}");
+
+                        let mut args = vec![
+                            "cc".to_string(),
+                            "-c".to_string(),
+                            format!("src/{source}"),
+                            "-o".to_string(),
+                            out_rel.clone(),
+                            "-target".to_string(),
+                            target_triple.clone(),
+                        ];
+
+                        if profile == "release" {
+                            args.push("-O3".to_string());
+                        } else {
+                            args.push("-O0".to_string());
+                            args.push("-g".to_string());
+                        }
+
+                        let compile_node = graph.add_action(Action::Run {
+                            label: format!("cc {source}"),
+                            toolchain: crate::action_graph::RunToolchain::Zig,
+                            program_rel: "zig".to_string(),
+                            args,
+                            env: vec![],
+                            cwd: None,
+                            clear_env: true,
+                            tree_mounts: vec![vx_runner_proto::RunTreeMount {
+                                mount: "src".to_string(),
+                                manifest: source_manifest,
+                            }],
+                            file_mounts: vec![],
+                            collect_file_mounts: vec![],
+                            outputs: vec![vx_runner_proto::RunOutput {
+                                logical: "object".to_string(),
+                                path: out_rel,
+                                executable: false,
+                            }],
+                            materialize: vec![],
                         });
 
-                        // CompileCObject depends on Zig toolchain
+                        // Depends on Zig toolchain
                         graph.add_edge(zig_node, compile_node);
                         object_nodes.push(compile_node);
                     }
 
-                    // Add LinkCBinary action
+                    // Add run action to link -> produces logical "binary"
                     let binary_output = format!("bin/{}", bin.name);
-                    let link_node = graph.add_action(Action::LinkCBinary {
-                        name: bin.name.clone(),
-                        objects: sources
-                            .iter()
-                            .map(|s| format!(".vx/obj/{}.o", s.replace('/', "_").replace(".c", "")))
-                            .collect(),
-                        output: binary_output.clone(),
-                        target_triple: target_triple.clone(),
+                    let binary_filename = binary_output
+                        .rsplit_once('/')
+                        .map(|(_, f)| f.to_string())
+                        .unwrap_or_else(|| binary_output.clone());
+                    let out_rel = format!("out/{binary_filename}");
+
+                    let mut args = vec![
+                        "cc".to_string(),
+                        "-target".to_string(),
+                        target_triple.clone(),
+                    ];
+                    for (idx, _) in sources.iter().enumerate() {
+                        args.push(format!("obj/{idx:04}.o"));
+                    }
+                    args.push("-o".to_string());
+                    args.push(out_rel.clone());
+
+                    let link_node = graph.add_action(Action::Run {
+                        label: format!("link {}", bin.name),
+                        toolchain: crate::action_graph::RunToolchain::Zig,
+                        program_rel: "zig".to_string(),
+                        args,
+                        env: vec![],
+                        cwd: None,
+                        clear_env: true,
+                        tree_mounts: vec![],
+                        file_mounts: vec![],
+                        collect_file_mounts: vec![crate::action_graph::RunCollectInput {
+                            logical: "object".to_string(),
+                            path_prefix: "obj/".to_string(),
+                            path_suffix: ".o".to_string(),
+                            pad_width: 4,
+                        }],
+                        outputs: vec![vx_runner_proto::RunOutput {
+                            logical: "binary".to_string(),
+                            path: out_rel,
+                            executable: true,
+                        }],
+                        materialize: vec![crate::action_graph::RunMaterialize {
+                            logical: "binary".to_string(),
+                            workspace_rel_path: binary_output.clone(),
+                        }],
                     });
 
-                    // LinkCBinary depends on all object files and Zig toolchain
+                    // Depends on all object files and Zig toolchain
                     graph.add_edge(zig_node, link_node);
                     for obj_node in object_nodes {
                         graph.add_edge(obj_node, link_node);

@@ -3380,6 +3380,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "ur-taking-me-with-you",
+ "vx-cache",
  "vx-io",
  "vx-manifest",
  "vx-plan",

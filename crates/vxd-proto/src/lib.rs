@@ -14,7 +14,7 @@ use vx_store_proto::CacheKey;
 
 /// Daemon protocol version.
 /// Bump this when making breaking changes to the daemon RPC interface.
-pub const VXD_PROTOCOL_VERSION: u32 = 2;
+pub const VXD_PROTOCOL_VERSION: u32 = 3;
 
 /// Request to build a project
 #[derive(Debug, Clone, Facet)]
@@ -70,6 +70,8 @@ pub enum ActionType {
     CompileC(String), // source path
     /// Linking C binary
     LinkC(String), // binary name
+    /// Running a generic tool
+    Run(String), // label
     /// Ingesting source tree to CAS
     IngestSource(String),
 }
@@ -92,6 +94,7 @@ impl ActionType {
             }
             ActionType::CompileC(source) => format!("compile {}", source),
             ActionType::LinkC(name) => format!("link {}", name),
+            ActionType::Run(label) => format!("run {}", label),
             ActionType::IngestSource(name) => format!("ingest {}", name),
         }
     }

@@ -9,6 +9,7 @@ use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
 use vx_report::{RulePlan, RulePlanEdge, RulePlanEdgeKind, RulePlanNode, RulePlanNodeKind};
 use vx_rs::crate_graph::{CrateGraph, CrateId, CrateSource, CrateType};
+use vx_runner_proto::{RunFileMount, RunOutput, RunTreeMount};
 use vx_store_proto::{Blake3Hash, RustChannel, RustComponent, RustToolchainSpec};
 
 use crate::inputs::{BuildConfig, RustCrate, RustToolchain};
@@ -53,6 +54,27 @@ impl PlannerSyntheticKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunToolchain {
+    Zig,
+    #[allow(dead_code)]
+    Rust,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunCollectInput {
+    pub logical: String,
+    pub path_prefix: String,
+    pub path_suffix: String,
+    pub pad_width: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunMaterialize {
+    pub logical: String,
+    pub workspace_rel_path: String,
+}
+
 /// A single unit of work in the build process
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -93,6 +115,22 @@ pub enum Action {
         checksum: String,
     },
 
+    /// Run a sandboxed toolchain command with declared CAS/VFS inputs and outputs.
+    Run {
+        label: String,
+        toolchain: RunToolchain,
+        program_rel: String,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+        cwd: Option<String>,
+        clear_env: bool,
+        tree_mounts: Vec<RunTreeMount>,
+        file_mounts: Vec<RunFileMount>,
+        collect_file_mounts: Vec<RunCollectInput>,
+        outputs: Vec<RunOutput>,
+        materialize: Vec<RunMaterialize>,
+    },
+
     /// Compile a Rust crate (lib or bin)
     CompileRustCrate {
         crate_id: CrateId,
@@ -118,32 +156,6 @@ pub enum Action {
         toolchain: RustToolchain,
         /// Build configuration (for cache key computation)
         config: BuildConfig,
-    },
-
-    /// Compile a C source file to an object file
-    CompileCObject {
-        /// Source file path (workspace-relative)
-        source: String,
-        /// Output object file path (workspace-relative, usually .vx/obj/...)
-        output: String,
-        /// Source tree manifest hash in CAS
-        source_manifest: Blake3Hash,
-        /// Target triple
-        target_triple: String,
-        /// Build profile (debug/release)
-        profile: String,
-    },
-
-    /// Link C object files into a binary
-    LinkCBinary {
-        /// Binary name
-        name: String,
-        /// Object files to link (workspace-relative)
-        objects: Vec<String>,
-        /// Output binary path (workspace-relative)
-        output: String,
-        /// Target triple
-        target_triple: String,
     },
 
     /// Planner-lowered Rust compile action (metadata-backed migration step).
@@ -179,14 +191,9 @@ impl Action {
             Action::AcquireRegistryCrate { name, version, .. } => {
                 format!("acquire {}@{}", name, version)
             }
+            Action::Run { label, .. } => format!("run {label}"),
             Action::CompileRustCrate { crate_name, .. } => {
                 format!("compile {}", crate_name)
-            }
-            Action::CompileCObject { source, .. } => {
-                format!("compile {}", source)
-            }
-            Action::LinkCBinary { name, .. } => {
-                format!("link {}", name)
             }
             Action::PlannerCompileRustCrate {
                 node_id,
@@ -237,8 +244,7 @@ impl Action {
             Action::DownloadRustToolchainComponent { .. }
             | Action::ExtractRustToolchainComponent { .. }
             | Action::AcquireZigToolchain { .. }
-            | Action::CompileCObject { .. }
-            | Action::LinkCBinary { .. } => self.display_name(),
+            | Action::Run { .. } => self.display_name(),
             Action::AcquireRegistryCrate { name, version, .. } => {
                 format!("acquire-registry:{name}:{version}")
             }
@@ -277,6 +283,7 @@ impl Action {
             Action::ExtractRustToolchainComponent { .. } => "toolchain.component.extract",
             Action::AcquireZigToolchain { .. } => "zig.toolchain.acquire",
             Action::AcquireRegistryCrate { .. } => "registry.acquire",
+            Action::Run { .. } => "run",
             Action::CompileRustCrate { crate_type, .. } => {
                 if crate_type.as_str() == "bin" {
                     "rust.compile_bin"
@@ -291,8 +298,6 @@ impl Action {
                     "rust.compile_rlib"
                 }
             }
-            Action::CompileCObject { .. } => "c.compile_obj",
-            Action::LinkCBinary { .. } => "c.link_bin",
             Action::PlannerSynthetic { kind, .. } => kind.report_kind(),
         }
     }
@@ -312,16 +317,13 @@ impl Action {
             Action::AcquireRegistryCrate { name, version, .. } => {
                 vxd_proto::ActionType::AcquireRegistryCrate(name.clone(), version.clone())
             }
+            Action::Run { label, .. } => vxd_proto::ActionType::Run(label.clone()),
             Action::CompileRustCrate { crate_name, .. } => {
                 vxd_proto::ActionType::CompileRust(crate_name.clone())
             }
             Action::PlannerCompileRustCrate { crate_name, .. } => {
                 vxd_proto::ActionType::CompileRust(crate_name.clone())
             }
-            Action::CompileCObject { source, .. } => {
-                vxd_proto::ActionType::CompileC(source.clone())
-            }
-            Action::LinkCBinary { name, .. } => vxd_proto::ActionType::LinkC(name.clone()),
             Action::PlannerSynthetic { node_id, kind, .. } => {
                 vxd_proto::ActionType::CompileRust(format!("planner:{}:{}", kind.label(), node_id))
             }
