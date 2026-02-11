@@ -290,7 +290,7 @@ impl BuildBuilder {
             cmd.env(key, value);
         }
         cmd.arg("build");
-        cmd.arg("--no-spawn");
+        // Let vx spawn daemons if needed (they'll be shared due to VX_HOME)
         if self.release {
             cmd.arg("--release");
         }

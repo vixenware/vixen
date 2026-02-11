@@ -34,9 +34,8 @@ export VX_HOME="/tmp/.vx-test/nextest/home"
 mkdir -p "${VX_HOME}"
 echo "Test VX_HOME will be ${VX_HOME}"
 
-# These together make vxd die (and take its children with it) when nextest exits.
+# VX_TEST=1 enables test mode: 30s idle timeout instead of 2 hours
 export VX_TEST=1
-export VX_NEXTEST_PID="${PPID}"
 
 "$VX_BIN" start
 
@@ -46,5 +45,4 @@ export VX_NEXTEST_PID="${PPID}"
     echo "VX_HOME=${VX_HOME}"
     echo "VX_TEST=${VX_TEST}"
     echo "VX_HTTP_CACHE_DIR=${VX_HTTP_CACHE_DIR}"
-    echo "VX_NEXTEST_PID=${VX_NEXTEST_PID}"
 } >> "${NEXTEST_ENV}"

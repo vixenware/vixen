@@ -232,22 +232,8 @@ async fn async_main() -> Result<()> {
     let in_test = std::env::var("VX_TEST").is_ok();
 
     // The daemon outlives its parent process (vx CLI) and shuts down
-    // after an idle timeout instead (5s in test mode, 2h in production).
-    // In test mode, we also watch the test harness ancestor (cargo-nextest,
-    // vx-fuse-stress, vx-vfs-integrity, etc.) and exit immediately when it dies.
-    if in_test {
-        if let Some((harness_pid, harness_name)) = nextest_watcher::find_test_harness_pid() {
-            tracing::info!(harness_pid, %harness_name, "watching test harness process");
-            peeps::tasks::spawn_tracked("nextest_watcher", async move {
-                nextest_watcher::wait_for_exit(harness_pid).await;
-                // Use libc::_exit — tracing/stdout/stderr may be broken pipes
-                // after ctrl-c kills the pipeline, and writing to them blocks.
-                unsafe { libc::_exit(0) };
-            });
-        } else {
-            tracing::debug!("no test harness ancestor found (external daemon?)");
-        }
-    }
+    // after an idle timeout instead (2s in test mode, 2h in production).
+    // Simple and robust: no PID tracking needed.
 
     // SIGUSR1: dump diagnostics
     peeps::install_sigusr1("vxd");
@@ -272,6 +258,36 @@ async fn async_main() -> Result<()> {
         None => tracing::info!("  Exec:    (will spawn)"),
     }
     tracing::info!("  Bind:    {}", args.bind);
+
+    // Acquire exclusive lock to prevent multiple vxd instances from racing.
+    // The lock is held for the daemon's lifetime and released on exit.
+    let lock_path = args.vx_home.join("vxd.lock");
+    std::fs::create_dir_all(&args.vx_home)?;
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = lock_file.as_raw_fd();
+        // Try to acquire exclusive lock (non-blocking)
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::WouldBlock {
+                tracing::debug!("Another vxd is already running (lock held)");
+                std::process::exit(0);
+            }
+            eyre::bail!("Failed to acquire lock on {}: {}", lock_path, err);
+        }
+        tracing::debug!("Acquired exclusive lock on {}", lock_path);
+    }
+
+    // Keep lock_file alive for the daemon's lifetime
+    let _lock_guard = lock_file;
 
     let spawn_tracker = Arc::new(DiagnosticAsyncMutex::new(
         "vxd/spawn_tracker",
@@ -319,7 +335,7 @@ async fn async_main() -> Result<()> {
     tracing::info!("Daemon listening on {}", args.bind);
 
     // Track active connections and shut down after idle timeout.
-    // Test mode: 5s, production: 2 hours.
+    // Test mode: 2s, production: 2 hours.
     let active_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let last_disconnect = Arc::new(DiagnosticAsyncMutex::new(
         "vxd/last_disconnect",
@@ -328,7 +344,7 @@ async fn async_main() -> Result<()> {
 
     {
         let idle_timeout = if in_test {
-            Duration::from_secs(5)
+            Duration::from_secs(2)
         } else {
             Duration::from_secs(2 * 60 * 60)
         };
