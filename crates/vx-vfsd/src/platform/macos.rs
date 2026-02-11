@@ -74,8 +74,8 @@ async fn kill_processes_under_mount(candidates: &[String]) {
     // Parse lsof -F output: p<pid>, c<command>, n<path> fields
     let mut current_pid: Option<u32> = None;
     let mut current_cmd: Option<String> = None;
-    // pid → command name, deduplicated
-    let mut to_kill: HashMap<u32, String> = HashMap::new();
+    // pid → (command name, first matching path)
+    let mut to_kill: HashMap<u32, (String, String)> = HashMap::new();
 
     for line in stdout.lines() {
         if let Some(rest) = line.strip_prefix('p') {
@@ -83,15 +83,15 @@ async fn kill_processes_under_mount(candidates: &[String]) {
             current_cmd = None;
         } else if let Some(rest) = line.strip_prefix('c') {
             current_cmd = Some(rest.to_string());
-        } else if let Some(path) = line.strip_prefix('n') {
-            if let (Some(pid), Some(cmd)) = (current_pid, current_cmd.as_deref()) {
-                if candidates
-                    .iter()
-                    .any(|prefix| path.starts_with(prefix.as_str()))
-                {
-                    to_kill.entry(pid).or_insert_with(|| cmd.to_string());
-                }
-            }
+        } else if let Some(path) = line.strip_prefix('n')
+            && let (Some(pid), Some(cmd)) = (current_pid, current_cmd.as_deref())
+            && candidates
+                .iter()
+                .any(|prefix| path.starts_with(prefix.as_str()))
+        {
+            to_kill
+                .entry(pid)
+                .or_insert_with(|| (cmd.to_string(), path.to_string()));
         }
     }
 
@@ -99,16 +99,37 @@ async fn kill_processes_under_mount(candidates: &[String]) {
         return;
     }
 
-    for (&pid, cmd) in &to_kill {
-        tracing::warn!(pid, cmd, "killing process with files open on stale mount");
+    let mut pids_to_wait = Vec::new();
+    for (&pid, (cmd, path)) in &to_kill {
+        tracing::warn!(
+            pid,
+            cmd,
+            path,
+            "killing process with files open on stale mount"
+        );
         // SAFETY: just sending a signal, no memory unsafety
         unsafe {
             libc::kill(pid as libc::pid_t, libc::SIGKILL);
         }
+        pids_to_wait.push(pid);
     }
 
-    // Give the kernel a moment to clean up after the kills
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Wait for killed processes to actually disappear. Once kill(pid, 0)
+    // returns ESRCH, the process is gone and its file descriptors are released.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !pids_to_wait.is_empty() && tokio::time::Instant::now() < deadline {
+        pids_to_wait.retain(|&pid| {
+            // SAFETY: signal 0 just checks if the process exists
+            let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+            ret == 0 // keep if still alive
+        });
+        if !pids_to_wait.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+    if !pids_to_wait.is_empty() {
+        tracing::warn!(pids = ?pids_to_wait, "some killed processes did not exit within 5s");
+    }
 }
 
 pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
