@@ -2,8 +2,15 @@
 set -euo pipefail
 
 # Build vx-store, vx-runner, vxd, vx
+CARGO_FEATURES=""
+if [[ "${VX_DIAGNOSTICS:-}" == "1" ]]; then
+    echo "VX_DIAGNOSTICS=1: enabling diagnostics feature"
+    CARGO_FEATURES="--features diagnostics"
+else
+    echo "Tip: set VX_DIAGNOSTICS=1 to build with the diagnostics feature (slower build, richer errors)"
+fi
 echo "Building vx-store, vx-runner, vxd, and vx..."
-cargo build --verbose --features diagnostics
+cargo build --verbose $CARGO_FEATURES
 
 # Resolve absolute paths to built binaries
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
