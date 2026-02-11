@@ -24,6 +24,7 @@ vx build
 - [Download](/download/) - Install vixen on macOS
 - [Specification](/spec/) - Full specification document
 - [Internals](/internals/) - How vixen builds things under the hood
+- [Daemon Topologies](/daemons/) - Local vs distributed daemon lifecycle model
 - [RulePlan Schema](/rule-plan/) - Typed planning IR and validation rules
 - [Planner Runtime Boundary](/planner-runtime/) - In-process host/interpreter contract
 - [Planner Builtins and Capability Policy](/planner-builtins/) - Deterministic builtin catalog and guardrails
