@@ -151,12 +151,21 @@ async fn async_main() -> Result<()> {
         ])
         .env("VX_HOME", args.vx_home.as_str());
 
-    let (runner_listener, store_handle, vfsd_handle) = tokio::try_join!(
+    let (runner_listener, store_handle, mut vfsd_handle) = tokio::try_join!(
         async { Listener::bind(&bind_endpoint).await },
         store_builder.connect(),
         vfsd_builder.connect(),
     )?;
     tracing::info!("Runner RPC bound on {}", bind_endpoint);
+
+    // Watch for vx-vfsd dying — if it does, we're useless.
+    if let Some(mut vfsd_child) = vfsd_handle.child.take() {
+        peeps::tasks::spawn_tracked("vfsd_death_watcher", async move {
+            let status = vfsd_child.wait().await;
+            tracing::error!(?status, "vx-vfsd exited unexpectedly");
+            std::process::exit(1);
+        });
+    }
 
     let store = Arc::new(StoreClient::new(store_handle.caller));
     let vfsd_protocol = vx_vfsd::protocol::VfsdClient::new(vfsd_handle.caller);

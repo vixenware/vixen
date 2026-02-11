@@ -307,33 +307,29 @@ async fn async_main() -> Result<()> {
             let read_result =
                 tokio::time::timeout(smoke_timeout, tokio::fs::read(canary_fs_path.as_std_path()))
                     .await;
-            match read_result {
+
+            let smoke_err = match read_result {
                 Ok(Ok(actual)) if actual == canary.content => {
                     tracing::info!("VFS smoke test passed");
+                    None
                 }
-                Ok(Ok(actual)) => {
-                    tracing::error!(
-                        expected_len = canary.content.len(),
-                        actual_len = actual.len(),
-                        "VFS smoke test: content mismatch"
-                    );
-                    platform::collect_smoke_test_diagnostics(&mount_path).await;
-                    std::process::exit(1);
-                }
-                Ok(Err(e)) => {
-                    tracing::error!(%e, path = %canary_fs_path, "VFS smoke test: read failed");
-                    platform::collect_smoke_test_diagnostics(&mount_path).await;
-                    std::process::exit(1);
-                }
-                Err(_) => {
-                    tracing::error!(
-                        path = %canary_fs_path,
-                        timeout = ?smoke_timeout,
-                        "VFS smoke test: timed out — mount is not responding"
-                    );
-                    platform::collect_smoke_test_diagnostics(&mount_path).await;
-                    std::process::exit(1);
-                }
+                Ok(Ok(actual)) => Some(format!(
+                    "content mismatch at {} (expected {} bytes, got {} bytes)",
+                    canary_fs_path,
+                    canary.content.len(),
+                    actual.len(),
+                )),
+                Ok(Err(e)) => Some(format!("failed to read {}: {e}", canary_fs_path,)),
+                Err(_) => Some(format!(
+                    "timed out after {smoke_timeout:?} reading {} — mount is not responding",
+                    canary_fs_path,
+                )),
+            };
+
+            if let Some(reason) = smoke_err {
+                let diagnostics = platform::collect_smoke_test_diagnostics(&mount_path).await;
+                eprintln!("VFS smoke test failed: {reason}\n{diagnostics}");
+                return Err("VFS is not usable, bailing out".into());
             }
 
             // Set up platform signal handler for diagnostics

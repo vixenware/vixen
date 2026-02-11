@@ -3345,6 +3345,7 @@ dependencies = [
  "figue",
  "futures-util",
  "libc",
+ "owo-colors",
  "peeps",
  "roam",
  "roam-session",

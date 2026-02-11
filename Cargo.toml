@@ -60,7 +60,9 @@ roam-session = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-shm = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-local = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-codegen = { git = "https://github.com/bearcove/roam", branch = "main" }
-ur-taking-me-with-you = { git = "https://github.com/bearcove/roam", branch = "main", features = ["tokio"] }
+ur-taking-me-with-you = { git = "https://github.com/bearcove/roam", branch = "main", features = [
+  "tokio",
+] }
 
 # process management
 
@@ -97,7 +99,7 @@ bytes = "1"
 fuse3 = { path = "crates/fuse3", features = ["telemetry"] }
 
 # terminal
-owo-colors = "4"
+owo-colors = { version = "4", features = ["supports-color"] }
 indicatif = "0.18"
 
 # build utilities
