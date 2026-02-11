@@ -123,6 +123,12 @@ pub enum PlannerExpr {
         entries: BTreeMap<String, PlannerExpr>,
         provenance: RulePlanProvenance,
     },
+    BinaryOp {
+        op: PlannerBinaryOp,
+        lhs: Box<PlannerExpr>,
+        rhs: Box<PlannerExpr>,
+        provenance: RulePlanProvenance,
+    },
     Call(PlannerCall),
     Let {
         name: String,
@@ -143,6 +149,12 @@ pub enum PlannerExpr {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannerBinaryOp {
+    Eq,
+    Neq,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannerCall {
     pub builtin: PlannerBuiltinId,
@@ -157,6 +169,8 @@ pub enum PlannerBuiltinId {
     EmitFact,
     SortMapKeys,
     SortScalars,
+    Get,
+    Len,
     EnvProfile,
     EnvTargetTriple,
     ClockNow,
@@ -174,6 +188,8 @@ impl PlannerBuiltinId {
             Self::EmitFact => "emit-fact",
             Self::SortMapKeys => "sort-map-keys",
             Self::SortScalars => "sort-scalars",
+            Self::Get => "get",
+            Self::Len => "len",
             Self::EnvProfile => "env-profile",
             Self::EnvTargetTriple => "env-target-triple",
             Self::ClockNow => "clock-now",
@@ -256,6 +272,7 @@ pub struct EmitNodeArgs {
     pub id: String,
     pub kind: RulePlanNodeKind,
     pub label: String,
+    pub meta: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,6 +280,7 @@ pub struct EmitEdgeArgs {
     pub from: String,
     pub to: String,
     pub kind: RulePlanEdgeKind,
+    pub meta: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,6 +288,7 @@ pub struct EmitFactArgs {
     pub id: String,
     pub node_id: String,
     pub value: String,
+    pub meta: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,6 +302,17 @@ pub struct SortScalarsArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GetArgs {
+    pub value: PlannerValue,
+    pub key: PlannerValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LenArgs {
+    pub value: PlannerValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlannerBuiltinArgs {
     None,
     EmitNode(EmitNodeArgs),
@@ -290,6 +320,8 @@ pub enum PlannerBuiltinArgs {
     EmitFact(EmitFactArgs),
     SortMapKeys(SortMapKeysArgs),
     SortScalars(SortScalarsArgs),
+    Get(GetArgs),
+    Len(LenArgs),
 }
 
 pub trait PlannerHost {
@@ -373,6 +405,20 @@ impl<H: PlannerHost> PlannerRuntime<H> {
                     out.insert(k.clone(), self.evaluate_expr(v)?);
                 }
                 Ok(PlannerValue::Map(out))
+            }
+            PlannerExpr::BinaryOp {
+                op,
+                lhs,
+                rhs,
+                provenance: _,
+            } => {
+                let lhs_v = self.evaluate_expr(lhs)?;
+                let rhs_v = self.evaluate_expr(rhs)?;
+                let out = match op {
+                    PlannerBinaryOp::Eq => lhs_v == rhs_v,
+                    PlannerBinaryOp::Neq => lhs_v != rhs_v,
+                };
+                Ok(PlannerValue::Bool(out))
             }
             PlannerExpr::Call(call) => self.evaluate_call(call),
             PlannerExpr::Let {
@@ -569,6 +615,16 @@ pub const BUILTIN_SORT_SCALARS: PlannerBuiltin = PlannerBuiltin {
     capability: PlannerCapability::Transform,
 };
 
+pub const BUILTIN_GET: PlannerBuiltin = PlannerBuiltin {
+    id: PlannerBuiltinId::Get,
+    capability: PlannerCapability::Transform,
+};
+
+pub const BUILTIN_LEN: PlannerBuiltin = PlannerBuiltin {
+    id: PlannerBuiltinId::Len,
+    capability: PlannerCapability::Transform,
+};
+
 pub const BUILTIN_ENV_PROFILE: PlannerBuiltin = PlannerBuiltin {
     id: PlannerBuiltinId::EnvProfile,
     capability: PlannerCapability::Env,
@@ -604,13 +660,15 @@ pub const BUILTIN_PROCESS_SPAWN: PlannerBuiltin = PlannerBuiltin {
     capability: PlannerCapability::Process,
 };
 
-pub fn planner_builtins() -> [PlannerBuiltin; 12] {
+pub fn planner_builtins() -> [PlannerBuiltin; 14] {
     [
         BUILTIN_EMIT_NODE,
         BUILTIN_EMIT_EDGE,
         BUILTIN_EMIT_FACT,
         BUILTIN_SORT_MAP_KEYS,
         BUILTIN_SORT_SCALARS,
+        BUILTIN_GET,
+        BUILTIN_LEN,
         BUILTIN_ENV_PROFILE,
         BUILTIN_ENV_TARGET_TRIPLE,
         BUILTIN_CLOCK_NOW,
@@ -680,29 +738,35 @@ impl PlannerHost for RulePlanHost {
 
         match (builtin, args) {
             (PlannerBuiltinId::EmitNode, PlannerBuiltinArgs::EmitNode(args)) => {
+                let mut provenance = site.provenance.clone();
+                provenance.metadata.extend(args.meta);
                 self.plan.nodes.push(RulePlanNode {
                     id: RulePlanNodeId::from(args.id),
                     kind: args.kind,
                     label: args.label,
-                    provenance: site.provenance.clone(),
+                    provenance,
                 });
                 Ok(PlannerValue::Keyword("ok".to_string()))
             }
             (PlannerBuiltinId::EmitEdge, PlannerBuiltinArgs::EmitEdge(args)) => {
+                let mut provenance = site.provenance.clone();
+                provenance.metadata.extend(args.meta);
                 self.plan.edges.push(RulePlanEdge {
                     from: RulePlanNodeId::from(args.from),
                     to: RulePlanNodeId::from(args.to),
                     kind: args.kind,
-                    provenance: site.provenance.clone(),
+                    provenance,
                 });
                 Ok(PlannerValue::Keyword("ok".to_string()))
             }
             (PlannerBuiltinId::EmitFact, PlannerBuiltinArgs::EmitFact(args)) => {
+                let mut provenance = site.provenance.clone();
+                provenance.metadata.extend(args.meta);
                 self.plan.facts.push(RulePlanFact {
                     id: RulePlanFactId::from(args.id),
                     node_id: RulePlanNodeId::from(args.node_id),
                     value: RulePlanValue::from(args.value),
-                    provenance: site.provenance.clone(),
+                    provenance,
                 });
                 Ok(PlannerValue::Keyword("ok".to_string()))
             }
@@ -724,6 +788,37 @@ impl PlannerHost for RulePlanHost {
                         .collect(),
                 ))
             }
+            (PlannerBuiltinId::Get, PlannerBuiltinArgs::Get(args)) => {
+                let key_as_string = match &args.key {
+                    PlannerValue::String(s) => Some(s.as_str()),
+                    PlannerValue::Keyword(s) => Some(s.as_str()),
+                    _ => None,
+                };
+
+                match args.value {
+                    PlannerValue::Map(map) => Ok(key_as_string
+                        .and_then(|k| map.get(k).cloned())
+                        .unwrap_or(PlannerValue::Null)),
+                    PlannerValue::Vector(values) => match args.key {
+                        PlannerValue::Int(idx) => {
+                            if idx < 0 {
+                                return Ok(PlannerValue::Null);
+                            }
+                            let idx = idx as usize;
+                            Ok(values.get(idx).cloned().unwrap_or(PlannerValue::Null))
+                        }
+                        _ => Err("get(vector) expects key to be an int index".to_string()),
+                    },
+                    _ => Err("get(value) expects value to be map or vector".to_string()),
+                }
+            }
+            (PlannerBuiltinId::Len, PlannerBuiltinArgs::Len(args)) => match args.value {
+                PlannerValue::Vector(v) => Ok(PlannerValue::Int(v.len() as i64)),
+                PlannerValue::Map(m) => Ok(PlannerValue::Int(m.len() as i64)),
+                PlannerValue::Set(s) => Ok(PlannerValue::Int(s.len() as i64)),
+                PlannerValue::String(s) => Ok(PlannerValue::Int(s.chars().count() as i64)),
+                _ => Err("len(value) expects value to be string/vector/map/set".to_string()),
+            },
             (PlannerBuiltinId::EnvProfile, PlannerBuiltinArgs::None) => self
                 .env_profile
                 .clone()
@@ -763,10 +858,12 @@ fn parse_builtin_args(
             let id = required_string(map, "id", builtin)?.to_owned();
             let kind = parse_node_kind(required_string(map, "kind", builtin)?)?;
             let label = required_string(map, "label", builtin)?.to_owned();
+            let meta = optional_meta(map, builtin)?;
             Ok(PlannerBuiltinArgs::EmitNode(EmitNodeArgs {
                 id,
                 kind,
                 label,
+                meta,
             }))
         }
         PlannerBuiltinId::EmitEdge => {
@@ -774,10 +871,12 @@ fn parse_builtin_args(
             let from = required_string(map, "from", builtin)?.to_owned();
             let to = required_string(map, "to", builtin)?.to_owned();
             let kind = parse_edge_kind(required_string(map, "kind", builtin)?)?;
+            let meta = optional_meta(map, builtin)?;
             Ok(PlannerBuiltinArgs::EmitEdge(EmitEdgeArgs {
                 from,
                 to,
                 kind,
+                meta,
             }))
         }
         PlannerBuiltinId::EmitFact => {
@@ -785,10 +884,12 @@ fn parse_builtin_args(
             let id = required_string(map, "id", builtin)?.to_owned();
             let node_id = required_string(map, "node-id", builtin)?.to_owned();
             let value = required_string(map, "value", builtin)?.to_owned();
+            let meta = optional_meta(map, builtin)?;
             Ok(PlannerBuiltinArgs::EmitFact(EmitFactArgs {
                 id,
                 node_id,
                 value,
+                meta,
             }))
         }
         PlannerBuiltinId::SortMapKeys => {
@@ -811,6 +912,40 @@ fn parse_builtin_args(
                 values.push(scalar);
             }
             Ok(PlannerBuiltinArgs::SortScalars(SortScalarsArgs { values }))
+        }
+        PlannerBuiltinId::Get => {
+            let map = exactly_one_map_arg(builtin, args)?;
+            let value = map.get("value").ok_or_else(|| {
+                format!(
+                    "builtin '{}' missing required key '{}'",
+                    builtin.as_str(),
+                    "value"
+                )
+            })?;
+            let key = map.get("key").ok_or_else(|| {
+                format!(
+                    "builtin '{}' missing required key '{}'",
+                    builtin.as_str(),
+                    "key"
+                )
+            })?;
+            Ok(PlannerBuiltinArgs::Get(GetArgs {
+                value: value.clone(),
+                key: key.clone(),
+            }))
+        }
+        PlannerBuiltinId::Len => {
+            let map = exactly_one_map_arg(builtin, args)?;
+            let value = map.get("value").ok_or_else(|| {
+                format!(
+                    "builtin '{}' missing required key '{}'",
+                    builtin.as_str(),
+                    "value"
+                )
+            })?;
+            Ok(PlannerBuiltinArgs::Len(LenArgs {
+                value: value.clone(),
+            }))
         }
         PlannerBuiltinId::EnvProfile | PlannerBuiltinId::EnvTargetTriple => {
             if args.is_empty() {
@@ -839,6 +974,41 @@ fn parse_builtin_args(
             }
         }
     }
+}
+
+fn optional_meta(
+    map: &BTreeMap<String, PlannerValue>,
+    builtin: PlannerBuiltinId,
+) -> Result<BTreeMap<String, String>, String> {
+    let Some(meta_value) = map.get("meta") else {
+        return Ok(BTreeMap::new());
+    };
+
+    let PlannerValue::Map(meta_map) = meta_value else {
+        return Err(format!(
+            "builtin '{}' key 'meta' must be a map",
+            builtin.as_str()
+        ));
+    };
+
+    let mut out = BTreeMap::new();
+    for (k, v) in meta_map {
+        let s = match v {
+            PlannerValue::Null => "null".to_string(),
+            PlannerValue::Bool(b) => b.to_string(),
+            PlannerValue::Int(i) => i.to_string(),
+            PlannerValue::String(s) => s.clone(),
+            PlannerValue::Keyword(s) => s.clone(),
+            PlannerValue::Vector(_) | PlannerValue::Set(_) | PlannerValue::Map(_) => {
+                return Err(format!(
+                    "builtin '{}' key 'meta' value for '{k}' must be a scalar",
+                    builtin.as_str()
+                ));
+            }
+        };
+        out.insert(k.clone(), s);
+    }
+    Ok(out)
 }
 
 fn exactly_one_map_arg(

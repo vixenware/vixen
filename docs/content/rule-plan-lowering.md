@@ -62,7 +62,12 @@ emit_fact(id: f_profile, node-id: n_profile, value: $profile);
 
 for root in $roots {
   if true {
-    emit_node(id: n_action, kind: action, label: "compile-bin:app");
+    emit_node(
+      id: n_action,
+      kind: action,
+      label: "compile",
+      meta: { crate_name: "app", crate_type: "bin" },
+    );
   } else { }
 }
 

@@ -1,4 +1,6 @@
-use crate::runtime::{PlannerBuiltinId, PlannerCall, PlannerExpr, PlannerProgram, PlannerValue};
+use crate::runtime::{
+    PlannerBinaryOp, PlannerBuiltinId, PlannerCall, PlannerExpr, PlannerProgram, PlannerValue,
+};
 use crate::{RuleId, RulePlanProvenance, RulePlanSourceId, RulePlanSpan};
 use camino::Utf8Path;
 use std::collections::BTreeMap;
@@ -63,6 +65,8 @@ enum TokenKind {
     RBracket,
     Dot,
     Dollar,
+    EqEq,
+    BangEq,
     Colon,
     Comma,
     Semi,
@@ -150,8 +154,27 @@ impl<'a> Lexer<'a> {
                 TokenKind::Semi
             }
             '=' => {
-                self.bump();
-                TokenKind::Eq
+                if self.peek_next_char() == Some('=') {
+                    self.bump();
+                    self.bump();
+                    TokenKind::EqEq
+                } else {
+                    self.bump();
+                    TokenKind::Eq
+                }
+            }
+            '!' => {
+                if self.peek_next_char() == Some('=') {
+                    self.bump();
+                    self.bump();
+                    TokenKind::BangEq
+                } else {
+                    return Err(VxParseError {
+                        message: "unexpected '!' (did you mean '!=')".to_string(),
+                        line,
+                        column,
+                    });
+                }
             }
             '"' => TokenKind::String(self.lex_string()?),
             '-' | '0'..='9' => {
@@ -390,7 +413,28 @@ impl Parser {
         if self.peek_ident_is("for") {
             return self.parse_for();
         }
-        self.parse_primary()
+        self.parse_comparison()
+    }
+
+    fn parse_comparison(&mut self) -> Result<PlannerExpr, VxParseError> {
+        let mut expr = self.parse_primary()?;
+        loop {
+            let op = match self.peek_kind() {
+                TokenKind::EqEq => PlannerBinaryOp::Eq,
+                TokenKind::BangEq => PlannerBinaryOp::Neq,
+                _ => break,
+            };
+            let (line, column) = self.peek_line_col();
+            self.pos += 1;
+            let rhs = self.parse_primary()?;
+            expr = PlannerExpr::BinaryOp {
+                op,
+                lhs: Box::new(expr),
+                rhs: Box::new(rhs),
+                provenance: self.provenance_script(line, column),
+            };
+        }
+        Ok(expr)
     }
 
     fn parse_primary(&mut self) -> Result<PlannerExpr, VxParseError> {
@@ -805,6 +849,8 @@ fn builtin_from_str(raw: &str) -> Option<PlannerBuiltinId> {
         "emit-fact" => Some(PlannerBuiltinId::EmitFact),
         "sort-map-keys" => Some(PlannerBuiltinId::SortMapKeys),
         "sort-scalars" => Some(PlannerBuiltinId::SortScalars),
+        "get" => Some(PlannerBuiltinId::Get),
+        "len" => Some(PlannerBuiltinId::Len),
         "env-profile" => Some(PlannerBuiltinId::EnvProfile),
         "env-target-triple" => Some(PlannerBuiltinId::EnvTargetTriple),
         "clock-now" => Some(PlannerBuiltinId::ClockNow),
@@ -865,7 +911,7 @@ emit_edge(from: n1, to: n2, kind: ifwritten)
             r#"
 let roots = ["app"];
 for c in $roots {
-  if true { emit_node(id: n1, kind: action, label: "compile"); } else { }
+  if "release" == "release" { emit_node(id: n1, kind: action, label: "compile"); } else { }
 }
 "#,
         )

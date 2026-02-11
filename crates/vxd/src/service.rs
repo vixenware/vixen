@@ -321,15 +321,6 @@ pub(crate) fn compare_rule_plan_edge_parity(
     }
 }
 
-fn parse_compile_node_id(node_id: &str) -> Option<(&str, &str)> {
-    let rest = node_id.strip_prefix("compile-")?;
-    let (crate_type, crate_name) = rest.split_once(':')?;
-    if crate_type.is_empty() || crate_name.is_empty() {
-        return None;
-    }
-    Some((crate_type, crate_name))
-}
-
 pub(crate) fn selected_crates_from_rule_plan(
     plan: &RulePlan,
     graph: &CrateGraph,
@@ -342,32 +333,19 @@ pub(crate) fn selected_crates_from_rule_plan(
             continue;
         }
 
-        // Prefer explicit metadata for selection.
-        let mut crate_name = node.provenance.metadata.get("crate_name").cloned();
-        let mut crate_type = node.provenance.metadata.get("crate_type").cloned();
-
-        if crate_name.is_none() || crate_type.is_none() {
-            if let Some(legacy) = node.provenance.metadata.get("legacy_node_id")
-                && let Some((kind, name)) = parse_compile_node_id(legacy)
-            {
-                crate_name = Some(name.to_string());
-                crate_type = Some(kind.to_string());
-            } else if let Some((kind, name)) = parse_compile_node_id(&node.label) {
-                crate_name = Some(name.to_string());
-                crate_type = Some(kind.to_string());
-            }
-        }
-
-        let (crate_name, crate_type) = match (crate_name, crate_type) {
-            (Some(name), Some(kind)) => (name, kind),
-            _ => continue,
+        let (Some(crate_name), Some(crate_type)) = (
+            node.provenance.metadata.get("crate_name"),
+            node.provenance.metadata.get("crate_type"),
+        ) else {
+            continue;
         };
 
         let mut matches = graph
             .nodes
             .values()
             .filter(|crate_node| {
-                crate_node.crate_name == crate_name && crate_node.crate_type.as_str() == crate_type
+                crate_node.crate_name == *crate_name
+                    && crate_node.crate_type.as_str() == *crate_type
             })
             .map(|crate_node| crate_node.id)
             .collect::<Vec<CrateId>>();
@@ -397,8 +375,7 @@ pub(crate) fn selected_crates_from_rule_plan(
 
     if selected.is_empty() {
         return Err(VxdError::InvalidManifest(
-            "RulePlan execution is enabled but no compile-* action nodes were found in the plan"
-                .to_string(),
+            "RulePlan execution is enabled but no action nodes with provenance metadata {crate_name, crate_type} were found in the plan".to_string(),
         ));
     }
 
