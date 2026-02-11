@@ -213,10 +213,15 @@ enum MountError: Error, CustomStringConvertible {
     }
 }
 
+/// Watches a parent PID and calls onExit when it dies.
+///
+/// Uses polling with kill(pid, 0) instead of DispatchSource.makeProcessSource
+/// because the latter can fire spuriously (e.g. kevent registration failure,
+/// permission issues) causing false-positive unmounts.
 final class ParentExitWatcher {
     private let pid: pid_t
     private let queue: DispatchQueue
-    private var source: DispatchSourceProcess?
+    private var timer: DispatchSourceTimer?
     private let onExit: () -> Void
 
     init(pid: pid_t, queue: DispatchQueue, onExit: @escaping () -> Void) {
@@ -234,19 +239,22 @@ final class ParentExitWatcher {
             onExit()
             return
         }
-        let source = DispatchSource.makeProcessSource(
-            identifier: pid, eventMask: .exit, queue: queue)
-        source.setEventHandler { [onExit] in
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(
+            deadline: .now(), repeating: .milliseconds(200),
+            leeway: .milliseconds(50))
+        t.setEventHandler { [pid, onExit] in
+            if kill(pid, 0) == 0 { return }
+            if errno == EPERM { return }  // exists but we lack permission; treat as alive
             onExit()
         }
-        source.setCancelHandler {}
-        source.resume()
-        self.source = source
+        t.resume()
+        timer = t
     }
 
     func stop() {
-        source?.cancel()
-        source = nil
+        timer?.cancel()
+        timer = nil
     }
 }
 
@@ -348,13 +356,9 @@ final class MountLifecycle {
         let queue = self.queue
         let lifecycle = self
 
-        // If we've already been reparented (parent died between spawn and now),
-        // clean up immediately.
-        let currentParent = getppid()
-        if currentParent != parentPID {
-            emit(
-                "parent already gone (expected \(parentPID), getppid()=\(currentParent)), unmounting"
-            )
+        // If the parent PID is already gone, clean up immediately.
+        if kill(parentPID, 0) != 0 && errno == ESRCH {
+            emit("parent already gone (pid \(parentPID) not found), unmounting")
             performCleanupAndExit(status: 0)
             return
         }

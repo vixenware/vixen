@@ -84,6 +84,7 @@ impl SharedVfs {
 impl Vfs for SharedVfs {
     async fn lookup(&self, cx: &roam::Context, parent_id: ItemId, name: String) -> LookupResult {
         if parent_id == ROOT_ITEM_ID && name == self.canary.name {
+            tracing::trace!(parent_id, %name, item_id = self.canary.item_id, "canary lookup hit");
             return LookupResult {
                 attrs: self.canary_attrs(),
                 error: vixenfs_proto::errno::OK,
@@ -94,6 +95,7 @@ impl Vfs for SharedVfs {
 
     async fn get_attributes(&self, cx: &roam::Context, item_id: ItemId) -> GetAttributesResult {
         if item_id == self.canary.item_id {
+            tracing::trace!(item_id, "canary get_attributes hit");
             return GetAttributesResult {
                 attrs: self.canary_attrs(),
                 error: vixenfs_proto::errno::OK,
@@ -108,6 +110,7 @@ impl Vfs for SharedVfs {
 
     async fn read(&self, cx: &roam::Context, item_id: ItemId, offset: u64, len: u64) -> ReadResult {
         if item_id == self.canary.item_id {
+            tracing::trace!(item_id, offset, len, "canary read hit");
             let content = &self.canary.content;
             let start = (offset as usize).min(content.len());
             let end = (start + len as usize).min(content.len());
