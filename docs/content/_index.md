@@ -1,6 +1,6 @@
 +++
 title = "vixen"
-description = "A Rust build engine with correct caching"
+description = "The best build system that doesn't exist yet"
 +++
 
 ## Why? {#why}

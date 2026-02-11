@@ -32,12 +32,14 @@ the VFS and flushed back to the store when the action completes.
 This is how hermeticity works: the sandbox prevents the compiler from observing
 anything outside its inputs, so the cache key is actually meaningful.
 
-## Debugging with pipes
+## Debugging with peeps
 
-When a build is stuck — a daemon isn't responding, an action is hanging — you
-can use Unix pipes to introspect the running system. The daemons expose
-diagnostic channels that let you see what queries are in-flight, what RPCs are
-pending, and where things are blocked.
+All vixen daemons are instrumented with [peeps](https://github.com/bearcove/peeps),
+a low-overhead diagnostics library. Locks, async tasks, and threads are all
+tracked. When a build is stuck, `vx debug` sends SIGUSR1 to every running
+daemon — each one dumps its internal state (in-flight tasks, lock holders,
+pending RPCs) to a JSON file, and `vx debug` aggregates them into a web
+dashboard showing exactly where things are blocked.
 
 ## A language for rules
 
