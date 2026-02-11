@@ -84,6 +84,11 @@ struct Args {
 }
 
 fn main() -> Result<()> {
+    // Create a new process group for vx-runner and all its children.
+    // The reaper watches our PID and kills this entire group if we die.
+    #[cfg(target_os = "macos")]
+    spawn_reaper();
+
     peeps::threads::install_sigprof_handler();
     peeps::threads::register_thread("main");
     peeps::tasks::init_task_tracking();
@@ -579,5 +584,67 @@ impl RunnerService {
     #[allow(dead_code)] // Will be used for sandbox integration
     pub(crate) fn get_prefix_mount_path(&self, prefix_id: &str) -> Utf8PathBuf {
         runner_mount_base().join(prefix_id)
+    }
+}
+
+/// Global handle to the reaper's stdin pipe.
+/// `run_sandboxed_command` writes child pgids here after spawning.
+#[cfg(target_os = "macos")]
+static REAPER_STDIN: std::sync::OnceLock<std::sync::Mutex<std::process::ChildStdin>> =
+    std::sync::OnceLock::new();
+
+/// Notify the reaper about a new child process group.
+#[cfg(target_os = "macos")]
+pub(crate) fn register_child_pgroup(pgid: u32) {
+    if let Some(stdin) = REAPER_STDIN.get() {
+        use std::io::Write;
+        if let Ok(mut guard) = stdin.lock() {
+            let _ = writeln!(guard, "{pgid}");
+            let _ = guard.flush();
+        }
+    }
+}
+
+/// Spawn the vx-reaper sidecar process.
+///
+/// Spawns vx-reaper which watches our PID via kqueue. vx-runner writes
+/// child process group IDs to the reaper's stdin as it spawns them.
+/// If vx-runner dies for any reason (including SIGKILL), the reaper
+/// kills all known child process groups, preventing orphaned compiler
+/// subprocesses from getting stuck on a dead FSKit mount.
+#[cfg(target_os = "macos")]
+fn spawn_reaper() {
+    use std::process::Command;
+
+    let my_pid = std::process::id();
+
+    // Find vx-reaper next to our own binary
+    let reaper_path = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("vx-reaper")))
+        .filter(|path| path.exists());
+
+    let Some(reaper_path) = reaper_path else {
+        // Not a hard error — just means orphan protection is disabled
+        return;
+    };
+
+    match Command::new(&reaper_path)
+        .arg("--parent-pid")
+        .arg(my_pid.to_string())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+    {
+        Ok(mut child) => {
+            if let Some(stdin) = child.stdin.take() {
+                let _ = REAPER_STDIN.set(std::sync::Mutex::new(stdin));
+            }
+            // Don't wait on it — fire-and-forget sidecar.
+        }
+        Err(_) => {
+            // Not a hard error — just means orphan protection is disabled
+        }
     }
 }

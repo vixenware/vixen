@@ -1,5 +1,5 @@
 [package]
-name = "vx-shim"
+name = "vx-reaper"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

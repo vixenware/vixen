@@ -3121,6 +3121,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-reaper"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "vx-report"
 version = "0.1.0"
 dependencies = [
@@ -3183,13 +3190,6 @@ dependencies = [
  "facet",
  "roam",
  "vx-store-proto",
-]
-
-[[package]]
-name = "vx-shim"
-version = "0.1.0"
-dependencies = [
- "libc",
 ]
 
 [[package]]
