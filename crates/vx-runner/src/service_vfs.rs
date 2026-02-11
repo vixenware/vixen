@@ -1107,7 +1107,7 @@ impl RunnerService {
 
         // Mount CAS trees into the prefix.
         for mount in &request.tree_mounts {
-            match self.cas.get_tree_manifest(mount.manifest).await {
+            match self.cas.get_node(NodeHash(mount.manifest)).await {
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     self.remove_action_prefix(&action.prefix_id).await;
@@ -1158,12 +1158,41 @@ impl RunnerService {
 
         // Materialize individual files from node manifests into a tree and mount it.
         if !request.file_mounts.is_empty() {
-            use vx_store_proto::TreeManifest;
-
-            let mut tree_manifest = TreeManifest::new();
             for fm in &request.file_mounts {
-                let manifest = match self.cas.get_manifest(fm.manifest).await {
-                    Ok(Some(m)) => m,
+                let manifest = match self.cas.get_node(NodeHash(fm.manifest)).await {
+                    Ok(Some(node_data)) => match CasNode::from_bytes(&node_data) {
+                        Ok(CasNode::Manifest(m)) => m,
+                        Ok(_) => {
+                            self.remove_action_prefix(&action.prefix_id).await;
+                            return RunResult {
+                                success: false,
+                                exit_code: -1,
+                                stdout: String::new(),
+                                stderr: String::new(),
+                                duration_ms: start.elapsed().as_millis() as u64,
+                                output_manifest: None,
+                                error: Some(format!(
+                                    "input manifest {} is not a Manifest node",
+                                    fm.manifest
+                                )),
+                            };
+                        }
+                        Err(e) => {
+                            self.remove_action_prefix(&action.prefix_id).await;
+                            return RunResult {
+                                success: false,
+                                exit_code: -1,
+                                stdout: String::new(),
+                                stderr: String::new(),
+                                duration_ms: start.elapsed().as_millis() as u64,
+                                output_manifest: None,
+                                error: Some(format!(
+                                    "failed to decode input manifest {}: {}",
+                                    fm.manifest, e
+                                )),
+                            };
+                        }
+                    },
                     Ok(None) => {
                         self.remove_action_prefix(&action.prefix_id).await;
                         return RunResult {
@@ -1209,47 +1238,37 @@ impl RunnerService {
                     }
                 };
 
-                tree_manifest.add_file(fm.path.clone(), entry.blob, entry.size, entry.executable);
-            }
-            tree_manifest.finalize();
-
-            let manifest_json = facet_json::to_string(&tree_manifest)
-                .map_err(|e| format!("failed to serialize tree manifest: {e}"))
-                .unwrap();
-            let manifest_hash = Blake3Hash::from_bytes(manifest_json.as_bytes());
-
-            if let Err(e) = self.cas.put_blob(manifest_json.into_bytes()).await {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return RunResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!(
-                        "failed to store input files tree manifest to CAS: {e}"
-                    )),
+                let (blob_hash, blob_size) = match &entry.blob {
+                    OutputBlobRef::Small { chunk, size } => (chunk.0, *size),
+                    OutputBlobRef::Large {
+                        content_hash, size, ..
+                    } => (content_hash.0, *size),
                 };
-            }
-
-            if let Err(e) = self
-                .vfs
-                .mount_tree(&action.prefix_id, "", manifest_hash)
-                .await
-            {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return RunResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!(
-                        "failed to mount input files tree manifest in VFS: {e}"
-                    )),
-                };
+                if let Err(e) = self
+                    .vfs
+                    .add_file_to_prefix(
+                        &action.prefix_id,
+                        &fm.path,
+                        blob_hash,
+                        blob_size,
+                        entry.executable,
+                    )
+                    .await
+                {
+                    self.remove_action_prefix(&action.prefix_id).await;
+                    return RunResult {
+                        success: false,
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        output_manifest: None,
+                        error: Some(format!(
+                            "failed to materialize file mount '{}': {e}",
+                            fm.path
+                        )),
+                    };
+                }
             }
         }
 
@@ -1426,8 +1445,10 @@ impl RunnerService {
             outputs.push(OutputEntry {
                 logical: out.logical.clone(),
                 filename,
-                blob,
-                size,
+                blob: OutputBlobRef::Small {
+                    chunk: ChunkHash(blob),
+                    size,
+                },
                 executable: out.executable,
             });
         }
@@ -1440,21 +1461,21 @@ impl RunnerService {
             outputs,
         };
 
-        let manifest_hash = match self.cas.put_manifest(manifest).await {
-            Ok(h) => h,
-            Err(e) => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return RunResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: output.combined_output,
-                    duration_ms,
-                    output_manifest: None,
-                    error: Some(format!("failed to store manifest: {:?}", e)),
-                };
-            }
-        };
+        let cas_node = CasNode::Manifest(manifest);
+        let (node_bytes, node_hash) = cas_node.to_bytes_and_hash();
+        let manifest_hash = node_hash.0;
+        if let Err(e) = self.cas.put_node(node_hash, node_bytes).await {
+            self.remove_action_prefix(&action.prefix_id).await;
+            return RunResult {
+                success: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: output.combined_output,
+                duration_ms,
+                output_manifest: None,
+                error: Some(format!("failed to store manifest: {:?}", e)),
+            };
+        }
 
         self.remove_action_prefix(&action.prefix_id).await;
 

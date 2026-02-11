@@ -17,7 +17,10 @@ use crate::action_graph::{Action, ActionGraph};
 use crate::error::VxdError;
 use vx_rs::CrateId;
 use vx_runner_proto::RunnerClient;
-use vx_store_proto::{Blake3Hash, RustComponent, RustToolchainSpec, StoreClient, StoreProgress};
+use vx_store_proto::{
+    Blake3Hash, BlobRef, CasNode, ChunkHash, ContentHash, DirEntryKind, NodeHash, OutputBlobRef,
+    RustComponent, RustToolchainSpec, StoreClient, StoreProgress,
+};
 use vxd_proto::{ActionProgress, ProgressListenerClient};
 
 /// State of an individual action
@@ -38,8 +41,8 @@ pub enum ActionResult {
     RustToolchainComponentDownloaded {
         /// Component that was downloaded.
         component: RustComponent,
-        /// Tarball blob hash (None if full toolchain was already cached).
-        tarball_blob: Option<Blake3Hash>,
+        /// Tarball blob ref (None if full toolchain was already cached).
+        tarball: Option<BlobRef>,
         /// Whether this was a cache hit
         was_cached: bool,
     },
@@ -48,8 +51,8 @@ pub enum ActionResult {
     RustToolchainComponentExtracted {
         /// Component that was extracted.
         component: RustComponent,
-        /// Tree manifest hash (None if full toolchain was already cached).
-        tree_manifest: Option<Blake3Hash>,
+        /// Tree root node hash (None if full toolchain was already cached).
+        tree_root: Option<NodeHash>,
         /// Whether this was a cache hit
         was_cached: bool,
     },
@@ -150,6 +153,139 @@ impl CompletionGuard {
     /// Disarm the guard (call this right before the normal send).
     fn disarm(&mut self) {
         self.tx = None;
+    }
+}
+
+async fn load_manifest(
+    cas: &Arc<StoreClient<crate::UpstreamCaller>>,
+    manifest_hash: NodeHash,
+    crate_name: &str,
+) -> Result<vx_store_proto::NodeManifest, VxdError> {
+    let node_bytes = cas
+        .get_node(manifest_hash)
+        .await
+        .map_err(|e| VxdError::Compilation {
+            crate_name: crate_name.to_string(),
+            message: format!("Failed to fetch manifest from CAS: {e}"),
+        })?
+        .ok_or(VxdError::OutputManifestNotFound(manifest_hash))?;
+    match CasNode::from_bytes(&node_bytes) {
+        Ok(CasNode::Manifest(m)) => Ok(m),
+        Ok(_) => Err(VxdError::Compilation {
+            crate_name: crate_name.to_string(),
+            message: format!("Node {} is not a Manifest", manifest_hash.to_hex()),
+        }),
+        Err(e) => Err(VxdError::Compilation {
+            crate_name: crate_name.to_string(),
+            message: format!(
+                "Failed to deserialize manifest node {}: {}",
+                manifest_hash.to_hex(),
+                e
+            ),
+        }),
+    }
+}
+
+async fn fetch_blob_from_ref(
+    cas: &Arc<StoreClient<crate::UpstreamCaller>>,
+    blob_ref: &BlobRef,
+) -> Result<Vec<u8>, VxdError> {
+    match blob_ref {
+        BlobRef::Small { chunk, .. } => {
+            let data = cas
+                .get_chunk(*chunk)
+                .await
+                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .ok_or_else(|| VxdError::BlobNotFound(format!("chunk {}", chunk.to_hex())))?;
+            Ok(data)
+        }
+        BlobRef::Large {
+            blob_node,
+            content_hash: _,
+            size: _,
+        } => {
+            let node_bytes = cas
+                .get_node(*blob_node)
+                .await
+                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .ok_or_else(|| VxdError::BlobNotFound(format!("blob node {}", blob_node)))?;
+            let blob_node_data = match CasNode::from_bytes(&node_bytes) {
+                Ok(CasNode::Blob(b)) => b,
+                Ok(_) => {
+                    return Err(VxdError::BlobNotFound(format!(
+                        "node {} is not a BlobNode",
+                        blob_node.to_hex()
+                    )));
+                }
+                Err(e) => return Err(VxdError::CasRpc(e.to_string())),
+            };
+
+            let mut result = Vec::with_capacity(blob_node_data.total_size as usize);
+            for chunk_entry in &blob_node_data.chunks {
+                let chunk_data = cas
+                    .get_chunk(chunk_entry.hash)
+                    .await
+                    .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                    .ok_or_else(|| {
+                        VxdError::BlobNotFound(format!("chunk {}", chunk_entry.hash.to_hex()))
+                    })?;
+                result.extend_from_slice(&chunk_data);
+            }
+            Ok(result)
+        }
+    }
+}
+
+async fn fetch_output_blob_data(
+    cas: &Arc<StoreClient<crate::UpstreamCaller>>,
+    blob_ref: &OutputBlobRef,
+) -> Result<Vec<u8>, VxdError> {
+    match blob_ref {
+        OutputBlobRef::Small { chunk, .. } => {
+            let data = cas
+                .get_chunk(*chunk)
+                .await
+                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .ok_or_else(|| VxdError::BlobNotFound(format!("chunk {}", chunk)))?;
+            Ok(data)
+        }
+        OutputBlobRef::Large {
+            blob_node,
+            content_hash: _,
+            size: _,
+        } => {
+            let node_bytes = cas
+                .get_node(*blob_node)
+                .await
+                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .ok_or_else(|| VxdError::BlobNotFound(format!("blob node {}", blob_node)))?;
+            let blob_node_data = match CasNode::from_bytes(&node_bytes) {
+                Ok(CasNode::Blob(b)) => b,
+                Ok(_) => {
+                    return Err(VxdError::BlobNotFound(format!(
+                        "node {} is not a BlobNode",
+                        blob_node
+                    )));
+                }
+                Err(e) => {
+                    return Err(VxdError::CasRpc(format!(
+                        "failed to deserialize blob node {}: {}",
+                        blob_node, e
+                    )));
+                }
+            };
+
+            let mut result = Vec::with_capacity(blob_node_data.total_size as usize);
+            for chunk_entry in &blob_node_data.chunks {
+                let chunk_data = cas
+                    .get_chunk(chunk_entry.hash)
+                    .await
+                    .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                    .ok_or_else(|| VxdError::BlobNotFound(format!("chunk {}", chunk_entry.hash)))?;
+                result.extend_from_slice(&chunk_data);
+            }
+            Ok(result)
+        }
     }
 }
 
@@ -522,7 +658,7 @@ impl Executor {
             match result {
                 ActionResult::RustToolchainComponentDownloaded {
                     component,
-                    tarball_blob,
+                    tarball,
                     was_cached,
                 } => {
                     if *was_cached {
@@ -531,8 +667,12 @@ impl Executor {
                         rebuilt += 1;
                     }
 
-                    let cache_key = tarball_blob
-                        .map(|h| h.to_hex())
+                    let tarball_id = tarball.as_ref().map(|r| match r {
+                        BlobRef::Small { chunk, .. } => chunk.to_hex(),
+                        BlobRef::Large { blob_node, .. } => blob_node.to_hex(),
+                    });
+                    let cache_key = tarball_id
+                        .clone()
                         .unwrap_or_else(|| format!("rust-toolchain-download:{:?}", component));
                     node_reports.push(vx_report::NodeReport {
                         node_id: action.display_name(),
@@ -561,7 +701,7 @@ impl Executor {
                         deps: vec![],
                         outputs: vec![vx_report::OutputRecord {
                             logical: format!("tarball_{:?}", component).to_lowercase(),
-                            manifest: tarball_blob.map(|h| h.to_hex()),
+                            manifest: tarball_id,
                             blob: None,
                             path: None,
                         }],
@@ -572,7 +712,7 @@ impl Executor {
                 }
                 ActionResult::RustToolchainComponentExtracted {
                     component,
-                    tree_manifest,
+                    tree_root,
                     was_cached,
                 } => {
                     if *was_cached {
@@ -581,7 +721,7 @@ impl Executor {
                         rebuilt += 1;
                     }
 
-                    let cache_key = tree_manifest
+                    let cache_key = tree_root
                         .map(|h| h.to_hex())
                         .unwrap_or_else(|| format!("rust-toolchain-extract:{:?}", component));
                     node_reports.push(vx_report::NodeReport {
@@ -611,7 +751,7 @@ impl Executor {
                         deps: vec![],
                         outputs: vec![vx_report::OutputRecord {
                             logical: format!("tree_{:?}", component).to_lowercase(),
-                            manifest: tree_manifest.map(|h| h.to_hex()),
+                            manifest: tree_root.map(|h| h.to_hex()),
                             blob: None,
                             path: None,
                         }],
@@ -1108,7 +1248,6 @@ async fn execute_action(
 ) -> Result<ActionResult, VxdError> {
     use camino::Utf8PathBuf;
     use vx_runner_proto::{RunFileMount, RunRequest};
-    use vx_store_proto::{IngestTreeRequest, TreeFile};
 
     debug!("processing action {}", action.display_name());
 
@@ -1147,7 +1286,7 @@ async fn execute_action(
 
             Ok(ActionResult::RustToolchainComponentDownloaded {
                 component,
-                tarball_blob: result.tarball_blob,
+                tarball: result.tarball,
                 was_cached: result.status == EnsureStatus::Hit,
             })
         }
@@ -1165,29 +1304,32 @@ async fn execute_action(
             };
 
             // Locate corresponding download result for this component.
-            let tarball_blob = {
+            let tarball = {
                 let results_lock = results.read().await;
                 results_lock.values().find_map(|r| match r {
                     ActionResult::RustToolchainComponentDownloaded {
                         component: downloaded_component,
-                        tarball_blob: Some(blob),
+                        tarball: Some(blob),
                         ..
-                    } if *downloaded_component == component => Some(*blob),
+                    } if *downloaded_component == component => Some(blob.clone()),
                     _ => None,
                 })
             };
 
-            let tarball_blob = match tarball_blob {
+            let tarball = match tarball {
                 Some(blob) => blob,
                 None => {
                     // If full toolchain is already cached, extraction call can still return Hit
                     // with a placeholder blob value that won't be used.
-                    Blake3Hash([0; 32])
+                    BlobRef::Small {
+                        chunk: ChunkHash(Blake3Hash([0; 32])),
+                        size: 0,
+                    }
                 }
             };
 
             let result = cas
-                .extract_rust_toolchain_component(spec, component.clone(), tarball_blob, progress)
+                .extract_rust_toolchain_component(spec, component.clone(), tarball, progress)
                 .await
                 .map_err(|e| VxdError::CasRpc(e.to_string()))?;
 
@@ -1199,7 +1341,7 @@ async fn execute_action(
 
             Ok(ActionResult::RustToolchainComponentExtracted {
                 component,
-                tree_manifest: result.tree_manifest,
+                tree_root: result.tree_root,
                 was_cached: result.status == EnsureStatus::Hit,
             })
         }
@@ -1248,7 +1390,7 @@ async fn execute_action(
                     Ok(ActionResult::RegistryCrateAcquired {
                         name,
                         version,
-                        manifest_hash,
+                        manifest_hash: manifest_hash.0,
                         was_cached,
                     })
                 }
@@ -1292,20 +1434,25 @@ async fn execute_action(
 
             // Update the RustToolchainManifest and RustToolchain in picante with real values.
             use crate::inputs::{RustToolchain as RustToolchainInput, RustToolchainManifest};
-            RustToolchainManifest::set(&**db, toolchain_manifest)
+            RustToolchainManifest::set(&**db, toolchain_manifest.0)
                 .map_err(|e| VxdError::Picante(e.to_string()))?;
 
             if let Some(toolchain) = rust_toolchain_spec {
                 let host = toolchain.host;
                 let target = toolchain.target;
-                let _ =
-                    RustToolchainInput::new(&**db, toolchain_id, toolchain_manifest, host, target)
-                        .map_err(|e| VxdError::Picante(e.to_string()))?;
+                let _ = RustToolchainInput::new(
+                    &**db,
+                    toolchain_id,
+                    toolchain_manifest.0,
+                    host,
+                    target,
+                )
+                .map_err(|e| VxdError::Picante(e.to_string()))?;
             }
 
             Ok(ActionResult::RustToolchainFinalized {
                 toolchain_id,
-                manifest_hash: toolchain_manifest,
+                manifest_hash: toolchain_manifest.0,
                 was_cached: finalize_result.status == EnsureStatus::Hit,
             })
         }
@@ -1356,9 +1503,9 @@ async fn execute_action(
                 .await
                 .map_err(|e| VxdError::CasRpc(e.to_string()))?
             {
-                (cached, true)
+                (cached.0, true)
             } else {
-                let mut files = Vec::with_capacity(paths.len());
+                let mut tree_files = Vec::with_capacity(paths.len());
                 for rel_path in &paths {
                     let abs_path = workspace_root_path.join(rel_path);
                     let contents =
@@ -1368,29 +1515,30 @@ async fn execute_action(
                                 path: abs_path.clone(),
                                 message: e.to_string(),
                             })?;
-                    files.push(TreeFile {
+                    let size = contents.len() as u64;
+                    let content_hash = ContentHash(Blake3Hash::from_bytes(&contents));
+                    let chunk_hash = ChunkHash(content_hash.0);
+                    cas.put_chunk(chunk_hash, contents)
+                        .await
+                        .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+
+                    tree_files.push(crate::cas_tree::TreeFile {
                         path: rel_path.to_string(),
-                        contents,
-                        executable: false,
+                        kind: DirEntryKind::SmallFile {
+                            content_hash,
+                            size,
+                            executable: false,
+                        },
                     });
                 }
 
-                let ingest_result = cas
-                    .ingest_tree(IngestTreeRequest { files })
-                    .await
-                    .map_err(|e| VxdError::CasRpc(e.to_string()))?;
-                if !ingest_result.success {
-                    return Err(VxdError::TreeIngestion(
-                        ingest_result
-                            .error
-                            .unwrap_or_else(|| "tree ingestion failed".to_string()),
-                    ));
-                }
-                let source_manifest = ingest_result
-                    .manifest_hash
-                    .ok_or_else(|| VxdError::TreeIngestion("missing manifest hash".to_string()))?;
+                let (source_node_hash, _total_size) =
+                    crate::cas_tree::build_merkle_tree(cas.as_ref(), tree_files)
+                        .await
+                        .map_err(VxdError::CasRpc)?;
+                let source_manifest = source_node_hash.0;
 
-                cas.publish(cache_key, source_manifest)
+                cas.publish(cache_key, source_node_hash)
                     .await
                     .map_err(|e| VxdError::CasRpc(e.to_string()))?;
 
@@ -1446,10 +1594,10 @@ async fn execute_action(
                 .await
                 .map_err(|e| VxdError::CasRpc(e.to_string()))?
             {
-                (cached, true)
+                (cached.0, true)
             } else {
                 let manifest = cas
-                    .get_registry_manifest(registry_manifest)
+                    .get_registry_manifest(NodeHash(registry_manifest))
                     .await
                     .map_err(|e| VxdError::CasRpc(e.to_string()))?
                     .ok_or_else(|| VxdError::RegistryCrateNoManifest {
@@ -1457,11 +1605,7 @@ async fn execute_action(
                         version: version.clone(),
                     })?;
 
-                let tarball = cas
-                    .get_blob(manifest.crate_tarball_blob)
-                    .await
-                    .map_err(|e| VxdError::CasRpc(e.to_string()))?
-                    .ok_or(VxdError::BlobNotFound(manifest.crate_tarball_blob))?;
+                let tarball = fetch_blob_from_ref(cas, &manifest.crate_tarball).await?;
 
                 let cas_for_blobs = cas.clone();
                 let tree = extract_to_tree(
@@ -1469,23 +1613,49 @@ async fn execute_action(
                     Compression::Gzip,
                     1,
                     async move |data| {
+                        let hash = Blake3Hash::from_bytes(&data);
                         cas_for_blobs
-                            .put_blob(data)
+                            .put_chunk(ChunkHash(hash), data)
                             .await
-                            .map_err(|e| e.to_string())
+                            .map_err(|e| e.to_string())?;
+                        Ok(hash)
                     },
                 )
                 .await
                 .map_err(|e| VxdError::TreeIngestion(e.to_string()))?;
 
-                let manifest_json = facet_json::to_string(&tree)
-                    .map_err(|e| VxdError::TreeIngestion(e.to_string()))?;
-                let source_manifest = Blake3Hash::from_bytes(manifest_json.as_bytes());
-                cas.put_blob(manifest_json.into_bytes())
-                    .await
-                    .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                let mut tree_files = Vec::new();
+                for entry in tree.entries {
+                    match entry.kind {
+                        vx_store_proto::TreeEntryKind::File {
+                            blob,
+                            size,
+                            executable,
+                        } => tree_files.push(crate::cas_tree::TreeFile {
+                            path: entry.path,
+                            kind: DirEntryKind::SmallFile {
+                                content_hash: ContentHash(blob),
+                                size,
+                                executable,
+                            },
+                        }),
+                        vx_store_proto::TreeEntryKind::Symlink { target } => {
+                            tree_files.push(crate::cas_tree::TreeFile {
+                                path: entry.path,
+                                kind: DirEntryKind::Symlink { target },
+                            })
+                        }
+                        vx_store_proto::TreeEntryKind::Directory => {}
+                    }
+                }
 
-                cas.publish(cache_key, source_manifest)
+                let (source_node_hash, _total_size) =
+                    crate::cas_tree::build_merkle_tree(cas.as_ref(), tree_files)
+                        .await
+                        .map_err(VxdError::CasRpc)?;
+                let source_manifest = source_node_hash.0;
+
+                cas.publish(cache_key, source_node_hash)
                     .await
                     .map_err(|e| VxdError::CasRpc(e.to_string()))?;
 
@@ -1566,7 +1736,7 @@ async fn execute_action(
 
             Ok(ActionResult::ZigToolchainAcquired {
                 toolchain_id,
-                manifest_hash,
+                manifest_hash: manifest_hash.0,
                 was_cached: result.status == EnsureStatus::Hit,
             })
         }
@@ -1690,17 +1860,7 @@ async fn execute_action(
 
                     let mut i = 0usize;
                     for mh in dep_manifests {
-                        let manifest = cas
-                            .get_manifest(mh)
-                            .await
-                            .map_err(|e| VxdError::Compilation {
-                                crate_name: label.clone(),
-                                message: format!("Failed to fetch dep manifest from CAS: {e}"),
-                            })?
-                            .ok_or_else(|| VxdError::Compilation {
-                                crate_name: label.clone(),
-                                message: format!("Dep manifest not found in CAS: {mh}"),
-                            })?;
+                        let manifest = load_manifest(cas, NodeHash(mh), &label).await?;
 
                         if manifest.outputs.iter().any(|o| o.logical == spec.logical) {
                             let path = format!(
@@ -1740,7 +1900,7 @@ async fn execute_action(
                 .await
                 .map_err(|e| VxdError::CasRpc(e.to_string()))?
             {
-                (cached, true)
+                (cached.0, true)
             } else {
                 let result = exec
                     .run(request, progress)
@@ -1759,7 +1919,7 @@ async fn execute_action(
                             crate_name: label.clone(),
                         })?;
 
-                cas.publish(cache_key, output_manifest)
+                cas.publish(cache_key, NodeHash(output_manifest))
                     .await
                     .map_err(|e| VxdError::CasRpc(e.to_string()))?;
 
@@ -1768,20 +1928,7 @@ async fn execute_action(
 
             let mut bin_output = None;
             if !materialize.is_empty() {
-                let manifest = cas
-                    .get_manifest(output_manifest)
-                    .await
-                    .map_err(|e| VxdError::Compilation {
-                        crate_name: label.clone(),
-                        message: format!("Failed to fetch output manifest from CAS: {e}"),
-                    })?
-                    .ok_or_else(|| VxdError::Compilation {
-                        crate_name: label.clone(),
-                        message: format!(
-                            "Output manifest not found in CAS: {}",
-                            output_manifest.to_hex()
-                        ),
-                    })?;
+                let manifest = load_manifest(cas, NodeHash(output_manifest), &label).await?;
 
                 let vx_root = workspace_root.join(".vx");
                 let mut ensured_vx_gitignore = false;
@@ -1817,16 +1964,11 @@ async fn execute_action(
                         ensured_vx_gitignore = true;
                     }
 
-                    let data = cas
-                        .get_blob(entry.blob)
+                    let data = fetch_output_blob_data(cas, &entry.blob)
                         .await
                         .map_err(|e| VxdError::Compilation {
                             crate_name: label.clone(),
                             message: format!("Failed to fetch output blob from CAS: {e}"),
-                        })?
-                        .ok_or_else(|| VxdError::Compilation {
-                            crate_name: label.clone(),
-                            message: format!("Output blob not found in CAS: {}", entry.blob),
                         })?;
 
                     tokio::fs::write(&out_path, &data).await.map_err(|e| {
