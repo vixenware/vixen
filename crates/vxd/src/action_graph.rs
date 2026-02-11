@@ -628,7 +628,8 @@ impl ActionGraph {
         let mut node_map = HashMap::with_capacity(plan.nodes.len());
 
         for node in &plan.nodes {
-            let idx = lowered.add_action(action_from_rule_plan_node(node));
+            let action = action_from_rule_plan_node(node)?;
+            let idx = lowered.add_action(action);
             node_map.insert(node.id.as_str().to_string(), idx);
         }
 
@@ -768,50 +769,107 @@ fn planner_kind_for_node(node: &RulePlanNode) -> PlannerSyntheticKind {
 }
 
 #[allow(dead_code)]
-fn action_from_rule_plan_node(node: &RulePlanNode) -> Action {
-    if let Some(action) = try_lower_compile_node(node) {
-        return action;
+fn action_from_rule_plan_node(node: &RulePlanNode) -> Result<Action, RulePlanLoweringError> {
+    if let Some(action) = try_lower_compile_node(node)? {
+        return Ok(action);
     }
-    if let Some(action) = try_lower_registry_node(node) {
-        return action;
+    if let Some(action) = try_lower_registry_node(node)? {
+        return Ok(action);
     }
 
     let synthetic_kind = planner_kind_for_node(node);
-    Action::PlannerSynthetic {
+    Ok(Action::PlannerSynthetic {
         node_id: node.id.as_str().to_string(),
         report_node_id: node.provenance.metadata.get("legacy_node_id").cloned(),
         label: node.label.clone(),
         kind: synthetic_kind,
-    }
+    })
 }
 
 #[allow(dead_code)]
-fn try_lower_compile_node(node: &RulePlanNode) -> Option<Action> {
-    let crate_name = node.provenance.metadata.get("crate_name")?.clone();
-    let crate_type_raw = node.provenance.metadata.get("crate_type")?.as_str();
+fn try_lower_compile_node(node: &RulePlanNode) -> Result<Option<Action>, RulePlanLoweringError> {
+    if !wants_compile_lowering(node) {
+        return Ok(None);
+    }
+    if node.kind != RulePlanNodeKind::Action {
+        return Err(lowering_error_for_node(
+            node,
+            "compile node lowering requires node kind 'action'".to_string(),
+        ));
+    }
+
+    let Some(crate_name) = node.provenance.metadata.get("crate_name").cloned() else {
+        return Err(lowering_error_for_node(
+            node,
+            "compile node is missing provenance metadata 'crate_name'".to_string(),
+        ));
+    };
+    let Some(crate_type_raw) = node
+        .provenance
+        .metadata
+        .get("crate_type")
+        .map(|s| s.as_str())
+    else {
+        return Err(lowering_error_for_node(
+            node,
+            "compile node is missing provenance metadata 'crate_type'".to_string(),
+        ));
+    };
     let crate_type = match crate_type_raw {
         "bin" => CrateType::Bin,
         "lib" => CrateType::Lib,
-        _ => return None,
+        other => {
+            return Err(lowering_error_for_node(
+                node,
+                format!("compile node has invalid crate_type '{other}' (expected 'bin' or 'lib')"),
+            ));
+        }
     };
-    Some(Action::PlannerCompileRustCrate {
+
+    Ok(Some(Action::PlannerCompileRustCrate {
         node_id: node.id.as_str().to_string(),
         report_node_id: node.provenance.metadata.get("legacy_node_id").cloned(),
         crate_name,
         crate_type,
-    })
+    }))
 }
 
 #[allow(dead_code)]
-fn try_lower_registry_node(node: &RulePlanNode) -> Option<Action> {
-    let name = node.provenance.metadata.get("registry_name")?.clone();
-    let version = node.provenance.metadata.get("registry_version")?.clone();
-    let checksum = node.provenance.metadata.get("registry_checksum")?.clone();
-    Some(Action::AcquireRegistryCrate {
+fn try_lower_registry_node(node: &RulePlanNode) -> Result<Option<Action>, RulePlanLoweringError> {
+    if !wants_registry_lowering(node) {
+        return Ok(None);
+    }
+    if node.kind != RulePlanNodeKind::Artifact {
+        return Err(lowering_error_for_node(
+            node,
+            "registry node lowering requires node kind 'artifact'".to_string(),
+        ));
+    }
+
+    let Some(name) = node.provenance.metadata.get("registry_name").cloned() else {
+        return Err(lowering_error_for_node(
+            node,
+            "registry node is missing provenance metadata 'registry_name'".to_string(),
+        ));
+    };
+    let Some(version) = node.provenance.metadata.get("registry_version").cloned() else {
+        return Err(lowering_error_for_node(
+            node,
+            "registry node is missing provenance metadata 'registry_version'".to_string(),
+        ));
+    };
+    let Some(checksum) = node.provenance.metadata.get("registry_checksum").cloned() else {
+        return Err(lowering_error_for_node(
+            node,
+            "registry node is missing provenance metadata 'registry_checksum'".to_string(),
+        ));
+    };
+
+    Ok(Some(Action::AcquireRegistryCrate {
         name,
         version,
         checksum,
-    })
+    }))
 }
 
 #[allow(dead_code)]
@@ -840,6 +898,46 @@ fn lowering_error_for_edge(edge: &RulePlanEdge, message: String) -> RulePlanLowe
         line: edge.provenance.span.line,
         column: edge.provenance.span.column,
     }
+}
+
+#[allow(dead_code)]
+fn lowering_error_for_node(node: &RulePlanNode, message: String) -> RulePlanLoweringError {
+    RulePlanLoweringError {
+        message,
+        rule_id: node.provenance.rule_id.as_str().to_string(),
+        source_id: node.provenance.source_id.as_str().to_string(),
+        line: node.provenance.span.line,
+        column: node.provenance.span.column,
+    }
+}
+
+#[allow(dead_code)]
+fn wants_compile_lowering(node: &RulePlanNode) -> bool {
+    if node.kind != RulePlanNodeKind::Action {
+        return false;
+    }
+    if node
+        .provenance
+        .metadata
+        .get("legacy_node_id")
+        .is_some_and(|value| value.starts_with("compile-"))
+    {
+        return true;
+    }
+    node.label.starts_with("compile-")
+        || node.provenance.metadata.contains_key("crate_name")
+        || node.provenance.metadata.contains_key("crate_type")
+}
+
+#[allow(dead_code)]
+fn wants_registry_lowering(node: &RulePlanNode) -> bool {
+    if node.kind != RulePlanNodeKind::Artifact {
+        return false;
+    }
+    node.label.starts_with("acquire-registry:")
+        || node.provenance.metadata.contains_key("registry_name")
+        || node.provenance.metadata.contains_key("registry_version")
+        || node.provenance.metadata.contains_key("registry_checksum")
 }
 
 #[cfg(test)]
@@ -1051,5 +1149,85 @@ mod tests {
                 .iter()
                 .any(|node| node.node_id == "compile-bin:app" && node.kind == "rust.compile_bin")
         );
+    }
+
+    #[test]
+    fn compile_lowering_missing_crate_type_returns_provenance_error() {
+        let mut plan = sample_plan();
+        let action_node = plan
+            .nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == "n_action")
+            .expect("action node");
+        action_node
+            .provenance
+            .metadata
+            .insert("crate_name".to_string(), "app".to_string());
+
+        let err = match ActionGraph::from_rule_plan(&plan) {
+            Ok(_) => panic!("lowering should fail"),
+            Err(err) => err,
+        };
+        assert!(err.message.contains("crate_type"));
+        assert_eq!(err.rule_id, "rule.action");
+        assert_eq!(err.source_id, "src0");
+        assert_eq!(err.line, 2);
+        assert_eq!(err.column, 1);
+    }
+
+    #[test]
+    fn compile_lowering_invalid_crate_type_returns_provenance_error() {
+        let mut plan = sample_plan();
+        let action_node = plan
+            .nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == "n_action")
+            .expect("action node");
+        action_node
+            .provenance
+            .metadata
+            .insert("crate_name".to_string(), "app".to_string());
+        action_node
+            .provenance
+            .metadata
+            .insert("crate_type".to_string(), "proc-macro".to_string());
+
+        let err = match ActionGraph::from_rule_plan(&plan) {
+            Ok(_) => panic!("lowering should fail"),
+            Err(err) => err,
+        };
+        assert!(err.message.contains("invalid crate_type"));
+        assert_eq!(err.rule_id, "rule.action");
+        assert_eq!(err.source_id, "src0");
+        assert_eq!(err.line, 2);
+        assert_eq!(err.column, 1);
+    }
+
+    #[test]
+    fn registry_lowering_missing_checksum_returns_provenance_error() {
+        let mut plan = sample_plan();
+        let artifact_node = plan
+            .nodes
+            .iter_mut()
+            .find(|node| node.id.as_str() == "n_artifact")
+            .expect("artifact node");
+        artifact_node
+            .provenance
+            .metadata
+            .insert("registry_name".to_string(), "serde".to_string());
+        artifact_node
+            .provenance
+            .metadata
+            .insert("registry_version".to_string(), "1.0.0".to_string());
+
+        let err = match ActionGraph::from_rule_plan(&plan) {
+            Ok(_) => panic!("lowering should fail"),
+            Err(err) => err,
+        };
+        assert!(err.message.contains("registry_checksum"));
+        assert_eq!(err.rule_id, "rule.artifact");
+        assert_eq!(err.source_id, "src0");
+        assert_eq!(err.line, 3);
+        assert_eq!(err.column, 1);
     }
 }
