@@ -28,48 +28,102 @@ fn canonicalize_without_stat(mount_path: &Utf8PathBuf) -> Utf8PathBuf {
 /// Dead FSKit mounts may not appear in `df` output, so we always attempt
 /// `diskutil unmount force` on all candidate paths unconditionally. If nothing
 /// is mounted, diskutil fails and we move on.
-pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
-    use std::process::Command;
-
-    tracing::debug!(mount_path = %mount_path, "cleaning up any stale FSKit mount");
-
+/// Build the set of candidate paths for a mount point.
+///
+/// Dead FSKit mounts don't always show up in `df`, so we try all plausible
+/// path variants: canonical, raw, and /private-prefixed (macOS /tmp symlink).
+fn mount_path_candidates(mount_path: &Utf8PathBuf) -> Vec<String> {
     let canonical = canonicalize_without_stat(mount_path);
-
-    // Collect all candidate paths to try unmounting. Dead FSKit mounts don't
-    // always show up in `df`, so we just try all plausible paths.
     let mut candidates: Vec<String> = vec![canonical.to_string()];
     let raw = mount_path.to_string();
     if raw != candidates[0] {
-        candidates.push(raw.clone());
+        candidates.push(raw);
     }
     // /tmp → /private/tmp on macOS
-    let private_prefixed = format!("/private{}", mount_path);
+    let private_prefixed = format!("/private{mount_path}");
     if !candidates.contains(&private_prefixed) {
         candidates.push(private_prefixed);
     }
+    candidates
+}
 
-    for path in &candidates {
-        let status = Command::new("diskutil")
-            .arg("unmount")
-            .arg("force")
-            .arg(path)
-            .output();
+/// Kill processes that have files open under any of the given mount path candidates.
+///
+/// Runs `lsof -n -P -Fpcn` and parses the structured output to find PIDs with
+/// open files under the mount prefix. Each matching process is killed with SIGKILL
+/// (these are typically stuck linker/debug tool processes like `dsymutil` or `ld`
+/// that prevent unmounting).
+async fn kill_processes_under_mount(candidates: &[String]) {
+    use std::collections::HashMap;
+    use tokio::process::Command;
 
-        match status {
-            Ok(output) if output.status.success() => {
-                tracing::info!(path = %path, "force-unmounted stale FSKit mount");
-                return Ok(());
-            }
-            Ok(_) => {
-                tracing::debug!(path = %path, "no mount to clean up at this path");
-            }
-            Err(e) => {
-                tracing::warn!(path = %path, error = %e, "failed to run diskutil");
+    let output = match Command::new("lsof")
+        .args(["-n", "-P", "-Fpcn"])
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(e) => {
+            tracing::debug!(error = %e, "lsof not available, skipping stuck process cleanup");
+            return;
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Parse lsof -F output: p<pid>, c<command>, n<path> fields
+    let mut current_pid: Option<u32> = None;
+    let mut current_cmd: Option<String> = None;
+    // pid → command name, deduplicated
+    let mut to_kill: HashMap<u32, String> = HashMap::new();
+
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix('p') {
+            current_pid = rest.parse().ok();
+            current_cmd = None;
+        } else if let Some(rest) = line.strip_prefix('c') {
+            current_cmd = Some(rest.to_string());
+        } else if let Some(path) = line.strip_prefix('n') {
+            if let (Some(pid), Some(cmd)) = (current_pid, current_cmd.as_deref()) {
+                if candidates
+                    .iter()
+                    .any(|prefix| path.starts_with(prefix.as_str()))
+                {
+                    to_kill.entry(pid).or_insert_with(|| cmd.to_string());
+                }
             }
         }
     }
 
-    tracing::debug!(mount_path = %mount_path, "no stale mount found (tried all candidates)");
+    if to_kill.is_empty() {
+        return;
+    }
+
+    for (&pid, cmd) in &to_kill {
+        tracing::warn!(pid, cmd, "killing process with files open on stale mount");
+        // SAFETY: just sending a signal, no memory unsafety
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+
+    // Give the kernel a moment to clean up after the kills
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+}
+
+pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
+    tracing::debug!(mount_path = %mount_path, "cleaning up any stale FSKit mount");
+
+    let candidates = mount_path_candidates(mount_path);
+
+    // Kill any processes with files open under the mount point.
+    // These (typically dsymutil, ld) prevent force-unmount from succeeding.
+    kill_processes_under_mount(&candidates).await;
+
+    // TODO: diskutil unmount force has never actually worked in practice —
+    // the stuck processes were always the real blocker. Revisit once we have
+    // evidence that killing the stragglers alone isn't sufficient.
+
     Ok(())
 }
 
