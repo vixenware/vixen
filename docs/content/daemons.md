@@ -3,155 +3,118 @@ title = "Daemon Topologies"
 insert_anchor_links = "heading"
 +++
 
-This page defines daemon topology and connection direction in vixen.
+The vixen build system runs as a fleet of daemons, and one CLI front, `vx`.
 
-## What This Page Is About
+```mermaid
+flowchart LR
+  vxd["vxd"]
+  store["store"]
+  runner["runner"]
 
-vixen is a multi-daemon build system. Core components (`vxd`, `store`, `runner`,
-`vfsd`) can run locally or remotely, and all component-to-component calls use
-Roam RPC.
+  vxd -->|"query/read/write CAS"| store
+  vxd -->|"dispatch actions"| runner
+  runner -->|"read/write artifacts"| store
+```
 
-Two useful extremes:
+All those daemons talk to each other using [roam](https://roam.bearcove.eu/), an
+RPC system built on top of [facet](https://facet.rs)
 
-- Local-first: everything on one machine (`UDS` / named pipes), easy dev/test.
-- Distributed: services pre-provisioned across hosts (`TCP`), better scaling.
+This page describes who starts those demons, when, how, and for how long? 
 
-You can mix and match in between. For example, `store` can be local, remote,
-backed by S3-like cloud storage, or backed by shared storage like NFS.
+## Connect Mode
 
-## Roam RPC Invariant
+If the `VXD` environment variable is set, `vx` connects to an existing
+daemon over whatever transport is defined by the address, e.g. `VXD` can be
+something like:
 
-Roam does not care who initiated a connection.
-
-- Interface semantics are the same regardless of dial direction.
-- Transport can be local (`UDS` / named pipes) or remote (`TCP`).
-- Bootstrap direction may differ from steady-state call direction.
-
-This is the key reason one protocol surface can support both local and
-distributed deployment models.
-
-## Daemon Roles
-
-- `vx`: user-facing CLI entrypoint; resolves endpoints and starts build requests.
-- `vxd`: orchestration/control plane; coordinates build graph execution.
-- `store`: content-addressed storage and toolchain/materialization backend.
-- `runner`: execution worker for compile/link actions.
-- `vfsd`: VFS service endpoint used by `runner`.
-- macOS only: `vixenfs-mount` manages mount session lifecycle; `VixenFS` is
-  OS-managed FSKit extension.
-
-## Endpoint And Socket Model
-
-In local mode, endpoint namespace lives under `VX_HOME`.
-
-- `VX_HOME` is the root for local runtime state.
-- Default local sockets are under `VX_HOME` (typically `*.sock` endpoints like
-  `vxd`, `store`, `runner`, `vfsd`).
-- Endpoint env vars can override defaults: `VXD`, `VX_STORE`, `VX_RUNNER`.
-
-For local daemons, resolved endpoints are propagated via CLI arguments, not
-hardcoded discovery:
-
-- `vxd` starts children with explicit flags such as `--listen`, `--store`,
-  `--runner`, `--vfsd`, `--vx-home`, `--root`, `--mount`.
-
-In distributed mode, these endpoints are usually TCP addresses.
-
-## What Happens When `vx` Starts
-
-When `vx` is invoked:
-
-1. `vx` resolves target endpoint(s) from CLI/env/defaults.
-2. `vx` attempts to reach `vxd`.
-3. If `vxd` is already up, `vx` connects directly and sends the request.
-4. If `vxd` is not up and local bootstrap is allowed, `vx` starts `vxd` with
-   explicit endpoint configuration.
-5. `vxd` ensures `store` / `runner` / `vfsd` topology is available.
-6. Build execution proceeds over Roam RPC.
-
-Important: bootstrap may involve one direction, while steady-state operation may
-use another. Roam semantics are unchanged.
-
-## Connection Direction By Mode
-
-### Local Model
+  * `unix://home/jane/.vx/vxd.sock`
+  * `tcp://10.200.0.4:9449`
 
 ```mermaid
 flowchart LR
   vx["vx"]
-  vxd["vxd"]
-  store["store"]
-  runner["runner"]
-  vfsd["vfsd"]
+  subgraph daemons["pre-existing daemons"]
+    vxd["vxd"]
+    store["store"]
+    runner["runner"]
+  end
 
-  vx -->|"UDS connect"| vxd
-  store -->|"UDS connect"| vxd
-  runner -->|"UDS connect"| vxd
-  vfsd -->|"UDS connect"| runner
+  vx -->|"connect"| vxd
+  vxd --> store
+  vxd --> runner
+  runner --> store
 ```
 
-- Connection direction focuses on who dials whom.
-- Transport is local (`UDS` / named pipes).
-- `vxd` owns local `VX_HOME` lock scope.
-- In local topology, child lifetimes are tied to parent lifetimes.
+If `vx` cannot connect on the first try, it immediately exits with an error.
 
-### Distributed Model
+## Bootstrap Mode
+
+If the `VXD` environment variable is _not_ set, `vx` starts in bootstrap mode: it'll attempt
+to start all necessary daemons under `VX_HOME` (or `{home-dir}/.vx`, failing that, and yes it
+respects XDG).
+
+Because it's starting all daemons locally, it will prefer Unix domain sockets on
+Linux and Mac, and named pipes on Windows. 
 
 ```mermaid
-flowchart LR
+flowchart RL
   vx["vx"]
-  vxd["vxd"]
-  store["store"]
-  runner["runner"]
-  vfs["vfsd"]
+  subgraph daemons["daemon set"]
+    vxd["vxd"]
+    store["store"]
+    runner["runner"]
+  end
 
-  vx -->|"TCP connect"| vxd
-  vxd -->|"TCP connect"| store
-  vxd -->|"TCP connect"| runner
-  runner -->|"TCP connect"| vfs
+  vxd -->|"UDS connect"| vx
+  store -->|"connect back"| vxd
+  runner -->|"connect back"| vxd
+  runner --> store
 ```
 
-- Services are pre-provisioned by external orchestration.
-- Transport is `TCP`.
-- No local auto-spawn assumptions.
+In this scenario the direction is reversed. Instead of starting `vxd` and waiting
+for it to listen, vx listens on an address and instructs `vxd` to connect to it.
 
-## macOS VFS Lifetime
+> Because in roam RPC the there's no link between the requester and the connection initiator,
+> this works fine.
 
-```mermaid
-flowchart LR
-  vfsd["vfsd"]
-  mount["vixenfs-mount"]
-  fskit["VixenFS"]
+### Standard output and error streams
 
-  vfsd -->|"mount session"| mount
-  mount -->|"mount lifecycle"| fskit
-  fskit -.->|"SHM"| vfsd
-```
+When running in Bootstrap mode, it is okay for all of vxd's descendants to
+inherit its standard error and output streams — therefore, instead of logging to
+files, all the output is available in the terminal or CI output when running
+tests. 
 
-- `vixenfs-mount` owns per-session mount/unmount behavior.
-- `VixenFS` is OS-managed capability, not a daemon child.
-- `vfsd` <-> `VixenFS` data path uses `SHM`.
+### Spawned daemon lifecycle
 
-## Topology Knobs
+When started by `vx` normally, `vxd` lives up to six hours after the last connection drops.
 
-### Environment Variables
+All its descendants use the
+[ur-taking-me-with-you](https://crates.io/crates/ur-taking-me-with-you) crate to make sure
+that they die when their parent dies, no matter what.
 
-- `VX_HOME`: local runtime root (sockets, logs, caches, lock scope).
-- `VXD`: `vxd` endpoint for `vx`.
-- `VX_STORE`: `store` endpoint for `vxd`.
-- `VX_RUNNER`: `runner` endpoint for `vxd`.
-- `VX_RUNNER_HOST_TRIPLE`: required when `VX_RUNNER` is remote.
+When running tests, we don't actually want vxd to survive that long, so we tie its lifetime
+to the test runner, `cargo-nextest`, by setting `VXD_DEATH_PACT_PID={pid}`.
 
-### CLI Flags
+### Multiplexing
 
-- `vx build --no-spawn`: connect-only mode; do not auto-start `vxd`.
-- `vxd --listen --store --runner --vx-home`: control-plane endpoint/home config.
-- `vx-store --listen --root --vx-home`: store endpoint/storage config.
-- `vx-runner --listen --store --vfsd --vx-home`: runner connectivity config.
-- `vx-vfsd --listen --mount --store`: VFS daemon endpoint/mount/store config.
+Even though in tests, VXD runs a relatively short amount of time, it is shared
+across different tests, which all run in their own processes. 
 
-## Invariants
+Therefore, there is a race for the first `vx` to spawn `vxd`.
 
-- No sleep/backoff loops as lifecycle strategy.
-- Lifecycle should be event/registration-driven.
-- `VX_HOME` lock semantics are local, not distributed orchestration.
+### The VFS daemon
+
+The diagrams presented above are not fully accurate. They are missing the VFS
+daemon. Those handle FUSE ops, FSKit operations, ProjFS... functions? From a process
+distinct from `vx-runner`, to avoid deadlocks.
+
+`vx-vfsd` is connected to both `vx-runner` (which tells it what to mount and where)
+and to `vx-store` (since you can mount entire store trees inside the VFS without
+transferring them eagerly to vx-vfsd).
+
+## Pending renames
+
+`vxd` breaks the `vx-{role}` pattern, it could be `vx-coord`, `vx-lead`, `vx-chef`,
+a number of things.
+
+`vx-vfsd` kind of a mouthful and has 'd' at the end, how about `vx-fs`, or `vx-filesystem`.

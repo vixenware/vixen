@@ -425,6 +425,14 @@ article blockquote {
     border-radius: 0 4px 4px 0;
 }
 
+article blockquote p:first-child {
+    margin-top: 0;
+}
+
+article blockquote p:last-child {
+    margin-bottom: 0;
+}
+
 /* Tables */
 article table {
     width: 100%;
