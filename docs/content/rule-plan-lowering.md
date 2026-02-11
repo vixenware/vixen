@@ -105,6 +105,11 @@ for c in $closure {
 Set `VX_RULE_PLAN_EXEC=1` (with `VX_RULE_PLAN_BRIDGE=1`) to execute a real Rust `ActionGraph`
 constructed from the subset of crates selected by the RulePlan.
 
+In this mode, RulePlan is treated as the source of truth for execution:
+
+- action nodes with provenance metadata `{crate_name, crate_type}` are lowered to real `CompileRustCrate` actions
+- the plan must include the full dependency closure of those crates (including registry crates), or lowering fails
+
 In `.vx` rules mode, RulePlan execution selects crates from action node provenance metadata:
 
 - `crate_name`

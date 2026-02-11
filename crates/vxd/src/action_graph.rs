@@ -605,6 +605,7 @@ impl ActionGraph {
         })
     }
 
+    #[allow(dead_code)]
     pub fn from_crate_graph_subset(
         crate_graph: &CrateGraph,
         included_crates: &std::collections::HashSet<CrateId>,
@@ -847,6 +848,323 @@ impl ActionGraph {
         }
 
         Ok(lowered)
+    }
+
+    /// Lower a `RulePlan` into an executable Rust `ActionGraph`.
+    ///
+    /// This is the first "RulePlan owns execution" slice:
+    ///
+    /// - action nodes with provenance metadata `{crate_name, crate_type}` are treated as Rust
+    ///   compilation nodes and lowered to real `CompileRustCrate` actions.
+    /// - all selected crates must include their full dependency closure in the plan, otherwise
+    ///   lowering fails with a provenance-mapped error (the plan must be the build).
+    /// - registry crates are materialized via `AcquireRegistryCrate` and compiled as part of the plan.
+    ///
+    /// For now, dependency edges are derived from the crate graph (not from RulePlan edges).
+    pub fn from_rule_plan_executable(
+        plan: &RulePlan,
+        crate_graph: &CrateGraph,
+        rust_channel: RustChannel,
+        target_triple: String,
+        toolchain: RustToolchain,
+        config: BuildConfig,
+        db: &crate::db::Database,
+    ) -> Result<Self, RulePlanLoweringError> {
+        if let Err(err) = plan.validate() {
+            return Err(RulePlanLoweringError {
+                message: format!(
+                    "RulePlan validation failed before lowering: {}",
+                    err.diagnostics.join("; ")
+                ),
+                rule_id: "ruleplan.validate".to_string(),
+                source_id: "ruleplan".to_string(),
+                line: 1,
+                column: 1,
+            });
+        }
+
+        // 1. Identify all crates mentioned by the plan (action nodes with crate metadata).
+        let mut included = std::collections::HashSet::<CrateId>::new();
+        let mut plan_node_by_crate = HashMap::<CrateId, RulePlanNode>::new();
+
+        for node in &plan.nodes {
+            if node.kind != RulePlanNodeKind::Action {
+                continue;
+            }
+            let Some(crate_name) = node.provenance.metadata.get("crate_name") else {
+                continue;
+            };
+            let Some(crate_type_raw) = node.provenance.metadata.get("crate_type") else {
+                continue;
+            };
+
+            let crate_type = match crate_type_raw.as_str() {
+                "bin" => CrateType::Bin,
+                "lib" => CrateType::Lib,
+                other => {
+                    return Err(lowering_error_for_node(
+                        node,
+                        format!("invalid crate_type '{other}' (expected 'bin' or 'lib')"),
+                    ));
+                }
+            };
+
+            let mut matches = crate_graph
+                .nodes
+                .values()
+                .filter(|crate_node| {
+                    crate_node.crate_name == *crate_name && crate_node.crate_type == crate_type
+                })
+                .map(|crate_node| crate_node.id)
+                .collect::<Vec<_>>();
+
+            match matches.as_slice() {
+                [] => {
+                    return Err(lowering_error_for_node(
+                        node,
+                        format!(
+                            "RulePlan references crate '{crate_name}' type '{crate_type_raw}' but it is not present in the crate graph"
+                        ),
+                    ));
+                }
+                [only] => {
+                    if !included.insert(*only) {
+                        return Err(lowering_error_for_node(
+                            node,
+                            format!(
+                                "RulePlan contains duplicate compile action nodes for crate '{crate_name}' type '{crate_type_raw}'"
+                            ),
+                        ));
+                    }
+                    plan_node_by_crate.insert(*only, node.clone());
+                }
+                _ => {
+                    matches.sort_by_key(|id| id.short_hex());
+                    return Err(lowering_error_for_node(
+                        node,
+                        format!(
+                            "RulePlan references crate '{crate_name}' type '{crate_type_raw}' but it matched multiple crate IDs: {}",
+                            matches
+                                .into_iter()
+                                .map(|id| id.short_hex())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ));
+                }
+            }
+        }
+
+        if included.is_empty() {
+            return Err(RulePlanLoweringError {
+                message: "RulePlan executable lowering requires at least one action node with provenance metadata {crate_name, crate_type}".to_string(),
+                rule_id: "ruleplan.exec".to_string(),
+                source_id: "ruleplan".to_string(),
+                line: 1,
+                column: 1,
+            });
+        }
+
+        // 2. Enforce "plan is the build": all deps must be present in the plan.
+        for crate_id in included.iter().copied().collect::<Vec<_>>() {
+            let crate_node = &crate_graph.nodes[&crate_id];
+            let plan_node = plan_node_by_crate
+                .get(&crate_id)
+                .expect("plan node exists for included crate");
+            for dep in &crate_node.deps {
+                if !included.contains(&dep.crate_id) {
+                    let dep_node = &crate_graph.nodes[&dep.crate_id];
+                    return Err(lowering_error_for_node(
+                        plan_node,
+                        format!(
+                            "RulePlan compile crate '{}' is missing dependency crate '{}' (add it to the plan, e.g. via rust.transitive_closure)",
+                            crate_node.crate_name, dep_node.crate_name
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // 3. Build a real action graph for exactly the plan's crate set.
+        let mut graph = DiGraph::new();
+        let mut crate_to_node = HashMap::new();
+        let mut registry_nodes = HashMap::new();
+
+        // Toolchain actions.
+        let download_rustc_node = graph.add_node(ActionNode {
+            action: Action::DownloadRustToolchainComponent {
+                channel: rust_channel.clone(),
+                target_triple: target_triple.clone(),
+                component: RustComponent::Rustc,
+            },
+        });
+        let download_rust_std_node = graph.add_node(ActionNode {
+            action: Action::DownloadRustToolchainComponent {
+                channel: rust_channel.clone(),
+                target_triple: target_triple.clone(),
+                component: RustComponent::RustStd,
+            },
+        });
+        let extract_rustc_node = graph.add_node(ActionNode {
+            action: Action::ExtractRustToolchainComponent {
+                channel: rust_channel.clone(),
+                target_triple: target_triple.clone(),
+                component: RustComponent::Rustc,
+            },
+        });
+        let extract_rust_std_node = graph.add_node(ActionNode {
+            action: Action::ExtractRustToolchainComponent {
+                channel: rust_channel.clone(),
+                target_triple: target_triple.clone(),
+                component: RustComponent::RustStd,
+            },
+        });
+
+        graph.add_edge(
+            extract_rustc_node,
+            download_rustc_node,
+            "always".to_string(),
+        );
+        graph.add_edge(
+            extract_rust_std_node,
+            download_rust_std_node,
+            "always".to_string(),
+        );
+
+        // Registry acquisition for needed registry crates in the plan set.
+        let mut needed_registry = std::collections::BTreeMap::<(String, String, String), ()>::new();
+        for crate_id in &included {
+            let node = &crate_graph.nodes[crate_id];
+            if let CrateSource::Registry {
+                name,
+                version,
+                checksum,
+            } = &node.source
+            {
+                needed_registry.insert((name.clone(), version.clone(), checksum.clone()), ());
+            }
+        }
+
+        for ((name, version, checksum), _) in needed_registry {
+            let registry_action = graph.add_node(ActionNode {
+                action: Action::AcquireRegistryCrate {
+                    name: name.clone(),
+                    version: version.clone(),
+                    checksum,
+                },
+            });
+            registry_nodes.insert((name, version), registry_action);
+        }
+
+        // Compile nodes in topo order for determinism.
+        for crate_id in &crate_graph.topo_order {
+            if !included.contains(crate_id) {
+                continue;
+            }
+            let crate_node = &crate_graph.nodes[crate_id];
+
+            let rust_crate = RustCrate::new(
+                db,
+                crate_node.id.to_string(),
+                crate_node.crate_name.clone(),
+                crate_node.edition.as_str().to_string(),
+                crate_node.crate_type.as_str().to_string(),
+                crate_node.crate_root_rel.to_string(),
+                Blake3Hash([0u8; 32]), // filled during execution
+            )
+            .map_err(|e| {
+                lowering_error_for_node(plan_node_by_crate.get(crate_id).unwrap(), e.to_string())
+            })?;
+
+            let action_deps: Vec<ActionDep> = crate_node
+                .deps
+                .iter()
+                .map(|dep| {
+                    let dep_node = &crate_graph.nodes[&dep.crate_id];
+                    ActionDep {
+                        extern_name: dep.extern_name.clone(),
+                        crate_id: dep.crate_id,
+                        source: dep_node.source.clone(),
+                    }
+                })
+                .collect();
+
+            let target_triple_str = toolchain.target(db).map_err(|e| {
+                lowering_error_for_node(plan_node_by_crate.get(crate_id).unwrap(), e.to_string())
+            })?;
+            let profile_str = config.profile(db).map_err(|e| {
+                lowering_error_for_node(plan_node_by_crate.get(crate_id).unwrap(), e.to_string())
+            })?;
+
+            let action = Action::CompileRustCrate {
+                crate_id: crate_node.id,
+                crate_name: crate_node.crate_name.clone(),
+                crate_type: crate_node.crate_type,
+                edition: crate_node.edition.as_str().to_string(),
+                crate_root_rel: crate_node.crate_root_rel.to_string(),
+                source: crate_node.source.clone(),
+                deps: action_deps,
+                workspace_root: crate_graph.workspace_root.to_string(),
+                target_triple: target_triple_str,
+                profile: profile_str,
+                rust_crate,
+                toolchain,
+                config,
+            };
+
+            let node_idx = graph.add_node(ActionNode { action });
+            crate_to_node.insert(crate_node.id, node_idx);
+        }
+
+        // Dependency edges.
+        for crate_id in &crate_graph.topo_order {
+            if !included.contains(crate_id) {
+                continue;
+            }
+            let crate_node = &crate_graph.nodes[crate_id];
+            let Some(&compile_idx) = crate_to_node.get(&crate_node.id) else {
+                continue;
+            };
+
+            graph.add_edge(compile_idx, extract_rustc_node, "always".to_string());
+            graph.add_edge(compile_idx, extract_rust_std_node, "always".to_string());
+
+            if let CrateSource::Registry { name, version, .. } = &crate_node.source
+                && let Some(&registry_idx) = registry_nodes.get(&(name.clone(), version.clone()))
+            {
+                graph.add_edge(compile_idx, registry_idx, "always".to_string());
+            }
+
+            for dep in &crate_node.deps {
+                let dep_compile_idx = crate_to_node.get(&dep.crate_id).copied().ok_or_else(|| {
+                    lowering_error_for_node(
+                        plan_node_by_crate.get(crate_id).unwrap(),
+                        format!(
+                            "internal lowering error: crate '{}' depends on '{}' but dependency node was not built",
+                            crate_node.crate_name,
+                            crate_graph.nodes[&dep.crate_id].crate_name
+                        ),
+                    )
+                })?;
+                graph.add_edge(compile_idx, dep_compile_idx, "always".to_string());
+            }
+        }
+
+        Ok(Self {
+            graph,
+            crate_to_node,
+            rust_toolchain_extract_nodes: HashMap::from([
+                (RustComponent::Rustc, extract_rustc_node),
+                (RustComponent::RustStd, extract_rust_std_node),
+            ]),
+            rust_toolchain_spec: Some(RustToolchainSpec {
+                channel: rust_channel,
+                host: target_triple.clone(),
+                target: target_triple,
+                components: vec![RustComponent::Rustc, RustComponent::RustStd],
+            }),
+            registry_nodes,
+        })
     }
 
     /// Get total number of actions

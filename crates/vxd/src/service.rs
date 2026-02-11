@@ -321,6 +321,7 @@ pub(crate) fn compare_rule_plan_edge_parity(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn selected_crates_from_rule_plan(
     plan: &RulePlan,
     graph: &CrateGraph,
@@ -382,6 +383,7 @@ pub(crate) fn selected_crates_from_rule_plan(
     Ok(selected)
 }
 
+#[allow(dead_code)]
 pub(crate) fn transitive_closure_crates(
     graph: &CrateGraph,
     selected: &std::collections::HashSet<vx_rs::crate_graph::CrateId>,
@@ -1411,23 +1413,23 @@ impl VxdService {
                     "VX_RULE_PLAN_EXEC is enabled but RulePlan was not produced".to_string(),
                 ));
             };
-            let selected = selected_crates_from_rule_plan(plan, &graph)?;
-            let closure = transitive_closure_crates(&graph, &selected);
             info!(
-                selected = selected.len(),
-                closure = closure.len(),
-                "RulePlan execution enabled; building action graph from selected crate subset"
+                nodes = plan.nodes.len(),
+                edges = plan.edges.len(),
+                "RulePlan execution enabled; executing ActionGraph lowered from RulePlan"
             );
-
-            ActionGraph::from_crate_graph_subset(
+            ActionGraph::from_rule_plan_executable(
+                plan,
                 &graph,
-                &closure,
                 RustChannel::Stable,
                 target_triple.clone(),
                 toolchain,
                 config,
                 &self.db,
-            )?
+            )
+            .map_err(|e| {
+                VxdError::InvalidManifest(format!("RulePlan executable lowering failed: {e}"))
+            })?
         } else {
             ActionGraph::from_crate_graph(
                 &graph,
@@ -1438,8 +1440,18 @@ impl VxdService {
                 &self.db,
             )?
         };
+
+        // In exec mode, the executed graph is the topology we want to report.
+        if rule_plan_exec_enabled() {
+            rule_plan_topology = Some(action_graph.to_topology());
+        }
+
+        // Parity harness compares the legacy crate-graph planner to RulePlan topology. Once we are
+        // executing RulePlan directly, parity is no longer meaningful (and will drift by design).
         let legacy_topology = action_graph.to_topology();
-        if let Some(rule_plan_topology_ref) = rule_plan_topology.as_ref() {
+        if !rule_plan_exec_enabled()
+            && let Some(rule_plan_topology_ref) = rule_plan_topology.as_ref()
+        {
             let parity = compare_rule_plan_parity(&legacy_topology, rule_plan_topology_ref);
             if parity.has_drift() {
                 let max_examples = 5;
@@ -1460,9 +1472,9 @@ impl VxdService {
                 );
                 if rule_plan_parity_strict_enabled() {
                     return Err(VxdError::InvalidManifest(
-                        "RulePlan parity drift detected (set VX_RULE_PLAN_PARITY_STRICT=0 to run non-strict)"
-                            .to_string(),
-                    ));
+                            "RulePlan parity drift detected (set VX_RULE_PLAN_PARITY_STRICT=0 to run non-strict)"
+                                .to_string(),
+                        ));
                 }
             } else {
                 info!(
@@ -1490,9 +1502,9 @@ impl VxdService {
                 );
                 if rule_plan_parity_strict_enabled() {
                     return Err(VxdError::InvalidManifest(
-                        "RulePlan edge parity drift detected (set VX_RULE_PLAN_PARITY_STRICT=0 to run non-strict)"
-                            .to_string(),
-                    ));
+                            "RulePlan edge parity drift detected (set VX_RULE_PLAN_PARITY_STRICT=0 to run non-strict)"
+                                .to_string(),
+                        ));
                 }
             } else {
                 info!("RulePlan edge parity check passed for compile/registry node dependencies");
