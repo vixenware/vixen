@@ -173,6 +173,101 @@ fn test_rule_plan_edge_parity_compares_focus_deps_with_two_hop_bridge() {
     assert!(diff.extra_in_rule_plan.is_empty(), "{diff:?}");
 }
 
+#[test]
+fn test_rule_plan_execution_selects_crate_subset_and_closure() {
+    use std::collections::{BTreeMap, HashMap, HashSet};
+    use vx_manifest::Edition;
+    use vx_report::{RuleId, RulePlan, RulePlanNode, RulePlanNodeId, RulePlanNodeKind};
+    use vx_rs::crate_graph::{CrateGraph, CrateId, CrateNode, CrateSource, CrateType, DepEdge};
+
+    let workspace_root = camino::Utf8PathBuf::from("/workspace");
+
+    let dep_source = CrateSource::Path {
+        workspace_rel: camino::Utf8PathBuf::from("dep"),
+    };
+    let dep_id = CrateId::from_source(&dep_source, "dep");
+    let dep_node = CrateNode {
+        id: dep_id,
+        package_name: "dep".to_string(),
+        crate_name: "dep".to_string(),
+        source: dep_source,
+        workspace_rel: camino::Utf8PathBuf::from("dep"),
+        crate_root_rel: camino::Utf8PathBuf::from("dep/src/lib.rs"),
+        edition: Edition::E2021,
+        crate_type: CrateType::Lib,
+        deps: vec![],
+        build_script_rel: None,
+        build_script_output: None,
+    };
+
+    let app_source = CrateSource::Path {
+        workspace_rel: camino::Utf8PathBuf::from("app"),
+    };
+    let app_id = CrateId::from_source(&app_source, "app");
+    let app_node = CrateNode {
+        id: app_id,
+        package_name: "app".to_string(),
+        crate_name: "app".to_string(),
+        source: app_source,
+        workspace_rel: camino::Utf8PathBuf::from("app"),
+        crate_root_rel: camino::Utf8PathBuf::from("app/src/main.rs"),
+        edition: Edition::E2021,
+        crate_type: CrateType::Bin,
+        deps: vec![DepEdge {
+            extern_name: "dep".to_string(),
+            crate_id: dep_id,
+        }],
+        build_script_rel: None,
+        build_script_output: None,
+    };
+
+    let graph = CrateGraph {
+        workspace_root: workspace_root.clone(),
+        nodes: HashMap::from([(dep_id, dep_node), (app_id, app_node)]),
+        topo_order: vec![dep_id, app_id],
+        root_crate: app_id,
+        registry_crates: vec![],
+        reachable_packages: None,
+    };
+
+    let provenance = vx_report::RulePlanProvenance {
+        rule_id: RuleId::from("rule.test".to_string()),
+        source_id: vx_report::RulePlanSourceId::from("src".to_string()),
+        span: vx_report::RulePlanSpan {
+            line: 1,
+            column: 1,
+            end_line: 1,
+            end_column: 1,
+        },
+        comment: None,
+        metadata: {
+            let mut m = BTreeMap::new();
+            m.insert("crate_name".to_string(), "app".to_string());
+            m.insert("crate_type".to_string(), "bin".to_string());
+            m
+        },
+    };
+
+    let plan = RulePlan {
+        sources: vec![],
+        nodes: vec![RulePlanNode {
+            id: RulePlanNodeId::from("n_action_app".to_string()),
+            kind: RulePlanNodeKind::Action,
+            label: "compile-bin:app".to_string(),
+            provenance,
+        }],
+        edges: vec![],
+        facts: vec![],
+    };
+
+    let selected = crate::service::selected_crates_from_rule_plan(&plan, &graph).unwrap();
+    assert_eq!(selected.len(), 1);
+    assert!(selected.contains(&app_id));
+
+    let closure = crate::service::transitive_closure_crates(&graph, &selected);
+    assert_eq!(closure, HashSet::from([app_id, dep_id]));
+}
+
 /// Set up common build configuration for C builds
 fn setup_cc_config(db: &Database) -> BuildConfig {
     let build_key = BuildConfig::compute_key("debug", "x86_64-linux-musl", "/test/workspace", "");

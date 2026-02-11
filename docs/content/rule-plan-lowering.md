@@ -61,6 +61,14 @@ emit-edge from=n_action to=n_artifact kind=ifwritten
 Note: in this migration mode, execution is still performed by the legacy action graph; the `.vx`
 rules file currently affects the report topology and parity harness, not the actual compilation steps.
 
+## Real Execution (Migration Slice)
+
+Set `VX_RULE_PLAN_EXEC=1` (with `VX_RULE_PLAN_BRIDGE=1`) to execute a real Rust `ActionGraph`
+constructed from the subset of crates selected by the RulePlan.
+
+In `.vx` rules mode, any `compile-*` action nodes in the RulePlan select crates by
+`compile-<bin|lib>:<crate_name>`. vxd computes the transitive dependency closure and executes that subset.
+
 Unsupported in starter bridge:
 
 - `ifcreate`

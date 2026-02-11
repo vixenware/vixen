@@ -116,6 +116,17 @@ fn rule_plan_bridge_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn rule_plan_exec_enabled() -> bool {
+    std::env::var("VX_RULE_PLAN_EXEC")
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 fn vx_rules_file() -> Option<camino::Utf8PathBuf> {
     std::env::var("VX_RULES_FILE")
         .ok()
@@ -308,6 +319,114 @@ pub(crate) fn compare_rule_plan_edge_parity(
         missing_in_rule_plan: missing_in_rule_plan.into_iter().collect(),
         extra_in_rule_plan: extra_in_rule_plan.into_iter().collect(),
     }
+}
+
+fn parse_compile_node_id(node_id: &str) -> Option<(&str, &str)> {
+    let rest = node_id.strip_prefix("compile-")?;
+    let (crate_type, crate_name) = rest.split_once(':')?;
+    if crate_type.is_empty() || crate_name.is_empty() {
+        return None;
+    }
+    Some((crate_type, crate_name))
+}
+
+pub(crate) fn selected_crates_from_rule_plan(
+    plan: &RulePlan,
+    graph: &CrateGraph,
+) -> std::result::Result<std::collections::HashSet<vx_rs::crate_graph::CrateId>, VxdError> {
+    use vx_rs::crate_graph::CrateId;
+
+    let mut selected = std::collections::HashSet::new();
+    for node in &plan.nodes {
+        if node.kind != RulePlanNodeKind::Action {
+            continue;
+        }
+
+        // Prefer explicit metadata for selection.
+        let mut crate_name = node.provenance.metadata.get("crate_name").cloned();
+        let mut crate_type = node.provenance.metadata.get("crate_type").cloned();
+
+        if crate_name.is_none() || crate_type.is_none() {
+            if let Some(legacy) = node.provenance.metadata.get("legacy_node_id")
+                && let Some((kind, name)) = parse_compile_node_id(legacy)
+            {
+                crate_name = Some(name.to_string());
+                crate_type = Some(kind.to_string());
+            } else if let Some((kind, name)) = parse_compile_node_id(&node.label) {
+                crate_name = Some(name.to_string());
+                crate_type = Some(kind.to_string());
+            }
+        }
+
+        let (crate_name, crate_type) = match (crate_name, crate_type) {
+            (Some(name), Some(kind)) => (name, kind),
+            _ => continue,
+        };
+
+        let mut matches = graph
+            .nodes
+            .values()
+            .filter(|crate_node| {
+                crate_node.crate_name == crate_name && crate_node.crate_type.as_str() == crate_type
+            })
+            .map(|crate_node| crate_node.id)
+            .collect::<Vec<CrateId>>();
+
+        match matches.as_slice() {
+            [] => {
+                return Err(VxdError::InvalidManifest(format!(
+                    "RulePlan selected crate '{crate_name}' type '{crate_type}' but it is not present in the crate graph",
+                )));
+            }
+            [only] => {
+                selected.insert(*only);
+            }
+            _ => {
+                matches.sort_by_key(|id| id.short_hex());
+                return Err(VxdError::InvalidManifest(format!(
+                    "RulePlan selected crate '{crate_name}' type '{crate_type}' but it matched multiple crate IDs: {}",
+                    matches
+                        .into_iter()
+                        .map(|id| id.short_hex())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+        }
+    }
+
+    if selected.is_empty() {
+        return Err(VxdError::InvalidManifest(
+            "RulePlan execution is enabled but no compile-* action nodes were found in the plan"
+                .to_string(),
+        ));
+    }
+
+    Ok(selected)
+}
+
+pub(crate) fn transitive_closure_crates(
+    graph: &CrateGraph,
+    selected: &std::collections::HashSet<vx_rs::crate_graph::CrateId>,
+) -> std::collections::HashSet<vx_rs::crate_graph::CrateId> {
+    use vx_rs::crate_graph::CrateId;
+
+    let mut closure = std::collections::HashSet::new();
+    let mut stack = selected.iter().copied().collect::<Vec<CrateId>>();
+
+    while let Some(id) = stack.pop() {
+        if !closure.insert(id) {
+            continue;
+        }
+        let Some(node) = graph.nodes.get(&id) else {
+            continue;
+        };
+        for dep in &node.deps {
+            stack.push(dep.crate_id);
+        }
+    }
+
+    closure
 }
 
 pub(crate) fn sanitize_id_component(input: &str) -> String {
@@ -1056,6 +1175,7 @@ impl VxdService {
             "resolved crate graph, building action graph"
         );
 
+        let mut rule_plan_plan: Option<RulePlan> = None;
         let mut rule_plan_topology: Option<vx_report::GraphTopology> = None;
         if rule_plan_bridge_enabled() {
             info!(
@@ -1116,6 +1236,7 @@ impl VxdService {
             } else {
                 build_rule_plan_from_crate_graph(&graph)
             };
+            rule_plan_plan = Some(plan.clone());
             let lowered = crate::action_graph::ActionGraph::from_rule_plan(&plan)
                 .map_err(|e| VxdError::InvalidManifest(format!("RulePlan lowering failed: {e}")))?;
             rule_plan_topology = Some(lowered.to_topology());
@@ -1155,14 +1276,44 @@ impl VxdService {
         .map_err(|e| VxdError::Picante(e.to_string()))?;
 
         use vx_store_proto::RustChannel;
-        let action_graph = ActionGraph::from_crate_graph(
-            &graph,
-            RustChannel::Stable,
-            target_triple.clone(),
-            toolchain,
-            config,
-            &self.db,
-        )?;
+        let action_graph = if rule_plan_exec_enabled() {
+            if !rule_plan_bridge_enabled() {
+                return Err(VxdError::InvalidManifest(
+                    "VX_RULE_PLAN_EXEC requires VX_RULE_PLAN_BRIDGE=1".to_string(),
+                ));
+            }
+            let Some(plan) = rule_plan_plan.as_ref() else {
+                return Err(VxdError::InvalidManifest(
+                    "VX_RULE_PLAN_EXEC is enabled but RulePlan was not produced".to_string(),
+                ));
+            };
+            let selected = selected_crates_from_rule_plan(plan, &graph)?;
+            let closure = transitive_closure_crates(&graph, &selected);
+            info!(
+                selected = selected.len(),
+                closure = closure.len(),
+                "RulePlan execution enabled; building action graph from selected crate subset"
+            );
+
+            ActionGraph::from_crate_graph_subset(
+                &graph,
+                &closure,
+                RustChannel::Stable,
+                target_triple.clone(),
+                toolchain,
+                config,
+                &self.db,
+            )?
+        } else {
+            ActionGraph::from_crate_graph(
+                &graph,
+                RustChannel::Stable,
+                target_triple.clone(),
+                toolchain,
+                config,
+                &self.db,
+            )?
+        };
         let legacy_topology = action_graph.to_topology();
         if let Some(rule_plan_topology_ref) = rule_plan_topology.as_ref() {
             let parity = compare_rule_plan_parity(&legacy_topology, rule_plan_topology_ref);

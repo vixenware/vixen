@@ -605,6 +605,201 @@ impl ActionGraph {
         })
     }
 
+    pub fn from_crate_graph_subset(
+        crate_graph: &CrateGraph,
+        included_crates: &std::collections::HashSet<CrateId>,
+        rust_channel: RustChannel,
+        target_triple: String,
+        toolchain: RustToolchain,
+        config: BuildConfig,
+        db: &crate::db::Database,
+    ) -> Result<Self, crate::error::VxdError> {
+        use tracing::debug;
+
+        debug!(
+            included = included_crates.len(),
+            "Building action graph from crate graph subset"
+        );
+        let mut graph = DiGraph::new();
+        let mut crate_to_node = HashMap::new();
+        let mut registry_nodes = HashMap::new();
+
+        // 1. Create per-component toolchain actions.
+        let download_rustc_node = graph.add_node(ActionNode {
+            action: Action::DownloadRustToolchainComponent {
+                channel: rust_channel.clone(),
+                target_triple: target_triple.clone(),
+                component: RustComponent::Rustc,
+            },
+        });
+        let download_rust_std_node = graph.add_node(ActionNode {
+            action: Action::DownloadRustToolchainComponent {
+                channel: rust_channel.clone(),
+                target_triple: target_triple.clone(),
+                component: RustComponent::RustStd,
+            },
+        });
+        let extract_rustc_node = graph.add_node(ActionNode {
+            action: Action::ExtractRustToolchainComponent {
+                channel: rust_channel.clone(),
+                target_triple: target_triple.clone(),
+                component: RustComponent::Rustc,
+            },
+        });
+        let extract_rust_std_node = graph.add_node(ActionNode {
+            action: Action::ExtractRustToolchainComponent {
+                channel: rust_channel.clone(),
+                target_triple: target_triple.clone(),
+                component: RustComponent::RustStd,
+            },
+        });
+
+        graph.add_edge(
+            extract_rustc_node,
+            download_rustc_node,
+            "always".to_string(),
+        );
+        graph.add_edge(
+            extract_rust_std_node,
+            download_rust_std_node,
+            "always".to_string(),
+        );
+
+        // 2. Create registry crate acquisition actions for needed registry crates.
+        let mut needed_registry = std::collections::BTreeMap::<(String, String, String), ()>::new();
+        for crate_id in included_crates {
+            let node = &crate_graph.nodes[crate_id];
+            if let CrateSource::Registry {
+                name,
+                version,
+                checksum,
+            } = &node.source
+            {
+                needed_registry.insert((name.clone(), version.clone(), checksum.clone()), ());
+            }
+        }
+
+        debug!(
+            registry_count = needed_registry.len(),
+            "Creating registry acquisition actions"
+        );
+        for ((name, version, checksum), _) in needed_registry {
+            let registry_action = graph.add_node(ActionNode {
+                action: Action::AcquireRegistryCrate {
+                    name: name.clone(),
+                    version: version.clone(),
+                    checksum,
+                },
+            });
+            registry_nodes.insert((name, version), registry_action);
+        }
+
+        // 3. Create compilation actions for included crates (topo order for determinism).
+        for crate_id in &crate_graph.topo_order {
+            if !included_crates.contains(crate_id) {
+                continue;
+            }
+            let crate_node = &crate_graph.nodes[crate_id];
+
+            let rust_crate = RustCrate::new(
+                db,
+                crate_node.id.to_string(),
+                crate_node.crate_name.clone(),
+                crate_node.edition.as_str().to_string(),
+                crate_node.crate_type.as_str().to_string(),
+                crate_node.crate_root_rel.to_string(),
+                Blake3Hash([0u8; 32]), // filled during execution
+            )
+            .map_err(|e| crate::error::VxdError::Picante(e.to_string()))?;
+
+            let action_deps: Vec<ActionDep> = crate_node
+                .deps
+                .iter()
+                .map(|dep| {
+                    let dep_node = &crate_graph.nodes[&dep.crate_id];
+                    ActionDep {
+                        extern_name: dep.extern_name.clone(),
+                        crate_id: dep.crate_id,
+                        source: dep_node.source.clone(),
+                    }
+                })
+                .collect();
+
+            let target_triple_str = toolchain
+                .target(db)
+                .map_err(|e| crate::error::VxdError::Picante(e.to_string()))?;
+            let profile_str = config
+                .profile(db)
+                .map_err(|e| crate::error::VxdError::Picante(e.to_string()))?;
+
+            let action = Action::CompileRustCrate {
+                crate_id: crate_node.id,
+                crate_name: crate_node.crate_name.clone(),
+                crate_type: crate_node.crate_type,
+                edition: crate_node.edition.as_str().to_string(),
+                crate_root_rel: crate_node.crate_root_rel.to_string(),
+                source: crate_node.source.clone(),
+                deps: action_deps,
+                workspace_root: crate_graph.workspace_root.to_string(),
+                target_triple: target_triple_str,
+                profile: profile_str,
+                rust_crate,
+                toolchain,
+                config,
+            };
+
+            let node_idx = graph.add_node(ActionNode { action });
+            crate_to_node.insert(crate_node.id, node_idx);
+        }
+
+        // 4. Add dependency edges.
+        for crate_id in &crate_graph.topo_order {
+            if !included_crates.contains(crate_id) {
+                continue;
+            }
+            let crate_node = &crate_graph.nodes[crate_id];
+            let Some(&compile_idx) = crate_to_node.get(&crate_node.id) else {
+                continue;
+            };
+
+            graph.add_edge(compile_idx, extract_rustc_node, "always".to_string());
+            graph.add_edge(compile_idx, extract_rust_std_node, "always".to_string());
+
+            if let CrateSource::Registry { name, version, .. } = &crate_node.source
+                && let Some(&registry_idx) = registry_nodes.get(&(name.clone(), version.clone()))
+            {
+                graph.add_edge(compile_idx, registry_idx, "always".to_string());
+            }
+
+            for dep in &crate_node.deps {
+                let dep_compile_idx = crate_to_node.get(&dep.crate_id).copied().ok_or_else(|| {
+                    crate::error::VxdError::InvalidManifest(format!(
+                        "selected crate '{}' depends on crate '{}' which is not included in the execution subset",
+                        crate_node.crate_name,
+                        crate_graph.nodes[&dep.crate_id].crate_name
+                    ))
+                })?;
+                graph.add_edge(compile_idx, dep_compile_idx, "always".to_string());
+            }
+        }
+
+        Ok(Self {
+            graph,
+            crate_to_node,
+            rust_toolchain_extract_nodes: HashMap::from([
+                (RustComponent::Rustc, extract_rustc_node),
+                (RustComponent::RustStd, extract_rust_std_node),
+            ]),
+            rust_toolchain_spec: Some(RustToolchainSpec {
+                channel: rust_channel,
+                host: target_triple.clone(),
+                target: target_triple,
+                components: vec![RustComponent::Rustc, RustComponent::RustStd],
+            }),
+            registry_nodes,
+        })
+    }
+
     /// Lower a `RulePlan` into an executable `ActionGraph`.
     ///
     /// This bridge intentionally starts small: it materializes `group`/`action`/`artifact`/`fact`
