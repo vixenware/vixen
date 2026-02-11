@@ -116,6 +116,13 @@ fn rule_plan_bridge_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn vx_rules_file() -> Option<camino::Utf8PathBuf> {
+    std::env::var("VX_RULES_FILE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(camino::Utf8PathBuf::from)
+}
+
 fn rule_plan_parity_strict_enabled() -> bool {
     std::env::var("VX_RULE_PLAN_PARITY_STRICT")
         .map(|value| {
@@ -1054,7 +1061,61 @@ impl VxdService {
             info!(
                 "VX_RULE_PLAN_BRIDGE is enabled; validating/lowering RulePlan and using RulePlan topology in report"
             );
-            let plan = build_rule_plan_from_crate_graph(&graph);
+            let plan = if let Some(rules_file) = vx_rules_file() {
+                let rules_path = if rules_file.is_absolute() {
+                    rules_file
+                } else {
+                    graph.workspace_root.join(rules_file)
+                };
+                let source_rel = rules_path
+                    .strip_prefix(&graph.workspace_root)
+                    .ok()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| rules_path.clone());
+
+                info!(rules = %source_rel, "loading .vx rules file for RulePlan bridge");
+                let contents = tokio::fs::read_to_string(&rules_path).await.map_err(|e| {
+                    VxdError::FileRead {
+                        path: rules_path.clone(),
+                        message: e.to_string(),
+                    }
+                })?;
+
+                let source_id =
+                    vx_plan::RulePlanSourceId::from(format!("vx:{}", source_rel.as_str()));
+                let source = vx_plan::RulePlanSource {
+                    id: source_id.clone(),
+                    path: source_rel.clone(),
+                };
+
+                let program = vx_plan::vx_lang::parse_vx_program(
+                    rules_path.as_path(),
+                    source_id.clone(),
+                    &contents,
+                )
+                .map_err(|e| {
+                    VxdError::InvalidManifest(format!("failed to parse {}: {}", source_rel, e))
+                })?;
+
+                let host = vx_plan::runtime::RulePlanHost::with_sources(vec![source]);
+                let mut runtime = vx_plan::runtime::PlannerRuntime::new(
+                    host,
+                    vx_plan::runtime::PlannerPolicy::deterministic(),
+                    vx_plan::runtime::planner_builtins(),
+                )
+                .map_err(VxdError::InvalidManifest)?;
+
+                runtime.evaluate_program(&program).map_err(|e| {
+                    VxdError::InvalidManifest(format!("VX rules runtime error: {e}"))
+                })?;
+                let host = runtime.into_host();
+                let plan = host.into_plan();
+                plan.validate()
+                    .map_err(|e| VxdError::InvalidManifest(e.to_string()))?;
+                plan
+            } else {
+                build_rule_plan_from_crate_graph(&graph)
+            };
             let lowered = crate::action_graph::ActionGraph::from_rule_plan(&plan)
                 .map_err(|e| VxdError::InvalidManifest(format!("RulePlan lowering failed: {e}")))?;
             rule_plan_topology = Some(lowered.to_topology());

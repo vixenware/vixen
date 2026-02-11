@@ -42,6 +42,25 @@ When `VX_RULE_PLAN_BRIDGE=1`, vxd also runs a focused parity check between the
 legacy planner topology and RulePlan-lowered topology for compile/registry node IDs.
 Set `VX_RULE_PLAN_PARITY_STRICT=1` to fail builds when that parity check detects drift.
 
+## Loading .vx Rules Files (Vertical Slice)
+
+When `VX_RULE_PLAN_BRIDGE=1` and `VX_RULES_FILE` is set, vxd will parse and evaluate a
+`.vx` rules file through `PlannerRuntime` to produce a `RulePlan` (instead of using the
+hardcoded Rust `CrateGraph -> RulePlan` builder).
+
+Current `.vx` syntax is intentionally tiny: one builtin call per line with `key=value` args.
+
+Example:
+
+```text
+emit-node id=n_action kind=action label="compile-bin:app"
+emit-node id=n_artifact kind=artifact label="artifact:app"
+emit-edge from=n_action to=n_artifact kind=ifwritten
+```
+
+Note: in this migration mode, execution is still performed by the legacy action graph; the `.vx`
+rules file currently affects the report topology and parity harness, not the actual compilation steps.
+
 Unsupported in starter bridge:
 
 - `ifcreate`

@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use strid::braid;
 
 pub mod runtime;
+pub mod vx_lang;
 pub use runtime::*;
 
 #[braid]

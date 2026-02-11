@@ -3382,6 +3382,7 @@ dependencies = [
  "ur-taking-me-with-you",
  "vx-io",
  "vx-manifest",
+ "vx-plan",
  "vx-project",
  "vx-report",
  "vx-rs",

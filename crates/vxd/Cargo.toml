@@ -37,6 +37,7 @@ vx-report = { workspace = true }
 vx-rs = { workspace = true }
 vx-toolchain = { workspace = true }
 tokio-test-lite = { workspace = true }
+vx-plan = { workspace = true }
 
 [features]
 default = []
