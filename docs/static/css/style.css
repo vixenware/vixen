@@ -5,7 +5,7 @@
     --bg-raised: light-dark(#ffffff, #111);
     --fg: light-dark(#1a1a1a, #d4d4d4);
     --fg-muted: light-dark(#6b6b6b, #737373);
-    --brand-orange: #E88602;
+    --brand-orange: #e88602;
     --brand-orange-dim: light-dark(#d97800, #f49a1f);
     --brand-orange-soft: light-dark(#f9e5c6, #4d3100);
     --accent: var(--brand-orange);
@@ -96,7 +96,11 @@ body {
     text-align: center;
     border-bottom: 1px solid var(--border);
     background:
-        radial-gradient(1200px 280px at 50% -40%, color-mix(in srgb, var(--brand-orange) 22%, transparent), transparent),
+        radial-gradient(
+            1200px 280px at 50% -40%,
+            color-mix(in srgb, var(--brand-orange) 22%, transparent),
+            transparent
+        ),
         linear-gradient(180deg, var(--bg) 0%, var(--bg-raised) 100%);
 }
 
@@ -336,6 +340,14 @@ article pre,
     border: 1px solid var(--border);
 }
 
+article pre.mermaid {
+    border-radius: 0;
+    border: none;
+    background: none;
+    margin: 2em 0;
+    max-width: 90%;
+}
+
 .code-block {
     padding: 0;
 }
@@ -375,7 +387,9 @@ article pre,
     color: var(--fg-muted);
     cursor: pointer;
     opacity: 0;
-    transition: opacity 0.15s, background 0.15s;
+    transition:
+        opacity 0.15s,
+        background 0.15s;
 }
 
 .code-block:hover .copy-btn {
@@ -514,10 +528,18 @@ footer a:hover {
     animation: fade-in 0.15s ease-in;
 }
 @keyframes fade-out {
-    from { opacity: 1; }
-    to { opacity: 0; }
+    from {
+        opacity: 1;
+    }
+    to {
+        opacity: 0;
+    }
 }
 @keyframes fade-in {
-    from { opacity: 0; }
-    to { opacity: 1; }
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
 }
