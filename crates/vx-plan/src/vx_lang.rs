@@ -851,6 +851,11 @@ fn builtin_from_str(raw: &str) -> Option<PlannerBuiltinId> {
         "sort-scalars" => Some(PlannerBuiltinId::SortScalars),
         "get" => Some(PlannerBuiltinId::Get),
         "len" => Some(PlannerBuiltinId::Len),
+        "str-cat" => Some(PlannerBuiltinId::StrCat),
+        "rust-crate-graph" => Some(PlannerBuiltinId::RustCrateGraph),
+        "rust-root" => Some(PlannerBuiltinId::RustRoot),
+        "rust-select" => Some(PlannerBuiltinId::RustSelect),
+        "rust-transitive-closure" => Some(PlannerBuiltinId::RustTransitiveClosure),
         "env-profile" => Some(PlannerBuiltinId::EnvProfile),
         "env-target-triple" => Some(PlannerBuiltinId::EnvTargetTriple),
         "clock-now" => Some(PlannerBuiltinId::ClockNow),
@@ -928,5 +933,21 @@ for c in $roots {
         )
         .expect("parse should succeed");
         assert_eq!(program.forms.len(), 2);
+    }
+
+    #[test]
+    fn parses_rust_builtins() {
+        let program = parse_vx_program(
+            Utf8Path::new(".vx/rules.vx"),
+            RulePlanSourceId::from("rules".to_string()),
+            r#"
+let g = rust.crate_graph();
+let root = rust.root(graph: $g);
+let sel = rust.select(graph: $g, name: "app", crate_type: "bin");
+let cl = rust.transitive_closure(graph: $g, roots: $sel);
+"#,
+        )
+        .expect("parse should succeed");
+        assert_eq!(program.forms.len(), 4);
     }
 }

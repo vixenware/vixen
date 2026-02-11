@@ -171,6 +171,11 @@ pub enum PlannerBuiltinId {
     SortScalars,
     Get,
     Len,
+    StrCat,
+    RustCrateGraph,
+    RustRoot,
+    RustSelect,
+    RustTransitiveClosure,
     EnvProfile,
     EnvTargetTriple,
     ClockNow,
@@ -190,6 +195,11 @@ impl PlannerBuiltinId {
             Self::SortScalars => "sort-scalars",
             Self::Get => "get",
             Self::Len => "len",
+            Self::StrCat => "str-cat",
+            Self::RustCrateGraph => "rust-crate-graph",
+            Self::RustRoot => "rust-root",
+            Self::RustSelect => "rust-select",
+            Self::RustTransitiveClosure => "rust-transitive-closure",
             Self::EnvProfile => "env-profile",
             Self::EnvTargetTriple => "env-target-triple",
             Self::ClockNow => "clock-now",
@@ -313,6 +323,29 @@ pub struct LenArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrCatArgs {
+    pub values: Vec<PlannerValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustRootArgs {
+    pub graph: PlannerValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustSelectArgs {
+    pub graph: PlannerValue,
+    pub name: String,
+    pub crate_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustTransitiveClosureArgs {
+    pub graph: PlannerValue,
+    pub roots: Vec<PlannerValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlannerBuiltinArgs {
     None,
     EmitNode(EmitNodeArgs),
@@ -322,6 +355,11 @@ pub enum PlannerBuiltinArgs {
     SortScalars(SortScalarsArgs),
     Get(GetArgs),
     Len(LenArgs),
+    StrCat(StrCatArgs),
+    RustCrateGraph,
+    RustRoot(RustRootArgs),
+    RustSelect(RustSelectArgs),
+    RustTransitiveClosure(RustTransitiveClosureArgs),
 }
 
 pub trait PlannerHost {
@@ -625,6 +663,11 @@ pub const BUILTIN_LEN: PlannerBuiltin = PlannerBuiltin {
     capability: PlannerCapability::Transform,
 };
 
+pub const BUILTIN_STR_CAT: PlannerBuiltin = PlannerBuiltin {
+    id: PlannerBuiltinId::StrCat,
+    capability: PlannerCapability::Transform,
+};
+
 pub const BUILTIN_ENV_PROFILE: PlannerBuiltin = PlannerBuiltin {
     id: PlannerBuiltinId::EnvProfile,
     capability: PlannerCapability::Env,
@@ -660,7 +703,7 @@ pub const BUILTIN_PROCESS_SPAWN: PlannerBuiltin = PlannerBuiltin {
     capability: PlannerCapability::Process,
 };
 
-pub fn planner_builtins() -> [PlannerBuiltin; 14] {
+pub fn planner_builtins() -> [PlannerBuiltin; 15] {
     [
         BUILTIN_EMIT_NODE,
         BUILTIN_EMIT_EDGE,
@@ -669,6 +712,51 @@ pub fn planner_builtins() -> [PlannerBuiltin; 14] {
         BUILTIN_SORT_SCALARS,
         BUILTIN_GET,
         BUILTIN_LEN,
+        BUILTIN_STR_CAT,
+        BUILTIN_ENV_PROFILE,
+        BUILTIN_ENV_TARGET_TRIPLE,
+        BUILTIN_CLOCK_NOW,
+        BUILTIN_RANDOM_INT,
+        BUILTIN_NET_REQUEST,
+        BUILTIN_FS_READ,
+        BUILTIN_PROCESS_SPAWN,
+    ]
+}
+
+pub const BUILTIN_RUST_CRATE_GRAPH: PlannerBuiltin = PlannerBuiltin {
+    id: PlannerBuiltinId::RustCrateGraph,
+    capability: PlannerCapability::Transform,
+};
+
+pub const BUILTIN_RUST_ROOT: PlannerBuiltin = PlannerBuiltin {
+    id: PlannerBuiltinId::RustRoot,
+    capability: PlannerCapability::Transform,
+};
+
+pub const BUILTIN_RUST_SELECT: PlannerBuiltin = PlannerBuiltin {
+    id: PlannerBuiltinId::RustSelect,
+    capability: PlannerCapability::Transform,
+};
+
+pub const BUILTIN_RUST_TRANSITIVE_CLOSURE: PlannerBuiltin = PlannerBuiltin {
+    id: PlannerBuiltinId::RustTransitiveClosure,
+    capability: PlannerCapability::Transform,
+};
+
+pub fn planner_builtins_with_rust() -> [PlannerBuiltin; 19] {
+    [
+        BUILTIN_EMIT_NODE,
+        BUILTIN_EMIT_EDGE,
+        BUILTIN_EMIT_FACT,
+        BUILTIN_SORT_MAP_KEYS,
+        BUILTIN_SORT_SCALARS,
+        BUILTIN_GET,
+        BUILTIN_LEN,
+        BUILTIN_STR_CAT,
+        BUILTIN_RUST_CRATE_GRAPH,
+        BUILTIN_RUST_ROOT,
+        BUILTIN_RUST_SELECT,
+        BUILTIN_RUST_TRANSITIVE_CLOSURE,
         BUILTIN_ENV_PROFILE,
         BUILTIN_ENV_TARGET_TRIPLE,
         BUILTIN_CLOCK_NOW,
@@ -819,6 +907,38 @@ impl PlannerHost for RulePlanHost {
                 PlannerValue::String(s) => Ok(PlannerValue::Int(s.chars().count() as i64)),
                 _ => Err("len(value) expects value to be string/vector/map/set".to_string()),
             },
+            (PlannerBuiltinId::StrCat, PlannerBuiltinArgs::StrCat(args)) => {
+                let mut out = String::new();
+                for (idx, v) in args.values.iter().enumerate() {
+                    let s = match v {
+                        PlannerValue::Null => "null".to_string(),
+                        PlannerValue::Bool(b) => b.to_string(),
+                        PlannerValue::Int(i) => i.to_string(),
+                        PlannerValue::String(s) => s.clone(),
+                        PlannerValue::Keyword(s) => s.clone(),
+                        PlannerValue::Vector(_) | PlannerValue::Set(_) | PlannerValue::Map(_) => {
+                            return Err(format!(
+                                "str-cat values[{idx}] must be a scalar, got {v:?}"
+                            ));
+                        }
+                    };
+                    out.push_str(&s);
+                }
+                Ok(PlannerValue::String(out))
+            }
+            (PlannerBuiltinId::RustCrateGraph, PlannerBuiltinArgs::RustCrateGraph) => Err(
+                "rust.crate_graph is host-provided and has no default implementation".to_string(),
+            ),
+            (PlannerBuiltinId::RustRoot, PlannerBuiltinArgs::RustRoot(args)) => {
+                rust_root(&args.graph)
+            }
+            (PlannerBuiltinId::RustSelect, PlannerBuiltinArgs::RustSelect(args)) => {
+                rust_select(&args.graph, &args.name, &args.crate_type)
+            }
+            (
+                PlannerBuiltinId::RustTransitiveClosure,
+                PlannerBuiltinArgs::RustTransitiveClosure(args),
+            ) => rust_transitive_closure(&args.graph, &args.roots),
             (PlannerBuiltinId::EnvProfile, PlannerBuiltinArgs::None) => self
                 .env_profile
                 .clone()
@@ -947,6 +1067,95 @@ fn parse_builtin_args(
                 value: value.clone(),
             }))
         }
+        PlannerBuiltinId::StrCat => {
+            let map = exactly_one_map_arg(builtin, args)?;
+            let values = map.get("values").ok_or_else(|| {
+                format!(
+                    "builtin '{}' missing required key '{}'",
+                    builtin.as_str(),
+                    "values"
+                )
+            })?;
+            let PlannerValue::Vector(values) = values else {
+                return Err(format!(
+                    "builtin '{}' key 'values' must be a vector",
+                    builtin.as_str()
+                ));
+            };
+            Ok(PlannerBuiltinArgs::StrCat(StrCatArgs {
+                values: values.clone(),
+            }))
+        }
+        PlannerBuiltinId::RustCrateGraph => {
+            if args.is_empty() {
+                Ok(PlannerBuiltinArgs::RustCrateGraph)
+            } else {
+                Err(format!(
+                    "builtin '{}' expected no arguments but got {}",
+                    builtin.as_str(),
+                    args.len()
+                ))
+            }
+        }
+        PlannerBuiltinId::RustRoot => {
+            let map = exactly_one_map_arg(builtin, args)?;
+            let graph = map.get("graph").ok_or_else(|| {
+                format!(
+                    "builtin '{}' missing required key '{}'",
+                    builtin.as_str(),
+                    "graph"
+                )
+            })?;
+            Ok(PlannerBuiltinArgs::RustRoot(RustRootArgs {
+                graph: graph.clone(),
+            }))
+        }
+        PlannerBuiltinId::RustSelect => {
+            let map = exactly_one_map_arg(builtin, args)?;
+            let graph = map.get("graph").ok_or_else(|| {
+                format!(
+                    "builtin '{}' missing required key '{}'",
+                    builtin.as_str(),
+                    "graph"
+                )
+            })?;
+            let name = required_string(map, "name", builtin)?.to_owned();
+            let crate_type = required_string(map, "crate_type", builtin)?.to_owned();
+            Ok(PlannerBuiltinArgs::RustSelect(RustSelectArgs {
+                graph: graph.clone(),
+                name,
+                crate_type,
+            }))
+        }
+        PlannerBuiltinId::RustTransitiveClosure => {
+            let map = exactly_one_map_arg(builtin, args)?;
+            let graph = map.get("graph").ok_or_else(|| {
+                format!(
+                    "builtin '{}' missing required key '{}'",
+                    builtin.as_str(),
+                    "graph"
+                )
+            })?;
+            let roots = map.get("roots").ok_or_else(|| {
+                format!(
+                    "builtin '{}' missing required key '{}'",
+                    builtin.as_str(),
+                    "roots"
+                )
+            })?;
+            let PlannerValue::Vector(roots) = roots else {
+                return Err(format!(
+                    "builtin '{}' key 'roots' must be a vector",
+                    builtin.as_str()
+                ));
+            };
+            Ok(PlannerBuiltinArgs::RustTransitiveClosure(
+                RustTransitiveClosureArgs {
+                    graph: graph.clone(),
+                    roots: roots.clone(),
+                },
+            ))
+        }
         PlannerBuiltinId::EnvProfile | PlannerBuiltinId::EnvTargetTriple => {
             if args.is_empty() {
                 Ok(PlannerBuiltinArgs::None)
@@ -1007,6 +1216,177 @@ fn optional_meta(
             }
         };
         out.insert(k.clone(), s);
+    }
+    Ok(out)
+}
+
+fn rust_root(graph: &PlannerValue) -> Result<PlannerValue, String> {
+    let (id_to_crate, topo, root_id) = rust_parse_graph(graph)?;
+    let _ = topo;
+    id_to_crate
+        .get(&root_id)
+        .cloned()
+        .ok_or_else(|| format!("rust graph root id '{root_id}' was not found in crates"))
+}
+
+fn rust_select(graph: &PlannerValue, name: &str, crate_type: &str) -> Result<PlannerValue, String> {
+    let (id_to_crate, topo, _root_id) = rust_parse_graph(graph)?;
+    let mut out = Vec::new();
+    for id in topo {
+        let Some(PlannerValue::Map(map)) = id_to_crate.get(&id) else {
+            continue;
+        };
+
+        let matches_name = map
+            .get("name")
+            .and_then(PlannerScalar::from_value)
+            .and_then(|s| match s {
+                PlannerScalar::String(s) | PlannerScalar::Keyword(s) => Some(s),
+                _ => None,
+            })
+            .is_some_and(|s| s == name);
+
+        let matches_type = map
+            .get("type")
+            .and_then(PlannerScalar::from_value)
+            .and_then(|s| match s {
+                PlannerScalar::String(s) | PlannerScalar::Keyword(s) => Some(s),
+                _ => None,
+            })
+            .is_some_and(|s| s == crate_type);
+
+        if matches_name && matches_type {
+            out.push(PlannerValue::Map(map.clone()));
+        }
+    }
+    Ok(PlannerValue::Vector(out))
+}
+
+fn rust_transitive_closure(
+    graph: &PlannerValue,
+    roots: &[PlannerValue],
+) -> Result<PlannerValue, String> {
+    let (id_to_crate, topo, _root_id) = rust_parse_graph(graph)?;
+
+    let mut roots_ids = Vec::new();
+    for (idx, r) in roots.iter().enumerate() {
+        let id = rust_root_id_from_value(r).ok_or_else(|| {
+            format!(
+                "rust.transitive_closure roots[{idx}] must be a crate map (with 'id') or an id string"
+            )
+        })?;
+        roots_ids.push(id);
+    }
+
+    let mut deps_by_id = BTreeMap::<String, Vec<String>>::new();
+    for (id, crate_value) in &id_to_crate {
+        let PlannerValue::Map(map) = crate_value else {
+            continue;
+        };
+        let deps = rust_deps_from_crate_map(map)?;
+        deps_by_id.insert(id.clone(), deps);
+    }
+
+    let mut reachable = BTreeSet::<String>::new();
+    let mut stack = roots_ids;
+    while let Some(id) = stack.pop() {
+        if !reachable.insert(id.clone()) {
+            continue;
+        }
+        if let Some(deps) = deps_by_id.get(&id) {
+            for dep in deps {
+                stack.push(dep.clone());
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for id in topo {
+        if !reachable.contains(&id) {
+            continue;
+        }
+        if let Some(v) = id_to_crate.get(&id) {
+            out.push(v.clone());
+        }
+    }
+
+    Ok(PlannerValue::Vector(out))
+}
+
+type RustGraphParsed = (BTreeMap<String, PlannerValue>, Vec<String>, String);
+
+fn rust_parse_graph(graph: &PlannerValue) -> Result<RustGraphParsed, String> {
+    let PlannerValue::Map(map) = graph else {
+        return Err("rust graph must be a map".to_string());
+    };
+
+    let topo = match map.get("topo") {
+        Some(PlannerValue::Vector(v)) => v
+            .iter()
+            .enumerate()
+            .map(|(idx, v)| {
+                rust_root_id_from_value(v)
+                    .ok_or_else(|| format!("rust graph topo[{idx}] must be a string/keyword id"))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => return Err("rust graph must contain key 'topo' as vector".to_string()),
+    };
+
+    let root_id = match map.get("root") {
+        Some(v) => rust_root_id_from_value(v)
+            .ok_or_else(|| "rust graph key 'root' must be a string/keyword id".to_string())?,
+        None => return Err("rust graph must contain key 'root'".to_string()),
+    };
+
+    let crates = match map.get("crates") {
+        Some(PlannerValue::Vector(v)) => v,
+        _ => return Err("rust graph must contain key 'crates' as vector".to_string()),
+    };
+
+    let mut id_to_crate = BTreeMap::new();
+    for (idx, c) in crates.iter().enumerate() {
+        let PlannerValue::Map(crate_map) = c else {
+            return Err(format!("rust graph crates[{idx}] must be a map"));
+        };
+        let Some(id) = crate_map
+            .get("id")
+            .and_then(rust_root_id_from_value)
+            .or_else(|| crate_map.get("crate_id").and_then(rust_root_id_from_value))
+        else {
+            return Err(format!("rust graph crates[{idx}] must have string 'id'"));
+        };
+        id_to_crate.insert(id, PlannerValue::Map(crate_map.clone()));
+    }
+
+    Ok((id_to_crate, topo, root_id))
+}
+
+fn rust_root_id_from_value(value: &PlannerValue) -> Option<String> {
+    match value {
+        PlannerValue::String(s) => Some(s.clone()),
+        PlannerValue::Keyword(s) => Some(s.clone()),
+        PlannerValue::Map(map) => map
+            .get("id")
+            .and_then(rust_root_id_from_value)
+            .or_else(|| map.get("crate_id").and_then(rust_root_id_from_value)),
+        _ => None,
+    }
+}
+
+fn rust_deps_from_crate_map(map: &BTreeMap<String, PlannerValue>) -> Result<Vec<String>, String> {
+    let deps = match map.get("deps") {
+        None => return Ok(Vec::new()),
+        Some(v) => v,
+    };
+    let PlannerValue::Vector(deps) = deps else {
+        return Err("crate map key 'deps' must be a vector".to_string());
+    };
+    let mut out = Vec::with_capacity(deps.len());
+    for (idx, dep) in deps.iter().enumerate() {
+        let Some(id) = rust_root_id_from_value(dep) else {
+            return Err(format!("crate deps[{idx}] must be a string/keyword id"));
+        };
+        out.push(id);
     }
     Ok(out)
 }

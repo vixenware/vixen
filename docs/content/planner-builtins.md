@@ -15,6 +15,7 @@ Capabilities are explicit and checked before host invocation.
 
 - `emit-graph`
 - `transform`
+- `env`
 - `time`
 - `random`
 - `network`
@@ -25,6 +26,7 @@ Capabilities are explicit and checked before host invocation.
 
 - `emit-graph`
 - `transform`
+- `env`
 
 This ensures nondeterministic/ambient operations are denied by default.
 
@@ -42,6 +44,18 @@ These builtins materialize into `RulePlan` through `RulePlanHost`.
 
 - `sort-map-keys` (`transform`): returns map keys in canonical sorted order
 - `sort-scalars` (`transform`): returns scalar values in canonical sorted order
+- `get` (`transform`): map/vector indexing helper (missing keys => `null`)
+- `len` (`transform`): length for string/vector/map/set
+- `str-cat` (`transform`): concatenate scalar values into a string
+
+### Deterministic Rust planning
+
+In vxd `.vx` mode, a small `rust.*` planning surface is available:
+
+- `rust-crate-graph` (`transform`): returns a deterministic snapshot of the crate graph
+- `rust-root` (`transform`): returns the root crate map from a crate graph
+- `rust-select` (`transform`): select crates by `name` + `crate_type`
+- `rust-transitive-closure` (`transform`): compute dependency closure (topologically ordered)
 
 ### Denied-by-default host effects
 
@@ -63,7 +77,14 @@ Argument parsing is typed through `PlannerBuiltinArgs` variants:
 - `EmitFact(EmitFactArgs)`
 - `SortMapKeys(SortMapKeysArgs)`
 - `SortScalars(SortScalarsArgs)`
-- `None`
+- `Get(GetArgs)`
+- `Len(LenArgs)`
+- `StrCat(StrCatArgs)`
+- `RustCrateGraph`
+- `RustRoot(RustRootArgs)`
+- `RustSelect(RustSelectArgs)`
+- `RustTransitiveClosure(RustTransitiveClosureArgs)`
+- `None` (no-arg builtins)
 
 ## Diagnostics Contract
 

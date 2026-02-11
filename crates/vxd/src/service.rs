@@ -1194,20 +1194,165 @@ impl VxdService {
                     VxdError::InvalidManifest(format!("failed to parse {}: {}", source_rel, e))
                 })?;
 
-                let mut host = vx_plan::runtime::RulePlanHost::with_sources(vec![source]);
-                host.set_env_profile(profile.to_string());
-                host.set_env_target_triple(target_triple.to_string());
+                struct VxdRulesHost<'a> {
+                    inner: vx_plan::runtime::RulePlanHost,
+                    crate_graph: &'a CrateGraph,
+                }
+
+                impl<'a> VxdRulesHost<'a> {
+                    fn into_inner(self) -> vx_plan::runtime::RulePlanHost {
+                        self.inner
+                    }
+                }
+
+                impl<'a> vx_plan::runtime::PlannerHost for VxdRulesHost<'a> {
+                    fn register_builtin(
+                        &mut self,
+                        builtin: vx_plan::runtime::PlannerBuiltin,
+                    ) -> std::result::Result<(), String> {
+                        self.inner.register_builtin(builtin)
+                    }
+
+                    fn invoke_builtin(
+                        &mut self,
+                        builtin: vx_plan::runtime::PlannerBuiltinId,
+                        args: vx_plan::runtime::PlannerBuiltinArgs,
+                        site: &vx_plan::runtime::PlannerCallSite,
+                    ) -> std::result::Result<vx_plan::runtime::PlannerValue, String>
+                    {
+                        use vx_plan::runtime::{PlannerBuiltinArgs, PlannerBuiltinId};
+
+                        match (builtin, args) {
+                            (
+                                PlannerBuiltinId::RustCrateGraph,
+                                PlannerBuiltinArgs::RustCrateGraph,
+                            ) => Ok(crate_graph_to_planner_value(self.crate_graph)),
+                            (builtin, args) => self.inner.invoke_builtin(builtin, args, site),
+                        }
+                    }
+                }
+
+                fn crate_graph_to_planner_value(
+                    crate_graph: &CrateGraph,
+                ) -> vx_plan::runtime::PlannerValue {
+                    use vx_plan::runtime::PlannerValue;
+
+                    let mut crates = crate_graph.nodes.values().collect::<Vec<_>>();
+                    crates.sort_by(|a, b| {
+                        a.crate_name
+                            .cmp(&b.crate_name)
+                            .then_with(|| a.crate_type.as_str().cmp(b.crate_type.as_str()))
+                            .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
+                    });
+
+                    let crates_value = crates
+                        .into_iter()
+                        .map(|node| {
+                            let deps = {
+                                let mut deps = node
+                                    .deps
+                                    .iter()
+                                    .map(|d| d.crate_id.to_string())
+                                    .collect::<Vec<_>>();
+                                deps.sort();
+                                deps.into_iter()
+                                    .map(PlannerValue::String)
+                                    .collect::<Vec<_>>()
+                            };
+
+                            let mut source = std::collections::BTreeMap::new();
+                            match &node.source {
+                                vx_rs::crate_graph::CrateSource::Path { workspace_rel } => {
+                                    source.insert(
+                                        "kind".to_string(),
+                                        PlannerValue::Keyword("path".to_string()),
+                                    );
+                                    source.insert(
+                                        "workspace_rel".to_string(),
+                                        PlannerValue::String(workspace_rel.to_string()),
+                                    );
+                                }
+                                vx_rs::crate_graph::CrateSource::Registry {
+                                    name,
+                                    version,
+                                    checksum,
+                                } => {
+                                    source.insert(
+                                        "kind".to_string(),
+                                        PlannerValue::Keyword("registry".to_string()),
+                                    );
+                                    source.insert(
+                                        "name".to_string(),
+                                        PlannerValue::String(name.clone()),
+                                    );
+                                    source.insert(
+                                        "version".to_string(),
+                                        PlannerValue::String(version.clone()),
+                                    );
+                                    source.insert(
+                                        "checksum".to_string(),
+                                        PlannerValue::String(checksum.clone()),
+                                    );
+                                }
+                            }
+
+                            let mut m = std::collections::BTreeMap::new();
+                            m.insert("id".to_string(), PlannerValue::String(node.id.to_string()));
+                            m.insert(
+                                "name".to_string(),
+                                PlannerValue::String(node.crate_name.clone()),
+                            );
+                            m.insert(
+                                "type".to_string(),
+                                PlannerValue::String(node.crate_type.as_str().to_string()),
+                            );
+                            m.insert("deps".to_string(), PlannerValue::Vector(deps));
+                            m.insert("source".to_string(), PlannerValue::Map(source));
+                            PlannerValue::Map(m)
+                        })
+                        .collect::<Vec<_>>();
+
+                    let topo = crate_graph
+                        .topo_order
+                        .iter()
+                        .map(|id| PlannerValue::String(id.to_string()))
+                        .collect::<Vec<_>>();
+
+                    let mut out = std::collections::BTreeMap::new();
+                    out.insert(
+                        "workspace_root".to_string(),
+                        PlannerValue::String(crate_graph.workspace_root.to_string()),
+                    );
+                    out.insert(
+                        "root".to_string(),
+                        PlannerValue::String(crate_graph.root_crate.to_string()),
+                    );
+                    out.insert("topo".to_string(), PlannerValue::Vector(topo));
+                    out.insert("crates".to_string(), PlannerValue::Vector(crates_value));
+
+                    PlannerValue::Map(out)
+                }
+
+                let mut inner = vx_plan::runtime::RulePlanHost::with_sources(vec![source]);
+                inner.set_env_profile(profile.to_string());
+                inner.set_env_target_triple(target_triple.to_string());
+
+                let host = VxdRulesHost {
+                    inner,
+                    crate_graph: &graph,
+                };
+
                 let mut runtime = vx_plan::runtime::PlannerRuntime::new(
                     host,
                     vx_plan::runtime::PlannerPolicy::deterministic(),
-                    vx_plan::runtime::planner_builtins(),
+                    vx_plan::runtime::planner_builtins_with_rust(),
                 )
                 .map_err(VxdError::InvalidManifest)?;
 
                 runtime.evaluate_program(&program).map_err(|e| {
                     VxdError::InvalidManifest(format!("VX rules runtime error: {e}"))
                 })?;
-                let host = runtime.into_host();
+                let host = runtime.into_host().into_inner();
                 let plan = host.into_plan();
                 plan.validate()
                     .map_err(|e| VxdError::InvalidManifest(e.to_string()))?;

@@ -70,22 +70,47 @@ for root in $roots {
     );
   } else { }
 }
-
-emit_node(id: n_action, kind: action, label: "compile-bin:app");
-emit_node(id: n_artifact, kind: artifact, label: "artifact:app");
-emit_edge(from: n_action, to: n_artifact, kind: ifwritten);
 ```
 
 Note: in this migration mode, execution is still performed by the legacy action graph; the `.vx`
 rules file currently affects the report topology and parity harness, not the actual compilation steps.
+
+## Rust Planning Helpers
+
+In `.vx` rules mode, vxd registers a small deterministic `rust.*` surface for planning.
+
+Sketch:
+
+```text
+let g = rust.crate_graph();
+let roots = rust.select(graph: $g, name: "app", crate_type: "bin");
+let closure = rust.transitive_closure(graph: $g, roots: $roots);
+
+for c in $closure {
+  let crate_name = get(value: $c, key: "name");
+  let crate_type = get(value: $c, key: "type");
+  let node_id = str.cat(values: ["compile-", $crate_type, ":", $crate_name]);
+
+  emit_node(
+    id: $node_id,
+    kind: action,
+    label: "compile",
+    meta: { crate_name: $crate_name, crate_type: $crate_type },
+  );
+}
+```
 
 ## Real Execution (Migration Slice)
 
 Set `VX_RULE_PLAN_EXEC=1` (with `VX_RULE_PLAN_BRIDGE=1`) to execute a real Rust `ActionGraph`
 constructed from the subset of crates selected by the RulePlan.
 
-In `.vx` rules mode, any `compile-*` action nodes in the RulePlan select crates by
-`compile-<bin|lib>:<crate_name>`. vxd computes the transitive dependency closure and executes that subset.
+In `.vx` rules mode, RulePlan execution selects crates from action node provenance metadata:
+
+- `crate_name`
+- `crate_type`
+
+vxd computes the transitive dependency closure and executes that subset.
 
 Unsupported in starter bridge:
 
