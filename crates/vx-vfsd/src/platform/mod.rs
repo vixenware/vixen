@@ -58,3 +58,8 @@ pub fn dump_platform_diagnostics() {
 pub fn should_create_mount_dir(mount_path: &Utf8PathBuf) -> bool {
     os::should_create_mount_dir(mount_path)
 }
+
+/// Collect and log diagnostics when the VFS smoke test fails.
+pub async fn collect_smoke_test_diagnostics(mount_path: &Utf8PathBuf) {
+    os::collect_smoke_test_diagnostics(mount_path).await;
+}

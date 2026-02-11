@@ -29,25 +29,91 @@ use crate::vfs::CasVfs;
 
 pub type CasCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
 
-/// Wrapper for CasVfs that implements Vfs by delegating to the inner CasVfs
+/// Wrapper for CasVfs that implements Vfs by delegating to the inner CasVfs.
+///
+/// Also serves a synthetic "canary" file at the root for smoke-testing:
+/// after mounting, vx-vfsd reads the canary through the real filesystem
+/// to verify the mount is actually working end-to-end.
 #[derive(Clone)]
-struct SharedVfs(Arc<CasVfs>);
+struct SharedVfs {
+    inner: Arc<CasVfs>,
+    canary: Arc<Canary>,
+}
+
+struct Canary {
+    /// Filename of the canary (e.g., ".vfs-smoke-ab3f...")
+    name: String,
+    /// Random content to verify round-trip
+    content: Vec<u8>,
+    /// Fake item ID for the canary file (u64::MAX — will never collide with real IDs)
+    item_id: ItemId,
+}
+
+const CANARY_ITEM_ID: ItemId = u64::MAX;
+const ROOT_ITEM_ID: ItemId = 1;
+
+impl SharedVfs {
+    fn new(inner: Arc<CasVfs>) -> Self {
+        let name = format!(".vfs-smoke-{:016x}", fastrand::u64(..));
+        let content: Vec<u8> = (0..32).map(|_| fastrand::u8(..)).collect();
+        Self {
+            inner,
+            canary: Arc::new(Canary {
+                name,
+                content,
+                item_id: CANARY_ITEM_ID,
+            }),
+        }
+    }
+
+    fn canary_attrs(&self) -> vixenfs_proto::ItemAttributes {
+        vixenfs_proto::ItemAttributes {
+            item_id: self.canary.item_id,
+            item_type: vixenfs_proto::ItemType::File,
+            size: self.canary.content.len() as u64,
+            modified_time: 0,
+            created_time: 0,
+            mode: vixenfs_proto::mode::FILE_REGULAR,
+        }
+    }
+}
 
 impl Vfs for SharedVfs {
     async fn lookup(&self, cx: &roam::Context, parent_id: ItemId, name: String) -> LookupResult {
-        self.0.lookup(cx, parent_id, name).await
+        if parent_id == ROOT_ITEM_ID && name == self.canary.name {
+            return LookupResult {
+                attrs: self.canary_attrs(),
+                error: vixenfs_proto::errno::OK,
+            };
+        }
+        self.inner.lookup(cx, parent_id, name).await
     }
 
     async fn get_attributes(&self, cx: &roam::Context, item_id: ItemId) -> GetAttributesResult {
-        self.0.get_attributes(cx, item_id).await
+        if item_id == self.canary.item_id {
+            return GetAttributesResult {
+                attrs: self.canary_attrs(),
+                error: vixenfs_proto::errno::OK,
+            };
+        }
+        self.inner.get_attributes(cx, item_id).await
     }
 
     async fn read_dir(&self, cx: &roam::Context, item_id: ItemId, cursor: u64) -> ReadDirResult {
-        self.0.read_dir(cx, item_id, cursor).await
+        self.inner.read_dir(cx, item_id, cursor).await
     }
 
     async fn read(&self, cx: &roam::Context, item_id: ItemId, offset: u64, len: u64) -> ReadResult {
-        self.0.read(cx, item_id, offset, len).await
+        if item_id == self.canary.item_id {
+            let content = &self.canary.content;
+            let start = (offset as usize).min(content.len());
+            let end = (start + len as usize).min(content.len());
+            return ReadResult {
+                data: content[start..end].to_vec(),
+                error: vixenfs_proto::errno::OK,
+            };
+        }
+        self.inner.read(cx, item_id, offset, len).await
     }
 
     async fn write(
@@ -57,7 +123,7 @@ impl Vfs for SharedVfs {
         offset: u64,
         data: Vec<u8>,
     ) -> WriteResult {
-        self.0.write(cx, item_id, offset, data).await
+        self.inner.write(cx, item_id, offset, data).await
     }
 
     async fn create(
@@ -67,11 +133,11 @@ impl Vfs for SharedVfs {
         name: String,
         item_type: vixenfs_proto::ItemType,
     ) -> CreateResult {
-        self.0.create(cx, parent_id, name, item_type).await
+        self.inner.create(cx, parent_id, name, item_type).await
     }
 
     async fn delete(&self, cx: &roam::Context, item_id: ItemId) -> VfsResult {
-        self.0.delete(cx, item_id).await
+        self.inner.delete(cx, item_id).await
     }
 
     async fn rename(
@@ -81,7 +147,9 @@ impl Vfs for SharedVfs {
         new_parent_id: ItemId,
         new_name: String,
     ) -> VfsResult {
-        self.0.rename(cx, item_id, new_parent_id, new_name).await
+        self.inner
+            .rename(cx, item_id, new_parent_id, new_name)
+            .await
     }
 
     async fn set_attributes(
@@ -90,7 +158,7 @@ impl Vfs for SharedVfs {
         item_id: ItemId,
         params: SetAttributesParams,
     ) -> VfsResult {
-        self.0.set_attributes(cx, item_id, params).await
+        self.inner.set_attributes(cx, item_id, params).await
     }
 
     async fn ping(&self, _cx: &roam::Context) -> String {
@@ -215,11 +283,13 @@ async fn async_main() -> Result<()> {
 
     // 6. Mount VFS
     tracing::info!("Mounting VFS at {}", args.mount);
+    let shared_vfs = SharedVfs::new(vfs.clone());
+    let canary = shared_vfs.canary.clone();
     match vx_vfs::mount(
         VfsConfig {
             mount_path: args.mount.clone(),
         },
-        SharedVfs(vfs.clone()),
+        shared_vfs,
     )
     .await
     {
@@ -229,6 +299,42 @@ async fn async_main() -> Result<()> {
             ..
         }) => {
             tracing::info!("VFS mounted at {}", mount_path);
+
+            // Smoke test: read the canary file through the real filesystem.
+            // This proves the FUSE/FSKit mount is actually serving files.
+            let canary_fs_path = mount_path.join(&canary.name);
+            let smoke_timeout = std::time::Duration::from_secs(5);
+            let read_result =
+                tokio::time::timeout(smoke_timeout, tokio::fs::read(canary_fs_path.as_std_path()))
+                    .await;
+            match read_result {
+                Ok(Ok(actual)) if actual == canary.content => {
+                    tracing::info!("VFS smoke test passed");
+                }
+                Ok(Ok(actual)) => {
+                    tracing::error!(
+                        expected_len = canary.content.len(),
+                        actual_len = actual.len(),
+                        "VFS smoke test: content mismatch"
+                    );
+                    platform::collect_smoke_test_diagnostics(&mount_path).await;
+                    std::process::exit(1);
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(%e, path = %canary_fs_path, "VFS smoke test: read failed");
+                    platform::collect_smoke_test_diagnostics(&mount_path).await;
+                    std::process::exit(1);
+                }
+                Err(_) => {
+                    tracing::error!(
+                        path = %canary_fs_path,
+                        timeout = ?smoke_timeout,
+                        "VFS smoke test: timed out — mount is not responding"
+                    );
+                    platform::collect_smoke_test_diagnostics(&mount_path).await;
+                    std::process::exit(1);
+                }
+            }
 
             // Set up platform signal handler for diagnostics
             platform::setup_diagnostics_signal(vfs.clone());

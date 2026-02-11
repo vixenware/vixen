@@ -3341,6 +3341,7 @@ dependencies = [
  "camino",
  "cfg-if",
  "facet",
+ "fastrand",
  "figue",
  "futures-util",
  "libc",

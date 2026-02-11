@@ -27,3 +27,11 @@ pub fn dump_platform_diagnostics() {}
 pub fn should_create_mount_dir(_mount_path: &Utf8PathBuf) -> bool {
     true
 }
+
+/// Collect diagnostics when the VFS smoke test fails.
+pub async fn collect_smoke_test_diagnostics(mount_path: &Utf8PathBuf) {
+    eprintln!("\n=== VFS SMOKE TEST DIAGNOSTICS ===\n");
+    eprintln!("  Mount path: {mount_path}");
+    eprintln!("  (Windows diagnostics not yet implemented)");
+    eprintln!("\n=== END DIAGNOSTICS ===\n");
+}

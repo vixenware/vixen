@@ -139,3 +139,61 @@ pub fn dump_platform_diagnostics() {
 pub fn should_create_mount_dir(_mount_path: &Utf8PathBuf) -> bool {
     true
 }
+
+/// Collect diagnostics when the VFS smoke test fails.
+pub async fn collect_smoke_test_diagnostics(mount_path: &Utf8PathBuf) {
+    eprintln!("\n=== VFS SMOKE TEST DIAGNOSTICS ===\n");
+
+    // Check /proc/mounts for FUSE entries
+    eprintln!("--- FUSE mounts ---");
+    match std::fs::read_to_string("/proc/mounts") {
+        Ok(mounts) => {
+            let fuse_lines: Vec<&str> = mounts
+                .lines()
+                .filter(|l| l.contains("fuse") || l.contains("vixen"))
+                .collect();
+            if fuse_lines.is_empty() {
+                eprintln!("  No FUSE/vixen mounts found");
+            } else {
+                for line in &fuse_lines {
+                    eprintln!("  {line}");
+                }
+            }
+        }
+        Err(e) => eprintln!("  Could not read /proc/mounts: {e}"),
+    }
+
+    // FUSE connection state
+    eprintln!("\n--- FUSE connections ---");
+    dump_platform_diagnostics();
+
+    // Process inventory
+    eprintln!("\n--- Vixen processes ---");
+    match tokio::process::Command::new("pgrep")
+        .args(["-la", "(vx-|vixen)"])
+        .output()
+        .await
+    {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.trim().is_empty() {
+                eprintln!("  No vixen-related processes found");
+            } else {
+                for line in stdout.lines() {
+                    eprintln!("  {line}");
+                }
+            }
+        }
+        Err(e) => eprintln!("  pgrep failed: {e}"),
+    }
+
+    // Mount point stat
+    eprintln!("\n--- Mount point ---");
+    eprintln!("  Expected: {mount_path}");
+    match std::fs::symlink_metadata(mount_path.as_std_path()) {
+        Ok(meta) => eprintln!("  stat: exists, is_dir={}", meta.is_dir()),
+        Err(e) => eprintln!("  stat: {e}"),
+    }
+
+    eprintln!("\n=== END DIAGNOSTICS ===\n");
+}
