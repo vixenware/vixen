@@ -465,52 +465,7 @@ impl CliContext {
 
         #[cfg(target_os = "macos")]
         {
-            let app_installed = vx_vfs::is_app_installed().await;
-            let health = vx_vfs::check_extension_health().await;
-
-            if matches!(health.as_ref(), Some(h) if h.extension_enabled) {
-                println!("{} {}", "filesystem extension:".bold(), "enabled".green());
-            } else {
-                println!(
-                    "{} {}",
-                    "filesystem extension:".bold(),
-                    "not ready".yellow()
-                );
-
-                if app_installed {
-                    match std::process::Command::new("open")
-                        .arg(vx_vfs::VIXEN_APP_PATH)
-                        .status()
-                    {
-                        Ok(status) if status.success() => {
-                            println!(
-                                "{} Opened Vixen.app to guide filesystem extension setup.",
-                                "note:".bold()
-                            );
-                        }
-                        Ok(status) => {
-                            println!(
-                                "{} Failed to open Vixen.app automatically (exit {}).",
-                                "note:".bold(),
-                                status
-                            );
-                        }
-                        Err(error) => {
-                            println!(
-                                "{} Failed to open Vixen.app automatically: {}",
-                                "note:".bold(),
-                                error
-                            );
-                        }
-                    }
-                } else {
-                    println!(
-                        "{} {} is missing; install it first.",
-                        "note:".bold(),
-                        vx_vfs::VIXEN_APP_PATH
-                    );
-                }
-            }
+            // there used to be stuff here, we might put it back at some point.
         }
 
         Ok(())

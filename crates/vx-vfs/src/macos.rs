@@ -15,10 +15,7 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
 use vixenfs_proto::{Vfs, VfsDispatcher};
-use vx_vfs_types::{
-    VIXEN_APP_PATH, VIXEN_DOWNLOAD_URL, VIXEN_EXTENSION_IDENTIFIER, VIXEN_MOUNT_HELPER_PATH,
-    VfsAction, VfsDiagnostic, VfsHealth, VfsIssueCode,
-};
+use vx_vfs_types::{VIXEN_MOUNT_HELPER_PATH, VfsAction, VfsDiagnostic, VfsIssueCode};
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_GC_AGE: Duration = Duration::from_secs(6 * 60 * 60);
 
@@ -40,23 +37,26 @@ where
     // /sbin/mount -F -t vixenfs, and health.json verification.
     let fskit_result = vx_fskit::setup(&sid, &config.mount_path, debug_mode).await;
 
-    // Log everything vx-fskit recorded.
-    for entry in &fskit_result.log {
-        tracing::debug!(target: "vx-fskit", "{}", entry.message);
-    }
-
     if let Some(ref error) = fskit_result.error {
         cleanup_session_dir(&sid).await;
-        let diagnostics = collect_mount_failure_diagnostics().await;
-        let detail = format!(
-            "{}\nremediation: {}",
-            error.summary,
-            error.remediation.join(", ")
-        );
-        return Err(VfsError::CommandFailed {
-            program: "vx-fskit",
+        let log_detail = fskit_result
+            .log
+            .iter()
+            .map(|entry| format!("[{}] {}", entry.timestamp, entry.message))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(VfsError::MountFailed {
             message: error.summary.clone(),
-            _diagnostics: with_mount_context_diagnostic(diagnostics, &error.summary, detail),
+            diagnostics: vec![VfsDiagnostic {
+                code: VfsIssueCode::MountFailed,
+                summary: error.summary.clone(),
+                detail: Some(log_detail),
+                actions: error
+                    .remediation
+                    .iter()
+                    .map(|r| VfsAction::RunCommand(r.clone()))
+                    .collect(),
+            }],
         });
     }
 
@@ -74,32 +74,20 @@ where
         }
         Ok(None) => {
             cleanup_session_dir(&sid).await;
-            let diagnostics = collect_mount_failure_diagnostics().await;
             Err(VfsError::CommandFailed {
-                program: "vx-fskit",
+                program: "vx-vfs",
                 message: "SHM readiness channel closed before extension connected".to_string(),
-                _diagnostics: with_mount_context_diagnostic(
-                    diagnostics,
-                    "SHM bootstrap failed",
-                    "mount succeeded but FSKit extension did not connect via SHM".to_string(),
-                ),
+                _diagnostics: vec![],
             })
         }
         Err(_) => {
             cleanup_session_dir(&sid).await;
-            let diagnostics = collect_mount_failure_diagnostics().await;
             Err(VfsError::CommandFailed {
-                program: "vx-fskit",
+                program: "vx-vfs",
                 message: format!(
                     "FSKit extension did not connect via SHM within {MOUNT_TIMEOUT:?}"
                 ),
-                _diagnostics: with_mount_context_diagnostic(
-                    diagnostics,
-                    "SHM bootstrap timed out",
-                    format!(
-                        "mount succeeded but FSKit extension did not connect within {MOUNT_TIMEOUT:?}"
-                    ),
-                ),
+                _diagnostics: vec![],
             })
         }
     }
@@ -410,94 +398,6 @@ async fn cleanup_session_dir(sid: &str) {
     }
 }
 
-async fn collect_mount_failure_diagnostics() -> Vec<VfsDiagnostic> {
-    let app_installed = is_app_installed().await;
-    let health = check_extension_health().await;
-
-    let mut diagnostics = Vec::new();
-    if !app_installed {
-        diagnostics.push(VfsDiagnostic {
-            code: VfsIssueCode::AppMissing,
-            summary: format!("{} is missing", VIXEN_APP_PATH),
-            detail: None,
-            actions: vec![
-                VfsAction::OpenDownloadUrl(VIXEN_DOWNLOAD_URL.to_string()),
-                VfsAction::RetryBuild,
-            ],
-        });
-    }
-
-    if app_installed {
-        match health {
-            Some(health) if !health.extension_installed => {
-                diagnostics.push(VfsDiagnostic {
-                    code: VfsIssueCode::ExtensionNotInstalled,
-                    summary: format!("plugin {} is not registered", VIXEN_EXTENSION_IDENTIFIER),
-                    detail: None,
-                    actions: vec![VfsAction::RunVxApp, VfsAction::RetryBuild],
-                });
-            }
-            Some(health) if !health.extension_enabled => {
-                diagnostics.push(VfsDiagnostic {
-                    code: VfsIssueCode::ExtensionDisabled,
-                    summary: format!(
-                        "plugin {} is installed but disabled",
-                        VIXEN_EXTENSION_IDENTIFIER
-                    ),
-                    detail: None,
-                    actions: vec![VfsAction::RunVxApp, VfsAction::RetryBuild],
-                });
-            }
-            Some(_) => {}
-            None => {
-                diagnostics.push(VfsDiagnostic {
-                    code: VfsIssueCode::HealthCheckFailed,
-                    summary: "failed to read extension health from vixenfs-mount --health --json"
-                        .to_string(),
-                    detail: None,
-                    actions: vec![VfsAction::RetryBuild],
-                });
-            }
-        }
-    }
-
-    if diagnostics.is_empty() {
-        diagnostics.push(VfsDiagnostic {
-            code: VfsIssueCode::MountFailed,
-            summary: r#"App here, extension enabled, but mounting failed. You can try the following:
-
- $ log stream --info --debug --predicate 'subsystem == "com.apple.FSKit" OR message CONTAINS "vixenfs"'
-
- And sometimes, killing fskit fixes it
-
- $ sudo killall fskitd fskit_agent
-
- Yeah, FSKit is wonky. File an issue against http://github.com/bearcove/vixen if necessary.
-                "#.to_string(),
-            detail: None,
-            actions: vec![VfsAction::RetryBuild],
-        });
-    }
-    diagnostics
-}
-
-pub(super) async fn is_app_installed() -> bool {
-    tokio::fs::metadata(VIXEN_APP_PATH).await.is_ok()
-}
-
-pub(super) async fn check_extension_health() -> Option<VfsHealth> {
-    let mut command = Command::new(VIXEN_MOUNT_HELPER_PATH);
-    command.arg("--health").arg("--json");
-
-    let output = match tokio::time::timeout(Duration::from_secs(2), command.output()).await {
-        Ok(Ok(output)) => output,
-        _ => return None,
-    };
-
-    let stdout = std::str::from_utf8(&output.stdout).ok()?.trim();
-    facet_json::from_str(stdout).ok()
-}
-
 /// Resolve the App Group container path via the `vixenfs-mount` helper.
 ///
 /// The helper is codesigned with the App Group entitlement, so it can call
@@ -528,31 +428,4 @@ pub async fn resolve_app_group_path() -> Result<PathBuf, String> {
     }
 
     Ok(PathBuf::from(path))
-}
-
-fn with_mount_context_diagnostic(
-    mut diagnostics: Vec<VfsDiagnostic>,
-    summary: &str,
-    detail: String,
-) -> Vec<VfsDiagnostic> {
-    if let Some(existing) = diagnostics
-        .iter_mut()
-        .find(|diagnostic| diagnostic.code == VfsIssueCode::MountFailed)
-    {
-        existing.detail = Some(match existing.detail.take() {
-            Some(existing_detail) if !existing_detail.is_empty() => {
-                format!("{}\n\n{}", existing_detail, detail)
-            }
-            _ => detail,
-        });
-        return diagnostics;
-    }
-
-    diagnostics.push(VfsDiagnostic {
-        code: VfsIssueCode::MountFailed,
-        summary: summary.to_string(),
-        detail: Some(detail),
-        actions: vec![VfsAction::RetryBuild],
-    });
-    diagnostics
 }

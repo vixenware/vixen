@@ -9,9 +9,9 @@ use vixenfs_proto::Vfs;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+mod types;
 #[cfg(target_os = "windows")]
 mod windows;
-mod types;
 pub use types::{VfsConfig, VfsError, VfsStart};
 #[cfg(target_os = "macos")]
 pub use vx_vfs_types::{VIXEN_APP_PATH, VfsHealth};
@@ -44,14 +44,4 @@ where
             })
         }
     }
-}
-
-#[cfg(target_os = "macos")]
-pub async fn is_app_installed() -> bool {
-    macos::is_app_installed().await
-}
-
-#[cfg(target_os = "macos")]
-pub async fn check_extension_health() -> Option<VfsHealth> {
-    macos::check_extension_health().await
 }
