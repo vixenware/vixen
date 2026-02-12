@@ -13,6 +13,26 @@ pub struct ServiceHandle<D> {
     pub caller: roam_stream::Client<EndpointConnector, D>,
 }
 
+impl<D> ServiceHandle<D>
+where
+    D: roam_stream::ServiceDispatcher + Clone + 'static,
+{
+    /// Run the boot protocol and open a virtual connection.
+    ///
+    /// 1. Gets the root connection handle
+    /// 2. Calls `boot()` — waits for the daemon to initialize
+    /// 3. Opens a virtual connection for the real service
+    ///
+    /// Returns the virtual connection handle.
+    pub async fn boot_and_connect(
+        &self,
+        dispatcher: Option<Box<dyn roam_stream::ServiceDispatcher>>,
+    ) -> Result<roam_stream::ConnectionHandle> {
+        let root_handle = self.caller.handle().await?;
+        crate::boot::boot_and_connect(&root_handle, dispatcher).await
+    }
+}
+
 /// Builder for spawning a vixen service and connecting to it via roam.
 ///
 /// The typical flow is:

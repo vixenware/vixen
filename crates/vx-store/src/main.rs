@@ -20,6 +20,7 @@ use facet::Facet;
 use figue as args;
 use roam_stream::{HandshakeConfig, accept};
 use std::sync::Arc;
+use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
 use vx_store_proto::StoreDispatcher;
 
@@ -91,63 +92,90 @@ async fn async_main() -> Result<()> {
 
     let bind = Endpoint::parse(&args.listen)?;
 
-    // Build storage backend
-    let storage = CasStore::new(FsStorage::new(args.root.clone()));
+    // Bind listener BEFORE booting — so parent can connect immediately.
+    let listener = Listener::bind(&bind).await?;
+    tracing::info!("store listening on {}", bind);
 
-    // Initialize storage directories
-    storage.init().await?;
+    // Set up boot gate — root connections get Boot service only.
+    let (gate, boot_tx) = BootGate::<StoreService>::new();
 
-    // Initialize store service
-    let store = StoreService::new(storage, args.vx_home);
-
-    // SIGUSR1: dump diagnostics
-    #[cfg(unix)]
+    // Boot in background: initialize storage, create service.
     {
-        let store = store.clone();
-        peeps::tasks::spawn_tracked("sigusr1_handler", async move {
-            use tokio::signal::unix::{SignalKind, signal};
-            let mut sigusr1 =
-                signal(SignalKind::user_defined1()).expect("failed to register SIGUSR1 handler");
-            loop {
-                sigusr1.recv().await;
-                tracing::info!("SIGUSR1 received, dumping diagnostics");
-                let sem = &store.download_semaphore;
-                tracing::debug!("SIGUSR1 received");
-                tracing::debug!("download_semaphore: available={}", sem.available_permits(),);
-                eprint!("{}", roam_session::diagnostic::dump_all_diagnostics());
+        let gate = Arc::clone(&gate);
+        let root = args.root.clone();
+        let vx_home = args.vx_home.clone();
+        peeps::tasks::spawn_tracked("store_boot", async move {
+            tracing::info!("Booting vx-store");
+            match async {
+                let storage = CasStore::new(FsStorage::new(root));
+                storage.init().await?;
+                let store = StoreService::new(storage, vx_home);
+                Ok::<_, eyre::Report>(store)
+            }
+            .await
+            {
+                Ok(store) => {
+                    // SIGUSR1: dump diagnostics
+                    #[cfg(unix)]
+                    {
+                        let store = store.clone();
+                        peeps::tasks::spawn_tracked("sigusr1_handler", async move {
+                            use tokio::signal::unix::{SignalKind, signal};
+                            let mut sigusr1 = signal(SignalKind::user_defined1())
+                                .expect("failed to register SIGUSR1 handler");
+                            loop {
+                                sigusr1.recv().await;
+                                tracing::info!("SIGUSR1 received, dumping diagnostics");
+                                let sem = &store.download_semaphore;
+                                tracing::debug!(
+                                    "download_semaphore: available={}",
+                                    sem.available_permits(),
+                                );
+                                eprint!("{}", roam_session::diagnostic::dump_all_diagnostics());
 
-                let mut custom = std::collections::HashMap::new();
-                custom.insert(
-                    "download_semaphore_available".into(),
-                    sem.available_permits().to_string(),
-                );
-                let dump = peeps::collect_dump("vx-store", custom);
-                peeps::write_dump(&dump);
+                                let mut custom = std::collections::HashMap::new();
+                                custom.insert(
+                                    "download_semaphore_available".into(),
+                                    sem.available_permits().to_string(),
+                                );
+                                let dump = peeps::collect_dump("vx-store", custom);
+                                peeps::write_dump(&dump);
+                            }
+                        });
+                    }
+
+                    tracing::info!("vx-store boot succeeded");
+                    gate.set_service(store);
+                    boot_tx.ready();
+                }
+                Err(e) => {
+                    tracing::error!("vx-store boot failed: {e:#}");
+                    boot_tx.failed(format!("{e:#}"));
+                }
             }
         });
     }
 
-    // Start server (TCP or Unix socket)
-    let listener = Listener::bind(&bind).await?;
-    tracing::info!("store listening on {}", bind);
+    let boot_service = gate.boot_service();
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
         tracing::info!("accepted connection from {peer_addr}");
-        let store = store.clone();
+        let boot_service = boot_service.clone();
 
         peeps::tasks::spawn_tracked(format!("store_connection_{}", peer_addr), async move {
             tracing::debug!("New connection from {}", peer_addr);
 
-            let dispatcher = StoreDispatcher::new(store);
-            let (_handle, _incoming, driver) = match accept(
+            // Root connection gets Boot service only.
+            let boot_dispatcher = BootDispatcher::new(boot_service.clone());
+            let (_handle, mut incoming, driver) = match accept(
                 stream,
                 HandshakeConfig {
                     max_payload_size: 256 * 1024 * 1024, // 256 MiB
                     name: Some("vx-store".into()),
                     ..Default::default()
                 },
-                dispatcher,
+                boot_dispatcher,
             )
             .await
             {
@@ -157,10 +185,31 @@ async fn async_main() -> Result<()> {
                     return;
                 }
             };
-            if let Err(e) = driver.run().await {
-                tracing::warn!("Connection error from {}: {}", peer_addr, e);
+
+            // Drive the connection in the background.
+            let driver_handle =
+                peeps::tasks::spawn_tracked(format!("store_driver_{}", peer_addr), async move {
+                    driver.run().await
+                });
+
+            // Accept virtual connections — each gets a StoreDispatcher.
+            while let Some(conn) = incoming.recv().await {
+                let Some(store) = boot_service.gate().service() else {
+                    conn.reject("boot not complete".into(), vec![]);
+                    continue;
+                };
+                let dispatcher = StoreDispatcher::new(store.clone());
+                if let Err(e) = conn.accept(vec![], Some(Box::new(dispatcher))).await {
+                    tracing::warn!(
+                        "Failed to accept virtual connection from {}: {e}",
+                        peer_addr
+                    );
+                }
             }
 
+            if let Err(e) = driver_handle.await {
+                tracing::warn!("Driver error from {}: {e:?}", peer_addr);
+            }
             tracing::debug!("Connection from {} closed", peer_addr);
         });
     }

@@ -31,8 +31,7 @@ use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Child;
-use tokio::sync::watch;
-use vx_io::boot::{Boot, BootDispatcher, BootResult};
+use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
 use vx_runner_proto::RunnerClient;
 use vx_store_proto::StoreClient;
@@ -43,15 +42,7 @@ pub use inputs::*;
 pub use queries::*;
 pub use service::VxdService;
 
-pub type UpstreamCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
-
-/// Boot state for vxd's child services.
-#[derive(Clone)]
-pub enum BootState {
-    Booting,
-    Ready,
-    Failed(String),
-}
+pub type UpstreamCaller = roam_stream::ConnectionHandle;
 
 /// vxd - Build orchestration daemon
 #[derive(Facet, Debug)]
@@ -164,8 +155,8 @@ struct ServiceClients {
     exec: Arc<RunnerClient<UpstreamCaller>>,
 }
 
-/// Ensure services are running (spawning them if necessary) and return
-/// connected roam clients. Store and runner are started in parallel.
+/// Ensure services are running (spawning them if necessary), run the boot
+/// protocol on each, and return connected roam clients.
 async fn ensure_services(
     args: &Args,
     spawn_tracker: &Arc<DiagnosticAsyncMutex<SpawnTracker>>,
@@ -212,62 +203,26 @@ async fn ensure_services(
         runner_builder = runner_builder.connect_only();
     }
 
-    let (store, runner) = tokio::try_join!(store_builder.connect(), runner_builder.connect(),)?;
+    // Spawn/connect to both services in parallel.
+    let (mut store_handle, mut runner_handle) =
+        tokio::try_join!(store_builder.connect(), runner_builder.connect(),)?;
 
     {
         let mut tracker = spawn_tracker.lock().await;
-        tracker.store = store.child;
-        tracker.runner = runner.child;
+        tracker.store = store_handle.child.take();
+        tracker.runner = runner_handle.child.take();
     }
+
+    // Run boot protocol on both services in parallel.
+    let (store_virtual, runner_virtual) = tokio::try_join!(
+        store_handle.boot_and_connect(None),
+        runner_handle.boot_and_connect(None),
+    )?;
 
     Ok(ServiceClients {
-        store: Arc::new(StoreClient::new(store.caller)),
-        exec: Arc::new(RunnerClient::new(runner.caller)),
+        store: Arc::new(StoreClient::new(store_virtual)),
+        exec: Arc::new(RunnerClient::new(runner_virtual)),
     })
-}
-
-/// Shared boot context — owns the watch channel and the lazily-created daemon.
-struct VxdBootContext {
-    boot_state: watch::Receiver<BootState>,
-    daemon: tokio::sync::OnceCell<Arc<VxdService>>,
-}
-
-/// Boot service implementation for vxd.
-#[derive(Clone)]
-struct VxdBootService {
-    ctx: Arc<VxdBootContext>,
-}
-
-impl Boot for VxdBootService {
-    async fn boot(&self, _cx: &roam::Context) -> BootResult {
-        let mut rx = self.ctx.boot_state.clone();
-        loop {
-            {
-                let state = rx.borrow().clone();
-                match state {
-                    BootState::Booting => { /* wait */ }
-                    BootState::Ready => {
-                        return BootResult {
-                            success: true,
-                            error: None,
-                        };
-                    }
-                    BootState::Failed(msg) => {
-                        return BootResult {
-                            success: false,
-                            error: Some(msg),
-                        };
-                    }
-                }
-            }
-            if rx.changed().await.is_err() {
-                return BootResult {
-                    success: false,
-                    error: Some("boot state channel closed".to_string()),
-                };
-            }
-        }
-    }
 }
 
 fn main() -> Result<()> {
@@ -370,12 +325,8 @@ async fn async_main() -> Result<()> {
     let listener = Listener::bind(&args.bind).await?;
     tracing::info!("Daemon listening on {}", args.bind);
 
-    let (boot_tx, boot_rx) = watch::channel(BootState::Booting);
-
-    let boot_ctx = Arc::new(VxdBootContext {
-        boot_state: boot_rx,
-        daemon: tokio::sync::OnceCell::new(),
-    });
+    // Set up boot gate — root connections get Boot service only.
+    let (gate, boot_tx) = BootGate::<Arc<VxdService>>::new();
 
     // Spawn service boot in background — listener is already accepting connections.
     {
@@ -386,7 +337,7 @@ async fn async_main() -> Result<()> {
             bind: args.bind.clone(),
         };
         let spawn_tracker = spawn_tracker.clone();
-        let boot_ctx = boot_ctx.clone();
+        let gate = Arc::clone(&gate);
         let vx_home = args.vx_home.clone();
         let exec_host_triple = exec_host_triple.clone();
         peeps::tasks::spawn_tracked("service_boot", async move {
@@ -404,18 +355,18 @@ async fn async_main() -> Result<()> {
                         )
                         .await,
                     );
-                    let _ = boot_ctx.daemon.set(daemon);
-                    let _ = boot_tx.send(BootState::Ready);
+                    gate.set_service(daemon);
+                    boot_tx.ready();
                 }
                 Err(e) => {
                     tracing::error!("Service boot failed: {e:#}");
-                    let _ = boot_tx.send(BootState::Failed(format!("{e:#}")));
+                    boot_tx.failed(format!("{e:#}"));
                 }
             }
         });
     }
 
-    let boot_service = VxdBootService { ctx: boot_ctx };
+    let boot_service = gate.boot_service();
 
     // Track active connections and shut down after idle timeout.
     // Test mode: 2s, production: 2 hours.
@@ -492,7 +443,7 @@ async fn async_main() -> Result<()> {
             // Accept virtual connections — each gets a per-session VxdDispatcher.
             // Reject if boot hasn't completed (client should call boot() first).
             while let Some(conn) = incoming.recv().await {
-                let Some(daemon) = boot_service.ctx.daemon.get() else {
+                let Some(daemon) = boot_service.gate().service() else {
                     conn.reject("boot not complete".into(), vec![]);
                     continue;
                 };

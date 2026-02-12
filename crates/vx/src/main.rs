@@ -14,7 +14,6 @@ use figue as args;
 use owo_colors::OwoColorize;
 use roam_stream::ConnectionHandle;
 use tui::emit_osc_progress;
-use vx_io::boot::BootClient;
 use vx_io::spawn::ServiceBuilder;
 use vx_report::ReportStore;
 use vx_store_proto::Blake3Hash;
@@ -113,25 +112,12 @@ impl CliContext {
         };
 
         let handle = builder.connect().await?;
-        let root_handle = handle.caller.handle().await?;
 
-        // Call boot() on root connection — waits for daemon services to be ready.
-        let boot_client = BootClient::new(root_handle.clone());
-        let boot_result = boot_client.boot().await?;
-        if !boot_result.success {
-            let msg = boot_result
-                .error
-                .unwrap_or_else(|| "unknown boot error".into());
-            eyre::bail!("daemon boot failed: {msg}");
-        }
-
-        // Open virtual connection with ProgressListener dispatcher for callbacks.
+        // Boot protocol: call boot(), then open virtual connection with
+        // ProgressListener dispatcher for callbacks from the daemon.
         let progress_listener = ProgressListenerImpl::new(self.mode.clone());
         let dispatcher = vxd_proto::ProgressListenerDispatcher::new(progress_listener);
-        let virtual_handle = root_handle
-            .connect(vec![], Some(Box::new(dispatcher)))
-            .await
-            .map_err(|e| eyre::eyre!("failed to open virtual connection to vxd: {e}"))?;
+        let virtual_handle = handle.boot_and_connect(Some(Box::new(dispatcher))).await?;
 
         Ok(VxdClient::new(virtual_handle))
     }

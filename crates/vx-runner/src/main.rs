@@ -24,14 +24,15 @@ use figue as args;
 use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::collections::HashMap;
 use std::sync::Arc;
+use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
 use vx_runner_proto::RunnerDispatcher;
 use vx_store_proto::{Blake3Hash, StoreClient};
 
 use crate::vfsd_client::VfsdClient as VfsClient;
 
-pub type CasCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
-pub type VfsdCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
+pub type CasCaller = roam_stream::ConnectionHandle;
+pub type VfsdCaller = roam_stream::ConnectionHandle;
 
 pub(crate) fn runner_mount_base() -> Utf8PathBuf {
     // Option 1: VX_HOME-based path (works with FSKit, but has system policy restrictions on unsigned binaries)
@@ -131,54 +132,36 @@ async fn async_main() -> Result<()> {
     .run()
     .unwrap();
 
-    let store_endpoint = Endpoint::parse(&args.store)?;
     let bind_endpoint = Endpoint::parse(&args.listen)?;
-    let vfsd_endpoint = Endpoint::parse(&args.vfsd)?;
 
-    // Bind listener, connect to store, and spawn+connect to vx-vfsd — all in parallel
-    use vx_io::spawn::ServiceBuilder;
-
-    let mount_path = runner_mount_base();
-
-    let store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone(), NoDispatcher)
-        .caller_name("vx-runner")
-        .connect_only();
-
-    let vfsd_builder = ServiceBuilder::new("vx-vfsd", vfsd_endpoint.clone(), NoDispatcher)
-        .caller_name("vx-runner")
-        .args(&[
-            "--mount",
-            mount_path.as_str(),
-            "--store",
-            &store_endpoint.display(),
-        ])
-        .env("VX_HOME", args.vx_home.as_str());
-
-    let (runner_listener, store_handle, mut vfsd_handle) = tokio::try_join!(
-        async { Listener::bind(&bind_endpoint).await },
-        store_builder.connect(),
-        vfsd_builder.connect(),
-    )?;
+    // Bind listener BEFORE booting — so parent can connect immediately.
+    let runner_listener = Listener::bind(&bind_endpoint).await?;
     tracing::info!("Runner RPC bound on {}", bind_endpoint);
 
-    // Watch for vx-vfsd dying — if it does, we're useless.
-    if let Some(mut vfsd_child) = vfsd_handle.child.take() {
-        peeps::tasks::spawn_tracked("vfsd_death_watcher", async move {
-            let status = vfsd_child.wait().await;
-            tracing::error!(?status, "vx-vfsd exited unexpectedly");
-            std::process::exit(1);
+    // Set up boot gate — root connections get Boot service only.
+    let (gate, boot_tx) = BootGate::<RunnerService>::new();
+
+    // Boot in background: connect to store, spawn vfsd, create runner service.
+    {
+        let gate = Arc::clone(&gate);
+        let store_addr = args.store.clone();
+        let vfsd_addr = args.vfsd.clone();
+        let vx_home = args.vx_home.clone();
+        peeps::tasks::spawn_tracked("runner_boot", async move {
+            tracing::info!("Booting vx-runner");
+            match boot_runner(&store_addr, &vfsd_addr, &vx_home).await {
+                Ok(service) => {
+                    tracing::info!("vx-runner boot succeeded");
+                    gate.set_service(service);
+                    boot_tx.ready();
+                }
+                Err(e) => {
+                    tracing::error!("vx-runner boot failed: {e:#}");
+                    boot_tx.failed(format!("{e:#}"));
+                }
+            }
         });
     }
-
-    let store = Arc::new(StoreClient::new(store_handle.caller));
-    let vfsd_protocol = vx_vfsd::protocol::VfsdClient::new(vfsd_handle.caller);
-    let vfs = VfsClient::new(vfsd_protocol, store.clone());
-
-    // Create Runner service
-    let exec = RunnerService::new(store.clone(), Arc::new(vfs));
-
-    // VFS is now mounted by vx-vfsd, not by vx-runner
-    tracing::info!("VFS provided by vx-vfsd at {}", runner_mount_base());
 
     // SIGUSR1: dump diagnostics
     #[cfg(unix)]
@@ -197,25 +180,27 @@ async fn async_main() -> Result<()> {
         }
     });
 
-    // Start accepting Runner RPC connections
-    tracing::info!("Starting Runner RPC server");
+    let boot_service = gate.boot_service();
+
     loop {
         match runner_listener.accept().await {
             Ok((stream, peer_addr)) => {
-                let exec = exec.clone();
+                let boot_service = boot_service.clone();
                 peeps::tasks::spawn_tracked(
                     format!("runner_connection_{}", peer_addr),
                     async move {
                         tracing::debug!("Runner connection from {}", peer_addr);
-                        let dispatcher = RunnerDispatcher::new(exec);
-                        let (_handle, _incoming, driver) = match accept(
+
+                        // Root connection gets Boot service only.
+                        let boot_dispatcher = BootDispatcher::new(boot_service.clone());
+                        let (_handle, mut incoming, driver) = match accept(
                             stream,
                             HandshakeConfig {
                                 max_payload_size: 256 * 1024 * 1024, // 256 MiB
                                 name: Some("vx-runner".into()),
                                 ..Default::default()
                             },
-                            dispatcher,
+                            boot_dispatcher,
                         )
                         .await
                         {
@@ -225,8 +210,30 @@ async fn async_main() -> Result<()> {
                                 return;
                             }
                         };
-                        if let Err(e) = driver.run().await {
-                            tracing::debug!("Runner connection error from {}: {}", peer_addr, e);
+
+                        // Drive the connection in the background.
+                        let driver_handle = peeps::tasks::spawn_tracked(
+                            format!("runner_driver_{}", peer_addr),
+                            async move { driver.run().await },
+                        );
+
+                        // Accept virtual connections — each gets a RunnerDispatcher.
+                        while let Some(conn) = incoming.recv().await {
+                            let Some(exec) = boot_service.gate().service() else {
+                                conn.reject("boot not complete".into(), vec![]);
+                                continue;
+                            };
+                            let dispatcher = RunnerDispatcher::new(exec.clone());
+                            if let Err(e) = conn.accept(vec![], Some(Box::new(dispatcher))).await {
+                                tracing::warn!(
+                                    "Failed to accept virtual connection from {}: {e}",
+                                    peer_addr
+                                );
+                            }
+                        }
+
+                        if let Err(e) = driver_handle.await {
+                            tracing::warn!("Driver error from {}: {e:?}", peer_addr);
                         }
                         tracing::debug!("Runner connection from {} closed", peer_addr);
                     },
@@ -237,6 +244,62 @@ async fn async_main() -> Result<()> {
             }
         }
     }
+}
+
+/// Full boot sequence: connect to store, spawn vfsd, create runner service.
+async fn boot_runner(
+    store_addr: &str,
+    vfsd_addr: &str,
+    vx_home: &Utf8PathBuf,
+) -> Result<RunnerService> {
+    use vx_io::spawn::ServiceBuilder;
+
+    let store_endpoint = Endpoint::parse(store_addr)?;
+    let vfsd_endpoint = Endpoint::parse(vfsd_addr)?;
+    let mount_path = runner_mount_base();
+
+    let store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone(), NoDispatcher)
+        .caller_name("vx-runner")
+        .connect_only();
+
+    let vfsd_builder = ServiceBuilder::new("vx-vfsd", vfsd_endpoint.clone(), NoDispatcher)
+        .caller_name("vx-runner")
+        .args(&[
+            "--mount",
+            mount_path.as_str(),
+            "--store",
+            &store_endpoint.display(),
+        ])
+        .env("VX_HOME", vx_home.as_str());
+
+    // Connect to store and spawn vfsd in parallel.
+    let (store_handle, mut vfsd_handle) =
+        tokio::try_join!(store_builder.connect(), vfsd_builder.connect(),)?;
+
+    // Watch for vx-vfsd dying — if it does, we're useless.
+    if let Some(mut vfsd_child) = vfsd_handle.child.take() {
+        peeps::tasks::spawn_tracked("vfsd_death_watcher", async move {
+            let status = vfsd_child.wait().await;
+            tracing::error!(?status, "vx-vfsd exited unexpectedly");
+            std::process::exit(1);
+        });
+    }
+
+    // Run boot protocol on both services.
+    let (store_virtual, vfsd_virtual) = tokio::try_join!(
+        store_handle.boot_and_connect(None),
+        vfsd_handle.boot_and_connect(None),
+    )?;
+
+    let store = Arc::new(StoreClient::new(store_virtual));
+    let vfsd_protocol = vx_vfsd::protocol::VfsdClient::new(vfsd_virtual);
+    let vfs = VfsClient::new(vfsd_protocol, store.clone());
+
+    let exec = RunnerService::new(store.clone(), Arc::new(vfs));
+
+    tracing::info!("VFS provided by vx-vfsd at {}", runner_mount_base());
+
+    Ok(exec)
 }
 
 /// Inner Exec service implementation

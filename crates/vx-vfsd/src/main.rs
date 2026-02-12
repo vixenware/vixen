@@ -8,7 +8,7 @@ mod protocol;
 mod service;
 mod vfs;
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 use camino::Utf8PathBuf;
 use facet::Facet;
@@ -19,6 +19,7 @@ use vixenfs_proto::{
     CreateResult, GetAttributesResult, ItemId, LookupResult, ReadDirResult, ReadResult,
     SetAttributesParams, Vfs, VfsResult, WriteResult,
 };
+use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
 use vx_store_proto::StoreClient;
 use vx_vfs::{VfsConfig, VfsStart};
@@ -27,7 +28,7 @@ use crate::protocol::VfsdDispatcher;
 use crate::service::VfsdService;
 use crate::vfs::CasVfs;
 
-pub type StoreCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
+pub type StoreCaller = roam_stream::ConnectionHandle;
 
 /// Wrapper for CasVfs that implements Vfs by delegating to the inner CasVfs.
 ///
@@ -258,23 +259,7 @@ async fn async_main() -> Result<()> {
         "starting vx-vfsd"
     );
 
-    // 1. Connect to vx-store
-    tracing::debug!("Connecting to vx-store at {}", args.store);
-    let cas = connect_to_store(&args.store).await?;
-    tracing::debug!("Connected to vx-store");
-
-    let cas = Arc::new(cas);
-
-    // 2. Create VFS with optional L2 disk blob cache
-    let disk_cache_dir = std::env::var("VX_HOME")
-        .ok()
-        .map(|vx_home| Utf8PathBuf::from(vx_home).join("cache/blobs/blake3"));
-    if let Some(ref dir) = disk_cache_dir {
-        tracing::debug!(%dir, "L2 disk blob cache enabled");
-    }
-    let vfs = Arc::new(CasVfs::new(cas.clone(), disk_cache_dir, args.mount.clone()));
-
-    // 3. Bind RPC listener before mount
+    // Bind RPC listener BEFORE booting — so parent can connect immediately.
     let listen_endpoint = Endpoint::parse(&args.listen)?;
     let vfsd_listener = Listener::bind(&listen_endpoint).await.map_err(|e| {
         format!(
@@ -285,29 +270,153 @@ async fn async_main() -> Result<()> {
     let actual_addr = vfsd_listener.local_addr()?;
     tracing::debug!("vx-vfsd RPC bound on {}", actual_addr);
 
-    // Print the actual address to stdout so vxd can parse it
-    println!("{}", actual_addr);
+    // Print the actual address to stdout so parent can parse it.
+    println!("{actual_addr}");
 
-    // 4–6. Clean up, create mount dir, mount VFS, smoke test.
-    // If anything fails, collect diagnostics before bailing.
+    // Set up boot gate — root connections get Boot service only.
+    let (gate, boot_tx) = BootGate::<VfsdService>::new();
+
+    // Boot in background: connect to store, create VFS, mount, smoke test.
+    {
+        let gate = Arc::clone(&gate);
+        let store_addr = args.store.clone();
+        let mount = args.mount.clone();
+        peeps::tasks::spawn_tracked("vfsd_boot", async move {
+            tracing::info!("Booting vx-vfsd");
+            match boot_vfsd(&store_addr, &mount).await {
+                Ok(service) => {
+                    tracing::info!("vx-vfsd boot succeeded");
+                    gate.set_service(service);
+                    boot_tx.ready();
+                }
+                Err(e) => {
+                    tracing::error!("vx-vfsd boot failed: {e:#}");
+                    boot_tx.failed(format!("{e:#}"));
+                }
+            }
+        });
+    }
+
+    let boot_service = gate.boot_service();
+
+    loop {
+        match vfsd_listener.accept().await {
+            Ok((stream, peer_addr)) => {
+                let boot_service = boot_service.clone();
+                peeps::tasks::spawn_tracked(format!("vfsd_connection_{}", peer_addr), async move {
+                    tracing::debug!("vx-vfsd connection from {}", peer_addr);
+
+                    // Root connection gets Boot service only.
+                    let boot_dispatcher = BootDispatcher::new(boot_service.clone());
+                    let (_handle, mut incoming, driver) = match accept(
+                        stream,
+                        HandshakeConfig {
+                            max_payload_size: 256 * 1024 * 1024, // 256 MiB
+                            name: Some("vx-vfsd".into()),
+                            ..Default::default()
+                        },
+                        boot_dispatcher,
+                    )
+                    .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to accept vx-vfsd connection from {}: {e}",
+                                peer_addr
+                            );
+                            return;
+                        }
+                    };
+
+                    // Drive the connection in the background.
+                    let driver_handle = peeps::tasks::spawn_tracked(
+                        format!("vfsd_driver_{}", peer_addr),
+                        async move { driver.run().await },
+                    );
+
+                    // Accept virtual connections — each gets a VfsdDispatcher.
+                    while let Some(conn) = incoming.recv().await {
+                        let Some(service) = boot_service.gate().service() else {
+                            conn.reject("boot not complete".into(), vec![]);
+                            continue;
+                        };
+                        let dispatcher = VfsdDispatcher::new(service.clone());
+                        if let Err(e) = conn.accept(vec![], Some(Box::new(dispatcher))).await {
+                            tracing::warn!(
+                                "Failed to accept virtual connection from {}: {e}",
+                                peer_addr
+                            );
+                        }
+                    }
+
+                    if let Err(e) = driver_handle.await {
+                        tracing::warn!("Driver error from {}: {e:?}", peer_addr);
+                    }
+                    tracing::debug!("vx-vfsd session closed with {}", peer_addr);
+                });
+            }
+            Err(e) => {
+                tracing::error!("vx-vfsd accept error: {}", e);
+            }
+        }
+    }
+}
+
+/// Connect to vx-store using the boot protocol.
+async fn connect_to_store(endpoint_str: &str) -> Result<StoreClient<StoreCaller>> {
+    let endpoint = Endpoint::parse(endpoint_str)?;
+    let caller = vx_io::net::reconnecting_client_named(
+        endpoint.clone(),
+        NoDispatcher,
+        Some("vx-vfsd".into()),
+    );
+
+    let root_handle = caller
+        .handle()
+        .await
+        .map_err(|e| format!("failed to connect to vx-store at {}: {}", endpoint, e))?;
+
+    let virtual_handle = vx_io::boot::boot_and_connect(&root_handle, None)
+        .await
+        .map_err(|e| format!("vx-store boot failed: {e:#}"))?;
+
+    Ok(StoreClient::new(virtual_handle))
+}
+
+/// Full boot sequence: connect to store, create VFS, mount, smoke test.
+async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService> {
+    // 1. Connect to vx-store (with boot protocol)
+    tracing::debug!("Connecting to vx-store at {store_addr}");
+    let cas = connect_to_store(store_addr).await?;
+    tracing::debug!("Connected to vx-store");
+    let cas = Arc::new(cas);
+
+    // 2. Create VFS with optional L2 disk blob cache
+    let disk_cache_dir = std::env::var("VX_HOME")
+        .ok()
+        .map(|vx_home| Utf8PathBuf::from(vx_home).join("cache/blobs/blake3"));
+    if let Some(ref dir) = disk_cache_dir {
+        tracing::debug!(%dir, "L2 disk blob cache enabled");
+    }
+    let vfs = Arc::new(CasVfs::new(cas.clone(), disk_cache_dir, mount.clone()));
+
+    // 3. Clean up, create mount dir, mount VFS, smoke test.
     let mount_result: Result<()> = async {
-        // 4. Clean up stuck mounts BEFORE creating directory
-        platform::cleanup_stuck_mount(&args.mount).await?;
+        platform::cleanup_stuck_mount(mount).await?;
 
-        // 5. Ensure mount directory exists (skip for system-managed paths)
-        if platform::should_create_mount_dir(&args.mount) {
-            tokio::fs::create_dir_all(args.mount.as_std_path())
+        if platform::should_create_mount_dir(mount) {
+            tokio::fs::create_dir_all(mount.as_std_path())
                 .await
-                .map_err(|e| format!("failed to create mount directory {}: {}", args.mount, e))?;
+                .map_err(|e| format!("failed to create mount directory {mount}: {e}"))?;
         }
 
-        // 6. Mount VFS
-        tracing::debug!("Mounting VFS at {}", args.mount);
+        tracing::debug!("Mounting VFS at {mount}");
         let shared_vfs = SharedVfs::new(vfs.clone());
         let canary = shared_vfs.canary.clone();
         match vx_vfs::mount(
             VfsConfig {
-                mount_path: args.mount.clone(),
+                mount_path: mount.clone(),
             },
             shared_vfs,
         )
@@ -318,12 +427,9 @@ async fn async_main() -> Result<()> {
                 mut vfs_dead,
                 ..
             }) => {
-                tracing::debug!("VFS mounted at {}", mount_path);
+                tracing::debug!("VFS mounted at {mount_path}");
 
                 // Smoke test: read the canary file through the real filesystem.
-                // This proves the FUSE/FSKit mount is actually serving files.
-                // Retry up to 10 times with 250ms delay — the FSKit extension
-                // may need a moment to become ready after the mount syscall returns.
                 let canary_fs_path = mount_path.join(&canary.name);
                 tracing::debug!("Trying to read canary from {canary_fs_path}");
 
@@ -378,13 +484,10 @@ async fn async_main() -> Result<()> {
                     return Err(format!("VFS smoke test failed: {reason}").into());
                 }
 
-                // Set up platform signal handler for diagnostics
                 platform::setup_diagnostics_signal(vfs.clone(), mount_path.clone());
 
-                // Spawn watcher for VFS death
                 let vfs_mount_path = mount_path.clone();
                 peeps::tasks::spawn_tracked("vfs_death_watcher", async move {
-                    // Wait for VFS to report death
                     loop {
                         if vfs_dead.changed().await.is_err() || *vfs_dead.borrow() {
                             break;
@@ -395,14 +498,14 @@ async fn async_main() -> Result<()> {
                 });
             }
             Ok(VfsStart::Unsupported { platform }) => {
-                return Err(format!("VFS not supported on platform {}", platform).into());
+                return Err(format!("VFS not supported on platform {platform}").into());
             }
             Err(error) => {
                 let mut msg = format!("VFS mount failed: {error}");
                 for diagnostic in error.diagnostics() {
                     msg.push_str(&format!("\n  {}: {}", diagnostic.code, diagnostic.summary));
                     if let Some(ref detail) = diagnostic.detail {
-                        msg.push_str(&format!("\n    {}", detail));
+                        msg.push_str(&format!("\n    {detail}"));
                     }
                 }
                 return Err(msg.into());
@@ -415,10 +518,9 @@ async fn async_main() -> Result<()> {
     if let Err(error) = mount_result {
         use std::time::Instant;
         let before = Instant::now();
-        let diagnostics = platform::collect_vfs_diagnostics(&args.mount).await;
+        let diagnostics = platform::collect_vfs_diagnostics(mount).await;
         let elapsed = before.elapsed();
 
-        // Write diagnostics to a temporary file (strip ANSI escapes for readability in files)
         let temp_path = format!("/tmp/vfsd-diagnostics-{:016x}.txt", fastrand::u64(..));
         let diagnostic_content = format!("{error}\n{diagnostics}");
         let diagnostic_content = strip_ansi_escapes::strip_str(&diagnostic_content);
@@ -436,64 +538,5 @@ async fn async_main() -> Result<()> {
         return Err(error);
     }
 
-    // 7. Start accepting RPC connections
-    tracing::debug!("Starting vx-vfsd RPC server");
-    let vfsd_service = VfsdService::new(vfs);
-
-    loop {
-        match vfsd_listener.accept().await {
-            Ok((stream, peer_addr)) => {
-                let service = vfsd_service.clone();
-                peeps::tasks::spawn_tracked(format!("vfsd_connection_{}", peer_addr), async move {
-                    tracing::debug!("vx-vfsd connection from {}", peer_addr);
-                    let dispatcher = VfsdDispatcher::new(service);
-                    let (_handle, _incoming, driver) = match accept(
-                        stream,
-                        HandshakeConfig {
-                            max_payload_size: 256 * 1024 * 1024, // 256 MiB
-                            name: Some("vx-vfsd".into()),
-                            ..Default::default()
-                        },
-                        dispatcher,
-                    )
-                    .await
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to accept vx-vfsd connection from {}: {e}",
-                                peer_addr
-                            );
-                            return;
-                        }
-                    };
-                    tracing::debug!("vx-vfsd session established with {}", peer_addr);
-                    if let Err(e) = driver.run().await {
-                        tracing::debug!("vx-vfsd session error with {}: {}", peer_addr, e);
-                    }
-                    tracing::debug!("vx-vfsd session closed with {}", peer_addr);
-                });
-            }
-            Err(e) => {
-                tracing::error!("vx-vfsd accept error: {}", e);
-            }
-        }
-    }
-}
-
-async fn connect_to_store(endpoint_str: &str) -> Result<StoreClient<StoreCaller>> {
-    let endpoint = Endpoint::parse(endpoint_str)?;
-    let caller = vx_io::net::reconnecting_client_named(
-        endpoint.clone(),
-        NoDispatcher,
-        Some("vx-vfsd".into()),
-    );
-
-    // Wait for initial connection
-    caller
-        .handle()
-        .await
-        .map_err(|e| format!("failed to connect to vx-store at {}: {}", endpoint, e))?;
-
-    Ok(StoreClient::new(caller))
+    Ok(VfsdService::new(vfs))
 }
