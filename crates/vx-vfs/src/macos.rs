@@ -44,9 +44,9 @@ where
             .iter()
             .map(|entry| {
                 let prefix = match entry.level {
-                    vx_fskit::LogLevel::Ok => "\u{2713}", // checkmark
-                    vx_fskit::LogLevel::Info => " ",
-                    vx_fskit::LogLevel::Fail => "\u{2717}", // cross
+                    vx_fskit::LogLevel::Ok => "\u{2713}",   // ✓
+                    vx_fskit::LogLevel::Info => "\u{00b7}", // ·
+                    vx_fskit::LogLevel::Fail => "\u{2717}", // ✗
                 };
                 format!("{prefix} {}", entry.message)
             })

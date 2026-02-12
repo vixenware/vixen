@@ -91,7 +91,7 @@ async fn async_main() {
 fn print_fatal_error(error: &eyre::Report) {
     // Cap content width: readable at 60, never wider than terminal
     let term_width = terminal_width().saturating_sub(4).max(40);
-    let content_width = term_width.min(60);
+    let content_width = term_width.min(90);
 
     let full_message = format!("{error:#}");
     let wrapped = soft_wrap(&full_message, content_width);
