@@ -54,7 +54,7 @@ impl ProgressListener for ProgressListenerImpl {
                 });
             }
             CliMode::Tui(tui) => {
-                tui.set_total(total as usize).await;
+                tui.set_total(total as usize);
             }
             CliMode::Text => {
                 self.total_actions.store(total, atomic::Ordering::SeqCst);
@@ -75,7 +75,7 @@ impl ProgressListener for ProgressListenerImpl {
                 });
                 id
             }
-            CliMode::Tui(tui) => tui.start_action(action_type).await,
+            CliMode::Tui(tui) => tui.start_action(action_type),
             CliMode::Text => {
                 let id = self.next_id();
                 tracing::info!("[{id}] Starting: {action_type:?}");
@@ -96,7 +96,7 @@ impl ProgressListener for ProgressListenerImpl {
                 });
             }
             CliMode::Tui(tui) => {
-                tui.update_progress(action_id, progress).await;
+                tui.update_progress(action_id, progress);
             }
             CliMode::Text => {
                 if let (Some(current), Some(total)) = (progress.current, progress.total) {
@@ -125,7 +125,7 @@ impl ProgressListener for ProgressListenerImpl {
                 });
             }
             CliMode::Tui(tui) => {
-                tui.complete_action(action_id).await;
+                tui.complete_action(action_id);
             }
             CliMode::Text => {
                 let completed = self
@@ -151,7 +151,7 @@ impl ProgressListener for ProgressListenerImpl {
                 });
             }
             CliMode::Tui(tui) => {
-                tui.log_message(message).await;
+                tui.log_message(message);
             }
             CliMode::Text => {
                 tracing::info!("{message}");

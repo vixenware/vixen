@@ -376,7 +376,7 @@ impl CliContext {
         // Handle build outcome based on mode
         match &self.mode {
             CliMode::Tui(tui) => {
-                tui.set_build_outcome(result.success).await;
+                tui.set_build_outcome(result.success);
                 tui.shutdown().await;
             }
             CliMode::Text => {

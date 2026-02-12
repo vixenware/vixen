@@ -6,12 +6,12 @@
 //! - 10 text bars for scrolling log buffer (last 10 messages)
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use peeps::locks::DiagnosticMutex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tracing_subscriber::Layer;
-use peeps::locks::DiagnosticAsyncRwLock;
 use vxd_proto::{ActionProgress, ActionType};
 
 /// Tracks a single action
@@ -100,9 +100,9 @@ impl TuiState {
 
 /// Handle for interacting with the TUI
 pub struct TuiHandle {
-    state: Arc<DiagnosticAsyncRwLock<TuiState>>,
+    state: Arc<DiagnosticMutex<TuiState>>,
     /// Receiver that signals when display task has finished cleanup
-    shutdown_rx: Arc<DiagnosticAsyncRwLock<Option<oneshot::Receiver<()>>>>,
+    shutdown_rx: Arc<DiagnosticMutex<Option<oneshot::Receiver<()>>>>,
 }
 
 impl Clone for TuiHandle {
@@ -117,15 +117,12 @@ impl Clone for TuiHandle {
 impl TuiHandle {
     /// Create a new TUI handle and spawn the display task
     pub fn new() -> Self {
-        let state = Arc::new(DiagnosticAsyncRwLock::new("vx/tui_state", TuiState::new()));
+        let state = Arc::new(DiagnosticMutex::new("vx/tui_state", TuiState::new()));
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let handle = Self {
             state: state.clone(),
-            shutdown_rx: Arc::new(DiagnosticAsyncRwLock::new(
-                "vx/tui_shutdown",
-                Some(shutdown_rx),
-            )),
+            shutdown_rx: Arc::new(DiagnosticMutex::new("vx/tui_shutdown", Some(shutdown_rx))),
         };
 
         // Spawn the display task
@@ -135,14 +132,14 @@ impl TuiHandle {
     }
 
     /// Set the total number of actions
-    pub async fn set_total(&self, total: usize) {
-        let mut state = self.state.write().await;
+    pub fn set_total(&self, total: usize) {
+        let mut state = self.state.lock();
         state.total = total;
     }
 
     /// Start tracking an action, returning its ID
-    pub async fn start_action(&self, action_type: ActionType) -> u64 {
-        let mut state = self.state.write().await;
+    pub fn start_action(&self, action_type: ActionType) -> u64 {
+        let mut state = self.state.lock();
         let id = state.next_id;
         state.next_id += 1;
 
@@ -159,24 +156,24 @@ impl TuiHandle {
     }
 
     /// Update progress on a running action
-    pub async fn update_progress(&self, id: u64, progress: ActionProgress) {
-        let mut state = self.state.write().await;
+    pub fn update_progress(&self, id: u64, progress: ActionProgress) {
+        let mut state = self.state.lock();
         if let Some(action) = state.active.get_mut(&id) {
             action.progress = Some(progress);
         }
     }
 
     /// Mark an action as completed
-    pub async fn complete_action(&self, id: u64) {
-        let mut state = self.state.write().await;
+    pub fn complete_action(&self, id: u64) {
+        let mut state = self.state.lock();
         if state.active.remove(&id).is_some() {
             state.completed += 1;
         }
     }
 
     /// Add a log message to the TUI
-    pub async fn log_message(&self, message: String) {
-        let mut state = self.state.write().await;
+    pub fn log_message(&self, message: String) {
+        let mut state = self.state.lock();
         state.logs.push_back(message);
         // Keep only last 100 messages
         if state.logs.len() > 100 {
@@ -185,8 +182,8 @@ impl TuiHandle {
     }
 
     /// Signal the build outcome so the terminal progress shows the right final state
-    pub async fn set_build_outcome(&self, success: bool) {
-        let mut state = self.state.write().await;
+    pub fn set_build_outcome(&self, success: bool) {
+        let mut state = self.state.lock();
         state.build_outcome = Some(success);
     }
 
@@ -194,21 +191,19 @@ impl TuiHandle {
     pub async fn shutdown(&self) {
         // Set the shutdown flag
         {
-            let mut state = self.state.write().await;
+            let mut state = self.state.lock();
             state.shutdown = true;
         }
 
         // Wait for the display task to signal completion
-        if let Some(rx) = self.shutdown_rx.write().await.take() {
+        let rx = self.shutdown_rx.lock().take();
+        if let Some(rx) = rx {
             let _ = rx.await; // Ignore errors (channel closed is fine)
         }
     }
 
     /// Background task that updates the display at ~15fps
-    async fn display_task(
-        state: Arc<DiagnosticAsyncRwLock<TuiState>>,
-        shutdown_tx: oneshot::Sender<()>,
-    ) {
+    async fn display_task(state: Arc<DiagnosticMutex<TuiState>>, shutdown_tx: oneshot::Sender<()>) {
         let multi = MultiProgress::new();
         multi.set_move_cursor(false); // can't set it to true, we add/remove tasks dynamically
 
@@ -258,7 +253,7 @@ impl TuiHandle {
         loop {
             interval.tick().await;
 
-            let state_snapshot = state.read().await;
+            let state_snapshot = state.lock();
 
             // Update progress bar
             let total = state_snapshot.total.max(1); // Avoid div by zero
@@ -431,10 +426,6 @@ where
 
         let formatted = format!("[{:<5}] {}: {}", level, target, visitor.message);
 
-        // Send to TUI (spawn to avoid blocking)
-        let tui = self.tui.clone();
-        tokio::spawn(async move {
-            tui.log_message(formatted).await;
-        });
+        self.tui.log_message(formatted);
     }
 }

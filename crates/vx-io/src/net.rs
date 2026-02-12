@@ -194,7 +194,7 @@ pub async fn try_connect(endpoint: &Endpoint) -> Result<Option<Stream>> {
 pub enum Listener {
     Tcp(tokio::net::TcpListener),
     Local {
-        listener: peeps::locks::DiagnosticAsyncMutex<roam_local::LocalListener>,
+        listener: roam_local::LocalListener,
         endpoint: camino::Utf8PathBuf,
     },
 }
@@ -227,10 +227,7 @@ impl Listener {
 
                 let listener = roam_local::LocalListener::bind(bind_target)?;
                 Ok(Listener::Local {
-                    listener: peeps::locks::DiagnosticAsyncMutex::new(
-                        "io/local_listener",
-                        listener,
-                    ),
+                    listener,
                     endpoint: path.clone(),
                 })
             }
@@ -238,15 +235,14 @@ impl Listener {
     }
 
     /// Accept a connection, returning the stream and peer address string.
-    pub async fn accept(&self) -> Result<(Stream, String)> {
+    pub async fn accept(&mut self) -> Result<(Stream, String)> {
         match self {
             Listener::Tcp(listener) => {
                 let (stream, addr) = listener.accept().await?;
                 Ok((Stream::Tcp(stream), addr.to_string()))
             }
             Listener::Local { listener, .. } => {
-                let guard = listener.lock().await;
-                let stream = guard.accept().await?;
+                let stream = listener.accept().await?;
                 #[cfg(unix)]
                 return Ok((Stream::Local(stream), "local".to_string()));
                 #[cfg(windows)]
