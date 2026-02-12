@@ -235,7 +235,7 @@ pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
         .map(|p| p.join("vixenfs-mount.log"));
 
     // Run all diagnostics in parallel
-    let (app_bundle, plugin_reg, mount_status, process_inv, mount_log, system_logs) = tokio::join!(
+    let (app_bundle, plugin_reg, mount_status, process_inv, mount_log, reaper_log) = tokio::join!(
         // 1. App bundle integrity
         async {
             let start = Instant::now();
@@ -372,36 +372,33 @@ pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
             }
             ("vixenfs-mount.log", section, start.elapsed())
         },
-        // 7. System logs
+        // 7. vx-reaper log
         async {
             let start = Instant::now();
             let mut section = String::new();
-            match Command::new("log")
-                .args([
-                    "show",
-                    "--last",
-                    "2m",
-                    "--predicate",
-                    r#"subsystem == "com.apple.FSKit" OR subsystem == "eu.bearcove.vixenfs""#,
-                    "--info",
-                    "--debug",
-                ])
-                .output()
-                .await
-            {
-                Ok(output) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    if stdout.trim().is_empty() {
-                        writeln!(section, "  No matching log entries").unwrap();
-                    } else {
-                        for line in stdout.lines() {
-                            writeln!(section, "  {line}").unwrap();
+            let reaper_log = mount_path
+                .as_std_path()
+                .parent()
+                .map(|p| p.join("vx-reaper.log"));
+            if let Some(reaper_log) = &reaper_log {
+                match tokio::fs::read_to_string(reaper_log).await {
+                    Ok(content) => {
+                        if content.is_empty() {
+                            writeln!(section, "  (empty)").unwrap();
+                        } else {
+                            for line in content.lines() {
+                                writeln!(section, "  {line}").unwrap();
+                            }
                         }
                     }
+                    Err(e) => {
+                        writeln!(section, "  Could not read {}: {e}", reaper_log.display()).unwrap()
+                    }
                 }
-                Err(e) => writeln!(section, "  log show failed: {e}").unwrap(),
+            } else {
+                writeln!(section, "  Could not determine log path").unwrap();
             }
-            ("System logs (last 2m)", section, start.elapsed())
+            ("vx-reaper.log", section, start.elapsed())
         },
     );
 
@@ -415,7 +412,7 @@ pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
         mount_status,
         process_inv,
         mount_log,
-        system_logs,
+        reaper_log,
     ] {
         writeln!(
             out,
