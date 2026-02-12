@@ -719,10 +719,14 @@ impl CliContext {
         // 3. Poll for JSON dumps to appear
         let expected = pids.len();
         let mut collected = 0;
-        for _ in 0..20 {
-            // 100ms intervals, 2s max
+        for _ in 0..100 {
+            // 100ms intervals, 10s max
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            collected = count_dump_files();
+            let now = count_dump_files();
+            if now > collected {
+                eprintln!("Collected {now}/{expected} dumps...");
+                collected = now;
+            }
             if collected >= expected {
                 break;
             }

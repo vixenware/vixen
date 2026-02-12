@@ -145,7 +145,7 @@ async fn probe_df(candidates: &[String], log: &mut Log) -> bool {
 }
 
 /// Check if the VixenFS extension process is running.
-async fn probe_pgrep(log: &mut Log) -> bool {
+pub(crate) async fn probe_pgrep(log: &mut Log) -> bool {
     let output = match Command::new("pgrep").args(["-x", "VixenFS"]).output().await {
         Ok(output) => output,
         Err(e) => {

@@ -4,7 +4,7 @@ set -euo pipefail
 # Build vx-store, vx-runner, vxd, vx
 CARGO_FEATURES=""
 if [[ "${VX_DIAGNOSTICS:-}" == "1" ]]; then
-    echo "VX_DIAGNOSTICS=1: enabling diagnostics feature"
+    echo "VX_DIAGNOSTICS=1: enabling diagnostics feature. Run './target/debug/vx debug' on hang to open a web dashboard"
     CARGO_FEATURES="--features diagnostics"
 else
     echo "Tip: set VX_DIAGNOSTICS=1 to build with the diagnostics feature (slower build, richer errors)"
@@ -38,7 +38,14 @@ echo "Test VX_HOME will be ${VX_HOME}"
 export VX_TEST=1
 
 # Start daemon
-"$VX_BIN" start --no-tui &
+VX_LOG="/tmp/vx-tests.log"
+if [[ "${VX_VERBOSE:-}" == "1" ]]; then
+    echo "VX_VERBOSE=1: daemon output will go to stderr"
+    "$VX_BIN" start --no-tui &
+else
+    echo "Daemon output redirected to ${VX_LOG} (set VX_VERBOSE=1 for inline output)"
+    "$VX_BIN" start --no-tui > "$VX_LOG" 2>&1 &
+fi
 
 # Set VXD so no other command starts their own
 export VXD="$VX_HOME/vxd.sock"

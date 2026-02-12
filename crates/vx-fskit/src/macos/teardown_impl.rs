@@ -115,6 +115,20 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
         }
     }
 
+    // --- Kill stale VixenFS extension if still running ---
+
+    if probe::probe_pgrep(&mut log).await {
+        log.info("VixenFS extension still running after unmount, sending SIGTERM");
+        let _ = Command::new("pkill").args(["-x", "VixenFS"]).output().await;
+        // Give it a moment to exit
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if probe::probe_pgrep(&mut log).await {
+            log.fail("VixenFS extension still running after SIGTERM");
+        } else {
+            log.ok("VixenFS extension exited");
+        }
+    }
+
     // --- Verify ---
 
     let after = probe::probe(mount_path, &candidates, &mut log, false).await;
