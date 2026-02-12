@@ -203,10 +203,10 @@ impl Vfsd for VfsdService {
         // Take a cheap snapshot (no write buffers — they've been drained by flush above).
         // Resolve the target directory, then recursively build DirectoryNodes.
         let (items_snapshot, target_id) = {
-            let prefixes = self.vfs.prefixes.lock();
-            let items = self.vfs.items.lock();
+            let state = self.vfs.state.lock();
 
-            let prefix = prefixes
+            let prefix = state
+                .prefixes
                 .get(&prefix_id)
                 .ok_or_else(|| format!("prefix {prefix_id} not found"))?;
 
@@ -214,14 +214,15 @@ impl Vfsd for VfsdService {
 
             if !rel_path.is_empty() {
                 for component in rel_path.split(['/', '\\']).filter(|s| !s.is_empty()) {
-                    let child = items
+                    let child = state
+                        .items
                         .lookup_child(current_id, component)
                         .ok_or_else(|| format!("path {path} not found"))?;
                     current_id = child.id;
                 }
             }
 
-            (items.clone_without_buffers(), current_id)
+            (state.items.clone_without_buffers(), current_id)
         };
 
         let root_hash = self
@@ -248,10 +249,10 @@ impl Vfsd for VfsdService {
         } else {
             // Remove specific subtree within prefix
             let target_item_id = {
-                let prefixes = self.vfs.prefixes.lock();
-                let items = self.vfs.items.lock();
+                let state = self.vfs.state.lock();
 
-                let prefix = prefixes
+                let prefix = state
+                    .prefixes
                     .get(&prefix_id)
                     .ok_or_else(|| format!("prefix {prefix_id} not found"))?;
 
@@ -259,7 +260,8 @@ impl Vfsd for VfsdService {
 
                 // Navigate to the target path
                 for component in rel_path.split(['/', '\\']).filter(|s| !s.is_empty()) {
-                    let child = items
+                    let child = state
+                        .items
                         .lookup_child(current_id, component)
                         .ok_or_else(|| format!("path {path} not found"))?;
                     current_id = child.id;
@@ -270,12 +272,12 @@ impl Vfsd for VfsdService {
 
             // Collect and remove all descendants under one write lock
             {
-                let mut items = self.vfs.items.lock();
+                let mut state = self.vfs.state.lock();
                 let to_remove =
-                    crate::vfs::CasVfs::collect_descendants_from(&items, target_item_id);
+                    crate::vfs::CasVfs::collect_descendants_from(&state.items, target_item_id);
                 // Remove in reverse (leaves first) to keep children index clean
                 for &id in to_remove.iter().rev() {
-                    items.remove(id);
+                    state.items.remove(id);
                 }
             }
 

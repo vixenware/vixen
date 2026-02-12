@@ -234,13 +234,16 @@ impl VfsItems {
 }
 
 /// CAS-backed VFS implementation
+pub(crate) struct VfsState {
+    pub(crate) items: VfsItems,
+    pub(crate) prefixes: HashMap<String, ActionPrefix>,
+}
+
 pub struct CasVfs {
     /// CAS client for fetching blobs
     pub(crate) cas: Arc<StoreClient<crate::StoreCaller>>,
-    /// All items in the VFS with adjacency index
-    pub(crate) items: DiagnosticMutex<VfsItems>,
-    /// Active action prefixes (keyed by prefix ID like "build-01JFX...")
-    pub(crate) prefixes: DiagnosticMutex<HashMap<String, ActionPrefix>>,
+    /// Unified VFS state lock: items + prefixes
+    pub(crate) state: DiagnosticMutex<VfsState>,
     /// Next available ItemId
     next_id: AtomicU64,
     /// L2 chunk cache (disk): persistent across vx-vfsd restarts.
@@ -281,8 +284,13 @@ impl CasVfs {
 
         Self {
             cas,
-            items: DiagnosticMutex::new("CasVfs::items", items),
-            prefixes: DiagnosticMutex::new("CasVfs::prefixes", HashMap::new()),
+            state: DiagnosticMutex::new(
+                "CasVfs::state",
+                VfsState {
+                    items,
+                    prefixes: HashMap::new(),
+                },
+            ),
             next_id: AtomicU64::new(2), // 1=root
             disk_cache_dir,
             blobnode_cache: DiagnosticMutex::new("CasVfs::blobnode_cache", HashMap::new()),
@@ -498,7 +506,7 @@ impl CasVfs {
     }
     /// Check if a prefix already exists
     pub async fn has_prefix(&self, prefix_id: &str) -> bool {
-        self.prefixes.lock().contains_key(prefix_id)
+        self.state.lock().prefixes.contains_key(prefix_id)
     }
 
     /// Create a new action prefix
@@ -507,10 +515,11 @@ impl CasVfs {
     pub async fn create_prefix(&self, prefix_id: String) -> (String, ItemId) {
         let prefix_root_id = self.alloc_id();
 
-        // Create the prefix directory under root
         {
-            let mut items = self.items.lock();
-            items.insert(VfsItem {
+            let mut state = self.state.lock();
+
+            // Create the prefix directory under root
+            state.items.insert(VfsItem {
                 id: prefix_root_id,
                 parent_id: 1, // under root
                 name: prefix_id.clone(),
@@ -520,12 +529,9 @@ impl CasVfs {
                 blob_node: None,
                 size: 0,
             });
-        }
 
-        // Register the prefix
-        {
-            let mut prefixes = self.prefixes.lock();
-            prefixes.insert(
+            // Register the prefix
+            state.prefixes.insert(
                 prefix_id.clone(),
                 ActionPrefix {
                     id: prefix_id.clone(),
@@ -616,27 +622,22 @@ impl CasVfs {
         path: &str,
         entry: PrefixEntry,
     ) -> Option<ItemId> {
-        // Get the prefix root
-        let prefix_root_id = {
-            let prefixes = self.prefixes.lock();
-            prefixes.get(prefix_id)?.root_item_id
-        };
-
         // Split path into components and create intermediate directories
         let components: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
         if components.is_empty() {
             return None;
         }
 
-        // Single write lock for the entire check+create sequence
-        let mut items = self.items.lock();
+        let mut state = self.state.lock();
+        let prefix_root_id = state.prefixes.get(prefix_id)?.root_item_id;
+
         let mut current_parent = prefix_root_id;
 
         for (i, component) in components.iter().enumerate() {
             let is_last = i == components.len() - 1;
 
             // Check if this component already exists (O(1) via children index)
-            if let Some(existing) = items.lookup_child(current_parent, component) {
+            if let Some(existing) = state.items.lookup_child(current_parent, component) {
                 let existing_id = existing.id;
                 let existing_type = existing.item_type;
                 if is_last {
@@ -664,7 +665,7 @@ impl CasVfs {
                 (ItemType::Directory, mode::DIRECTORY, None, None, 0)
             };
 
-            items.insert(VfsItem {
+            state.items.insert(VfsItem {
                 id: new_id,
                 parent_id: current_parent,
                 name: component.to_string(),
@@ -676,10 +677,7 @@ impl CasVfs {
             });
 
             if is_last {
-                drop(items);
-                // Update prefix mappings
-                let mut prefixes = self.prefixes.lock();
-                if let Some(prefix) = prefixes.get_mut(prefix_id) {
+                if let Some(prefix) = state.prefixes.get_mut(prefix_id) {
                     prefix.path_mappings.insert(path.to_string(), entry);
                 }
                 return Some(new_id);
@@ -693,29 +691,19 @@ impl CasVfs {
 
     /// Remove an action prefix and all its contents
     pub async fn remove_prefix(&self, prefix_id: &str) {
-        let prefix_root_id = {
-            let prefixes = self.prefixes.lock();
-            let Some(prefix) = prefixes.get(prefix_id) else {
-                return;
-            };
-            prefix.root_item_id
+        let mut state = self.state.lock();
+        let Some(prefix) = state.prefixes.get(prefix_id) else {
+            return;
         };
+        let prefix_root_id = prefix.root_item_id;
 
-        // Collect then remove under one write lock
-        {
-            let mut items = self.items.lock();
-            let to_remove = Self::collect_descendants_from(&items, prefix_root_id);
-            // Remove in reverse (leaves first) to keep children index clean
-            for &id in to_remove.iter().rev() {
-                items.remove(id);
-            }
+        let to_remove = Self::collect_descendants_from(&state.items, prefix_root_id);
+        // Remove in reverse (leaves first) to keep children index clean
+        for &id in to_remove.iter().rev() {
+            state.items.remove(id);
         }
 
-        // Remove prefix registration
-        {
-            let mut prefixes = self.prefixes.lock();
-            prefixes.remove(prefix_id);
-        }
+        state.prefixes.remove(prefix_id);
 
         tracing::debug!(prefix_id = %prefix_id, "removed action prefix");
     }
@@ -743,8 +731,8 @@ impl Vfs for CasVfs {
     async fn lookup(&self, _cx: &roam::Context, parent_id: ItemId, name: String) -> LookupResult {
         tracing::trace!(parent_id, name = %name, "VFS lookup");
 
-        let items = self.items.lock();
-        if let Some(item) = items.lookup_child(parent_id, &name) {
+        let state = self.state.lock();
+        if let Some(item) = state.items.lookup_child(parent_id, &name) {
             tracing::trace!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found");
             return LookupResult {
                 attrs: ItemAttributes {
@@ -776,8 +764,8 @@ impl Vfs for CasVfs {
     async fn get_attributes(&self, _cx: &roam::Context, item_id: ItemId) -> GetAttributesResult {
         tracing::trace!(item_id, "VFS get_attributes");
 
-        let items = self.items.lock();
-        match items.get(&item_id) {
+        let state = self.state.lock();
+        match state.items.get(&item_id) {
             Some(item) => GetAttributesResult {
                 attrs: ItemAttributes {
                     item_id: item.id,
@@ -806,10 +794,10 @@ impl Vfs for CasVfs {
     async fn read_dir(&self, _cx: &roam::Context, item_id: ItemId, cursor: u64) -> ReadDirResult {
         tracing::trace!(item_id, cursor, "VFS read_dir");
 
-        let items = self.items.lock();
-        match items.get(&item_id) {
+        let state = self.state.lock();
+        match state.items.get(&item_id) {
             Some(item) if item.item_type == ItemType::Directory => {
-                let children: Vec<_> = items.children_of(item_id).collect();
+                let children: Vec<_> = state.items.children_of(item_id).collect();
 
                 let entries: Vec<DirEntry> = children
                     .iter()
@@ -864,8 +852,8 @@ impl Vfs for CasVfs {
         // Extract what we need while holding the read lock — slice the write buffer
         // in-place instead of cloning the entire Vec<u8>.
         let (cas_hash, blob_node) = {
-            let items = self.items.lock();
-            let Some(item) = items.get(&item_id) else {
+            let state = self.state.lock();
+            let Some(item) = state.items.get(&item_id) else {
                 return ReadResult {
                     data: Vec::new(),
                     error: errno::ENOENT,
@@ -880,7 +868,7 @@ impl Vfs for CasVfs {
             }
 
             // If there's buffered write data, serve from that (it's newer than CAS)
-            if let Some(data) = items.write_buffers.get(&item_id) {
+            if let Some(data) = state.items.write_buffers.get(&item_id) {
                 let start = (offset as usize).min(data.len());
                 let end = ((offset + len) as usize).min(data.len());
                 return ReadResult {
@@ -926,9 +914,9 @@ impl Vfs for CasVfs {
     ) -> WriteResult {
         tracing::trace!(item_id, offset, len = data.len(), "write");
 
-        let mut items = self.items.lock();
+        let mut state = self.state.lock();
 
-        match items.get(&item_id).map(|i| i.item_type) {
+        match state.items.get(&item_id).map(|i| i.item_type) {
             None => {
                 return WriteResult {
                     bytes_written: 0,
@@ -945,7 +933,7 @@ impl Vfs for CasVfs {
         }
 
         // Initialize or extend write buffer
-        let buffer = items.write_buffers.entry(item_id).or_default();
+        let buffer = state.items.write_buffers.entry(item_id).or_default();
         let end = offset as usize + data.len();
 
         // Extend buffer if needed
@@ -958,7 +946,7 @@ impl Vfs for CasVfs {
         let new_size = buffer.len() as u64;
 
         // Update size on the item
-        items.get_mut(&item_id).unwrap().size = new_size;
+        state.items.get_mut(&item_id).unwrap().size = new_size;
 
         WriteResult {
             bytes_written: data.len() as u64,
@@ -983,10 +971,10 @@ impl Vfs for CasVfs {
             ItemType::Symlink => mode::FILE_REGULAR,
         };
 
-        let mut items = self.items.lock();
+        let mut state = self.state.lock();
 
         // Verify parent exists and is a directory
-        match items.get(&parent_id) {
+        match state.items.get(&parent_id) {
             Some(item) if item.item_type == ItemType::Directory => {}
             Some(_) => {
                 return CreateResult {
@@ -1003,14 +991,14 @@ impl Vfs for CasVfs {
         }
 
         // Check if name already exists (O(1) via index)
-        if items.child_exists(parent_id, &name) {
+        if state.items.child_exists(parent_id, &name) {
             return CreateResult {
                 item_id: 0,
                 error: errno::EEXIST,
             };
         }
 
-        items.insert(VfsItem {
+        state.items.insert(VfsItem {
             id: new_id,
             parent_id,
             name,
@@ -1036,22 +1024,22 @@ impl Vfs for CasVfs {
             };
         }
 
-        let mut items = self.items.lock();
+        let mut state = self.state.lock();
 
-        let Some(item) = items.get(&item_id) else {
+        let Some(item) = state.items.get(&item_id) else {
             return VfsResult {
                 error: errno::ENOENT,
             };
         };
 
         // If directory, check if empty (O(1) via index)
-        if item.item_type == ItemType::Directory && items.has_children(item_id) {
+        if item.item_type == ItemType::Directory && state.items.has_children(item_id) {
             return VfsResult {
                 error: errno::ENOTEMPTY,
             };
         }
 
-        items.remove(item_id);
+        state.items.remove(item_id);
         VfsResult { error: errno::OK }
     }
 
@@ -1070,16 +1058,16 @@ impl Vfs for CasVfs {
             };
         }
 
-        let mut items = self.items.lock();
+        let mut state = self.state.lock();
 
-        if !items.contains_key(&item_id) {
+        if !state.items.contains_key(&item_id) {
             return VfsResult {
                 error: errno::ENOENT,
             };
         }
 
         // Check new parent exists and is directory
-        match items.get(&new_parent_id) {
+        match state.items.get(&new_parent_id) {
             Some(p) if p.item_type == ItemType::Directory => {}
             Some(_) => {
                 return VfsResult {
@@ -1094,9 +1082,9 @@ impl Vfs for CasVfs {
         }
 
         // Check name doesn't exist in new parent (O(1) via index)
-        if items.child_exists(new_parent_id, &new_name) {
+        if state.items.child_exists(new_parent_id, &new_name) {
             // Could be ourselves moving to same parent with same name — check
-            if let Some(existing) = items.lookup_child(new_parent_id, &new_name)
+            if let Some(existing) = state.items.lookup_child(new_parent_id, &new_name)
                 && existing.id != item_id
             {
                 return VfsResult {
@@ -1105,7 +1093,7 @@ impl Vfs for CasVfs {
             }
         }
 
-        items.rename(item_id, new_parent_id, new_name);
+        state.items.rename(item_id, new_parent_id, new_name);
         VfsResult { error: errno::OK }
     }
 
@@ -1121,22 +1109,22 @@ impl Vfs for CasVfs {
             return VfsResult { error: errno::OK };
         }
 
-        let mut items = self.items.lock();
+        let mut state = self.state.lock();
 
-        if !items.contains_key(&item_id) {
+        if !state.items.contains_key(&item_id) {
             return VfsResult {
                 error: errno::ENOENT,
             };
         }
 
         if let Some(mode) = params.mode {
-            items.get_mut(&item_id).unwrap().mode = mode;
+            state.items.get_mut(&item_id).unwrap().mode = mode;
         }
 
         if let Some(new_size) = params.size {
-            let buffer = items.write_buffers.entry(item_id).or_default();
+            let buffer = state.items.write_buffers.entry(item_id).or_default();
             buffer.resize(new_size as usize, 0);
-            items.get_mut(&item_id).unwrap().size = new_size;
+            state.items.get_mut(&item_id).unwrap().size = new_size;
         }
 
         // modified_time is ignored for now (we don't track times)
@@ -1153,9 +1141,9 @@ impl Vfs for CasVfs {
 impl CasVfs {
     pub async fn flush_to_cas(&self, item_id: ItemId) -> Option<(Blake3Hash, u64)> {
         let data = {
-            let mut items = self.items.lock();
-            items.get(&item_id)?; // check item exists
-            items.write_buffers.remove(&item_id)?
+            let mut state = self.state.lock();
+            state.items.get(&item_id)?; // check item exists
+            state.items.write_buffers.remove(&item_id)?
         };
 
         if data.is_empty() {
@@ -1167,8 +1155,8 @@ impl CasVfs {
         let chunk_hash = ChunkHash(content_hash);
         match self.cas.put_chunk(chunk_hash, data.clone()).await {
             Ok(()) => {
-                let mut items = self.items.lock();
-                if let Some(item) = items.get_mut(&item_id) {
+                let mut state = self.state.lock();
+                if let Some(item) = state.items.get_mut(&item_id) {
                     item.cas_hash = Some(content_hash);
                     item.blob_node = None; // single chunk
                     item.size = size;
@@ -1178,11 +1166,11 @@ impl CasVfs {
             Err(e) => {
                 tracing::error!(item_id, error = %e, "failed to flush to CAS, restoring write buffer");
                 // Restore the write buffer so data isn't lost
-                let mut items = self.items.lock();
-                if let Some(item) = items.get_mut(&item_id) {
+                let mut state = self.state.lock();
+                if let Some(item) = state.items.get_mut(&item_id) {
                     item.size = data.len() as u64;
                 }
-                items.write_buffers.insert(item_id, data);
+                state.items.write_buffers.insert(item_id, data);
                 None
             }
         }
@@ -1210,23 +1198,23 @@ impl CasVfs {
         let mut results = HashMap::new();
 
         let prefix_root_id = {
-            let prefixes = self.prefixes.lock();
-            match prefixes.get(prefix_id) {
+            let state = self.state.lock();
+            match state.prefixes.get(prefix_id) {
                 Some(p) => p.root_item_id,
                 None => return results,
             }
         };
 
         let items_to_flush: Vec<(ItemId, String)> = {
-            let items = self.items.lock();
-            let descendants = Self::collect_descendants_from(&items, prefix_root_id);
+            let state = self.state.lock();
+            let descendants = Self::collect_descendants_from(&state.items, prefix_root_id);
 
             descendants
                 .into_iter()
                 .filter_map(|id| {
-                    items.get(&id)?; // check item exists
-                    if items.write_buffers.contains_key(&id) {
-                        let path = self.build_path(&items, id, prefix_root_id);
+                    state.items.get(&id)?; // check item exists
+                    if state.items.write_buffers.contains_key(&id) {
+                        let path = self.build_path(&state.items, id, prefix_root_id);
                         Some((id, path))
                     } else {
                         None
@@ -1311,20 +1299,20 @@ impl CasVfs {
     /// Dump VFS state for debugging
     #[cfg(unix)]
     pub fn dump_all_state(&self) {
-        let items = self.items.lock();
-        let prefixes = self.prefixes.lock();
+        let state = self.state.lock();
 
         eprintln!("\n=== VFS STATE DUMP ===");
-        eprintln!("Total items: {}", items.len());
-        eprintln!("Total prefixes: {}", prefixes.len());
+        eprintln!("Total items: {}", state.items.len());
+        eprintln!("Total prefixes: {}", state.prefixes.len());
 
-        for (prefix_id, prefix) in prefixes.iter() {
+        for (prefix_id, prefix) in state.prefixes.iter() {
             eprintln!(
                 "\nPrefix '{}' root_item_id={}",
                 prefix_id, prefix.root_item_id
             );
 
-            let children: Vec<_> = items
+            let children: Vec<_> = state
+                .items
                 .children_of(prefix.root_item_id)
                 .map(|i| format!("{} (type={:?})", i.name, i.item_type))
                 .collect();
@@ -1333,44 +1321,47 @@ impl CasVfs {
     }
 
     pub async fn dump_state(&self, prefix_id: &str) {
-        let items = self.items.lock();
-        let prefixes = self.prefixes.lock();
+        let state = self.state.lock();
 
         tracing::debug!("=== VFS STATE DUMP ===");
-        tracing::debug!("Total items: {}", items.len());
-        tracing::debug!("Total prefixes: {}", prefixes.len());
+        tracing::debug!("Total items: {}", state.items.len());
+        tracing::debug!("Total prefixes: {}", state.prefixes.len());
 
         // Show root children
-        let root_children: Vec<_> = items
+        let root_children: Vec<_> = state
+            .items
             .children_of(ROOT_ITEM_ID)
             .map(|i| format!("{} (id={})", i.name, i.id))
             .collect();
         tracing::debug!("Root children: {:?}", root_children);
 
         // Show prefix info
-        if let Some(prefix) = prefixes.get(prefix_id) {
+        if let Some(prefix) = state.prefixes.get(prefix_id) {
             tracing::debug!(
                 "Prefix '{}' root_item_id={}",
                 prefix_id,
                 prefix.root_item_id
             );
 
-            let prefix_children: Vec<_> = items
+            let prefix_children: Vec<_> = state
+                .items
                 .children_of(prefix.root_item_id)
                 .map(|i| format!("{} (id={}, type={:?})", i.name, i.id, i.item_type))
                 .collect();
             tracing::debug!("Prefix children: {:?}", prefix_children);
 
-            if let Some(toolchain) = items.lookup_child(prefix.root_item_id, "toolchain") {
+            if let Some(toolchain) = state.items.lookup_child(prefix.root_item_id, "toolchain") {
                 let tc_id = toolchain.id;
-                let tc_children: Vec<_> = items
+                let tc_children: Vec<_> = state
+                    .items
                     .children_of(tc_id)
                     .map(|i| format!("{} (id={})", i.name, i.id))
                     .collect();
                 tracing::debug!("toolchain/ children: {:?}", tc_children);
 
-                if let Some(bin) = items.lookup_child(tc_id, "bin") {
-                    let bin_children: Vec<_> = items
+                if let Some(bin) = state.items.lookup_child(tc_id, "bin") {
+                    let bin_children: Vec<_> = state
+                        .items
                         .children_of(bin.id)
                         .map(|i| format!("{} (id={})", i.name, i.id))
                         .collect();
