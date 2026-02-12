@@ -89,14 +89,13 @@ async fn async_main() {
 }
 
 fn print_fatal_error(error: &eyre::Report) {
-    // Terminal width, minus 4 for "│ " and " │"
+    // Cap content width: readable at 60, never wider than terminal
     let term_width = terminal_width().saturating_sub(4).max(40);
+    let content_width = term_width.min(60);
 
     let full_message = format!("{error:#}");
-    let wrapped = soft_wrap(&full_message, term_width);
+    let wrapped = soft_wrap(&full_message, content_width);
     let lines: Vec<&str> = wrapped.lines().collect();
-
-    let content_width = term_width;
     let bar = "─".repeat(content_width + 2);
 
     eprintln!();
@@ -107,8 +106,8 @@ fn print_fatal_error(error: &eyre::Report) {
     );
     eprintln!("{}", format!("├{bar}┤").red().bold());
     for line in &lines {
-        let char_len = line.chars().count();
-        let padding = content_width.saturating_sub(char_len);
+        let visible_len = visible_width(line);
+        let padding = content_width.saturating_sub(visible_len);
         eprintln!(
             "{}{}{}{}",
             "│ ".red().bold(),
@@ -121,12 +120,20 @@ fn print_fatal_error(error: &eyre::Report) {
     eprintln!();
 }
 
+/// Count visible display width, ignoring ANSI escape sequences.
+fn visible_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    let stripped = strip_ansi_escapes::strip(s);
+    let plain = String::from_utf8_lossy(&stripped);
+    UnicodeWidthStr::width(plain.as_ref())
+}
+
 fn terminal_width() -> usize {
     // Try COLUMNS env var first, then ioctl
-    if let Ok(cols) = std::env::var("COLUMNS") {
-        if let Ok(w) = cols.parse::<usize>() {
-            return w;
-        }
+    if let Ok(cols) = std::env::var("COLUMNS")
+        && let Ok(w) = cols.parse::<usize>()
+    {
+        return w;
     }
     #[cfg(unix)]
     {
@@ -142,23 +149,25 @@ fn terminal_width() -> usize {
 fn soft_wrap(text: &str, max_width: usize) -> String {
     let mut out = String::new();
     for line in text.lines() {
-        if line.chars().count() <= max_width {
+        if visible_width(line) <= max_width {
             out.push_str(line);
             out.push('\n');
         } else {
             let mut remaining = line;
-            while remaining.chars().count() > max_width {
-                // Find the byte offset of the max_width-th char
-                let byte_limit = remaining
-                    .char_indices()
-                    .nth(max_width)
-                    .map(|(i, _)| i)
-                    .unwrap_or(remaining.len());
-                // Try to break at a space within that range
-                let break_at = remaining[..byte_limit].rfind(' ').unwrap_or(byte_limit);
-                out.push_str(&remaining[..break_at]);
+            while visible_width(remaining) > max_width {
+                let break_pos = find_wrap_point(remaining, max_width);
+                let chunk = &remaining[..break_pos];
+                out.push_str(chunk);
+                // Reset color at end of wrapped line, then restore on next
+                let active_sgr = last_sgr(chunk);
+                if active_sgr.is_some() {
+                    out.push_str("\x1b[0m");
+                }
                 out.push('\n');
-                remaining = remaining[break_at..].trim_start();
+                remaining = remaining[break_pos..].trim_start();
+                if let Some(ref sgr) = active_sgr {
+                    out.push_str(sgr);
+                }
             }
             if !remaining.is_empty() {
                 out.push_str(remaining);
@@ -167,6 +176,75 @@ fn soft_wrap(text: &str, max_width: usize) -> String {
         }
     }
     out
+}
+
+/// Extract the last SGR (Select Graphic Rendition) sequence from a string,
+/// or None if the string ends with a reset or has no SGR sequences.
+fn last_sgr(s: &str) -> Option<String> {
+    let mut last: Option<String> = None;
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\x1b' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            let start = i;
+            i += 2;
+            while i < bytes.len() && !(0x40..=0x7E).contains(&bytes[i]) {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1; // skip final byte
+                let seq = &s[start..i];
+                // Only track SGR sequences (ending with 'm')
+                if seq.ends_with('m') {
+                    if seq == "\x1b[0m" || seq == "\x1b[m" {
+                        last = None; // reset clears active style
+                    } else {
+                        last = Some(seq.to_string());
+                    }
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    last
+}
+
+/// Find byte offset in `s` where visible width reaches `max_width`,
+/// preferring to break at a space. Skips ANSI escape sequences.
+fn find_wrap_point(s: &str, max_width: usize) -> usize {
+    use unicode_width::UnicodeWidthChar;
+
+    let bytes = s.as_bytes();
+    let mut orig_pos = 0;
+    let mut col = 0;
+    let mut last_space = None;
+
+    while orig_pos < bytes.len() && col < max_width {
+        if bytes[orig_pos] == b'\x1b' && orig_pos + 1 < bytes.len() && bytes[orig_pos + 1] == b'[' {
+            // Skip CSI sequence: ESC [ ... final_byte
+            orig_pos += 2;
+            while orig_pos < bytes.len() && !(0x40..=0x7E).contains(&bytes[orig_pos]) {
+                orig_pos += 1;
+            }
+            if orig_pos < bytes.len() {
+                orig_pos += 1;
+            }
+        } else {
+            let c = s[orig_pos..].chars().next().unwrap();
+            let w = UnicodeWidthChar::width(c).unwrap_or(0);
+            if col + w > max_width {
+                break;
+            }
+            if c == ' ' {
+                last_space = Some(orig_pos);
+            }
+            col += w;
+            orig_pos += c.len_utf8();
+        }
+    }
+
+    last_space.unwrap_or(orig_pos)
 }
 
 // ─── CliContext methods ─────────────────────────────────────────────────────

@@ -12,22 +12,18 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
     let mut log = Log::new();
     let candidates = mount_path_candidates(mount_path).await;
 
-    log.record(format!(
-        "setup: sid={sid}, mount_path={mount_path}, debug={debug}"
-    ));
-
     // --- Prerequisites ---
 
     // Is Vixen.app installed?
     if tokio::fs::metadata(VIXEN_APP_PATH).await.is_err() {
-        log.record(format!("{VIXEN_APP_PATH} not found"));
+        log.fail(format!("{VIXEN_APP_PATH} not found"));
         return FsKitResult::failure(
             log.into_entries(),
             "Vixen.app is not installed",
             vec!["brew install --cask bearcove/tap/vixen".to_string()],
         );
     }
-    log.record(format!("{VIXEN_APP_PATH} exists"));
+    log.ok(format!("{VIXEN_APP_PATH} exists"));
 
     // Is codesign valid?
     match Command::new("codesign")
@@ -37,11 +33,11 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
         .await
     {
         Ok(output) if output.status.success() => {
-            log.record("codesign: valid");
+            log.ok("codesign: valid");
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            log.record(format!("codesign: FAILED — {}", stderr.trim()));
+            log.fail(format!("codesign: FAILED — {}", stderr.trim()));
             return FsKitResult::failure(
                 log.into_entries(),
                 "Vixen.app codesign is invalid",
@@ -49,7 +45,7 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
             );
         }
         Err(e) => {
-            log.record(format!("codesign: failed to run: {e}"));
+            log.fail(format!("codesign: failed to run: {e}"));
             // Non-fatal — codesign might not be available in CI
         }
     }
@@ -67,20 +63,20 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
                 line.contains(VIXEN_EXTENSION_IDENTIFIER) && line.trim_start().starts_with('+')
             });
             if found {
-                log.record("pluginkit: extension registered and enabled");
+                log.ok("pluginkit: extension registered and enabled");
             } else {
                 let registered = stdout
                     .lines()
                     .any(|line| line.contains(VIXEN_EXTENSION_IDENTIFIER));
                 if registered {
-                    log.record("pluginkit: extension registered but NOT enabled");
+                    log.fail("pluginkit: extension registered but NOT enabled");
                     return FsKitResult::failure(
                         log.into_entries(),
                         "VixenFS extension is registered but not enabled",
                         vec!["run `vx doctor` to enable the extension".to_string()],
                     );
                 } else {
-                    log.record("pluginkit: extension not registered");
+                    log.fail("pluginkit: extension not registered");
                     return FsKitResult::failure(
                         log.into_entries(),
                         "VixenFS extension is not registered",
@@ -93,7 +89,7 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
             }
         }
         Err(e) => {
-            log.record(format!("pluginkit: failed to run: {e}"));
+            log.fail(format!("pluginkit: failed to run: {e}"));
             // Non-fatal — might not be available
         }
     }
@@ -103,19 +99,19 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
     let probe_result = probe::probe(mount_path, &candidates, &mut log, true).await;
 
     if probe_result.is_healthy() {
-        log.record("mount is already healthy");
+        log.ok("mount is already healthy");
         return FsKitResult::success(log.into_entries());
     }
 
     if probe_result.is_broken_mount() {
-        log.record("broken mount detected, running teardown first");
+        log.info("broken mount detected, running teardown first");
         let teardown_result = super::teardown_impl::teardown(mount_path).await;
         // Merge teardown logs
         for entry in teardown_result.log {
             log.entries.push(entry);
         }
         if let Some(err) = teardown_result.error {
-            log.record(format!("teardown failed: {}", err.summary));
+            log.fail(format!("teardown failed: {}", err.summary));
             return FsKitResult::failure(log.into_entries(), err.summary, err.remediation);
         }
     }
@@ -124,14 +120,14 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
 
     // Create mount point directory
     if let Err(e) = tokio::fs::create_dir_all(mount_path.as_std_path()).await {
-        log.record(format!("mkdir -p {mount_path}: {e}"));
+        log.fail(format!("mkdir -p {mount_path}: {e}"));
         return FsKitResult::failure(
             log.into_entries(),
             format!("failed to create mount point: {e}"),
             vec![],
         );
     }
-    log.record(format!("mkdir -p {mount_path}: ok"));
+    log.ok(format!("mkdir -p {mount_path}: ok"));
 
     // Build the source URL
     let mut source = format!("vixen://session?sid={sid}");
@@ -139,9 +135,7 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
         source.push_str("&debug=1");
     }
 
-    log.record(format!(
-        "mounting: /sbin/mount -F -t vixenfs {source} {mount_path}"
-    ));
+    log.info(format!("mounting vixenfs at {mount_path}"));
 
     let mount_output = match Command::new("/sbin/mount")
         .args(["-F", "-t", "vixenfs", &source, mount_path.as_str()])
@@ -150,7 +144,7 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
     {
         Ok(output) => output,
         Err(e) => {
-            log.record(format!("/sbin/mount: failed to run: {e}"));
+            log.fail(format!("/sbin/mount: failed to run: {e}"));
             return FsKitResult::failure(
                 log.into_entries(),
                 format!("failed to run /sbin/mount: {e}"),
@@ -162,8 +156,8 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
     if !mount_output.status.success() {
         let stderr = String::from_utf8_lossy(&mount_output.stderr);
         let exit_code = mount_output.status.code();
-        log.record(format!(
-            "/sbin/mount: failed (exit={}): {}",
+        log.fail(format!(
+            "/sbin/mount: exit {}: {}",
             mount_output.status,
             stderr.trim()
         ));
@@ -189,22 +183,22 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
             vec!["sudo killall fskitd fskit_agent".to_string()],
         );
     }
-    log.record("/sbin/mount: ok");
+    log.ok("/sbin/mount: ok");
 
     // --- Verify via health.json ---
 
     // Retry a few times — the extension needs time to start up and connect.
     for attempt in 1..=5 {
-        log.record(format!("health check attempt {attempt}/5"));
+        log.info(format!("health check attempt {attempt}/5"));
         let health = probe::probe(mount_path, &candidates, &mut log, true).await;
         match &health.health {
             HealthProbe::Ok(json) => match facet_json::from_str::<super::HealthPayload>(json) {
                 Ok(payload) if payload.connected => {
-                    log.record("health.json: connected=true, mount is healthy");
+                    log.ok("health.json: connected=true, mount is healthy");
                     return FsKitResult::success(log.into_entries());
                 }
                 Ok(_payload) => {
-                    log.record("health.json: connected=false");
+                    log.info("health.json: connected=false");
                     if attempt < 5 {
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         continue;
@@ -216,7 +210,7 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
                     );
                 }
                 Err(e) => {
-                    log.record(format!("health.json: parse error: {e}"));
+                    log.fail(format!("health.json: parse error: {e}"));
                     if attempt < 5 {
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         continue;
@@ -229,7 +223,7 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
                 }
             },
             HealthProbe::Timeout => {
-                log.record("health.json: timed out (mount is zombied)");
+                log.fail("health.json: timed out (mount is zombied)");
                 return FsKitResult::failure(
                     log.into_entries(),
                     "mount is zombied — /bin/cat health.json timed out",

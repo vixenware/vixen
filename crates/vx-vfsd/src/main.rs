@@ -501,12 +501,24 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
                 return Err(format!("VFS not supported on platform {platform}").into());
             }
             Err(error) => {
-                let mut msg = format!("{error}");
+                use owo_colors::OwoColorize;
+
+                let mut msg = format!("{}", format!("{error}").blue());
                 for diagnostic in error.diagnostics() {
+                    for action in &diagnostic.actions {
+                        if let vx_vfs::VfsAction::RunCommand(cmd) = action {
+                            msg.push_str(&format!(
+                                "\n{}",
+                                format!("Try: {cmd}").yellow()
+                            ));
+                        }
+                    }
                     if let Some(ref detail) = diagnostic.detail {
-                        // Indent each line of the detail log
                         for line in detail.lines() {
-                            msg.push_str(&format!("\n  {line}"));
+                            msg.push_str(&format!(
+                                "\n  {}",
+                                line.dimmed()
+                            ));
                         }
                     }
                 }

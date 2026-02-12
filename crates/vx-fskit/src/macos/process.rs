@@ -24,7 +24,7 @@ pub(crate) async fn find_open_processes(candidates: &[String], log: &mut Log) ->
     {
         Ok(output) => output,
         Err(e) => {
-            log.record(format!("lsof: failed to run: {e}"));
+            log.fail(format!("lsof: failed to run: {e}"));
             return Vec::new();
         }
     };
@@ -59,10 +59,10 @@ pub(crate) async fn find_open_processes(candidates: &[String], log: &mut Log) ->
         .collect();
 
     if result.is_empty() {
-        log.record("lsof: no processes with files open under mount");
+        log.info("lsof: no processes with files open under mount");
     } else {
         for p in &result {
-            log.record(format!(
+            log.info(format!(
                 "lsof: pid {} ({}) has files open under {}",
                 p.pid, p.command, p.path
             ));
@@ -79,11 +79,11 @@ pub(crate) async fn kill_and_wait(processes: &[OpenProcess], log: &mut Log) -> V
         return Vec::new();
     }
 
-    log.record(format!("killing {} process(es)", processes.len()));
+    log.info(format!("killing {} process(es)", processes.len()));
 
     let mut pids: Vec<u32> = Vec::new();
     for p in processes {
-        log.record(format!(
+        log.info(format!(
             "SIGKILL pid {} ({}) — files open under {}",
             p.pid, p.command, p.path
         ));
@@ -106,11 +106,11 @@ pub(crate) async fn kill_and_wait(processes: &[OpenProcess], log: &mut Log) -> V
     }
 
     if pids.is_empty() {
-        log.record("all killed processes have exited");
+        log.ok("all killed processes have exited");
     } else {
         for &pid in &pids {
             if let Some(p) = processes.iter().find(|p| p.pid == pid) {
-                log.record(format!(
+                log.fail(format!(
                     "pid {} ({}) survived SIGKILL — uninterruptible sleep",
                     pid, p.command
                 ));

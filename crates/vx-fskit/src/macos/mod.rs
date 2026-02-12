@@ -41,6 +41,17 @@ impl FsKitResult {
 pub struct LogEntry {
     pub timestamp: Zoned,
     pub message: String,
+    pub level: LogLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    /// A check passed successfully.
+    Ok,
+    /// Neutral/informational step.
+    Info,
+    /// Something failed.
+    Fail,
 }
 
 pub struct FsKitError {
@@ -79,12 +90,25 @@ impl Log {
         }
     }
 
-    pub fn record(&mut self, message: impl Into<String>) {
+    pub fn ok(&mut self, message: impl Into<String>) {
+        self.push(message, LogLevel::Ok);
+    }
+
+    pub fn info(&mut self, message: impl Into<String>) {
+        self.push(message, LogLevel::Info);
+    }
+
+    pub fn fail(&mut self, message: impl Into<String>) {
+        self.push(message, LogLevel::Fail);
+    }
+
+    fn push(&mut self, message: impl Into<String>, level: LogLevel) {
         let msg = message.into();
         tracing::debug!("{msg}");
         self.entries.push(LogEntry {
             timestamp: Zoned::now(),
             message: msg,
+            level,
         });
     }
 

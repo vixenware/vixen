@@ -42,7 +42,14 @@ where
         let log_detail = fskit_result
             .log
             .iter()
-            .map(|entry| entry.message.as_str())
+            .map(|entry| {
+                let prefix = match entry.level {
+                    vx_fskit::LogLevel::Ok => "\u{2713}", // checkmark
+                    vx_fskit::LogLevel::Info => " ",
+                    vx_fskit::LogLevel::Fail => "\u{2717}", // cross
+                };
+                format!("{prefix} {}", entry.message)
+            })
             .collect::<Vec<_>>()
             .join("\n");
         return Err(VfsError::MountFailed {

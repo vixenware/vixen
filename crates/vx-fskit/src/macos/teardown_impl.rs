@@ -16,7 +16,7 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
     let mut log = Log::new();
     let candidates = mount_path_candidates(mount_path).await;
 
-    log.record(format!("teardown: mount_path={mount_path}"));
+    log.info(format!("teardown: mount_path={mount_path}"));
 
     // --- Probe ---
 
@@ -25,19 +25,19 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
     let mount_exists = tokio::fs::metadata(mount_path.as_std_path()).await.is_ok();
 
     if probe_result.is_clean() && !mount_exists {
-        log.record("nothing mounted and no stale directory, nothing to do");
+        log.ok("nothing mounted and no stale directory, nothing to do");
         return FsKitResult::success(log.into_entries());
     }
 
     if probe_result.is_clean() && mount_exists {
-        log.record("stale mountpoint directory, removing");
+        log.info("stale mountpoint directory, removing");
         match tokio::fs::remove_dir(mount_path.as_std_path()).await {
             Ok(()) => {
-                log.record(format!("rmdir {mount_path}: ok"));
+                log.ok(format!("rmdir {mount_path}: ok"));
                 return FsKitResult::success(log.into_entries());
             }
             Err(e) => {
-                log.record(format!("rmdir {mount_path}: {e}"));
+                log.fail(format!("rmdir {mount_path}: {e}"));
                 // Not fatal — might have files in it, proceed anyway
             }
         }
@@ -75,7 +75,7 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
     // Try diskutil unmount force on all candidates (dead mounts may only
     // respond to one specific path variant).
     for candidate in &candidates {
-        log.record(format!("diskutil unmount force {candidate}"));
+        log.info(format!("diskutil unmount force {candidate}"));
 
         let mut child = match Command::new("diskutil")
             .args(["unmount", "force", candidate])
@@ -85,7 +85,7 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
         {
             Ok(child) => child,
             Err(e) => {
-                log.record(format!("diskutil: failed to spawn: {e}"));
+                log.fail(format!("diskutil: failed to spawn: {e}"));
                 continue;
             }
         };
@@ -97,19 +97,19 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
                 let stdout = String::from_utf8_lossy(&stdout);
                 let stderr = String::from_utf8_lossy(&stderr);
                 if status.success() {
-                    log.record(format!("diskutil: ok — {}", stdout.trim()));
+                    log.ok(format!("diskutil: ok — {}", stdout.trim()));
                 } else {
-                    log.record(format!(
+                    log.fail(format!(
                         "diskutil: failed (exit={status}) — {}",
                         stderr.trim()
                     ));
                 }
             }
             Ok(Err(e)) => {
-                log.record(format!("diskutil: error: {e}"));
+                log.fail(format!("diskutil: error: {e}"));
             }
             Err(_) => {
-                log.record("diskutil: timed out after 1s, killing");
+                log.fail("diskutil: timed out after 1s, killing");
                 let _ = child.kill().await;
             }
         }
@@ -124,11 +124,11 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
         if tokio::fs::metadata(mount_path.as_std_path()).await.is_ok() {
             let _ = tokio::fs::remove_dir(mount_path.as_std_path()).await;
         }
-        log.record("teardown complete: mount is clean");
+        log.ok("teardown complete: mount is clean");
         return FsKitResult::success(log.into_entries());
     }
 
-    log.record("mount is still present after unmount attempt");
+    log.fail("mount is still present after unmount attempt");
     FsKitResult::failure(
         log.into_entries(),
         "failed to unmount — mount point is still active after diskutil unmount force",

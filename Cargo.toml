@@ -106,6 +106,7 @@ windows-projfs = { version = "0.1", features = ["dynamic-import"] }
 # terminal
 owo-colors = { version = "4", features = ["supports-color"] }
 strip-ansi-escapes = "0.2"
+unicode-width = "0.2"
 indicatif = "0.18"
 
 # build utilities

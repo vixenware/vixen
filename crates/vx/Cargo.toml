@@ -30,6 +30,8 @@ vx-io = { workspace = true }
 vx-report = { workspace = true }
 vx-vfs = { workspace = true }
 dirs = { workspace = true }
+strip-ansi-escapes = { workspace = true }
+unicode-width = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

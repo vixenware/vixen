@@ -61,7 +61,7 @@ pub(crate) async fn probe(
     log: &mut Log,
     read_health: bool,
 ) -> ProbeResult {
-    log.record(format!("probing mount point {mount_path}"));
+    log.info(format!("probing mount point {mount_path}"));
 
     // 1. mkdir — returns EBUSY if mounted
     let mkdir_ebusy = probe_mkdir(mount_path, log);
@@ -77,7 +77,7 @@ pub(crate) async fn probe(
         probe_health(mount_path, log).await
     } else {
         if !mkdir_ebusy && !in_df {
-            log.record("nothing mounted, skipping health.json probe");
+            log.info("nothing mounted, skipping health.json probe");
         }
         HealthProbe::NotAttempted
     };
@@ -89,7 +89,7 @@ pub(crate) async fn probe(
         health,
     };
 
-    log.record(format!(
+    log.info(format!(
         "probe result: mkdir_ebusy={}, in_df={}, extension_running={}, health={}",
         result.mkdir_ebusy,
         result.in_df,
@@ -112,18 +112,18 @@ fn probe_mkdir(mount_path: &Utf8PathBuf, log: &mut Log) -> bool {
     if ret == 0 {
         // mkdir succeeded — nothing mounted, clean up the dir we just created
         unsafe { libc::rmdir(path.as_ptr()) };
-        log.record("mkdir: ok (nothing mounted)");
+        log.ok("mkdir: ok (nothing mounted)");
         false
     } else {
         let errno = std::io::Error::last_os_error();
         if errno.raw_os_error() == Some(libc::EBUSY) {
-            log.record("mkdir: EBUSY (something is mounted)");
+            log.fail("mkdir: EBUSY (something is mounted)");
             true
         } else if errno.raw_os_error() == Some(libc::EEXIST) {
-            log.record("mkdir: EEXIST (directory exists, nothing mounted)");
+            log.info("mkdir: EEXIST (directory exists, nothing mounted)");
             false
         } else {
-            log.record(format!("mkdir: {errno}"));
+            log.fail(format!("mkdir: {errno}"));
             false
         }
     }
@@ -134,7 +134,7 @@ async fn probe_df(candidates: &[String], log: &mut Log) -> bool {
     let output = match Command::new("df").output().await {
         Ok(output) => output,
         Err(e) => {
-            log.record(format!("df: failed to run: {e}"));
+            log.fail(format!("df: failed to run: {e}"));
             return false;
         }
     };
@@ -142,11 +142,11 @@ async fn probe_df(candidates: &[String], log: &mut Log) -> bool {
     let stdout = String::from_utf8_lossy(&output.stdout);
     for candidate in candidates {
         if stdout.lines().any(|line| line.contains(candidate.as_str())) {
-            log.record(format!("df: found mount matching {candidate}"));
+            log.info(format!("df: found mount matching {candidate}"));
             return true;
         }
     }
-    log.record("df: no vixenfs mount found");
+    log.info("df: no vixenfs mount found");
     false
 }
 
@@ -155,7 +155,7 @@ async fn probe_pgrep(log: &mut Log) -> bool {
     let output = match Command::new("pgrep").args(["-x", "VixenFS"]).output().await {
         Ok(output) => output,
         Err(e) => {
-            log.record(format!("pgrep: failed to run: {e}"));
+            log.fail(format!("pgrep: failed to run: {e}"));
             return false;
         }
     };
@@ -163,9 +163,9 @@ async fn probe_pgrep(log: &mut Log) -> bool {
     let running = output.status.success() && !output.stdout.is_empty();
     if running {
         let pids = String::from_utf8_lossy(&output.stdout);
-        log.record(format!("pgrep: VixenFS running (pids: {})", pids.trim()));
+        log.info(format!("pgrep: VixenFS running (pids: {})", pids.trim()));
     } else {
-        log.record("pgrep: VixenFS not running");
+        log.info("pgrep: VixenFS not running");
     }
     running
 }
@@ -173,7 +173,7 @@ async fn probe_pgrep(log: &mut Log) -> bool {
 /// Read health.json via a sacrificial /bin/cat process with timeout.
 async fn probe_health(mount_path: &Utf8PathBuf, log: &mut Log) -> HealthProbe {
     let health_path = format!("{mount_path}/.vixenfs/health.json");
-    log.record(format!("reading {health_path} via /bin/cat"));
+    log.info(format!("reading {health_path} via /bin/cat"));
 
     let mut child = match Command::new("/bin/cat")
         .arg(&health_path)
@@ -183,7 +183,7 @@ async fn probe_health(mount_path: &Utf8PathBuf, log: &mut Log) -> HealthProbe {
     {
         Ok(child) => child,
         Err(e) => {
-            log.record(format!("/bin/cat: failed to spawn: {e}"));
+            log.fail(format!("/bin/cat: failed to spawn: {e}"));
             return HealthProbe::Failed(e.to_string());
         }
     };
@@ -194,11 +194,11 @@ async fn probe_health(mount_path: &Utf8PathBuf, log: &mut Log) -> HealthProbe {
             let stderr = read_pipe(child.stderr.take()).await;
             if status.success() {
                 let json = String::from_utf8_lossy(&stdout).to_string();
-                log.record(format!("health.json: {json}"));
+                log.ok(format!("health.json: {json}"));
                 HealthProbe::Ok(json)
             } else {
                 let msg = String::from_utf8_lossy(&stderr);
-                log.record(format!(
+                log.fail(format!(
                     "health.json: cat failed (exit={status}): {}",
                     msg.trim()
                 ));
@@ -206,12 +206,12 @@ async fn probe_health(mount_path: &Utf8PathBuf, log: &mut Log) -> HealthProbe {
             }
         }
         Ok(Err(e)) => {
-            log.record(format!("health.json: cat error: {e}"));
+            log.fail(format!("health.json: cat error: {e}"));
             HealthProbe::Failed(e.to_string())
         }
         Err(_) => {
             // Timed out — kill the sacrificial process
-            log.record("health.json: /bin/cat timed out (mount is zombied), killing");
+            log.fail("health.json: /bin/cat timed out (mount is zombied), killing");
             let _ = child.kill().await;
             HealthProbe::Timeout
         }
