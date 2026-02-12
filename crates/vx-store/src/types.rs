@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use camino::Utf8PathBuf;
-use peeps::locks::DiagnosticAsyncMutex;
+use peeps::locks::DiagnosticMutex;
 use tokio::sync::Semaphore;
 use vx_store_proto::{BlobRef, RustComponent, ToolchainSpecKey};
 
@@ -48,10 +48,10 @@ pub(crate) struct StoreServiceInner {
 
     /// Downloaded Rust toolchain component tarballs by (spec_key, component)
     pub(crate) rust_component_tarballs:
-        DiagnosticAsyncMutex<std::collections::HashMap<(ToolchainSpecKey, RustComponent), BlobRef>>,
+        DiagnosticMutex<std::collections::HashMap<(ToolchainSpecKey, RustComponent), BlobRef>>,
 
     /// Extracted Rust toolchain components by (spec_key, component)
-    pub(crate) rust_component_trees: DiagnosticAsyncMutex<
+    pub(crate) rust_component_trees: DiagnosticMutex<
         std::collections::HashMap<(ToolchainSpecKey, RustComponent), ExtractedRustComponent>,
     >,
 }

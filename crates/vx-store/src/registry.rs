@@ -49,16 +49,13 @@ type InflightFuture = Arc<tokio::sync::OnceCell<EnsureRegistryCrateResult>>;
 ///
 /// Same design as ToolchainManager: inflight entries are never removed.
 pub struct RegistryManager {
-    inflight: peeps::locks::DiagnosticAsyncMutex<HashMap<RegistrySpecKey, InflightFuture>>,
+    inflight: peeps::locks::DiagnosticMutex<HashMap<RegistrySpecKey, InflightFuture>>,
 }
 
 impl RegistryManager {
     pub fn new() -> Self {
         Self {
-            inflight: peeps::locks::DiagnosticAsyncMutex::new(
-                "store/registry_inflight",
-                HashMap::new(),
-            ),
+            inflight: peeps::locks::DiagnosticMutex::new("store/registry_inflight", HashMap::new()),
         }
     }
 
@@ -81,7 +78,7 @@ impl RegistryManager {
 
         // Get or create inflight entry
         let cell = {
-            let mut inflight = self.inflight.lock().await;
+            let mut inflight = self.inflight.lock();
             inflight
                 .entry(spec_key)
                 .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))

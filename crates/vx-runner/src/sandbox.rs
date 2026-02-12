@@ -134,11 +134,11 @@ pub async fn run_sandboxed_command(
 
     // Merge stdout and stderr into a single combined output buffer.
     // Also track the latest line for progress reporting.
-    let combined_output = std::sync::Arc::new(peeps::locks::DiagnosticAsyncMutex::new(
+    let combined_output = std::sync::Arc::new(peeps::locks::DiagnosticMutex::new(
         "runner/combined_output",
         String::new(),
     ));
-    let latest_line = std::sync::Arc::new(peeps::locks::DiagnosticAsyncMutex::new(
+    let latest_line = std::sync::Arc::new(peeps::locks::DiagnosticMutex::new(
         "runner/latest_line",
         String::new(),
     ));
@@ -156,9 +156,9 @@ pub async fn run_sandboxed_command(
                     Ok(0) => break,
                     Ok(_) => {
                         let trimmed = line.trim_end().to_string();
-                        combined_for_stdout.lock().await.push_str(&line);
+                        combined_for_stdout.lock().push_str(&line);
                         if !trimmed.is_empty() {
-                            *latest_for_stdout.lock().await = trimmed;
+                            *latest_for_stdout.lock() = trimmed;
                         }
                     }
                     Err(_) => break,
@@ -178,9 +178,9 @@ pub async fn run_sandboxed_command(
                     Ok(0) => break,
                     Ok(_) => {
                         let trimmed = line.trim_end().to_string();
-                        combined_for_stderr.lock().await.push_str(&line);
+                        combined_for_stderr.lock().push_str(&line);
                         if !trimmed.is_empty() {
-                            *latest_for_stderr.lock().await = trimmed;
+                            *latest_for_stderr.lock() = trimmed;
                         }
                     }
                     Err(_) => break,
@@ -197,7 +197,7 @@ pub async fn run_sandboxed_command(
             let mut interval = tokio::time::interval(PROGRESS_TICK_INTERVAL);
             loop {
                 interval.tick().await;
-                let current = latest_for_tick.lock().await.clone();
+                let current = latest_for_tick.lock().clone();
                 if current != last_sent && !current.is_empty() {
                     let _ = progress
                         .send(&StoreProgress {
@@ -251,7 +251,7 @@ pub async fn run_sandboxed_command(
             }
             let _ = stdout_task.await;
             let _ = stderr_task.await;
-            let output = combined_output.lock().await.clone();
+            let output = combined_output.lock().clone();
             Ok(CommandOutput {
                 exit_status,
                 combined_output: output,
@@ -281,7 +281,7 @@ pub async fn run_sandboxed_command(
 
             let _ = stdout_task.await;
             let _ = stderr_task.await;
-            let partial = combined_output.lock().await.clone();
+            let partial = combined_output.lock().clone();
 
             Err(CommandError::TimedOut {
                 action_desc: action_desc.to_string(),
@@ -304,7 +304,7 @@ pub async fn run_sandboxed_command(
 
             let _ = stdout_task.await;
             let _ = stderr_task.await;
-            let partial = combined_output.lock().await.clone();
+            let partial = combined_output.lock().clone();
 
             Err(CommandError::Cancelled {
                 action_desc: action_desc.to_string(),

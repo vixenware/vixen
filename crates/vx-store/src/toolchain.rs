@@ -304,13 +304,13 @@ type InflightFuture = Arc<tokio::sync::OnceCell<EnsureToolchainResult>>;
 
 /// Manages in-flight toolchain acquisitions with deduplication.
 pub(crate) struct ToolchainManager {
-    inflight: peeps::locks::DiagnosticAsyncMutex<HashMap<ToolchainSpecKey, InflightFuture>>,
+    inflight: peeps::locks::DiagnosticMutex<HashMap<ToolchainSpecKey, InflightFuture>>,
 }
 
 impl ToolchainManager {
     pub(crate) fn new() -> Self {
         Self {
-            inflight: peeps::locks::DiagnosticAsyncMutex::new(
+            inflight: peeps::locks::DiagnosticMutex::new(
                 "store/toolchain_inflight",
                 HashMap::new(),
             ),
@@ -334,7 +334,7 @@ impl ToolchainManager {
         }
 
         let cell = {
-            let mut inflight = self.inflight.lock().await;
+            let mut inflight = self.inflight.lock();
             inflight
                 .entry(spec_key)
                 .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
@@ -708,14 +708,14 @@ impl StoreService {
         // Track per-file info: content_hash -> (blob_node, size)
         // This lets us build DirectoryNode entries after extraction.
         let rustc_file_info: Arc<
-            peeps::locks::DiagnosticAsyncMutex<HashMap<Blake3Hash, ExtractedFileInfo>>,
-        > = Arc::new(peeps::locks::DiagnosticAsyncMutex::new(
+            peeps::locks::DiagnosticMutex<HashMap<Blake3Hash, ExtractedFileInfo>>,
+        > = Arc::new(peeps::locks::DiagnosticMutex::new(
             "store/rustc_file_info",
             HashMap::new(),
         ));
         let std_file_info: Arc<
-            peeps::locks::DiagnosticAsyncMutex<HashMap<Blake3Hash, ExtractedFileInfo>>,
-        > = Arc::new(peeps::locks::DiagnosticAsyncMutex::new(
+            peeps::locks::DiagnosticMutex<HashMap<Blake3Hash, ExtractedFileInfo>>,
+        > = Arc::new(peeps::locks::DiagnosticMutex::new(
             "store/std_file_info",
             HashMap::new(),
         ));
@@ -759,7 +759,7 @@ impl StoreService {
                             None
                         };
                         // Track info
-                        rustc_info.lock().await.insert(
+                        rustc_info.lock().insert(
                             content_hash.0,
                             ExtractedFileInfo {
                                 content_hash,
@@ -803,7 +803,7 @@ impl StoreService {
                         } else {
                             None
                         };
-                        std_info.lock().await.insert(
+                        std_info.lock().insert(
                             content_hash.0,
                             ExtractedFileInfo {
                                 content_hash,
@@ -890,11 +890,11 @@ impl StoreService {
 
         // Count unique chunks
         let rustc_unique_chunks = {
-            let info = rustc_file_info.lock().await;
+            let info = rustc_file_info.lock();
             info.len() as u32
         };
         let std_unique_chunks = {
-            let info = std_file_info.lock().await;
+            let info = std_file_info.lock();
             info.len() as u32
         };
 
@@ -1020,7 +1020,7 @@ impl StoreService {
         }
 
         let key = (spec_key, component.clone());
-        if let Some(blob_ref) = self.rust_component_tarballs.lock().await.get(&key).cloned() {
+        if let Some(blob_ref) = self.rust_component_tarballs.lock().get(&key).cloned() {
             return EnsureRustToolchainComponentResult {
                 spec_key: Some(spec_key),
                 component,
@@ -1108,7 +1108,6 @@ impl StoreService {
 
         self.rust_component_tarballs
             .lock()
-            .await
             .insert((spec_key, component.clone()), tarball_ref.clone());
 
         EnsureRustToolchainComponentResult {
@@ -1183,7 +1182,6 @@ impl StoreService {
         if let Some(existing) = self
             .rust_component_trees
             .lock()
-            .await
             .get(&extracted_key)
             .cloned()
         {
@@ -1227,8 +1225,8 @@ impl StoreService {
         };
 
         // Track per-file info during extraction
-        let file_info: Arc<peeps::locks::DiagnosticAsyncMutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
-            Arc::new(peeps::locks::DiagnosticAsyncMutex::new(
+        let file_info: Arc<peeps::locks::DiagnosticMutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
+            Arc::new(peeps::locks::DiagnosticMutex::new(
                 "store/file_info",
                 HashMap::new(),
             ));
@@ -1260,7 +1258,7 @@ impl StoreService {
                 } else {
                     None
                 };
-                file_info_clone.lock().await.insert(
+                file_info_clone.lock().insert(
                     content_hash.0,
                     ExtractedFileInfo {
                         content_hash,
@@ -1308,9 +1306,9 @@ impl StoreService {
             RustComponent::Cargo => unreachable!("cargo is filtered above"),
         };
 
-        let unique_chunks = file_info.lock().await.len() as u32;
+        let unique_chunks = file_info.lock().len() as u32;
 
-        self.rust_component_trees.lock().await.insert(
+        self.rust_component_trees.lock().insert(
             extracted_key,
             ExtractedRustComponent {
                 tree_root,
@@ -1367,11 +1365,11 @@ impl StoreService {
         }
 
         let rustc_component = {
-            let lock = self.rust_component_trees.lock().await;
+            let lock = self.rust_component_trees.lock();
             lock.get(&(spec_key, RustComponent::Rustc)).cloned()
         };
         let rust_std_component = {
-            let lock = self.rust_component_trees.lock().await;
+            let lock = self.rust_component_trees.lock();
             lock.get(&(spec_key, RustComponent::RustStd)).cloned()
         };
 
@@ -1821,46 +1819,49 @@ impl StoreService {
 async fn tree_manifest_to_merkle(
     service: &StoreService,
     tree: &vx_store_proto::TreeManifest,
-    file_info: &Arc<peeps::locks::DiagnosticAsyncMutex<HashMap<Blake3Hash, ExtractedFileInfo>>>,
+    file_info: &Arc<peeps::locks::DiagnosticMutex<HashMap<Blake3Hash, ExtractedFileInfo>>>,
 ) -> Result<(NodeHash, u64), String> {
     use vx_store_proto::TreeEntryKind;
 
-    let info = file_info.lock().await;
+    let (files, symlinks) = {
+        let info = file_info.lock();
 
-    let mut files: Vec<(String, ExtractedFileInfo)> = Vec::new();
-    let mut symlinks: Vec<(String, String)> = Vec::new();
+        let mut files: Vec<(String, ExtractedFileInfo)> = Vec::new();
+        let mut symlinks: Vec<(String, String)> = Vec::new();
 
-    for entry in &tree.entries {
-        match &entry.kind {
-            TreeEntryKind::File {
-                blob,
-                size,
-                executable,
-            } => {
-                let extracted = info
-                    .get(blob)
-                    .ok_or_else(|| format!("file info not found for blob {}", blob.to_hex()))?;
-                files.push((
-                    entry.path.clone(),
-                    ExtractedFileInfo {
-                        content_hash: extracted.content_hash,
-                        blob_node: extracted.blob_node,
-                        size: *size,
-                        executable: *executable,
-                    },
-                ));
-            }
-            TreeEntryKind::Symlink { target } => {
-                symlinks.push((entry.path.clone(), target.clone()));
-            }
-            TreeEntryKind::Directory => {
-                // Empty directories — these become empty DirectoryNode children
-                // if they have no files. The build_merkle_tree function handles
-                // this naturally by creating empty entry lists.
+        for entry in &tree.entries {
+            match &entry.kind {
+                TreeEntryKind::File {
+                    blob,
+                    size,
+                    executable,
+                } => {
+                    let extracted = info
+                        .get(blob)
+                        .ok_or_else(|| format!("file info not found for blob {}", blob.to_hex()))?;
+                    files.push((
+                        entry.path.clone(),
+                        ExtractedFileInfo {
+                            content_hash: extracted.content_hash,
+                            blob_node: extracted.blob_node,
+                            size: *size,
+                            executable: *executable,
+                        },
+                    ));
+                }
+                TreeEntryKind::Symlink { target } => {
+                    symlinks.push((entry.path.clone(), target.clone()));
+                }
+                TreeEntryKind::Directory => {
+                    // Empty directories — these become empty DirectoryNode children
+                    // if they have no files. The build_merkle_tree function handles
+                    // this naturally by creating empty entry lists.
+                }
             }
         }
-    }
 
-    drop(info);
+        (files, symlinks)
+    };
+
     build_merkle_tree(service, &files, &symlinks).await
 }

@@ -322,7 +322,7 @@ async fn async_main() -> Result<()> {
 
     // Bind listener BEFORE booting services — so vx CLI can connect immediately.
     // RPC calls will wait for boot to complete (or return the boot error).
-    let listener = Listener::bind(&args.bind).await?;
+    let mut listener = Listener::bind(&args.bind).await?;
     tracing::info!("Daemon listening on {}", args.bind);
 
     // Set up boot gate — root connections get Boot service only.

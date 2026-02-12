@@ -122,7 +122,7 @@ async fn async_main() -> Result<()> {
     let bind_endpoint = Endpoint::parse(&args.listen)?;
 
     // Bind listener BEFORE booting — so parent can connect immediately.
-    let runner_listener = Listener::bind(&bind_endpoint).await?;
+    let mut runner_listener = Listener::bind(&bind_endpoint).await?;
     tracing::info!("Runner RPC bound on {}", bind_endpoint);
 
     // Set up boot gate — root connections get Boot service only.
@@ -302,7 +302,7 @@ pub struct RunnerServiceInner {
     /// Stores Ok(prefix_id) or Err(message) — errors are cached too, since a missing
     /// toolchain manifest won't fix itself without a new runner session.
     #[allow(clippy::type_complexity)]
-    toolchain_flights: peeps::locks::DiagnosticAsyncMutex<
+    toolchain_flights: peeps::locks::DiagnosticMutex<
         HashMap<Blake3Hash, Arc<tokio::sync::OnceCell<Result<String, String>>>>,
     >,
 
@@ -334,7 +334,7 @@ impl RunnerService {
             inner: Arc::new(RunnerServiceInner {
                 cas,
                 vfs,
-                toolchain_flights: peeps::locks::DiagnosticAsyncMutex::new(
+                toolchain_flights: peeps::locks::DiagnosticMutex::new(
                     "runner/toolchain_flights",
                     HashMap::new(),
                 ),
@@ -404,7 +404,7 @@ impl RunnerService {
     ) -> RunnerResult<String> {
         // Single-flight: concurrent callers for the same toolchain coalesce into one.
         let cell = {
-            let mut flights = self.toolchain_flights.lock().await;
+            let mut flights = self.toolchain_flights.lock();
             flights
                 .entry(toolchain_manifest_hash)
                 .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))

@@ -93,7 +93,7 @@ async fn async_main() -> Result<()> {
     let bind = Endpoint::parse(&args.listen)?;
 
     // Bind listener BEFORE booting — so parent can connect immediately.
-    let listener = Listener::bind(&bind).await?;
+    let mut listener = Listener::bind(&bind).await?;
     tracing::info!("store listening on {}", bind);
 
     // Set up boot gate — root connections get Boot service only.
@@ -224,11 +224,11 @@ impl StoreService {
                 toolchain_manager: ToolchainManager::new(),
                 registry_manager: RegistryManager::new(),
                 download_semaphore: Arc::new(tokio::sync::Semaphore::new(32)),
-                rust_component_tarballs: peeps::locks::DiagnosticAsyncMutex::new(
+                rust_component_tarballs: peeps::locks::DiagnosticMutex::new(
                     "store/rust_component_tarballs",
                     std::collections::HashMap::new(),
                 ),
-                rust_component_trees: peeps::locks::DiagnosticAsyncMutex::new(
+                rust_component_trees: peeps::locks::DiagnosticMutex::new(
                     "store/rust_component_trees",
                     std::collections::HashMap::new(),
                 ),

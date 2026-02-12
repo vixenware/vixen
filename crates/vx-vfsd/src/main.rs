@@ -261,7 +261,7 @@ async fn async_main() -> Result<()> {
 
     // Bind RPC listener BEFORE booting — so parent can connect immediately.
     let listen_endpoint = Endpoint::parse(&args.listen)?;
-    let vfsd_listener = Listener::bind(&listen_endpoint).await.map_err(|e| {
+    let mut vfsd_listener = Listener::bind(&listen_endpoint).await.map_err(|e| {
         format!(
             "Failed to bind vx-vfsd RPC socket at {}: {}",
             listen_endpoint, e
