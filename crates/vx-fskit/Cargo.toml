@@ -1,0 +1,19 @@
+[package]
+name = "vx-fskit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+camino = { workspace = true }
+jiff = { workspace = true }
+facet = { workspace = true }
+facet-json = { workspace = true }

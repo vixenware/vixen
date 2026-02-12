@@ -3098,6 +3098,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-fskit"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "facet",
+ "facet-json",
+ "jiff",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "vx-fuse-stress"
 version = "0.1.0"
 dependencies = [
