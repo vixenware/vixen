@@ -219,7 +219,7 @@ where
         .await
         {
             Ok(Ok(_)) => {
-                tracing::info!("{binary_name} is ready at {endpoint}");
+                tracing::debug!("{binary_name} is ready at {endpoint}");
                 return Ok(attempt_caller);
             }
             Ok(Err(e)) => {

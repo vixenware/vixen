@@ -503,9 +503,11 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
             Err(error) => {
                 let mut msg = format!("{error}");
                 for diagnostic in error.diagnostics() {
-                    msg.push_str(&format!("\n  {}: {}", diagnostic.code, diagnostic.summary));
                     if let Some(ref detail) = diagnostic.detail {
-                        msg.push_str(&format!("\n    {detail}"));
+                        // Indent each line of the detail log
+                        for line in detail.lines() {
+                            msg.push_str(&format!("\n  {line}"));
+                        }
                     }
                 }
                 return Err(msg.into());
