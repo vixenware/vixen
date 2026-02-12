@@ -107,7 +107,7 @@ pub fn unmount(mount_path: &Utf8PathBuf) {
 }
 
 /// Dump kernel FUSE state and thread stacks to stderr.
-pub fn dump_platform_diagnostics() {
+pub async fn dump_platform_diagnostics(_mount_path: &Utf8PathBuf) {
     eprintln!("\n--- Kernel FUSE state ---");
 
     if let Ok(entries) = std::fs::read_dir("/sys/fs/fuse/connections") {
@@ -140,9 +140,9 @@ pub fn should_create_mount_dir(_mount_path: &Utf8PathBuf) -> bool {
     true
 }
 
-/// Collect diagnostics when the VFS smoke test fails.
+/// Collect comprehensive VFS diagnostics when any mount operation fails.
 /// Returns all diagnostics as a single string so the caller can print it atomically.
-pub async fn collect_smoke_test_diagnostics(mount_path: &Utf8PathBuf) -> String {
+pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
     use owo_colors::OwoColorize;
     use std::fmt::Write;
 

@@ -274,7 +274,7 @@ async fn async_main() -> Result<()> {
     }
     let vfs = Arc::new(CasVfs::new(cas.clone(), disk_cache_dir, args.mount.clone()));
 
-    // 3. Bind RPC listener before FUSE mount
+    // 3. Bind RPC listener before mount
     let listen_endpoint = Endpoint::parse(&args.listen)?;
     let vfsd_listener = Listener::bind(&listen_endpoint).await.map_err(|e| {
         format!(
@@ -288,124 +288,134 @@ async fn async_main() -> Result<()> {
     // Print the actual address to stdout so vxd can parse it
     println!("{}", actual_addr);
 
-    // 4. Clean up stuck mounts BEFORE creating directory
-    platform::cleanup_stuck_mount(&args.mount).await?;
+    // 4–6. Clean up, create mount dir, mount VFS, smoke test.
+    // If anything fails, collect diagnostics before bailing.
+    let mount_result: Result<()> = async {
+        // 4. Clean up stuck mounts BEFORE creating directory
+        platform::cleanup_stuck_mount(&args.mount).await?;
 
-    // 5. Ensure mount directory exists (skip for system-managed paths)
-    if platform::should_create_mount_dir(&args.mount) {
-        tokio::fs::create_dir_all(args.mount.as_std_path())
-            .await
-            .map_err(|e| format!("failed to create mount directory {}: {}", args.mount, e))?;
+        // 5. Ensure mount directory exists (skip for system-managed paths)
+        if platform::should_create_mount_dir(&args.mount) {
+            tokio::fs::create_dir_all(args.mount.as_std_path())
+                .await
+                .map_err(|e| format!("failed to create mount directory {}: {}", args.mount, e))?;
+        }
+
+        // 6. Mount VFS
+        tracing::info!("Mounting VFS at {}", args.mount);
+        let shared_vfs = SharedVfs::new(vfs.clone());
+        let canary = shared_vfs.canary.clone();
+        match vx_vfs::mount(
+            VfsConfig {
+                mount_path: args.mount.clone(),
+            },
+            shared_vfs,
+        )
+        .await
+        {
+            Ok(VfsStart::Mounted {
+                mount_path,
+                mut vfs_dead,
+                ..
+            }) => {
+                tracing::info!("VFS mounted at {}", mount_path);
+
+                // Smoke test: read the canary file through the real filesystem.
+                // This proves the FUSE/FSKit mount is actually serving files.
+                // Retry up to 10 times with 250ms delay — the FSKit extension
+                // may need a moment to become ready after the mount syscall returns.
+                let canary_fs_path = mount_path.join(&canary.name);
+                tracing::info!("Trying to read canary from {canary_fs_path}");
+
+                const MAX_ATTEMPTS: u32 = 10;
+                const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+                let smoke_timeout = std::time::Duration::from_secs(5);
+
+                let mut smoke_err = None;
+                for attempt in 1..=MAX_ATTEMPTS {
+                    let read_result = tokio::time::timeout(
+                        smoke_timeout,
+                        tokio::fs::read(canary_fs_path.as_std_path()),
+                    )
+                    .await;
+
+                    match read_result {
+                        Ok(Ok(actual)) if actual == canary.content => {
+                            tracing::info!(attempt, "VFS smoke test passed");
+                            smoke_err = None;
+                            break;
+                        }
+                        Ok(Ok(actual)) => {
+                            smoke_err = Some(format!(
+                                "content mismatch at {} (expected {} bytes, got {} bytes)",
+                                canary_fs_path,
+                                canary.content.len(),
+                                actual.len(),
+                            ));
+                        }
+                        Ok(Err(e)) => {
+                            smoke_err = Some(format!("failed to read {}: {e}", canary_fs_path));
+                        }
+                        Err(_) => {
+                            smoke_err = Some(format!(
+                                "timed out after {smoke_timeout:?} reading {} — mount is not responding",
+                                canary_fs_path,
+                            ));
+                        }
+                    }
+
+                    if attempt < MAX_ATTEMPTS {
+                        tracing::debug!(
+                            attempt,
+                            error = smoke_err.as_deref().unwrap_or("unknown"),
+                            "canary read failed, retrying"
+                        );
+                        tokio::time::sleep(RETRY_DELAY).await;
+                    }
+                }
+
+                if let Some(reason) = smoke_err {
+                    return Err(format!("VFS smoke test failed: {reason}").into());
+                }
+
+                // Set up platform signal handler for diagnostics
+                platform::setup_diagnostics_signal(vfs.clone(), mount_path.clone());
+
+                // Spawn watcher for VFS death
+                let vfs_mount_path = mount_path.clone();
+                peeps::tasks::spawn_tracked("vfs_death_watcher", async move {
+                    // Wait for VFS to report death
+                    loop {
+                        if vfs_dead.changed().await.is_err() || *vfs_dead.borrow() {
+                            break;
+                        }
+                    }
+                    tracing::error!("VFS session died unexpectedly at {}", vfs_mount_path);
+                    std::process::exit(1);
+                });
+            }
+            Ok(VfsStart::Unsupported { platform }) => {
+                return Err(format!("VFS not supported on platform {}", platform).into());
+            }
+            Err(error) => {
+                let mut msg = format!("VFS mount failed: {error}");
+                for diagnostic in error.diagnostics() {
+                    msg.push_str(&format!("\n  {}: {}", diagnostic.code, diagnostic.summary));
+                    if let Some(ref detail) = diagnostic.detail {
+                        msg.push_str(&format!("\n    {}", detail));
+                    }
+                }
+                return Err(msg.into());
+            }
+        }
+        Ok(())
     }
+    .await;
 
-    // 6. Mount VFS
-    tracing::info!("Mounting VFS at {}", args.mount);
-    let shared_vfs = SharedVfs::new(vfs.clone());
-    let canary = shared_vfs.canary.clone();
-    match vx_vfs::mount(
-        VfsConfig {
-            mount_path: args.mount.clone(),
-        },
-        shared_vfs,
-    )
-    .await
-    {
-        Ok(VfsStart::Mounted {
-            mount_path,
-            mut vfs_dead,
-            ..
-        }) => {
-            tracing::info!("VFS mounted at {}", mount_path);
-
-            // Smoke test: read the canary file through the real filesystem.
-            // This proves the FUSE/FSKit mount is actually serving files.
-            // Retry up to 10 times with 250ms delay — the FSKit extension
-            // may need a moment to become ready after the mount syscall returns.
-            let canary_fs_path = mount_path.join(&canary.name);
-            tracing::info!("Trying to read canary from {canary_fs_path}");
-
-            const MAX_ATTEMPTS: u32 = 10;
-            const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
-            let smoke_timeout = std::time::Duration::from_secs(5);
-
-            let mut smoke_err = None;
-            for attempt in 1..=MAX_ATTEMPTS {
-                let read_result = tokio::time::timeout(
-                    smoke_timeout,
-                    tokio::fs::read(canary_fs_path.as_std_path()),
-                )
-                .await;
-
-                match read_result {
-                    Ok(Ok(actual)) if actual == canary.content => {
-                        tracing::info!(attempt, "VFS smoke test passed");
-                        smoke_err = None;
-                        break;
-                    }
-                    Ok(Ok(actual)) => {
-                        smoke_err = Some(format!(
-                            "content mismatch at {} (expected {} bytes, got {} bytes)",
-                            canary_fs_path,
-                            canary.content.len(),
-                            actual.len(),
-                        ));
-                    }
-                    Ok(Err(e)) => {
-                        smoke_err = Some(format!("failed to read {}: {e}", canary_fs_path));
-                    }
-                    Err(_) => {
-                        smoke_err = Some(format!(
-                            "timed out after {smoke_timeout:?} reading {} — mount is not responding",
-                            canary_fs_path,
-                        ));
-                    }
-                }
-
-                if attempt < MAX_ATTEMPTS {
-                    tracing::debug!(
-                        attempt,
-                        error = smoke_err.as_deref().unwrap_or("unknown"),
-                        "canary read failed, retrying"
-                    );
-                    tokio::time::sleep(RETRY_DELAY).await;
-                }
-            }
-
-            if let Some(reason) = smoke_err {
-                let diagnostics = platform::collect_smoke_test_diagnostics(&mount_path).await;
-                eprintln!("VFS smoke test failed: {reason}\n{diagnostics}");
-                return Err("VFS is not usable, bailing out".into());
-            }
-
-            // Set up platform signal handler for diagnostics
-            platform::setup_diagnostics_signal(vfs.clone());
-
-            // Spawn watcher for VFS death
-            let vfs_mount_path = mount_path.clone();
-            peeps::tasks::spawn_tracked("vfs_death_watcher", async move {
-                // Wait for VFS to report death
-                loop {
-                    if vfs_dead.changed().await.is_err() || *vfs_dead.borrow() {
-                        break;
-                    }
-                }
-                tracing::error!("VFS session died unexpectedly at {}", vfs_mount_path);
-                std::process::exit(1);
-            });
-        }
-        Ok(VfsStart::Unsupported { platform }) => {
-            return Err(format!("VFS not supported on platform {}", platform).into());
-        }
-        Err(error) => {
-            eprintln!("VFS mount failed: {}", error);
-            for diagnostic in error.diagnostics() {
-                eprintln!("  {}: {}", diagnostic.code, diagnostic.summary);
-                if let Some(ref detail) = diagnostic.detail {
-                    eprintln!("    {}", detail);
-                }
-            }
-            return Err(format!("VFS mount failed: {}", error).into());
-        }
+    if let Err(error) = mount_result {
+        let diagnostics = platform::collect_vfs_diagnostics(&args.mount).await;
+        eprintln!("{error}\n{diagnostics}");
+        return Err(error);
     }
 
     // 7. Start accepting RPC connections

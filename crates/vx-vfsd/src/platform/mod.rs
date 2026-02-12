@@ -38,19 +38,14 @@ pub async fn run_sentinel(mount_path: &Utf8PathBuf) -> Result<()> {
 }
 
 /// Register platform signal handler for diagnostics dumps.
-pub fn setup_diagnostics_signal(vfs: Arc<CasVfs>) {
+pub fn setup_diagnostics_signal(vfs: Arc<CasVfs>, mount_path: Utf8PathBuf) {
     cfg_if::cfg_if! {
         if #[cfg(unix)] {
-            unix::setup_diagnostics_signal(vfs);
+            unix::setup_diagnostics_signal(vfs, mount_path);
         } else {
-            os::setup_diagnostics_signal(vfs);
+            os::setup_diagnostics_signal(vfs, mount_path);
         }
     }
-}
-
-/// Dump platform-specific VFS diagnostics to stderr.
-pub fn dump_platform_diagnostics() {
-    os::dump_platform_diagnostics();
 }
 
 /// Whether we should create the mount directory (false for system-managed paths).
@@ -58,8 +53,8 @@ pub fn should_create_mount_dir(mount_path: &Utf8PathBuf) -> bool {
     os::should_create_mount_dir(mount_path)
 }
 
-/// Collect diagnostics when the VFS smoke test fails.
+/// Collect comprehensive VFS diagnostics when any mount operation fails.
 /// Returns all diagnostics as a single string for atomic output.
-pub async fn collect_smoke_test_diagnostics(mount_path: &Utf8PathBuf) -> String {
-    os::collect_smoke_test_diagnostics(mount_path).await
+pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
+    os::collect_vfs_diagnostics(mount_path).await
 }

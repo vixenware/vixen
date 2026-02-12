@@ -211,14 +211,16 @@ pub fn unmount(mount_path: &Utf8PathBuf) {
     }
 }
 
-/// No additional platform diagnostics on macOS.
-pub fn dump_platform_diagnostics() {}
+/// Dump platform diagnostics to stderr.
+pub async fn dump_platform_diagnostics(mount_path: &Utf8PathBuf) {
+    eprint!("{}", collect_vfs_diagnostics(mount_path).await);
+}
 
 /// Collect comprehensive diagnostics when the VFS smoke test fails.
 ///
 /// Runs every check regardless of earlier failures — we want the full picture.
 /// Returns all diagnostics as a single string so the caller can print it atomically.
-pub async fn collect_smoke_test_diagnostics(mount_path: &Utf8PathBuf) -> String {
+pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
     use owo_colors::OwoColorize;
     use std::fmt::Write;
     use tokio::process::Command;
