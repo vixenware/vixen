@@ -100,10 +100,6 @@ pub enum VxdError {
 
     #[error("cache key computation failed: {0}")]
     CacheKey(String),
-
-    // === Boot Errors ===
-    #[error("service boot failed: {0}")]
-    BootFailed(String),
 }
 
 /// Result type for daemon operations.

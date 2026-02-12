@@ -17,8 +17,10 @@ impl CliContext {
             CliMode::Json
         } else if cli.no_tui || !std::io::stdout().is_terminal() {
             CliMode::Text
-        } else {
+        } else if matches!(cli.command, crate::cli::CliCommand::Build(_)) {
             CliMode::Tui(tui::TuiHandle::new())
+        } else {
+            CliMode::Text
         };
         let strat = DaemonStrategy::from_env()?;
         Ok(Self { mode, strat })

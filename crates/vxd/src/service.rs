@@ -25,9 +25,10 @@ use vx_report::{
     RulePlanProvenance, RulePlanSource, RulePlanSourceId, RulePlanSpan, RulePlanValue,
 };
 use vx_rs::CrateGraph;
+use vx_runner_proto::RunnerClient;
 use vx_store_proto::{
     Blake3Hash, ChunkHash, ContentHash, DirEntryKind, EnsureStatus, NodeHash, RustChannel,
-    RustComponent, RustToolchainSpec, ServiceVersion,
+    RustComponent, RustToolchainSpec, ServiceVersion, StoreClient,
 };
 use vxd_proto::{
     ActionType, BuildRequest, BuildResult, ProgressListenerClient, UnpublishResult,
@@ -58,8 +59,8 @@ pub struct AcquiredToolchains {
 /// The daemon service implementation
 #[derive(Clone)]
 pub struct VxdService {
-    /// Boot state receiver — services may still be starting.
-    boot_state: tokio::sync::watch::Receiver<crate::BootState>,
+    store: Arc<StoreClient<crate::UpstreamCaller>>,
+    exec: Arc<RunnerClient<crate::UpstreamCaller>>,
 
     /// The host triple of the execd machine (used for toolchain selection + cache keys).
     exec_host_triple: String,
@@ -642,40 +643,13 @@ impl VxdService {
         &self.vx_home
     }
 
-    /// Wait for boot to complete and return the booted daemon.
-    /// Returns an error if boot failed.
-    async fn await_boot(&self) -> Result<crate::BootedDaemon> {
-        let mut rx = self.boot_state.clone();
-        loop {
-            {
-                let state = rx.borrow().clone();
-                match state {
-                    crate::BootState::Booting => {
-                        // Still booting — wait for change.
-                    }
-                    crate::BootState::Ready(daemon) => {
-                        return Ok(daemon);
-                    }
-                    crate::BootState::Failed(msg) => {
-                        return Err(VxdError::BootFailed(msg));
-                    }
-                }
-            }
-            // Wait for the next state change.
-            if rx.changed().await.is_err() {
-                return Err(VxdError::BootFailed(
-                    "boot state channel closed unexpectedly".to_string(),
-                ));
-            }
-        }
-    }
-
     /// Create a new daemon service
     pub async fn new(
         vx_home: Utf8PathBuf,
         exec_host_triple: String,
         spawn_tracker: Arc<DiagnosticAsyncMutex<SpawnTracker>>,
-        boot_state: tokio::sync::watch::Receiver<crate::BootState>,
+        store: Arc<StoreClient<crate::UpstreamCaller>>,
+        exec: Arc<RunnerClient<crate::UpstreamCaller>>,
     ) -> Self {
         let db = Database::new();
         let cache_path = vx_home.join("picante.cache");
@@ -727,7 +701,8 @@ impl VxdService {
         };
 
         Self {
-            boot_state,
+            store,
+            exec,
             exec_host_triple,
             vx_home,
             db: Arc::new(db),
@@ -752,10 +727,11 @@ impl VxdService {
     }
 
     /// Create a per-connection session with fresh ephemeral state.
-    /// Shared state (boot_state, DB, toolchains, WAL) is still shared via Arc.
+    /// Shared state (booted, DB, toolchains, WAL) is still shared via Arc.
     pub fn new_session(&self) -> Self {
         Self {
-            boot_state: self.boot_state.clone(),
+            store: self.store.clone(),
+            exec: self.exec.clone(),
             exec_host_triple: self.exec_host_triple.clone(),
             vx_home: self.vx_home.clone(),
             db: Arc::new(Database::new()),
@@ -797,8 +773,6 @@ impl VxdService {
 
     /// Ensure Rust toolchain exists in CAS. Returns info for cache keys.
     pub async fn ensure_rust_toolchain(&self, channel: RustChannel) -> Result<ToolchainInfo> {
-        let booted = self.await_boot().await?;
-
         // Check if already acquired
         {
             let toolchains = self.toolchains.lock().await;
@@ -849,8 +823,8 @@ impl VxdService {
             },
         );
 
-        let result = booted
-            .cas
+        let result = self
+            .store
             .ensure_rust_toolchain(spec, progress_tx)
             .await
             .map_err(|e| {
@@ -882,8 +856,8 @@ impl VxdService {
         })?;
 
         // Get manifest for version info (and toolchain_id on cache hit)
-        let manifest = booted
-            .cas
+        let manifest = self
+            .store
             .get_toolchain_manifest(manifest_hash)
             .await
             .map_err(|e| {
@@ -941,7 +915,6 @@ impl VxdService {
         _request: BuildRequest,
         vx_styx_path: camino::Utf8PathBuf,
     ) -> Result<BuildResult> {
-        let booted = self.await_boot().await?;
         use vx_project::{Language, VxManifest};
 
         // Parse vx.styx
@@ -998,8 +971,7 @@ impl VxdService {
                         let chunk_hash = ChunkHash(content_hash.0);
 
                         // Store as chunk
-                        booted
-                            .cas
+                        self.store
                             .put_chunk(chunk_hash, contents)
                             .await
                             .map_err(|e| VxdError::CasRpc(e.to_string()))?;
@@ -1017,7 +989,7 @@ impl VxdService {
 
                 // Build recursive Merkle directory tree
                 let (node_hash, _total_size) =
-                    crate::cas_tree::build_merkle_tree(&booted.cas, tree_files)
+                    crate::cas_tree::build_merkle_tree(&self.store, tree_files)
                         .await
                         .map_err(VxdError::CasRpc)?;
 
@@ -1175,8 +1147,8 @@ impl VxdService {
                 let mut executor = crate::executor::Executor::new(
                     graph,
                     progress_listener,
-                    booted.cas.clone(),
-                    booted.exec.clone(),
+                    self.store.clone(),
+                    self.exec.clone(),
                     self.db.clone(),
                     project_dir.to_path_buf(),
                     target_triple.clone(),
@@ -1243,9 +1215,6 @@ impl VxdService {
             info!("Found vx.styx, using unified project manifest");
             return self.build_from_vx_styx(request, vx_styx_path).await;
         }
-
-        // Wait for services to be ready before doing any real work.
-        let booted = self.await_boot().await?;
 
         // Fall back to Cargo.toml (Rust-only projects)
         // Build the crate graph with lockfile support
@@ -1638,8 +1607,8 @@ impl VxdService {
         let mut executor = Executor::new(
             action_graph,
             progress_listener,
-            booted.cas.clone(),
-            booted.exec.clone(),
+            self.store.clone(),
+            self.exec.clone(),
             self.db.clone(),
             graph.workspace_root.clone(),
             target_triple.clone(),
@@ -1759,22 +1728,11 @@ impl Vxd for VxdService {
         _cx: &roam::Context,
         cache_keys: Vec<vx_store_proto::CacheKey>,
     ) -> UnpublishResult {
-        let booted = match self.await_boot().await {
-            Ok(booted) => booted,
-            Err(e) => {
-                tracing::error!("cannot unpublish: {e}");
-                return UnpublishResult {
-                    removed: 0,
-                    not_found: cache_keys.len() as u32,
-                };
-            }
-        };
-
         let mut removed = 0u32;
         let mut not_found = 0u32;
 
         for key in cache_keys {
-            if booted.cas.unpublish(key).await.unwrap_or(false) {
+            if self.store.unpublish(key).await.unwrap_or(false) {
                 removed += 1;
             } else {
                 not_found += 1;
