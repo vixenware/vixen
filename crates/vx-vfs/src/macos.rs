@@ -42,7 +42,20 @@ where
         let log_detail = fskit_result
             .log
             .iter()
-            .map(|entry| format!("[{}] {}", entry.timestamp, entry.message))
+            .map(|entry| {
+                let t = &entry.timestamp;
+                format!(
+                    "[{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}] {}",
+                    t.year(),
+                    t.month(),
+                    t.day(),
+                    t.hour(),
+                    t.minute(),
+                    t.second(),
+                    t.millisecond(),
+                    entry.message,
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         return Err(VfsError::MountFailed {

@@ -161,14 +161,31 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
 
     if !mount_output.status.success() {
         let stderr = String::from_utf8_lossy(&mount_output.stderr);
+        let exit_code = mount_output.status.code();
         log.record(format!(
             "/sbin/mount: failed (exit={}): {}",
             mount_output.status,
             stderr.trim()
         ));
+
+        // Exit code 69 (EX_UNAVAILABLE) with "File system named vixenfs not found"
+        // means fskitd has a stale view of the extension — typically because the
+        // extension binary was rebuilt or updated. Killing fskitd forces a rescan.
+        let summary = if exit_code == Some(69) && stderr.contains("not found") {
+            "FSKit daemon has a stale view of the VixenFS extension (it was likely rebuilt). \
+             Kill fskitd to force a rescan."
+                .to_string()
+        } else {
+            format!(
+                "mount failed (exit {}): {}",
+                mount_output.status,
+                stderr.trim()
+            )
+        };
+
         return FsKitResult::failure(
             log.into_entries(),
-            format!("mount failed: {}", stderr.trim()),
+            summary,
             vec!["sudo killall fskitd fskit_agent".to_string()],
         );
     }

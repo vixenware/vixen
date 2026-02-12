@@ -83,9 +83,54 @@ async fn async_main() {
         if let CliMode::Tui(tui) = &cx.mode {
             tui.shutdown().await;
         }
-        eprintln!("vx: {e:#}");
+        print_fatal_error(&e);
         std::process::exit(1);
     }
+}
+
+fn print_fatal_error(error: &eyre::Report) {
+    use std::fmt::Write;
+
+    // Collect the error chain, stripping the repetitive "boot failed:" wrappers.
+    let mut causes: Vec<String> = Vec::new();
+    for cause in error.chain() {
+        let msg = cause.to_string();
+        if msg.starts_with("boot failed") {
+            continue;
+        }
+        causes.push(msg);
+    }
+    if causes.is_empty() {
+        causes.push(format!("{error:#}"));
+    }
+
+    let mut body = String::new();
+    let _ = writeln!(body, "{}", causes[0]);
+    for cause in &causes[1..] {
+        let _ = writeln!(body, "  caused by: {cause}");
+    }
+
+    let lines: Vec<&str> = body.lines().collect();
+    let max_width = lines.iter().map(|l| l.len()).max().unwrap_or(40).max(40);
+    let bar = "─".repeat(max_width + 2);
+
+    eprintln!();
+    eprintln!("{}", format!("┌{bar}┐").red().bold());
+    eprintln!(
+        "{}",
+        format!("│ {:max_width$} │", "FATAL ERROR").red().bold()
+    );
+    eprintln!("{}", format!("├{bar}┤").red().bold());
+    for line in &lines {
+        eprintln!(
+            "{}{}{}",
+            "│ ".red().bold(),
+            format!("{line:max_width$}"),
+            " │".red().bold(),
+        );
+    }
+    eprintln!("{}", format!("└{bar}┘").red().bold());
+    eprintln!();
 }
 
 // ─── CliContext methods ─────────────────────────────────────────────────────
