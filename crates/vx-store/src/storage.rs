@@ -68,7 +68,7 @@ impl FsStorage {
     }
 
     pub(crate) async fn put_chunk(&self, hash: &ChunkHash, data: &[u8]) -> io::Result<()> {
-        atomic_write(&self.chunk_path_for(hash), data).await
+        atomic_write(&self.chunk_path_for(hash), data, false).await
     }
 
     pub(crate) async fn has_chunk(&self, hash: &ChunkHash) -> io::Result<bool> {
@@ -91,7 +91,7 @@ impl FsStorage {
     }
 
     pub(crate) async fn put_node(&self, hash: &NodeHash, data: &[u8]) -> io::Result<()> {
-        atomic_write(&self.node_path_for(hash), data).await
+        atomic_write(&self.node_path_for(hash), data, false).await
     }
 
     pub(crate) async fn has_node(&self, hash: &NodeHash) -> io::Result<bool> {
@@ -305,7 +305,7 @@ impl CasStore {
         manifest_hash: &Blake3Hash,
     ) -> io::Result<()> {
         let dest = Self::cache_path(self.primary.root(), key);
-        atomic_write(&dest, manifest_hash.to_hex().as_bytes()).await
+        atomic_write(&dest, manifest_hash.to_hex().as_bytes(), false).await
     }
 
     pub(crate) async fn delete_cache(&self, key: &CacheKey) -> io::Result<bool> {

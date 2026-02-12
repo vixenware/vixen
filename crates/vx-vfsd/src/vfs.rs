@@ -387,7 +387,7 @@ impl CasVfs {
 
         // Write-through to L2
         if let Some(path) = self.chunk_cache_path(&chunk_hash.0)
-            && let Err(e) = vx_io::atomic_write_noclobber(&path, &data).await
+            && let Err(e) = vx_io::atomic_write(&path, &data, false).await
         {
             tracing::warn!(hash = %chunk_hash.0, error = %e, "L2 cache write-through failed");
         }
