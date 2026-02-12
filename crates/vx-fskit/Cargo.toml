@@ -17,3 +17,4 @@ camino = { workspace = true }
 jiff = { workspace = true }
 facet = { workspace = true }
 facet-json = { workspace = true }
+libc = { workspace = true }

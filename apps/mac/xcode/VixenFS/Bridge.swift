@@ -80,6 +80,70 @@ final class NoopDispatcher: ServiceDispatcher, @unchecked Sendable {
     }
 }
 
+actor ConnectionHealth {
+    static let shared = ConnectionHealth()
+
+    private var everConnected = false
+    private var currentlyConnected = false
+    private var connectedAt: Date?
+    private var disconnectedAt: Date?
+    private var disconnectReason: String?
+
+    func recordConnected() {
+        everConnected = true
+        currentlyConnected = true
+        connectedAt = Date()
+        disconnectedAt = nil
+        disconnectReason = nil
+    }
+
+    func recordDisconnected(reason: String) {
+        currentlyConnected = false
+        disconnectedAt = Date()
+        disconnectReason = reason
+    }
+
+    func toJSON() -> Data {
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        var json = "{\n"
+        json += "  \"connected\": \(currentlyConnected),\n"
+        json += "  \"ever_connected\": \(everConnected),\n"
+
+        if let t = connectedAt {
+            json += "  \"connected_at\": \"\(iso.string(from: t))\",\n"
+        } else {
+            json += "  \"connected_at\": null,\n"
+        }
+
+        if let t = disconnectedAt {
+            json += "  \"disconnected_at\": \"\(iso.string(from: t))\",\n"
+        } else {
+            json += "  \"disconnected_at\": null,\n"
+        }
+
+        if currentlyConnected, let start = connectedAt {
+            let seconds = Date().timeIntervalSince(start)
+            json += "  \"uptime_seconds\": \(String(format: "%.3f", seconds)),\n"
+        } else if let start = connectedAt, let end = disconnectedAt {
+            let seconds = end.timeIntervalSince(start)
+            json += "  \"uptime_seconds\": \(String(format: "%.3f", seconds)),\n"
+        } else {
+            json += "  \"uptime_seconds\": null,\n"
+        }
+
+        if let reason = disconnectReason {
+            json += "  \"disconnect_reason\": \"\(reason)\"\n"
+        } else {
+            json += "  \"disconnect_reason\": null\n"
+        }
+
+        json += "}\n"
+        return Data(json.utf8)
+    }
+}
+
 /// Global VFS client shared across the extension
 actor VfsConnection {
     static let shared = VfsConnection()
@@ -145,6 +209,7 @@ actor VfsConnection {
             await self?.handleDriverExit()
         }
         client = VfsClient(connection: handle, timeout: 5.0)
+        await ConnectionHealth.shared.recordConnected()
         log.info("Connected to \(url.absoluteString)")
         await LifecycleTrace.shared.mark(
             log, event: "vfs.connect.ready", details: "url=\(url.absoluteString)")
@@ -152,6 +217,7 @@ actor VfsConnection {
 
     func disconnect() async {
         await LifecycleTrace.shared.mark(log, event: "vfs.disconnect")
+        await ConnectionHealth.shared.recordDisconnected(reason: "requested")
         disconnectRequested = true
         debugEnabled = false
         driverTask?.cancel()
@@ -172,6 +238,7 @@ actor VfsConnection {
             log.info("VFS connection closed during normal unload")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.normal")
         } else {
+            await ConnectionHealth.shared.recordDisconnected(reason: "driver_exit")
             log.error("Connection to VFS server lost; waiting for FSKit to unload/deactivate")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.unexpected")
         }

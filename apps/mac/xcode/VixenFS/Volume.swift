@@ -143,11 +143,14 @@ final class Volume: FSVolume {
     // IDs chosen high to avoid collision with vx-vfsd's allocator (starts at 2).
     private static let vixenfsDirId: UInt64 = 0xFFFF_FFFF_FFFE_0001
     private static let statsJsonId: UInt64 = 0xFFFF_FFFF_FFFE_0002
+    private static let healthJsonId: UInt64 = 0xFFFF_FFFF_FFFE_0003
     private static let vixenfsDirName = ".vixenfs"
     private static let statsJsonName = "stats.json"
+    private static let healthJsonName = "health.json"
 
     private func isVirtualItem(_ itemId: UInt64) -> Bool {
         itemId == Volume.vixenfsDirId || itemId == Volume.statsJsonId
+            || itemId == Volume.healthJsonId
     }
 
     private func vixenfsDirAttributes() -> FSItem.Attributes {
@@ -166,6 +169,19 @@ final class Volume: FSVolume {
         let data = await readTelemetry.toJSON()
         return FSItem.Attributes.fromVfs(
             itemId: Volume.statsJsonId,
+            parentId: Volume.vixenfsDirId,
+            itemType: .file,
+            size: UInt64(data.count),
+            modifiedTime: 0,
+            createdTime: 0,
+            mode: 0o444
+        )
+    }
+
+    private func healthJsonAttributes() async -> FSItem.Attributes {
+        let data = await ConnectionHealth.shared.toJSON()
+        return FSItem.Attributes.fromVfs(
+            itemId: Volume.healthJsonId,
             parentId: Volume.vixenfsDirId,
             itemType: .file,
             size: UInt64(data.count),
@@ -339,6 +355,11 @@ extension Volume: FSVolume.Operations {
             item.updateAttributes(attrs)
             return attrs
         }
+        if item.itemId == Volume.healthJsonId {
+            let attrs = await healthJsonAttributes()
+            item.updateAttributes(attrs)
+            return attrs
+        }
 
         let nowNs = DispatchTime.now().uptimeNanoseconds
         let snapshot = item.attributesSnapshot()
@@ -471,7 +492,20 @@ extension Volume: FSVolume.Operations {
             return (item, item.name)
         }
 
-        // Items under .vixenfs that aren't stats.json → ENOENT
+        // Virtual health.json under .vixenfs
+        if dirItem.itemId == Volume.vixenfsDirId && nameStr == Volume.healthJsonName {
+            let attrs = await healthJsonAttributes()
+            if let existing = getCachedItem(Volume.healthJsonId) {
+                existing.updateAttributes(attrs)
+                return (existing, existing.name)
+            }
+            let item = Item(
+                itemId: Volume.healthJsonId, name: Volume.healthJsonName, attributes: attrs)
+            cacheItem(item)
+            return (item, item.name)
+        }
+
+        // Items under .vixenfs that aren't known virtual files → ENOENT
         if dirItem.itemId == Volume.vixenfsDirId {
             throw fs_errorForPOSIXError(POSIXError.ENOENT.rawValue)
         }
@@ -645,19 +679,47 @@ extension Volume: FSVolume.Operations {
         let dirItem = try getItem(directory)
         log.debug("enumerateDirectory: itemId=\(dirItem.itemId) cookie=\(cookie.rawValue)")
 
-        // Virtual .vixenfs directory: list stats.json
+        // Virtual .vixenfs directory: list virtual files
         if dirItem.itemId == Volume.vixenfsDirId {
             if cookie.rawValue == 0 {
-                let attrs = await statsJsonAttributes()
+                let statsAttrs = await statsJsonAttributes()
                 let statsItem = Item(
-                    itemId: Volume.statsJsonId, name: Volume.statsJsonName, attributes: attrs)
+                    itemId: Volume.statsJsonId, name: Volume.statsJsonName, attributes: statsAttrs)
                 cacheItem(statsItem)
-                _ = packer.packEntry(
+                let shouldContinue = packer.packEntry(
                     name: FSFileName(string: Volume.statsJsonName),
                     itemType: .file,
-                    itemID: attrs.fileID,
+                    itemID: statsAttrs.fileID,
                     nextCookie: FSDirectoryCookie(1),
-                    attributes: attributes != nil ? attrs : nil
+                    attributes: attributes != nil ? statsAttrs : nil
+                )
+                if shouldContinue {
+                    let healthAttrs = await healthJsonAttributes()
+                    let healthItem = Item(
+                        itemId: Volume.healthJsonId, name: Volume.healthJsonName,
+                        attributes: healthAttrs)
+                    cacheItem(healthItem)
+                    _ = packer.packEntry(
+                        name: FSFileName(string: Volume.healthJsonName),
+                        itemType: .file,
+                        itemID: healthAttrs.fileID,
+                        nextCookie: FSDirectoryCookie(2),
+                        attributes: attributes != nil ? healthAttrs : nil
+                    )
+                }
+            }
+            if cookie.rawValue == 1 {
+                let healthAttrs = await healthJsonAttributes()
+                let healthItem = Item(
+                    itemId: Volume.healthJsonId, name: Volume.healthJsonName,
+                    attributes: healthAttrs)
+                cacheItem(healthItem)
+                _ = packer.packEntry(
+                    name: FSFileName(string: Volume.healthJsonName),
+                    itemType: .file,
+                    itemID: healthAttrs.fileID,
+                    nextCookie: FSDirectoryCookie(2),
+                    attributes: attributes != nil ? healthAttrs : nil
                 )
             }
             return FSDirectoryVerifier(0)
@@ -716,9 +778,14 @@ extension Volume: FSVolume.ReadWriteOperations {
         let item = try getItem(fsItem)
         log.debug("read: itemId=\(item.itemId) offset=\(offset) length=\(length)")
 
-        // Virtual stats.json: serve from ReadTelemetry
-        if item.itemId == Volume.statsJsonId {
-            let data = await readTelemetry.toJSON()
+        // Virtual files under .vixenfs: serve directly
+        if item.itemId == Volume.statsJsonId || item.itemId == Volume.healthJsonId {
+            let data: Data
+            if item.itemId == Volume.statsJsonId {
+                data = await readTelemetry.toJSON()
+            } else {
+                data = await ConnectionHealth.shared.toJSON()
+            }
             let start = min(Int(offset), data.count)
             let end = min(start + max(length, 0), data.count)
             let slice = data[start..<end]

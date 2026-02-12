@@ -3105,6 +3105,7 @@ dependencies = [
  "facet",
  "facet-json",
  "jiff",
+ "libc",
  "tokio",
  "tracing",
 ]
