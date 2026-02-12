@@ -501,7 +501,7 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
                 return Err(format!("VFS not supported on platform {platform}").into());
             }
             Err(error) => {
-                let mut msg = format!("VFS mount failed: {error}");
+                let mut msg = format!("{error}");
                 for diagnostic in error.diagnostics() {
                     msg.push_str(&format!("\n  {}: {}", diagnostic.code, diagnostic.summary));
                     if let Some(ref detail) = diagnostic.detail {
