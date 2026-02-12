@@ -30,6 +30,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use camino::Utf8PathBuf;
@@ -254,8 +255,17 @@ pub struct CasVfs {
     /// BlobNodes are immutable (content-addressed) so caching is unconditionally safe.
     /// Small: each entry is ~100 bytes × MAX_CHUNKS_PER_BLOB chunk entries.
     blobnode_cache: DiagnosticMutex<HashMap<NodeHash, Arc<BlobNode>>>,
+    /// Diagnostic tracker for CAS-backed file identity stability.
+    observed_identities: DiagnosticMutex<HashMap<ItemId, ObservedIdentity>>,
     /// Mount path for reading back files written directly to disk (ProjFS on Windows).
     mount_path: Utf8PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ObservedIdentity {
+    cas_hash: Blake3Hash,
+    blob_node: Option<NodeHash>,
+    size: u64,
 }
 
 impl CasVfs {
@@ -294,6 +304,10 @@ impl CasVfs {
             next_id: AtomicU64::new(2), // 1=root
             disk_cache_dir,
             blobnode_cache: DiagnosticMutex::new("CasVfs::blobnode_cache", HashMap::new()),
+            observed_identities: DiagnosticMutex::new(
+                "CasVfs::observed_identities",
+                HashMap::new(),
+            ),
             mount_path,
         }
     }
@@ -540,6 +554,94 @@ impl CasVfs {
             }
         }
     }
+
+    fn size_checks_enabled() -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("VX_VFSD_VERIFY_SIZE")
+                .ok()
+                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        })
+    }
+
+    fn observe_identity(&self, item_id: ItemId, identity: ObservedIdentity, context: &'static str) {
+        let mut observed = self.observed_identities.lock();
+        if let Some(prev) = observed.get(&item_id).copied()
+            && prev != identity
+        {
+            tracing::error!(
+                item_id,
+                context,
+                prev_hash = %prev.cas_hash,
+                prev_blob_node = ?prev.blob_node,
+                prev_size = prev.size,
+                new_hash = %identity.cas_hash,
+                new_blob_node = ?identity.blob_node,
+                new_size = identity.size,
+                "CAS-backed file identity changed for existing item_id"
+            );
+        }
+        observed.insert(item_id, identity);
+    }
+
+    fn clear_observed_identity(&self, item_id: ItemId) {
+        self.observed_identities.lock().remove(&item_id);
+    }
+
+    async fn cas_truth_size(
+        &self,
+        cas_hash: Blake3Hash,
+        blob_node: Option<NodeHash>,
+    ) -> Result<u64, String> {
+        match blob_node {
+            None => {
+                let data = self.read_chunk_cached(ChunkHash(cas_hash)).await?;
+                Ok(data.len() as u64)
+            }
+            Some(blob_node_hash) => {
+                let blob = self.get_blobnode_cached(blob_node_hash).await?;
+                Ok(blob.total_size)
+            }
+        }
+    }
+
+    async fn verify_size_consistency(
+        &self,
+        item_id: ItemId,
+        identity: ObservedIdentity,
+        context: &'static str,
+    ) {
+        if !Self::size_checks_enabled() {
+            return;
+        }
+        match self
+            .cas_truth_size(identity.cas_hash, identity.blob_node)
+            .await
+        {
+            Ok(actual) if actual == identity.size => {}
+            Ok(actual) => {
+                tracing::error!(
+                    item_id,
+                    context,
+                    hash = %identity.cas_hash,
+                    blob_node = ?identity.blob_node,
+                    expected_size = identity.size,
+                    actual_size = actual,
+                    "item.size differs from CAS truth size"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    item_id,
+                    context,
+                    hash = %identity.cas_hash,
+                    blob_node = ?identity.blob_node,
+                    error = %e,
+                    "failed to compute CAS truth size for consistency check"
+                );
+            }
+        }
+    }
     /// Check if a prefix already exists
     pub async fn has_prefix(&self, prefix_id: &str) -> bool {
         self.state.lock().prefixes.contains_key(prefix_id)
@@ -740,6 +842,10 @@ impl CasVfs {
         }
 
         state.prefixes.remove(prefix_id);
+        drop(state);
+        for id in to_remove {
+            self.clear_observed_identity(id);
+        }
 
         tracing::debug!(prefix_id = %prefix_id, "removed action prefix");
     }
@@ -800,30 +906,59 @@ impl Vfs for CasVfs {
     async fn get_attributes(&self, _cx: &roam::Context, item_id: ItemId) -> GetAttributesResult {
         tracing::trace!(item_id, "VFS get_attributes");
 
-        let state = self.state.lock();
-        match state.items.get(&item_id) {
-            Some(item) => GetAttributesResult {
-                attrs: ItemAttributes {
-                    item_id: item.id,
-                    item_type: item.item_type,
-                    size: item.size,
-                    modified_time: 0,
-                    created_time: 0,
-                    mode: item.mode,
-                },
-                error: errno::OK,
-            },
-            None => GetAttributesResult {
-                attrs: ItemAttributes {
-                    item_id: 0,
-                    item_type: ItemType::File,
-                    size: 0,
-                    modified_time: 0,
-                    created_time: 0,
-                    mode: 0,
-                },
-                error: errno::ENOENT,
-            },
+        let (attrs, identity_to_check) = {
+            let state = self.state.lock();
+            match state.items.get(&item_id) {
+                Some(item) => {
+                    let identity_to_check = if item.item_type == ItemType::File
+                        && let Some(cas_hash) = item.cas_hash
+                        && !state.items.write_buffers.contains_key(&item_id)
+                    {
+                        Some(ObservedIdentity {
+                            cas_hash,
+                            blob_node: item.blob_node,
+                            size: item.size,
+                        })
+                    } else {
+                        None
+                    };
+                    (
+                        ItemAttributes {
+                            item_id: item.id,
+                            item_type: item.item_type,
+                            size: item.size,
+                            modified_time: 0,
+                            created_time: 0,
+                            mode: item.mode,
+                        },
+                        identity_to_check,
+                    )
+                }
+                None => {
+                    return GetAttributesResult {
+                        attrs: ItemAttributes {
+                            item_id: 0,
+                            item_type: ItemType::File,
+                            size: 0,
+                            modified_time: 0,
+                            created_time: 0,
+                            mode: 0,
+                        },
+                        error: errno::ENOENT,
+                    };
+                }
+            }
+        };
+
+        if let Some(identity) = identity_to_check {
+            self.observe_identity(item_id, identity, "get_attributes");
+            self.verify_size_consistency(item_id, identity, "get_attributes")
+                .await;
+        }
+
+        GetAttributesResult {
+            attrs,
+            error: errno::OK,
         }
     }
 
@@ -925,6 +1060,15 @@ impl Vfs for CasVfs {
             };
         };
 
+        let identity = ObservedIdentity {
+            cas_hash: hash,
+            blob_node,
+            size,
+        };
+        self.observe_identity(item_id, identity, "read");
+        self.verify_size_consistency(item_id, identity, "read")
+            .await;
+
         // Fetch via chunk-based CAS reads (SmallFile → single chunk, LargeFile → BlobNode)
         match self.read_cas_range(hash, blob_node, offset, len).await {
             Ok(data) => {
@@ -1006,6 +1150,8 @@ impl Vfs for CasVfs {
 
         // Update size on the item
         state.items.get_mut(&item_id).unwrap().size = new_size;
+        drop(state);
+        self.clear_observed_identity(item_id);
 
         WriteResult {
             bytes_written: data.len() as u64,
@@ -1099,6 +1245,8 @@ impl Vfs for CasVfs {
         }
 
         state.items.remove(item_id);
+        drop(state);
+        self.clear_observed_identity(item_id);
         VfsResult { error: errno::OK }
     }
 
@@ -1184,6 +1332,9 @@ impl Vfs for CasVfs {
             let buffer = state.items.write_buffers.entry(item_id).or_default();
             buffer.resize(new_size as usize, 0);
             state.items.get_mut(&item_id).unwrap().size = new_size;
+            drop(state);
+            self.clear_observed_identity(item_id);
+            return VfsResult { error: errno::OK };
         }
 
         // modified_time is ignored for now (we don't track times)
@@ -1220,6 +1371,8 @@ impl CasVfs {
                     item.blob_node = None; // single chunk
                     item.size = size;
                 }
+                drop(state);
+                self.clear_observed_identity(item_id);
                 Some((content_hash, size))
             }
             Err(e) => {
