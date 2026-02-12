@@ -573,7 +573,6 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
                     self.handle_init(request, data_ref, &fuse_connection, &fs)
                         .await?;
                 }
-
                 fuse_opcode::FUSE_DESTROY => {
                     debug!("receive fuse destroy");
 
@@ -583,191 +582,137 @@ impl<FS: Filesystem + Send + Sync + 'static> Session<FS> {
 
                     return Ok(());
                 }
-
                 fuse_opcode::FUSE_LOOKUP => {
                     self.handle_lookup(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_FORGET => {
                     self.handle_forget(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_GETATTR => {
                     self.handle_getattr(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_SETATTR => {
                     self.handle_setattr(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_READLINK => {
                     self.handle_readlink(request, in_header, &fs).await;
                 }
-
                 fuse_opcode::FUSE_SYMLINK => {
                     self.handle_symlink(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_MKNOD => {
                     self.handle_mknod(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_MKDIR => {
                     self.handle_mkdir(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_UNLINK => {
                     self.handle_unlink(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_RMDIR => {
                     self.handle_rmdir(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_RENAME => {
                     self.handle_rename(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_LINK => {
                     self.handle_link(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_OPEN => {
                     self.handle_open(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_READ => {
                     self.handle_read(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_WRITE => {
                     self.handle_write(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_STATFS => {
                     self.handle_statfs(request, in_header, &fs).await;
                 }
-
                 fuse_opcode::FUSE_RELEASE => {
                     self.handle_release(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_FSYNC => {
                     self.handle_fsync(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_SETXATTR => {
                     self.handle_setxattr(request, in_header, data_ref, &fs)
                         .await;
                 }
-
                 fuse_opcode::FUSE_GETXATTR => {
                     self.handle_getxattr(request, in_header, data_ref, &fs)
                         .await;
                 }
-
                 fuse_opcode::FUSE_LISTXATTR => {
                     self.handle_listxattr(request, in_header, data_ref, &fs)
                         .await;
                 }
-
                 fuse_opcode::FUSE_REMOVEXATTR => {
                     self.handle_removexattr(request, in_header, data_ref, &fs)
                         .await;
                 }
-
                 fuse_opcode::FUSE_FLUSH => {
                     self.handle_flush(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_OPENDIR => {
                     self.handle_opendir(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_READDIR => {
                     self.handle_readdir(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_RELEASEDIR => {
                     self.handle_releasedir(request, in_header, data_ref, &fs)
                         .await;
                 }
-
                 fuse_opcode::FUSE_FSYNCDIR => {
                     self.handle_fsyncdir(request, in_header, data_ref, &fs)
                         .await;
                 }
-
                 fuse_opcode::FUSE_ACCESS => {
                     self.handle_access(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_CREATE => {
                     self.handle_create(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_INTERRUPT => {
                     self.handle_interrupt(request, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_BMAP => {
                     self.handle_bmap(request, in_header, data_ref, &fs).await;
                 }
-
-                /*fuse_opcode::FUSE_IOCTL => {
-                    let mut resp_sender = self.response_sender.clone();
-
-                    let ioctl_in = decode_from_slice::<fuse_ioctl_in, _>(data, get_bincode_config()) {
-                        Err(err) => {
-                            error!("deserialize fuse_ioctl_in failed {}", err);
-
-                             reply_error_in_place(libc::EINVAL.into(), request, &self.response_sender).await;
-
-                            continue;
-                        }
-
-                        Ok(ioctl_in) => ioctl_in,
-                    };
-
-                    let ioctl_data = (&data[FUSE_IOCTL_IN_SIZE..]).to_vec();
-
-                    let fs = fs.clone();
-                }*/
                 fuse_opcode::FUSE_POLL => {
                     self.handle_poll(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_NOTIFY_REPLY => {
                     self.handle_notify_reply(request, in_header, data_ref, &fs)
                         .await;
                 }
-
                 fuse_opcode::FUSE_BATCH_FORGET => {
                     self.handle_batch_forget(request, in_header, data_ref, &fs)
                         .await;
                 }
-
                 fuse_opcode::FUSE_FALLOCATE => {
                     self.handle_fallocate(request, in_header, data_ref, &fs)
                         .await;
                 }
-
                 fuse_opcode::FUSE_READDIRPLUS => {
                     self.handle_readdirplus(request, in_header, data_ref, &fs)
                         .await;
                 }
-
                 fuse_opcode::FUSE_RENAME2 => {
                     self.handle_rename2(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_LSEEK => {
                     self.handle_lseek(request, in_header, data_ref, &fs).await;
                 }
-
                 fuse_opcode::FUSE_COPY_FILE_RANGE => {
                     self.handle_copy_file_range(request, in_header, data_ref, &fs)
                         .await;
+                }
+
+                fuse_opcode::FUSE_GETLK | fuse_opcode::FUSE_SETLK | fuse_opcode::FUSE_SETLKW => {
+                    reply_error_in_place(libc::ENOSYS.into(), request, &self.response_sender).await;
                 }
             }
         }
