@@ -72,7 +72,7 @@ async fn async_main() -> Result<()> {
     vx_tracing::init_service("vx_store=info");
 
     // Initialize peeps instrumentation
-    peeps::init();
+    peeps::init_named("vx-store");
     #[cfg(unix)]
     peeps::install_sigusr1("vx-store");
 

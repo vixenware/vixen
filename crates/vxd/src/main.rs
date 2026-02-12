@@ -226,8 +226,6 @@ async fn ensure_services(
 }
 
 fn main() -> Result<()> {
-    peeps::init();
-
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
@@ -246,6 +244,7 @@ fn main() -> Result<()> {
 async fn async_main() -> Result<()> {
     // Initialize tracing (logs will go to ~/.vx/vxd.log via spawn_service redirection)
     vx_tracing::init_service("vxd=info");
+    peeps::init_named("vxd");
 
     let in_test = std::env::var("VX_TEST").is_ok();
 

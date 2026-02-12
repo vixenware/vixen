@@ -1736,7 +1736,6 @@ dependencies = [
 [[package]]
 name = "peeps"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/peeps?branch=main#dd8ad5245c6913b2bdac3e9f4e23a0ec98b29cda"
 dependencies = [
  "facet",
  "facet-json",
@@ -1752,10 +1751,10 @@ dependencies = [
 [[package]]
 name = "peeps-locks"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/peeps?branch=main#dd8ad5245c6913b2bdac3e9f4e23a0ec98b29cda"
 dependencies = [
  "facet",
  "parking_lot",
+ "peeps-tasks",
  "peeps-types",
  "tokio",
 ]
@@ -1763,8 +1762,8 @@ dependencies = [
 [[package]]
 name = "peeps-sync"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/peeps?branch=main#dd8ad5245c6913b2bdac3e9f4e23a0ec98b29cda"
 dependencies = [
+ "peeps-tasks",
  "peeps-types",
  "tokio",
 ]
@@ -1772,7 +1771,6 @@ dependencies = [
 [[package]]
 name = "peeps-tasks"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/peeps?branch=main#dd8ad5245c6913b2bdac3e9f4e23a0ec98b29cda"
 dependencies = [
  "backtrace",
  "facet",
@@ -1783,7 +1781,6 @@ dependencies = [
 [[package]]
 name = "peeps-threads"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/peeps?branch=main#dd8ad5245c6913b2bdac3e9f4e23a0ec98b29cda"
 dependencies = [
  "facet",
  "libc",
@@ -1793,7 +1790,6 @@ dependencies = [
 [[package]]
 name = "peeps-types"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/peeps?branch=main#dd8ad5245c6913b2bdac3e9f4e23a0ec98b29cda"
 dependencies = [
  "facet",
  "inventory",

@@ -234,7 +234,7 @@ async fn async_main() -> Result<()> {
     ur_taking_me_with_you::die_with_parent();
 
     // Initialize peeps instrumentation
-    peeps::init();
+    peeps::init_named("vx-vfsd");
     #[cfg(unix)]
     peeps::install_sigusr1("vx-vfsd");
 

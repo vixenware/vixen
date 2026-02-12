@@ -101,7 +101,7 @@ async fn async_main() -> Result<()> {
     vx_tracing::init_service("vx_runner=info");
 
     // Initialize peeps instrumentation
-    peeps::init();
+    peeps::init_named("vx-runner");
     #[cfg(unix)]
     peeps::install_sigusr1("vx-runner");
 

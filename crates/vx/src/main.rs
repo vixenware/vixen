@@ -759,8 +759,15 @@ impl CliContext {
             return Ok(());
         }
 
-        // Default: serve web dashboard
-        peeps::serve_dashboard(dumps).await?;
+        // Default: launch peeps dashboard server CLI.
+        // It loads existing dump files from peeps::DUMP_DIR and serves the web UI.
+        let status = tokio::process::Command::new("peeps")
+            .status()
+            .await
+            .map_err(|e| eyre::eyre!("failed to launch `peeps` dashboard CLI: {e}"))?;
+        if !status.success() {
+            eyre::bail!("`peeps` exited with status: {status}");
+        }
         Ok(())
     }
 }
