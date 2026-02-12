@@ -21,6 +21,19 @@ fn main() {
     std::process::exit(1);
 }
 
+/// Log with PID and ISO-8601 timestamp prefix.
+#[cfg(target_os = "macos")]
+macro_rules! log {
+    ($($arg:tt)*) => {{
+        eprintln!(
+            "{} {} {}",
+            std::process::id(),
+            jiff::Zoned::now(),
+            format_args!($($arg)*)
+        );
+    }};
+}
+
 #[cfg(target_os = "macos")]
 fn main() {
     let args = match parse_args() {
@@ -51,9 +64,8 @@ fn main() {
         }
     }
 
-    eprintln!(
-        "vx-reaper: starting (pid={}, parent-pid={}, mount-path={})",
-        std::process::id(),
+    log!(
+        "starting (parent-pid={}, mount-path={})",
         args.parent_pid,
         args.mount_path
     );
@@ -75,10 +87,7 @@ fn main() {
     // Set up kqueue to watch parent exit AND stdin readability
     let kq = unsafe { libc::kqueue() };
     if kq < 0 {
-        eprintln!(
-            "vx-reaper: kqueue() failed: {}",
-            std::io::Error::last_os_error()
-        );
+        log!("kqueue() failed: {}", std::io::Error::last_os_error());
         std::process::exit(1);
     }
 
@@ -102,8 +111,8 @@ fn main() {
         )
     };
     if ret < 0 {
-        eprintln!(
-            "vx-reaper: kevent register stdin failed: {}",
+        log!(
+            "kevent register stdin failed: {}",
             std::io::Error::last_os_error()
         );
         std::process::exit(1);
@@ -130,8 +139,8 @@ fn main() {
         )
     };
     if ret < 0 {
-        eprintln!(
-            "vx-reaper: EVFILT_PROC registration failed ({}), relying on stdin EOF",
+        log!(
+            "EVFILT_PROC registration failed ({}), relying on stdin EOF",
             std::io::Error::last_os_error()
         );
     }
@@ -149,7 +158,7 @@ fn main() {
             if err.kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            eprintln!("vx-reaper: kevent wait failed: {err}");
+            log!("kevent wait failed: {err}");
             std::process::exit(1);
         }
 
@@ -161,7 +170,7 @@ fn main() {
 
         if tag == 1 {
             // Parent exited — time to reap
-            eprintln!("vx-reaper: parent exited (EVFILT_PROC), starting cleanup");
+            log!("parent exited (EVFILT_PROC), starting cleanup");
             break;
         }
 
@@ -177,7 +186,7 @@ fn main() {
 
             if bytes_read <= 0 {
                 // EOF on stdin — parent closed its end
-                eprintln!("vx-reaper: stdin EOF, starting cleanup");
+                log!("stdin EOF, starting cleanup");
                 break;
             }
 
@@ -187,7 +196,7 @@ fn main() {
             while let Some(newline_pos) = stdin_buf.find('\n') {
                 let line = &stdin_buf[..newline_pos];
                 if let Ok(pgid) = line.trim().parse::<libc::pid_t>() {
-                    eprintln!("vx-reaper: registered pgroup {pgid}");
+                    log!("registered pgroup {pgid}");
                     pgroups.insert(pgid);
                 }
                 stdin_buf.drain(..=newline_pos);
@@ -198,9 +207,9 @@ fn main() {
     unsafe { libc::close(kq) };
 
     // Phase 1: SIGKILL all known process groups (double tap)
-    eprintln!("vx-reaper: killing {} pgroup(s)", pgroups.len());
+    log!("killing {} pgroup(s)", pgroups.len());
     for &pgid in &pgroups {
-        eprintln!("vx-reaper: SIGKILL pgroup {pgid}");
+        log!("SIGKILL pgroup {pgid}");
         unsafe {
             libc::killpg(pgid, libc::SIGKILL);
             libc::kill(pgid, libc::SIGKILL);
@@ -213,9 +222,9 @@ fn main() {
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     // Phase 3: force-unmount with timeout
-    eprintln!("vx-reaper: unmounting {}", args.mount_path);
+    log!("unmounting {}", args.mount_path);
     force_unmount(&args.mount_path);
-    eprintln!("vx-reaper: done");
+    log!("done");
 }
 
 /// Force-unmount a path with timeout and last-resort pkill.
@@ -233,7 +242,7 @@ fn force_unmount(mount_path: &str) {
     {
         Ok(child) => child,
         Err(e) => {
-            eprintln!("vx-reaper: failed to spawn diskutil: {e}");
+            log!("failed to spawn diskutil: {e}");
             return;
         }
     };
@@ -244,7 +253,7 @@ fn force_unmount(mount_path: &str) {
             Ok(Some(_status)) => return,
             Ok(None) => {}
             Err(e) => {
-                eprintln!("vx-reaper: failed to wait for diskutil: {e}");
+                log!("failed to wait for diskutil: {e}");
                 return;
             }
         }
@@ -255,11 +264,11 @@ fn force_unmount(mount_path: &str) {
     }
 
     // Timed out — kill diskutil and try killing the FSKit extension as last resort
-    eprintln!("vx-reaper: diskutil unmount force timed out, killing diskutil");
+    log!("diskutil unmount force timed out, killing diskutil");
     let _ = child.kill();
     let _ = child.wait();
 
-    eprintln!("vx-reaper: killing VixenFS extension as last resort");
+    log!("killing VixenFS extension as last resort");
     let _ = Command::new("pkill")
         .arg("-x")
         .arg("VixenFS")

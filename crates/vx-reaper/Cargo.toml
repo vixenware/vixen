@@ -11,4 +11,5 @@ repository.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
+jiff = { workspace = true }
 libc = { workspace = true }

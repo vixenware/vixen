@@ -5,6 +5,21 @@ import os
 
 private let log = Logger(subsystem: "eu.bearcove.vixenfs.mount", category: "Main")
 
+private let iso8601Formatter: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime]
+    return f
+}()
+
+/// Log with PID and ISO-8601 timestamp prefix to stderr + unified logging.
+private func emit(_ message: String) {
+    let prefix =
+        "\(ProcessInfo.processInfo.processIdentifier) \(iso8601Formatter.string(from: Date()))"
+    fputs("\(prefix) \(message)\n", stderr)
+    fflush(stderr)
+    log.notice("\(message, privacy: .public)")
+}
+
 enum Command {
     case mount(Config)
     case health(json: Bool)
@@ -210,10 +225,8 @@ final class MountLifecycle {
     }
 
     /// Log to both stderr (which may be redirected to a log file) and unified logging.
-    func emit(_ message: String) {
-        fputs("vixenfs-mount: \(message)\n", stderr)
-        fflush(stderr)
-        log.notice("\(message, privacy: .public)")
+    func log(_ message: String) {
+        emit(message)
     }
 
     func run() throws {
@@ -287,8 +300,7 @@ private func runHealthCheck(json: Bool) -> Never {
             if json {
                 emitHealthJSON(installed: false, enabled: false)
             }
-            fputs(
-                "vixenfs-mount: FSKit health check failed: \(error.localizedDescription)\n", stderr)
+            emit("FSKit health check failed: \(error.localizedDescription)")
             exit(2)
         }
 
@@ -296,7 +308,7 @@ private func runHealthCheck(json: Bool) -> Never {
             if json {
                 emitHealthJSON(installed: false, enabled: false)
             }
-            fputs("vixenfs-mount: FSKit health check failed: no module list returned\n", stderr)
+            emit("FSKit health check failed: no module list returned")
             exit(2)
         }
 
@@ -312,20 +324,14 @@ private func runHealthCheck(json: Bool) -> Never {
 
         guard installed else {
             if !json {
-                fputs(
-                    "vixenfs-mount: FSKit module \(Config.extensionBundleIdentifier) is not installed\n",
-                    stderr
-                )
+                emit("FSKit module \(Config.extensionBundleIdentifier) is not installed")
             }
             exit(2)
         }
 
         guard enabled else {
             if !json {
-                fputs(
-                    "vixenfs-mount: FSKit module \(Config.extensionBundleIdentifier) is installed but disabled\n",
-                    stderr
-                )
+                emit("FSKit module \(Config.extensionBundleIdentifier) is installed but disabled")
             }
             exit(2)
         }
@@ -348,9 +354,7 @@ do {
             let url = FileManager.default.containerURL(
                 forSecurityApplicationGroupIdentifier: Config.appGroupIdentifier)
         else {
-            fputs(
-                "vixenfs-mount: failed to resolve App Group container for \(Config.appGroupIdentifier)\n",
-                stderr)
+            emit("failed to resolve App Group container for \(Config.appGroupIdentifier)")
             exit(2)
         }
         fputs(url.path, stdout)
@@ -359,7 +363,7 @@ do {
         if let logFile = config.logFile {
             let fd = open(logFile, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
             guard fd >= 0 else {
-                fputs("vixenfs-mount: failed to open log file \(logFile): errno \(errno)\n", stderr)
+                emit("failed to open log file \(logFile): errno \(errno)")
                 exit(2)
             }
             dup2(fd, STDOUT_FILENO)
@@ -370,20 +374,16 @@ do {
             setvbuf(stdout, nil, _IOLBF, 0)
         }
         let lifecycle = MountLifecycle(config: config)
-        lifecycle.emit(
-            "starting (pid=\(ProcessInfo.processInfo.processIdentifier), mount-point=\(config.mountPoint))"
-        )
+        lifecycle.log("starting (mount-point=\(config.mountPoint))")
         try lifecycle.run()
     }
 } catch let error as MountError {
-    fputs("vixenfs-mount: \(error.description)\n", stderr)
-    fflush(stderr)
+    emit("\(error.description)")
     if case .usage = error {
         exit(0)
     }
     exit(2)
 } catch {
-    fputs("vixenfs-mount: unexpected error: \(error)\n", stderr)
-    fflush(stderr)
+    emit("unexpected error: \(error)")
     exit(3)
 }
