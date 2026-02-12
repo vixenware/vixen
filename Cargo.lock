@@ -3054,6 +3054,7 @@ name = "vx"
 version = "0.1.0"
 dependencies = [
  "camino",
+ "dirs",
  "eyre",
  "facet",
  "facet-json",

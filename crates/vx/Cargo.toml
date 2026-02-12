@@ -29,6 +29,7 @@ vx-store-proto = { workspace = true }
 vx-io = { workspace = true }
 vx-report = { workspace = true }
 vx-vfs = { workspace = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
