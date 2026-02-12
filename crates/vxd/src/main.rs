@@ -366,34 +366,10 @@ async fn async_main() -> Result<()> {
         });
     }
 
-    // If boot fails, exit after a short grace period so clients can receive the error.
-    {
-        let mut boot_rx = gate.subscribe();
-        peeps::tasks::spawn_tracked("boot_failure_watchdog", async move {
-            loop {
-                if boot_rx.changed().await.is_err() {
-                    tracing::error!("boot state channel closed unexpectedly, shutting down");
-                    std::process::exit(1);
-                }
-                let state = boot_rx.borrow().clone();
-                match state {
-                    vx_io::boot::BootState::Ready => return,
-                    vx_io::boot::BootState::Failed(msg) => {
-                        tracing::error!("boot failed: {msg}");
-                        tracing::info!("shutting down in 10s (boot failed)");
-                        tokio::time::sleep(Duration::from_secs(10)).await;
-                        std::process::exit(1);
-                    }
-                    vx_io::boot::BootState::Booting => continue,
-                }
-            }
-        });
-    }
-
     let boot_service = gate.boot_service();
 
     // Track active connections and shut down after idle timeout.
-    // Test mode: 2s, production: 2 hours.
+    // Normal: 2 hours, test mode: 2s, boot failed: 2s.
     let active_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let last_disconnect = Arc::new(DiagnosticAsyncMutex::new(
         "vxd/last_disconnect",
@@ -401,23 +377,44 @@ async fn async_main() -> Result<()> {
     ));
 
     {
-        let idle_timeout = if in_test {
+        let normal_idle_timeout = if in_test {
             Duration::from_secs(2)
         } else {
             Duration::from_secs(2 * 60 * 60)
         };
         let active_connections = active_connections.clone();
         let last_disconnect = last_disconnect.clone();
+        let mut boot_rx = gate.subscribe();
         peeps::tasks::spawn_tracked("idle_shutdown_monitor", async move {
+            let mut idle_timeout = normal_idle_timeout;
+            let mut boot_failed = false;
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                let count = active_connections.load(std::sync::atomic::Ordering::Relaxed);
-                if count == 0
-                    && let Some(when) = *last_disconnect.lock().await
-                    && when.elapsed() >= idle_timeout
+
+                // If boot failed, shrink idle timeout so we exit quickly
+                // once the client disconnects after receiving the error.
+                if !boot_failed
+                    && let Ok(true) = boot_rx.has_changed()
+                    && matches!(
+                        *boot_rx.borrow_and_update(),
+                        vx_io::boot::BootState::Failed(_)
+                    )
                 {
-                    tracing::info!("no connections for {idle_timeout:?}, shutting down");
-                    std::process::exit(0);
+                    idle_timeout = Duration::from_secs(2);
+                    boot_failed = true;
+                }
+
+                let count = active_connections.load(std::sync::atomic::Ordering::Relaxed);
+                if count == 0 {
+                    let idle_long_enough = match *last_disconnect.lock().await {
+                        Some(when) => when.elapsed() >= idle_timeout,
+                        // No client ever connected — only shut down if boot failed.
+                        None => boot_failed,
+                    };
+                    if idle_long_enough {
+                        tracing::info!("no connections for {idle_timeout:?}, shutting down");
+                        std::process::exit(0);
+                    }
                 }
             }
         });
