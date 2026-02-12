@@ -2,6 +2,7 @@
 
 use crate::protocol::Vfsd;
 use crate::vfs::CasVfs;
+use std::collections::HashSet;
 use std::sync::Arc;
 use vx_store_proto::{
     Blake3Hash, CasNode, ContentHash, DirEntry as CasDirEntry, DirEntryKind, DirectoryNode,
@@ -58,68 +59,81 @@ impl VfsdService {
     ) -> Result<(), String> {
         let cas = &self.vfs.cas;
 
-        let node_data = cas
-            .get_node(node_hash)
-            .await
-            .map_err(|e| format!("failed to fetch DirectoryNode: {e}"))?
-            .ok_or_else(|| format!("DirectoryNode {} not found in CAS", node_hash.to_hex()))?;
+        let mut stack: Vec<(String, NodeHash)> = vec![(base_path.to_string(), node_hash)];
+        let mut visited: HashSet<NodeHash> = HashSet::new();
 
-        let node = CasNode::from_bytes(&node_data)
-            .map_err(|e| format!("failed to deserialize DirectoryNode: {e}"))?;
+        while let Some((dir_path, dir_hash)) = stack.pop() {
+            if !visited.insert(dir_hash) {
+                return Err(format!(
+                    "detected DirectoryNode cycle while mounting: {}",
+                    dir_hash.to_hex()
+                ));
+            }
 
-        let dir = match node {
-            CasNode::Directory(d) => d,
-            _ => return Err("expected DirectoryNode, got different CasNode variant".to_string()),
-        };
+            let node_data = cas
+                .get_node(dir_hash)
+                .await
+                .map_err(|e| format!("failed to fetch DirectoryNode: {e}"))?
+                .ok_or_else(|| format!("DirectoryNode {} not found in CAS", dir_hash.to_hex()))?;
 
-        for entry in &dir.entries {
-            let entry_path = if base_path.is_empty() {
-                entry.name.clone()
-            } else {
-                format!("{}/{}", base_path, entry.name)
+            let node = CasNode::from_bytes(&node_data)
+                .map_err(|e| format!("failed to deserialize DirectoryNode: {e}"))?;
+
+            let dir = match node {
+                CasNode::Directory(d) => d,
+                _ => {
+                    return Err("expected DirectoryNode, got different CasNode variant".to_string());
+                }
             };
 
-            match &entry.kind {
-                DirEntryKind::SmallFile {
-                    content_hash,
-                    size,
-                    executable,
-                } => {
-                    self.vfs
-                        .add_file_to_prefix(
-                            prefix_id,
-                            &entry_path,
-                            content_hash.0,
-                            None,
-                            *size,
-                            *executable,
-                        )
-                        .await;
-                }
-                DirEntryKind::LargeFile {
-                    content_hash,
-                    blob_node,
-                    size,
-                    executable,
-                } => {
-                    self.vfs
-                        .add_file_to_prefix(
-                            prefix_id,
-                            &entry_path,
-                            content_hash.0,
-                            Some(*blob_node),
-                            *size,
-                            *executable,
-                        )
-                        .await;
-                }
-                DirEntryKind::Dir { hash, .. } => {
-                    self.vfs.add_dir_to_prefix(prefix_id, &entry_path).await;
-                    // Recursively mount subdirectory
-                    Box::pin(self.mount_directory_node(prefix_id, &entry_path, *hash)).await?;
-                }
-                DirEntryKind::Symlink { .. } => {
-                    tracing::warn!(path = %entry_path, "skipping symlink (not yet supported)");
+            for entry in &dir.entries {
+                let entry_path = if dir_path.is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{}/{}", dir_path, entry.name)
+                };
+
+                match &entry.kind {
+                    DirEntryKind::SmallFile {
+                        content_hash,
+                        size,
+                        executable,
+                    } => {
+                        self.vfs
+                            .add_file_to_prefix(
+                                prefix_id,
+                                &entry_path,
+                                content_hash.0,
+                                None,
+                                *size,
+                                *executable,
+                            )
+                            .await;
+                    }
+                    DirEntryKind::LargeFile {
+                        content_hash,
+                        blob_node,
+                        size,
+                        executable,
+                    } => {
+                        self.vfs
+                            .add_file_to_prefix(
+                                prefix_id,
+                                &entry_path,
+                                content_hash.0,
+                                Some(*blob_node),
+                                *size,
+                                *executable,
+                            )
+                            .await;
+                    }
+                    DirEntryKind::Dir { hash, .. } => {
+                        self.vfs.add_dir_to_prefix(prefix_id, &entry_path).await;
+                        stack.push((entry_path, *hash));
+                    }
+                    DirEntryKind::Symlink { .. } => {
+                        tracing::warn!(path = %entry_path, "skipping symlink (not yet supported)");
+                    }
                 }
             }
         }
@@ -305,8 +319,9 @@ impl VfsdService {
         items: &crate::vfs::VfsItems,
         dir_item_id: vixenfs_proto::ItemId,
     ) -> Result<NodeHash, String> {
+        let mut visited = HashSet::new();
         let (hash, _total_size) = self
-            .build_directory_node_inner(cas, items, dir_item_id)
+            .build_directory_node_inner(cas, items, dir_item_id, &mut visited)
             .await?;
         Ok(hash)
     }
@@ -317,8 +332,15 @@ impl VfsdService {
         cas: &Arc<StoreClient<crate::StoreCaller>>,
         items: &crate::vfs::VfsItems,
         dir_item_id: vixenfs_proto::ItemId,
+        visited: &mut HashSet<vixenfs_proto::ItemId>,
     ) -> Result<(NodeHash, u64), String> {
         use vixenfs_proto::ItemType;
+
+        if !visited.insert(dir_item_id) {
+            return Err(format!(
+                "detected directory cycle while flushing: item_id={dir_item_id:?}"
+            ));
+        }
 
         let children = items.sorted_children_of(dir_item_id);
 
@@ -357,7 +379,8 @@ impl VfsdService {
                 }
                 ItemType::Directory => {
                     let (child_hash, child_total) =
-                        Box::pin(self.build_directory_node_inner(cas, items, child.id)).await?;
+                        Box::pin(self.build_directory_node_inner(cas, items, child.id, visited))
+                            .await?;
 
                     total_size += child_total;
 
@@ -384,6 +407,8 @@ impl VfsdService {
         cas.put_node(node_hash, node_bytes.to_vec())
             .await
             .map_err(|e| format!("failed to store DirectoryNode: {e}"))?;
+
+        visited.remove(&dir_item_id);
 
         Ok((node_hash, total_size))
     }

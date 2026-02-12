@@ -17,6 +17,13 @@ use crate::types::StoreService;
 const CRATES_IO_REGISTRY: &str = "https://crates.io";
 const MATERIALIZATION_LAYOUT_VERSION: u32 = 2;
 
+fn now_utc_string() -> String {
+    match Timestamp::now().in_tz("UTC") {
+        Ok(ts) => ts.to_string(),
+        Err(_) => Timestamp::now().to_string(),
+    }
+}
+
 impl Store for StoreService {
     async fn version(&self, _cx: &roam::Context) -> ServiceVersion {
         ServiceVersion {
@@ -431,8 +438,8 @@ impl Store for StoreService {
                     let manifest = RegistryCrateManifest {
                         schema_version: REGISTRY_MANIFEST_SCHEMA_VERSION,
                         spec: spec.clone(),
-                        crate_tarball: tarball_ref,
-                        created_at: Timestamp::now().in_tz("UTC").unwrap().to_string(),
+                        crate_tarball: tarball_ref.clone(),
+                        created_at: now_utc_string(),
                     };
 
                     let node = CasNode::RegistryCrate(manifest);
@@ -451,23 +458,67 @@ impl Store for StoreService {
                         };
                     }
 
-                    // Publish spec → manifest_hash mapping (only after node write succeeded)
-                    if let Err(e) = this2
-                        .storage
-                        .put_registry_spec(&spec_key, &manifest_hash.0)
-                        .await
-                    {
-                        tracing::error!(
-                            "failed to publish registry spec mapping for {}: {}",
-                            spec_key,
-                            e
-                        );
+                    if let Err(e) = validate_blob_ref_closure(&this2, &tarball_ref).await {
                         return EnsureRegistryCrateResult {
                             spec_key: Some(spec_key),
                             manifest_hash: None,
                             status: EnsureStatus::Failed,
-                            error: Some(format!("failed to publish registry spec mapping: {e}")),
+                            error: Some(format!("registry closure validation failed: {e}")),
                         };
+                    }
+
+                    // Publish spec → manifest_hash mapping and return canonical mapping winner.
+                    match this2
+                        .storage
+                        .put_registry_spec(&spec_key, &manifest_hash.0)
+                        .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            let winner_hash = match this2.storage.get_registry_spec(&spec_key).await
+                            {
+                                Ok(Some(hash)) => hash,
+                                Ok(None) => {
+                                    return EnsureRegistryCrateResult {
+                                        spec_key: Some(spec_key),
+                                        manifest_hash: None,
+                                        status: EnsureStatus::Failed,
+                                        error: Some(format!(
+                                            "registry spec mapping for {spec_key} already exists but could not be read"
+                                        )),
+                                    };
+                                }
+                                Err(e) => {
+                                    return EnsureRegistryCrateResult {
+                                        spec_key: Some(spec_key),
+                                        manifest_hash: None,
+                                        status: EnsureStatus::Failed,
+                                        error: Some(format!(
+                                            "failed to read winner registry mapping for {spec_key}: {e}"
+                                        )),
+                                    };
+                                }
+                            };
+                            return EnsureRegistryCrateResult {
+                                spec_key: Some(spec_key),
+                                manifest_hash: Some(NodeHash(winner_hash)),
+                                status: EnsureStatus::Hit,
+                                error: None,
+                            };
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "failed to publish registry spec mapping for {}: {}",
+                                spec_key,
+                                e
+                            );
+                            return EnsureRegistryCrateResult {
+                                spec_key: Some(spec_key),
+                                manifest_hash: None,
+                                status: EnsureStatus::Failed,
+                                error: Some(format!("failed to publish registry spec mapping: {e}")),
+                            };
+                        }
                     }
 
                     tracing::info!(
@@ -686,4 +737,52 @@ async fn store_prepared_blob(
             size: data.len() as u64,
         })
     }
+}
+
+async fn validate_blob_ref_closure(
+    service: &StoreService,
+    blob_ref: &BlobRef,
+) -> Result<(), String> {
+    match blob_ref {
+        BlobRef::Small { chunk, .. } => {
+            let exists = service
+                .storage
+                .has_chunk(chunk)
+                .await
+                .map_err(|e| format!("failed to check chunk {}: {e}", chunk.to_hex()))?;
+            if !exists {
+                return Err(format!("missing chunk {}", chunk.to_hex()));
+            }
+        }
+        BlobRef::Large { blob_node, .. } => {
+            let blob_data = service
+                .storage
+                .get_node(blob_node)
+                .await
+                .map_err(|e| format!("failed to read BlobNode {}: {e}", blob_node.to_hex()))?
+                .ok_or_else(|| format!("missing BlobNode {}", blob_node.to_hex()))?;
+            let node = CasNode::from_bytes(&blob_data).map_err(|e| {
+                format!("failed to deserialize BlobNode {}: {e}", blob_node.to_hex())
+            })?;
+            let blob = match node {
+                CasNode::Blob(blob) => blob,
+                _ => return Err(format!("node {} is not a BlobNode", blob_node.to_hex())),
+            };
+            for chunk in blob.chunks {
+                let exists =
+                    service.storage.has_chunk(&chunk.hash).await.map_err(|e| {
+                        format!("failed to check chunk {}: {e}", chunk.hash.to_hex())
+                    })?;
+                if !exists {
+                    return Err(format!(
+                        "BlobNode {} references missing chunk {}",
+                        blob_node.to_hex(),
+                        chunk.hash.to_hex()
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }

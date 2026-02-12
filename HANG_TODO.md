@@ -13,38 +13,43 @@ Prioritized list of suspected or confirmed hang/deadlock/stall risks.
   - High-risk callsite: `tokio::select!` loop in `download_and_extract_component`.
   - Candidate fixes: `try_send`, bounded timeout around `send`, or decoupled progress task.
 
-- [ ] Fail toolchain ensure paths on chunk/node write failure instead of warn-and-continue.
+- [x] Fail toolchain ensure paths on chunk/node write failure instead of warn-and-continue.
   - Current behavior can publish manifests that are not fully materializable.
 
 ## P1
 
-- [ ] Ensure RPC returns canonical published manifest hash (toolchain + registry).
+- [x] Ensure RPC returns canonical published manifest hash (toolchain + registry).
   - Concurrent writers plus non-deterministic `created_at` can return a hash different from mapped spec key.
   - Option A: return mapping winner hash from `put_*_spec`.
   - Option B: remove/normalize non-deterministic fields from hashed manifest bytes.
 
-- [ ] Make toolchain spec publish truly create-if-absent (atomic), matching intended semantics.
+- [x] Make toolchain spec publish truly create-if-absent (atomic), matching intended semantics.
   - Current `try_exists + atomic_write` pattern is race-prone.
 
-- [ ] Add closure validation before publish/finalize.
+- [x] Add closure validation before publish/finalize.
   - Verify all referenced directory/blob/chunk nodes exist before mapping spec/cache keys.
 
-- [ ] Handle `put_registry_spec` "already exists" case explicitly in result.
+- [x] Handle `put_registry_spec` "already exists" case explicitly in result.
   - Avoid returning a non-canonical manifest hash when another writer won.
 
 ## P2
 
-- [ ] Revisit `OnceCell` failure caching policy for toolchain/registry ensure.
+- [x] Revisit `OnceCell` failure caching policy for toolchain/registry ensure.
   - Transient first failure for a key can stay sticky for subsequent callers.
 
-- [ ] Bound growth of inflight ensure maps.
+- [x] Bound growth of inflight ensure maps.
   - Inflight entries are currently never removed; can increase memory use and mutex contention over time.
 
-- [ ] Replace panic-prone `unwrap()`s in acquisition/publish paths with explicit error returns.
+- [x] Replace panic-prone `unwrap()`s in acquisition/publish paths with explicit error returns.
   - Panics under load can leave partially written CAS state and amplify inconsistency risks.
 
-- [ ] Add cycle protection for recursive DirectoryNode walks in mount/materialization paths.
+- [x] Add cycle protection for recursive DirectoryNode walks in mount/materialization paths.
   - Detect already-visited `NodeHash` during recursive traversal.
 
-- [ ] Verify and document `roam::Tx` semantics (bounded/unbounded/lossy) and backpressure behavior.
+- [x] Verify and document `roam::Tx` semantics (bounded/unbounded/lossy) and backpressure behavior.
   - Needed to confirm severity of progress-channel stall risk and choose safe defaults.
+  - Verified against `roam-session` source (git rev `dcea18e`):
+    - `roam::channel()` uses a bounded channel (`CHANNEL_SIZE = 1024` in `roam-session/src/lib.rs`).
+    - `Tx::send(...).await` awaits queue capacity / receiver readiness and can backpressure.
+    - `Tx::send` returns `TxError::Closed` when receiver side is gone; no lossy drop behavior by default.
+    - `try_send` exists at the runtime sender layer and is used in limited paths (e.g. `Tx` drop close), not as default `Tx::send` semantics.

@@ -204,14 +204,35 @@ impl CasStore {
         manifest_hash: &Blake3Hash,
     ) -> io::Result<bool> {
         let path = Self::toolchain_spec_path(self.primary.root(), key);
-        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return Ok(false);
-        }
-        match atomic_write(&path, manifest_hash.to_hex().as_bytes()).await {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
-            Err(e) => Err(e),
-        }
+        let parent = path
+            .parent()
+            .expect("toolchain spec path has parent")
+            .to_path_buf();
+        let manifest_hex = manifest_hash.to_hex();
+
+        tokio::task::spawn_blocking(move || {
+            use std::fs::{File, OpenOptions};
+            use std::io::Write;
+
+            std::fs::create_dir_all(&parent)?;
+
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    file.write_all(manifest_hex.as_bytes())?;
+                    file.sync_all()?;
+                    if let Ok(dir) = File::open(&parent)
+                        && let Err(e) = dir.sync_all()
+                    {
+                        tracing::warn!("failed to sync directory {}: {}", parent, e);
+                    }
+                    Ok(true)
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+                Err(e) => Err(e),
+            }
+        })
+        .await
+        .expect("spawn_blocking join failed")
     }
 
     // -- Registry specs (spec_key → manifest_hash mapping) --

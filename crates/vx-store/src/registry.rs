@@ -86,7 +86,16 @@ impl RegistryManager {
         };
 
         // Initialize if we're first, otherwise wait
-        cell.get_or_init(|| acquire_fn()).await.clone()
+        let result = cell.get_or_init(|| acquire_fn()).await.clone();
+
+        let mut inflight = self.inflight.lock();
+        if let Some(existing) = inflight.get(&spec_key)
+            && Arc::ptr_eq(existing, &cell)
+        {
+            inflight.remove(&spec_key);
+        }
+
+        result
     }
 }
 
