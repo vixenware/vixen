@@ -34,6 +34,7 @@ pub(crate) enum CliMode {
 }
 
 /// VX daemon strategy
+#[derive(Clone)]
 pub(crate) enum DaemonStrategy {
     /// Connect to existing daemons, never bootstrap
     Connect(Endpoint),
@@ -48,6 +49,12 @@ impl DaemonStrategy {
         match self {
             Self::Bootstrap(ep) => Self::Connect(ep),
             already @ Self::Connect(_) => already,
+        }
+    }
+
+    pub(crate) fn endpoint(&self) -> &Endpoint {
+        match self {
+            Self::Bootstrap(ep) | Self::Connect(ep) => ep,
         }
     }
 

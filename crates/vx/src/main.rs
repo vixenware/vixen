@@ -41,20 +41,13 @@ fn main() {
         .enable_all()
         .build()
         .expect("failed to build tokio runtime");
-    match rt.block_on(async_main()) {
-        Ok(()) => {}
-        Err(e) => {
-            // Build failures already call process::exit(1) directly,
-            // so any error reaching here is an internal error (exit code 2).
-            eprintln!("vx: {e:#}");
-            std::process::exit(2);
-        }
-    }
+    rt.block_on(async_main());
 }
 
-async fn async_main() -> Result<()> {
+async fn async_main() {
     let cli: Cli = args::Driver::new(
-        args::builder::<Cli>()?
+        args::builder::<Cli>()
+            .expect("failed to build CLI")
             .cli(|cli| cli.args(std::env::args().skip(1)))
             .help(|h| {
                 h.program_name(env!("CARGO_PKG_NAME"))
@@ -65,9 +58,9 @@ async fn async_main() -> Result<()> {
     .run()
     .unwrap();
 
-    let ctx = CliContext::from_cli(&cli)?;
+    let mut ctx = CliContext::from_cli(&cli).expect("failed to create context");
 
-    match cli.command {
+    let result = match cli.command {
         CliCommand::Build(args) => ctx.cmd_build(args).await,
         CliCommand::Start(args) => ctx.cmd_start(args).await,
         CliCommand::Ping => ctx.cmd_ping().await,
@@ -75,6 +68,14 @@ async fn async_main() -> Result<()> {
         CliCommand::Clean(args) => ctx.cmd_clean(args).await,
         CliCommand::Doctor(_args) => ctx.cmd_doctor().await,
         CliCommand::Debug(args) => ctx.cmd_debug(args).await,
+    };
+
+    if let Err(e) = result {
+        if let CliMode::Tui(tui) = &ctx.mode {
+            tui.shutdown().await;
+        }
+        eprintln!("vx: {e:#}");
+        std::process::exit(1);
     }
 }
 
@@ -89,35 +90,24 @@ impl CliContext {
         let progress_listener = ProgressListenerImpl::new(self.mode.clone());
         let dispatcher = vxd_proto::ProgressListenerDispatcher::new(progress_listener);
 
-        let builder = match &self.strat {
-            DaemonStrategy::Connect(endpoint) => {
-                ServiceBuilder::new("vxd", endpoint.clone(), dispatcher)
-                    .caller_name("vx")
-                    .connect_only()
-            }
-            DaemonStrategy::Bootstrap(endpoint) => {
-                let vx_home = vx_io::vx_home();
-                ServiceBuilder::new("vxd", endpoint.clone(), dispatcher)
-                    .caller_name("vx")
-                    .env("VX_HOME", vx_home.as_str())
-                    .log_path(vx_home.join("vxd.log"))
-            }
+        let vx_home = vx_io::vx_home();
+        let mut builder =
+            ServiceBuilder::new("vxd", self.strat.endpoint().clone(), dispatcher).caller_name("vx");
+
+        builder = match &self.strat {
+            DaemonStrategy::Connect(_) => builder.connect_only(),
+            DaemonStrategy::Bootstrap(_) => builder
+                .env("VX_HOME", vx_home.as_str())
+                .log_path(vx_home.join("vxd.log")),
         };
 
-        match builder.connect().await {
-            Ok(handle) => Ok(VxdClient::new(handle.caller)),
-            Err(e) => {
-                if let CliMode::Tui(tui) = &self.mode {
-                    tui.shutdown().await;
-                }
-                Err(e)
-            }
-        }
+        let handle = builder.connect().await?;
+        Ok(VxdClient::new(handle.caller))
     }
 
     // ─── Commands ───────────────────────────────────────────────────────
 
-    async fn cmd_build(self, args: BuildArgs) -> Result<()> {
+    async fn cmd_build(&mut self, args: BuildArgs) -> Result<()> {
         let cwd = Utf8PathBuf::try_from(std::env::current_dir()?)?;
 
         // Emit indeterminate OSC 9;4 progress while connecting to daemon
@@ -269,7 +259,7 @@ impl CliContext {
         }
     }
 
-    async fn cmd_start(self, _args: StartArgs) -> Result<()> {
+    async fn cmd_start(&mut self, _args: StartArgs) -> Result<()> {
         vx_tracing::init_cli_stderr();
         let daemon = self.ensure_vxd().await?;
 
@@ -284,17 +274,17 @@ impl CliContext {
         Ok(())
     }
 
-    async fn cmd_ping(mut self) -> Result<()> {
+    async fn cmd_ping(&mut self) -> Result<()> {
         vx_tracing::init_cli_stderr();
         // Ping only connects, never spawns
-        self.strat = self.strat.connect_only();
+        self.strat = self.strat.clone().connect_only();
         let daemon = self.ensure_vxd().await?;
         let version = daemon.version().await?;
         println!("{version}");
         Ok(())
     }
 
-    async fn cmd_kill(self, _args: KillArgs) -> Result<()> {
+    async fn cmd_kill(&mut self, _args: KillArgs) -> Result<()> {
         vx_tracing::init_cli_stderr();
 
         let endpoint = match &self.strat {
@@ -334,7 +324,7 @@ impl CliContext {
         Ok(())
     }
 
-    async fn cmd_clean(self, args: CleanArgs) -> Result<()> {
+    async fn cmd_clean(&mut self, args: CleanArgs) -> Result<()> {
         vx_tracing::init_cli_stderr();
 
         if args.home && args.cache {
@@ -456,7 +446,7 @@ impl CliContext {
         Ok(())
     }
 
-    async fn cmd_doctor(self) -> Result<()> {
+    async fn cmd_doctor(&mut self) -> Result<()> {
         vx_tracing::init_cli_stderr();
 
         // Daemon status — check if vxd socket exists
@@ -531,7 +521,7 @@ impl CliContext {
         Ok(())
     }
 
-    async fn cmd_debug(self, args: DebugArgs) -> Result<()> {
+    async fn cmd_debug(&mut self, args: DebugArgs) -> Result<()> {
         vx_tracing::init_cli_stderr();
 
         // 1. Find vixen process PIDs
