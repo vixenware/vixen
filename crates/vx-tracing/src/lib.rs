@@ -7,6 +7,7 @@ pub fn init_service(default_filter: &str) {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter)),
         )
+        .with_writer(std::io::stderr)
         .init();
 }
 

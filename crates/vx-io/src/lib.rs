@@ -6,6 +6,17 @@ pub mod git;
 pub mod net;
 pub mod spawn;
 
+/// Resolve the VX_HOME directory: `$VX_HOME` if set, otherwise `~/.vx`.
+pub fn vx_home() -> Utf8PathBuf {
+    match std::env::var("VX_HOME") {
+        Ok(v) => Utf8PathBuf::from(v),
+        Err(_) => {
+            let home = dirs::home_dir().expect("could not determine home directory");
+            Utf8PathBuf::from(home.join(".vx").to_string_lossy().into_owned())
+        }
+    }
+}
+
 /// Atomically write contents to a file.
 ///
 /// Creates a temporary file in the same directory, writes contents,
@@ -32,11 +43,12 @@ pub async fn atomic_write(path: &Utf8Path, contents: &[u8]) -> Result<(), std::i
     // fall back to copy + delete.
     if let Err(e) = temp_path.persist(path) {
         let temp = e.path;
-        std::fs::copy(&temp, path.as_std_path())
-            .map_err(|ce| std::io::Error::other(format!(
+        std::fs::copy(&temp, path.as_std_path()).map_err(|ce| {
+            std::io::Error::other(format!(
                 "rename failed ({}), copy fallback also failed: {}",
                 e.error, ce
-            )))?;
+            ))
+        })?;
         // temp is dropped here, which deletes the temp file
     }
 
@@ -77,11 +89,12 @@ pub async fn atomic_write_executable(
     // Atomically persist (with copy+delete fallback)
     if let Err(e) = temp_path.persist(path) {
         let temp = e.path;
-        std::fs::copy(&temp, path.as_std_path())
-            .map_err(|ce| std::io::Error::other(format!(
+        std::fs::copy(&temp, path.as_std_path()).map_err(|ce| {
+            std::io::Error::other(format!(
                 "rename failed ({}), copy fallback also failed: {}",
                 e.error, ce
-            )))?;
+            ))
+        })?;
     }
 
     Ok(())
@@ -136,11 +149,12 @@ pub mod sync {
 
         if let Err(e) = temp_path.persist(path) {
             let temp = e.path;
-            std::fs::copy(&temp, path.as_std_path())
-                .map_err(|ce| std::io::Error::other(format!(
+            std::fs::copy(&temp, path.as_std_path()).map_err(|ce| {
+                std::io::Error::other(format!(
                     "rename failed ({}), copy fallback also failed: {}",
                     e.error, ce
-                )))?;
+                ))
+            })?;
         }
 
         Ok(())
@@ -175,11 +189,12 @@ pub mod sync {
 
         if let Err(e) = temp_path.persist(path) {
             let temp = e.path;
-            std::fs::copy(&temp, path.as_std_path())
-                .map_err(|ce| std::io::Error::other(format!(
+            std::fs::copy(&temp, path.as_std_path()).map_err(|ce| {
+                std::io::Error::other(format!(
                     "rename failed ({}), copy fallback also failed: {}",
                     e.error, ce
-                )))?;
+                ))
+            })?;
         }
 
         Ok(())

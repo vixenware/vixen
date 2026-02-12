@@ -34,10 +34,6 @@ struct BuildArgs {
     #[facet(args::named, args::short = 'r')]
     release: bool,
 
-    /// Don't auto-spawn daemon if not running. (for tests)
-    #[facet(args::named)]
-    no_spawn: bool,
-
     /// Disable TUI and use plain log output
     #[facet(args::named)]
     no_tui: bool,
@@ -392,90 +388,91 @@ impl ProgressListener for ProgressListenerImpl {
     }
 }
 
+enum CliMode {
+    /// Full-terminal TUI: tracing is redirected to events etc.
+    TUI,
+    /// NDJSON output
+    Json,
+    /// Text outpu
+    Text,
+}
+
 /// Connect to the daemon, spawning it if necessary.
 ///
 /// The TUI and progress dispatcher are created here because they're
 /// tightly coupled to the vx CLI's display logic.
-async fn get_or_spawn_daemon(
-    no_spawn: bool,
-    no_tui: bool,
-    json: bool,
-) -> Result<(VxdClient<VxdCaller>, Option<tui::TuiHandle>)> {
+async fn ensure_vxd(mode: CliMode) -> Result<(VxdClient<VxdCaller>, Option<tui::TuiHandle>)> {
     use vx_io::net::Endpoint;
     use vx_io::spawn::ServiceBuilder;
 
-    let vx_home = std::env::var("VX_HOME").unwrap_or_else(|_| {
-        dirs::home_dir()
-            .expect("could not determine home directory")
-            .join(".vx")
-            .to_string_lossy()
-            .into_owned()
-    });
-    let vx_home = camino::Utf8PathBuf::from(&vx_home);
+    let vx_home = vx_io::vx_home();
 
-    // Parse endpoint (defaults to local IPC in VX_HOME)
-    let endpoint = match std::env::var("VXD") {
-        Ok(v) => Endpoint::parse(&v)?,
-        Err(_) => vx_io::net::default_local_endpoint(&vx_home, "vxd"),
+    // Create TUI and progress listener based on mode
+    let tui = match mode {
+        CliMode::TUI => Some(tui::TuiHandle::new()),
+        _ => None,
     };
-
-    // Create TUI and progress listener
-    let tui = if no_tui {
-        None
-    } else {
-        Some(tui::TuiHandle::new())
-    };
+    let json = matches!(mode, CliMode::Json);
     let progress_listener = ProgressListenerImpl::new(tui.clone(), json);
     let dispatcher = vxd_proto::ProgressListenerDispatcher::new(progress_listener);
 
-    let mut builder = ServiceBuilder::new("vxd", endpoint.clone(), dispatcher)
-        .caller_name("vx")
-        .env("VX_HOME", vx_home.as_str())
-        .log_path(vx_home.join("vxd.log"));
+    // VXD env var: connect to an existing daemon (no spawn).
+    // Otherwise: spawn at the default local endpoint.
+    if let Ok(vxd) = std::env::var("VXD") {
+        let endpoint = Endpoint::parse(&vxd)?;
+        let builder = ServiceBuilder::new("vxd", endpoint, dispatcher)
+            .caller_name("vx")
+            .connect_only();
 
-    if no_spawn || std::env::var("VXD").is_ok() {
-        builder = builder.connect_only();
-    } else if !endpoint.is_local() {
-        // Shut down TUI before bailing
-        if let Some(tui) = tui {
-            tui.shutdown().await;
-        }
-        eyre::bail!(
-            "failed to connect to vxd at {}.\n\
-            Auto-spawn is only supported for local endpoints.\n\
-            Start vxd on the remote host, or point VXD to a local endpoint.",
-            endpoint
-        );
-    }
-
-    match builder.connect().await {
-        Ok(handle) => {
-            let client = VxdClient::new(handle.caller);
-            Ok((client, tui))
-        }
-        Err(e) => {
-            if let Some(tui) = tui {
-                tui.shutdown().await;
+        match builder.connect().await {
+            Ok(handle) => Ok((VxdClient::new(handle.caller), tui)),
+            Err(e) => {
+                if let Some(tui) = tui {
+                    tui.shutdown().await;
+                }
+                Err(e)
             }
-            Err(e)
+        }
+    } else {
+        let endpoint = vx_io::net::default_local_endpoint(&vx_home, "vxd");
+        let builder = ServiceBuilder::new("vxd", endpoint.clone(), dispatcher)
+            .caller_name("vx")
+            .env("VX_HOME", vx_home.as_str())
+            .log_path(vx_home.join("vxd.log"));
+
+        match builder.connect().await {
+            Ok(handle) => Ok((VxdClient::new(handle.caller), tui)),
+            Err(e) => {
+                if let Some(tui) = tui {
+                    tui.shutdown().await;
+                }
+                Err(e)
+            }
         }
     }
 }
 
 async fn cmd_build(args: BuildArgs) -> Result<()> {
     let cwd = Utf8PathBuf::try_from(std::env::current_dir()?)?;
-    let json_mode = args.json;
-    let no_tui = args.no_tui || json_mode;
+
+    let mode = if args.json {
+        CliMode::Json
+    } else if args.no_tui {
+        CliMode::Text
+    } else {
+        CliMode::TUI
+    };
 
     // Emit indeterminate OSC 9;4 progress while connecting to daemon
     // (TUI mode emits this from its display task; no-tui mode needs it here)
     // Skip in JSON mode — CI doesn't need terminal progress sequences.
-    if no_tui && !json_mode {
+    if matches!(mode, CliMode::Text) {
         emit_osc_progress(tui::OscProgressState::Indeterminate, None);
     }
 
     // Connect to daemon (spawning if necessary) and set up TUI
-    let (daemon, tui) = get_or_spawn_daemon(args.no_spawn, no_tui, json_mode).await?;
+    let json_mode = matches!(mode, CliMode::Json);
+    let (daemon, tui) = ensure_vxd(mode).await?;
 
     // Initialize tracing - with TUI layer, or plain output to stderr.
     // In JSON mode, tracing goes to stderr so stdout stays clean NDJSON.
@@ -625,7 +622,7 @@ async fn cmd_build(args: BuildArgs) -> Result<()> {
 }
 
 async fn cmd_start(_args: StartArgs) -> Result<()> {
-    let (daemon, _tui) = get_or_spawn_daemon(false, true, false).await?;
+    let (daemon, _tui) = ensure_vxd(CliMode::Text).await?;
 
     tracing::info!("{} daemon is running", "✓".green().bold());
 
@@ -643,17 +640,7 @@ async fn cmd_kill(_args: KillArgs) -> Result<()> {
 
     let endpoint = match std::env::var("VXD") {
         Ok(v) => Endpoint::parse(&v)?,
-        Err(_) => {
-            let vx_home = std::env::var("VX_HOME").unwrap_or_else(|_| {
-                dirs::home_dir()
-                    .expect("could not determine home directory")
-                    .join(".vx")
-                    .to_string_lossy()
-                    .into_owned()
-            });
-            let vx_home = camino::Utf8PathBuf::from(&vx_home);
-            vx_io::net::default_local_endpoint(&vx_home, "vxd")
-        }
+        Err(_) => vx_io::net::default_local_endpoint(&vx_io::vx_home(), "vxd"),
     };
 
     // Try graceful shutdown via RPC first
@@ -696,9 +683,7 @@ async fn cmd_clean(args: CleanArgs) -> Result<()> {
         bail!("--home and --cache are mutually exclusive");
     }
 
-    let vx_home = std::env::var("VX_HOME")
-        .unwrap_or_else(|_| format!("{}/.vx", std::env::var("HOME").expect("HOME not set")));
-    let vx_home = Utf8PathBuf::from(&vx_home);
+    let vx_home = vx_io::vx_home();
 
     if args.cache {
         return cmd_clean_cache(&vx_home).await;
@@ -790,7 +775,7 @@ async fn cmd_clean_cache(vx_home: &Utf8PathBuf) -> Result<()> {
     }
 
     // Connect to daemon (spawns it if needed), unpublish via RPC
-    let (daemon, _tui) = get_or_spawn_daemon(false, true, false).await?;
+    let (daemon, _tui) = ensure_vxd(CliMode::Text).await?;
 
     let result = daemon.unpublish_cache_keys(cache_keys).await?;
 
@@ -822,21 +807,15 @@ async fn cmd_clean_cache(vx_home: &Utf8PathBuf) -> Result<()> {
 
 async fn cmd_doctor() -> Result<()> {
     // Daemon status — check if vxd socket exists
-    let vx_home = std::env::var("VX_HOME").unwrap_or_else(|_| {
-        dirs::home_dir()
-            .expect("could not determine home directory")
-            .join(".vx")
-            .to_string_lossy()
-            .into_owned()
-    });
+    let vx_home = vx_io::vx_home();
     println!("{} {}", "home:".bold(), vx_home);
-    let daemon_sock = std::path::PathBuf::from(&vx_home).join("vxd.sock");
+    let daemon_sock = vx_home.join("vxd.sock");
     if daemon_sock.exists() {
         println!(
             "{} {} (socket exists at {})",
             "daemon:".bold(),
             "likely running".green(),
-            daemon_sock.display(),
+            daemon_sock,
         );
     } else {
         println!(
