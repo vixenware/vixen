@@ -251,7 +251,7 @@ async fn async_main() -> Result<()> {
         return Ok(());
     }
 
-    tracing::info!(
+    tracing::debug!(
         listen = %args.listen,
         mount = %args.mount,
         store = %args.store,
@@ -259,9 +259,9 @@ async fn async_main() -> Result<()> {
     );
 
     // 1. Connect to vx-store
-    tracing::info!("Connecting to vx-store at {}", args.store);
+    tracing::debug!("Connecting to vx-store at {}", args.store);
     let cas = connect_to_store(&args.store).await?;
-    tracing::info!("Connected to vx-store");
+    tracing::debug!("Connected to vx-store");
 
     let cas = Arc::new(cas);
 
@@ -270,7 +270,7 @@ async fn async_main() -> Result<()> {
         .ok()
         .map(|vx_home| Utf8PathBuf::from(vx_home).join("cache/blobs/blake3"));
     if let Some(ref dir) = disk_cache_dir {
-        tracing::info!(%dir, "L2 disk blob cache enabled");
+        tracing::debug!(%dir, "L2 disk blob cache enabled");
     }
     let vfs = Arc::new(CasVfs::new(cas.clone(), disk_cache_dir, args.mount.clone()));
 
@@ -283,7 +283,7 @@ async fn async_main() -> Result<()> {
         )
     })?;
     let actual_addr = vfsd_listener.local_addr()?;
-    tracing::info!("vx-vfsd RPC bound on {}", actual_addr);
+    tracing::debug!("vx-vfsd RPC bound on {}", actual_addr);
 
     // Print the actual address to stdout so vxd can parse it
     println!("{}", actual_addr);
@@ -302,7 +302,7 @@ async fn async_main() -> Result<()> {
         }
 
         // 6. Mount VFS
-        tracing::info!("Mounting VFS at {}", args.mount);
+        tracing::debug!("Mounting VFS at {}", args.mount);
         let shared_vfs = SharedVfs::new(vfs.clone());
         let canary = shared_vfs.canary.clone();
         match vx_vfs::mount(
@@ -318,14 +318,14 @@ async fn async_main() -> Result<()> {
                 mut vfs_dead,
                 ..
             }) => {
-                tracing::info!("VFS mounted at {}", mount_path);
+                tracing::debug!("VFS mounted at {}", mount_path);
 
                 // Smoke test: read the canary file through the real filesystem.
                 // This proves the FUSE/FSKit mount is actually serving files.
                 // Retry up to 10 times with 250ms delay — the FSKit extension
                 // may need a moment to become ready after the mount syscall returns.
                 let canary_fs_path = mount_path.join(&canary.name);
-                tracing::info!("Trying to read canary from {canary_fs_path}");
+                tracing::debug!("Trying to read canary from {canary_fs_path}");
 
                 const MAX_ATTEMPTS: u32 = 10;
                 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
@@ -341,7 +341,7 @@ async fn async_main() -> Result<()> {
 
                     match read_result {
                         Ok(Ok(actual)) if actual == canary.content => {
-                            tracing::info!(attempt, "VFS smoke test passed");
+                            tracing::debug!(attempt, "VFS smoke test passed");
                             smoke_err = None;
                             break;
                         }
@@ -413,13 +413,30 @@ async fn async_main() -> Result<()> {
     .await;
 
     if let Err(error) = mount_result {
+        use std::time::Instant;
+        let before = Instant::now();
         let diagnostics = platform::collect_vfs_diagnostics(&args.mount).await;
-        eprintln!("{error}\n{diagnostics}");
+        let elapsed = before.elapsed();
+
+        // Write diagnostics to a temporary file
+        let temp_path = format!("/tmp/vfsd-diagnostics-{:016x}.txt", fastrand::u64(..));
+        let diagnostic_content = format!("{error}\n{diagnostics}");
+        if let Err(e) = tokio::fs::write(&temp_path, &diagnostic_content).await {
+            tracing::error!("Failed to write VFS diagnostics to {}: {}", temp_path, e);
+        } else {
+            tracing::error!("==================================================");
+            tracing::error!(
+                "VFS diagnostics (gathered in {elapsed:?}) written to: {}",
+                temp_path
+            );
+            tracing::error!("==================================================");
+        }
+
         return Err(error);
     }
 
     // 7. Start accepting RPC connections
-    tracing::info!("Starting vx-vfsd RPC server");
+    tracing::debug!("Starting vx-vfsd RPC server");
     let vfsd_service = VfsdService::new(vfs);
 
     loop {

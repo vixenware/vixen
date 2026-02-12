@@ -193,7 +193,7 @@ where
         }
 
         match tokio::time::timeout(
-            remaining.min(Duration::from_secs(2)),
+            remaining.min(Duration::from_secs(1)),
             attempt_caller.handle(),
         )
         .await
@@ -203,11 +203,11 @@ where
                 return Ok(attempt_caller);
             }
             Ok(Err(e)) => {
-                tracing::debug!("{binary_name} not ready yet at {endpoint}: {e}");
+                tracing::trace!("{binary_name} not ready yet at {endpoint}: {e}");
                 last_err = Some(e.to_string());
             }
             Err(_) => {
-                tracing::debug!("{binary_name} connect attempt timed out at {endpoint}");
+                tracing::trace!("{binary_name} connect attempt timed out at {endpoint}");
                 last_err = Some("connection timed out".into());
             }
         }

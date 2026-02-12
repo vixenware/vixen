@@ -280,17 +280,6 @@ async fn async_main() -> Result<()> {
     .run()
     .unwrap();
     let args = resolve_args(cli)?;
-    tracing::info!("Starting vxd");
-    tracing::info!("  VX_HOME: {}", args.vx_home);
-    match &args.store_endpoint {
-        Some(ep) => tracing::info!("  Store:   {ep} (from VX_STORE)"),
-        None => tracing::info!("  Store:   (will spawn)"),
-    }
-    match &args.exec_endpoint {
-        Some(ep) => tracing::info!("  Exec:    {ep} (from VX_RUNNER)"),
-        None => tracing::info!("  Exec:    (will spawn)"),
-    }
-    tracing::info!("  Bind:    {}", args.bind);
 
     // Acquire exclusive lock to prevent multiple vxd instances from racing.
     // The lock is held for the daemon's lifetime and released on exit.

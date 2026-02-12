@@ -223,194 +223,276 @@ pub async fn dump_platform_diagnostics(mount_path: &Utf8PathBuf) {
 pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
     use owo_colors::OwoColorize;
     use std::fmt::Write;
+    use std::time::Instant;
     use tokio::process::Command;
 
-    let mut out = String::new();
+    let total_start = Instant::now();
 
-    writeln!(out, "\n{}\n", "=== VFS DIAGNOSTICS ===".red().bold()).unwrap();
-
-    // 1. App bundle integrity
-    writeln!(out, "{}", "--- App bundle integrity ---".yellow().bold()).unwrap();
-    let app_path = std::path::Path::new("/Applications/Vixen.app");
-    let extension_path = app_path.join("Contents/Extensions/VixenFS.appex");
-    let helper_path = app_path.join("Contents/Helpers/vixenfs-mount");
-
-    writeln!(out, "  Vixen.app exists: {}", app_path.exists()).unwrap();
-    writeln!(out, "  VixenFS.appex exists: {}", extension_path.exists()).unwrap();
-    writeln!(out, "  vixenfs-mount exists: {}", helper_path.exists()).unwrap();
-
-    if app_path.exists() {
-        match Command::new("codesign")
-            .args(["--verify", "--deep", "--strict"])
-            .arg(app_path)
-            .output()
-            .await
-        {
-            Ok(output) if output.status.success() => {
-                writeln!(out, "  codesign --verify: OK").unwrap();
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                writeln!(out, "  codesign --verify: {}", "FAILED".red().bold()).unwrap();
-                writeln!(out, "    {}", stderr.trim()).unwrap();
-            }
-            Err(e) => writeln!(out, "  codesign --verify: could not run: {e}").unwrap(),
-        }
-    }
-
-    // 2. Plugin registration
-    writeln!(out, "\n{}", "--- Plugin registration ---".yellow().bold()).unwrap();
-    match Command::new("pluginkit")
-        .args(["-m", "-p", "com.apple.fskit.fsmodule"])
-        .output()
-        .await
-    {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let vixen_lines: Vec<&str> = stdout
-                .lines()
-                .filter(|l| l.to_lowercase().contains("vixen") || l.contains("eu.bearcove"))
-                .collect();
-            if vixen_lines.is_empty() {
-                writeln!(out, "  No vixen-related FSKit plugins registered").unwrap();
-            } else {
-                for line in &vixen_lines {
-                    writeln!(out, "  {line}").unwrap();
-                }
-            }
-        }
-        Err(e) => writeln!(out, "  pluginkit failed: {e}").unwrap(),
-    }
-
-    // 3. Mount status
-    writeln!(out, "\n{}", "--- Mount status ---".yellow().bold()).unwrap();
-    match Command::new("df").output().await {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let vixen_lines: Vec<&str> = stdout
-                .lines()
-                .filter(|l| l.to_lowercase().contains("vixen"))
-                .collect();
-            if vixen_lines.is_empty() {
-                writeln!(out, "  No vixen mounts found in df output").unwrap();
-            } else {
-                for line in &vixen_lines {
-                    writeln!(out, "  {line}").unwrap();
-                }
-            }
-        }
-        Err(e) => writeln!(out, "  df failed: {e}").unwrap(),
-    }
-
-    // 4. Process inventory
-    writeln!(out, "\n{}", "--- Vixen processes ---".yellow().bold()).unwrap();
-    match Command::new("pgrep")
-        .args(["-la", "(vx-|vixenfs-mount|VixenFS|Vixen)"])
-        .output()
-        .await
-    {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.trim().is_empty() {
-                writeln!(out, "  No vixen-related processes found").unwrap();
-            } else {
-                for line in stdout.lines() {
-                    writeln!(out, "  {line}").unwrap();
-                }
-            }
-        }
-        Err(e) => writeln!(out, "  pgrep failed: {e}").unwrap(),
-    }
-
-    // 5. Mount helper log
-    writeln!(out, "\n{}", "--- vixenfs-mount.log ---".yellow().bold()).unwrap();
+    // Compute log_path upfront (no async needed)
     let log_path = mount_path
         .as_std_path()
         .parent()
         .map(|p| p.join("vixenfs-mount.log"));
-    if let Some(log_path) = log_path {
-        match tokio::fs::read_to_string(&log_path).await {
-            Ok(content) => {
-                if content.is_empty() {
-                    writeln!(out, "  (empty)").unwrap();
-                } else {
-                    for line in content.lines() {
-                        writeln!(out, "  {line}").unwrap();
+
+    // Run all diagnostics in parallel
+    let (
+        app_bundle,
+        plugin_reg,
+        mount_status,
+        process_inv,
+        mount_log,
+        sample_mount_helper,
+        sample_vixenfs,
+        system_logs,
+    ) = tokio::join!(
+        // 1. App bundle integrity
+        async {
+            let start = Instant::now();
+            let mut section = String::new();
+            let app_path = std::path::Path::new("/Applications/Vixen.app");
+            let extension_path = app_path.join("Contents/Extensions/VixenFS.appex");
+            let helper_path = app_path.join("Contents/Helpers/vixenfs-mount");
+
+            writeln!(section, "  Vixen.app exists: {}", app_path.exists()).unwrap();
+            writeln!(
+                section,
+                "  VixenFS.appex exists: {}",
+                extension_path.exists()
+            )
+            .unwrap();
+            writeln!(section, "  vixenfs-mount exists: {}", helper_path.exists()).unwrap();
+
+            if app_path.exists() {
+                match Command::new("codesign")
+                    .args(["--verify", "--deep", "--strict"])
+                    .arg(app_path)
+                    .output()
+                    .await
+                {
+                    Ok(output) if output.status.success() => {
+                        writeln!(section, "  codesign --verify: OK").unwrap();
                     }
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        writeln!(section, "  codesign --verify: {}", "FAILED".red().bold())
+                            .unwrap();
+                        writeln!(section, "    {}", stderr.trim()).unwrap();
+                    }
+                    Err(e) => writeln!(section, "  codesign --verify: could not run: {e}").unwrap(),
                 }
             }
-            Err(e) => writeln!(out, "  Could not read {}: {e}", log_path.display()).unwrap(),
-        }
-    } else {
-        writeln!(out, "  Could not determine log path").unwrap();
-    }
 
-    // 6. Process samples (vixenfs-mount and VixenFS)
-    for process_name in &["vixenfs-mount", "VixenFS"] {
-        writeln!(
-            out,
-            "\n{}",
-            format!("--- sample {process_name} ---").yellow().bold()
-        )
-        .unwrap();
-        match Command::new("pgrep")
-            .arg("-x")
-            .arg(process_name)
-            .output()
-            .await
-        {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for pid in stdout.lines().filter(|l| !l.is_empty()) {
-                    writeln!(out, "  Sampling PID {pid}...").unwrap();
-                    match Command::new("sample").args([pid, "1"]).output().await {
-                        Ok(sample_output) => {
-                            let stdout = String::from_utf8_lossy(&sample_output.stdout);
-                            for line in stdout.lines() {
-                                writeln!(out, "  {line}").unwrap();
+            ("App bundle integrity", section, start.elapsed())
+        },
+        // 2. Plugin registration
+        async {
+            let start = Instant::now();
+            let mut section = String::new();
+            match Command::new("pluginkit")
+                .args(["-m", "-p", "com.apple.fskit.fsmodule"])
+                .output()
+                .await
+            {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let vixen_lines: Vec<&str> = stdout
+                        .lines()
+                        .filter(|l| l.to_lowercase().contains("vixen") || l.contains("eu.bearcove"))
+                        .collect();
+                    if vixen_lines.is_empty() {
+                        writeln!(section, "  No vixen-related FSKit plugins registered").unwrap();
+                    } else {
+                        for line in &vixen_lines {
+                            writeln!(section, "  {line}").unwrap();
+                        }
+                    }
+                }
+                Err(e) => writeln!(section, "  pluginkit failed: {e}").unwrap(),
+            }
+            ("Plugin registration", section, start.elapsed())
+        },
+        // 3. Mount status
+        async {
+            let start = Instant::now();
+            let mut section = String::new();
+            match Command::new("df").output().await {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let vixen_lines: Vec<&str> = stdout
+                        .lines()
+                        .filter(|l| l.to_lowercase().contains("vixen"))
+                        .collect();
+                    if vixen_lines.is_empty() {
+                        writeln!(section, "  No vixen mounts found in df output").unwrap();
+                    } else {
+                        for line in &vixen_lines {
+                            writeln!(section, "  {line}").unwrap();
+                        }
+                    }
+                }
+                Err(e) => writeln!(section, "  df failed: {e}").unwrap(),
+            }
+            ("Mount status", section, start.elapsed())
+        },
+        // 4. Process inventory
+        async {
+            let start = Instant::now();
+            let mut section = String::new();
+            match Command::new("pgrep")
+                .args(["-la", "(vx-|vixenfs-mount|VixenFS|Vixen)"])
+                .output()
+                .await
+            {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    if stdout.trim().is_empty() {
+                        writeln!(section, "  No vixen-related processes found").unwrap();
+                    } else {
+                        for line in stdout.lines() {
+                            writeln!(section, "  {line}").unwrap();
+                        }
+                    }
+                }
+                Err(e) => writeln!(section, "  pgrep failed: {e}").unwrap(),
+            }
+            ("Vixen processes", section, start.elapsed())
+        },
+        // 5. Mount helper log
+        async {
+            let start = Instant::now();
+            let mut section = String::new();
+            if let Some(log_path) = &log_path {
+                match tokio::fs::read_to_string(log_path).await {
+                    Ok(content) => {
+                        if content.is_empty() {
+                            writeln!(section, "  (empty)").unwrap();
+                        } else {
+                            for line in content.lines() {
+                                writeln!(section, "  {line}").unwrap();
                             }
                         }
-                        Err(e) => writeln!(out, "  sample failed: {e}").unwrap(),
+                    }
+                    Err(e) => {
+                        writeln!(section, "  Could not read {}: {e}", log_path.display()).unwrap()
                     }
                 }
-                if stdout.trim().is_empty() {
-                    writeln!(out, "  Process not found").unwrap();
-                }
+            } else {
+                writeln!(section, "  Could not determine log path").unwrap();
             }
-            Err(e) => writeln!(out, "  pgrep failed: {e}").unwrap(),
-        }
+            ("vixenfs-mount.log", section, start.elapsed())
+        },
+        // 6a. Sample vixenfs-mount
+        async {
+            let start = Instant::now();
+            let section = sample_process("vixenfs-mount").await;
+            ("sample vixenfs-mount", section, start.elapsed())
+        },
+        // 6b. Sample VixenFS
+        async {
+            let start = Instant::now();
+            let section = sample_process("VixenFS").await;
+            ("sample VixenFS", section, start.elapsed())
+        },
+        // 7. System logs
+        async {
+            let start = Instant::now();
+            let mut section = String::new();
+            match Command::new("log")
+                .args([
+                    "show",
+                    "--last",
+                    "2m",
+                    "--predicate",
+                    r#"subsystem == "com.apple.FSKit" OR subsystem == "eu.bearcove.vixenfs""#,
+                    "--info",
+                    "--debug",
+                ])
+                .output()
+                .await
+            {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    if stdout.trim().is_empty() {
+                        writeln!(section, "  No matching log entries").unwrap();
+                    } else {
+                        for line in stdout.lines() {
+                            writeln!(section, "  {line}").unwrap();
+                        }
+                    }
+                }
+                Err(e) => writeln!(section, "  log show failed: {e}").unwrap(),
+            }
+            ("System logs (last 2m)", section, start.elapsed())
+        },
+    );
+
+    // Assemble output in order
+    let mut out = String::new();
+    writeln!(out, "\n{}\n", "=== VFS DIAGNOSTICS ===".red().bold()).unwrap();
+
+    for (name, section, elapsed) in [
+        app_bundle,
+        plugin_reg,
+        mount_status,
+        process_inv,
+        mount_log,
+        sample_mount_helper,
+        sample_vixenfs,
+        system_logs,
+    ] {
+        writeln!(
+            out,
+            "{} {}",
+            format!("--- {name} ---").yellow().bold(),
+            format!("({elapsed:.1?})").dimmed(),
+        )
+        .unwrap();
+        out.push_str(&section);
     }
 
-    // 7. System log stream (FSKit + vixenfs, last 2 minutes)
-    writeln!(out, "\n{}", "--- System logs (last 2m) ---".yellow().bold()).unwrap();
-    match Command::new("log")
-        .args([
-            "show",
-            "--last",
-            "2m",
-            "--predicate",
-            r#"subsystem == "com.apple.FSKit" OR subsystem == "eu.bearcove.vixenfs""#,
-            "--info",
-            "--debug",
-        ])
+    let total = total_start.elapsed();
+    writeln!(
+        out,
+        "\n{} {}",
+        "=== END DIAGNOSTICS ===".red().bold(),
+        format!("(total: {total:.1?})").dimmed(),
+    )
+    .unwrap();
+    out
+}
+
+async fn sample_process(process_name: &str) -> String {
+    use std::fmt::Write;
+    use tokio::process::Command;
+
+    let mut section = String::new();
+    match Command::new("pgrep")
+        .arg("-x")
+        .arg(process_name)
         .output()
         .await
     {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.trim().is_empty() {
-                writeln!(out, "  No matching log entries").unwrap();
-            } else {
-                for line in stdout.lines() {
-                    writeln!(out, "  {line}").unwrap();
+            for pid in stdout.lines().filter(|l| !l.is_empty()) {
+                writeln!(section, "  Sampling PID {pid}...").unwrap();
+                match Command::new("sample").args([pid, "1"]).output().await {
+                    Ok(sample_output) => {
+                        let stdout = String::from_utf8_lossy(&sample_output.stdout);
+                        for line in stdout.lines() {
+                            writeln!(section, "  {line}").unwrap();
+                        }
+                    }
+                    Err(e) => writeln!(section, "  sample failed: {e}").unwrap(),
                 }
             }
+            if stdout.trim().is_empty() {
+                writeln!(section, "  Process not found").unwrap();
+            }
         }
-        Err(e) => writeln!(out, "  log show failed: {e}").unwrap(),
+        Err(e) => writeln!(section, "  pgrep failed: {e}").unwrap(),
     }
-
-    writeln!(out, "\n{}", "=== END DIAGNOSTICS ===".red().bold()).unwrap();
-    out
+    section
 }
 
 /// Whether we should create the mount directory.

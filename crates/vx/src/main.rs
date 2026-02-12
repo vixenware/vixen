@@ -265,12 +265,12 @@ impl CliContext {
     async fn cmd_start(&mut self, _args: StartArgs) -> Result<()> {
         let daemon = self.ensure_vxd().await?;
 
-        tracing::info!("{} daemon is running", "✓".green().bold());
+        tracing::info!("✓ daemon is running");
 
         // Ping to verify connection
         let version = daemon.version().await?;
 
-        tracing::info!("{} connected to vxd", "✓".green().bold());
+        tracing::info!("✓ connected to vxd");
         tracing::info!("   {}", version);
 
         Ok(())

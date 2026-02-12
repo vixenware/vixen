@@ -69,7 +69,6 @@ async fn async_main() -> Result<()> {
 
     // Initialize tracing
     vx_tracing::init_service("vx_store=info");
-    tracing::debug!("tracing initialized");
 
     // Initialize peeps instrumentation
     peeps::init();
@@ -77,7 +76,6 @@ async fn async_main() -> Result<()> {
     peeps::install_sigusr1("vx-store");
 
     tracing::info!("hello from vixen-store");
-    tracing::debug!("parsing args");
 
     let args: Args = args::Driver::new(
         args::builder::<Args>()?
@@ -91,16 +89,13 @@ async fn async_main() -> Result<()> {
     .run()
     .unwrap();
 
-    tracing::debug!("args parsed, listen={}", args.listen);
     let bind = Endpoint::parse(&args.listen)?;
 
     // Build storage backend
     let storage = CasStore::new(FsStorage::new(args.root.clone()));
 
     // Initialize storage directories
-    tracing::debug!("initializing storage at {}", args.root);
     storage.init().await?;
-    tracing::debug!("storage initialized");
 
     // Initialize store service
     let store = StoreService::new(storage, args.vx_home);
@@ -138,7 +133,7 @@ async fn async_main() -> Result<()> {
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
-        tracing::info!("accepted connection");
+        tracing::info!("accepted connection from {peer_addr}");
         let store = store.clone();
 
         peeps::tasks::spawn_tracked(format!("store_connection_{}", peer_addr), async move {

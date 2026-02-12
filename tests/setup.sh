@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set -x
 
 # Build vx-store, vx-runner, vxd, vx
 CARGO_FEATURES=""
@@ -34,16 +35,20 @@ export VX_HOME="/tmp/.vx-test/nextest/home"
 mkdir -p "${VX_HOME}"
 echo "Test VX_HOME will be ${VX_HOME}"
 
-# VX_TEST=1 enables test mode: 30s idle timeout instead of 2 hours
+# VX_TEST=1 enables test mode: 2s idle timeout, inherit stderr
 export VX_TEST=1
 
+# Start daemon
 "$VX_BIN" start --no-tui &
-sleep 2
+
+# Set VXD so no other command starts their own
+export VXD="$VX_HOME/vxd.sock"
+"$VX_BIN" pinG
 
 # Export connection info for all tests. TestEnv::new() reads these to skip
 # spawning and connect to this daemon instead.
 {
     echo "VX_HOME=${VX_HOME}"
     echo "VX_TEST=${VX_TEST}"
-    echo "VX_HTTP_CACHE_DIR=${VX_HTTP_CACHE_DIR}"
+    echo "VXD=${VXD}"
 } >> "${NEXTEST_ENV}"
