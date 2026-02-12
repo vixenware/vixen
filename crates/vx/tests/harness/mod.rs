@@ -172,6 +172,28 @@ impl VxOutput {
         );
     }
 
+    /// Assert the command failed
+    #[track_caller]
+    pub fn assert_failure(&self) {
+        assert!(
+            !self.success,
+            "expected command to fail but it succeeded (exit code {:?}):\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            self.exit_code, self.stdout, self.stderr
+        );
+    }
+
+    /// Assert the command failed and output contains the given string
+    #[track_caller]
+    pub fn assert_failure_contains(&self, needle: &str) {
+        self.assert_failure();
+        assert!(
+            self.contains(needle),
+            "expected output to contain {needle:?}:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            self.stdout,
+            self.stderr
+        );
+    }
+
     /// Assert the build was NOT a cache hit, panicking with full output on failure
     #[track_caller]
     pub fn assert_not_cached(&self) {

@@ -48,7 +48,7 @@ fn json_output_success() {
     create_hello_world(&env);
 
     let result = env.build().json().run();
-    assert_eq!(result.exit_code, Some(0), "expected exit code 0 on success");
+    result.assert_success();
 
     let lines = json_lines(&result);
     assert!(
@@ -108,11 +108,11 @@ fn json_output_cache_hit() {
 
     // First build
     let result1 = env.build().json().run();
-    assert_eq!(result1.exit_code, Some(0));
+    result1.assert_success();
 
     // Second build — nothing changed, must be a full cache hit
     let result2 = env.build().json().run();
-    assert_eq!(result2.exit_code, Some(0));
+    result2.assert_success();
 
     let lines = json_lines(&result2);
     let finished = build_finished_line(&lines);
@@ -155,11 +155,7 @@ edition = "2021"
     env.write_file("src/main.rs", "fn main() { SYNTAX ERROR }\n");
 
     let result = env.build().json().run();
-    assert_eq!(
-        result.exit_code,
-        Some(1),
-        "expected exit code 1 on build error"
-    );
+    result.assert_failure();
 
     let lines = json_lines(&result);
     let last = lines.last().expect("expected build_finished event");

@@ -13,17 +13,7 @@ fn rejects_registry_deps_without_lockfile() {
 
     // No Cargo.lock file - should fail with a clear error message
     let result = env.build().run();
-
-    assert!(
-        !result.success,
-        "build should fail with registry deps but no Cargo.lock"
-    );
-    assert!(
-        result.contains("Cargo.lock") || result.contains("lockfile"),
-        "error should mention Cargo.lock requirement: {}\n{}",
-        result.stdout,
-        result.stderr
-    );
+    result.assert_failure_contains("Cargo.lock");
 }
 
 #[test]
@@ -32,18 +22,7 @@ fn rejects_workspace() {
     create_workspace(&env);
 
     let result = env.build().run();
-
-    assert!(!result.success, "build should fail for workspace");
-    // Workspaces are rejected because they have [workspace] instead of [package]
-    // The error message may mention "workspace", "not supported", or "package"
-    assert!(
-        result.contains("workspace")
-            || result.contains("not supported")
-            || result.contains("package"),
-        "error should mention workspace rejection: {}\n{}",
-        result.stdout,
-        result.stderr
-    );
+    result.assert_failure_contains("workspace");
 }
 
 #[test]
@@ -52,14 +31,7 @@ fn rejects_build_script() {
     create_project_with_build_script(&env);
 
     let result = env.build().run();
-
-    assert!(!result.success, "build should fail with build script");
-    assert!(
-        result.contains("build") || result.contains("not supported"),
-        "error should mention build script: {}\n{}",
-        result.stdout,
-        result.stderr
-    );
+    result.assert_failure_contains("build script");
 }
 
 #[test]
@@ -80,12 +52,7 @@ foo = []
     env.write_file("src/main.rs", "fn main() {}\n");
 
     let result = env.build().run();
-
-    assert!(!result.success, "build should fail with features");
-    assert!(
-        result.contains("features") || result.contains("not supported"),
-        "error should mention features"
-    );
+    result.assert_failure_contains("features");
 }
 
 #[test]
@@ -105,6 +72,5 @@ proc-macro = true
     env.write_file("src/lib.rs", "");
 
     let result = env.build().run();
-
-    assert!(!result.success, "build should fail with proc-macro");
+    result.assert_failure_contains("proc-macro");
 }
