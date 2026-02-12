@@ -213,7 +213,7 @@ pub async fn boot_and_connect(
         let msg = boot_result
             .error
             .unwrap_or_else(|| "unknown boot error".into());
-        eyre::bail!("boot failed: {msg}");
+        eyre::bail!("{msg}");
     }
 
     let virtual_handle = root_handle

@@ -89,48 +89,75 @@ async fn async_main() {
 }
 
 fn print_fatal_error(error: &eyre::Report) {
-    use std::fmt::Write;
+    // Terminal width, minus 4 for "│ " and " │"
+    let term_width = terminal_width().saturating_sub(4).max(40);
 
-    // Collect the error chain, stripping the repetitive "boot failed:" wrappers.
-    let mut causes: Vec<String> = Vec::new();
-    for cause in error.chain() {
-        let msg = cause.to_string();
-        if msg.starts_with("boot failed") {
-            continue;
-        }
-        causes.push(msg);
-    }
-    if causes.is_empty() {
-        causes.push(format!("{error:#}"));
-    }
+    let full_message = format!("{error:#}");
+    let wrapped = soft_wrap(&full_message, term_width);
+    let lines: Vec<&str> = wrapped.lines().collect();
 
-    let mut body = String::new();
-    let _ = writeln!(body, "{}", causes[0]);
-    for cause in &causes[1..] {
-        let _ = writeln!(body, "  caused by: {cause}");
-    }
-
-    let lines: Vec<&str> = body.lines().collect();
-    let max_width = lines.iter().map(|l| l.len()).max().unwrap_or(40).max(40);
-    let bar = "─".repeat(max_width + 2);
+    let content_width = lines.iter().map(|l| l.len()).max().unwrap_or(40).max(40);
+    let bar = "─".repeat(content_width + 2);
 
     eprintln!();
     eprintln!("{}", format!("┌{bar}┐").red().bold());
     eprintln!(
         "{}",
-        format!("│ {:max_width$} │", "FATAL ERROR").red().bold()
+        format!("│ {:content_width$} │", "FATAL ERROR").red().bold()
     );
     eprintln!("{}", format!("├{bar}┤").red().bold());
     for line in &lines {
         eprintln!(
             "{}{}{}",
             "│ ".red().bold(),
-            format!("{line:max_width$}"),
+            format!("{line:content_width$}"),
             " │".red().bold(),
         );
     }
     eprintln!("{}", format!("└{bar}┘").red().bold());
     eprintln!();
+}
+
+fn terminal_width() -> usize {
+    // Try COLUMNS env var first, then ioctl
+    if let Ok(cols) = std::env::var("COLUMNS") {
+        if let Ok(w) = cols.parse::<usize>() {
+            return w;
+        }
+    }
+    #[cfg(unix)]
+    {
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        let ret = unsafe { libc::ioctl(2, libc::TIOCGWINSZ, &mut ws) };
+        if ret == 0 && ws.ws_col > 0 {
+            return ws.ws_col as usize;
+        }
+    }
+    80
+}
+
+fn soft_wrap(text: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        if line.len() <= max_width {
+            out.push_str(line);
+            out.push('\n');
+        } else {
+            let mut remaining = line;
+            while remaining.len() > max_width {
+                // Try to break at a space
+                let break_at = remaining[..max_width].rfind(' ').unwrap_or(max_width);
+                out.push_str(&remaining[..break_at]);
+                out.push('\n');
+                remaining = remaining[break_at..].trim_start();
+            }
+            if !remaining.is_empty() {
+                out.push_str(remaining);
+                out.push('\n');
+            }
+        }
+    }
+    out
 }
 
 // ─── CliContext methods ─────────────────────────────────────────────────────
