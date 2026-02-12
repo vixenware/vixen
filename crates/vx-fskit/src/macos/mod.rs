@@ -56,11 +56,15 @@ pub struct FsKitError {
 pub struct HealthPayload {
     pub connected: bool,
     #[facet(default)]
-    pub backend_pid: Option<u32>,
+    pub ever_connected: bool,
     #[facet(default)]
-    pub uptime_secs: Option<u64>,
+    pub connected_at: Option<String>,
     #[facet(default)]
     pub disconnected_at: Option<String>,
+    #[facet(default)]
+    pub uptime_seconds: Option<f64>,
+    #[facet(default)]
+    pub disconnect_reason: Option<String>,
 }
 
 /// Accumulates log entries with timestamps.

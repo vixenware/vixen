@@ -3199,8 +3199,13 @@ dependencies = [
 name = "vx-reaper"
 version = "0.1.0"
 dependencies = [
+ "camino",
+ "facet",
+ "figue",
  "jiff",
  "libc",
+ "tokio",
+ "vx-fskit",
 ]
 
 [[package]]
@@ -3374,6 +3379,7 @@ dependencies = [
  "tokio",
  "tracing",
  "vixenfs-proto",
+ "vx-fskit",
  "vx-vfs-types",
  "windows-projfs",
 ]

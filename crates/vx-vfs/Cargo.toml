@@ -23,6 +23,7 @@ vx-vfs-types = { workspace = true }
 roam-shm = { workspace = true }
 facet-json = { workspace = true }
 fastrand = { workspace = true }
+vx-fskit = { path = "../vx-fskit" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-projfs = { workspace = true }
