@@ -284,7 +284,15 @@ impl CliContext {
         Ok(())
     }
 
-    async fn cmd_ping(self) -> Result<()> {}
+    async fn cmd_ping(mut self) -> Result<()> {
+        vx_tracing::init_cli_stderr();
+        // Ping only connects, never spawns
+        self.strat = self.strat.connect_only();
+        let daemon = self.ensure_vxd().await?;
+        let version = daemon.version().await?;
+        println!("{version}");
+        Ok(())
+    }
 
     async fn cmd_kill(self, _args: KillArgs) -> Result<()> {
         vx_tracing::init_cli_stderr();

@@ -43,6 +43,14 @@ pub(crate) enum DaemonStrategy {
 }
 
 impl DaemonStrategy {
+    /// Convert Bootstrap to Connect (keep the endpoint, just don't spawn).
+    pub(crate) fn connect_only(self) -> Self {
+        match self {
+            Self::Bootstrap(ep) => Self::Connect(ep),
+            already @ Self::Connect(_) => already,
+        }
+    }
+
     pub(crate) fn from_env() -> eyre::Result<Self> {
         if let Ok(vxd) = std::env::var("VXD") {
             // VXD env var set: connect to existing daemon, never spawn
