@@ -31,6 +31,7 @@ use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Child;
+use tokio::sync::watch;
 use vx_io::net::{Endpoint, Listener};
 use vx_runner_proto::RunnerClient;
 use vx_store_proto::StoreClient;
@@ -42,6 +43,29 @@ pub use queries::*;
 pub use service::VxdService;
 
 pub type UpstreamCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
+
+/// State shared across all connections once boot succeeds.
+/// Contains the CAS and exec clients plus everything that depends on them.
+#[derive(Clone)]
+pub struct BootedDaemon {
+    pub cas: Arc<StoreClient<UpstreamCaller>>,
+    pub exec: Arc<RunnerClient<UpstreamCaller>>,
+}
+
+/// Boot state for vxd's child services.
+///
+/// vxd binds its socket and starts accepting connections before services are
+/// ready. RPC handlers check this state and either wait (Booting), proceed
+/// (Ready), or return an error (Failed).
+#[derive(Clone)]
+pub enum BootState {
+    /// Services are still starting up.
+    Booting,
+    /// Services are ready.
+    Ready(BootedDaemon),
+    /// Service boot failed.
+    Failed(String),
+}
 
 /// vxd - Build orchestration daemon
 #[derive(Facet, Debug)]
@@ -303,8 +327,7 @@ async fn async_main() -> Result<()> {
         SpawnTracker::default(),
     ));
 
-    let clients = ensure_services(&args, &spawn_tracker).await?;
-
+    // Resolve host triple early — this is cheap and can fail fast.
     let exec_host_triple = match std::env::var("VX_RUNNER_HOST_TRIPLE") {
         Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
         _ => {
@@ -323,25 +346,52 @@ async fn async_main() -> Result<()> {
         }
     };
 
-    let store_client = clients.store;
-    let exec_client = clients.exec;
+    // Bind listener BEFORE booting services — so vx CLI can connect immediately.
+    // RPC calls will wait for boot to complete (or return the boot error).
+    let listener = Listener::bind(&args.bind).await?;
+    tracing::info!("Daemon listening on {}", args.bind);
 
-    // Initialize daemon service (singleton shared across all connections)
+    // Boot state: services start as Booting, transition to Ready or Failed.
+    let (boot_tx, boot_rx) = watch::channel(BootState::Booting);
+
+    // Initialize daemon service with boot state (no store/exec clients yet)
     tracing::info!("Initializing daemon service");
     let daemon = Arc::new(
         VxdService::new(
-            store_client,
-            exec_client,
             args.vx_home,
             exec_host_triple,
-            spawn_tracker,
+            spawn_tracker.clone(),
+            boot_rx.clone(),
         )
         .await,
     );
 
-    // Start server (TCP or Unix socket)
-    let listener = Listener::bind(&args.bind).await?;
-    tracing::info!("Daemon listening on {}", args.bind);
+    // Spawn service boot in background — listener is already accepting connections.
+    {
+        let args_for_boot = Args {
+            vx_home: daemon.vx_home().clone(),
+            store_endpoint: args.store_endpoint.clone(),
+            exec_endpoint: args.exec_endpoint.clone(),
+            bind: args.bind.clone(),
+        };
+        let spawn_tracker = spawn_tracker.clone();
+        peeps::tasks::spawn_tracked("service_boot", async move {
+            tracing::info!("Booting services (vx-store, vx-runner)");
+            match ensure_services(&args_for_boot, &spawn_tracker).await {
+                Ok(clients) => {
+                    tracing::info!("Services booted successfully");
+                    let _ = boot_tx.send(BootState::Ready(BootedDaemon {
+                        cas: clients.store,
+                        exec: clients.exec,
+                    }));
+                }
+                Err(e) => {
+                    tracing::error!("Service boot failed: {e:#}");
+                    let _ = boot_tx.send(BootState::Failed(format!("{e:#}")));
+                }
+            }
+        });
+    }
 
     // Track active connections and shut down after idle timeout.
     // Test mode: 2s, production: 2 hours.

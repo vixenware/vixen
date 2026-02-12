@@ -227,12 +227,7 @@ pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
 
     let mut out = String::new();
 
-    writeln!(
-        out,
-        "\n{}\n",
-        "=== VFS SMOKE TEST DIAGNOSTICS ===".red().bold()
-    )
-    .unwrap();
+    writeln!(out, "\n{}\n", "=== VFS DIAGNOSTICS ===".red().bold()).unwrap();
 
     // 1. App bundle integrity
     writeln!(out, "{}", "--- App bundle integrity ---".yellow().bold()).unwrap();
