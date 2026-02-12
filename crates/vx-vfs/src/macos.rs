@@ -7,13 +7,13 @@
 //! - `vx-vfs`, which serves VFS connections over SHM.
 
 use crate::types::{VfsConfig, VfsError, VfsStart};
+use peeps_sync::{Sender, WatchSender};
 use roam_shm::bootstrap::{SessionId, SessionPaths, unix as shm_bootstrap};
 use roam_shm::driver::MultiPeerHostDriver;
 use roam_shm::{AddPeerOptions, SegmentConfig, ShmHost};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Command;
-use tokio::sync::{mpsc, watch};
 use vixenfs_proto::{Vfs, VfsDispatcher};
 use vx_vfs_types::{VIXEN_MOUNT_HELPER_PATH, VfsAction, VfsDiagnostic, VfsIssueCode};
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -25,8 +25,8 @@ where
 {
     tracing::debug!(mount_path = %config.mount_path, "entering macos vfs startup");
 
-    let (mount_ready_tx, mut mount_ready_rx) = mpsc::channel::<()>(2);
-    let (vfs_dead_tx, vfs_dead_rx) = watch::channel(false);
+    let (mount_ready_tx, mut mount_ready_rx) = peeps_sync::channel::<()>("mount_ready", 2);
+    let (vfs_dead_tx, vfs_dead_rx) = peeps_sync::watch_channel("vfs_dead", false);
     let sid = spawn_shm_loop(vfs, mount_ready_tx, vfs_dead_tx)?;
 
     let debug_mode = std::env::var("VIXENFS_DEBUG").as_deref() == Ok("1");
@@ -102,8 +102,8 @@ where
 
 fn spawn_shm_loop<T>(
     vfs: T,
-    mount_ready_tx: mpsc::Sender<()>,
-    vfs_dead_tx: watch::Sender<bool>,
+    mount_ready_tx: Sender<()>,
+    vfs_dead_tx: WatchSender<bool>,
 ) -> Result<String, VfsError>
 where
     T: Vfs + Clone + Send + Sync + 'static,
@@ -217,14 +217,13 @@ where
 
                 let _ = sid_tx.send(Ok(sid.clone()));
 
-                let vfs_dead_tx_for_driver = vfs_dead_tx.clone();
                 peeps::tasks::spawn_tracked("shm_host_driver", async move {
                     if let Err(error) = driver.run().await {
                         tracing::debug!(%error, "SHM host driver exited with error");
                     } else {
                         tracing::debug!("SHM host driver exited cleanly");
                     }
-                    let _ = vfs_dead_tx_for_driver.send(true);
+                    let _ = vfs_dead_tx.send(true);
                 });
 
                 loop {

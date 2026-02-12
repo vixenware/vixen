@@ -146,7 +146,7 @@ enum ExecutorMessage {
 /// fires. This guard ensures the executor always receives a completion message.
 struct CompletionGuard {
     node_idx: NodeIndex,
-    tx: Option<tokio::sync::mpsc::UnboundedSender<ExecutorMessage>>,
+    tx: Option<peeps_sync::UnboundedSender<ExecutorMessage>>,
 }
 
 impl CompletionGuard {
@@ -337,8 +337,8 @@ pub struct Executor {
     concurrency_limit: Arc<Semaphore>,
 
     /// Channel for messages from spawned tasks
-    message_tx: tokio::sync::mpsc::UnboundedSender<ExecutorMessage>,
-    message_rx: tokio::sync::mpsc::UnboundedReceiver<ExecutorMessage>,
+    message_tx: peeps_sync::UnboundedSender<ExecutorMessage>,
+    message_rx: peeps_sync::UnboundedReceiver<ExecutorMessage>,
 
     /// In-flight action tasks (for waiting on cancellation)
     in_flight: JoinSet<()>,
@@ -443,7 +443,7 @@ impl Executor {
             debug!("ready[{}] = {:?} {}", i, node_idx, action.display_name());
         }
 
-        let (message_tx, message_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (message_tx, message_rx) = peeps_sync::unbounded_channel("executor_messages");
 
         // Detect CommandLineTools version on macOS
         #[cfg(target_os = "macos")]

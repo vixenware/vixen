@@ -57,7 +57,9 @@ impl<T: Vfs + Send + Sync + 'static> ProjFsBridge<T> {
 
         for component in path.components() {
             let name = component.as_os_str().to_string_lossy().to_string();
-            let result = self.handle.block_on(self.vfs.lookup(&cx, current_id, name.clone()));
+            let result = self
+                .handle
+                .block_on(self.vfs.lookup(&cx, current_id, name.clone()));
             if result.error != 0 {
                 tracing::debug!(?path, %name, current_id, error = result.error, "resolve_path: lookup failed");
                 return None;
@@ -134,7 +136,11 @@ impl<T: Vfs + Send + Sync + 'static> ProjectedFileSystemSource for ProjFsBridge<
         let parent_id = match self.resolve_path(parent) {
             Some(id) => id,
             None => {
-                tracing::warn!(?path, ?parent, "ProjFS get_directory_entry: parent resolve failed");
+                tracing::warn!(
+                    ?path,
+                    ?parent,
+                    "ProjFS get_directory_entry: parent resolve failed"
+                );
                 return None;
             }
         };
@@ -185,11 +191,17 @@ impl<T: Vfs + Send + Sync + 'static> ProjectedFileSystemSource for ProjFsBridge<
         };
 
         let cx = dummy_context();
-        let result = self
-            .handle
-            .block_on(self.vfs.read(&cx, file_id, byte_offset as u64, length as u64));
+        let result =
+            self.handle.block_on(
+                self.vfs
+                    .read(&cx, file_id, byte_offset as u64, length as u64),
+            );
         if result.error != 0 {
-            tracing::error!(error = result.error, ?path, "stream_file_content: read failed");
+            tracing::error!(
+                error = result.error,
+                ?path,
+                "stream_file_content: read failed"
+            );
             return Ok(Box::new(Cursor::new(vec![0u8; length])));
         }
 
@@ -251,7 +263,7 @@ where
                 }
             };
 
-            let (vfs_dead_tx, vfs_dead_rx) = tokio::sync::watch::channel(false);
+            let (vfs_dead_tx, vfs_dead_rx) = peeps_sync::watch_channel("vfs_dead", false);
 
             let _ = result_tx.send(Ok(VfsStart::Mounted {
                 mount_path,

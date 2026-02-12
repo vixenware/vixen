@@ -7,10 +7,10 @@
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use peeps::locks::DiagnosticMutex;
+use peeps_sync::{OneshotReceiver, OneshotSender};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::oneshot;
 use tracing_subscriber::Layer;
 use vxd_proto::{ActionProgress, ActionType};
 
@@ -102,7 +102,7 @@ impl TuiState {
 pub struct TuiHandle {
     state: Arc<DiagnosticMutex<TuiState>>,
     /// Receiver that signals when display task has finished cleanup
-    shutdown_rx: Arc<DiagnosticMutex<Option<oneshot::Receiver<()>>>>,
+    shutdown_rx: Arc<DiagnosticMutex<Option<OneshotReceiver<()>>>>,
 }
 
 impl Clone for TuiHandle {
@@ -118,7 +118,7 @@ impl TuiHandle {
     /// Create a new TUI handle and spawn the display task
     pub fn new() -> Self {
         let state = Arc::new(DiagnosticMutex::new("vx/tui_state", TuiState::new()));
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = peeps_sync::oneshot_channel("tui_shutdown");
 
         let handle = Self {
             state: state.clone(),
@@ -198,12 +198,12 @@ impl TuiHandle {
         // Wait for the display task to signal completion
         let rx = self.shutdown_rx.lock().take();
         if let Some(rx) = rx {
-            let _ = rx.await; // Ignore errors (channel closed is fine)
+            let _ = rx.recv().await; // Ignore errors (channel closed is fine)
         }
     }
 
     /// Background task that updates the display at ~15fps
-    async fn display_task(state: Arc<DiagnosticMutex<TuiState>>, shutdown_tx: oneshot::Sender<()>) {
+    async fn display_task(state: Arc<DiagnosticMutex<TuiState>>, shutdown_tx: OneshotSender<()>) {
         let multi = MultiProgress::new();
         multi.set_move_cursor(false); // can't set it to true, we add/remove tasks dynamically
 

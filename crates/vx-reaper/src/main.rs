@@ -122,7 +122,7 @@ async fn async_main(parent_pid: libc::pid_t, mount_path: String) {
     let mut pgroups = std::collections::HashSet::<libc::pid_t>::new();
 
     // Spawn a blocking task that watches the parent via kqueue EVFILT_PROC.
-    let (parent_dead_tx, parent_dead_rx) = tokio::sync::oneshot::channel::<()>();
+    let (parent_dead_tx, parent_dead_rx) = peeps_sync::oneshot_channel::<()>("parent_dead");
 
     tokio::task::spawn_blocking(move || {
         let kq = unsafe { libc::kqueue() };
@@ -198,7 +198,7 @@ async fn async_main(parent_pid: libc::pid_t, mount_path: String) {
             }
             log!("stdin EOF, starting cleanup");
         } => {}
-        _ = parent_dead_rx => {
+        _ = parent_dead_rx.recv() => {
             log!("parent exited (kqueue), starting cleanup");
         }
     }

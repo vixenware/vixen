@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use eyre::Result;
 use facet::Facet;
+use peeps_sync::{WatchReceiver, WatchSender};
 use roam_stream::{ConnectionHandle, ServiceDispatcher};
-use tokio::sync::watch;
 
 /// Optional cleanup hook for services that need to do work before exit.
 pub trait GracefulShutdown {
@@ -82,13 +82,13 @@ pub enum BootState {
 /// The gate provides a [`Boot`] service implementation and gates virtual
 /// connection acceptance.
 pub struct BootGate<S> {
-    boot_rx: watch::Receiver<BootState>,
-    service: tokio::sync::OnceCell<S>,
+    boot_rx: WatchReceiver<BootState>,
+    service: peeps_sync::OnceCell<S>,
 }
 
 /// Sender half — used by the daemon's boot task to signal completion.
 pub struct BootTx {
-    tx: watch::Sender<BootState>,
+    tx: WatchSender<BootState>,
 }
 
 impl BootTx {
@@ -106,10 +106,10 @@ impl BootTx {
 impl<S: Send + Sync + 'static> BootGate<S> {
     /// Create a new boot gate and its sender.
     pub fn new() -> (Arc<Self>, BootTx) {
-        let (tx, rx) = watch::channel(BootState::Booting);
+        let (tx, rx) = peeps_sync::watch_channel("boot_state", BootState::Booting);
         let gate = Arc::new(Self {
             boot_rx: rx,
-            service: tokio::sync::OnceCell::new(),
+            service: peeps_sync::OnceCell::new("boot_service"),
         });
         let boot_tx = BootTx { tx };
         (gate, boot_tx)
@@ -129,7 +129,7 @@ impl<S: Send + Sync + 'static> BootGate<S> {
     }
 
     /// Subscribe to boot state changes.
-    pub fn subscribe(&self) -> watch::Receiver<BootState> {
+    pub fn subscribe(&self) -> WatchReceiver<BootState> {
         self.boot_rx.clone()
     }
 

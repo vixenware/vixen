@@ -43,7 +43,7 @@ pub(crate) enum DownloadError {
 // Registry Manager (Inflight Deduplication)
 // =============================================================================
 
-type InflightFuture = Arc<tokio::sync::OnceCell<EnsureRegistryCrateResult>>;
+type InflightFuture = Arc<peeps_sync::OnceCell<EnsureRegistryCrateResult>>;
 
 /// Manages in-flight registry crate acquisitions with deduplication.
 ///
@@ -81,7 +81,7 @@ impl RegistryManager {
             let mut inflight = self.inflight.lock();
             inflight
                 .entry(spec_key)
-                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
+                .or_insert_with(|| Arc::new(peeps_sync::OnceCell::new("registry_inflight")))
                 .clone()
         };
 

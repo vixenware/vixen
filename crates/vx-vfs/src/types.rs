@@ -11,19 +11,33 @@ pub struct VfsConfig {
 }
 
 /// Successful VFS start outcomes.
-#[derive(Debug)]
 pub enum VfsStart {
     /// VFS is mounted and ready at the given path.
     Mounted {
         mount_path: Utf8PathBuf,
         /// Becomes `true` when the VFS session dies unexpectedly.
-        vfs_dead: tokio::sync::watch::Receiver<bool>,
+        vfs_dead: peeps_sync::WatchReceiver<bool>,
         /// FUSE telemetry state for diagnostics (Linux only).
         #[cfg(target_os = "linux")]
         telemetry: fuse3::telemetry::TelemetryState,
     },
     /// VFS is unavailable on this platform.
     Unsupported { platform: String },
+}
+
+impl std::fmt::Debug for VfsStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Mounted { mount_path, .. } => f
+                .debug_struct("Mounted")
+                .field("mount_path", mount_path)
+                .finish_non_exhaustive(),
+            Self::Unsupported { platform } => f
+                .debug_struct("Unsupported")
+                .field("platform", platform)
+                .finish(),
+        }
+    }
 }
 
 /// Errors returned while starting or managing VFS.
