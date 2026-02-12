@@ -3421,6 +3421,7 @@ dependencies = [
  "roam-session",
  "roam-shm",
  "roam-stream",
+ "strip-ansi-escapes",
  "tokio",
  "tracing",
  "ur-taking-me-with-you",

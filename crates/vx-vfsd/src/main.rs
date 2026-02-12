@@ -418,9 +418,10 @@ async fn async_main() -> Result<()> {
         let diagnostics = platform::collect_vfs_diagnostics(&args.mount).await;
         let elapsed = before.elapsed();
 
-        // Write diagnostics to a temporary file
+        // Write diagnostics to a temporary file (strip ANSI escapes for readability in files)
         let temp_path = format!("/tmp/vfsd-diagnostics-{:016x}.txt", fastrand::u64(..));
         let diagnostic_content = format!("{error}\n{diagnostics}");
+        let diagnostic_content = strip_ansi_escapes::strip_str(&diagnostic_content);
         if let Err(e) = tokio::fs::write(&temp_path, &diagnostic_content).await {
             tracing::error!("Failed to write VFS diagnostics to {}: {}", temp_path, e);
         } else {
