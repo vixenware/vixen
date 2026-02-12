@@ -26,7 +26,7 @@ use camino::Utf8PathBuf;
 use eyre::Result;
 use facet::Facet;
 use figue as args;
-use peeps::locks::DiagnosticAsyncMutex;
+use peeps::locks::DiagnosticMutex;
 use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::sync::Arc;
 use std::time::Duration;
@@ -159,7 +159,7 @@ struct ServiceClients {
 /// protocol on each, and return connected roam clients.
 async fn ensure_services(
     args: &Args,
-    spawn_tracker: &Arc<DiagnosticAsyncMutex<SpawnTracker>>,
+    spawn_tracker: &Arc<DiagnosticMutex<SpawnTracker>>,
 ) -> Result<ServiceClients> {
     use vx_io::spawn::ServiceBuilder;
 
@@ -208,7 +208,7 @@ async fn ensure_services(
         tokio::try_join!(store_builder.connect(), runner_builder.connect(),)?;
 
     {
-        let mut tracker = spawn_tracker.lock().await;
+        let mut tracker = spawn_tracker.lock();
         tracker.store = store_handle.child.take();
         tracker.runner = runner_handle.child.take();
     }
@@ -296,7 +296,7 @@ async fn async_main() -> Result<()> {
     // Keep lock_file alive for the daemon's lifetime
     let _lock_guard = lock_file;
 
-    let spawn_tracker = Arc::new(DiagnosticAsyncMutex::new(
+    let spawn_tracker = Arc::new(DiagnosticMutex::new(
         "vxd/spawn_tracker",
         SpawnTracker::default(),
     ));
@@ -376,7 +376,7 @@ async fn async_main() -> Result<()> {
     // Track active connections and shut down after idle timeout.
     // Normal: 2 hours, test mode: 2s, boot failed: 2s.
     let active_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let last_disconnect = Arc::new(DiagnosticAsyncMutex::new(
+    let last_disconnect = Arc::new(DiagnosticMutex::new(
         "vxd/last_disconnect",
         Option::<tokio::time::Instant>::None,
     ));
@@ -410,7 +410,7 @@ async fn async_main() -> Result<()> {
 
                 let count = active_connections.load(std::sync::atomic::Ordering::Relaxed);
                 if count == 0 {
-                    let idle_long_enough = match *last_disconnect.lock().await {
+                    let idle_long_enough = match *last_disconnect.lock() {
                         Some(when) => {
                             let elapsed = when.elapsed();
                             tracing::trace!(
@@ -485,7 +485,7 @@ async fn async_main() -> Result<()> {
                         active_connections = count,
                         "connection dropped after handshake error"
                     );
-                    *last_disconnect.lock().await = Some(tokio::time::Instant::now());
+                    *last_disconnect.lock() = Some(tokio::time::Instant::now());
                     return;
                 }
             };
@@ -541,7 +541,7 @@ async fn async_main() -> Result<()> {
                 active_connections = count,
                 "connection closed"
             );
-            *last_disconnect.lock().await = Some(tokio::time::Instant::now());
+            *last_disconnect.lock() = Some(tokio::time::Instant::now());
         });
     }
 }

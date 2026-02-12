@@ -203,8 +203,8 @@ impl Vfsd for VfsdService {
         // Take a cheap snapshot (no write buffers — they've been drained by flush above).
         // Resolve the target directory, then recursively build DirectoryNodes.
         let (items_snapshot, target_id) = {
-            let prefixes = self.vfs.prefixes.read();
-            let items = self.vfs.items.read();
+            let prefixes = self.vfs.prefixes.lock();
+            let items = self.vfs.items.lock();
 
             let prefix = prefixes
                 .get(&prefix_id)
@@ -248,8 +248,8 @@ impl Vfsd for VfsdService {
         } else {
             // Remove specific subtree within prefix
             let target_item_id = {
-                let prefixes = self.vfs.prefixes.read();
-                let items = self.vfs.items.read();
+                let prefixes = self.vfs.prefixes.lock();
+                let items = self.vfs.items.lock();
 
                 let prefix = prefixes
                     .get(&prefix_id)
@@ -270,7 +270,7 @@ impl Vfsd for VfsdService {
 
             // Collect and remove all descendants under one write lock
             {
-                let mut items = self.vfs.items.write();
+                let mut items = self.vfs.items.lock();
                 let to_remove =
                     crate::vfs::CasVfs::collect_descendants_from(&items, target_item_id);
                 // Remove in reverse (leaves first) to keep children index clean

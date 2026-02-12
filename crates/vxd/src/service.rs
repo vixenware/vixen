@@ -13,7 +13,7 @@ use crate::executor::Executor;
 use crate::inputs::*;
 use camino::Utf8PathBuf;
 use facet::trace;
-use peeps::locks::{DiagnosticAsyncMutex, DiagnosticAsyncRwLock};
+use peeps::locks::DiagnosticMutex;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
 use std::sync::Arc;
@@ -57,6 +57,7 @@ pub struct AcquiredToolchains {
 }
 
 /// The daemon service implementation
+// TODO: group some of those locks together?
 #[derive(Clone)]
 pub struct VxdService {
     store: Arc<StoreClient<crate::UpstreamCaller>>,
@@ -78,27 +79,25 @@ pub struct VxdService {
     picante_wal: Utf8PathBuf,
 
     /// WAL writer for incremental persistence (kept open across builds)
-    wal_writer: Arc<DiagnosticAsyncMutex<Option<WalWriter>>>,
+    wal_writer: Arc<DiagnosticMutex<Option<WalWriter>>>,
 
     /// Acquired toolchains (manifest references only)
-    toolchains: Arc<DiagnosticAsyncMutex<AcquiredToolchains>>,
+    toolchains: Arc<DiagnosticMutex<AcquiredToolchains>>,
 
     /// Spawn tracker for child services
-    spawn_tracker: Arc<DiagnosticAsyncMutex<SpawnTracker>>,
+    spawn_tracker: Arc<DiagnosticMutex<SpawnTracker>>,
 
     /// Progress listener client (for reporting progress to vx CLI)
-    /// Uses RwLock for interior mutability so it can be updated per-connection
-    progress_listener: Arc<
-        DiagnosticAsyncRwLock<Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>>,
-    >,
+    progress_listener:
+        Arc<DiagnosticMutex<Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>>>,
 
     /// Session ID for cache key namespacing. Empty = session zero (shared).
     /// Per-connection state — each connection handler gets its own instance.
-    session_id: Arc<DiagnosticAsyncRwLock<String>>,
+    session_id: Arc<DiagnosticMutex<String>>,
 
     /// Cancellation token for the build active on this session (if any).
     /// Per-connection: when the CLI disconnects, only this session's build is cancelled.
-    active_build_cancel: Arc<DiagnosticAsyncMutex<Option<CancellationToken>>>,
+    active_build_cancel: Arc<DiagnosticMutex<Option<CancellationToken>>>,
 }
 
 fn rule_plan_bridge_enabled() -> bool {
@@ -616,8 +615,8 @@ fn build_rule_plan_from_crate_graph(graph: &CrateGraph) -> RulePlan {
 impl VxdService {
     /// Report progress to CLI if connected
     async fn report_start_action(&self, action_type: ActionType) -> Option<u64> {
-        let listener_guard = self.progress_listener.read().await;
-        if let Some(ref listener) = *listener_guard {
+        let listener = self.progress_listener.lock().clone();
+        if let Some(ref listener) = listener {
             listener.start_action(action_type).await.ok()
         } else {
             None
@@ -625,15 +624,15 @@ impl VxdService {
     }
 
     async fn report_complete_action(&self, action_id: Option<u64>) {
-        let listener_guard = self.progress_listener.read().await;
-        if let (Some(listener), Some(id)) = (listener_guard.as_ref(), action_id) {
+        let listener = self.progress_listener.lock().clone();
+        if let (Some(listener), Some(id)) = (listener.as_ref(), action_id) {
             let _ = listener.complete_action(id).await;
         }
     }
 
     async fn report_set_total(&self, total: u64) {
-        let listener_guard = self.progress_listener.read().await;
-        if let Some(ref listener) = *listener_guard {
+        let listener = self.progress_listener.lock().clone();
+        if let Some(ref listener) = listener {
             let _ = listener.set_total(total).await;
         }
     }
@@ -647,7 +646,7 @@ impl VxdService {
     pub async fn new(
         vx_home: Utf8PathBuf,
         exec_host_triple: String,
-        spawn_tracker: Arc<DiagnosticAsyncMutex<SpawnTracker>>,
+        spawn_tracker: Arc<DiagnosticMutex<SpawnTracker>>,
         store: Arc<StoreClient<crate::UpstreamCaller>>,
         exec: Arc<RunnerClient<crate::UpstreamCaller>>,
     ) -> Self {
@@ -708,8 +707,8 @@ impl VxdService {
             db: Arc::new(db),
             picante_cache: cache_path,
             picante_wal: wal_path,
-            wal_writer: Arc::new(DiagnosticAsyncMutex::new("vxd/wal_writer", wal_writer)),
-            toolchains: Arc::new(DiagnosticAsyncMutex::new(
+            wal_writer: Arc::new(DiagnosticMutex::new("vxd/wal_writer", wal_writer)),
+            toolchains: Arc::new(DiagnosticMutex::new(
                 "vxd/toolchains",
                 AcquiredToolchains {
                     rust: None,
@@ -717,12 +716,9 @@ impl VxdService {
                 },
             )),
             spawn_tracker,
-            progress_listener: Arc::new(DiagnosticAsyncRwLock::new("vxd/progress_listener", None)),
-            session_id: Arc::new(DiagnosticAsyncRwLock::new("vxd/session_id", String::new())),
-            active_build_cancel: Arc::new(DiagnosticAsyncMutex::new(
-                "vxd/active_build_cancel",
-                None,
-            )),
+            progress_listener: Arc::new(DiagnosticMutex::new("vxd/progress_listener", None)),
+            session_id: Arc::new(DiagnosticMutex::new("vxd/session_id", String::new())),
+            active_build_cancel: Arc::new(DiagnosticMutex::new("vxd/active_build_cancel", None)),
         }
     }
 
@@ -741,18 +737,15 @@ impl VxdService {
             toolchains: self.toolchains.clone(),
             spawn_tracker: self.spawn_tracker.clone(),
             // Per-connection state: fresh for each session
-            progress_listener: Arc::new(DiagnosticAsyncRwLock::new("vxd/progress_listener", None)),
-            session_id: Arc::new(DiagnosticAsyncRwLock::new("vxd/session_id", String::new())),
-            active_build_cancel: Arc::new(DiagnosticAsyncMutex::new(
-                "vxd/active_build_cancel",
-                None,
-            )),
+            progress_listener: Arc::new(DiagnosticMutex::new("vxd/progress_listener", None)),
+            session_id: Arc::new(DiagnosticMutex::new("vxd/session_id", String::new())),
+            active_build_cancel: Arc::new(DiagnosticMutex::new("vxd/active_build_cancel", None)),
         }
     }
 
     /// Get the current session ID for this connection.
     pub async fn session_id(&self) -> String {
-        self.session_id.read().await.clone()
+        self.session_id.lock().clone()
     }
 
     /// Update the progress listener for the current connection
@@ -760,12 +753,12 @@ impl VxdService {
         &self,
         listener: Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>,
     ) {
-        *self.progress_listener.write().await = listener;
+        *self.progress_listener.lock() = listener;
     }
 
     /// Cancel any active build. Called by the signal handler on SIGINT/SIGTERM.
     pub async fn cancel_active_build(&self) {
-        if let Some(token) = self.active_build_cancel.lock().await.as_ref() {
+        if let Some(token) = self.active_build_cancel.lock().as_ref() {
             info!("cancelling active build");
             token.cancel();
         }
@@ -775,7 +768,7 @@ impl VxdService {
     pub async fn ensure_rust_toolchain(&self, channel: RustChannel) -> Result<ToolchainInfo> {
         // Check if already acquired
         {
-            let toolchains = self.toolchains.lock().await;
+            let toolchains = self.toolchains.lock();
             if let Some(ref rust) = toolchains.rust {
                 return Ok(ToolchainInfo {
                     manifest_hash: rust.manifest_hash,
@@ -801,7 +794,7 @@ impl VxdService {
         let (progress_tx, mut progress_rx) = roam::channel::<vx_store_proto::StoreProgress>();
 
         // Forward store progress to the CLI's ProgressListener
-        let forward_listener = self.progress_listener.read().await.clone();
+        let forward_listener = self.progress_listener.lock().clone();
         let forward_action_id = action_id;
         let forward_handle = peeps::tasks::spawn_tracked(
             format!("toolchain_progress_fwd_{:?}", action_id),
@@ -889,7 +882,7 @@ impl VxdService {
 
         // Cache it
         {
-            let mut toolchains = self.toolchains.lock().await;
+            let mut toolchains = self.toolchains.lock();
             toolchains.rust = Some(ToolchainInfo {
                 manifest_hash,
                 toolchain_id,
@@ -906,7 +899,7 @@ impl VxdService {
 
     /// Kill all spawned child services (casd, execd)
     pub async fn kill_spawned_services(&self) {
-        self.spawn_tracker.lock().await.kill_all();
+        self.spawn_tracker.lock().kill_all();
     }
 
     /// Build from vx.styx manifest (C, Rust, or mixed projects)
@@ -1141,7 +1134,7 @@ impl VxdService {
                     .map(|n| n.get() * 2)
                     .unwrap_or(16);
 
-                let progress_listener = self.progress_listener.read().await.clone();
+                let progress_listener = self.progress_listener.lock().clone();
                 let session_id = self.session_id().await;
 
                 let mut executor = crate::executor::Executor::new(
@@ -1158,14 +1151,14 @@ impl VxdService {
                 );
 
                 // Register the executor's cancel token so signal handlers can cancel this build
-                *self.active_build_cancel.lock().await = Some(executor.cancel_token());
+                *self.active_build_cancel.lock() = Some(executor.cancel_token());
 
                 let build_start = std::time::Instant::now();
                 let exec_result = executor.execute().await;
                 let duration = build_start.elapsed();
 
                 // Clear the cancel token now that the build is done
-                *self.active_build_cancel.lock().await = None;
+                *self.active_build_cancel.lock() = None;
                 exec_result?;
 
                 // Get execution statistics
@@ -1601,7 +1594,7 @@ impl VxdService {
         tracing::debug!("creating executor with max_concurrency={}", max_concurrency);
 
         // Get current progress listener (clones the Option<Arc<...>> inside the RwLock)
-        let progress_listener = self.progress_listener.read().await.clone();
+        let progress_listener = self.progress_listener.lock().clone();
         let session_id = self.session_id().await;
 
         let mut executor = Executor::new(
@@ -1618,22 +1611,23 @@ impl VxdService {
         );
 
         // Register the executor's cancel token so signal handlers can cancel this build
-        *self.active_build_cancel.lock().await = Some(executor.cancel_token());
+        *self.active_build_cancel.lock() = Some(executor.cancel_token());
 
         tracing::debug!("calling executor.execute()");
         let exec_result = executor.execute().await;
         tracing::debug!("executor.execute() completed");
 
         // Clear the cancel token now that the build is done
-        *self.active_build_cancel.lock().await = None;
+        *self.active_build_cancel.lock() = None;
         exec_result?;
 
         // Append changes to WAL after build (incremental persistence)
-        if let Some(ref mut wal) = *self.wal_writer.lock().await {
-            match self.db.append_to_wal(wal).await {
+        // Take the writer out of the mutex so we don't hold the guard across await
+        let wal_writer = self.wal_writer.lock().take();
+        if let Some(mut wal) = wal_writer {
+            match self.db.append_to_wal(&mut wal).await {
                 Ok(count) if count > 0 => {
                     info!(path = %self.picante_wal, entries = count, "appended changes to WAL");
-                    // Explicit flush to ensure durability (WAL auto-flushes after threshold, but we flush after each build)
                     if let Err(e) = wal.flush() {
                         warn!(path = %self.picante_wal, error = %e, "failed to flush WAL");
                     }
@@ -1645,6 +1639,8 @@ impl VxdService {
                     warn!(path = %self.picante_wal, error = %e, "failed to append to WAL");
                 }
             }
+            // Put it back
+            *self.wal_writer.lock() = Some(wal);
         }
 
         // Get execution statistics
@@ -1742,7 +1738,7 @@ impl Vxd for VxdService {
 
     async fn set_session(&self, _cx: &roam::Context, session_id: String) {
         info!(session_id = %session_id, "session ID set");
-        *self.session_id.write().await = session_id;
+        *self.session_id.lock() = session_id;
     }
 
     async fn unpublish_cache_keys(

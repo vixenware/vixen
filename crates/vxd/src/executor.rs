@@ -3,12 +3,13 @@
 //! This module implements the execution engine that schedules and runs actions
 //! from the action graph with optimal parallelism while respecting dependencies.
 
+use peeps::locks::DiagnosticMutex;
 use petgraph::Direction::Incoming;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
@@ -324,7 +325,7 @@ pub struct Executor {
     states: HashMap<NodeIndex, ActionState>,
 
     /// Results from completed actions (shared read-only with spawned tasks)
-    results: Arc<RwLock<HashMap<NodeIndex, ActionResult>>>,
+    results: Arc<DiagnosticMutex<HashMap<NodeIndex, ActionResult>>>,
 
     /// Remaining dependency count for each action (owned by executor)
     remaining_deps: HashMap<NodeIndex, usize>,
@@ -364,7 +365,7 @@ pub struct Executor {
     build_start: std::time::Instant,
 
     /// Free-list of concurrency lane IDs (0..max_concurrency)
-    free_lanes: Arc<tokio::sync::Mutex<Vec<u32>>>,
+    free_lanes: Arc<DiagnosticMutex<Vec<u32>>>,
 
     /// Execution statistics (owned by executor)
     stats: ExecutionStats,
@@ -470,7 +471,7 @@ impl Executor {
         Self {
             graph,
             states: HashMap::new(),
-            results: Arc::new(RwLock::new(HashMap::new())),
+            results: Arc::new(DiagnosticMutex::new("vxd/executor_results", HashMap::new())),
             remaining_deps,
             ready_queue,
             concurrency_limit: Arc::new(Semaphore::new(max_concurrency)),
@@ -484,7 +485,8 @@ impl Executor {
             db,
             node_timings: HashMap::new(),
             build_start: std::time::Instant::now(),
-            free_lanes: Arc::new(tokio::sync::Mutex::new(
+            free_lanes: Arc::new(DiagnosticMutex::new(
+                "vxd/executor_free_lanes",
                 (0..max_concurrency as u32).collect(),
             )),
             stats: ExecutionStats::default(),
@@ -628,7 +630,7 @@ impl Executor {
                                 node_idx
                             );
                             self.states.insert(node_idx, ActionState::Completed);
-                            self.results.write().await.insert(node_idx, action_result);
+                            self.results.lock().insert(node_idx, action_result);
 
                             // Decrement dependency counts and add newly ready actions to queue
                             for dependent_idx in
@@ -662,7 +664,7 @@ impl Executor {
         }
 
         // Compute stats from results
-        let results_lock = self.results.read().await;
+        let results_lock = self.results.lock();
         let mut cache_hits = 0;
         let mut rebuilt = 0;
         let mut bin_output = None;
@@ -1183,7 +1185,7 @@ impl Executor {
             });
 
             // Acquire a lane ID for timeline tracking
-            let lane = free_lanes.lock().await.pop().unwrap_or(0);
+            let lane = free_lanes.lock().pop().unwrap_or(0);
 
             debug!("calling execute_action for {:?} on lane {}", node_idx, lane);
 
@@ -1230,7 +1232,7 @@ impl Executor {
             let execute_ms = execute_start.elapsed().as_millis() as u64;
 
             // Release the lane back to the pool
-            free_lanes.lock().await.push(lane);
+            free_lanes.lock().push(lane);
 
             debug!("sending completion message for {:?}", node_idx);
             // Send result back to executor — disarm the drop guard since we're sending explicitly
@@ -1257,7 +1259,7 @@ async fn execute_action(
     cas: &Arc<StoreClient<crate::UpstreamCaller>>,
     exec: &Arc<RunnerClient<crate::UpstreamCaller>>,
     db: &Arc<crate::db::Database>,
-    results: &Arc<RwLock<HashMap<NodeIndex, ActionResult>>>,
+    results: &Arc<DiagnosticMutex<HashMap<NodeIndex, ActionResult>>>,
     workspace_root: &camino::Utf8PathBuf,
     _target_triple: &str,
     _profile: &str,
@@ -1325,7 +1327,7 @@ async fn execute_action(
 
             // Locate corresponding download result for this component.
             let tarball = {
-                let results_lock = results.read().await;
+                let results_lock = results.lock();
                 results_lock.values().find_map(|r| match r {
                     ActionResult::RustToolchainComponentDownloaded {
                         component: downloaded_component,
@@ -1585,7 +1587,7 @@ async fn execute_action(
             use vx_tarball::{Compression, extract_to_tree};
 
             let registry_manifest = {
-                let results_lock = results.read().await;
+                let results_lock = results.lock();
                 deps.iter()
                     .find_map(|idx| match results_lock.get(idx) {
                         Some(ActionResult::RegistryCrateAcquired {
@@ -1780,7 +1782,7 @@ async fn execute_action(
         } => {
             let toolchain_manifest = match toolchain {
                 crate::action_graph::RunToolchain::Zig => {
-                    let results_lock = results.read().await;
+                    let results_lock = results.lock();
                     deps.iter()
                         .find_map(|idx| match results_lock.get(idx) {
                             Some(ActionResult::ZigToolchainAcquired { manifest_hash, .. }) => {
@@ -1794,7 +1796,7 @@ async fn execute_action(
                         })?
                 }
                 crate::action_graph::RunToolchain::Rust => {
-                    let results_lock = results.read().await;
+                    let results_lock = results.lock();
                     deps.iter()
                         .find_map(|idx| match results_lock.get(idx) {
                             Some(ActionResult::RustToolchainFinalized {
@@ -1811,7 +1813,7 @@ async fn execute_action(
 
             let mut resolved_tree_mounts = tree_mounts.clone();
             if !dep_tree_mounts.is_empty() {
-                let results_lock = results.read().await;
+                let results_lock = results.lock();
                 for spec in &dep_tree_mounts {
                     let source_manifest = deps
                         .iter()
@@ -1839,7 +1841,7 @@ async fn execute_action(
 
             let mut resolved_file_mounts = file_mounts.clone();
             if !dep_file_mounts.is_empty() {
-                let results_lock = results.read().await;
+                let results_lock = results.lock();
                 for spec in &dep_file_mounts {
                     let manifest_hash = deps
                         .iter()
@@ -1866,21 +1868,23 @@ async fn execute_action(
                 }
             }
             if !collect_file_mounts.is_empty() {
-                let results_lock = results.read().await;
-                for spec in &collect_file_mounts {
-                    let dep_manifests: Vec<Blake3Hash> = deps
-                        .iter()
+                // Collect all dep manifests under the lock, then release it
+                let dep_manifests: Vec<Blake3Hash> = {
+                    let results_lock = results.lock();
+                    deps.iter()
                         .filter_map(|idx| match results_lock.get(idx) {
                             Some(ActionResult::RunCompleted {
                                 output_manifest, ..
                             }) => Some(*output_manifest),
                             _ => None,
                         })
-                        .collect();
+                        .collect()
+                };
 
+                for spec in &collect_file_mounts {
                     let mut i = 0usize;
-                    for mh in dep_manifests {
-                        let manifest = load_manifest(cas, NodeHash(mh), &label).await?;
+                    for mh in &dep_manifests {
+                        let manifest = load_manifest(cas, NodeHash(*mh), &label).await?;
 
                         if manifest.outputs.iter().any(|o| o.logical == spec.logical) {
                             let path = format!(
@@ -1891,7 +1895,7 @@ async fn execute_action(
                                 width = spec.pad_width
                             );
                             resolved_file_mounts.push(RunFileMount {
-                                manifest: mh,
+                                manifest: *mh,
                                 logical: spec.logical.clone(),
                                 path,
                             });

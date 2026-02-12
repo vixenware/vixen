@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use camino::Utf8PathBuf;
-use peeps::locks::DiagnosticRwLock;
+use peeps::locks::DiagnosticMutex;
 use vixenfs_proto::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
     ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
@@ -238,9 +238,9 @@ pub struct CasVfs {
     /// CAS client for fetching blobs
     pub(crate) cas: Arc<StoreClient<crate::StoreCaller>>,
     /// All items in the VFS with adjacency index
-    pub(crate) items: DiagnosticRwLock<VfsItems>,
+    pub(crate) items: DiagnosticMutex<VfsItems>,
     /// Active action prefixes (keyed by prefix ID like "build-01JFX...")
-    pub(crate) prefixes: DiagnosticRwLock<HashMap<String, ActionPrefix>>,
+    pub(crate) prefixes: DiagnosticMutex<HashMap<String, ActionPrefix>>,
     /// Next available ItemId
     next_id: AtomicU64,
     /// L2 chunk cache (disk): persistent across vx-vfsd restarts.
@@ -250,7 +250,7 @@ pub struct CasVfs {
     /// BlobNode metadata cache: NodeHash → parsed BlobNode.
     /// BlobNodes are immutable (content-addressed) so caching is unconditionally safe.
     /// Small: each entry is ~100 bytes × MAX_CHUNKS_PER_BLOB chunk entries.
-    blobnode_cache: DiagnosticRwLock<HashMap<NodeHash, Arc<BlobNode>>>,
+    blobnode_cache: DiagnosticMutex<HashMap<NodeHash, Arc<BlobNode>>>,
     /// Mount path for reading back files written directly to disk (ProjFS on Windows).
     mount_path: Utf8PathBuf,
 }
@@ -281,11 +281,11 @@ impl CasVfs {
 
         Self {
             cas,
-            items: DiagnosticRwLock::new("CasVfs::items", items),
-            prefixes: DiagnosticRwLock::new("CasVfs::prefixes", HashMap::new()),
+            items: DiagnosticMutex::new("CasVfs::items", items),
+            prefixes: DiagnosticMutex::new("CasVfs::prefixes", HashMap::new()),
             next_id: AtomicU64::new(2), // 1=root
             disk_cache_dir,
-            blobnode_cache: DiagnosticRwLock::new("CasVfs::blobnode_cache", HashMap::new()),
+            blobnode_cache: DiagnosticMutex::new("CasVfs::blobnode_cache", HashMap::new()),
             mount_path,
         }
     }
@@ -341,7 +341,7 @@ impl CasVfs {
     async fn get_blobnode_cached(&self, blob_node_hash: NodeHash) -> Result<Arc<BlobNode>, String> {
         // Check cache
         {
-            let cache = self.blobnode_cache.read();
+            let cache = self.blobnode_cache.lock();
             if let Some(blob) = cache.get(&blob_node_hash) {
                 return Ok(Arc::clone(blob));
             }
@@ -372,7 +372,7 @@ impl CasVfs {
 
         // Insert into cache
         {
-            let mut cache = self.blobnode_cache.write();
+            let mut cache = self.blobnode_cache.lock();
             cache.insert(blob_node_hash, Arc::clone(&blob));
         }
 
@@ -498,7 +498,7 @@ impl CasVfs {
     }
     /// Check if a prefix already exists
     pub async fn has_prefix(&self, prefix_id: &str) -> bool {
-        self.prefixes.read().contains_key(prefix_id)
+        self.prefixes.lock().contains_key(prefix_id)
     }
 
     /// Create a new action prefix
@@ -509,7 +509,7 @@ impl CasVfs {
 
         // Create the prefix directory under root
         {
-            let mut items = self.items.write();
+            let mut items = self.items.lock();
             items.insert(VfsItem {
                 id: prefix_root_id,
                 parent_id: 1, // under root
@@ -524,7 +524,7 @@ impl CasVfs {
 
         // Register the prefix
         {
-            let mut prefixes = self.prefixes.write();
+            let mut prefixes = self.prefixes.lock();
             prefixes.insert(
                 prefix_id.clone(),
                 ActionPrefix {
@@ -618,7 +618,7 @@ impl CasVfs {
     ) -> Option<ItemId> {
         // Get the prefix root
         let prefix_root_id = {
-            let prefixes = self.prefixes.read();
+            let prefixes = self.prefixes.lock();
             prefixes.get(prefix_id)?.root_item_id
         };
 
@@ -629,7 +629,7 @@ impl CasVfs {
         }
 
         // Single write lock for the entire check+create sequence
-        let mut items = self.items.write();
+        let mut items = self.items.lock();
         let mut current_parent = prefix_root_id;
 
         for (i, component) in components.iter().enumerate() {
@@ -678,7 +678,7 @@ impl CasVfs {
             if is_last {
                 drop(items);
                 // Update prefix mappings
-                let mut prefixes = self.prefixes.write();
+                let mut prefixes = self.prefixes.lock();
                 if let Some(prefix) = prefixes.get_mut(prefix_id) {
                     prefix.path_mappings.insert(path.to_string(), entry);
                 }
@@ -694,7 +694,7 @@ impl CasVfs {
     /// Remove an action prefix and all its contents
     pub async fn remove_prefix(&self, prefix_id: &str) {
         let prefix_root_id = {
-            let prefixes = self.prefixes.read();
+            let prefixes = self.prefixes.lock();
             let Some(prefix) = prefixes.get(prefix_id) else {
                 return;
             };
@@ -703,7 +703,7 @@ impl CasVfs {
 
         // Collect then remove under one write lock
         {
-            let mut items = self.items.write();
+            let mut items = self.items.lock();
             let to_remove = Self::collect_descendants_from(&items, prefix_root_id);
             // Remove in reverse (leaves first) to keep children index clean
             for &id in to_remove.iter().rev() {
@@ -713,7 +713,7 @@ impl CasVfs {
 
         // Remove prefix registration
         {
-            let mut prefixes = self.prefixes.write();
+            let mut prefixes = self.prefixes.lock();
             prefixes.remove(prefix_id);
         }
 
@@ -743,7 +743,7 @@ impl Vfs for CasVfs {
     async fn lookup(&self, _cx: &roam::Context, parent_id: ItemId, name: String) -> LookupResult {
         tracing::trace!(parent_id, name = %name, "VFS lookup");
 
-        let items = self.items.read();
+        let items = self.items.lock();
         if let Some(item) = items.lookup_child(parent_id, &name) {
             tracing::trace!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found");
             return LookupResult {
@@ -776,7 +776,7 @@ impl Vfs for CasVfs {
     async fn get_attributes(&self, _cx: &roam::Context, item_id: ItemId) -> GetAttributesResult {
         tracing::trace!(item_id, "VFS get_attributes");
 
-        let items = self.items.read();
+        let items = self.items.lock();
         match items.get(&item_id) {
             Some(item) => GetAttributesResult {
                 attrs: ItemAttributes {
@@ -806,7 +806,7 @@ impl Vfs for CasVfs {
     async fn read_dir(&self, _cx: &roam::Context, item_id: ItemId, cursor: u64) -> ReadDirResult {
         tracing::trace!(item_id, cursor, "VFS read_dir");
 
-        let items = self.items.read();
+        let items = self.items.lock();
         match items.get(&item_id) {
             Some(item) if item.item_type == ItemType::Directory => {
                 let children: Vec<_> = items.children_of(item_id).collect();
@@ -864,7 +864,7 @@ impl Vfs for CasVfs {
         // Extract what we need while holding the read lock — slice the write buffer
         // in-place instead of cloning the entire Vec<u8>.
         let (cas_hash, blob_node) = {
-            let items = self.items.read();
+            let items = self.items.lock();
             let Some(item) = items.get(&item_id) else {
                 return ReadResult {
                     data: Vec::new(),
@@ -926,7 +926,7 @@ impl Vfs for CasVfs {
     ) -> WriteResult {
         tracing::trace!(item_id, offset, len = data.len(), "write");
 
-        let mut items = self.items.write();
+        let mut items = self.items.lock();
 
         match items.get(&item_id).map(|i| i.item_type) {
             None => {
@@ -983,7 +983,7 @@ impl Vfs for CasVfs {
             ItemType::Symlink => mode::FILE_REGULAR,
         };
 
-        let mut items = self.items.write();
+        let mut items = self.items.lock();
 
         // Verify parent exists and is a directory
         match items.get(&parent_id) {
@@ -1036,7 +1036,7 @@ impl Vfs for CasVfs {
             };
         }
 
-        let mut items = self.items.write();
+        let mut items = self.items.lock();
 
         let Some(item) = items.get(&item_id) else {
             return VfsResult {
@@ -1070,7 +1070,7 @@ impl Vfs for CasVfs {
             };
         }
 
-        let mut items = self.items.write();
+        let mut items = self.items.lock();
 
         if !items.contains_key(&item_id) {
             return VfsResult {
@@ -1121,7 +1121,7 @@ impl Vfs for CasVfs {
             return VfsResult { error: errno::OK };
         }
 
-        let mut items = self.items.write();
+        let mut items = self.items.lock();
 
         if !items.contains_key(&item_id) {
             return VfsResult {
@@ -1153,7 +1153,7 @@ impl Vfs for CasVfs {
 impl CasVfs {
     pub async fn flush_to_cas(&self, item_id: ItemId) -> Option<(Blake3Hash, u64)> {
         let data = {
-            let mut items = self.items.write();
+            let mut items = self.items.lock();
             items.get(&item_id)?; // check item exists
             items.write_buffers.remove(&item_id)?
         };
@@ -1167,7 +1167,7 @@ impl CasVfs {
         let chunk_hash = ChunkHash(content_hash);
         match self.cas.put_chunk(chunk_hash, data.clone()).await {
             Ok(()) => {
-                let mut items = self.items.write();
+                let mut items = self.items.lock();
                 if let Some(item) = items.get_mut(&item_id) {
                     item.cas_hash = Some(content_hash);
                     item.blob_node = None; // single chunk
@@ -1178,7 +1178,7 @@ impl CasVfs {
             Err(e) => {
                 tracing::error!(item_id, error = %e, "failed to flush to CAS, restoring write buffer");
                 // Restore the write buffer so data isn't lost
-                let mut items = self.items.write();
+                let mut items = self.items.lock();
                 if let Some(item) = items.get_mut(&item_id) {
                     item.size = data.len() as u64;
                 }
@@ -1210,7 +1210,7 @@ impl CasVfs {
         let mut results = HashMap::new();
 
         let prefix_root_id = {
-            let prefixes = self.prefixes.read();
+            let prefixes = self.prefixes.lock();
             match prefixes.get(prefix_id) {
                 Some(p) => p.root_item_id,
                 None => return results,
@@ -1218,7 +1218,7 @@ impl CasVfs {
         };
 
         let items_to_flush: Vec<(ItemId, String)> = {
-            let items = self.items.read();
+            let items = self.items.lock();
             let descendants = Self::collect_descendants_from(&items, prefix_root_id);
 
             descendants
@@ -1311,8 +1311,8 @@ impl CasVfs {
     /// Dump VFS state for debugging
     #[cfg(unix)]
     pub fn dump_all_state(&self) {
-        let items = self.items.read();
-        let prefixes = self.prefixes.read();
+        let items = self.items.lock();
+        let prefixes = self.prefixes.lock();
 
         eprintln!("\n=== VFS STATE DUMP ===");
         eprintln!("Total items: {}", items.len());
@@ -1333,8 +1333,8 @@ impl CasVfs {
     }
 
     pub async fn dump_state(&self, prefix_id: &str) {
-        let items = self.items.read();
-        let prefixes = self.prefixes.read();
+        let items = self.items.lock();
+        let prefixes = self.prefixes.lock();
 
         tracing::debug!("=== VFS STATE DUMP ===");
         tracing::debug!("Total items: {}", items.len());
