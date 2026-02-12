@@ -16,6 +16,7 @@ use tui::emit_osc_progress;
 use vx_io::spawn::ServiceBuilder;
 use vx_report::ReportStore;
 use vx_store_proto::Blake3Hash;
+use vx_tracing::init_cli_stderr;
 use vxd_proto::{BuildRequest, VxdClient};
 
 use crate::types::{CliContext, CliMode, DaemonStrategy};
@@ -58,20 +59,28 @@ async fn async_main() {
     .run()
     .unwrap();
 
-    let mut ctx = CliContext::from_cli(&cli).expect("failed to create context");
+    let mut cx = CliContext::from_cli(&cli).expect("failed to create context");
+
+    // Initialize tracing - with TUI layer, or plain output to stderr.
+    // In JSON mode, tracing goes to stderr so stdout stays clean NDJSON.
+    if let CliMode::Tui(ref tui) = cx.mode {
+        init_tracing_with_tui(tui.clone());
+    } else {
+        init_cli_stderr();
+    }
 
     let result = match cli.command {
-        CliCommand::Build(args) => ctx.cmd_build(args).await,
-        CliCommand::Start(args) => ctx.cmd_start(args).await,
-        CliCommand::Ping => ctx.cmd_ping().await,
-        CliCommand::Kill(args) => ctx.cmd_kill(args).await,
-        CliCommand::Clean(args) => ctx.cmd_clean(args).await,
-        CliCommand::Doctor(_args) => ctx.cmd_doctor().await,
-        CliCommand::Debug(args) => ctx.cmd_debug(args).await,
+        CliCommand::Build(args) => cx.cmd_build(args).await,
+        CliCommand::Start(args) => cx.cmd_start(args).await,
+        CliCommand::Ping => cx.cmd_ping().await,
+        CliCommand::Kill(args) => cx.cmd_kill(args).await,
+        CliCommand::Clean(args) => cx.cmd_clean(args).await,
+        CliCommand::Doctor(_args) => cx.cmd_doctor().await,
+        CliCommand::Debug(args) => cx.cmd_debug(args).await,
     };
 
     if let Err(e) = result {
-        if let CliMode::Tui(tui) = &ctx.mode {
+        if let CliMode::Tui(tui) = &cx.mode {
             tui.shutdown().await;
         }
         eprintln!("vx: {e:#}");
@@ -118,12 +127,6 @@ impl CliContext {
         }
 
         let daemon = self.ensure_vxd().await?;
-
-        // Initialize tracing - with TUI layer, or plain output to stderr.
-        // In JSON mode, tracing goes to stderr so stdout stays clean NDJSON.
-        if let CliMode::Tui(ref tui) = self.mode {
-            init_tracing_with_tui(tui.clone());
-        }
 
         // When running under the test harness, set the session ID so cache keys
         // are namespaced per-test (isolating parallel tests from each other).
@@ -260,7 +263,6 @@ impl CliContext {
     }
 
     async fn cmd_start(&mut self, _args: StartArgs) -> Result<()> {
-        vx_tracing::init_cli_stderr();
         let daemon = self.ensure_vxd().await?;
 
         tracing::info!("{} daemon is running", "✓".green().bold());
@@ -275,7 +277,6 @@ impl CliContext {
     }
 
     async fn cmd_ping(&mut self) -> Result<()> {
-        vx_tracing::init_cli_stderr();
         // Ping only connects, never spawns
         self.strat = self.strat.clone().connect_only();
         let daemon = self.ensure_vxd().await?;
@@ -285,24 +286,14 @@ impl CliContext {
     }
 
     async fn cmd_kill(&mut self, _args: KillArgs) -> Result<()> {
-        vx_tracing::init_cli_stderr();
-
-        let endpoint = match &self.strat {
-            DaemonStrategy::Connect(ep) | DaemonStrategy::Bootstrap(ep) => ep.clone(),
-        };
-
         // Try graceful shutdown via RPC first
-        let progress_listener = ProgressListenerImpl::new(CliMode::Text);
-        let dispatcher = vxd_proto::ProgressListenerDispatcher::new(progress_listener);
-        let kill_result = ServiceBuilder::new("vxd", endpoint.clone(), dispatcher)
-            .caller_name("vx")
-            .connect_only()
-            .connect()
-            .await;
+        // Like ping, only connect — never spawn
+        self.strat = self.strat.clone().connect_only();
+        let kill_result = self.ensure_vxd().await;
 
         match kill_result {
-            Ok(handle) => {
-                let daemon = VxdClient::new(handle.caller);
+            Ok(daemon) => {
+                let endpoint = self.strat.endpoint();
                 tracing::info!("{} daemon at {}", "Stopping".green().bold(), endpoint);
                 if let Err(e) = daemon.shutdown().await {
                     // shutdown() calls process::exit(0) on the daemon side, so the
@@ -325,8 +316,6 @@ impl CliContext {
     }
 
     async fn cmd_clean(&mut self, args: CleanArgs) -> Result<()> {
-        vx_tracing::init_cli_stderr();
-
         if args.home && args.cache {
             bail!("--home and --cache are mutually exclusive");
         }
@@ -447,8 +436,6 @@ impl CliContext {
     }
 
     async fn cmd_doctor(&mut self) -> Result<()> {
-        vx_tracing::init_cli_stderr();
-
         // Daemon status — check if vxd socket exists
         let vx_home = vx_io::vx_home();
         println!("{} {}", "home:".bold(), vx_home);
@@ -522,8 +509,6 @@ impl CliContext {
     }
 
     async fn cmd_debug(&mut self, args: DebugArgs) -> Result<()> {
-        vx_tracing::init_cli_stderr();
-
         // 1. Find vixen process PIDs
         let pids = find_vixen_pids()?;
         if pids.is_empty() {
