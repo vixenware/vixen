@@ -27,7 +27,7 @@ use crate::protocol::VfsdDispatcher;
 use crate::service::VfsdService;
 use crate::vfs::CasVfs;
 
-pub type CasCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
+pub type StoreCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
 
 /// Wrapper for CasVfs that implements Vfs by delegating to the inner CasVfs.
 ///
@@ -453,7 +453,7 @@ async fn async_main() -> Result<()> {
     }
 }
 
-async fn connect_to_store(endpoint_str: &str) -> Result<StoreClient<CasCaller>> {
+async fn connect_to_store(endpoint_str: &str) -> Result<StoreClient<StoreCaller>> {
     let endpoint = Endpoint::parse(endpoint_str)?;
     let caller = vx_io::net::reconnecting_client_named(
         endpoint.clone(),

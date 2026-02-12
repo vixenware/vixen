@@ -269,7 +269,7 @@ pub(crate) struct FlushSnapshot {
 /// CAS-backed VFS implementation
 pub struct CasVfs {
     /// CAS client for fetching blobs
-    pub(crate) cas: Arc<StoreClient<crate::CasCaller>>,
+    pub(crate) cas: Arc<StoreClient<crate::StoreCaller>>,
     /// All items in the VFS with adjacency index
     pub(crate) items: DiagnosticRwLock<VfsItems>,
     /// Active action prefixes (keyed by prefix ID like "build-01JFX...")
@@ -294,7 +294,7 @@ impl CasVfs {
     /// `disk_cache_dir` enables persistent L2 blob cache across restarts.
     /// Pass `None` to disable (L1 memory-only).
     pub fn new(
-        cas: Arc<StoreClient<crate::CasCaller>>,
+        cas: Arc<StoreClient<crate::StoreCaller>>,
         disk_cache_dir: Option<Utf8PathBuf>,
         mount_path: Utf8PathBuf,
     ) -> Self {

@@ -1,8 +1,9 @@
 //! RPC service implementation for vx-vfsd.
 
-use crate::protocol::Vfsd;
 use crate::vfs::CasVfs;
+use crate::{protocol::Vfsd, vfs::FlushSnapshot};
 use std::sync::Arc;
+use vx_store_proto::StoreClient;
 use vx_store_proto::{
     Blake3Hash, CasNode, ContentHash, DirEntry as CasDirEntry, DirEntryKind, DirectoryNode,
     NodeHash,
@@ -253,7 +254,9 @@ impl Vfsd for VfsdService {
 
             for item_id in descendants {
                 let item = items_snapshot.get(&item_id).unwrap();
-                let item_path = self.vfs.build_path(&items_snapshot, item_id, target_item_id);
+                let item_path = self
+                    .vfs
+                    .build_path(&items_snapshot, item_id, target_item_id);
 
                 // Skip items we already added from flushed
                 if flushed.contains_key(&item_path) {
@@ -360,8 +363,8 @@ impl VfsdService {
     /// Returns (NodeHash, total_size) so the parent can record total_size without re-scanning.
     async fn build_directory_node(
         &self,
-        cas: &Arc<vx_store_proto::StoreClient<crate::CasCaller>>,
-        snapshot: &crate::vfs::FlushSnapshot,
+        cas: &Arc<StoreClient<crate::StoreCaller>>,
+        snapshot: &FlushSnapshot,
         dir_item_id: vixenfs_proto::ItemId,
     ) -> Result<NodeHash, String> {
         let (hash, _total_size) = self
@@ -373,8 +376,8 @@ impl VfsdService {
     /// Inner recursive builder that returns (NodeHash, total_size).
     async fn build_directory_node_inner(
         &self,
-        cas: &Arc<vx_store_proto::StoreClient<crate::CasCaller>>,
-        snapshot: &crate::vfs::FlushSnapshot,
+        cas: &Arc<StoreClient<crate::StoreCaller>>,
+        snapshot: &FlushSnapshot,
         dir_item_id: vixenfs_proto::ItemId,
     ) -> Result<(NodeHash, u64), String> {
         use vixenfs_proto::ItemType;

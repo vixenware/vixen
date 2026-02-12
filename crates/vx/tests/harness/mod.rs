@@ -233,11 +233,6 @@ impl BuildBuilder {
         self
     }
 
-    pub fn env(mut self, key: &str, value: &str) -> Self {
-        self.extra_env.push((key.to_owned(), value.to_owned()));
-        self
-    }
-
     pub fn run(self) -> VxOutput {
         let mut cmd = Command::new(TestEnv::vx_binary());
         let work_dir = match &self.subdir {
