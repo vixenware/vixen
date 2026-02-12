@@ -13,10 +13,10 @@ fn canonicalize_without_stat(mount_path: &Utf8PathBuf) -> Utf8PathBuf {
         && let Some(name) = mount_path.file_name()
     {
         let result = canonical_parent.join(name);
-        tracing::debug!(%mount_path, %parent, %canonical_parent, %name, %result, "canonicalized via parent");
+        tracing::trace!(%mount_path, %parent, %canonical_parent, %name, %result, "canonicalized via parent");
         return result;
     }
-    tracing::debug!(%mount_path, "canonicalize fallback: returning mount_path as-is");
+    tracing::trace!(%mount_path, "canonicalize fallback: returning mount_path as-is");
     mount_path.clone()
 }
 
@@ -37,20 +37,20 @@ fn canonicalize_without_stat(mount_path: &Utf8PathBuf) -> Utf8PathBuf {
 /// path variants: canonical, raw, and /private-prefixed (macOS /tmp symlink).
 fn mount_path_candidates(mount_path: &Utf8PathBuf) -> Vec<String> {
     let canonical = canonicalize_without_stat(mount_path);
-    tracing::debug!(%mount_path, %canonical, "resolved canonical mount path");
+    tracing::trace!(%mount_path, %canonical, "resolved canonical mount path");
     let mut candidates: Vec<String> = vec![canonical.to_string()];
     let raw = mount_path.to_string();
     if raw != candidates[0] {
-        tracing::debug!(raw, "adding raw path as candidate");
+        tracing::trace!(raw, "adding raw path as candidate");
         candidates.push(raw);
     }
     // /tmp → /private/tmp on macOS
     let private_prefixed = format!("/private{mount_path}");
     if !candidates.contains(&private_prefixed) {
-        tracing::debug!(private_prefixed, "adding /private-prefixed candidate");
+        tracing::trace!(private_prefixed, "adding /private-prefixed candidate");
         candidates.push(private_prefixed);
     }
-    tracing::debug!(?candidates, "mount path candidates");
+    tracing::trace!(?candidates, "mount path candidates");
     candidates
 }
 
@@ -64,7 +64,7 @@ async fn kill_processes_under_mount(candidates: &[String]) -> crate::Result<()> 
     use std::collections::HashMap;
     use tokio::process::Command;
 
-    tracing::debug!(
+    tracing::trace!(
         ?candidates,
         "scanning for processes with files open under mount"
     );
@@ -76,13 +76,13 @@ async fn kill_processes_under_mount(candidates: &[String]) -> crate::Result<()> 
     {
         Ok(output) => output,
         Err(e) => {
-            tracing::debug!(error = %e, "lsof not available, skipping stuck process cleanup");
+            tracing::trace!(error = %e, "lsof not available, skipping stuck process cleanup");
             return Ok(());
         }
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    tracing::debug!(lsof_output_lines = stdout.lines().count(), "lsof completed");
+    tracing::trace!(lsof_output_lines = stdout.lines().count(), "lsof completed");
 
     // Parse lsof -F output: p<pid>, c<command>, n<path> fields
     let mut current_pid: Option<u32> = None;
@@ -102,7 +102,7 @@ async fn kill_processes_under_mount(candidates: &[String]) -> crate::Result<()> 
                 .iter()
                 .any(|prefix| path.starts_with(prefix.as_str()))
         {
-            tracing::debug!(pid, cmd, path, "found process with file open under mount");
+            tracing::trace!(pid, cmd, path, "found process with file open under mount");
             to_kill
                 .entry(pid)
                 .or_insert_with(|| (cmd.to_string(), path.to_string()));
@@ -110,7 +110,7 @@ async fn kill_processes_under_mount(candidates: &[String]) -> crate::Result<()> 
     }
 
     if to_kill.is_empty() {
-        tracing::debug!("no processes found with files open under mount");
+        tracing::trace!("no processes found with files open under mount");
         return Ok(());
     }
 
@@ -183,7 +183,7 @@ async fn kill_processes_under_mount(candidates: &[String]) -> crate::Result<()> 
 }
 
 pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
-    tracing::debug!(mount_path = %mount_path, "cleaning up any stale FSKit mount");
+    tracing::trace!(mount_path = %mount_path, "cleaning up any stale FSKit mount");
 
     let candidates = mount_path_candidates(mount_path);
 
@@ -235,16 +235,7 @@ pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
         .map(|p| p.join("vixenfs-mount.log"));
 
     // Run all diagnostics in parallel
-    let (
-        app_bundle,
-        plugin_reg,
-        mount_status,
-        process_inv,
-        mount_log,
-        sample_mount_helper,
-        sample_vixenfs,
-        system_logs,
-    ) = tokio::join!(
+    let (app_bundle, plugin_reg, mount_status, process_inv, mount_log, system_logs) = tokio::join!(
         // 1. App bundle integrity
         async {
             let start = Instant::now();
@@ -381,18 +372,6 @@ pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
             }
             ("vixenfs-mount.log", section, start.elapsed())
         },
-        // 6a. Sample vixenfs-mount
-        async {
-            let start = Instant::now();
-            let section = sample_process("vixenfs-mount").await;
-            ("sample vixenfs-mount", section, start.elapsed())
-        },
-        // 6b. Sample VixenFS
-        async {
-            let start = Instant::now();
-            let section = sample_process("VixenFS").await;
-            ("sample VixenFS", section, start.elapsed())
-        },
         // 7. System logs
         async {
             let start = Instant::now();
@@ -436,8 +415,6 @@ pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
         mount_status,
         process_inv,
         mount_log,
-        sample_mount_helper,
-        sample_vixenfs,
         system_logs,
     ] {
         writeln!(
@@ -459,40 +436,6 @@ pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
     )
     .unwrap();
     out
-}
-
-async fn sample_process(process_name: &str) -> String {
-    use std::fmt::Write;
-    use tokio::process::Command;
-
-    let mut section = String::new();
-    match Command::new("pgrep")
-        .arg("-x")
-        .arg(process_name)
-        .output()
-        .await
-    {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for pid in stdout.lines().filter(|l| !l.is_empty()) {
-                writeln!(section, "  Sampling PID {pid}...").unwrap();
-                match Command::new("sample").args([pid, "1"]).output().await {
-                    Ok(sample_output) => {
-                        let stdout = String::from_utf8_lossy(&sample_output.stdout);
-                        for line in stdout.lines() {
-                            writeln!(section, "  {line}").unwrap();
-                        }
-                    }
-                    Err(e) => writeln!(section, "  sample failed: {e}").unwrap(),
-                }
-            }
-            if stdout.trim().is_empty() {
-                writeln!(section, "  Process not found").unwrap();
-            }
-        }
-        Err(e) => writeln!(section, "  pgrep failed: {e}").unwrap(),
-    }
-    section
 }
 
 /// Whether we should create the mount directory.
