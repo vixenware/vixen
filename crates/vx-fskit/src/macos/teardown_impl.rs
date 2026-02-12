@@ -1,9 +1,12 @@
+use std::process::Stdio;
+use std::time::Duration;
+
 use camino::Utf8PathBuf;
 use tokio::process::Command;
 
-use crate::probe;
-use crate::process;
-use crate::{FsKitResult, Log, mount_path_candidates};
+use super::probe;
+use super::process;
+use super::{FsKitResult, Log, mount_path_candidates};
 
 /// Unmount a VixenFS filesystem.
 ///
@@ -11,7 +14,7 @@ use crate::{FsKitResult, Log, mount_path_candidates};
 /// and verifies the mount is gone.
 pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
     let mut log = Log::new();
-    let candidates = mount_path_candidates(mount_path);
+    let candidates = mount_path_candidates(mount_path).await;
 
     log.record(format!("teardown: mount_path={mount_path}"));
 
@@ -19,14 +22,16 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
 
     let probe_result = probe::probe(mount_path, &candidates, &mut log, false).await;
 
-    if probe_result.is_clean() && !mount_path.exists() {
+    let mount_exists = tokio::fs::metadata(mount_path.as_std_path()).await.is_ok();
+
+    if probe_result.is_clean() && !mount_exists {
         log.record("nothing mounted and no stale directory, nothing to do");
         return FsKitResult::success(log.into_entries());
     }
 
-    if probe_result.is_clean() && mount_path.exists() {
+    if probe_result.is_clean() && mount_exists {
         log.record("stale mountpoint directory, removing");
-        match std::fs::remove_dir(mount_path.as_std_path()) {
+        match tokio::fs::remove_dir(mount_path.as_std_path()).await {
             Ok(()) => {
                 log.record(format!("rmdir {mount_path}: ok"));
                 return FsKitResult::success(log.into_entries());
@@ -74,8 +79,8 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
 
         let mut child = match Command::new("diskutil")
             .args(["unmount", "force", candidate])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
         {
             Ok(child) => child,
@@ -85,9 +90,7 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
             }
         };
 
-        match tokio::time::timeout(std::time::Duration::from_secs(1), child.wait_with_output())
-            .await
-        {
+        match tokio::time::timeout(Duration::from_secs(1), child.wait_with_output()).await {
             Ok(Ok(output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -105,8 +108,7 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
                 log.record(format!("diskutil: error: {e}"));
             }
             Err(_) => {
-                log.record("diskutil: timed out after 1s, killing");
-                let _ = child.kill().await;
+                log.record("diskutil: timed out after 1s, killingx");
             }
         }
     }
@@ -117,8 +119,8 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
 
     if after.is_clean() {
         // Clean up the stale directory if it exists
-        if mount_path.exists() {
-            let _ = std::fs::remove_dir(mount_path.as_std_path());
+        if tokio::fs::metadata(mount_path.as_std_path()).await.is_ok() {
+            let _ = tokio::fs::remove_dir(mount_path.as_std_path()).await;
         }
         log.record("teardown complete: mount is clean");
         return FsKitResult::success(log.into_entries());

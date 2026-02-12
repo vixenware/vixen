@@ -5,16 +5,12 @@ import os
 
 private let log = Logger(subsystem: "eu.bearcove.vixenfs.mount", category: "Main")
 
-private let iso8601Formatter: ISO8601DateFormatter = {
-    let f = ISO8601DateFormatter()
-    f.formatOptions = [.withInternetDateTime]
-    return f
-}()
-
 /// Log with PID and ISO-8601 timestamp prefix to stderr + unified logging.
 private func emit(_ message: String) {
+    let fmt = ISO8601DateFormatter()
+    fmt.formatOptions = [.withInternetDateTime]
     let prefix =
-        "\(ProcessInfo.processInfo.processIdentifier) \(iso8601Formatter.string(from: Date()))"
+        "\(ProcessInfo.processInfo.processIdentifier) \(fmt.string(from: Date()))"
     fputs("\(prefix) \(message)\n", stderr)
     fflush(stderr)
     log.notice("\(message, privacy: .public)")

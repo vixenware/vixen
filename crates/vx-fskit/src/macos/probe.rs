@@ -32,11 +32,6 @@ impl ProbeResult {
         !self.mkdir_ebusy && !self.in_df
     }
 
-    /// Directory exists but nothing is mounted (stale mountpoint).
-    pub fn is_stale_dir(&self, mount_path: &Utf8PathBuf) -> bool {
-        self.is_clean() && mount_path.exists()
-    }
-
     /// Something is mounted and healthy (health.json says connected: true).
     pub fn is_healthy(&self) -> bool {
         matches!(&self.health, HealthProbe::Ok(json) if json.contains("\"connected\":true") || json.contains("\"connected\": true"))
@@ -203,9 +198,8 @@ async fn probe_health(mount_path: &Utf8PathBuf, log: &mut Log) -> HealthProbe {
             HealthProbe::Failed(e.to_string())
         }
         Err(_) => {
-            // Timed out — kill the sacrificial process
+            // Timed out
             log.record("health.json: /bin/cat timed out (mount is zombied), killing");
-            let _ = child.kill().await;
             HealthProbe::Timeout
         }
     }

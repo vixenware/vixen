@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use tokio::process::Command;
 
-use crate::Log;
+use super::Log;
 
 /// Information about a process with files open under the mount.
 pub(crate) struct OpenProcess {

@@ -1,8 +1,8 @@
 use camino::Utf8PathBuf;
 use tokio::process::Command;
 
-use crate::probe::{self, HealthProbe};
-use crate::{FsKitResult, Log, VIXEN_APP_PATH, VIXEN_EXTENSION_IDENTIFIER, mount_path_candidates};
+use super::probe::{self, HealthProbe};
+use super::{FsKitResult, Log, VIXEN_APP_PATH, VIXEN_EXTENSION_IDENTIFIER, mount_path_candidates};
 
 /// Mount a VixenFS filesystem.
 ///
@@ -10,7 +10,7 @@ use crate::{FsKitResult, Log, VIXEN_APP_PATH, VIXEN_EXTENSION_IDENTIFIER, mount_
 /// cleans up broken mounts, mounts, and verifies via health.json.
 pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitResult {
     let mut log = Log::new();
-    let candidates = mount_path_candidates(mount_path);
+    let candidates = mount_path_candidates(mount_path).await;
 
     log.record(format!(
         "setup: sid={sid}, mount_path={mount_path}, debug={debug}"
@@ -19,7 +19,7 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
     // --- Prerequisites ---
 
     // Is Vixen.app installed?
-    if !std::path::Path::new(VIXEN_APP_PATH).exists() {
+    if tokio::fs::metadata(VIXEN_APP_PATH).await.is_err() {
         log.record(format!("{VIXEN_APP_PATH} not found"));
         return FsKitResult::failure(
             log.into_entries(),
@@ -109,7 +109,7 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
 
     if probe_result.is_broken_mount() {
         log.record("broken mount detected, running teardown first");
-        let teardown_result = crate::teardown_impl::teardown(mount_path).await;
+        let teardown_result = super::teardown_impl::teardown(mount_path).await;
         // Merge teardown logs
         for entry in teardown_result.log {
             log.entries.push(entry);
@@ -123,7 +123,7 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
     // --- Mount ---
 
     // Create mount point directory
-    if let Err(e) = std::fs::create_dir_all(mount_path.as_std_path()) {
+    if let Err(e) = tokio::fs::create_dir_all(mount_path.as_std_path()).await {
         log.record(format!("mkdir -p {mount_path}: {e}"));
         return FsKitResult::failure(
             log.into_entries(),
@@ -181,7 +181,7 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
         log.record(format!("health check attempt {attempt}/5"));
         let health = probe::probe(mount_path, &candidates, &mut log, true).await;
         match &health.health {
-            HealthProbe::Ok(json) => match facet_json::from_str::<crate::HealthPayload>(json) {
+            HealthProbe::Ok(json) => match facet_json::from_str::<super::HealthPayload>(json) {
                 Ok(payload) if payload.connected => {
                     log.record("health.json: connected=true, mount is healthy");
                     return FsKitResult::success(log.into_entries());
