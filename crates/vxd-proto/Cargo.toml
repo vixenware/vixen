@@ -14,3 +14,6 @@ roam = { workspace = true }
 facet-postcard = { workspace = true, features = ["camino"] }
 camino = { workspace = true }
 vx-store-proto = { workspace = true }
+
+[lints]
+workspace = true

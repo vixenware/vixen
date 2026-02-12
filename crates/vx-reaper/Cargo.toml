@@ -18,3 +18,6 @@ camino = { workspace = true }
 facet = { workspace = true }
 figue = { workspace = true }
 vx-fskit = { path = "../vx-fskit" }
+
+[lints]
+workspace = true

@@ -192,5 +192,8 @@ facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
 inherits = "release"
 debug = true
 
+[workspace.lints.clippy]
+disallowed-types = "deny"
+
 [workspace.metadata.cargo-shear]
 ignored = ["facet-error"]

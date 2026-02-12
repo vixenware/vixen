@@ -44,3 +44,6 @@ tracing-subscriber = { workspace = true }
 [features]
 default = []
 diagnostics = ["peeps/diagnostics", "roam-session/diagnostics"]
+
+[lints]
+workspace = true

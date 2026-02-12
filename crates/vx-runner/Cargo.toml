@@ -37,3 +37,6 @@ vx-io = { workspace = true }
 libc = { workspace = true }
 roam-session = { workspace = true }
 peeps = { workspace = true }
+
+[lints]
+workspace = true

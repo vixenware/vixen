@@ -39,3 +39,6 @@ async-stream = { workspace = true }
 
 [package.metadata.cargo-shear]
 ignored = ["facet-error"]
+
+[lints]
+workspace = true

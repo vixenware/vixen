@@ -17,3 +17,6 @@ facet = { workspace = true }
 vx-store-proto = { workspace = true }
 
 [dev-dependencies]
+
+[lints]
+workspace = true

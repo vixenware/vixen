@@ -12,3 +12,6 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 blake3 = { workspace = true }
 vx-store-proto = { workspace = true }
 vx-runner-proto = { workspace = true }
+
+[lints]
+workspace = true

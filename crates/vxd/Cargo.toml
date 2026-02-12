@@ -44,3 +44,6 @@ vx-tarball = { workspace = true }
 [features]
 default = []
 diagnostics = ["peeps/diagnostics", "roam-stream/diagnostics"]
+
+[lints]
+workspace = true

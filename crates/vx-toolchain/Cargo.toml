@@ -24,3 +24,6 @@ vx-http = { workspace = true }
 uuid = { version = "1.19.0", features = ["v4"] }
 
 [dev-dependencies]
+
+[lints]
+workspace = true

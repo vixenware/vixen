@@ -58,3 +58,6 @@ roam-shm = { workspace = true }
 [features]
 default = []
 diagnostics = ["peeps/diagnostics", "roam-session/diagnostics", "roam-shm/diagnostics"]
+
+[lints]
+workspace = true

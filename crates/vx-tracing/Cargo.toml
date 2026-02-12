@@ -10,3 +10,6 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
 tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

@@ -15,3 +15,6 @@ facet-postcard = { workspace = true, features = ["camino"] }
 blake3 = { workspace = true }
 hex = { workspace = true }
 roam-stream = { workspace = true }
+
+[lints]
+workspace = true
