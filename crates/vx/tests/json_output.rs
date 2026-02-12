@@ -5,7 +5,6 @@
 //! - Events include build_started and build_finished
 //! - Exit codes follow the spec: 0=success, 1=build error
 
-#[allow(dead_code)]
 mod harness;
 use harness::{TestEnv, create_hello_world};
 

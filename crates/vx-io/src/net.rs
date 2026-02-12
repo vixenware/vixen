@@ -227,7 +227,10 @@ impl Listener {
 
                 let listener = roam_local::LocalListener::bind(bind_target)?;
                 Ok(Listener::Local {
-                    listener: peeps::locks::DiagnosticAsyncMutex::new("io/local_listener", listener),
+                    listener: peeps::locks::DiagnosticAsyncMutex::new(
+                        "io/local_listener",
+                        listener,
+                    ),
                     endpoint: path.clone(),
                 })
             }
@@ -242,7 +245,7 @@ impl Listener {
                 Ok((Stream::Tcp(stream), addr.to_string()))
             }
             Listener::Local { listener, .. } => {
-                let mut guard = listener.lock().await;
+                let guard = listener.lock().await;
                 let stream = guard.accept().await?;
                 #[cfg(unix)]
                 return Ok((Stream::Local(stream), "local".to_string()));

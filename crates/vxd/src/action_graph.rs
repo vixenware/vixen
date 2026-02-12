@@ -24,7 +24,6 @@ pub struct ActionDep {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum PlannerSyntheticKind {
     Group,
     Action,
@@ -97,7 +96,6 @@ pub struct RunDepFileMount {
 
 /// A single unit of work in the build process
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 #[allow(clippy::large_enum_variant)]
 pub enum Action {
     /// Download a Rust toolchain component from static.rust-lang.org
@@ -375,7 +373,6 @@ pub struct ActionNode {
 }
 
 /// The action dependency graph
-#[allow(dead_code)]
 pub struct ActionGraph {
     /// Directed graph: edges point from dependent → dependency
     /// (i.e., if A depends on B, there's an edge A → B)
@@ -395,7 +392,6 @@ pub struct ActionGraph {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct RulePlanLoweringError {
     pub message: String,
     pub rule_id: String,
@@ -748,7 +744,6 @@ impl ActionGraph {
         })
     }
 
-    #[allow(dead_code)]
     pub fn from_crate_graph_subset(
         crate_graph: &CrateGraph,
         included_crates: &std::collections::HashSet<CrateId>,
@@ -1053,7 +1048,6 @@ impl ActionGraph {
     ///
     /// This bridge intentionally starts small: it materializes `group`/`action`/`artifact`/`fact`
     /// nodes as synthetic planner actions and preserves edge kinds in topology metadata.
-    #[allow(dead_code)]
     pub fn from_rule_plan(plan: &RulePlan) -> Result<Self, RulePlanLoweringError> {
         if let Err(err) = plan.validate() {
             return Err(RulePlanLoweringError {
@@ -1621,7 +1615,6 @@ impl ActionGraph {
     }
 }
 
-#[allow(dead_code)]
 fn planner_kind_for_node(node: &RulePlanNode) -> PlannerSyntheticKind {
     match node.kind {
         RulePlanNodeKind::Group => PlannerSyntheticKind::Group,
@@ -1631,7 +1624,6 @@ fn planner_kind_for_node(node: &RulePlanNode) -> PlannerSyntheticKind {
     }
 }
 
-#[allow(dead_code)]
 fn action_from_rule_plan_node(node: &RulePlanNode) -> Result<Action, RulePlanLoweringError> {
     if let Some(action) = try_lower_compile_node(node)? {
         return Ok(action);
@@ -1649,7 +1641,6 @@ fn action_from_rule_plan_node(node: &RulePlanNode) -> Result<Action, RulePlanLow
     })
 }
 
-#[allow(dead_code)]
 fn try_lower_compile_node(node: &RulePlanNode) -> Result<Option<Action>, RulePlanLoweringError> {
     if !wants_compile_lowering(node) {
         return Ok(None);
@@ -1697,7 +1688,6 @@ fn try_lower_compile_node(node: &RulePlanNode) -> Result<Option<Action>, RulePla
     }))
 }
 
-#[allow(dead_code)]
 fn try_lower_registry_node(node: &RulePlanNode) -> Result<Option<Action>, RulePlanLoweringError> {
     if !wants_registry_lowering(node) {
         return Ok(None);
@@ -1735,7 +1725,6 @@ fn try_lower_registry_node(node: &RulePlanNode) -> Result<Option<Action>, RulePl
     }))
 }
 
-#[allow(dead_code)]
 fn planner_edge_kind(edge: &RulePlanEdge) -> Result<&'static str, RulePlanLoweringError> {
     match edge.kind {
         RulePlanEdgeKind::Always => Ok("always"),
@@ -1752,7 +1741,6 @@ fn planner_edge_kind(edge: &RulePlanEdge) -> Result<&'static str, RulePlanLoweri
     }
 }
 
-#[allow(dead_code)]
 fn lowering_error_for_edge(edge: &RulePlanEdge, message: String) -> RulePlanLoweringError {
     RulePlanLoweringError {
         message,
@@ -1763,7 +1751,6 @@ fn lowering_error_for_edge(edge: &RulePlanEdge, message: String) -> RulePlanLowe
     }
 }
 
-#[allow(dead_code)]
 fn lowering_error_for_node(node: &RulePlanNode, message: String) -> RulePlanLoweringError {
     RulePlanLoweringError {
         message,
@@ -1774,7 +1761,6 @@ fn lowering_error_for_node(node: &RulePlanNode, message: String) -> RulePlanLowe
     }
 }
 
-#[allow(dead_code)]
 fn wants_compile_lowering(node: &RulePlanNode) -> bool {
     if node.kind != RulePlanNodeKind::Action {
         return false;
@@ -1784,7 +1770,6 @@ fn wants_compile_lowering(node: &RulePlanNode) -> bool {
         || node.provenance.metadata.contains_key("crate_type")
 }
 
-#[allow(dead_code)]
 fn wants_registry_lowering(node: &RulePlanNode) -> bool {
     if node.kind != RulePlanNodeKind::Artifact {
         return false;

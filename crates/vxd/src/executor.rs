@@ -25,7 +25,6 @@ use vxd_proto::{ActionProgress, ProgressListenerClient};
 
 /// State of an individual action
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ActionState {
     Pending,
     Running,

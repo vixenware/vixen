@@ -6,7 +6,6 @@
 //! - Source/profile/edition changes cause cache miss
 //! - Changes to any module in the closure cause cache miss
 
-#[allow(dead_code)]
 mod harness;
 use harness::{TestEnv, create_hello_world};
 

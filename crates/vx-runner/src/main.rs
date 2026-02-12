@@ -580,7 +580,6 @@ impl RunnerService {
     ///
     /// This is the path that should be passed to sandboxed processes.
     /// Format: <mount-base>/<prefix_id>/ where mount-base is /Volumes/vixenfs (macOS) or /tmp/vixenfs (Linux).
-    #[allow(dead_code)] // Will be used for sandbox integration
     pub(crate) fn get_prefix_mount_path(&self, prefix_id: &str) -> Utf8PathBuf {
         runner_mount_base().join(prefix_id)
     }

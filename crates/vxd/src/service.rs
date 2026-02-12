@@ -48,7 +48,6 @@ pub struct ToolchainInfo {
 }
 
 /// Acquired toolchains (manifest references only)
-#[allow(dead_code)]
 pub struct AcquiredToolchains {
     /// Rust toolchain (if acquired)
     pub rust: Option<ToolchainInfo>,
@@ -321,7 +320,6 @@ pub(crate) fn compare_rule_plan_edge_parity(
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn selected_crates_from_rule_plan(
     plan: &RulePlan,
     graph: &CrateGraph,
@@ -383,7 +381,6 @@ pub(crate) fn selected_crates_from_rule_plan(
     Ok(selected)
 }
 
-#[allow(dead_code)]
 pub(crate) fn transitive_closure_crates(
     graph: &CrateGraph,
     selected: &std::collections::HashSet<vx_rs::crate_graph::CrateId>,

@@ -627,7 +627,6 @@ pub(super) async fn check_extension_health() -> Option<VfsHealth> {
 /// `FileManager.containerURL(forSecurityApplicationGroupIdentifier:)` and
 /// return the resolved path. This lets VXRunner (a plain Rust binary) discover
 /// the shared container without needing its own App Group entitlement.
-#[allow(dead_code)]
 pub async fn resolve_app_group_path() -> Result<PathBuf, String> {
     let output = Command::new(VIXEN_MOUNT_HELPER_PATH)
         .arg("--app-group-path")

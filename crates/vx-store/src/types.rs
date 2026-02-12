@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use camino::Utf8PathBuf;
-use tokio::sync::Semaphore;
 use peeps::locks::DiagnosticAsyncMutex;
+use tokio::sync::Semaphore;
 use vx_store_proto::{BlobRef, RustComponent, ToolchainSpecKey};
 
 use crate::{
@@ -31,7 +31,6 @@ pub(crate) struct StoreServiceInner {
     pub(crate) storage: crate::storage::CasStore,
 
     /// VX home directory (typically .vx) - parent of root, used for toolchain spec mappings
-    #[allow(dead_code)]
     pub(crate) vx_home: Utf8PathBuf,
 
     /// Toolchain acquisition manager (handles inflight deduplication)

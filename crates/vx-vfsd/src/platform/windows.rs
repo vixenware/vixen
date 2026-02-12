@@ -20,7 +20,6 @@ pub async fn run_sentinel(_mount_path: &Utf8PathBuf) -> Result<()> {
 pub fn setup_diagnostics_signal(_vfs: Arc<CasVfs>) {}
 
 /// No platform-specific diagnostics on Windows.
-#[allow(dead_code)]
 pub fn dump_platform_diagnostics() {}
 
 /// Always create the mount directory on Windows.

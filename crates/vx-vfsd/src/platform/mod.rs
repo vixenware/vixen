@@ -49,7 +49,6 @@ pub fn setup_diagnostics_signal(vfs: Arc<CasVfs>) {
 }
 
 /// Dump platform-specific VFS diagnostics to stderr.
-#[allow(dead_code)]
 pub fn dump_platform_diagnostics() {
     os::dump_platform_diagnostics();
 }

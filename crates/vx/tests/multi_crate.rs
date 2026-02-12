@@ -7,7 +7,6 @@
 //! - Changes to app only rebuild app
 //! - Path independence (same content, different checkout location = cache hit)
 
-#[allow(dead_code)]
 mod harness;
 use harness::{TestEnv, create_diamond_dependency_project, create_multi_crate_project};
 

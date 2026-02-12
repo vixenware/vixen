@@ -62,7 +62,6 @@ pub struct VfsItem {
 
 /// An action prefix - represents a build directory like `/build-01JFX.../`
 #[derive(Debug)]
-#[allow(dead_code)] // Fields used for debugging and future prefix management
 pub struct ActionPrefix {
     /// Unique ID for this prefix (e.g., ULID)
     pub id: String,
@@ -1235,7 +1234,10 @@ impl CasVfs {
     }
 
     /// FUSE path: flush in-memory write buffers to CAS.
-    async fn flush_prefix_from_buffers(&self, prefix_id: &str) -> HashMap<String, (Blake3Hash, u64)> {
+    async fn flush_prefix_from_buffers(
+        &self,
+        prefix_id: &str,
+    ) -> HashMap<String, (Blake3Hash, u64)> {
         let mut results = HashMap::new();
 
         let prefix_root_id = {
