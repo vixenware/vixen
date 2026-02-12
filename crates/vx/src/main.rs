@@ -153,29 +153,81 @@ fn soft_wrap(text: &str, max_width: usize) -> String {
             out.push_str(line);
             out.push('\n');
         } else {
+            // Extract the visual indent (leading whitespace after stripping ANSI).
+            // We keep the full prefix (ANSI escapes + spaces) so continuations
+            // preserve both color and indentation.
+            let (indent, indent_width) = extract_indent(line);
+            let cont_width = max_width.saturating_sub(indent_width).max(20);
+
+            let mut first = true;
             let mut remaining = line;
-            while visible_width(remaining) > max_width {
-                let break_pos = find_wrap_point(remaining, max_width);
+            while !remaining.is_empty() {
+                // First line uses full width; continuations use reduced width
+                // because we prepend the indent prefix.
+                let width = if first { max_width } else { cont_width };
+                if visible_width(remaining) <= width {
+                    out.push_str(remaining);
+                    out.push('\n');
+                    break;
+                }
+                let break_pos = find_wrap_point(remaining, width);
                 let chunk = &remaining[..break_pos];
                 out.push_str(chunk);
-                // Reset color at end of wrapped line, then restore on next
                 let active_sgr = last_sgr(chunk);
                 if active_sgr.is_some() {
                     out.push_str("\x1b[0m");
                 }
                 out.push('\n');
                 remaining = remaining[break_pos..].trim_start();
-                if let Some(ref sgr) = active_sgr {
-                    out.push_str(sgr);
+                first = false;
+                // Prepend indent on continuation lines
+                if !remaining.is_empty() {
+                    out.push_str(indent);
+                    if let Some(ref sgr) = active_sgr {
+                        out.push_str(sgr);
+                    }
                 }
-            }
-            if !remaining.is_empty() {
-                out.push_str(remaining);
-                out.push('\n');
             }
         }
     }
     out
+}
+
+/// Extract the leading "indent" from a line that may contain ANSI escapes.
+///
+/// Returns `(prefix, visible_width)` where `prefix` is the byte slice
+/// covering all leading ANSI escapes and whitespace, and `visible_width`
+/// is how many display columns the whitespace occupies.
+fn extract_indent(line: &str) -> (&str, usize) {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    let mut width = 0;
+
+    while i < bytes.len() {
+        // Skip ANSI CSI sequences (ESC [ ... final_byte)
+        if bytes[i] == b'\x1b' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            i += 2;
+            while i < bytes.len() && !(0x40..=0x7E).contains(&bytes[i]) {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1; // skip final byte
+            }
+            continue;
+        }
+        // Count spaces/tabs
+        if bytes[i] == b' ' {
+            width += 1;
+            i += 1;
+        } else if bytes[i] == b'\t' {
+            width += 4; // approximate
+            i += 1;
+        } else {
+            break;
+        }
+    }
+
+    (&line[..i], width)
 }
 
 /// Extract the last SGR (Select Graphic Rendition) sequence from a string,

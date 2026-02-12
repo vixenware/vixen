@@ -14,44 +14,9 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
 
     // --- Prerequisites ---
 
-    // Is Vixen.app installed?
-    if tokio::fs::metadata(VIXEN_APP_PATH).await.is_err() {
-        log.fail(format!("{VIXEN_APP_PATH} not found"));
-        return FsKitResult::failure(
-            log.into_entries(),
-            "Vixen.app is not installed",
-            vec!["brew install --cask bearcove/tap/vixen".to_string()],
-        );
-    }
-    log.ok(format!("{VIXEN_APP_PATH} exists"));
-
-    // Is codesign valid?
-    match Command::new("codesign")
-        .args(["--verify", "--deep", "--strict"])
-        .arg(VIXEN_APP_PATH)
-        .output()
-        .await
-    {
-        Ok(output) if output.status.success() => {
-            log.ok("codesign: valid");
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            log.fail(format!("codesign: FAILED — {}", stderr.trim()));
-            return FsKitResult::failure(
-                log.into_entries(),
-                "Vixen.app codesign is invalid",
-                vec!["brew reinstall --cask bearcove/tap/vixen".to_string()],
-            );
-        }
-        Err(e) => {
-            log.fail(format!("codesign: failed to run: {e}"));
-            // Non-fatal — codesign might not be available in CI
-        }
-    }
-
-    // Is extension registered and enabled?
-    match Command::new("pluginkit")
+    // Check extension first — if it's registered and enabled, the app is
+    // necessarily installed and properly signed, so we can skip those checks.
+    let extension_ok = match Command::new("pluginkit")
         .args(["-m", "-p", "com.apple.fskit.fsmodule"])
         .output()
         .await
@@ -63,7 +28,8 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
                 line.contains(VIXEN_EXTENSION_IDENTIFIER) && line.trim_start().starts_with('+')
             });
             if found {
-                log.ok("pluginkit: extension registered and enabled");
+                log.ok("FSKit extension registered and enabled");
+                true
             } else {
                 let registered = stdout
                     .lines()
@@ -75,23 +41,59 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
                         "VixenFS extension is registered but not enabled",
                         vec!["run `vx doctor` to enable the extension".to_string()],
                     );
-                } else {
-                    log.fail("pluginkit: extension not registered");
-                    return FsKitResult::failure(
-                        log.into_entries(),
-                        "VixenFS extension is not registered",
-                        vec![
-                            "run `vx doctor` to launch Vixen.app and register the extension"
-                                .to_string(),
-                        ],
-                    );
                 }
+                false
             }
         }
         Err(e) => {
             log.fail(format!("pluginkit: failed to run: {e}"));
-            // Non-fatal — might not be available
+            false
         }
+    };
+
+    // Extension not registered — dig deeper to give a useful diagnostic.
+    if !extension_ok {
+        if tokio::fs::metadata(VIXEN_APP_PATH).await.is_err() {
+            log.fail(format!("{VIXEN_APP_PATH} not found"));
+            return FsKitResult::failure(
+                log.into_entries(),
+                "Vixen.app is not installed",
+                vec!["brew install --cask bearcove/tap/vixen".to_string()],
+            );
+        }
+        log.ok("Vixen.app installed");
+
+        // App exists but extension not registered — codesign might be broken
+        match Command::new("codesign")
+            .args(["--verify", "--deep", "--strict"])
+            .arg(VIXEN_APP_PATH)
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() => {
+                log.ok("codesign valid");
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log.fail(format!("codesign: FAILED — {}", stderr.trim()));
+                return FsKitResult::failure(
+                    log.into_entries(),
+                    "Vixen.app codesign is invalid",
+                    vec!["brew reinstall --cask bearcove/tap/vixen".to_string()],
+                );
+            }
+            Err(e) => {
+                log.fail(format!("codesign: failed to run: {e}"));
+            }
+        }
+
+        // App installed, codesign ok, but extension not registered
+        log.fail("pluginkit: extension not registered");
+        return FsKitResult::failure(
+            log.into_entries(),
+            "VixenFS extension is not registered",
+            vec!["run `vx doctor` to launch Vixen.app and register the extension".to_string()],
+        );
     }
 
     // --- Probe mount point ---
@@ -127,15 +129,11 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
             vec![],
         );
     }
-    log.ok(format!("mkdir -p {mount_path}: ok"));
-
     // Build the source URL
     let mut source = format!("vixen://session?sid={sid}");
     if debug {
         source.push_str("&debug=1");
     }
-
-    log.info(format!("mounting vixenfs at {mount_path}"));
 
     let mount_output = match Command::new("/sbin/mount")
         .args(["-F", "-t", "vixenfs", &source, mount_path.as_str()])
@@ -156,34 +154,49 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
     if !mount_output.status.success() {
         let stderr = String::from_utf8_lossy(&mount_output.stderr);
         let exit_code = mount_output.status.code();
-        log.fail(format!(
-            "/sbin/mount: exit {}: {}",
-            mount_output.status,
-            stderr.trim()
-        ));
 
         // Exit code 69 (EX_UNAVAILABLE) with "File system named vixenfs not found"
         // means fskitd has a stale view of the extension — typically because the
         // extension binary was rebuilt or updated. Killing fskitd forces a rescan.
-        let summary = if exit_code == Some(69) && stderr.contains("not found") {
-            "FSKit daemon has a stale view of the VixenFS extension (it was likely rebuilt). \
-             Kill fskitd to force a rescan."
-                .to_string()
+        let (summary, remediation) = if exit_code == Some(69) && stderr.contains("not found") {
+            (
+                "FSKit daemon has a stale view of the VixenFS extension \
+                 (it was likely rebuilt). Kill fskitd to force a rescan."
+                    .to_string(),
+                vec!["sudo killall fskitd fskit_agent".to_string()],
+            )
+        } else if exit_code == Some(69) {
+            (
+                "The VixenFS filesystem type is not available. \
+                 The FSKit daemon may need to be restarted."
+                    .to_string(),
+                vec!["sudo killall fskitd fskit_agent".to_string()],
+            )
         } else {
-            format!(
-                "mount failed (exit {}): {}",
-                mount_output.status,
-                stderr.trim()
+            let first_line = stderr.lines().next().unwrap_or("").trim();
+            let detail = if first_line.is_empty() {
+                String::new()
+            } else {
+                format!(": {first_line}")
+            };
+            (
+                format!("mount failed{detail}"),
+                vec!["sudo killall fskitd fskit_agent".to_string()],
             )
         };
 
-        return FsKitResult::failure(
-            log.into_entries(),
-            summary,
-            vec!["sudo killall fskitd fskit_agent".to_string()],
-        );
+        log.fail(format!(
+            "mount failed (exit code {})",
+            exit_code.map_or("unknown".to_string(), |c| c.to_string())
+        ));
+        if !stderr.trim().is_empty() {
+            for line in stderr.trim().lines() {
+                log.info(format!("  {line}"));
+            }
+        }
+
+        return FsKitResult::failure(log.into_entries(), summary, remediation);
     }
-    log.ok("/sbin/mount: ok");
 
     // --- Verify via health.json ---
 

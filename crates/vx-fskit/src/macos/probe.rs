@@ -61,7 +61,7 @@ pub(crate) async fn probe(
     log: &mut Log,
     read_health: bool,
 ) -> ProbeResult {
-    log.info(format!("probing mount point {mount_path}"));
+    tracing::debug!("probing mount point {mount_path}");
 
     // 1. mkdir — returns EBUSY if mounted
     let mkdir_ebusy = probe_mkdir(mount_path, log);
@@ -76,9 +76,6 @@ pub(crate) async fn probe(
     let health = if read_health && (mkdir_ebusy || in_df) {
         probe_health(mount_path, log).await
     } else {
-        if !mkdir_ebusy && !in_df {
-            log.info("nothing mounted, skipping health.json probe");
-        }
         HealthProbe::NotAttempted
     };
 
@@ -89,18 +86,18 @@ pub(crate) async fn probe(
         health,
     };
 
-    log.info(format!(
-        "probe result: mkdir_ebusy={}, in_df={}, extension_running={}, health={}",
-        result.mkdir_ebusy,
-        result.in_df,
-        result.extension_running,
-        match &result.health {
+    tracing::debug!(
+        mkdir_ebusy = result.mkdir_ebusy,
+        in_df = result.in_df,
+        extension_running = result.extension_running,
+        health = match &result.health {
             HealthProbe::NotAttempted => "not_attempted".to_string(),
             HealthProbe::Ok(json) => format!("ok({json})"),
             HealthProbe::Timeout => "timeout".to_string(),
             HealthProbe::Failed(e) => format!("failed({e})"),
-        }
-    ));
+        },
+        "probe result"
+    );
 
     result
 }
@@ -112,7 +109,6 @@ fn probe_mkdir(mount_path: &Utf8PathBuf, log: &mut Log) -> bool {
     if ret == 0 {
         // mkdir succeeded — nothing mounted, clean up the dir we just created
         unsafe { libc::rmdir(path.as_ptr()) };
-        log.ok("mkdir: ok (nothing mounted)");
         false
     } else {
         let errno = std::io::Error::last_os_error();
@@ -120,7 +116,6 @@ fn probe_mkdir(mount_path: &Utf8PathBuf, log: &mut Log) -> bool {
             log.fail("mkdir: EBUSY (something is mounted)");
             true
         } else if errno.raw_os_error() == Some(libc::EEXIST) {
-            log.info("mkdir: EEXIST (directory exists, nothing mounted)");
             false
         } else {
             log.fail(format!("mkdir: {errno}"));
@@ -146,7 +141,6 @@ async fn probe_df(candidates: &[String], log: &mut Log) -> bool {
             return true;
         }
     }
-    log.info("df: no vixenfs mount found");
     false
 }
 
@@ -164,8 +158,6 @@ async fn probe_pgrep(log: &mut Log) -> bool {
     if running {
         let pids = String::from_utf8_lossy(&output.stdout);
         log.info(format!("pgrep: VixenFS running (pids: {})", pids.trim()));
-    } else {
-        log.info("pgrep: VixenFS not running");
     }
     running
 }

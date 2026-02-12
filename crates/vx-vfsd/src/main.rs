@@ -507,13 +507,11 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
                 for diagnostic in error.diagnostics() {
                     for action in &diagnostic.actions {
                         if let vx_vfs::VfsAction::RunCommand(cmd) = action {
-                            msg.push_str(&format!(
-                                "\n{}",
-                                format!("Try: {cmd}").yellow()
-                            ));
+                            msg.push_str(&format!("\n\nTry: \n  $ {}", cmd.yellow()));
                         }
                     }
                     if let Some(ref detail) = diagnostic.detail {
+                        msg.push_str(&"\n\nDetails:".dimmed().to_string());
                         for line in detail.lines() {
                             msg.push_str(&format!(
                                 "\n  {}",
