@@ -75,8 +75,6 @@ where
         .arg(&sid)
         .arg("--mount-point")
         .arg(config.mount_path.as_str())
-        .arg("--parent-pid")
-        .arg(std::process::id().to_string())
         .arg("--log-file")
         .arg(&log_file_path);
 
@@ -96,6 +94,9 @@ where
     let mut helper = match helper_command.spawn() {
         Ok(child) => child,
         Err(error) => {
+            tracing::trace!(
+                "Error spawning mount helper, cleaning up session dir. Error was {error}"
+            );
             cleanup_session_dir(&sid).await;
             let diagnostics = collect_mount_failure_diagnostics().await;
             return Err(VfsError::CommandFailed {
@@ -150,6 +151,9 @@ where
             })
         }
         Err(readiness_error) => {
+            tracing::trace!(
+                "Got readiness error, cleaning up session dir. Error was {readiness_error}"
+            );
             cleanup_session_dir(&sid).await;
             let diagnostics = collect_mount_failure_diagnostics().await;
             let _ = helper.kill().await;
