@@ -90,16 +90,17 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
             }
         };
 
-        match tokio::time::timeout(Duration::from_secs(1), child.wait_with_output()).await {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if output.status.success() {
+        match tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
+            Ok(Ok(status)) => {
+                let stdout = super::probe::read_pipe(child.stdout.take()).await;
+                let stderr = super::probe::read_pipe(child.stderr.take()).await;
+                let stdout = String::from_utf8_lossy(&stdout);
+                let stderr = String::from_utf8_lossy(&stderr);
+                if status.success() {
                     log.record(format!("diskutil: ok — {}", stdout.trim()));
                 } else {
                     log.record(format!(
-                        "diskutil: failed (exit={}) — {}",
-                        output.status,
+                        "diskutil: failed (exit={status}) — {}",
                         stderr.trim()
                     ));
                 }
@@ -108,7 +109,8 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
                 log.record(format!("diskutil: error: {e}"));
             }
             Err(_) => {
-                log.record("diskutil: timed out after 1s, killingx");
+                log.record("diskutil: timed out after 1s, killing");
+                let _ = child.kill().await;
             }
         }
     }

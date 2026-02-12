@@ -1,7 +1,17 @@
 use camino::Utf8PathBuf;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use super::Log;
+
+pub(crate) async fn read_pipe(pipe: Option<impl AsyncReadExt + Unpin>) -> Vec<u8> {
+    let Some(mut pipe) = pipe else {
+        return Vec::new();
+    };
+    let mut buf = Vec::new();
+    let _ = pipe.read_to_end(&mut buf).await;
+    buf
+}
 
 /// Result of probing a mount point.
 pub(crate) struct ProbeResult {
@@ -178,28 +188,31 @@ async fn probe_health(mount_path: &Utf8PathBuf, log: &mut Log) -> HealthProbe {
         }
     };
 
-    match tokio::time::timeout(std::time::Duration::from_secs(1), child.wait_with_output()).await {
-        Ok(Ok(output)) if output.status.success() => {
-            let json = String::from_utf8_lossy(&output.stdout).to_string();
-            log.record(format!("health.json: {json}"));
-            HealthProbe::Ok(json)
-        }
-        Ok(Ok(output)) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            log.record(format!(
-                "health.json: cat failed (exit={}): {}",
-                output.status,
-                stderr.trim()
-            ));
-            HealthProbe::Failed(stderr.trim().to_string())
+    match tokio::time::timeout(std::time::Duration::from_secs(1), child.wait()).await {
+        Ok(Ok(status)) => {
+            let stdout = read_pipe(child.stdout.take()).await;
+            let stderr = read_pipe(child.stderr.take()).await;
+            if status.success() {
+                let json = String::from_utf8_lossy(&stdout).to_string();
+                log.record(format!("health.json: {json}"));
+                HealthProbe::Ok(json)
+            } else {
+                let msg = String::from_utf8_lossy(&stderr);
+                log.record(format!(
+                    "health.json: cat failed (exit={status}): {}",
+                    msg.trim()
+                ));
+                HealthProbe::Failed(msg.trim().to_string())
+            }
         }
         Ok(Err(e)) => {
             log.record(format!("health.json: cat error: {e}"));
             HealthProbe::Failed(e.to_string())
         }
         Err(_) => {
-            // Timed out
+            // Timed out — kill the sacrificial process
             log.record("health.json: /bin/cat timed out (mount is zombied), killing");
+            let _ = child.kill().await;
             HealthProbe::Timeout
         }
     }
