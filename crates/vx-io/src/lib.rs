@@ -43,6 +43,11 @@ pub async fn atomic_write(path: &Utf8Path, contents: &[u8]) -> Result<(), std::i
     // If rename fails (e.g. cross-filesystem or Windows access denied),
     // fall back to copy + delete.
     if let Err(e) = temp_path.persist(path) {
+        tracing::warn!(
+            path = %path,
+            error = %e.error,
+            "atomic_write persist failed, falling back to copy"
+        );
         let temp = e.path;
         std::fs::copy(&temp, path.as_std_path()).map_err(|ce| {
             std::io::Error::other(format!(
@@ -54,6 +59,31 @@ pub async fn atomic_write(path: &Utf8Path, contents: &[u8]) -> Result<(), std::i
     }
 
     Ok(())
+}
+
+/// Atomically write contents only if destination does not already exist.
+///
+/// This is intended for content-addressed cache writes where "already exists"
+/// is a successful race outcome and overwriting is undesirable.
+pub async fn atomic_write_noclobber(
+    path: &Utf8Path,
+    contents: &[u8],
+) -> Result<(), std::io::Error> {
+    let parent_dir = path.parent().unwrap_or_else(|| Utf8Path::new("."));
+    tokio::fs::create_dir_all(parent_dir).await?;
+
+    let temp_file = tempfile::Builder::new()
+        .prefix(".tmp-")
+        .tempfile_in(parent_dir)
+        .map_err(std::io::Error::other)?;
+    let temp_path = temp_file.into_temp_path();
+    tokio::fs::write(&temp_path, contents).await?;
+
+    match temp_path.persist_noclobber(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e.error),
+    }
 }
 
 /// Atomically write contents to a file, optionally making it executable.
@@ -149,6 +179,11 @@ pub mod sync {
         drop(file);
 
         if let Err(e) = temp_path.persist(path) {
+            tracing::warn!(
+                path = %path,
+                error = %e.error,
+                "sync::atomic_write persist failed, falling back to copy"
+            );
             let temp = e.path;
             std::fs::copy(&temp, path.as_std_path()).map_err(|ce| {
                 std::io::Error::other(format!(
@@ -159,6 +194,27 @@ pub mod sync {
         }
 
         Ok(())
+    }
+
+    /// Synchronous version of [`super::atomic_write_noclobber`].
+    pub fn atomic_write_noclobber(path: &Utf8Path, contents: &[u8]) -> Result<(), std::io::Error> {
+        let parent_dir = path.parent().unwrap_or_else(|| Utf8Path::new("."));
+        std::fs::create_dir_all(parent_dir)?;
+
+        let temp_file = tempfile::Builder::new()
+            .prefix(".tmp-")
+            .tempfile_in(parent_dir)
+            .map_err(std::io::Error::other)?;
+        let (mut file, temp_path) = temp_file.into_parts();
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+
+        match temp_path.persist_noclobber(path) {
+            Ok(_) => Ok(()),
+            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(e.error),
+        }
     }
 
     /// Atomically write contents to a file, optionally making it executable.

@@ -313,10 +313,51 @@ impl CasVfs {
 
     /// Fetch a chunk with L2 disk cache. On miss, fetches from CAS and writes through.
     async fn read_chunk_cached(&self, chunk_hash: ChunkHash) -> Result<Vec<u8>, String> {
+        async fn fetch_from_cas(
+            cas: &StoreClient<crate::StoreCaller>,
+            chunk_hash: ChunkHash,
+        ) -> Result<Vec<u8>, String> {
+            let data = cas
+                .get_chunk(chunk_hash)
+                .await
+                .map_err(|e| format!("CAS chunk read error: {e}"))?
+                .ok_or_else(|| format!("chunk {} not found", chunk_hash.to_hex()))?;
+
+            let actual_hash = Blake3Hash::from_bytes(&data);
+            if actual_hash != chunk_hash.0 {
+                return Err(format!(
+                    "CAS returned wrong chunk bytes for {} (got {})",
+                    chunk_hash.to_hex(),
+                    actual_hash.to_hex()
+                ));
+            }
+
+            Ok(data)
+        }
+
         // Try L2 disk cache first
         if let Some(path) = self.chunk_cache_path(&chunk_hash.0) {
             match tokio::fs::read(path.as_std_path()).await {
-                Ok(data) => return Ok(data),
+                Ok(data) => {
+                    let actual_hash = Blake3Hash::from_bytes(&data);
+                    if actual_hash == chunk_hash.0 {
+                        return Ok(data);
+                    }
+
+                    tracing::error!(
+                        expected = %chunk_hash.to_hex(),
+                        actual = %actual_hash.to_hex(),
+                        bytes = data.len(),
+                        path = %path,
+                        "L2 cache hash mismatch on hit, evicting corrupted entry"
+                    );
+                    if let Err(e) = tokio::fs::remove_file(path.as_std_path()).await
+                        && e.kind() != std::io::ErrorKind::NotFound
+                    {
+                        tracing::warn!(path = %path, error = %e, "failed to remove bad L2 cache file");
+                    }
+                    // Fall through to CAS refetch.
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     // Cache miss — fall through to RPC
                 }
@@ -328,16 +369,11 @@ impl CasVfs {
         }
 
         // Fetch from CAS
-        let data = self
-            .cas
-            .get_chunk(chunk_hash)
-            .await
-            .map_err(|e| format!("CAS chunk read error: {e}"))?
-            .ok_or_else(|| format!("chunk {} not found", chunk_hash.to_hex()))?;
+        let data = fetch_from_cas(&self.cas, chunk_hash).await?;
 
         // Write-through to L2
         if let Some(path) = self.chunk_cache_path(&chunk_hash.0)
-            && let Err(e) = vx_io::atomic_write(&path, &data).await
+            && let Err(e) = vx_io::atomic_write_noclobber(&path, &data).await
         {
             tracing::warn!(hash = %chunk_hash.0, error = %e, "L2 cache write-through failed");
         }
@@ -851,7 +887,7 @@ impl Vfs for CasVfs {
 
         // Extract what we need while holding the read lock — slice the write buffer
         // in-place instead of cloning the entire Vec<u8>.
-        let (cas_hash, blob_node) = {
+        let (cas_hash, blob_node, size) = {
             let state = self.state.lock();
             let Some(item) = state.items.get(&item_id) else {
                 return ReadResult {
@@ -877,7 +913,7 @@ impl Vfs for CasVfs {
                 };
             }
 
-            (item.cas_hash, item.blob_node)
+            (item.cas_hash, item.blob_node, item.size)
         };
 
         // Fetch from CAS if we have a hash
@@ -891,10 +927,33 @@ impl Vfs for CasVfs {
 
         // Fetch via chunk-based CAS reads (SmallFile → single chunk, LargeFile → BlobNode)
         match self.read_cas_range(hash, blob_node, offset, len).await {
-            Ok(data) => ReadResult {
-                data,
-                error: errno::OK,
-            },
+            Ok(data) => {
+                let expected_len = if offset >= size {
+                    0
+                } else {
+                    (size - offset).min(len) as usize
+                };
+                if data.len() != expected_len {
+                    tracing::error!(
+                        item_id,
+                        hash = %hash,
+                        file_size = size,
+                        offset,
+                        requested = len,
+                        expected = expected_len,
+                        actual = data.len(),
+                        "short read before EOF detected in CAS-backed read path"
+                    );
+                    return ReadResult {
+                        data: Vec::new(),
+                        error: errno::EIO,
+                    };
+                }
+                ReadResult {
+                    data,
+                    error: errno::OK,
+                }
+            }
             Err(e) => {
                 tracing::error!(hash = %hash, error = %e, "failed to read blob range");
                 ReadResult {
