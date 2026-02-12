@@ -227,7 +227,7 @@ fn main() -> Result<()> {
 }
 
 async fn async_main() -> Result<()> {
-    vx_tracing::init_service("vx-vfsd=debug");
+    vx_tracing::init_service("vx-vfsd=info");
 
     // Die when parent dies
     ur_taking_me_with_you::die_with_parent();
