@@ -2,6 +2,7 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 
+pub mod boot;
 pub mod git;
 pub mod net;
 pub mod spawn;

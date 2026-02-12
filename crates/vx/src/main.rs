@@ -12,7 +12,9 @@ use camino::Utf8PathBuf;
 use eyre::{Result, bail};
 use figue as args;
 use owo_colors::OwoColorize;
+use roam_stream::ConnectionHandle;
 use tui::emit_osc_progress;
+use vx_io::boot::BootClient;
 use vx_io::spawn::ServiceBuilder;
 use vx_report::ReportStore;
 use vx_store_proto::Blake3Hash;
@@ -24,7 +26,6 @@ use crate::{
     cli::{BuildArgs, CleanArgs, Cli, CliCommand, DebugArgs, KillArgs, StartArgs},
     progress_listener::ProgressListenerImpl,
 };
-use progress_listener::VxdCaller;
 
 /// Initialize tracing with TUI layer
 fn init_tracing_with_tui(tui: tui::TuiHandle) {
@@ -95,13 +96,14 @@ impl CliContext {
     ///
     /// The progress dispatcher is created here because it's tightly coupled
     /// to the vx CLI's display logic.
-    async fn ensure_vxd(&self) -> Result<VxdClient<VxdCaller>> {
-        let progress_listener = ProgressListenerImpl::new(self.mode.clone());
-        let dispatcher = vxd_proto::ProgressListenerDispatcher::new(progress_listener);
+    async fn ensure_vxd(&self) -> Result<VxdClient<ConnectionHandle>> {
+        use roam_stream::NoDispatcher;
 
         let vx_home = vx_io::vx_home();
-        let mut builder =
-            ServiceBuilder::new("vxd", self.strat.endpoint().clone(), dispatcher).caller_name("vx");
+
+        // Connect to daemon — root connection only has the Boot service.
+        let mut builder = ServiceBuilder::new("vxd", self.strat.endpoint().clone(), NoDispatcher)
+            .caller_name("vx");
 
         builder = match &self.strat {
             DaemonStrategy::Connect(_) => builder.connect_only(),
@@ -111,7 +113,27 @@ impl CliContext {
         };
 
         let handle = builder.connect().await?;
-        Ok(VxdClient::new(handle.caller))
+        let root_handle = handle.caller.handle().await?;
+
+        // Call boot() on root connection — waits for daemon services to be ready.
+        let boot_client = BootClient::new(root_handle.clone());
+        let boot_result = boot_client.boot().await?;
+        if !boot_result.success {
+            let msg = boot_result
+                .error
+                .unwrap_or_else(|| "unknown boot error".into());
+            eyre::bail!("daemon boot failed: {msg}");
+        }
+
+        // Open virtual connection with ProgressListener dispatcher for callbacks.
+        let progress_listener = ProgressListenerImpl::new(self.mode.clone());
+        let dispatcher = vxd_proto::ProgressListenerDispatcher::new(progress_listener);
+        let virtual_handle = root_handle
+            .connect(vec![], Some(Box::new(dispatcher)))
+            .await
+            .map_err(|e| eyre::eyre!("failed to open virtual connection to vxd: {e}"))?;
+
+        Ok(VxdClient::new(virtual_handle))
     }
 
     // ─── Commands ───────────────────────────────────────────────────────

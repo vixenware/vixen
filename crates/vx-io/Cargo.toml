@@ -16,6 +16,8 @@ tokio = { workspace = true }
 dirs = { workspace = true }
 tempfile = { workspace = true }
 tracing = { workspace = true }
+facet = { workspace = true }
+roam = { workspace = true }
 roam-local = { workspace = true }
 roam-stream = { workspace = true }
 ur-taking-me-with-you = { workspace = true }

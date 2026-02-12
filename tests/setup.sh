@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-set -x
 
 # Build vx-store, vx-runner, vxd, vx
 CARGO_FEATURES=""
@@ -43,7 +42,7 @@ export VX_TEST=1
 
 # Set VXD so no other command starts their own
 export VXD="$VX_HOME/vxd.sock"
-"$VX_BIN" pinG
+"$VX_BIN" ping
 
 # Export connection info for all tests. TestEnv::new() reads these to skip
 # spawning and connect to this daemon instead.

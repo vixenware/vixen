@@ -4,11 +4,7 @@ use crate::{
     types::CliMode,
 };
 use std::sync::atomic::{self, AtomicU64};
-use vx_io::net::EndpointConnector;
-use vxd_proto::{ActionProgress, ActionType, ProgressListener, ProgressListenerDispatcher};
-
-pub type VxdCaller =
-    roam_stream::Client<EndpointConnector, ProgressListenerDispatcher<ProgressListenerImpl>>;
+use vxd_proto::{ActionProgress, ActionType, ProgressListener};
 
 /// Progress listener that dispatches to TUI, JSON, or plain text output.
 pub(crate) struct ProgressListenerImpl {

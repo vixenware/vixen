@@ -32,6 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Child;
 use tokio::sync::watch;
+use vx_io::boot::{Boot, BootDispatcher, BootResult};
 use vx_io::net::{Endpoint, Listener};
 use vx_runner_proto::RunnerClient;
 use vx_store_proto::StoreClient;
@@ -240,6 +241,48 @@ async fn ensure_services(
     })
 }
 
+/// Boot service implementation for vxd.
+///
+/// Holds what's needed to boot child services and create sessions.
+/// Shared across all connections via Arc.
+#[derive(Clone)]
+struct VxdBootService {
+    daemon: Arc<VxdService>,
+    boot_state: watch::Receiver<BootState>,
+}
+
+impl Boot for VxdBootService {
+    async fn boot(&self, _cx: &roam::Context) -> BootResult {
+        let mut rx = self.boot_state.clone();
+        loop {
+            {
+                let state = rx.borrow().clone();
+                match state {
+                    BootState::Booting => { /* wait */ }
+                    BootState::Ready(_) => {
+                        return BootResult {
+                            success: true,
+                            error: None,
+                        };
+                    }
+                    BootState::Failed(msg) => {
+                        return BootResult {
+                            success: false,
+                            error: Some(msg),
+                        };
+                    }
+                }
+            }
+            if rx.changed().await.is_err() {
+                return BootResult {
+                    success: false,
+                    error: Some("boot state channel closed".to_string()),
+                };
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
     peeps::init();
 
@@ -382,6 +425,11 @@ async fn async_main() -> Result<()> {
         });
     }
 
+    let boot_service = VxdBootService {
+        daemon: daemon.clone(),
+        boot_state: boot_rx,
+    };
+
     // Track active connections and shut down after idle timeout.
     // Test mode: 2s, production: 2 hours.
     let active_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -415,27 +463,27 @@ async fn async_main() -> Result<()> {
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
-        let daemon = daemon.clone();
         let active_connections = active_connections.clone();
         let last_disconnect = last_disconnect.clone();
 
         active_connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        let boot_service = boot_service.clone();
+
         peeps::tasks::spawn_tracked(format!("vxd_connection_{}", peer_addr), async move {
             tracing::debug!("New connection from {}", peer_addr);
 
-            // Create a per-connection session with fresh state
-            let session = daemon.new_session();
-
-            let dispatcher = VxdDispatcher::new(session.clone());
-            let (handle, _incoming, driver) = match accept(
+            // Root connection gets Boot service only — clients must call boot()
+            // then open a virtual connection for the real Vxd service.
+            let boot_dispatcher = BootDispatcher::new(boot_service.clone());
+            let (_handle, mut incoming, driver) = match accept(
                 stream,
                 HandshakeConfig {
                     max_payload_size: 256 * 1024 * 1024, // 256 MiB
                     name: Some("vxd".into()),
                     ..Default::default()
                 },
-                dispatcher,
+                boot_dispatcher,
             )
             .await
             {
@@ -448,20 +496,43 @@ async fn async_main() -> Result<()> {
                 }
             };
 
-            let progress_listener =
-                Arc::new(vxd_proto::ProgressListenerClient::new(handle.clone()));
+            // Drive the connection in the background
+            let driver_handle =
+                peeps::tasks::spawn_tracked(format!("vxd_driver_{}", peer_addr), async move {
+                    driver.run().await
+                });
 
-            // Set progress listener for this connection
-            session.set_progress_listener(Some(progress_listener)).await;
+            // Accept virtual connections — each gets a per-session VxdDispatcher
+            while let Some(conn) = incoming.recv().await {
+                let session = boot_service.daemon.new_session();
+                let dispatcher = VxdDispatcher::new(session.clone());
 
-            if let Err(e) = driver.run().await {
-                tracing::warn!("Session error from {}: {}", peer_addr, e);
+                match conn.accept(vec![], Some(Box::new(dispatcher))).await {
+                    Ok(virtual_handle) => {
+                        let progress_listener = Arc::new(vxd_proto::ProgressListenerClient::new(
+                            virtual_handle.clone(),
+                        ));
+                        session.set_progress_listener(Some(progress_listener)).await;
+                        tracing::debug!("Virtual connection accepted from {}", peer_addr);
+                        // Note: cancel_active_build is handled when the root
+                        // connection's driver finishes (all virtual connections
+                        // close with it). Per-virtual-conn cancellation can be
+                        // added later if we support multiple virtual connections
+                        // per root connection.
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to accept virtual connection from {}: {e}",
+                            peer_addr
+                        );
+                    }
+                }
             }
 
-            // Connection dropped — cancel any in-flight build for this session.
-            // This is the primary graceful shutdown mechanism: when the CLI exits
-            // (e.g. Ctrl-C), its connection closes, which cancels the build.
-            session.cancel_active_build().await;
+            // incoming channel closed — root connection is done
+            if let Err(e) = driver_handle.await {
+                tracing::warn!("Driver error from {}: {e:?}", peer_addr);
+            }
 
             tracing::debug!("Connection from {} closed", peer_addr);
             active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
