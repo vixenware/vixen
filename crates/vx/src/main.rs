@@ -96,7 +96,7 @@ fn print_fatal_error(error: &eyre::Report) {
     let wrapped = soft_wrap(&full_message, term_width);
     let lines: Vec<&str> = wrapped.lines().collect();
 
-    let content_width = lines.iter().map(|l| l.len()).max().unwrap_or(40).max(40);
+    let content_width = term_width;
     let bar = "─".repeat(content_width + 2);
 
     eprintln!();
@@ -107,10 +107,13 @@ fn print_fatal_error(error: &eyre::Report) {
     );
     eprintln!("{}", format!("├{bar}┤").red().bold());
     for line in &lines {
+        let char_len = line.chars().count();
+        let padding = content_width.saturating_sub(char_len);
         eprintln!(
-            "{}{}{}",
+            "{}{}{}{}",
             "│ ".red().bold(),
-            format!("{line:content_width$}"),
+            line,
+            " ".repeat(padding),
             " │".red().bold(),
         );
     }
@@ -139,14 +142,20 @@ fn terminal_width() -> usize {
 fn soft_wrap(text: &str, max_width: usize) -> String {
     let mut out = String::new();
     for line in text.lines() {
-        if line.len() <= max_width {
+        if line.chars().count() <= max_width {
             out.push_str(line);
             out.push('\n');
         } else {
             let mut remaining = line;
-            while remaining.len() > max_width {
-                // Try to break at a space
-                let break_at = remaining[..max_width].rfind(' ').unwrap_or(max_width);
+            while remaining.chars().count() > max_width {
+                // Find the byte offset of the max_width-th char
+                let byte_limit = remaining
+                    .char_indices()
+                    .nth(max_width)
+                    .map(|(i, _)| i)
+                    .unwrap_or(remaining.len());
+                // Try to break at a space within that range
+                let break_at = remaining[..byte_limit].rfind(' ').unwrap_or(byte_limit);
                 out.push_str(&remaining[..break_at]);
                 out.push('\n');
                 remaining = remaining[break_at..].trim_start();
