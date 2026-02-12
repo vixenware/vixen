@@ -43,6 +43,7 @@ if [[ "${VX_VERBOSE:-}" == "1" ]]; then
     echo "VX_VERBOSE=1: daemon output will go to stderr"
     "$VX_BIN" start --no-tui &
 else
+    rm "$VX_LOG" || true
     echo "Daemon output redirected to ${VX_LOG} (set VX_VERBOSE=1 for inline output)"
     "$VX_BIN" start --no-tui > "$VX_LOG" 2>&1 &
 fi
