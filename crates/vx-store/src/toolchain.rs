@@ -4,6 +4,7 @@ use futures_util::{StreamExt, future::join};
 use jiff::Timestamp;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use vx_store_proto::{
     Blake3Hash, BlobRef, CDC_MAX_CHUNK, CasNode, ContentHash, DirEntry, DirEntryKind,
     DirectoryNode, EnsureRustToolchainComponentResult, EnsureStatus,
@@ -31,6 +32,12 @@ struct ExtractedFileInfo {
     blob_node: Option<NodeHash>,
     size: u64,
     executable: bool,
+}
+
+const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_millis(25);
+
+async fn send_progress_best_effort(progress: &roam::Tx<StoreProgress>, update: StoreProgress) {
+    let _ = tokio::time::timeout(PROGRESS_SEND_TIMEOUT, progress.send(&update)).await;
 }
 
 // =============================================================================
@@ -90,13 +97,15 @@ async fn download_component(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
 
-    let _ = progress
-        .send(&StoreProgress {
+    send_progress_best_effort(
+        progress,
+        StoreProgress {
             message: format!("downloading {component_name}"),
             current: Some(0),
             total: content_length,
-        })
-        .await;
+        },
+    )
+    .await;
 
     let body_reader = tokio_util::io::StreamReader::new(
         response
@@ -122,13 +131,15 @@ async fn download_component(
                 let now = std::time::Instant::now();
                 if now.duration_since(last_progress) >= std::time::Duration::from_millis(250) {
                     last_progress = now;
-                    let _ = progress
-                        .send(&StoreProgress {
+                    send_progress_best_effort(
+                        progress,
+                        StoreProgress {
                             message: format!("downloading {component_name}"),
                             current: Some(bytes_read),
                             total: content_length,
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                 }
             }
             Err(e) => {
@@ -141,13 +152,15 @@ async fn download_component(
         }
     }
 
-    let _ = progress
-        .send(&StoreProgress {
+    send_progress_best_effort(
+        progress,
+        StoreProgress {
             message: format!("downloading {component_name}"),
             current: Some(bytes_read),
             total: content_length,
-        })
-        .await;
+        },
+    )
+    .await;
 
     tracing::debug!(
         url = %url,
@@ -178,8 +191,6 @@ async fn download_and_extract_component(
     use http_body_util::BodyExt;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Duration;
-
     tracing::info!(url = %url, "streaming download+extract for {component_name}");
 
     let response =
@@ -229,13 +240,15 @@ async fn download_and_extract_component(
                 result = &mut extract_fut => break result,
                 _ = interval.tick() => {
                     let current = counter.load(Ordering::Relaxed);
-                    let _ = progress
-                        .send(&StoreProgress {
+                    send_progress_best_effort(
+                        progress,
+                        StoreProgress {
                             message: format!("downloading+extracting {component_name}"),
                             current: Some(current),
                             total: content_length,
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                 }
             }
         }
@@ -273,13 +286,15 @@ async fn download_and_extract_component(
         });
     }
 
-    let _ = progress
-        .send(&StoreProgress {
+    send_progress_best_effort(
+        progress,
+        StoreProgress {
             message: format!("downloading+extracting {component_name}"),
             current: Some(counter.load(std::sync::atomic::Ordering::Relaxed)),
             total: content_length,
-        })
-        .await;
+        },
+    )
+    .await;
 
     tracing::debug!(
         url = %url,
@@ -1210,13 +1225,15 @@ impl StoreService {
             }
         };
 
-        let _ = progress
-            .send(&StoreProgress {
+        send_progress_best_effort(
+            &progress,
+            StoreProgress {
                 message: format!("extracting {component_name}"),
                 current: None,
                 total: None,
-            })
-            .await;
+            },
+        )
+        .await;
 
         let strip_components = match component {
             RustComponent::Rustc => 2,
@@ -1588,13 +1605,15 @@ impl StoreService {
             .to_string(),
         };
 
-        let _ = progress
-            .send(&StoreProgress {
+        send_progress_best_effort(
+            progress,
+            StoreProgress {
                 message: format!("downloading zig {}", spec.version),
                 current: None,
                 total: None,
-            })
-            .await;
+            },
+        )
+        .await;
 
         let acquired =
             match vx_toolchain::zig::acquire_zig_toolchain(version.clone(), platform.clone()).await
@@ -1611,13 +1630,15 @@ impl StoreService {
                 }
             };
 
-        let _ = progress
-            .send(&StoreProgress {
+        send_progress_best_effort(
+            progress,
+            StoreProgress {
                 message: "storing zig toolchain".to_string(),
                 current: None,
                 total: None,
-            })
-            .await;
+            },
+        )
+        .await;
 
         // Store zig executable as a single-file DirectoryNode
         let zig_exe_ref = match store_blob_chunked(self, &acquired.zig_exe_contents).await {

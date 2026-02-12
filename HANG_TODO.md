@@ -8,7 +8,7 @@ Prioritized list of suspected or confirmed hang/deadlock/stall risks.
   - `crates/vx-vfsd/src/service.rs` locks `prefixes -> items`
   - `crates/vx-vfsd/src/vfs.rs` has paths that lock `items -> prefixes`
 
-- [ ] Make progress reporting non-blocking in acquisition hot paths.
+- [x] Make progress reporting non-blocking in acquisition hot paths.
   - Risk: `progress.send(...).await` can stall acquisition if receiver is slow/dropped/backpressured.
   - High-risk callsite: `tokio::select!` loop in `download_and_extract_component`.
   - Candidate fixes: `try_send`, bounded timeout around `send`, or decoupled progress task.
