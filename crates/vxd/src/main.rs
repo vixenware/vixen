@@ -16,7 +16,6 @@ mod db;
 mod error;
 mod executor;
 mod inputs;
-mod nextest_watcher;
 mod queries;
 mod service;
 
@@ -243,19 +242,6 @@ async fn async_main() -> Result<()> {
 
     // The daemon outlives its parent process (vx CLI) and shuts down
     // after an idle timeout instead (2s in test mode, 2h in production).
-    // In test mode, we also watch the test harness ancestor (cargo-nextest,
-    // vx-fuse-stress, vx-vfs-integrity, etc.) and exit immediately when it dies.
-    if in_test {
-        if let Some((harness_pid, harness_name)) = nextest_watcher::find_test_harness_pid() {
-            tracing::info!(harness_pid, %harness_name, "watching test harness process");
-            peeps::tasks::spawn_tracked("nextest_watcher", async move {
-                nextest_watcher::wait_for_exit(harness_pid).await;
-                std::process::exit(0);
-            });
-        } else {
-            tracing::debug!("no test harness ancestor found (external daemon?)");
-        }
-    }
 
     // SIGUSR1: dump diagnostics
     #[cfg(unix)]
