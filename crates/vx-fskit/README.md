@@ -91,24 +91,41 @@ indefinitely if the VFS is zombied — the calling thread enters uninterruptible
 sleep and can never be cancelled. We never touch the mount path from our own
 process.
 
-Safe probes (never touch the mount path):
+### Path candidates
 
-1. `df` output — does userspace list a vixenfs mount here?
-2. `pgrep -x VixenFS` — is the extension process running?
-3. `lsof -n -P -Fpcn` — are there processes with files open under the mount?
-4. `mkdir(mount_path)` — returns EBUSY if something is mounted there.
+Dead FSKit mounts don't always show up under the same path. macOS has
+`/tmp` → `/private/tmp` symlinks, and `lsof`/`df` may report either form.
+We always check all plausible variants:
+
+- Canonical form (resolve parent via `canonicalize`, append final component —
+  never `stat` the mount path itself)
+- Raw form as passed in
+- `/private`-prefixed form (for `/tmp/...` paths)
+
+### Safe probes
+
+These never touch the mount path and always return quickly:
+
+1. **`mkdir(mount_path)`** — returns EBUSY if something is mounted there.
    This is a metadata operation on the *parent* directory, not I/O into the
    mount itself.
 
-Sacrificial child process (may hang, we kill it on timeout):
+2. **`df`** — check if any output line contains one of the path candidates.
 
-5. `/bin/cat $mount/.vixenfs/health.json` — spawned as a child process with
-   a 1s timeout. If it returns, we get the health payload. If it hangs, we
-   kill it and know the mount is zombied.
+3. **`pgrep -x VixenFS`** — is the extension process running?
 
-The `lsof` probe also feeds into teardown: before unmounting, we must kill
-processes with files open under the mount. If they survive SIGKILL (still
-alive after 2s), they're in uninterruptible sleep — reboot required.
+4. **`lsof -n -P -Fpcn`** — parses structured output (lines prefixed with
+   `p` for PID, `c` for command, `n` for path) to find processes with files
+   open under any of the path candidates. Also used by teardown to kill
+   processes before unmounting. If any survive SIGKILL after 2s of polling
+   with `kill(pid, 0)`, they're in uninterruptible sleep — reboot required.
+
+### Sacrificial child process
+
+5. **`/bin/cat $mount/.vixenfs/health.json`** — spawned via
+   `tokio::process::Command` with a 1s `tokio::time::timeout`. If it
+   returns, we parse the JSON payload. If it hangs, we `kill()` the child
+   and know the mount is zombied.
 
 ## setup() state machine
 
@@ -132,14 +149,8 @@ Is Vixen.app codesign valid?
   YES
   │
   ▼
-Is extension registered? (pluginkit -m)
-  │
-  NO ──→ FAIL: "run `vx doctor` to launch Vixen.app and register the extension"
-  │
-  YES
-  │
-  ▼
-Is extension enabled? (systemextensionsctl list)
+Is extension registered and enabled? (pluginkit -m -p com.apple.fskit.fsmodule)
+  look for "+    eu.bearcove.vixenfs" in output (+ means enabled)
   │
   NO ──→ FAIL: "run `vx doctor` to launch Vixen.app and enable the extension"
   │
