@@ -37,8 +37,8 @@ echo "Test VX_HOME will be ${VX_HOME}"
 # VX_TEST=1 enables test mode: 30s idle timeout instead of 2 hours
 export VX_TEST=1
 
-"$VX_BIN" start 2>/tmp/vx-test.log
-tail -f /tmp/vx-test.log &
+"$VX_BIN" start &
+sleep 2
 
 # Export connection info for all tests. TestEnv::new() reads these to skip
 # spawning and connect to this daemon instead.

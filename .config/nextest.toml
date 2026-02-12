@@ -3,19 +3,19 @@
 # Enable experimental setup scripts feature
 experimental = ["setup-scripts"]
 
-[scripts.setup.start-vxd-for-tests-unix]
-command = 'bash tests/start-vxd-for-tests.sh'
+[scripts.setup.setup-unix]
+command = 'bash tests/setup.sh'
 
-[scripts.setup.start-vxd-for-tests-windows]
+[scripts.setup.setup-windows]
 command = ['powershell', '-ExecutionPolicy', 'Bypass', '-File', 'tests/warmup-toolchains.ps1']
 
 # Run setup scripts for all tests (platform-specific)
 [[profile.default.scripts]]
 platform = { host = "cfg(unix)" }
 filter = 'all()'
-setup = ['start-vxd-for-tests-unix']
+setup = ['setup-unix']
 
 [[profile.default.scripts]]
 platform = { host = "cfg(windows)" }
 filter = 'all()'
-setup = ['start-vxd-for-tests-windows']
+setup = ['setup-windows']
