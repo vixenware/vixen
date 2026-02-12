@@ -398,13 +398,13 @@ async fn async_main() -> Result<()> {
             let mut idle_timeout = normal_idle_timeout;
             let mut saw_boot_failure = false;
             loop {
-                tokio::time::sleep(Duration::from_secs(1000)).await;
+                tokio::time::sleep(Duration::from_millis(400)).await;
 
                 // If boot failed, shrink idle timeout so we exit quickly
                 // once the client disconnects after receiving the error.
                 if !saw_boot_failure && boot_failed.load(std::sync::atomic::Ordering::Relaxed) {
                     tracing::trace!("boot failed, shrinking idle timeout");
-                    idle_timeout = Duration::from_secs(2);
+                    idle_timeout = Duration::from_secs(1);
                     saw_boot_failure = true;
                 }
 
