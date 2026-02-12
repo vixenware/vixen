@@ -3,103 +3,27 @@
 //! This is a thin CLI client that talks to the vx daemon.
 
 mod build_json;
+mod cli;
+mod progress_listener;
 mod tui;
+mod types;
 
 use camino::Utf8PathBuf;
 use eyre::{Result, bail};
-use facet::Facet;
 use figue as args;
 use owo_colors::OwoColorize;
 use tui::emit_osc_progress;
+use vx_io::net::Endpoint;
+use vx_io::spawn::ServiceBuilder;
 use vx_report::ReportStore;
-use vx_store_proto::Blake3Hash;
-use vxd_proto::{ActionProgress, ActionType, BuildRequest, ProgressListener, VxdClient};
+use vxd_proto::{BuildRequest, VxdClient};
 
-/// vx - Build execution engine with deterministic caching
-#[derive(Facet, Debug)]
-struct Cli {
-    /// Command to run
-    #[facet(args::subcommand)]
-    command: CliCommand,
-
-    /// Standard CLI options (--help, --version, --completions)
-    #[facet(flatten)]
-    builtins: args::FigueBuiltins,
-}
-
-/// Arguments for the `build` subcommand
-#[derive(Facet, Debug)]
-struct BuildArgs {
-    /// Build in release mode
-    #[facet(args::named, args::short = 'r')]
-    release: bool,
-
-    /// Disable TUI and use plain log output
-    #[facet(args::named)]
-    no_tui: bool,
-
-    /// Emit NDJSON build events to stdout (implies --no-tui)
-    #[facet(args::named)]
-    json: bool,
-}
-
-/// Start daemons
-#[derive(Facet, Debug)]
-struct StartArgs {}
-
-/// Arguments for the `kill` subcommand
-#[derive(Facet, Debug)]
-struct KillArgs {}
-
-/// Arguments for the `clean` subcommand
-#[derive(Facet, Debug)]
-struct CleanArgs {
-    /// Remove VX_HOME instead of project .vx/ (asks for confirmation)
-    #[facet(args::named)]
-    home: bool,
-
-    /// Invalidate cache entries from the last build (keeps toolchains)
-    #[facet(args::named)]
-    cache: bool,
-}
-
-/// Arguments for the `debug` subcommand
-#[derive(Facet, Debug)]
-struct DebugArgs {
-    /// Print aggregated text dump to stderr (no web dashboard)
-    #[facet(args::named)]
-    dump: bool,
-
-    /// Print aggregated JSON to stdout (no web dashboard)
-    #[facet(args::named)]
-    json: bool,
-}
-
-/// Arguments for the `doctor` subcommand
-#[derive(Facet, Debug)]
-struct DoctorArgs {}
-
-#[derive(Facet, Debug)]
-#[repr(u8)]
-enum CliCommand {
-    /// Execute a build
-    Build(BuildArgs),
-
-    /// Just start daemons
-    Start(StartArgs),
-
-    /// Stop the daemon process
-    Kill(KillArgs),
-
-    /// Stop the daemon and remove .vx/ directory
-    Clean(CleanArgs),
-
-    /// Quick health check
-    Doctor(DoctorArgs),
-
-    /// Collect diagnostic dumps from all vixen processes
-    Debug(DebugArgs),
-}
+use crate::types::CliMode;
+use crate::{
+    cli::{BuildArgs, CleanArgs, Cli, CliCommand, DebugArgs, KillArgs, StartArgs},
+    progress_listener::ProgressListenerImpl,
+};
+use progress_listener::VxdCaller;
 
 /// Initialize tracing with TUI layer
 fn init_tracing_with_tui(tui: tui::TuiHandle) {
@@ -148,6 +72,7 @@ async fn async_main() -> Result<()> {
             vx_tracing::init_cli_stderr();
             cmd_start(args).await
         }
+        CliCommand::Ping => cmd_ping().await,
         // Other commands use stderr tracing
         CliCommand::Kill(args) => {
             vx_tracing::init_cli_stderr();
@@ -168,184 +93,6 @@ async fn async_main() -> Result<()> {
     }
 }
 
-// ─── CliMode & ProgressListener ─────────────────────────────────────────────
-
-#[derive(Clone)]
-enum CliMode {
-    /// Full-terminal TUI: tracing is redirected to events etc.
-    Tui(tui::TuiHandle),
-    /// NDJSON output
-    Json,
-    /// Text output
-    Text,
-}
-
-/// Progress listener that dispatches to TUI, JSON, or plain text output.
-struct ProgressListenerImpl {
-    mode: CliMode,
-    next_action_id: std::sync::atomic::AtomicU64,
-    /// Tracks total/completed for OSC progress in Text mode
-    total_actions: std::sync::atomic::AtomicU64,
-    completed_actions: std::sync::atomic::AtomicU64,
-}
-
-type VxdCaller = roam_stream::Client<
-    vx_io::net::EndpointConnector,
-    vxd_proto::ProgressListenerDispatcher<ProgressListenerImpl>,
->;
-
-impl Clone for ProgressListenerImpl {
-    fn clone(&self) -> Self {
-        Self {
-            mode: self.mode.clone(),
-            next_action_id: std::sync::atomic::AtomicU64::new(
-                self.next_action_id
-                    .load(std::sync::atomic::Ordering::SeqCst),
-            ),
-            total_actions: std::sync::atomic::AtomicU64::new(
-                self.total_actions.load(std::sync::atomic::Ordering::SeqCst),
-            ),
-            completed_actions: std::sync::atomic::AtomicU64::new(
-                self.completed_actions
-                    .load(std::sync::atomic::Ordering::SeqCst),
-            ),
-        }
-    }
-}
-
-impl ProgressListenerImpl {
-    fn new(mode: CliMode) -> Self {
-        Self {
-            mode,
-            next_action_id: std::sync::atomic::AtomicU64::new(1),
-            total_actions: std::sync::atomic::AtomicU64::new(0),
-            completed_actions: std::sync::atomic::AtomicU64::new(0),
-        }
-    }
-
-    fn next_id(&self) -> u64 {
-        self.next_action_id
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-    }
-}
-
-impl ProgressListener for ProgressListenerImpl {
-    async fn set_total(&self, _cx: &roam::Context, total: u64) {
-        match &self.mode {
-            CliMode::Json => {
-                build_json::emit(&build_json::BuildStarted {
-                    event: "build_started".into(),
-                    total_actions: total,
-                });
-            }
-            CliMode::Tui(tui) => {
-                tui.set_total(total as usize).await;
-            }
-            CliMode::Text => {
-                self.total_actions
-                    .store(total, std::sync::atomic::Ordering::SeqCst);
-                emit_osc_progress(tui::OscProgressState::Set, Some(0));
-                tracing::info!("Build: {total} actions total");
-            }
-        }
-    }
-
-    async fn start_action(&self, _cx: &roam::Context, action_type: ActionType) -> u64 {
-        match &self.mode {
-            CliMode::Json => {
-                let id = self.next_id();
-                build_json::emit(&build_json::ActionStarted {
-                    event: "action_started".into(),
-                    action_id: id,
-                    action: action_type.display_name(),
-                });
-                id
-            }
-            CliMode::Tui(tui) => tui.start_action(action_type).await,
-            CliMode::Text => {
-                let id = self.next_id();
-                tracing::info!("[{id}] Starting: {action_type:?}");
-                id
-            }
-        }
-    }
-
-    async fn update_progress(&self, _cx: &roam::Context, action_id: u64, progress: ActionProgress) {
-        match &self.mode {
-            CliMode::Json => {
-                build_json::emit(&build_json::ActionProgress {
-                    event: "action_progress".into(),
-                    action_id,
-                    message: progress.message,
-                    current: progress.current,
-                    total: progress.total,
-                });
-            }
-            CliMode::Tui(tui) => {
-                tui.update_progress(action_id, progress).await;
-            }
-            CliMode::Text => {
-                if let (Some(current), Some(total)) = (progress.current, progress.total) {
-                    let pct = if total > 0 {
-                        current as f64 / total as f64 * 100.0
-                    } else {
-                        0.0
-                    };
-                    tracing::info!(
-                        "[{action_id}] {}: {pct:.0}% ({current}/{total})",
-                        progress.message,
-                    );
-                } else {
-                    tracing::info!("[{action_id}] {}", progress.message);
-                }
-            }
-        }
-    }
-
-    async fn complete_action(&self, _cx: &roam::Context, action_id: u64) {
-        match &self.mode {
-            CliMode::Json => {
-                build_json::emit(&build_json::ActionCompleted {
-                    event: "action_completed".into(),
-                    action_id,
-                });
-            }
-            CliMode::Tui(tui) => {
-                tui.complete_action(action_id).await;
-            }
-            CliMode::Text => {
-                let completed = self
-                    .completed_actions
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                    + 1;
-                let total = self.total_actions.load(std::sync::atomic::Ordering::SeqCst);
-                if total > 0 {
-                    let pct = (completed as f64 / total as f64 * 100.0).min(100.0) as u8;
-                    emit_osc_progress(tui::OscProgressState::Set, Some(pct));
-                }
-                tracing::info!("[{action_id}] Complete");
-            }
-        }
-    }
-
-    async fn log_message(&self, _cx: &roam::Context, message: String) {
-        match &self.mode {
-            CliMode::Json => {
-                build_json::emit(&build_json::LogMessage {
-                    event: "log".into(),
-                    message,
-                });
-            }
-            CliMode::Tui(tui) => {
-                tui.log_message(message).await;
-            }
-            CliMode::Text => {
-                tracing::info!("{message}");
-            }
-        }
-    }
-}
-
 // ─── Daemon connection ──────────────────────────────────────────────────────
 
 /// Connect to the daemon, spawning it if necessary.
@@ -354,9 +101,6 @@ impl ProgressListener for ProgressListenerImpl {
 /// to the vx CLI's display logic. The mode is cloned into the progress
 /// listener and returned for post-build use.
 async fn ensure_vxd(mode: CliMode) -> Result<(VxdClient<VxdCaller>, CliMode)> {
-    use vx_io::net::Endpoint;
-    use vx_io::spawn::ServiceBuilder;
-
     let vx_home = vx_io::vx_home();
 
     let progress_listener = ProgressListenerImpl::new(mode.clone());
@@ -573,6 +317,8 @@ async fn cmd_start(_args: StartArgs) -> Result<()> {
 
     Ok(())
 }
+
+async fn cmd_ping() -> Result<()> {}
 
 async fn cmd_kill(_args: KillArgs) -> Result<()> {
     use vx_io::net::Endpoint;
