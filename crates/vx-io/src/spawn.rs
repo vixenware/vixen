@@ -261,7 +261,8 @@ fn spawn_binary(
     }
 
     if vx_test {
-        cmd.stdout(Stdio::inherit());
+        // We do not inherit standard output because it can corrupt `--json` output
+        cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::inherit());
     } else if let Some(log_path) = log_path {
         use std::fs::OpenOptions;
