@@ -17,6 +17,10 @@ pub(crate) struct StoreService {
     pub(crate) inner: Arc<StoreServiceInner>,
 }
 
+impl vx_io::boot::GracefulShutdown for StoreService {
+    async fn graceful_shutdown(&self) {}
+}
+
 impl std::ops::Deref for StoreService {
     type Target = StoreServiceInner;
 

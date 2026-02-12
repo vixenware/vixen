@@ -339,28 +339,33 @@ impl CliContext {
     }
 
     async fn cmd_kill(&mut self, _args: KillArgs) -> Result<()> {
-        // Try graceful shutdown via RPC first
-        // Like ping, only connect — never spawn
-        self.strat = self.strat.clone().connect_only();
-        let kill_result = self.ensure_vxd().await;
+        use roam_stream::NoDispatcher;
+        use vx_io::boot::BootClient;
+        use vx_io::spawn::ServiceBuilder;
 
-        match kill_result {
-            Ok(daemon) => {
-                let endpoint = self.strat.endpoint();
+        // Connect to the root connection only — don't boot, don't open virtual connections.
+        // shutdown() lives on the Boot service, so it's always reachable even if boot failed.
+        let endpoint = self.strat.endpoint().clone();
+        let builder = ServiceBuilder::new("vxd", endpoint.clone(), NoDispatcher)
+            .caller_name("vx")
+            .connect_only();
+
+        match builder.connect().await {
+            Ok(handle) => {
                 tracing::info!("{} daemon at {}", "Stopping".green().bold(), endpoint);
-                if let Err(e) = daemon.shutdown().await {
+                let root_handle = handle.caller.handle().await?;
+                let boot_client = BootClient::new(root_handle);
+                if let Err(e) = boot_client.shutdown().await {
                     // shutdown() calls process::exit(0) on the daemon side, so the
                     // connection closing is expected — not an error.
                     tracing::debug!("shutdown RPC returned: {e} (expected — daemon exited)");
                 }
-                // Give it a moment to finish cleanup
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 tracing::info!("{} daemon stopped", "✓".green().bold());
             }
             Err(_) => {
                 tracing::info!(
-                    "{} daemon not reachable (child processes use die-with-parent, so they'll exit on their own)",
-                    "Note:".yellow().bold()
+                    "note: daemon not reachable (child processes use die-with-parent, so they'll exit on their own)",
                 );
             }
         }

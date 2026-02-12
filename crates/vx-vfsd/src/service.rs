@@ -13,6 +13,10 @@ pub struct VfsdService {
     vfs: Arc<CasVfs>,
 }
 
+impl vx_io::boot::GracefulShutdown for VfsdService {
+    async fn graceful_shutdown(&self) {}
+}
+
 impl VfsdService {
     pub fn new(vfs: Arc<CasVfs>) -> Self {
         Self { vfs }

@@ -366,6 +366,30 @@ async fn async_main() -> Result<()> {
         });
     }
 
+    // If boot fails, exit after a short grace period so clients can receive the error.
+    {
+        let mut boot_rx = gate.subscribe();
+        peeps::tasks::spawn_tracked("boot_failure_watchdog", async move {
+            loop {
+                if boot_rx.changed().await.is_err() {
+                    tracing::error!("boot state channel closed unexpectedly, shutting down");
+                    std::process::exit(1);
+                }
+                let state = boot_rx.borrow().clone();
+                match state {
+                    vx_io::boot::BootState::Ready => return,
+                    vx_io::boot::BootState::Failed(msg) => {
+                        tracing::error!("boot failed: {msg}");
+                        tracing::info!("shutting down in 10s (boot failed)");
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        std::process::exit(1);
+                    }
+                    vx_io::boot::BootState::Booting => continue,
+                }
+            }
+        });
+    }
+
     let boot_service = gate.boot_service();
 
     // Track active connections and shut down after idle timeout.

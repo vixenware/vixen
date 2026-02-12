@@ -1698,6 +1698,28 @@ impl VxdService {
     }
 }
 
+impl vx_io::boot::GracefulShutdown for VxdService {
+    async fn graceful_shutdown(&self) {
+        // Compact WAL before shutdown to create a clean snapshot
+        match self
+            .db
+            .compact_wal(&self.picante_cache, &self.picante_wal, false)
+            .await
+        {
+            Ok(_revision) => {
+                trace!(
+                    cache = %self.picante_cache,
+                    revision = _revision,
+                    "compacted WAL to snapshot"
+                );
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to compact WAL on shutdown");
+            }
+        }
+    }
+}
+
 impl Vxd for VxdService {
     async fn build(&self, _cx: &roam::Context, request: BuildRequest) -> BuildResult {
         match self.do_build(request).await {
@@ -1740,31 +1762,6 @@ impl Vxd for VxdService {
         }
 
         UnpublishResult { removed, not_found }
-    }
-
-    async fn shutdown(&self, _cx: &roam::Context) {
-        tracing::info!("Shutdown requested");
-
-        // Compact WAL before shutdown to create a clean snapshot
-        match self
-            .db
-            .compact_wal(&self.picante_cache, &self.picante_wal, false)
-            .await
-        {
-            Ok(_revision) => {
-                trace!(
-                    cache = %self.picante_cache,
-                    revision = _revision,
-                    "compacted WAL to snapshot"
-                );
-            }
-            Err(e) => {
-                warn!(error = %e, "failed to compact WAL on shutdown");
-            }
-        }
-
-        tracing::info!("Spawned services killed, exiting daemon");
-        std::process::exit(0);
     }
 
     async fn version(&self, _cx: &roam::Context) -> ServiceVersion {

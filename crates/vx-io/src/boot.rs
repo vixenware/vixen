@@ -22,6 +22,18 @@ use facet::Facet;
 use roam_stream::{ConnectionHandle, ServiceDispatcher};
 use tokio::sync::watch;
 
+/// Optional cleanup hook for services that need to do work before exit.
+pub trait GracefulShutdown {
+    /// Called before `process::exit(0)` when shutdown is requested.
+    fn graceful_shutdown(&self) -> impl std::future::Future<Output = ()> + Send;
+}
+
+impl<T: GracefulShutdown + Send + Sync> GracefulShutdown for Arc<T> {
+    async fn graceful_shutdown(&self) {
+        T::graceful_shutdown(self).await;
+    }
+}
+
 /// Result of a boot attempt.
 #[derive(Debug, Clone, Facet)]
 pub struct BootResult {
@@ -43,6 +55,9 @@ pub trait Boot {
     /// Initialize the daemon. Returns success/failure.
     /// The daemon stays alive regardless of outcome.
     async fn boot(&self) -> BootResult;
+
+    /// Shut the daemon down. Always available, even if boot failed.
+    async fn shutdown(&self);
 }
 
 // ─── Boot state ─────────────────────────────────────────────────────────────
@@ -113,6 +128,11 @@ impl<S: Send + Sync + 'static> BootGate<S> {
         self.service.get()
     }
 
+    /// Subscribe to boot state changes.
+    pub fn subscribe(&self) -> watch::Receiver<BootState> {
+        self.boot_rx.clone()
+    }
+
     /// Create a [`BootService`] that implements the [`Boot`] trait.
     pub fn boot_service(self: &Arc<Self>) -> BootService<S> {
         BootService {
@@ -134,7 +154,15 @@ impl<S> BootService<S> {
     }
 }
 
-impl<S: Send + Sync + 'static> Boot for BootService<S> {
+impl<S: GracefulShutdown + Send + Sync + 'static> Boot for BootService<S> {
+    async fn shutdown(&self, _cx: &roam::Context) {
+        tracing::info!("Shutdown requested via Boot service");
+        if let Some(service) = self.gate.service() {
+            service.graceful_shutdown().await;
+        }
+        std::process::exit(0);
+    }
+
     async fn boot(&self, _cx: &roam::Context) -> BootResult {
         let mut rx = self.gate.boot_rx.clone();
         loop {

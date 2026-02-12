@@ -329,6 +329,10 @@ pub struct RunnerService {
     inner: Arc<RunnerServiceInner>,
 }
 
+impl vx_io::boot::GracefulShutdown for RunnerService {
+    async fn graceful_shutdown(&self) {}
+}
+
 impl std::ops::Deref for RunnerService {
     type Target = RunnerServiceInner;
 
