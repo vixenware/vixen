@@ -3158,15 +3158,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vx-locks"
-version = "0.1.0"
-dependencies = [
- "facet",
- "parking_lot",
- "tokio",
-]
-
-[[package]]
 name = "vx-manifest"
 version = "0.1.0"
 dependencies = [
