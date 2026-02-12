@@ -1,5 +1,8 @@
 #!/bin/bash
 
+echo "== df"
+df | grep vixen
+
 echo "== Usual suspects"
 pgrep -la '(vxd|vx-|Vixen|vixen)' || echo "no one"
 echo
