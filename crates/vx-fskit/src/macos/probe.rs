@@ -39,7 +39,7 @@ pub(crate) enum HealthProbe {
 impl ProbeResult {
     /// Nothing is mounted here — clean state.
     pub fn is_clean(&self) -> bool {
-        !self.mkdir_ebusy && !self.in_df
+        !self.mkdir_ebusy && !self.in_df && !self.extension_running
     }
 
     /// Something is mounted and healthy (health.json says connected: true).
@@ -47,9 +47,9 @@ impl ProbeResult {
         matches!(&self.health, HealthProbe::Ok(json) if json.contains("\"connected\":true") || json.contains("\"connected\": true"))
     }
 
-    /// Something is mounted (EBUSY or in df) but not healthy.
+    /// Something is mounted (EBUSY or in df) or extension is still running, but not healthy.
     pub fn is_broken_mount(&self) -> bool {
-        (self.mkdir_ebusy || self.in_df) && !self.is_healthy()
+        (self.mkdir_ebusy || self.in_df || self.extension_running) && !self.is_healthy()
     }
 }
 

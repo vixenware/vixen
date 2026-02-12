@@ -507,7 +507,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -647,7 +647,7 @@ dependencies = [
 [[package]]
 name = "facet-error"
 version = "0.43.2"
-source = "git+https://github.com/facet-rs/facet?branch=main#967e78d7ba4ba05b270996c1235f951665cd201b"
+source = "git+https://github.com/facet-rs/facet?branch=main#910995c970b160809f678f87c5608082ec61a84d"
 dependencies = [
  "facet",
 ]
@@ -728,7 +728,7 @@ dependencies = [
 [[package]]
 name = "facet-postcard"
 version = "0.43.2"
-source = "git+https://github.com/facet-rs/facet?branch=main#967e78d7ba4ba05b270996c1235f951665cd201b"
+source = "git+https://github.com/facet-rs/facet?branch=main#910995c970b160809f678f87c5608082ec61a84d"
 dependencies = [
  "camino",
  "facet-core",
@@ -743,7 +743,7 @@ dependencies = [
 [[package]]
 name = "facet-pretty"
 version = "0.43.2"
-source = "git+https://github.com/facet-rs/facet?branch=main#967e78d7ba4ba05b270996c1235f951665cd201b"
+source = "git+https://github.com/facet-rs/facet?branch=main#910995c970b160809f678f87c5608082ec61a84d"
 dependencies = [
  "facet-core",
  "facet-reflect",
@@ -811,7 +811,7 @@ dependencies = [
 [[package]]
 name = "facet-toml"
 version = "0.43.2"
-source = "git+https://github.com/facet-rs/facet?branch=main#967e78d7ba4ba05b270996c1235f951665cd201b"
+source = "git+https://github.com/facet-rs/facet?branch=main#910995c970b160809f678f87c5608082ec61a84d"
 dependencies = [
  "facet-core",
  "facet-format",
@@ -822,7 +822,7 @@ dependencies = [
 [[package]]
 name = "facet-value"
 version = "0.43.2"
-source = "git+https://github.com/facet-rs/facet?branch=main#967e78d7ba4ba05b270996c1235f951665cd201b"
+source = "git+https://github.com/facet-rs/facet?branch=main#910995c970b160809f678f87c5608082ec61a84d"
 dependencies = [
  "facet-core",
  "facet-format",
@@ -1655,7 +1655,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2055,7 +2055,7 @@ dependencies = [
 [[package]]
 name = "roam"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
+source = "git+https://github.com/bearcove/roam?branch=main#6753b7b19965e857fbf416279326e86eda6b5f8d"
 dependencies = [
  "facet",
  "facet-core",
@@ -2072,7 +2072,7 @@ dependencies = [
 [[package]]
 name = "roam-codegen"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
+source = "git+https://github.com/bearcove/roam?branch=main#6753b7b19965e857fbf416279326e86eda6b5f8d"
 dependencies = [
  "facet-core",
  "heck",
@@ -2083,7 +2083,7 @@ dependencies = [
 [[package]]
 name = "roam-fdpass"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
+source = "git+https://github.com/bearcove/roam?branch=main#6753b7b19965e857fbf416279326e86eda6b5f8d"
 dependencies = [
  "libc",
  "passfd",
@@ -2094,7 +2094,7 @@ dependencies = [
 [[package]]
 name = "roam-frame"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
+source = "git+https://github.com/bearcove/roam?branch=main#6753b7b19965e857fbf416279326e86eda6b5f8d"
 dependencies = [
  "bytes",
  "facet",
@@ -2104,7 +2104,7 @@ dependencies = [
 [[package]]
 name = "roam-hash"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
+source = "git+https://github.com/bearcove/roam?branch=main#6753b7b19965e857fbf416279326e86eda6b5f8d"
 dependencies = [
  "blake3",
  "facet-core",
@@ -2115,7 +2115,7 @@ dependencies = [
 [[package]]
 name = "roam-local"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
+source = "git+https://github.com/bearcove/roam?branch=main#6753b7b19965e857fbf416279326e86eda6b5f8d"
 dependencies = [
  "tokio",
 ]
@@ -2123,7 +2123,7 @@ dependencies = [
 [[package]]
 name = "roam-macros-parse"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
+source = "git+https://github.com/bearcove/roam?branch=main#6753b7b19965e857fbf416279326e86eda6b5f8d"
 dependencies = [
  "proc-macro2",
  "unsynn",
@@ -2132,7 +2132,7 @@ dependencies = [
 [[package]]
 name = "roam-schema"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
+source = "git+https://github.com/bearcove/roam?branch=main#6753b7b19965e857fbf416279326e86eda6b5f8d"
 dependencies = [
  "facet",
  "facet-core",
@@ -2142,7 +2142,7 @@ dependencies = [
 [[package]]
 name = "roam-service-macros"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
+source = "git+https://github.com/bearcove/roam?branch=main#6753b7b19965e857fbf416279326e86eda6b5f8d"
 dependencies = [
  "facet-cargo-toml",
  "heck",
@@ -2154,7 +2154,7 @@ dependencies = [
 [[package]]
 name = "roam-session"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
+source = "git+https://github.com/bearcove/roam?branch=main#6753b7b19965e857fbf416279326e86eda6b5f8d"
 dependencies = [
  "async-channel",
  "facet",
@@ -2168,6 +2168,7 @@ dependencies = [
  "futures-util",
  "gloo-timers",
  "inventory",
+ "peeps-sync",
  "peeps-tasks",
  "peeps-types",
  "roam-frame",
@@ -2181,7 +2182,7 @@ dependencies = [
 [[package]]
 name = "roam-shm"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
+source = "git+https://github.com/bearcove/roam?branch=main#6753b7b19965e857fbf416279326e86eda6b5f8d"
 dependencies = [
  "facet",
  "facet-postcard",
@@ -2189,6 +2190,7 @@ dependencies = [
  "inventory",
  "libc",
  "libproc",
+ "peeps-sync",
  "peeps-tasks",
  "peeps-types",
  "roam-fdpass",
@@ -2205,7 +2207,7 @@ dependencies = [
 [[package]]
 name = "roam-stream"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
+source = "git+https://github.com/bearcove/roam?branch=main#6753b7b19965e857fbf416279326e86eda6b5f8d"
 dependencies = [
  "facet",
  "facet-postcard",
@@ -2218,7 +2220,7 @@ dependencies = [
 [[package]]
 name = "roam-task-local"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
+source = "git+https://github.com/bearcove/roam?branch=main#6753b7b19965e857fbf416279326e86eda6b5f8d"
 dependencies = [
  "pin-project-lite",
 ]
@@ -2226,7 +2228,7 @@ dependencies = [
 [[package]]
 name = "roam-wire"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
+source = "git+https://github.com/bearcove/roam?branch=main#6753b7b19965e857fbf416279326e86eda6b5f8d"
 dependencies = [
  "facet",
  "facet-postcard",
@@ -2272,7 +2274,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2471,7 +2473,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 [[package]]
 name = "shm-primitives"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
+source = "git+https://github.com/bearcove/roam?branch=main#6753b7b19965e857fbf416279326e86eda6b5f8d"
 dependencies = [
  "libc",
  "loom",
@@ -2998,7 +3000,7 @@ checksum = "169ea32c8f5801e4b397f08d2b5d3d0d3675d11c241aad7338b601beed52a291"
 [[package]]
 name = "ur-taking-me-with-you"
 version = "3.0.0"
-source = "git+https://github.com/bearcove/roam?branch=main#6ef77ff009a00a00e658f014c979621bdb54694d"
+source = "git+https://github.com/bearcove/roam?branch=main#6753b7b19965e857fbf416279326e86eda6b5f8d"
 dependencies = [
  "libc",
  "tokio",

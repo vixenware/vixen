@@ -43,9 +43,11 @@ pub(crate) async fn find_open_processes(candidates: &[String], log: &mut Log) ->
             current_cmd = Some(rest.to_string());
         } else if let Some(path) = line.strip_prefix('n')
             && let (Some(pid), Some(cmd)) = (current_pid, current_cmd.as_deref())
-            && candidates
-                .iter()
-                .any(|prefix| path.starts_with(prefix.as_str()))
+            && candidates.iter().any(|prefix| {
+                // Match as directory prefix: candidate must match with trailing /
+                // to avoid e.g. "/tmp/.vx-test/vfs" matching "/tmp/.vx-test/vfsd.sock"
+                path.starts_with(&format!("{prefix}/")) || path == prefix.as_str()
+            })
         {
             found
                 .entry(pid)
