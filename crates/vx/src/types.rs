@@ -1,3 +1,5 @@
+use std::io::IsTerminal;
+
 use eyre::Context;
 use vx_io::net::Endpoint;
 
@@ -13,7 +15,7 @@ impl CliContext {
     pub(crate) fn from_cli(cli: &crate::cli::Cli) -> eyre::Result<Self> {
         let mode = if cli.json {
             CliMode::Json
-        } else if cli.no_tui {
+        } else if cli.no_tui || !std::io::stdout().is_terminal() {
             CliMode::Text
         } else {
             CliMode::Tui(tui::TuiHandle::new())
