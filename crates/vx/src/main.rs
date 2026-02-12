@@ -352,7 +352,7 @@ impl CliContext {
 
         match builder.connect().await {
             Ok(handle) => {
-                tracing::info!("{} daemon at {}", "Stopping".green().bold(), endpoint);
+                tracing::info!("Stopping daemon at {}", endpoint);
                 let root_handle = handle.caller.handle().await?;
                 let boot_client = BootClient::new(root_handle);
                 if let Err(e) = boot_client.shutdown().await {
@@ -361,7 +361,7 @@ impl CliContext {
                     tracing::debug!("shutdown RPC returned: {e} (expected — daemon exited)");
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                tracing::info!("{} daemon stopped", "✓".green().bold());
+                tracing::info!("Daemon stopped");
             }
             Err(_) => {
                 tracing::info!(
