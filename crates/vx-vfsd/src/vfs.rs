@@ -28,7 +28,7 @@
 //! - ID 1: Root directory (`/`)
 //! - ID 2+: Dynamically allocated for prefixes and their contents
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -56,8 +56,6 @@ pub struct VfsItem {
     pub blob_node: Option<NodeHash>,
     /// For files: size in bytes
     pub size: u64,
-    /// For files being written: buffered data
-    pub write_buffer: Option<Vec<u8>>,
 }
 
 /// An action prefix - represents a build directory like `/build-01JFX.../`
@@ -96,8 +94,11 @@ const ROOT_ITEM_ID: ItemId = 1;
 pub(crate) struct VfsItems {
     /// All items keyed by ItemId.
     items: HashMap<ItemId, VfsItem>,
-    /// parent_id → { child_name → child_id }
-    children: HashMap<ItemId, HashMap<String, ItemId>>,
+    /// parent_id → { child_name → child_id } (BTreeMap for deterministic iteration order)
+    children: HashMap<ItemId, BTreeMap<String, ItemId>>,
+    /// In-memory write buffers for files being written (FUSE only).
+    /// Stored separately from VfsItem so items can be cloned cheaply for snapshots.
+    write_buffers: HashMap<ItemId, Vec<u8>>,
 }
 
 impl VfsItems {
@@ -105,6 +106,7 @@ impl VfsItems {
         Self {
             items: HashMap::new(),
             children: HashMap::new(),
+            write_buffers: HashMap::new(),
         }
     }
 
@@ -122,6 +124,7 @@ impl VfsItems {
     /// Remove an item by id, updating the children index.
     pub(crate) fn remove(&mut self, id: ItemId) -> Option<VfsItem> {
         let item = self.items.remove(&id)?;
+        self.write_buffers.remove(&id);
         // Remove from parent's children map
         if item.parent_id != 0
             && let Some(siblings) = self.children.get_mut(&item.parent_id)
@@ -208,62 +211,26 @@ impl VfsItems {
         self.items.contains_key(id)
     }
 
-    /// Build a minimal snapshot for flush: no write_buffers, includes children index.
-    /// Single pass over items, O(N) where N = total items.
-    pub(crate) fn snapshot_for_flush(&self) -> FlushSnapshot {
-        let mut mini_items = HashMap::with_capacity(self.items.len());
-        let mut children: HashMap<ItemId, Vec<(String, ItemId)>> = HashMap::new();
-
-        for (id, item) in &self.items {
-            mini_items.insert(
-                *id,
-                MiniItem {
-                    id: item.id,
-                    name: item.name.clone(),
-                    item_type: item.item_type,
-                    mode: item.mode,
-                    cas_hash: item.cas_hash,
-                    blob_node: item.blob_node,
-                    size: item.size,
-                },
-            );
-            if item.parent_id != 0 {
-                children
-                    .entry(item.parent_id)
-                    .or_default()
-                    .push((item.name.clone(), *id));
-            }
-        }
-
-        // Sort children by name for deterministic DirectoryNode hashing
-        for kids in children.values_mut() {
-            kids.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-        }
-
-        FlushSnapshot {
-            items: mini_items,
-            children,
+    /// Clone items and children index without write buffers (cheap snapshot for flush).
+    pub(crate) fn clone_without_buffers(&self) -> Self {
+        Self {
+            items: self.items.clone(),
+            children: self.children.clone(),
+            write_buffers: HashMap::new(),
         }
     }
-}
 
-/// Minimal item for flush snapshots — no write_buffer, no heap-heavy fields.
-pub(crate) struct MiniItem {
-    pub id: ItemId,
-    pub name: String,
-    pub item_type: ItemType,
-    pub mode: u32,
-    pub cas_hash: Option<Blake3Hash>,
-    pub blob_node: Option<NodeHash>,
-    pub size: u64,
-}
-
-/// Snapshot of VFS state for tree-building during flush.
-/// Built in a single O(N) pass, no write_buffers included.
-pub(crate) struct FlushSnapshot {
-    pub items: HashMap<ItemId, MiniItem>,
-    /// parent_id → sorted Vec of (child_name, child_id)
-    pub children: HashMap<ItemId, Vec<(String, ItemId)>>,
+    /// Iterate over children of a parent, sorted by name.
+    /// BTreeMap guarantees lexicographic order, which matches the byte ordering
+    /// required for deterministic DirectoryNode hashing.
+    pub(crate) fn sorted_children_of(&self, parent_id: ItemId) -> Vec<(&str, &VfsItem)> {
+        let Some(kids) = self.children.get(&parent_id) else {
+            return Vec::new();
+        };
+        kids.iter()
+            .filter_map(|(name, id)| Some((name.as_str(), self.items.get(id)?)))
+            .collect()
+    }
 }
 
 /// CAS-backed VFS implementation
@@ -310,7 +277,6 @@ impl CasVfs {
             cas_hash: None,
             blob_node: None,
             size: 0,
-            write_buffer: None,
         });
 
         Self {
@@ -553,7 +519,6 @@ impl CasVfs {
                 cas_hash: None,
                 blob_node: None,
                 size: 0,
-                write_buffer: None,
             });
         }
 
@@ -708,7 +673,6 @@ impl CasVfs {
                 cas_hash,
                 blob_node,
                 size,
-                write_buffer: None,
             });
 
             if is_last {
@@ -916,7 +880,7 @@ impl Vfs for CasVfs {
             }
 
             // If there's buffered write data, serve from that (it's newer than CAS)
-            if let Some(ref data) = item.write_buffer {
+            if let Some(data) = items.write_buffers.get(&item_id) {
                 let start = (offset as usize).min(data.len());
                 let end = ((offset + len) as usize).min(data.len());
                 return ReadResult {
@@ -963,22 +927,25 @@ impl Vfs for CasVfs {
         tracing::trace!(item_id, offset, len = data.len(), "write");
 
         let mut items = self.items.write();
-        let Some(item) = items.get_mut(&item_id) else {
-            return WriteResult {
-                bytes_written: 0,
-                error: errno::ENOENT,
-            };
-        };
 
-        if item.item_type != ItemType::File {
-            return WriteResult {
-                bytes_written: 0,
-                error: errno::EISDIR,
-            };
+        match items.get(&item_id).map(|i| i.item_type) {
+            None => {
+                return WriteResult {
+                    bytes_written: 0,
+                    error: errno::ENOENT,
+                };
+            }
+            Some(t) if t != ItemType::File => {
+                return WriteResult {
+                    bytes_written: 0,
+                    error: errno::EISDIR,
+                };
+            }
+            _ => {}
         }
 
         // Initialize or extend write buffer
-        let buffer = item.write_buffer.get_or_insert_with(Vec::new);
+        let buffer = items.write_buffers.entry(item_id).or_default();
         let end = offset as usize + data.len();
 
         // Extend buffer if needed
@@ -988,7 +955,10 @@ impl Vfs for CasVfs {
 
         // Copy data into buffer
         buffer[offset as usize..end].copy_from_slice(&data);
-        item.size = buffer.len() as u64;
+        let new_size = buffer.len() as u64;
+
+        // Update size on the item
+        items.get_mut(&item_id).unwrap().size = new_size;
 
         WriteResult {
             bytes_written: data.len() as u64,
@@ -1049,7 +1019,6 @@ impl Vfs for CasVfs {
             cas_hash: None,
             blob_node: None,
             size: 0,
-            write_buffer: None,
         });
 
         CreateResult {
@@ -1154,20 +1123,20 @@ impl Vfs for CasVfs {
 
         let mut items = self.items.write();
 
-        let Some(item) = items.get_mut(&item_id) else {
+        if !items.contains_key(&item_id) {
             return VfsResult {
                 error: errno::ENOENT,
             };
-        };
+        }
 
         if let Some(mode) = params.mode {
-            item.mode = mode;
+            items.get_mut(&item_id).unwrap().mode = mode;
         }
 
         if let Some(new_size) = params.size {
-            let buffer = item.write_buffer.get_or_insert_with(Vec::new);
+            let buffer = items.write_buffers.entry(item_id).or_default();
             buffer.resize(new_size as usize, 0);
-            item.size = new_size;
+            items.get_mut(&item_id).unwrap().size = new_size;
         }
 
         // modified_time is ignored for now (we don't track times)
@@ -1185,8 +1154,8 @@ impl CasVfs {
     pub async fn flush_to_cas(&self, item_id: ItemId) -> Option<(Blake3Hash, u64)> {
         let data = {
             let mut items = self.items.write();
-            let item = items.get_mut(&item_id)?;
-            item.write_buffer.take()?
+            items.get(&item_id)?; // check item exists
+            items.write_buffers.remove(&item_id)?
         };
 
         if data.is_empty() {
@@ -1212,8 +1181,8 @@ impl CasVfs {
                 let mut items = self.items.write();
                 if let Some(item) = items.get_mut(&item_id) {
                     item.size = data.len() as u64;
-                    item.write_buffer = Some(data);
                 }
+                items.write_buffers.insert(item_id, data);
                 None
             }
         }
@@ -1255,8 +1224,8 @@ impl CasVfs {
             descendants
                 .into_iter()
                 .filter_map(|id| {
-                    let item = items.get(&id)?;
-                    if item.write_buffer.is_some() {
+                    items.get(&id)?; // check item exists
+                    if items.write_buffers.contains_key(&id) {
                         let path = self.build_path(&items, id, prefix_root_id);
                         Some((id, path))
                     } else {

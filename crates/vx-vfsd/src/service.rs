@@ -1,13 +1,11 @@
 //! RPC service implementation for vx-vfsd.
 
+use crate::protocol::Vfsd;
 use crate::vfs::CasVfs;
-use crate::{protocol::Vfsd, vfs::FlushSnapshot};
 use std::sync::Arc;
-use vx_store_proto::StoreClient;
 use vx_store_proto::{
     Blake3Hash, CasNode, ContentHash, DirEntry as CasDirEntry, DirEntryKind, DirectoryNode,
-    NodeHash,
-    cas_tree::{MerkleTreeFile, build_merkle_tree},
+    NodeHash, StoreClient,
 };
 
 #[derive(Clone)]
@@ -185,7 +183,7 @@ impl Vfsd for VfsdService {
         let (prefix_id, rel_path) = Self::parse_path(&path)?;
 
         // Flush written files to CAS.
-        // On FUSE this drains in-memory write buffers.
+        // On FUSE this drains in-memory write buffers, updating cas_hash on each item.
         // On ProjFS (Windows) this reads files from the on-disk mount.
         let flushed = self.vfs.flush_prefix_to_cas(&prefix_id).await;
 
@@ -196,100 +194,35 @@ impl Vfsd for VfsdService {
             "flushed written files"
         );
 
-        // Build Merkle directory tree from flushed files + existing VFS items with cas_hash.
         let cas = &self.vfs.cas;
 
-        // Collect files for the Merkle tree
-        let mut files: Vec<MerkleTreeFile> = Vec::new();
+        // Take a cheap snapshot (no write buffers — they've been drained by flush above).
+        // Resolve the target directory, then recursively build DirectoryNodes.
+        let (items_snapshot, target_id) = {
+            let prefixes = self.vfs.prefixes.read();
+            let items = self.vfs.items.read();
 
-        // Start with flushed files (these are newly written outputs)
-        for (path, (hash, size)) in &flushed {
-            // Filter by rel_path prefix if specified
-            let entry_path = if rel_path.is_empty() {
-                path.clone()
-            } else if let Some(stripped) = path.strip_prefix(&format!("{}/", rel_path)) {
-                stripped.to_string()
-            } else if path == &rel_path {
-                path.clone()
-            } else {
-                continue;
-            };
-            files.push(MerkleTreeFile {
-                path: entry_path,
-                kind: DirEntryKind::SmallFile {
-                    content_hash: ContentHash(*hash),
-                    size: *size,
-                    executable: false,
-                },
-            });
-        }
+            let prefix = prefixes
+                .get(&prefix_id)
+                .ok_or_else(|| format!("prefix {prefix_id} not found"))?;
 
-        // Also include VFS items that already have cas_hash (e.g. source files,
-        // deps that were mounted from CAS). Skip on Windows since those items
-        // are projections, not real outputs.
-        if !cfg!(windows) {
-            let (target_item_id, items_snapshot) = {
-                let prefixes = self.vfs.prefixes.read();
-                let items = self.vfs.items.read();
+            let mut current_id = prefix.root_item_id;
 
-                let prefix = prefixes
-                    .get(&prefix_id)
-                    .ok_or_else(|| format!("prefix {prefix_id} not found"))?;
-
-                let mut current_id = prefix.root_item_id;
-
-                if !rel_path.is_empty() {
-                    for component in rel_path.split(['/', '\\']).filter(|s| !s.is_empty()) {
-                        let child = items
-                            .lookup_child(current_id, component)
-                            .ok_or_else(|| format!("path {path} not found"))?;
-                        current_id = child.id;
-                    }
-                }
-
-                (current_id, (*items).clone())
-            };
-
-            let descendants = CasVfs::collect_descendants_from(&items_snapshot, target_item_id);
-
-            for item_id in descendants {
-                let item = items_snapshot.get(&item_id).unwrap();
-                let item_path = self
-                    .vfs
-                    .build_path(&items_snapshot, item_id, target_item_id);
-
-                // Skip items we already added from flushed
-                if flushed.contains_key(&item_path) {
-                    continue;
-                }
-
-                match item.item_type {
-                    vixenfs_proto::ItemType::File => {
-                        if let Some(hash) = item.cas_hash {
-                            let executable = (item.mode & 0o111) != 0;
-                            files.push(MerkleTreeFile {
-                                path: item_path,
-                                kind: DirEntryKind::SmallFile {
-                                    content_hash: ContentHash(hash),
-                                    size: item.size,
-                                    executable,
-                                },
-                            });
-                        }
-                    }
-                    vixenfs_proto::ItemType::Directory => {
-                        // Directories are handled implicitly by build_merkle_tree
-                    }
-                    vixenfs_proto::ItemType::Symlink => {
-                        tracing::warn!(path = %item_path, "skipping symlink in flush");
-                    }
+            if !rel_path.is_empty() {
+                for component in rel_path.split(['/', '\\']).filter(|s| !s.is_empty()) {
+                    let child = items
+                        .lookup_child(current_id, component)
+                        .ok_or_else(|| format!("path {path} not found"))?;
+                    current_id = child.id;
                 }
             }
-        }
 
-        let (root_hash, _total_size) = build_merkle_tree(cas, files)
-            .await
-            .map_err(|e| format!("failed to build Merkle tree: {e}"))?;
+            (items.clone_without_buffers(), current_id)
+        };
+
+        let root_hash = self
+            .build_directory_node(cas, &items_snapshot, target_id)
+            .await?;
 
         tracing::debug!(
             root_hash = %root_hash,
@@ -358,17 +291,16 @@ impl Vfsd for VfsdService {
 }
 
 impl VfsdService {
-    /// Recursively build a DirectoryNode from a flush snapshot, store it in CAS, return the NodeHash.
-    /// Uses the snapshot's children index for O(children) per directory instead of O(N) scans.
-    /// Returns (NodeHash, total_size) so the parent can record total_size without re-scanning.
+    /// Recursively build a DirectoryNode from VFS items, store it in CAS, return the NodeHash.
+    /// Uses the VfsItems children index for O(children) per directory instead of O(N) scans.
     async fn build_directory_node(
         &self,
         cas: &Arc<StoreClient<crate::StoreCaller>>,
-        snapshot: &FlushSnapshot,
+        items: &crate::vfs::VfsItems,
         dir_item_id: vixenfs_proto::ItemId,
     ) -> Result<NodeHash, String> {
         let (hash, _total_size) = self
-            .build_directory_node_inner(cas, snapshot, dir_item_id)
+            .build_directory_node_inner(cas, items, dir_item_id)
             .await?;
         Ok(hash)
     }
@@ -377,26 +309,17 @@ impl VfsdService {
     async fn build_directory_node_inner(
         &self,
         cas: &Arc<StoreClient<crate::StoreCaller>>,
-        snapshot: &FlushSnapshot,
+        items: &crate::vfs::VfsItems,
         dir_item_id: vixenfs_proto::ItemId,
     ) -> Result<(NodeHash, u64), String> {
         use vixenfs_proto::ItemType;
 
-        // Children are already sorted by name in the snapshot
-        let empty_children = Vec::new();
-        let children = snapshot
-            .children
-            .get(&dir_item_id)
-            .unwrap_or(&empty_children);
+        let children = items.sorted_children_of(dir_item_id);
 
         let mut entries = Vec::new();
         let mut total_size: u64 = 0;
 
-        for (child_name, child_id) in children {
-            let Some(child) = snapshot.items.get(child_id) else {
-                continue;
-            };
-
+        for (child_name, child) in &children {
             match child.item_type {
                 ItemType::File => {
                     let Some(hash) = child.cas_hash else {
@@ -422,18 +345,18 @@ impl VfsdService {
                     };
 
                     entries.push(CasDirEntry {
-                        name: child_name.clone(),
+                        name: child_name.to_string(),
                         kind,
                     });
                 }
                 ItemType::Directory => {
                     let (child_hash, child_total) =
-                        Box::pin(self.build_directory_node_inner(cas, snapshot, child.id)).await?;
+                        Box::pin(self.build_directory_node_inner(cas, items, child.id)).await?;
 
                     total_size += child_total;
 
                     entries.push(CasDirEntry {
-                        name: child_name.clone(),
+                        name: child_name.to_string(),
                         kind: DirEntryKind::Dir {
                             hash: child_hash,
                             total_size: child_total,
