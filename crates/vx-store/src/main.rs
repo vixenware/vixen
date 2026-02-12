@@ -73,8 +73,6 @@ async fn async_main() -> Result<()> {
 
     // Initialize peeps instrumentation
     peeps::init_named("vx-store");
-    #[cfg(unix)]
-    peeps::install_sigusr1("vx-store");
 
     tracing::info!("hello from vixen-store");
 
@@ -115,35 +113,6 @@ async fn async_main() -> Result<()> {
             .await
             {
                 Ok(store) => {
-                    // SIGUSR1: dump diagnostics
-                    #[cfg(unix)]
-                    {
-                        let store = store.clone();
-                        peeps::tasks::spawn_tracked("sigusr1_handler", async move {
-                            use tokio::signal::unix::{SignalKind, signal};
-                            let mut sigusr1 = signal(SignalKind::user_defined1())
-                                .expect("failed to register SIGUSR1 handler");
-                            loop {
-                                sigusr1.recv().await;
-                                tracing::info!("SIGUSR1 received, dumping diagnostics");
-                                let sem = &store.download_semaphore;
-                                tracing::debug!(
-                                    "download_semaphore: available={}",
-                                    sem.available_permits(),
-                                );
-                                eprint!("{}", roam_session::diagnostic::dump_all_diagnostics());
-
-                                let mut custom = std::collections::HashMap::new();
-                                custom.insert(
-                                    "download_semaphore_available".into(),
-                                    sem.available_permits().to_string(),
-                                );
-                                let dump = peeps::collect_dump("vx-store", custom);
-                                peeps::write_dump(&dump);
-                            }
-                        });
-                    }
-
                     tracing::info!("vx-store boot succeeded");
                     gate.set_service(store);
                     boot_tx.ready();

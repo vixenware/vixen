@@ -235,8 +235,6 @@ async fn async_main() -> Result<()> {
 
     // Initialize peeps instrumentation
     peeps::init_named("vx-vfsd");
-    #[cfg(unix)]
-    peeps::install_sigusr1("vx-vfsd");
 
     let args: Args = args::Driver::new(
         args::builder::<Args>()?

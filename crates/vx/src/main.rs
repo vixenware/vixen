@@ -688,6 +688,18 @@ impl CliContext {
     }
 
     async fn cmd_debug(&mut self, args: DebugArgs) -> Result<()> {
+        if !args.json && !args.dump {
+            // Launch peeps dashboard server CLI (push-only ingestion).
+            let status = tokio::process::Command::new("peeps")
+                .status()
+                .await
+                .map_err(|e| eyre::eyre!("failed to launch `peeps` dashboard CLI: {e}"))?;
+            if !status.success() {
+                eyre::bail!("`peeps` exited with status: {status}");
+            }
+            return Ok(());
+        }
+
         // 1. Find vixen process PIDs
         let pids = find_vixen_pids()?;
         if pids.is_empty() {
@@ -705,46 +717,50 @@ impl CliContext {
                 .join(", ")
         );
 
-        // 2. Clean stale dumps, send SIGUSR1 to each
-        peeps::clean_dumps();
-        std::fs::create_dir_all(peeps::DUMP_DIR)?;
-
-        #[cfg(unix)]
-        for (_name, pid) in &pids {
-            unsafe {
-                libc::kill(*pid as i32, libc::SIGUSR1);
-            }
-        }
-
-        // 3. Poll for JSON dumps to appear
+        // 2. Poll dashboard API for live push snapshots.
         let expected = pids.len();
+        let expected_pids: std::collections::HashSet<u32> =
+            pids.iter().map(|(_name, pid)| *pid).collect();
         let mut collected = 0;
+        let mut latest = Vec::new();
         for _ in 0..100 {
             // 100ms intervals, 10s max
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            let now = count_dump_files();
+            let dumps = fetch_dashboard_dumps().await.unwrap_or_default();
+            let now = dumps
+                .iter()
+                .filter(|dump| expected_pids.contains(&dump.pid))
+                .count();
             if now > collected {
                 eprintln!("Collected {now}/{expected} dumps...");
                 collected = now;
             }
+            latest = dumps;
             if collected >= expected {
                 break;
             }
         }
 
         if collected == 0 {
-            eprintln!("No dumps collected. Processes may not have the dump handler yet.");
+            eprintln!(
+                "No live dashboard dumps collected from running vixen processes.\n\
+                 Is the dashboard server running? Try: peeps\n\
+                 Also ensure daemons were started with PEEPS_DASHBOARD=<host:port>."
+            );
             std::process::exit(1);
         }
 
         if collected < expected {
             eprintln!(
-                "Warning: only collected {collected}/{expected} dumps (some processes may lack the handler)"
+                "Warning: only collected {collected}/{expected} dumps (some processes may not be pushing yet)"
             );
         }
 
-        // 4. Read all dumps
-        let dumps = peeps::read_all_dumps();
+        // 3. Keep only currently running vixen daemons.
+        let dumps: Vec<peeps::ProcessDump> = latest
+            .into_iter()
+            .filter(|dump| expected_pids.contains(&dump.pid))
+            .collect();
 
         if args.json {
             // --json: raw JSON array to stdout
@@ -759,15 +775,6 @@ impl CliContext {
             return Ok(());
         }
 
-        // Default: launch peeps dashboard server CLI.
-        // It loads existing dump files from peeps::DUMP_DIR and serves the web UI.
-        let status = tokio::process::Command::new("peeps")
-            .status()
-            .await
-            .map_err(|e| eyre::eyre!("failed to launch `peeps` dashboard CLI: {e}"))?;
-        if !status.success() {
-            eyre::bail!("`peeps` exited with status: {status}");
-        }
         Ok(())
     }
 }
@@ -805,16 +812,15 @@ fn find_vixen_pids() -> Result<Vec<(String, u32)>> {
     Ok(pids)
 }
 
-/// Count JSON files in the dump directory.
-fn count_dump_files() -> usize {
-    let dir = std::path::Path::new(peeps::DUMP_DIR);
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .count()
+async fn fetch_dashboard_dumps() -> Result<Vec<peeps::ProcessDump>> {
+    let http_addr = std::env::var("PEEPS_HTTP").unwrap_or_else(|_| "127.0.0.1:9120".to_string());
+    let url = format!("http://{http_addr}/api/dumps");
+    let body = vx_http::get_text(&url)
+        .await
+        .map_err(|e| eyre::eyre!("failed to fetch {url}: {e}"))?;
+    let dumps = facet_json::from_str::<Vec<peeps::ProcessDump>>(&body)
+        .map_err(|e| eyre::eyre!("failed to parse dashboard dumps from {url}: {e}"))?;
+    Ok(dumps)
 }
 
 /// Print a human-readable text dump of all process diagnostics.

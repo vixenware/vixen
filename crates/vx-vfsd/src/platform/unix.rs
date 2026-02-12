@@ -46,9 +46,6 @@ pub fn setup_diagnostics_signal(vfs: Arc<CasVfs>, mount_path: Utf8PathBuf) {
                 eprintln!("\n=== SHM STATE ===");
                 eprintln!("{}", roam_shm::dump_all_state());
             }
-
-            let dump = peeps::collect_dump("vx-vfsd", Default::default());
-            peeps::write_dump(&dump);
         }
     });
 }

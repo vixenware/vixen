@@ -102,8 +102,6 @@ async fn async_main() -> Result<()> {
 
     // Initialize peeps instrumentation
     peeps::init_named("vx-runner");
-    #[cfg(unix)]
-    peeps::install_sigusr1("vx-runner");
 
     tracing::info!("hello from vixen-runner");
 
@@ -149,23 +147,6 @@ async fn async_main() -> Result<()> {
             }
         });
     }
-
-    // SIGUSR1: dump diagnostics
-    #[cfg(unix)]
-    peeps::tasks::spawn_tracked("sigusr1_handler", async {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut sigusr1 =
-            signal(SignalKind::user_defined1()).expect("failed to register SIGUSR1 handler");
-        loop {
-            sigusr1.recv().await;
-            tracing::info!("SIGUSR1 received, dumping diagnostics");
-            eprintln!("[vx-runner] SIGUSR1 received");
-            eprint!("{}", roam_session::diagnostic::dump_all_diagnostics());
-
-            let dump = peeps::collect_dump("vx-runner", Default::default());
-            peeps::write_dump(&dump);
-        }
-    });
 
     let boot_service = gate.boot_service();
 

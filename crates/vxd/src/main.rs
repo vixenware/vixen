@@ -251,10 +251,6 @@ async fn async_main() -> Result<()> {
     // The daemon outlives its parent process (vx CLI) and shuts down
     // after an idle timeout instead (2s in test mode, 2h in production).
 
-    // SIGUSR1: dump diagnostics
-    #[cfg(unix)]
-    peeps::install_sigusr1("vxd");
-
     let cli: CliArgs = args::Driver::new(
         args::builder::<CliArgs>()?
             .cli(|cli| cli.args(std::env::args().skip(1)))

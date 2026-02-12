@@ -1739,7 +1739,6 @@ version = "0.1.0"
 dependencies = [
  "facet",
  "facet-json",
- "libc",
  "peeps-locks",
  "peeps-sync",
  "peeps-tasks",
@@ -3082,6 +3081,7 @@ dependencies = [
  "tracing-subscriber",
  "ulid",
  "unicode-width",
+ "vx-http",
  "vx-io",
  "vx-report",
  "vx-store-proto",

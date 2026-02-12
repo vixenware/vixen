@@ -42,7 +42,7 @@ pub(crate) enum CliCommand {
     /// Quick health check
     Doctor(DoctorArgs),
 
-    /// Collect diagnostic dumps from all vixen processes
+    /// Collect live diagnostic snapshots from all vixen processes
     Debug(DebugArgs),
 }
 
