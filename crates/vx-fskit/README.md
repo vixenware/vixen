@@ -6,6 +6,14 @@ Two public functions: `setup()` and `teardown()`. Both return a structured
 log of everything they did, tried, and observed — even on success. On failure,
 they suggest manual remediation steps.
 
+Callers:
+- **vx-vfsd** calls `setup(sid, mount_path, debug)`
+- **vx-reaper** calls `teardown(mount_path)`
+
+The `vixenfs-mount` Swift helper is only used for querying the app group
+container path (`--app-group-path`). All mounting, unmounting, health
+checking, and diagnostics live in this crate.
+
 ## Architecture
 
 VixenFS has three layers:
@@ -78,35 +86,33 @@ From least to most alarming:
 
 ## Probing
 
-Probes that touch the mount path (`statfs`, `mkdir`, reading `health.json`)
-can hang indefinitely if the VFS is zombied — the calling thread enters
-uninterruptible sleep. These must run in a **child process** that we can
-kill after a timeout, not in `spawn_blocking` (a hung thread can't be
-cancelled).
+Any syscall that touches the mount path (`stat`, `open`, `readdir`) can hang
+indefinitely if the VFS is zombied — the calling thread enters uninterruptible
+sleep and can never be cancelled. We never touch the mount path from our own
+process.
 
-Safe probes (never touch the mount path, always return quickly):
+Safe probes (never touch the mount path):
 
 1. `df` output — does userspace list a vixenfs mount here?
 2. `pgrep -x VixenFS` — is the extension process running?
 3. `lsof -n -P -Fpcn` — are there processes with files open under the mount?
+4. `mkdir(mount_path)` — returns EBUSY if something is mounted there.
+   This is a metadata operation on the *parent* directory, not I/O into the
+   mount itself.
 
-Unsafe probes (may hang, must run in a sacrificial child process with timeout):
+Sacrificial child process (may hang, we kill it on timeout):
 
-4. `statfs(mount_path)` — does the kernel report a vixenfs filesystem?
-5. `mkdir(mount_path)` — does it return EBUSY?
-6. `read($mount/.vixenfs/health.json)` — is I/O working? Is the backend connected?
-
-The safe probes run first. If they already give a clear picture (e.g. not in
-`df` and no extension running), the unsafe probes can be skipped entirely.
+5. `/bin/cat $mount/.vixenfs/health.json` — spawned as a child process with
+   a 1s timeout. If it returns, we get the health payload. If it hangs, we
+   kill it and know the mount is zombied.
 
 The `lsof` probe also feeds into teardown: before unmounting, we must kill
 processes with files open under the mount. If they survive SIGKILL (still
-alive after 2s), they're in uninterruptible sleep — that's state #9, game
-over, reboot required.
+alive after 2s), they're in uninterruptible sleep — reboot required.
 
 ## setup() state machine
 
-Goal: get from any state to state 2 (fully healthy mount).
+Goal: get from any state to a fully healthy mount.
 
 ```
 START
@@ -114,28 +120,28 @@ START
   ▼
 Is Vixen.app installed at /Applications/Vixen.app?
   │
-  NO ──→ FAIL: "install Vixen.app from <url>"
+  NO ──→ FAIL: "brew install --cask bearcove/tap/vixen"
   │
   YES
   │
   ▼
 Is Vixen.app codesign valid?
   │
-  NO ──→ FAIL: "reinstall Vixen.app — codesign invalid"
+  NO ──→ FAIL: "brew reinstall --cask bearcove/tap/vixen"
   │
   YES
   │
   ▼
 Is extension registered? (pluginkit -m)
   │
-  NO ──→ FAIL: "launch Vixen.app to register extension"
+  NO ──→ FAIL: "run `vx doctor` to launch Vixen.app and register the extension"
   │
   YES
   │
   ▼
-Is extension enabled? (vixenfs-mount --health --json)
+Is extension enabled? (systemextensionsctl list)
   │
-  NO ──→ FAIL: "enable in System Settings > General > Login Items & Extensions"
+  NO ──→ FAIL: "run `vx doctor` to launch Vixen.app and enable the extension"
   │
   YES
   │
@@ -154,17 +160,19 @@ MOUNT
   Call /sbin/mount -F -t vixenfs <source> <mount_path>
   │
   ▼
-Probe again (with retries, extension startup takes time)
+Read /.vixenfs/health.json (via /bin/cat, with retries + timeout)
   │
-  ├─ State 2 ──→ SUCCESS
-  ├─ anything else ──→ FAIL: "sudo killall fskitd fskit_agent"
+  ├─ connected: true ──→ SUCCESS
+  ├─ connected: false ──→ FAIL: extension running but backend not connected
+  ├─ timeout/hang ──→ FAIL: mount is zombied
+  ├─ cat failed ──→ FAIL: "sudo killall fskitd fskit_agent"
   │
   ▼
 ```
 
 ## teardown() state machine
 
-Goal: get from any state to state 1 (clean, not mounted).
+Goal: get from any state to clean (not mounted).
 
 ```
 START
@@ -172,7 +180,7 @@ START
   ▼
 Probe mount point
   │
-  ├─ State 1 (clean) ──→ SUCCESS (nothing to do)
+  ├─ clean ──→ SUCCESS (nothing to do)
   ├─ Stale dir ──→ rmdir, SUCCESS
   │
   ├─ some kind of mount exists
