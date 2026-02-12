@@ -41,20 +41,7 @@ pub(crate) fn runner_mount_base() -> Utf8PathBuf {
             .expect("VX_HOME not set — vx-runner must be launched by `vx` or with VX_HOME set"),
     );
 
-    vx_home.join("vixen").join("runner")
-
-    // Option 2: /Volumes path (avoids system policy restrictions, but FSKit mount fails)
-    // let base = if cfg!(target_os = "macos") {
-    //     "/Volumes"
-    // } else {
-    //     "/tmp"
-    // };
-    // let suffix = if std::env::var("VX_TEST").is_ok() {
-    //     "vixenfs-test"
-    // } else {
-    //     "vixenfs"
-    // };
-    // Utf8PathBuf::from(format!("{}/{}", base, suffix))
+    vx_home.join("vfs")
 }
 
 /// vx-runner - Worker daemon
