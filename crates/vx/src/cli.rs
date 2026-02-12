@@ -4,6 +4,14 @@ use figue as args;
 /// vx - Build execution engine with deterministic caching
 #[derive(Facet, Debug)]
 pub(crate) struct Cli {
+    /// Disable TUI and use plain log output
+    #[facet(args::named)]
+    pub(crate) no_tui: bool,
+
+    /// Emit NDJSON build events to stdout (implies --no-tui)
+    #[facet(args::named)]
+    pub(crate) json: bool,
+
     /// Command to run
     #[facet(args::subcommand)]
     pub(crate) command: CliCommand,
@@ -44,14 +52,6 @@ pub(crate) struct BuildArgs {
     /// Build in release mode
     #[facet(args::named, args::short = 'r')]
     pub(crate) release: bool,
-
-    /// Disable TUI and use plain log output
-    #[facet(args::named)]
-    pub(crate) no_tui: bool,
-
-    /// Emit NDJSON build events to stdout (implies --no-tui)
-    #[facet(args::named)]
-    pub(crate) json: bool,
 }
 
 /// Start daemons

@@ -575,14 +575,6 @@ impl RunnerService {
     pub(crate) async fn remove_action_prefix(&self, prefix_id: &str) {
         self.vfs.remove_prefix(prefix_id).await;
     }
-
-    /// Get the VFS mount path for an action prefix
-    ///
-    /// This is the path that should be passed to sandboxed processes.
-    /// Format: <mount-base>/<prefix_id>/ where mount-base is /Volumes/vixenfs (macOS) or /tmp/vixenfs (Linux).
-    pub(crate) fn get_prefix_mount_path(&self, prefix_id: &str) -> Utf8PathBuf {
-        runner_mount_base().join(prefix_id)
-    }
 }
 
 /// Global handle to the reaper's stdin pipe.

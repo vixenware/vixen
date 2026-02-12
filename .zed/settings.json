@@ -1,5 +1,13 @@
 {
   "lsp": {
     "sourcekit-lsp": {},
+    "rust-analyzer": {
+      "initialization_options": {
+        "check": { "allTargets": true, "features": "all" },
+        "cargo": {
+          "allTargets": true,
+        },
+      },
+    },
   },
 }

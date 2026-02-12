@@ -3,6 +3,26 @@ use vx_io::net::Endpoint;
 
 use crate::tui;
 
+/// CLI Context, passed everywhere
+pub(crate) struct CliContext {
+    pub(crate) mode: CliMode,
+    pub(crate) strat: DaemonStrategy,
+}
+
+impl CliContext {
+    pub(crate) fn from_cli(cli: &crate::cli::Cli) -> eyre::Result<Self> {
+        let mode = if cli.json {
+            CliMode::Json
+        } else if cli.no_tui {
+            CliMode::Text
+        } else {
+            CliMode::Tui(tui::TuiHandle::new())
+        };
+        let strat = DaemonStrategy::from_env()?;
+        Ok(Self { mode, strat })
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum CliMode {
     /// Full-terminal TUI: tracing is redirected to events etc.
