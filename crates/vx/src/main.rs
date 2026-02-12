@@ -3,7 +3,6 @@
 //! This is a thin CLI client that talks to the vx daemon.
 
 mod build_json;
-mod explain;
 mod tui;
 
 use camino::Utf8PathBuf;
@@ -80,42 +79,6 @@ struct DebugArgs {
 #[derive(Facet, Debug)]
 struct DoctorArgs {}
 
-/// Arguments for the `explain` subcommand
-#[derive(Facet, Debug)]
-pub(crate) struct ExplainArgs {
-    /// Show all nodes including cache hits
-    #[facet(args::named)]
-    all: bool,
-
-    /// Show verbose output (full hashes, unchanged deps)
-    #[facet(args::named, args::short = 'v')]
-    verbose: bool,
-
-    /// Explain only this specific node ID
-    #[facet(args::named)]
-    node: Option<String>,
-
-    /// Show only fanout analysis
-    #[facet(args::named)]
-    fanout: bool,
-
-    /// Output in JSON format
-    #[facet(args::named)]
-    json: bool,
-
-    /// Compare last two builds and show what changed
-    #[facet(args::named)]
-    diff: bool,
-
-    /// Show details of the last cache miss
-    #[facet(args::named)]
-    last_miss: bool,
-
-    /// Open interactive build graph in browser
-    #[facet(args::named)]
-    web: bool,
-}
-
 #[derive(Facet, Debug)]
 #[repr(u8)]
 enum CliCommand {
@@ -130,9 +93,6 @@ enum CliCommand {
 
     /// Stop the daemon and remove .vx/ directory
     Clean(CleanArgs),
-
-    /// Explain the last build
-    Explain(ExplainArgs),
 
     /// Quick health check
     Doctor(DoctorArgs),
@@ -196,10 +156,6 @@ async fn async_main() -> Result<()> {
         CliCommand::Clean(args) => {
             vx_tracing::init_cli_stderr();
             cmd_clean(args).await
-        }
-        CliCommand::Explain(args) => {
-            vx_tracing::init_cli_stderr();
-            explain::cmd_explain(args)
         }
         CliCommand::Doctor(_args) => {
             vx_tracing::init_cli_stderr();

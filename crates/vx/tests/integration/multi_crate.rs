@@ -7,8 +7,7 @@
 //! - Changes to app only rebuild app
 //! - Path independence (same content, different checkout location = cache hit)
 
-mod harness;
-use harness::{TestEnv, create_diamond_dependency_project, create_multi_crate_project};
+use crate::harness::{TestEnv, create_diamond_dependency_project, create_multi_crate_project};
 
 #[test]
 fn multi_crate_build_succeeds() {

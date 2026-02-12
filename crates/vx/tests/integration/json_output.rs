@@ -5,11 +5,10 @@
 //! - Events include build_started and build_finished
 //! - Exit codes follow the spec: 0=success, 1=build error
 
-mod harness;
-use harness::{TestEnv, create_hello_world};
+use crate::harness::{TestEnv, VxOutput, create_hello_world};
 
 /// Parse stdout lines, keeping only non-empty ones
-fn json_lines(output: &harness::VxOutput) -> Vec<&str> {
+fn json_lines(output: &VxOutput) -> Vec<&str> {
     output
         .stdout
         .lines()

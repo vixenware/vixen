@@ -82,13 +82,6 @@ impl TestEnv {
         path
     }
 
-    /// Path to the vxd binary (built by cargo)
-    fn vxd_path() -> PathBuf {
-        let path = Self::bindir().join(format!("vxd{}", std::env::consts::EXE_SUFFIX));
-        assert!(path.exists(), "vxd binary does not exist at {:?}", path);
-        path
-    }
-
     /// Run `vx build` in this environment
     pub fn build(&self) -> BuildBuilder {
         BuildBuilder::new(self)
@@ -123,12 +116,6 @@ impl TestEnv {
             std::fs::create_dir_all(parent).expect("failed to create parent dirs");
         }
         std::fs::write(&path, contents).expect("failed to write file");
-    }
-
-    /// Read a file from the project directory
-    pub fn read_file(&self, relative_path: &str) -> String {
-        let path = self.project.path().join(relative_path);
-        std::fs::read_to_string(&path).expect("failed to read file")
     }
 
     /// Check if a file exists in the project directory
@@ -207,24 +194,6 @@ impl From<Output> for VxOutput {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         }
     }
-}
-
-/// Persistent cache directory for HTTP responses across test runs.
-///
-/// All test daemons share this directory so toolchain downloads are fetched
-/// once and reused. The directory survives across test runs.
-fn http_cache_dir() -> PathBuf {
-    let dir = dirs_next().join("vx-test-http-cache");
-    std::fs::create_dir_all(&dir).expect("failed to create HTTP cache dir");
-    dir
-}
-
-/// Platform-appropriate cache base directory.
-fn dirs_next() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
-        return PathBuf::from(xdg);
-    }
-    dirs::cache_dir().expect("could not determine cache directory")
 }
 
 /// Builder for `vx build` commands
