@@ -328,6 +328,9 @@ async fn async_main() -> Result<()> {
     // Set up boot gate — root connections get Boot service only.
     let (gate, boot_tx) = BootGate::<Arc<VxdService>>::new();
 
+    // Shared flag so the idle watchdog can see boot failure immediately.
+    let boot_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // Spawn service boot in background — listener is already accepting connections.
     {
         let args_for_boot = Args {
@@ -340,6 +343,7 @@ async fn async_main() -> Result<()> {
         let gate = Arc::clone(&gate);
         let vx_home = args.vx_home.clone();
         let exec_host_triple = exec_host_triple.clone();
+        let boot_failed = boot_failed.clone();
         peeps::tasks::spawn_tracked("service_boot", async move {
             tracing::info!("Booting services (vx-store, vx-runner)");
             match ensure_services(&args_for_boot, &spawn_tracker).await {
@@ -359,7 +363,8 @@ async fn async_main() -> Result<()> {
                     boot_tx.ready();
                 }
                 Err(e) => {
-                    tracing::error!("Service boot failed: {e:#}");
+                    tracing::error!(e = %format!("{e:#}"), "Service boot failed");
+                    boot_failed.store(true, std::sync::atomic::Ordering::Relaxed);
                     boot_tx.failed(format!("{e:#}"));
                 }
             }
@@ -384,48 +389,72 @@ async fn async_main() -> Result<()> {
         };
         let active_connections = active_connections.clone();
         let last_disconnect = last_disconnect.clone();
-        let mut boot_rx = gate.subscribe();
+        let boot_failed = boot_failed.clone();
         peeps::tasks::spawn_tracked("idle_shutdown_monitor", async move {
+            tracing::trace!(
+                idle_timeout = ?normal_idle_timeout,
+                "idle watchdog started"
+            );
             let mut idle_timeout = normal_idle_timeout;
-            let mut boot_failed = false;
+            let mut saw_boot_failure = false;
             loop {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(500)).await;
 
                 // If boot failed, shrink idle timeout so we exit quickly
                 // once the client disconnects after receiving the error.
-                if !boot_failed
-                    && let Ok(true) = boot_rx.has_changed()
-                    && matches!(
-                        *boot_rx.borrow_and_update(),
-                        vx_io::boot::BootState::Failed(_)
-                    )
-                {
-                    idle_timeout = Duration::from_secs(2);
-                    boot_failed = true;
+                if !saw_boot_failure && boot_failed.load(std::sync::atomic::Ordering::Relaxed) {
+                    tracing::trace!("boot failed, shrinking idle timeout");
+                    idle_timeout = Duration::from_secs(1);
+                    saw_boot_failure = true;
                 }
 
                 let count = active_connections.load(std::sync::atomic::Ordering::Relaxed);
                 if count == 0 {
                     let idle_long_enough = match *last_disconnect.lock().await {
-                        Some(when) => when.elapsed() >= idle_timeout,
+                        Some(when) => {
+                            let elapsed = when.elapsed();
+                            tracing::trace!(
+                                ?elapsed,
+                                ?idle_timeout,
+                                "idle watchdog tick: no active connections"
+                            );
+                            elapsed >= idle_timeout
+                        }
                         // No client ever connected — only shut down if boot failed.
-                        None => boot_failed,
+                        None => {
+                            tracing::trace!(
+                                saw_boot_failure,
+                                "idle watchdog tick: no connections ever established"
+                            );
+                            saw_boot_failure
+                        }
                     };
                     if idle_long_enough {
                         tracing::info!("no connections for {idle_timeout:?}, shutting down");
                         std::process::exit(0);
                     }
+                } else {
+                    tracing::trace!(
+                        active_connections = count,
+                        "idle watchdog tick: connections active"
+                    );
                 }
             }
         });
     }
 
+    tracing::trace!("Starting accept loop");
     loop {
         let (stream, peer_addr) = listener.accept().await?;
         let active_connections = active_connections.clone();
         let last_disconnect = last_disconnect.clone();
 
-        active_connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let count = active_connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        tracing::trace!(
+            %peer_addr,
+            active_connections = count,
+            "accepted new TCP connection"
+        );
 
         let boot_service = boot_service.clone();
 
@@ -449,7 +478,13 @@ async fn async_main() -> Result<()> {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!("Handshake error from {}: {e}", peer_addr);
-                    active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    let count =
+                        active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) - 1;
+                    tracing::trace!(
+                        %peer_addr,
+                        active_connections = count,
+                        "connection dropped after handshake error"
+                    );
                     *last_disconnect.lock().await = Some(tokio::time::Instant::now());
                     return;
                 }
@@ -465,6 +500,7 @@ async fn async_main() -> Result<()> {
             // Reject if boot hasn't completed (client should call boot() first).
             while let Some(conn) = incoming.recv().await {
                 let Some(daemon) = boot_service.gate().service() else {
+                    tracing::trace!(%peer_addr, "rejecting virtual connection: boot not complete");
                     conn.reject("boot not complete".into(), vec![]);
                     continue;
                 };
@@ -494,12 +530,17 @@ async fn async_main() -> Result<()> {
             }
 
             // incoming channel closed — root connection is done
+            tracing::trace!(%peer_addr, "incoming virtual connection channel closed, awaiting driver");
             if let Err(e) = driver_handle.await {
                 tracing::warn!("Driver error from {}: {e:?}", peer_addr);
             }
 
-            tracing::debug!("Connection from {} closed", peer_addr);
-            active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            let count = active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) - 1;
+            tracing::debug!(
+                %peer_addr,
+                active_connections = count,
+                "connection closed"
+            );
             *last_disconnect.lock().await = Some(tokio::time::Instant::now());
         });
     }
