@@ -10,7 +10,10 @@ repository = "https://github.com/bearcove/vx"
 
 [workspace.dependencies]
 # instrumentation
-peeps = { git = "https://github.com/bearcove/peeps", branch = "main", features = ["locks", "dashboard"] }
+peeps = { git = "https://github.com/bearcove/peeps", branch = "main", features = [
+  "locks",
+  "dashboard",
+] }
 peeps-sync = { git = "https://github.com/bearcove/peeps", branch = "main" }
 
 
@@ -180,14 +183,14 @@ peeps-tasks = { path = "/Users/amos/bearcove/peeps/crates/peeps-tasks" }
 peeps-threads = { path = "/Users/amos/bearcove/peeps/crates/peeps-threads" }
 peeps-types = { path = "/Users/amos/bearcove/peeps/crates/peeps-types" }
 
-# [patch."https://github.com/bearcove/roam"]
-# roam = { path = "/Users/amos/bearcove/roam/rust/roam" }
-# roam-stream = { path = "/Users/amos/bearcove/roam/rust/roam-stream" }
-# roam-session = { path = "/Users/amos/bearcove/roam/rust/roam-session" }
-# roam-shm = { path = "/Users/amos/bearcove/roam/rust/roam-shm" }
-# roam-local = { path = "/Users/amos/bearcove/roam/rust/roam-local" }
-# roam-codegen = { path = "/Users/amos/bearcove/roam/rust/roam-codegen" }
-# ur-taking-me-with-you = { path = "/Users/amos/bearcove/roam/rust/ur-taking-me-with-you" }
+[patch."https://github.com/bearcove/roam"]
+roam = { path = "/Users/amos/bearcove/roam/rust/roam" }
+roam-stream = { path = "/Users/amos/bearcove/roam/rust/roam-stream" }
+roam-session = { path = "/Users/amos/bearcove/roam/rust/roam-session" }
+roam-shm = { path = "/Users/amos/bearcove/roam/rust/roam-shm" }
+roam-local = { path = "/Users/amos/bearcove/roam/rust/roam-local" }
+roam-codegen = { path = "/Users/amos/bearcove/roam/rust/roam-codegen" }
+ur-taking-me-with-you = { path = "/Users/amos/bearcove/roam/rust/ur-taking-me-with-you" }
 
 [profile.samply]
 inherits = "release"
