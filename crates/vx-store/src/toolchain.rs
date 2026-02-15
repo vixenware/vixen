@@ -332,10 +332,7 @@ pub(crate) struct ToolchainManager {
 impl ToolchainManager {
     pub(crate) fn new() -> Self {
         Self {
-            inflight: peeps::Mutex::new(
-                "store/toolchain_inflight",
-                HashMap::new(),
-            ),
+            inflight: peeps::Mutex::new("store/toolchain_inflight", HashMap::new()),
         }
     }
 
@@ -854,18 +851,10 @@ impl StoreService {
 
         // Track per-file info: content_hash -> (blob_node, size)
         // This lets us build DirectoryNode entries after extraction.
-        let rustc_file_info: Arc<
-            peeps::Mutex<HashMap<Blake3Hash, ExtractedFileInfo>>,
-        > = Arc::new(peeps::Mutex::new(
-            "store/rustc_file_info",
-            HashMap::new(),
-        ));
-        let std_file_info: Arc<
-            peeps::Mutex<HashMap<Blake3Hash, ExtractedFileInfo>>,
-        > = Arc::new(peeps::Mutex::new(
-            "store/std_file_info",
-            HashMap::new(),
-        ));
+        let rustc_file_info: Arc<peeps::Mutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
+            Arc::new(peeps::Mutex::new("store/rustc_file_info", HashMap::new()));
+        let std_file_info: Arc<peeps::Mutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
+            Arc::new(peeps::Mutex::new("store/std_file_info", HashMap::new()));
 
         let this1 = self.clone();
         let this2 = self.clone();
@@ -874,7 +863,7 @@ impl StoreService {
 
         let (rustc_result, rust_std_result) = join(
             async {
-                let _permit = peeps::tasks::peep!(
+                let _permit = peeps::peep!(
                     sem.acquire(),
                     "store.toolchain.download_permit.acquire",
                     {
@@ -934,7 +923,7 @@ impl StoreService {
                 .await
             },
             async {
-                let _permit = peeps::tasks::peep!(
+                let _permit = peeps::peep!(
                     sem.acquire(),
                     "store.toolchain.download_permit.acquire",
                     {
@@ -1473,10 +1462,7 @@ impl StoreService {
 
         // Track per-file info during extraction
         let file_info: Arc<peeps::Mutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
-            Arc::new(peeps::Mutex::new(
-                "store/file_info",
-                HashMap::new(),
-            ));
+            Arc::new(peeps::Mutex::new("store/file_info", HashMap::new()));
         let file_info_clone = file_info.clone();
         let this = self.clone();
 

@@ -229,14 +229,6 @@ fn main() -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
-        .on_thread_start(|| {
-            peeps::threads::register_thread(
-                std::thread::current().name().unwrap_or("tokio-worker"),
-            );
-        })
-        .on_thread_stop(|| {
-            peeps::threads::deregister_thread();
-        })
         .build()?;
     rt.block_on(async_main())
 }
@@ -244,7 +236,7 @@ fn main() -> Result<()> {
 async fn async_main() -> Result<()> {
     // Initialize tracing (logs will go to ~/.vx/vxd.log via spawn_service redirection)
     vx_tracing::init_service("vxd=info");
-    peeps::init_named("vxd");
+    peeps::init("vxd");
 
     let in_test = std::env::var("VX_TEST").is_ok();
 
@@ -291,10 +283,7 @@ async fn async_main() -> Result<()> {
     // Keep lock_file alive for the daemon's lifetime
     let _lock_guard = lock_file;
 
-    let spawn_tracker = Arc::new(Mutex::new(
-        "vxd/spawn_tracker",
-        SpawnTracker::default(),
-    ));
+    let spawn_tracker = Arc::new(Mutex::new("vxd/spawn_tracker", SpawnTracker::default()));
 
     // Resolve host triple early — this is cheap and can fail fast.
     let exec_host_triple = match std::env::var("VX_RUNNER_HOST_TRIPLE") {
@@ -339,7 +328,7 @@ async fn async_main() -> Result<()> {
         let vx_home = args.vx_home.clone();
         let exec_host_triple = exec_host_triple.clone();
         let boot_failed = boot_failed.clone();
-        peeps::tasks::spawn_tracked("service_boot", async move {
+        peeps::spawn_tracked("service_boot", async move {
             tracing::info!("Booting services (vx-store, vx-runner)");
             match ensure_services(&args_for_boot, &spawn_tracker).await {
                 Ok(clients) => {
@@ -385,7 +374,7 @@ async fn async_main() -> Result<()> {
         let active_connections = active_connections.clone();
         let last_disconnect = last_disconnect.clone();
         let boot_failed = boot_failed.clone();
-        peeps::tasks::spawn_tracked("idle_shutdown_monitor", async move {
+        peeps::spawn_tracked("idle_shutdown_monitor", async move {
             tracing::trace!(
                 idle_timeout = ?normal_idle_timeout,
                 "idle watchdog started"
@@ -453,7 +442,7 @@ async fn async_main() -> Result<()> {
 
         let boot_service = boot_service.clone();
 
-        peeps::tasks::spawn_tracked(format!("vxd_connection_{}", peer_addr), async move {
+        peeps::spawn_tracked(format!("vxd_connection_{}", peer_addr), async move {
             tracing::debug!("New connection from {}", peer_addr);
 
             // Root connection gets Boot service only — clients must call boot()
@@ -487,13 +476,13 @@ async fn async_main() -> Result<()> {
 
             // Drive the connection in the background
             let driver_handle =
-                peeps::tasks::spawn_tracked(format!("vxd_driver_{}", peer_addr), async move {
+                peeps::spawn_tracked(format!("vxd_driver_{}", peer_addr), async move {
                     driver.run().await
                 });
 
             // Accept virtual connections — each gets a per-session VxdDispatcher.
             // Reject if boot hasn't completed (client should call boot() first).
-            while let Some(conn) = peeps::tasks::peep!(incoming.recv(), "vxd.incoming.recv").await {
+            while let Some(conn) = peeps::peep!(incoming.recv(), "vxd.incoming.recv").await {
                 let Some(daemon) = boot_service.gate().service() else {
                     tracing::trace!(%peer_addr, "rejecting virtual connection: boot not complete");
                     conn.reject("boot not complete".into(), vec![]);

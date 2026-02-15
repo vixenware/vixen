@@ -125,7 +125,7 @@ impl TuiHandle {
         };
 
         // Spawn the display task
-        peeps::tasks::spawn_tracked("vx_tui_display", Self::display_task(state, shutdown_tx));
+        peeps::spawn_tracked("vx_tui_display", Self::display_task(state, shutdown_tx));
 
         handle
     }

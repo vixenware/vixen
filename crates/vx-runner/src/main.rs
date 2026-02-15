@@ -74,21 +74,9 @@ fn main() -> Result<()> {
     #[cfg(target_os = "macos")]
     spawn_reaper();
 
-    peeps::threads::install_sigprof_handler();
-    peeps::threads::register_thread("main");
-    peeps::tasks::init_task_tracking();
-
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
-        .on_thread_start(|| {
-            peeps::threads::register_thread(
-                std::thread::current().name().unwrap_or("tokio-worker"),
-            );
-        })
-        .on_thread_stop(|| {
-            peeps::threads::deregister_thread();
-        })
         .build()?;
     rt.block_on(async_main())
 }
@@ -101,7 +89,7 @@ async fn async_main() -> Result<()> {
     vx_tracing::init_service("vx_runner=info");
 
     // Initialize peeps instrumentation
-    peeps::init_named("vx-runner");
+    peeps::init("vx-runner");
 
     tracing::info!("hello from vixen-runner");
 
@@ -132,7 +120,7 @@ async fn async_main() -> Result<()> {
         let store_addr = args.store.clone();
         let vfsd_addr = args.vfsd.clone();
         let vx_home = args.vx_home.clone();
-        peeps::tasks::spawn_tracked("runner_boot", async move {
+        peeps::spawn_tracked("runner_boot", async move {
             tracing::info!("Booting vx-runner");
             match boot_runner(&store_addr, &vfsd_addr, &vx_home).await {
                 Ok(service) => {
@@ -154,60 +142,57 @@ async fn async_main() -> Result<()> {
         match runner_listener.accept().await {
             Ok((stream, peer_addr)) => {
                 let boot_service = boot_service.clone();
-                peeps::tasks::spawn_tracked(
-                    format!("runner_connection_{}", peer_addr),
-                    async move {
-                        tracing::debug!("Runner connection from {}", peer_addr);
+                peeps::spawn_tracked(format!("runner_connection_{}", peer_addr), async move {
+                    tracing::debug!("Runner connection from {}", peer_addr);
 
-                        // Root connection gets Boot service only.
-                        let boot_dispatcher = BootDispatcher::new(boot_service.clone());
-                        let (_handle, mut incoming, driver) = match accept(
-                            stream,
-                            HandshakeConfig {
-                                max_payload_size: 256 * 1024 * 1024, // 256 MiB
-                                name: Some("vx-runner".into()),
-                                ..Default::default()
-                            },
-                            boot_dispatcher,
-                        )
-                        .await
-                        {
-                            Ok(v) => v,
-                            Err(e) => {
-                                tracing::debug!("Runner handshake error from {}: {e}", peer_addr);
-                                return;
-                            }
+                    // Root connection gets Boot service only.
+                    let boot_dispatcher = BootDispatcher::new(boot_service.clone());
+                    let (_handle, mut incoming, driver) = match accept(
+                        stream,
+                        HandshakeConfig {
+                            max_payload_size: 256 * 1024 * 1024, // 256 MiB
+                            name: Some("vx-runner".into()),
+                            ..Default::default()
+                        },
+                        boot_dispatcher,
+                    )
+                    .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::debug!("Runner handshake error from {}: {e}", peer_addr);
+                            return;
+                        }
+                    };
+
+                    // Drive the connection in the background.
+                    let driver_handle =
+                        peeps::spawn_tracked(format!("runner_driver_{}", peer_addr), async move {
+                            driver.run().await
+                        });
+
+                    // Accept virtual connections — each gets a RunnerDispatcher.
+                    while let Some(conn) =
+                        peeps::peep!(incoming.recv(), "runner.incoming.recv").await
+                    {
+                        let Some(exec) = boot_service.gate().service() else {
+                            conn.reject("boot not complete".into(), vec![]);
+                            continue;
                         };
-
-                        // Drive the connection in the background.
-                        let driver_handle = peeps::tasks::spawn_tracked(
-                            format!("runner_driver_{}", peer_addr),
-                            async move { driver.run().await },
-                        );
-
-                        // Accept virtual connections — each gets a RunnerDispatcher.
-                        while let Some(conn) =
-                            peeps::tasks::peep!(incoming.recv(), "runner.incoming.recv").await
-                        {
-                            let Some(exec) = boot_service.gate().service() else {
-                                conn.reject("boot not complete".into(), vec![]);
-                                continue;
-                            };
-                            let dispatcher = RunnerDispatcher::new(exec.clone());
-                            if let Err(e) = conn.accept(vec![], Some(Box::new(dispatcher))).await {
-                                tracing::warn!(
-                                    "Failed to accept virtual connection from {}: {e}",
-                                    peer_addr
-                                );
-                            }
+                        let dispatcher = RunnerDispatcher::new(exec.clone());
+                        if let Err(e) = conn.accept(vec![], Some(Box::new(dispatcher))).await {
+                            tracing::warn!(
+                                "Failed to accept virtual connection from {}: {e}",
+                                peer_addr
+                            );
                         }
+                    }
 
-                        if let Err(e) = driver_handle.await {
-                            tracing::warn!("Driver error from {}: {e:?}", peer_addr);
-                        }
-                        tracing::debug!("Runner connection from {} closed", peer_addr);
-                    },
-                );
+                    if let Err(e) = driver_handle.await {
+                        tracing::warn!("Driver error from {}: {e:?}", peer_addr);
+                    }
+                    tracing::debug!("Runner connection from {} closed", peer_addr);
+                });
             }
             Err(e) => {
                 tracing::debug!("Runner accept error: {}", e);
@@ -248,7 +233,7 @@ async fn boot_runner(
 
     // Watch for vx-vfsd dying — if it does, we're useless.
     if let Some(mut vfsd_child) = vfsd_handle.child.take() {
-        peeps::tasks::spawn_tracked("vfsd_death_watcher", async move {
+        peeps::spawn_tracked("vfsd_death_watcher", async move {
             let status = vfsd_child.wait().await;
             tracing::error!(?status, "vx-vfsd exited unexpectedly");
             std::process::exit(1);
@@ -285,9 +270,8 @@ pub struct RunnerServiceInner {
     /// Stores Ok(prefix_id) or Err(message) — errors are cached too, since a missing
     /// toolchain manifest won't fix itself without a new runner session.
     #[allow(clippy::type_complexity)]
-    toolchain_flights: peeps::Mutex<
-        HashMap<Blake3Hash, Arc<peeps::OnceCell<Result<String, String>>>>,
-    >,
+    toolchain_flights:
+        peeps::Mutex<HashMap<Blake3Hash, Arc<peeps::OnceCell<Result<String, String>>>>>,
 
     /// Track created prefix IDs to avoid collisions
     created_prefixes: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -317,10 +301,7 @@ impl RunnerService {
             inner: Arc::new(RunnerServiceInner {
                 cas,
                 vfs,
-                toolchain_flights: peeps::Mutex::new(
-                    "runner/toolchain_flights",
-                    HashMap::new(),
-                ),
+                toolchain_flights: peeps::Mutex::new("runner/toolchain_flights", HashMap::new()),
                 created_prefixes: std::sync::Mutex::new(std::collections::HashSet::new()),
             }),
         }

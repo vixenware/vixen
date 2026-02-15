@@ -1748,51 +1748,10 @@ version = "0.1.0"
 dependencies = [
  "facet",
  "facet-json",
- "peeps-locks",
- "peeps-sync",
- "peeps-tasks",
- "peeps-threads",
+ "parking_lot",
  "peeps-types",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "peeps-locks"
-version = "0.1.0"
-dependencies = [
- "facet",
- "parking_lot",
- "peeps-tasks",
- "peeps-types",
- "tokio",
-]
-
-[[package]]
-name = "peeps-sync"
-version = "0.1.0"
-dependencies = [
- "peeps-tasks",
- "peeps-types",
- "tokio",
-]
-
-[[package]]
-name = "peeps-tasks"
-version = "0.1.0"
-dependencies = [
- "facet",
- "peeps-types",
- "tokio",
-]
-
-[[package]]
-name = "peeps-threads"
-version = "0.1.0"
-dependencies = [
- "facet",
- "libc",
- "peeps-types",
 ]
 
 [[package]]
@@ -2116,7 +2075,7 @@ dependencies = [
 name = "roam-local"
 version = "3.0.0"
 dependencies = [
- "peeps-tasks",
+ "peeps",
  "tokio",
 ]
 
@@ -2163,10 +2122,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "gloo-timers",
- "inventory",
- "peeps-locks",
- "peeps-sync",
- "peeps-tasks",
+ "peeps",
  "peeps-types",
  "roam-frame",
  "roam-task-local",
@@ -2188,8 +2144,7 @@ dependencies = [
  "libc",
  "libproc",
  "once_cell",
- "peeps-sync",
- "peeps-tasks",
+ "peeps",
  "peeps-types",
  "roam-fdpass",
  "roam-frame",
@@ -2209,8 +2164,7 @@ dependencies = [
  "facet",
  "facet-postcard",
  "facet-reflect",
- "peeps-locks",
- "peeps-tasks",
+ "peeps",
  "roam-session",
  "roam-wire",
  "tokio",
@@ -3070,7 +3024,6 @@ dependencies = [
  "libc",
  "owo-colors",
  "peeps",
- "peeps-sync",
  "roam",
  "roam-stream",
  "strip-ansi-escapes",
@@ -3158,7 +3111,6 @@ dependencies = [
  "eyre",
  "facet",
  "peeps",
- "peeps-sync",
  "roam",
  "roam-local",
  "roam-stream",
@@ -3208,7 +3160,7 @@ dependencies = [
  "figue",
  "jiff",
  "libc",
- "peeps-sync",
+ "peeps",
  "tokio",
  "vx-fskit",
 ]
@@ -3253,7 +3205,6 @@ dependencies = [
  "jiff",
  "libc",
  "peeps",
- "peeps-sync",
  "roam",
  "roam-session",
  "roam-stream",
@@ -3294,7 +3245,6 @@ dependencies = [
  "http-body-util",
  "jiff",
  "peeps",
- "peeps-sync",
  "pin-project-lite",
  "roam",
  "roam-session",
@@ -3381,7 +3331,6 @@ dependencies = [
  "futures-util",
  "libc",
  "peeps",
- "peeps-sync",
  "roam",
  "roam-shm",
  "tokio",
@@ -3473,7 +3422,6 @@ dependencies = [
  "figue",
  "libc",
  "peeps",
- "peeps-sync",
  "petgraph",
  "picante",
  "roam",

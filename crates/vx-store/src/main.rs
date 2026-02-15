@@ -45,21 +45,9 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    peeps::threads::install_sigprof_handler();
-    peeps::threads::register_thread("main");
-    peeps::tasks::init_task_tracking();
-
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
-        .on_thread_start(|| {
-            peeps::threads::register_thread(
-                std::thread::current().name().unwrap_or("tokio-worker"),
-            );
-        })
-        .on_thread_stop(|| {
-            peeps::threads::deregister_thread();
-        })
         .build()?;
     rt.block_on(async_main())
 }
@@ -72,7 +60,7 @@ async fn async_main() -> Result<()> {
     vx_tracing::init_service("vx_store=info");
 
     // Initialize peeps instrumentation
-    peeps::init_named("vx-store");
+    peeps::init("vx-store");
 
     tracing::info!("hello from vixen-store");
 
@@ -102,7 +90,7 @@ async fn async_main() -> Result<()> {
         let gate = Arc::clone(&gate);
         let root = args.root.clone();
         let vx_home = args.vx_home.clone();
-        peeps::tasks::spawn_tracked("store_boot", async move {
+        peeps::spawn_tracked("store_boot", async move {
             tracing::info!("Booting vx-store");
             match async {
                 let storage = CasStore::new(FsStorage::new(root));
@@ -128,12 +116,11 @@ async fn async_main() -> Result<()> {
     let boot_service = gate.boot_service();
 
     loop {
-        let (stream, peer_addr) =
-            peeps::tasks::peep!(listener.accept(), "store.listener.accept").await?;
+        let (stream, peer_addr) = peeps::peep!(listener.accept(), "store.listener.accept").await?;
         tracing::info!("accepted connection from {peer_addr}");
         let boot_service = boot_service.clone();
 
-        peeps::tasks::spawn_tracked(format!("store_connection_{}", peer_addr), async move {
+        peeps::spawn_tracked(format!("store_connection_{}", peer_addr), async move {
             tracing::debug!("New connection from {}", peer_addr);
 
             // Root connection gets Boot service only.
@@ -158,13 +145,12 @@ async fn async_main() -> Result<()> {
 
             // Drive the connection in the background.
             let driver_handle =
-                peeps::tasks::spawn_tracked(format!("store_driver_{}", peer_addr), async move {
+                peeps::spawn_tracked(format!("store_driver_{}", peer_addr), async move {
                     driver.run().await
                 });
 
             // Accept virtual connections — each gets a StoreDispatcher.
-            while let Some(conn) = peeps::tasks::peep!(incoming.recv(), "store.incoming.recv").await
-            {
+            while let Some(conn) = peeps::peep!(incoming.recv(), "store.incoming.recv").await {
                 let Some(store) = boot_service.gate().service() else {
                     conn.reject("boot not complete".into(), vec![]);
                     continue;

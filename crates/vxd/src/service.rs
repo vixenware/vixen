@@ -796,11 +796,11 @@ impl VxdService {
         // Forward store progress to the CLI's ProgressListener
         let forward_listener = self.progress_listener.lock().clone();
         let forward_action_id = action_id;
-        let forward_handle = peeps::tasks::spawn_tracked(
+        let forward_handle = peeps::spawn_tracked(
             format!("toolchain_progress_fwd_{:?}", action_id),
             async move {
                 while let Ok(Some(sp)) =
-                    peeps::tasks::peep!(progress_rx.recv(), "vxd.toolchain.progress.recv").await
+                    peeps::peep!(progress_rx.recv(), "vxd.toolchain.progress.recv").await
                 {
                     if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
                         let _ = listener
@@ -818,7 +818,7 @@ impl VxdService {
             },
         );
 
-        let result = peeps::tasks::peep!(
+        let result = peeps::peep!(
             self.store.ensure_rust_toolchain(spec, progress_tx),
             "vxd.store.ensure_rust_toolchain",
             {
@@ -829,7 +829,7 @@ impl VxdService {
         .map_err(|e| {
             // Complete action on error
             let this = self.clone();
-            peeps::tasks::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
+            peeps::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
                 this.report_complete_action(action_id).await
             });
             VxdError::CasRpc(e.to_string())
@@ -847,14 +847,14 @@ impl VxdService {
 
         let manifest_hash = result.manifest_hash.ok_or_else(|| {
             let this = self.clone();
-            peeps::tasks::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
+            peeps::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
                 this.report_complete_action(action_id).await
             });
             VxdError::NoManifestHash
         })?;
 
         // Get manifest for version info (and toolchain_id on cache hit)
-        let manifest = peeps::tasks::peep!(
+        let manifest = peeps::peep!(
             self.store.get_toolchain_manifest(manifest_hash),
             "vxd.store.get_toolchain_manifest",
             {
@@ -864,14 +864,14 @@ impl VxdService {
         .await
         .map_err(|e| {
             let this = self.clone();
-            peeps::tasks::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
+            peeps::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
                 this.report_complete_action(action_id).await
             });
             VxdError::CasRpc(e.to_string())
         })?
         .ok_or_else(|| {
             let this = self.clone();
-            peeps::tasks::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
+            peeps::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
                 this.report_complete_action(action_id).await
             });
             VxdError::ToolchainManifestNotFound(manifest_hash)

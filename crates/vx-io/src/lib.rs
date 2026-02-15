@@ -32,7 +32,7 @@ pub async fn atomic_write(
     let parent_dir = path.parent().unwrap_or_else(|| Utf8Path::new("."));
 
     // Create parent directory if it doesn't exist
-    peeps::tasks::peep!(
+    peeps::peep!(
         tokio::fs::create_dir_all(parent_dir),
         "atomic_write.create_dir_all",
         {
@@ -48,7 +48,7 @@ pub async fn atomic_write(
 
     // Get the temporary path and write contents to it
     let temp_path = temp_file.file_path();
-    peeps::tasks::peep!(tokio::fs::write(&temp_path, contents), "atomic_write.write", {
+    peeps::peep!(tokio::fs::write(&temp_path, contents), "atomic_write.write", {
         "resource.path" => path.as_str(),
         "write.bytes" => contents.len(),
     })
@@ -60,7 +60,7 @@ pub async fn atomic_write(
         use std::os::unix::fs::PermissionsExt;
         let mut perms = tokio::fs::metadata(&temp_path).await?.permissions();
         perms.set_mode(perms.mode() | 0o111);
-        peeps::tasks::peep!(
+        peeps::peep!(
             tokio::fs::set_permissions(&temp_path, perms),
             "atomic_write.set_permissions",
             {
@@ -72,7 +72,7 @@ pub async fn atomic_write(
 
     // Atomically move temp file to final path. rename() on the same filesystem is
     // atomic and overwrites any existing target, which is fine for our use case.
-    peeps::tasks::peep!(
+    peeps::peep!(
         tokio::fs::rename(temp_path.to_path_buf(), path.as_std_path()),
         "atomic_write.rename",
         {

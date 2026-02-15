@@ -591,7 +591,7 @@ impl Executor {
             while let Some(node_idx) = self.ready_queue.pop_front() {
                 debug!("spawning action for node {:?}", node_idx);
                 self.states.insert(node_idx, ActionState::Running);
-                let permit = peeps::tasks::peep!(
+                let permit = peeps::peep!(
                     self.concurrency_limit.clone().acquire_owned(),
                     "executor.concurrency.acquire_owned"
                 )
@@ -613,7 +613,7 @@ impl Executor {
             }
 
             // Wait for a completion message
-            match peeps::tasks::peep!(self.message_rx.recv(), "executor.message.recv").await {
+            match peeps::peep!(self.message_rx.recv(), "executor.message.recv").await {
                 Some(ExecutorMessage::ActionCompleted {
                     node_idx,
                     result,
@@ -1168,12 +1168,9 @@ impl Executor {
             let forward_listener = progress_listener.clone();
             let forward_action_id = action_id;
             let forward_handle =
-                peeps::tasks::spawn_tracked("vxd_executor_store_progress_forward", async move {
-                    while let Ok(Some(sp)) = peeps::tasks::peep!(
-                        store_progress_rx.recv(),
-                        "executor.store_progress.recv"
-                    )
-                    .await
+                peeps::spawn_tracked("vxd_executor_store_progress_forward", async move {
+                    while let Ok(Some(sp)) =
+                        peeps::peep!(store_progress_rx.recv(), "executor.store_progress.recv").await
                     {
                         if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
                             let _ = listener

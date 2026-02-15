@@ -113,19 +113,10 @@ where
     std::thread::Builder::new()
         .name("vfs-runtime".into())
         .spawn(move || {
-            peeps::threads::register_thread("vfs-runtime");
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(4)
                 .thread_name("vfs-worker")
                 .enable_all()
-                .on_thread_start(|| {
-                    peeps::threads::register_thread(
-                        std::thread::current().name().unwrap_or("vfs-worker"),
-                    );
-                })
-                .on_thread_stop(|| {
-                    peeps::threads::deregister_thread();
-                })
                 .build()
                 .expect("failed to create VFS tokio runtime");
             rt.block_on(async move {
@@ -217,7 +208,7 @@ where
 
                 let _ = sid_tx.send(Ok(sid.clone()));
 
-                peeps::tasks::spawn_tracked("shm_host_driver", async move {
+                peeps::spawn_tracked("shm_host_driver", async move {
                     if let Err(error) = driver.run().await {
                         tracing::debug!(%error, "SHM host driver exited with error");
                     } else {

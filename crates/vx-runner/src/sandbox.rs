@@ -134,82 +134,74 @@ pub async fn run_sandboxed_command(
 
     // Merge stdout and stderr into a single combined output buffer.
     // Also track the latest line for progress reporting.
-    let combined_output = std::sync::Arc::new(peeps::Mutex::new(
-        "runner/combined_output",
-        String::new(),
-    ));
-    let latest_line = std::sync::Arc::new(peeps::Mutex::new(
-        "runner/latest_line",
-        String::new(),
-    ));
+    let combined_output =
+        std::sync::Arc::new(peeps::Mutex::new("runner/combined_output", String::new()));
+    let latest_line = std::sync::Arc::new(peeps::Mutex::new("runner/latest_line", String::new()));
 
     // Spawn readers for both streams
     let combined_for_stdout = combined_output.clone();
     let latest_for_stdout = latest_line.clone();
-    let stdout_task =
-        peeps::tasks::spawn_tracked(format!("sandbox_stdout_{}", action_desc), async move {
-            let mut reader = BufReader::new(stdout);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let trimmed = line.trim_end().to_string();
-                        combined_for_stdout.lock().push_str(&line);
-                        if !trimmed.is_empty() {
-                            *latest_for_stdout.lock() = trimmed;
-                        }
+    let stdout_task = peeps::spawn_tracked(format!("sandbox_stdout_{}", action_desc), async move {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end().to_string();
+                    combined_for_stdout.lock().push_str(&line);
+                    if !trimmed.is_empty() {
+                        *latest_for_stdout.lock() = trimmed;
                     }
-                    Err(_) => break,
                 }
+                Err(_) => break,
             }
-        });
+        }
+    });
 
     let combined_for_stderr = combined_output.clone();
     let latest_for_stderr = latest_line.clone();
-    let stderr_task =
-        peeps::tasks::spawn_tracked(format!("sandbox_stderr_{}", action_desc), async move {
-            let mut reader = BufReader::new(stderr);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let trimmed = line.trim_end().to_string();
-                        combined_for_stderr.lock().push_str(&line);
-                        if !trimmed.is_empty() {
-                            *latest_for_stderr.lock() = trimmed;
-                        }
+    let stderr_task = peeps::spawn_tracked(format!("sandbox_stderr_{}", action_desc), async move {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end().to_string();
+                    combined_for_stderr.lock().push_str(&line);
+                    if !trimmed.is_empty() {
+                        *latest_for_stderr.lock() = trimmed;
                     }
-                    Err(_) => break,
                 }
+                Err(_) => break,
             }
-        });
+        }
+    });
 
     // Progress tick task: every 250ms, send the latest line if it changed
     let latest_for_tick = latest_line.clone();
     let action_desc_owned = action_desc.to_string();
-    let tick_task =
-        peeps::tasks::spawn_tracked(format!("sandbox_tick_{}", action_desc), async move {
-            let mut last_sent = String::new();
-            let mut interval = tokio::time::interval(PROGRESS_TICK_INTERVAL);
-            loop {
-                interval.tick().await;
-                let current = latest_for_tick.lock().clone();
-                if current != last_sent && !current.is_empty() {
-                    let _ = progress
-                        .send(&StoreProgress {
-                            message: format!("{action_desc_owned}: {current}"),
-                            current: None,
-                            total: None,
-                        })
-                        .await;
-                    last_sent = current;
-                }
+    let tick_task = peeps::spawn_tracked(format!("sandbox_tick_{}", action_desc), async move {
+        let mut last_sent = String::new();
+        let mut interval = tokio::time::interval(PROGRESS_TICK_INTERVAL);
+        loop {
+            interval.tick().await;
+            let current = latest_for_tick.lock().clone();
+            if current != last_sent && !current.is_empty() {
+                let _ = progress
+                    .send(&StoreProgress {
+                        message: format!("{action_desc_owned}: {current}"),
+                        current: None,
+                        total: None,
+                    })
+                    .await;
+                last_sent = current;
             }
-        });
+        }
+    });
 
     // Grab the PID before wait (child.id() returns None after exit)
     let pid = child.id();

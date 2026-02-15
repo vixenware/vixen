@@ -62,7 +62,7 @@ impl Store for StoreService {
             ));
         }
 
-        peeps::tasks::peep!(
+        peeps::peep!(
             self.storage.put_chunk(&hash, &data),
             "storage.put_chunk",
             {

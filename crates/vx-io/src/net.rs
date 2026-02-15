@@ -239,12 +239,11 @@ impl Listener {
         match self {
             Listener::Tcp(listener) => {
                 let (stream, addr) =
-                    peeps::tasks::peep!(listener.accept(), "net.listener.tcp.accept").await?;
+                    peeps::peep!(listener.accept(), "net.listener.tcp.accept").await?;
                 Ok((Stream::Tcp(stream), addr.to_string()))
             }
             Listener::Local { listener, .. } => {
-                let stream =
-                    peeps::tasks::peep!(listener.accept(), "net.listener.local.accept").await?;
+                let stream = peeps::peep!(listener.accept(), "net.listener.local.accept").await?;
                 #[cfg(unix)]
                 return Ok((Stream::Local(stream), "local".to_string()));
                 #[cfg(windows)]

@@ -208,21 +208,9 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    peeps::threads::install_sigprof_handler();
-    peeps::threads::register_thread("main");
-    peeps::tasks::init_task_tracking();
-
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
-        .on_thread_start(|| {
-            peeps::threads::register_thread(
-                std::thread::current().name().unwrap_or("tokio-worker"),
-            );
-        })
-        .on_thread_stop(|| {
-            peeps::threads::deregister_thread();
-        })
         .build()?;
     rt.block_on(async_main())
 }
@@ -234,7 +222,7 @@ async fn async_main() -> Result<()> {
     ur_taking_me_with_you::die_with_parent();
 
     // Initialize peeps instrumentation
-    peeps::init_named("vx-vfsd");
+    peeps::init("vx-vfsd");
 
     let args: Args = args::Driver::new(
         args::builder::<Args>()?
@@ -279,7 +267,7 @@ async fn async_main() -> Result<()> {
         let gate = Arc::clone(&gate);
         let store_addr = args.store.clone();
         let mount = args.mount.clone();
-        peeps::tasks::spawn_tracked("vfsd_boot", async move {
+        peeps::spawn_tracked("vfsd_boot", async move {
             tracing::info!("Booting vx-vfsd");
             match boot_vfsd(&store_addr, &mount).await {
                 Ok(service) => {
@@ -301,7 +289,7 @@ async fn async_main() -> Result<()> {
         match vfsd_listener.accept().await {
             Ok((stream, peer_addr)) => {
                 let boot_service = boot_service.clone();
-                peeps::tasks::spawn_tracked(format!("vfsd_connection_{}", peer_addr), async move {
+                peeps::spawn_tracked(format!("vfsd_connection_{}", peer_addr), async move {
                     tracing::debug!("vx-vfsd connection from {}", peer_addr);
 
                     // Root connection gets Boot service only.
@@ -328,14 +316,13 @@ async fn async_main() -> Result<()> {
                     };
 
                     // Drive the connection in the background.
-                    let driver_handle = peeps::tasks::spawn_tracked(
-                        format!("vfsd_driver_{}", peer_addr),
-                        async move { driver.run().await },
-                    );
+                    let driver_handle =
+                        peeps::spawn_tracked(format!("vfsd_driver_{}", peer_addr), async move {
+                            driver.run().await
+                        });
 
                     // Accept virtual connections — each gets a VfsdDispatcher.
-                    while let Some(conn) =
-                        peeps::tasks::peep!(incoming.recv(), "vfsd.incoming.recv").await
+                    while let Some(conn) = peeps::peep!(incoming.recv(), "vfsd.incoming.recv").await
                     {
                         let Some(service) = boot_service.gate().service() else {
                             conn.reject("boot not complete".into(), vec![]);
@@ -485,7 +472,7 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
                 }
 
                 let vfs_mount_path = mount_path.clone();
-                peeps::tasks::spawn_tracked("vfs_death_watcher", async move {
+                peeps::spawn_tracked("vfs_death_watcher", async move {
                     loop {
                         if vfs_dead.changed().await.is_err() || *vfs_dead.borrow() {
                             break;
