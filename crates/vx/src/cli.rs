@@ -76,15 +76,7 @@ pub(crate) struct CleanArgs {
 
 /// Arguments for the `debug` subcommand
 #[derive(Facet, Debug)]
-pub(crate) struct DebugArgs {
-    /// Print aggregated text dump to stderr (no web dashboard)
-    #[facet(args::named)]
-    pub(crate) dump: bool,
-
-    /// Print aggregated JSON to stdout (no web dashboard)
-    #[facet(args::named)]
-    pub(crate) json: bool,
-}
+pub(crate) struct DebugArgs {}
 
 /// Arguments for the `doctor` subcommand
 #[derive(Facet, Debug)]
