@@ -1606,7 +1606,7 @@ function fmtArgs(args) {
     'park_internal', 'park_timeout', 'thread_park',
     'epoll_wait', 'kevent', '__psynch_cvwait', '__psynch_mutexwait',
     'futex_wait', 'SYS_futex', 'condvar', 'Condvar',
-    'mio::poll', 'tokio::runtime::park', 'tokio::park',
+    'mio::poll', 'tokio::runtime::park', 'tokio::park', '::park',
     'tokio::runtime::io::Driver', 'tokio::io::driver',
     'io_uring_enter', 'select$DARWIN', 'pselect',
     'recv_timeout', 'thread::sleep',
@@ -1741,7 +1741,7 @@ function fmtArgs(args) {
 
   let html = '';
   html += '<div class="card"><div class="card-head">Tracked Tasks';
-  
+
   const polling = allTasks.filter(t => t.state === 'Polling').length;
   const pending = allTasks.filter(t => t.state === 'Pending').length;
   const completed = allTasks.filter(t => t.state === 'Completed').length;
@@ -1771,7 +1771,7 @@ function fmtArgs(args) {
   for (const t of sorted) {
     const stuckPolling = t.state === 'Polling' && t.poll_events.length > 0 && t.poll_events[t.poll_events.length - 1].duration_secs === null;
     const rowClass = stuckPolling ? 'severity-warning' : '';
-    
+
     let stateLabel = '';
     if (t.state === 'Polling') {
       stateLabel = '<span class="text-amber">● polling</span>';
@@ -1788,24 +1788,24 @@ function fmtArgs(args) {
     html += `<td>${stateLabel}</td>`;
     html += `<td class="num" data-v="${t.age_secs.toFixed(3)}">${t.age_secs.toFixed(3)}</td>`;
     html += `<td class="num" data-v="${t.poll_events.length}">${t.poll_events.length}</td>`;
-    
+
     // Last poll info
     if (t.poll_events.length > 0) {
       const lastPoll = t.poll_events[t.poll_events.length - 1];
       const lastPollAge = t.age_secs - lastPoll.started_at_secs;
       const lastPollAgeClass = lastPollAge > 5 ? 'text-red' : lastPollAge > 1 ? 'text-amber' : '';
       html += `<td class="num ${lastPollAgeClass}" data-v="${lastPollAge.toFixed(3)}">${lastPollAge.toFixed(3)}</td>`;
-      
+
       const duration = lastPoll.duration_secs !== null ? `${(lastPoll.duration_secs * 1000).toFixed(1)}ms` : '<span class="text-amber">polling...</span>';
       html += `<td class="mono" style="font-size:11px">${duration}</td>`;
-      
+
       html += `<td>${lastPoll.backtrace ? expandBtn(lastPoll.backtrace) : (t.spawn_backtrace ? expandBtn(t.spawn_backtrace) : '<span class="muted">—</span>')}</td>`;
     } else {
       html += '<td class="muted">—</td>';
       html += '<td class="muted">—</td>';
       html += `<td>${t.spawn_backtrace ? expandBtn(t.spawn_backtrace) : '<span class="muted">—</span>'}</td>`;
     }
-    
+
     html += '</tr>';
   }
   html += '</tbody></table></div>';

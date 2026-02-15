@@ -1,6 +1,8 @@
 //! Common I/O utilities for vixen crates
 
+use async_tempfile::TempFile;
 use camino::{Utf8Path, Utf8PathBuf};
+use peeps::tasks::PeepableFutureExt;
 
 pub mod boot;
 pub mod git;
@@ -31,17 +33,20 @@ pub async fn atomic_write(
     let parent_dir = path.parent().unwrap_or_else(|| Utf8Path::new("."));
 
     // Create parent directory if it doesn't exist
-    tokio::fs::create_dir_all(parent_dir).await?;
+    tokio::fs::create_dir_all(parent_dir)
+        .peepable("atomic_write.create_dir_all")
+        .await?;
 
     // Create a temporary file in the same directory to ensure it's on the same filesystem
-    let temp_file = tempfile::Builder::new()
-        .prefix(".tmp-")
-        .tempfile_in(parent_dir)
+    let temp_file = TempFile::new_in(parent_dir.as_std_path())
+        .await
         .map_err(std::io::Error::other)?;
 
     // Get the temporary path and write contents to it
-    let temp_path = temp_file.into_temp_path();
-    tokio::fs::write(&temp_path, contents).await?;
+    let temp_path = temp_file.file_path();
+    tokio::fs::write(&temp_path, contents)
+        .peepable("atomic_write.write")
+        .await?;
 
     // Set executable bit if requested.
     #[cfg(unix)]
@@ -49,14 +54,16 @@ pub async fn atomic_write(
         use std::os::unix::fs::PermissionsExt;
         let mut perms = tokio::fs::metadata(&temp_path).await?.permissions();
         perms.set_mode(perms.mode() | 0o111);
-        tokio::fs::set_permissions(&temp_path, perms).await?;
+        tokio::fs::set_permissions(&temp_path, perms)
+            .peepable("atomic_write.set_permissions")
+            .await?;
     }
 
-    match temp_path.persist_noclobber(path) {
-        Ok(_) => Ok(()),
-        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(e.error),
-    }
+    // Atomically move temp file to final path. rename() on the same filesystem is
+    // atomic and overwrites any existing target, which is fine for our use case.
+    tokio::fs::rename(temp_path.to_path_buf(), path.as_std_path())
+        .peepable("atomic_write.rename")
+        .await
 }
 
 /// Create a unique scratch directory under the given base path.

@@ -1,4 +1,5 @@
 use jiff::Timestamp;
+use peeps::tasks::PeepableFutureExt;
 use vx_store_proto::Store;
 use vx_store_proto::{
     Blake3Hash, BlobRef, CDC_MAX_CHUNK, CacheKey, CasNode, ChunkHash, DirEntryKind, DirectoryNode,
@@ -64,6 +65,7 @@ impl Store for StoreService {
 
         self.storage
             .put_chunk(&hash, &data)
+            .peepable("storage.put_chunk")
             .await
             .map_err(|e| format!("storage error: {e}"))
     }
