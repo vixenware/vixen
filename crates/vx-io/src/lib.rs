@@ -2,7 +2,6 @@
 
 use async_tempfile::TempFile;
 use camino::{Utf8Path, Utf8PathBuf};
-use peeps::tasks::PeepableFutureExt;
 
 pub mod boot;
 pub mod git;
@@ -33,9 +32,14 @@ pub async fn atomic_write(
     let parent_dir = path.parent().unwrap_or_else(|| Utf8Path::new("."));
 
     // Create parent directory if it doesn't exist
-    tokio::fs::create_dir_all(parent_dir)
-        .peepable("atomic_write.create_dir_all")
-        .await?;
+    peeps::tasks::peep!(
+        tokio::fs::create_dir_all(parent_dir),
+        "atomic_write.create_dir_all",
+        {
+            "resource.path" => path.as_str(),
+        }
+    )
+    .await?;
 
     // Create a temporary file in the same directory to ensure it's on the same filesystem
     let temp_file = TempFile::new_in(parent_dir.as_std_path())
@@ -44,9 +48,11 @@ pub async fn atomic_write(
 
     // Get the temporary path and write contents to it
     let temp_path = temp_file.file_path();
-    tokio::fs::write(&temp_path, contents)
-        .peepable("atomic_write.write")
-        .await?;
+    peeps::tasks::peep!(tokio::fs::write(&temp_path, contents), "atomic_write.write", {
+        "resource.path" => path.as_str(),
+        "write.bytes" => contents.len(),
+    })
+    .await?;
 
     // Set executable bit if requested.
     #[cfg(unix)]
@@ -54,16 +60,27 @@ pub async fn atomic_write(
         use std::os::unix::fs::PermissionsExt;
         let mut perms = tokio::fs::metadata(&temp_path).await?.permissions();
         perms.set_mode(perms.mode() | 0o111);
-        tokio::fs::set_permissions(&temp_path, perms)
-            .peepable("atomic_write.set_permissions")
-            .await?;
+        peeps::tasks::peep!(
+            tokio::fs::set_permissions(&temp_path, perms),
+            "atomic_write.set_permissions",
+            {
+                "resource.path" => path.as_str(),
+            }
+        )
+        .await?;
     }
 
     // Atomically move temp file to final path. rename() on the same filesystem is
     // atomic and overwrites any existing target, which is fine for our use case.
-    tokio::fs::rename(temp_path.to_path_buf(), path.as_std_path())
-        .peepable("atomic_write.rename")
-        .await
+    peeps::tasks::peep!(
+        tokio::fs::rename(temp_path.to_path_buf(), path.as_std_path()),
+        "atomic_write.rename",
+        {
+            "resource.path" => path.as_str(),
+            "write.executable" => executable,
+        }
+    )
+    .await
 }
 
 /// Create a unique scratch directory under the given base path.

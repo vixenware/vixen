@@ -334,7 +334,9 @@ async fn async_main() -> Result<()> {
                     );
 
                     // Accept virtual connections — each gets a VfsdDispatcher.
-                    while let Some(conn) = incoming.recv().await {
+                    while let Some(conn) =
+                        peeps::tasks::peep!(incoming.recv(), "vfsd.incoming.recv").await
+                    {
                         let Some(service) = boot_service.gate().service() else {
                             conn.reject("boot not complete".into(), vec![]);
                             continue;

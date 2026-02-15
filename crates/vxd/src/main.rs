@@ -493,7 +493,7 @@ async fn async_main() -> Result<()> {
 
             // Accept virtual connections — each gets a per-session VxdDispatcher.
             // Reject if boot hasn't completed (client should call boot() first).
-            while let Some(conn) = incoming.recv().await {
+            while let Some(conn) = peeps::tasks::peep!(incoming.recv(), "vxd.incoming.recv").await {
                 let Some(daemon) = boot_service.gate().service() else {
                     tracing::trace!(%peer_addr, "rejecting virtual connection: boot not complete");
                     conn.reject("boot not complete".into(), vec![]);

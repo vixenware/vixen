@@ -186,7 +186,9 @@ async fn async_main() -> Result<()> {
                         );
 
                         // Accept virtual connections — each gets a RunnerDispatcher.
-                        while let Some(conn) = incoming.recv().await {
+                        while let Some(conn) =
+                            peeps::tasks::peep!(incoming.recv(), "runner.incoming.recv").await
+                        {
                             let Some(exec) = boot_service.gate().service() else {
                                 conn.reject("boot not complete".into(), vec![]);
                                 continue;

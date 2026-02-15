@@ -126,7 +126,7 @@ impl TuiHandle {
         };
 
         // Spawn the display task
-        tokio::spawn(Self::display_task(state, shutdown_tx));
+        peeps::tasks::spawn_tracked("vx_tui_display", Self::display_task(state, shutdown_tx));
 
         handle
     }
