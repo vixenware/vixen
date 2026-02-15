@@ -153,6 +153,9 @@ impl VxOutput {
     /// Assert the command succeeded, panicking with full output on failure
     #[track_caller]
     pub fn assert_success(&self) {
+        tracing::trace!("{}", self.stdout);
+        tracing::trace!("{}", self.stderr);
+
         assert!(
             self.success,
             "command failed (exit code {:?}):\n--- stdout ---\n{}\n--- stderr ---\n{}",
