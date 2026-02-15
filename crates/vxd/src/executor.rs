@@ -3,6 +3,7 @@
 //! This module implements the execution engine that schedules and runs actions
 //! from the action graph with optimal parallelism while respecting dependencies.
 
+use peeps::JoinSetExt as _;
 use peeps::Mutex;
 use petgraph::Direction::Incoming;
 use petgraph::graph::NodeIndex;
@@ -1140,117 +1141,121 @@ impl Executor {
         let free_lanes = self.free_lanes.clone();
         let build_start = self.build_start;
 
-        self.in_flight.spawn(async move {
-            // Drop guard: if this task is aborted (e.g. by JoinSet::abort_all), send
-            // a Cancelled result back so the executor doesn't lose track of this action.
-            let guard_tx = message_tx.clone();
-            let mut _completion_guard = CompletionGuard {
-                node_idx,
-                tx: Some(guard_tx),
-            };
+        self.in_flight
+            .spawn_peeps("vxd_executor_action", async move {
+                // Drop guard: if this task is aborted (e.g. by JoinSet::abort_all), send
+                // a Cancelled result back so the executor doesn't lose track of this action.
+                let guard_tx = message_tx.clone();
+                let mut _completion_guard = CompletionGuard {
+                    node_idx,
+                    tx: Some(guard_tx),
+                };
 
-            debug!("started for {:?}", node_idx);
+                debug!("started for {:?}", node_idx);
 
-            // Start progress tracking
-            let action_type = action.to_progress_action_type();
-            let action_id = if let Some(ref listener) = progress_listener {
-                listener.start_action(action_type).await.ok()
-            } else {
-                None
-            };
+                // Start progress tracking
+                let action_type = action.to_progress_action_type();
+                let action_id = if let Some(ref listener) = progress_listener {
+                    listener.start_action(action_type).await.ok()
+                } else {
+                    None
+                };
 
-            // Create a progress channel for the store RPC.
-            // The store sends StoreProgress on tx; we receive on rx and forward
-            // to the CLI's ProgressListener as ActionProgress.
-            let (store_progress_tx, mut store_progress_rx) = roam::channel::<StoreProgress>();
+                // Create a progress channel for the store RPC.
+                // The store sends StoreProgress on tx; we receive on rx and forward
+                // to the CLI's ProgressListener as ActionProgress.
+                let (store_progress_tx, mut store_progress_rx) = roam::channel::<StoreProgress>();
 
-            // Spawn a task to forward StoreProgress → ActionProgress
-            let forward_listener = progress_listener.clone();
-            let forward_action_id = action_id;
-            let forward_handle =
-                peeps::spawn_tracked("vxd_executor_store_progress_forward", async move {
-                    while let Ok(Some(sp)) =
-                        peeps::peep!(store_progress_rx.recv(), "executor.store_progress.recv").await
-                    {
-                        if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
-                            let _ = listener
-                                .update_progress(
-                                    id,
-                                    ActionProgress {
-                                        message: sp.message,
-                                        current: sp.current,
-                                        total: sp.total,
-                                    },
-                                )
-                                .await;
+                // Spawn a task to forward StoreProgress → ActionProgress
+                let forward_listener = progress_listener.clone();
+                let forward_action_id = action_id;
+                let forward_handle =
+                    peeps::spawn_tracked("vxd_executor_store_progress_forward", async move {
+                        while let Ok(Some(sp)) =
+                            peeps::peep!(store_progress_rx.recv(), "executor.store_progress.recv")
+                                .await
+                        {
+                            if let (Some(listener), Some(id)) =
+                                (&forward_listener, forward_action_id)
+                            {
+                                let _ = listener
+                                    .update_progress(
+                                        id,
+                                        ActionProgress {
+                                            message: sp.message,
+                                            current: sp.current,
+                                            total: sp.total,
+                                        },
+                                    )
+                                    .await;
+                            }
                         }
+                    });
+
+                // Acquire a lane ID for timeline tracking
+                let lane = free_lanes.lock().pop().unwrap_or(0);
+
+                debug!("calling execute_action for {:?} on lane {}", node_idx, lane);
+
+                // Execute action with cancellation support, measuring wall-clock time
+                let execute_start = std::time::Instant::now();
+                let start_offset_ms = execute_start.duration_since(build_start).as_millis() as u64;
+                let result = tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => {
+                        debug!("action {:?} cancelled via token", node_idx);
+                        Err(VxdError::Cancelled)
                     }
+                    result = execute_action(
+                        action,
+                        deps,
+                        &cas,
+                        &exec,
+                        &db,
+                        &results,
+                        &workspace_root,
+                        &target_triple,
+                        &profile,
+                        &session_id,
+                        rust_toolchain_spec,
+                        store_progress_tx,
+                        macos_commandlinetools_version,
+                    ) => result,
+                };
+
+                debug!(
+                    "execute_action returned for {:?}: {:?}",
+                    node_idx,
+                    result.is_ok()
+                );
+
+                // Wait for progress forwarding to drain
+                let _ = forward_handle.await;
+
+                // Complete progress tracking
+                if let (Some(listener), Some(id)) = (&progress_listener, action_id) {
+                    let _ = listener.complete_action(id).await;
+                }
+
+                let execute_ms = execute_start.elapsed().as_millis() as u64;
+
+                // Release the lane back to the pool
+                free_lanes.lock().push(lane);
+
+                debug!("sending completion message for {:?}", node_idx);
+                // Send result back to executor — disarm the drop guard since we're sending explicitly
+                _completion_guard.disarm();
+                let _ = message_tx.send(ExecutorMessage::ActionCompleted {
+                    node_idx,
+                    result,
+                    execute_ms,
+                    start_offset_ms,
+                    lane,
                 });
 
-            // Acquire a lane ID for timeline tracking
-            let lane = free_lanes.lock().pop().unwrap_or(0);
-
-            debug!("calling execute_action for {:?} on lane {}", node_idx, lane);
-
-            // Execute action with cancellation support, measuring wall-clock time
-            let execute_start = std::time::Instant::now();
-            let start_offset_ms = execute_start.duration_since(build_start).as_millis() as u64;
-            let result = tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => {
-                    debug!("action {:?} cancelled via token", node_idx);
-                    Err(VxdError::Cancelled)
-                }
-                result = execute_action(
-                    action,
-                    deps,
-                    &cas,
-                    &exec,
-                    &db,
-                    &results,
-                    &workspace_root,
-                    &target_triple,
-                    &profile,
-                    &session_id,
-                    rust_toolchain_spec,
-                    store_progress_tx,
-                    macos_commandlinetools_version,
-                ) => result,
-            };
-
-            debug!(
-                "execute_action returned for {:?}: {:?}",
-                node_idx,
-                result.is_ok()
-            );
-
-            // Wait for progress forwarding to drain
-            let _ = forward_handle.await;
-
-            // Complete progress tracking
-            if let (Some(listener), Some(id)) = (&progress_listener, action_id) {
-                let _ = listener.complete_action(id).await;
-            }
-
-            let execute_ms = execute_start.elapsed().as_millis() as u64;
-
-            // Release the lane back to the pool
-            free_lanes.lock().push(lane);
-
-            debug!("sending completion message for {:?}", node_idx);
-            // Send result back to executor — disarm the drop guard since we're sending explicitly
-            _completion_guard.disarm();
-            let _ = message_tx.send(ExecutorMessage::ActionCompleted {
-                node_idx,
-                result,
-                execute_ms,
-                start_offset_ms,
-                lane,
+                debug!("done for {:?}", node_idx);
+                // Permit dropped here, allowing next action to run
             });
-
-            debug!("done for {:?}", node_idx);
-            // Permit dropped here, allowing next action to run
-        });
     }
 }
 
