@@ -3,7 +3,7 @@
 //! This module implements the execution engine that schedules and runs actions
 //! from the action graph with optimal parallelism while respecting dependencies.
 
-use peeps::locks::DiagnosticMutex;
+use peeps::Mutex;
 use petgraph::Direction::Incoming;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, VecDeque};
@@ -146,7 +146,7 @@ enum ExecutorMessage {
 /// fires. This guard ensures the executor always receives a completion message.
 struct CompletionGuard {
     node_idx: NodeIndex,
-    tx: Option<peeps_sync::UnboundedSender<ExecutorMessage>>,
+    tx: Option<peeps::UnboundedSender<ExecutorMessage>>,
 }
 
 impl CompletionGuard {
@@ -325,7 +325,7 @@ pub struct Executor {
     states: HashMap<NodeIndex, ActionState>,
 
     /// Results from completed actions (shared read-only with spawned tasks)
-    results: Arc<DiagnosticMutex<HashMap<NodeIndex, ActionResult>>>,
+    results: Arc<Mutex<HashMap<NodeIndex, ActionResult>>>,
 
     /// Remaining dependency count for each action (owned by executor)
     remaining_deps: HashMap<NodeIndex, usize>,
@@ -337,8 +337,8 @@ pub struct Executor {
     concurrency_limit: Arc<Semaphore>,
 
     /// Channel for messages from spawned tasks
-    message_tx: peeps_sync::UnboundedSender<ExecutorMessage>,
-    message_rx: peeps_sync::UnboundedReceiver<ExecutorMessage>,
+    message_tx: peeps::UnboundedSender<ExecutorMessage>,
+    message_rx: peeps::UnboundedReceiver<ExecutorMessage>,
 
     /// In-flight action tasks (for waiting on cancellation)
     in_flight: JoinSet<()>,
@@ -365,7 +365,7 @@ pub struct Executor {
     build_start: std::time::Instant,
 
     /// Free-list of concurrency lane IDs (0..max_concurrency)
-    free_lanes: Arc<DiagnosticMutex<Vec<u32>>>,
+    free_lanes: Arc<Mutex<Vec<u32>>>,
 
     /// Execution statistics (owned by executor)
     stats: ExecutionStats,
@@ -443,7 +443,7 @@ impl Executor {
             debug!("ready[{}] = {:?} {}", i, node_idx, action.display_name());
         }
 
-        let (message_tx, message_rx) = peeps_sync::unbounded_channel("executor_messages");
+        let (message_tx, message_rx) = peeps::unbounded_channel("executor_messages");
 
         // Detect CommandLineTools version on macOS
         #[cfg(target_os = "macos")]
@@ -471,7 +471,7 @@ impl Executor {
         Self {
             graph,
             states: HashMap::new(),
-            results: Arc::new(DiagnosticMutex::new("vxd/executor_results", HashMap::new())),
+            results: Arc::new(Mutex::new("vxd/executor_results", HashMap::new())),
             remaining_deps,
             ready_queue,
             concurrency_limit: Arc::new(Semaphore::new(max_concurrency)),
@@ -485,7 +485,7 @@ impl Executor {
             db,
             node_timings: HashMap::new(),
             build_start: std::time::Instant::now(),
-            free_lanes: Arc::new(DiagnosticMutex::new(
+            free_lanes: Arc::new(Mutex::new(
                 "vxd/executor_free_lanes",
                 (0..max_concurrency as u32).collect(),
             )),
@@ -1265,7 +1265,7 @@ async fn execute_action(
     cas: &Arc<StoreClient<crate::UpstreamCaller>>,
     exec: &Arc<RunnerClient<crate::UpstreamCaller>>,
     db: &Arc<crate::db::Database>,
-    results: &Arc<DiagnosticMutex<HashMap<NodeIndex, ActionResult>>>,
+    results: &Arc<Mutex<HashMap<NodeIndex, ActionResult>>>,
     workspace_root: &camino::Utf8PathBuf,
     _target_triple: &str,
     _profile: &str,

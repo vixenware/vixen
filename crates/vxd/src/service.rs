@@ -13,7 +13,7 @@ use crate::executor::Executor;
 use crate::inputs::*;
 use camino::Utf8PathBuf;
 use facet::trace;
-use peeps::locks::DiagnosticMutex;
+use peeps::Mutex;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
 use std::sync::Arc;
@@ -79,25 +79,25 @@ pub struct VxdService {
     picante_wal: Utf8PathBuf,
 
     /// WAL writer for incremental persistence (kept open across builds)
-    wal_writer: Arc<DiagnosticMutex<Option<WalWriter>>>,
+    wal_writer: Arc<Mutex<Option<WalWriter>>>,
 
     /// Acquired toolchains (manifest references only)
-    toolchains: Arc<DiagnosticMutex<AcquiredToolchains>>,
+    toolchains: Arc<Mutex<AcquiredToolchains>>,
 
     /// Spawn tracker for child services
-    spawn_tracker: Arc<DiagnosticMutex<SpawnTracker>>,
+    spawn_tracker: Arc<Mutex<SpawnTracker>>,
 
     /// Progress listener client (for reporting progress to vx CLI)
     progress_listener:
-        Arc<DiagnosticMutex<Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>>>,
+        Arc<Mutex<Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>>>,
 
     /// Session ID for cache key namespacing. Empty = session zero (shared).
     /// Per-connection state — each connection handler gets its own instance.
-    session_id: Arc<DiagnosticMutex<String>>,
+    session_id: Arc<Mutex<String>>,
 
     /// Cancellation token for the build active on this session (if any).
     /// Per-connection: when the CLI disconnects, only this session's build is cancelled.
-    active_build_cancel: Arc<DiagnosticMutex<Option<CancellationToken>>>,
+    active_build_cancel: Arc<Mutex<Option<CancellationToken>>>,
 }
 
 fn rule_plan_bridge_enabled() -> bool {
@@ -646,7 +646,7 @@ impl VxdService {
     pub async fn new(
         vx_home: Utf8PathBuf,
         exec_host_triple: String,
-        spawn_tracker: Arc<DiagnosticMutex<SpawnTracker>>,
+        spawn_tracker: Arc<Mutex<SpawnTracker>>,
         store: Arc<StoreClient<crate::UpstreamCaller>>,
         exec: Arc<RunnerClient<crate::UpstreamCaller>>,
     ) -> Self {
@@ -707,8 +707,8 @@ impl VxdService {
             db: Arc::new(db),
             picante_cache: cache_path,
             picante_wal: wal_path,
-            wal_writer: Arc::new(DiagnosticMutex::new("vxd/wal_writer", wal_writer)),
-            toolchains: Arc::new(DiagnosticMutex::new(
+            wal_writer: Arc::new(Mutex::new("vxd/wal_writer", wal_writer)),
+            toolchains: Arc::new(Mutex::new(
                 "vxd/toolchains",
                 AcquiredToolchains {
                     rust: None,
@@ -716,9 +716,9 @@ impl VxdService {
                 },
             )),
             spawn_tracker,
-            progress_listener: Arc::new(DiagnosticMutex::new("vxd/progress_listener", None)),
-            session_id: Arc::new(DiagnosticMutex::new("vxd/session_id", String::new())),
-            active_build_cancel: Arc::new(DiagnosticMutex::new("vxd/active_build_cancel", None)),
+            progress_listener: Arc::new(Mutex::new("vxd/progress_listener", None)),
+            session_id: Arc::new(Mutex::new("vxd/session_id", String::new())),
+            active_build_cancel: Arc::new(Mutex::new("vxd/active_build_cancel", None)),
         }
     }
 
@@ -737,9 +737,9 @@ impl VxdService {
             toolchains: self.toolchains.clone(),
             spawn_tracker: self.spawn_tracker.clone(),
             // Per-connection state: fresh for each session
-            progress_listener: Arc::new(DiagnosticMutex::new("vxd/progress_listener", None)),
-            session_id: Arc::new(DiagnosticMutex::new("vxd/session_id", String::new())),
-            active_build_cancel: Arc::new(DiagnosticMutex::new("vxd/active_build_cancel", None)),
+            progress_listener: Arc::new(Mutex::new("vxd/progress_listener", None)),
+            session_id: Arc::new(Mutex::new("vxd/session_id", String::new())),
+            active_build_cancel: Arc::new(Mutex::new("vxd/active_build_cancel", None)),
         }
     }
 

@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 default = []
-diagnostics = ["peeps/diagnostics", "peeps-sync/diagnostics", "roam-session/diagnostics"]
+diagnostics = ["peeps/diagnostics", "roam-session/diagnostics"]
 
 [package.metadata]
 
@@ -37,7 +37,6 @@ vx-io = { workspace = true }
 libc = { workspace = true }
 roam-session = { workspace = true }
 peeps = { workspace = true }
-peeps-sync = { workspace = true }
 
 [lints]
 workspace = true

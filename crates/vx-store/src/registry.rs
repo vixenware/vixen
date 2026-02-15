@@ -43,19 +43,19 @@ pub(crate) enum DownloadError {
 // Registry Manager (Inflight Deduplication)
 // =============================================================================
 
-type InflightFuture = Arc<peeps_sync::OnceCell<EnsureRegistryCrateResult>>;
+type InflightFuture = Arc<peeps::OnceCell<EnsureRegistryCrateResult>>;
 
 /// Manages in-flight registry crate acquisitions with deduplication.
 ///
 /// Same design as ToolchainManager: inflight entries are never removed.
 pub struct RegistryManager {
-    inflight: peeps::locks::DiagnosticMutex<HashMap<RegistrySpecKey, InflightFuture>>,
+    inflight: peeps::Mutex<HashMap<RegistrySpecKey, InflightFuture>>,
 }
 
 impl RegistryManager {
     pub fn new() -> Self {
         Self {
-            inflight: peeps::locks::DiagnosticMutex::new("store/registry_inflight", HashMap::new()),
+            inflight: peeps::Mutex::new("store/registry_inflight", HashMap::new()),
         }
     }
 
@@ -81,7 +81,7 @@ impl RegistryManager {
             let mut inflight = self.inflight.lock();
             inflight
                 .entry(spec_key)
-                .or_insert_with(|| Arc::new(peeps_sync::OnceCell::new("registry_inflight")))
+                .or_insert_with(|| Arc::new(peeps::OnceCell::new("registry_inflight")))
                 .clone()
         };
 

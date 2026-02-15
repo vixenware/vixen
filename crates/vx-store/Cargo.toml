@@ -23,7 +23,6 @@ pin-project-lite = { workspace = true }
 roam = { workspace = true }
 roam-session = { workspace = true }
 peeps = { workspace = true }
-peeps-sync = { workspace = true }
 roam-stream = { workspace = true }
 sha2 = "0.10"
 tar = { workspace = true }
@@ -44,7 +43,7 @@ tracing-subscriber = { workspace = true }
 
 [features]
 default = []
-diagnostics = ["peeps/diagnostics", "peeps-sync/diagnostics", "roam-session/diagnostics"]
+diagnostics = ["peeps/diagnostics", "roam-session/diagnostics"]
 
 [lints]
 workspace = true

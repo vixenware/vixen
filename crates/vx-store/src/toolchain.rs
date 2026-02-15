@@ -322,17 +322,17 @@ fn rust_component_name(component: &RustComponent) -> Option<&'static str> {
     }
 }
 
-type InflightFuture = Arc<peeps_sync::OnceCell<EnsureToolchainResult>>;
+type InflightFuture = Arc<peeps::OnceCell<EnsureToolchainResult>>;
 
 /// Manages in-flight toolchain acquisitions with deduplication.
 pub(crate) struct ToolchainManager {
-    inflight: peeps::locks::DiagnosticMutex<HashMap<ToolchainSpecKey, InflightFuture>>,
+    inflight: peeps::Mutex<HashMap<ToolchainSpecKey, InflightFuture>>,
 }
 
 impl ToolchainManager {
     pub(crate) fn new() -> Self {
         Self {
-            inflight: peeps::locks::DiagnosticMutex::new(
+            inflight: peeps::Mutex::new(
                 "store/toolchain_inflight",
                 HashMap::new(),
             ),
@@ -359,7 +359,7 @@ impl ToolchainManager {
             let mut inflight = self.inflight.lock();
             inflight
                 .entry(spec_key)
-                .or_insert_with(|| Arc::new(peeps_sync::OnceCell::new("toolchain_inflight")))
+                .or_insert_with(|| Arc::new(peeps::OnceCell::new("toolchain_inflight")))
                 .clone()
         };
 
@@ -855,14 +855,14 @@ impl StoreService {
         // Track per-file info: content_hash -> (blob_node, size)
         // This lets us build DirectoryNode entries after extraction.
         let rustc_file_info: Arc<
-            peeps::locks::DiagnosticMutex<HashMap<Blake3Hash, ExtractedFileInfo>>,
-        > = Arc::new(peeps::locks::DiagnosticMutex::new(
+            peeps::Mutex<HashMap<Blake3Hash, ExtractedFileInfo>>,
+        > = Arc::new(peeps::Mutex::new(
             "store/rustc_file_info",
             HashMap::new(),
         ));
         let std_file_info: Arc<
-            peeps::locks::DiagnosticMutex<HashMap<Blake3Hash, ExtractedFileInfo>>,
-        > = Arc::new(peeps::locks::DiagnosticMutex::new(
+            peeps::Mutex<HashMap<Blake3Hash, ExtractedFileInfo>>,
+        > = Arc::new(peeps::Mutex::new(
             "store/std_file_info",
             HashMap::new(),
         ));
@@ -1472,8 +1472,8 @@ impl StoreService {
         };
 
         // Track per-file info during extraction
-        let file_info: Arc<peeps::locks::DiagnosticMutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
-            Arc::new(peeps::locks::DiagnosticMutex::new(
+        let file_info: Arc<peeps::Mutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
+            Arc::new(peeps::Mutex::new(
                 "store/file_info",
                 HashMap::new(),
             ));
@@ -2258,7 +2258,7 @@ impl StoreService {
 async fn tree_manifest_to_merkle(
     service: &StoreService,
     tree: &vx_store_proto::TreeManifest,
-    file_info: &Arc<peeps::locks::DiagnosticMutex<HashMap<Blake3Hash, ExtractedFileInfo>>>,
+    file_info: &Arc<peeps::Mutex<HashMap<Blake3Hash, ExtractedFileInfo>>>,
 ) -> Result<(NodeHash, u64), String> {
     use vx_store_proto::TreeEntryKind;
 

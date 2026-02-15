@@ -263,7 +263,7 @@ where
                 }
             };
 
-            let (vfs_dead_tx, vfs_dead_rx) = peeps_sync::watch_channel("vfs_dead", false);
+            let (vfs_dead_tx, vfs_dead_rx) = peeps::watch_channel("vfs_dead", false);
 
             let _ = result_tx.send(Ok(VfsStart::Mounted {
                 mount_path,

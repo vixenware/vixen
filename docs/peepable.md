@@ -1,4 +1,4 @@
-# `peeps_tasks::peepable` instrumentation guide
+# `peeps::peepable` instrumentation guide
 
 This is the quick reference for adding causal wait edges with `peeps`.
 
@@ -18,13 +18,13 @@ Use it on real await points that can block progress (socket I/O, RPC waits, chan
 Two equivalent forms:
 
 ```rust
-use peeps_tasks::PeepableFutureExt;
+use peeps::PeepableFutureExt;
 
 stream.read(&mut buf).peepable("socket.read").await?;
 ```
 
 ```rust
-use peeps_tasks::peepable;
+use peeps::peepable;
 
 peepable(stream.read(&mut buf), "socket.read").await?;
 ```
@@ -90,7 +90,7 @@ self.stream.write_all(&header).await?;
 After:
 
 ```rust
-use peeps_tasks::PeepableFutureExt;
+use peeps::PeepableFutureExt;
 
 let n = self.stream.read(&mut tmp).peepable("socket.read").await?;
 self.stream
@@ -110,9 +110,8 @@ For full chains across processes, keep both:
 
 ## Agent checklist
 
-1. Add `use peeps_tasks::PeepableFutureExt;`
+1. Add `use peeps::PeepableFutureExt;`
 2. Wrap every meaningful blocking `.await` with `.peepable("<resource>")`
 3. Keep names stable and low-cardinality
 4. Build and run checks
 5. Verify dashboard shows new wait resources under task/resource views
-

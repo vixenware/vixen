@@ -195,11 +195,11 @@ impl StoreService {
                 toolchain_manager: ToolchainManager::new(),
                 registry_manager: RegistryManager::new(),
                 download_semaphore: Arc::new(tokio::sync::Semaphore::new(32)),
-                rust_component_tarballs: peeps::locks::DiagnosticMutex::new(
+                rust_component_tarballs: peeps::Mutex::new(
                     "store/rust_component_tarballs",
                     std::collections::HashMap::new(),
                 ),
-                rust_component_trees: peeps::locks::DiagnosticMutex::new(
+                rust_component_trees: peeps::Mutex::new(
                     "store/rust_component_trees",
                     std::collections::HashMap::new(),
                 ),

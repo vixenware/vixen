@@ -285,8 +285,8 @@ pub struct RunnerServiceInner {
     /// Stores Ok(prefix_id) or Err(message) — errors are cached too, since a missing
     /// toolchain manifest won't fix itself without a new runner session.
     #[allow(clippy::type_complexity)]
-    toolchain_flights: peeps::locks::DiagnosticMutex<
-        HashMap<Blake3Hash, Arc<peeps_sync::OnceCell<Result<String, String>>>>,
+    toolchain_flights: peeps::Mutex<
+        HashMap<Blake3Hash, Arc<peeps::OnceCell<Result<String, String>>>>,
     >,
 
     /// Track created prefix IDs to avoid collisions
@@ -317,7 +317,7 @@ impl RunnerService {
             inner: Arc::new(RunnerServiceInner {
                 cas,
                 vfs,
-                toolchain_flights: peeps::locks::DiagnosticMutex::new(
+                toolchain_flights: peeps::Mutex::new(
                     "runner/toolchain_flights",
                     HashMap::new(),
                 ),
@@ -390,7 +390,7 @@ impl RunnerService {
             let mut flights = self.toolchain_flights.lock();
             flights
                 .entry(toolchain_manifest_hash)
-                .or_insert_with(|| Arc::new(peeps_sync::OnceCell::new("toolchain_prefix_flight")))
+                .or_insert_with(|| Arc::new(peeps::OnceCell::new("toolchain_prefix_flight")))
                 .clone()
         };
         let result = cell

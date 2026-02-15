@@ -16,7 +16,7 @@ pub enum VfsStart {
     Mounted {
         mount_path: Utf8PathBuf,
         /// Becomes `true` when the VFS session dies unexpectedly.
-        vfs_dead: peeps_sync::WatchReceiver<bool>,
+        vfs_dead: peeps::WatchReceiver<bool>,
         /// FUSE telemetry state for diagnostics (Linux only).
         #[cfg(target_os = "linux")]
         telemetry: fuse3::telemetry::TelemetryState,

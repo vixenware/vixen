@@ -134,11 +134,11 @@ pub async fn run_sandboxed_command(
 
     // Merge stdout and stderr into a single combined output buffer.
     // Also track the latest line for progress reporting.
-    let combined_output = std::sync::Arc::new(peeps::locks::DiagnosticMutex::new(
+    let combined_output = std::sync::Arc::new(peeps::Mutex::new(
         "runner/combined_output",
         String::new(),
     ));
-    let latest_line = std::sync::Arc::new(peeps::locks::DiagnosticMutex::new(
+    let latest_line = std::sync::Arc::new(peeps::Mutex::new(
         "runner/latest_line",
         String::new(),
     ));

@@ -15,7 +15,6 @@ figue = { workspace = true }
 picante = { workspace = true }
 roam = { workspace = true }
 peeps = { workspace = true }
-peeps-sync = { workspace = true }
 roam-stream = { workspace = true }
 tokio = { workspace = true }
 blake3 = { workspace = true }
@@ -44,7 +43,7 @@ vx-tarball = { workspace = true }
 
 [features]
 default = []
-diagnostics = ["peeps/diagnostics", "peeps-sync/diagnostics", "roam-stream/diagnostics"]
+diagnostics = ["peeps/diagnostics", "roam-stream/diagnostics"]
 
 [lints]
 workspace = true

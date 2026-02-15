@@ -26,7 +26,7 @@ use camino::Utf8PathBuf;
 use eyre::Result;
 use facet::Facet;
 use figue as args;
-use peeps::locks::DiagnosticMutex;
+use peeps::Mutex;
 use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::sync::Arc;
 use std::time::Duration;
@@ -159,7 +159,7 @@ struct ServiceClients {
 /// protocol on each, and return connected roam clients.
 async fn ensure_services(
     args: &Args,
-    spawn_tracker: &Arc<DiagnosticMutex<SpawnTracker>>,
+    spawn_tracker: &Arc<Mutex<SpawnTracker>>,
 ) -> Result<ServiceClients> {
     use vx_io::spawn::ServiceBuilder;
 
@@ -291,7 +291,7 @@ async fn async_main() -> Result<()> {
     // Keep lock_file alive for the daemon's lifetime
     let _lock_guard = lock_file;
 
-    let spawn_tracker = Arc::new(DiagnosticMutex::new(
+    let spawn_tracker = Arc::new(Mutex::new(
         "vxd/spawn_tracker",
         SpawnTracker::default(),
     ));
@@ -371,7 +371,7 @@ async fn async_main() -> Result<()> {
     // Track active connections and shut down after idle timeout.
     // Normal: 2 hours, test mode: 2s, boot failed: 2s.
     let active_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let last_disconnect = Arc::new(DiagnosticMutex::new(
+    let last_disconnect = Arc::new(Mutex::new(
         "vxd/last_disconnect",
         Option::<tokio::time::Instant>::None,
     ));

@@ -7,7 +7,7 @@
 //! - `vx-vfs`, which serves VFS connections over SHM.
 
 use crate::types::{VfsConfig, VfsError, VfsStart};
-use peeps_sync::{Sender, WatchSender};
+use peeps::{Sender, WatchSender};
 use roam_shm::bootstrap::{SessionId, SessionPaths, unix as shm_bootstrap};
 use roam_shm::driver::MultiPeerHostDriver;
 use roam_shm::{AddPeerOptions, SegmentConfig, ShmHost};
@@ -25,8 +25,8 @@ where
 {
     tracing::debug!(mount_path = %config.mount_path, "entering macos vfs startup");
 
-    let (mount_ready_tx, mut mount_ready_rx) = peeps_sync::channel::<()>("mount_ready", 2);
-    let (vfs_dead_tx, vfs_dead_rx) = peeps_sync::watch_channel("vfs_dead", false);
+    let (mount_ready_tx, mut mount_ready_rx) = peeps::channel::<()>("mount_ready", 2);
+    let (vfs_dead_tx, vfs_dead_rx) = peeps::watch_channel("vfs_dead", false);
     let sid = spawn_shm_loop(vfs, mount_ready_tx, vfs_dead_tx)?;
 
     let debug_mode = std::env::var("VIXENFS_DEBUG").as_deref() == Ok("1");

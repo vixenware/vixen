@@ -34,7 +34,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use camino::Utf8PathBuf;
-use peeps::locks::DiagnosticMutex;
+use peeps::Mutex;
 use vixenfs_proto::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
     ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
@@ -244,7 +244,7 @@ pub struct CasVfs {
     /// CAS client for fetching blobs
     pub(crate) cas: Arc<StoreClient<crate::StoreCaller>>,
     /// Unified VFS state lock: items + prefixes
-    pub(crate) state: DiagnosticMutex<VfsState>,
+    pub(crate) state: Mutex<VfsState>,
     /// Next available ItemId
     next_id: AtomicU64,
     /// L2 chunk cache (disk): persistent across vx-vfsd restarts.
@@ -254,9 +254,9 @@ pub struct CasVfs {
     /// BlobNode metadata cache: NodeHash → parsed BlobNode.
     /// BlobNodes are immutable (content-addressed) so caching is unconditionally safe.
     /// Small: each entry is ~100 bytes × MAX_CHUNKS_PER_BLOB chunk entries.
-    blobnode_cache: DiagnosticMutex<HashMap<NodeHash, Arc<BlobNode>>>,
+    blobnode_cache: Mutex<HashMap<NodeHash, Arc<BlobNode>>>,
     /// Diagnostic tracker for CAS-backed file identity stability.
-    observed_identities: DiagnosticMutex<HashMap<ItemId, ObservedIdentity>>,
+    observed_identities: Mutex<HashMap<ItemId, ObservedIdentity>>,
     /// Mount path for reading back files written directly to disk (ProjFS on Windows).
     mount_path: Utf8PathBuf,
 }
@@ -294,7 +294,7 @@ impl CasVfs {
 
         Self {
             cas,
-            state: DiagnosticMutex::new(
+            state: Mutex::new(
                 "CasVfs::state",
                 VfsState {
                     items,
@@ -303,8 +303,8 @@ impl CasVfs {
             ),
             next_id: AtomicU64::new(2), // 1=root
             disk_cache_dir,
-            blobnode_cache: DiagnosticMutex::new("CasVfs::blobnode_cache", HashMap::new()),
-            observed_identities: DiagnosticMutex::new(
+            blobnode_cache: Mutex::new("CasVfs::blobnode_cache", HashMap::new()),
+            observed_identities: Mutex::new(
                 "CasVfs::observed_identities",
                 HashMap::new(),
             ),

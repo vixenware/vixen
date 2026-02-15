@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use eyre::Result;
 use facet::Facet;
-use peeps_sync::{WatchReceiver, WatchSender};
+use peeps::{WatchReceiver, WatchSender};
 use roam_stream::{ConnectionHandle, ServiceDispatcher};
 
 /// Optional cleanup hook for services that need to do work before exit.
@@ -83,7 +83,7 @@ pub enum BootState {
 /// connection acceptance.
 pub struct BootGate<S> {
     boot_rx: WatchReceiver<BootState>,
-    service: peeps_sync::OnceCell<S>,
+    service: peeps::OnceCell<S>,
 }
 
 /// Sender half — used by the daemon's boot task to signal completion.
@@ -106,10 +106,10 @@ impl BootTx {
 impl<S: Send + Sync + 'static> BootGate<S> {
     /// Create a new boot gate and its sender.
     pub fn new() -> (Arc<Self>, BootTx) {
-        let (tx, rx) = peeps_sync::watch_channel("boot_state", BootState::Booting);
+        let (tx, rx) = peeps::watch_channel("boot_state", BootState::Booting);
         let gate = Arc::new(Self {
             boot_rx: rx,
-            service: peeps_sync::OnceCell::new("boot_service"),
+            service: peeps::OnceCell::new("boot_service"),
         });
         let boot_tx = BootTx { tx };
         (gate, boot_tx)

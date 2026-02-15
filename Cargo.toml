@@ -12,9 +12,9 @@ repository = "https://github.com/bearcove/vx"
 # instrumentation
 peeps = { git = "https://github.com/bearcove/peeps", branch = "main", features = [
   "locks",
+  "sync",
   "dashboard",
 ] }
-peeps-sync = { git = "https://github.com/bearcove/peeps", branch = "main" }
 
 
 # internal crates
@@ -178,8 +178,6 @@ facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
 
 [patch."https://github.com/bearcove/peeps"]
 peeps = { path = "/Users/amos/bearcove/peeps/crates/peeps" }
-peeps-locks = { path = "/Users/amos/bearcove/peeps/crates/peeps-locks" }
-peeps-sync = { path = "/Users/amos/bearcove/peeps/crates/peeps-sync" }
 peeps-tasks = { path = "/Users/amos/bearcove/peeps/crates/peeps-tasks" }
 peeps-threads = { path = "/Users/amos/bearcove/peeps/crates/peeps-threads" }
 peeps-types = { path = "/Users/amos/bearcove/peeps/crates/peeps-types" }

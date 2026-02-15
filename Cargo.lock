@@ -1781,7 +1781,6 @@ dependencies = [
 name = "peeps-tasks"
 version = "0.1.0"
 dependencies = [
- "backtrace",
  "facet",
  "peeps-types",
  "tokio",
@@ -1802,6 +1801,7 @@ version = "0.1.0"
 dependencies = [
  "facet",
  "inventory",
+ "ulid",
 ]
 
 [[package]]
@@ -2173,6 +2173,7 @@ dependencies = [
  "roam-wire",
  "tokio",
  "tracing",
+ "ulid",
  "wasm-bindgen-futures",
 ]
 
