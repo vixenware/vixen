@@ -238,11 +238,13 @@ impl Listener {
     pub async fn accept(&mut self) -> Result<(Stream, String)> {
         match self {
             Listener::Tcp(listener) => {
-                let (stream, addr) = listener.accept().await?;
+                let (stream, addr) =
+                    peeps::tasks::peep!(listener.accept(), "net.listener.tcp.accept").await?;
                 Ok((Stream::Tcp(stream), addr.to_string()))
             }
             Listener::Local { listener, .. } => {
-                let stream = listener.accept().await?;
+                let stream =
+                    peeps::tasks::peep!(listener.accept(), "net.listener.local.accept").await?;
                 #[cfg(unix)]
                 return Ok((Stream::Local(stream), "local".to_string()));
                 #[cfg(windows)]

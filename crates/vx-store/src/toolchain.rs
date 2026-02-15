@@ -872,115 +872,126 @@ impl StoreService {
         let rustc_info = rustc_file_info.clone();
         let std_info = std_file_info.clone();
 
-        let (rustc_result, rust_std_result) =
-            join(
-                async {
-                    let _permit = sem.acquire().await.map_err(|e| {
-                        vx_toolchain::ToolchainError::FetchError {
-                            url: rustc_url.clone(),
-                            source: Box::new(std::io::Error::other(format!(
-                                "download semaphore closed: {e}"
-                            ))),
+        let (rustc_result, rust_std_result) = join(
+            async {
+                let _permit = peeps::tasks::peep!(
+                    sem.acquire(),
+                    "store.toolchain.download_permit.acquire",
+                    {
+                        "resource.kind" => "semaphore",
+                    }
+                )
+                .await
+                .map_err(|e| vx_toolchain::ToolchainError::FetchError {
+                    url: rustc_url.clone(),
+                    source: Box::new(std::io::Error::other(format!(
+                        "download semaphore closed: {e}"
+                    ))),
+                })?;
+                download_and_extract_component(
+                    &rustc_url,
+                    &rustc_hash,
+                    "rustc",
+                    Compression::Xz,
+                    2,
+                    progress,
+                    async move |data: Vec<u8>| {
+                        let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
+                        let prepared = chunking::prepare_blob(&data);
+                        // Store chunks
+                        for ci in &prepared.chunks {
+                            let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
+                            this1
+                                .storage
+                                .put_chunk(&ci.hash, chunk_data)
+                                .await
+                                .map_err(|e| format!("failed to write chunk: {e}"))?;
                         }
-                    })?;
-                    download_and_extract_component(
-                        &rustc_url,
-                        &rustc_hash,
-                        "rustc",
-                        Compression::Xz,
-                        2,
-                        progress,
-                        async move |data: Vec<u8>| {
-                            let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
-                            let prepared = chunking::prepare_blob(&data);
-                            // Store chunks
-                            for ci in &prepared.chunks {
-                                let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
-                                this1
-                                    .storage
-                                    .put_chunk(&ci.hash, chunk_data)
-                                    .await
-                                    .map_err(|e| format!("failed to write chunk: {e}"))?;
-                            }
-                            // Store blob node if multi-chunk
-                            let blob_node = if let Some(bn) = &prepared.blob_node {
-                                this1
-                                    .storage
-                                    .put_node(&bn.node_hash, &bn.serialized_bytes)
-                                    .await
-                                    .map_err(|e| format!("failed to write BlobNode: {e}"))?;
-                                Some(bn.node_hash)
-                            } else {
-                                None
-                            };
-                            // Track info
-                            rustc_info.lock().insert(
-                                content_hash.0,
-                                ExtractedFileInfo {
-                                    content_hash,
-                                    blob_node,
-                                    size: data.len() as u64,
-                                    executable: false, // will be set from tree manifest
-                                },
-                            );
-                            Ok(content_hash.0)
-                        },
-                    )
-                    .await
-                },
-                async {
-                    let _permit = sem.acquire().await.map_err(|e| {
-                        vx_toolchain::ToolchainError::FetchError {
-                            url: rust_std_url.clone(),
-                            source: Box::new(std::io::Error::other(format!(
-                                "download semaphore closed: {e}"
-                            ))),
+                        // Store blob node if multi-chunk
+                        let blob_node = if let Some(bn) = &prepared.blob_node {
+                            this1
+                                .storage
+                                .put_node(&bn.node_hash, &bn.serialized_bytes)
+                                .await
+                                .map_err(|e| format!("failed to write BlobNode: {e}"))?;
+                            Some(bn.node_hash)
+                        } else {
+                            None
+                        };
+                        // Track info
+                        rustc_info.lock().insert(
+                            content_hash.0,
+                            ExtractedFileInfo {
+                                content_hash,
+                                blob_node,
+                                size: data.len() as u64,
+                                executable: false, // will be set from tree manifest
+                            },
+                        );
+                        Ok(content_hash.0)
+                    },
+                )
+                .await
+            },
+            async {
+                let _permit = peeps::tasks::peep!(
+                    sem.acquire(),
+                    "store.toolchain.download_permit.acquire",
+                    {
+                        "resource.kind" => "semaphore",
+                    }
+                )
+                .await
+                .map_err(|e| vx_toolchain::ToolchainError::FetchError {
+                    url: rust_std_url.clone(),
+                    source: Box::new(std::io::Error::other(format!(
+                        "download semaphore closed: {e}"
+                    ))),
+                })?;
+                download_and_extract_component(
+                    &rust_std_url,
+                    &rust_std_hash,
+                    "rust-std",
+                    Compression::Xz,
+                    2,
+                    progress,
+                    async move |data: Vec<u8>| {
+                        let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
+                        let prepared = chunking::prepare_blob(&data);
+                        for ci in &prepared.chunks {
+                            let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
+                            this2
+                                .storage
+                                .put_chunk(&ci.hash, chunk_data)
+                                .await
+                                .map_err(|e| format!("failed to write chunk: {e}"))?;
                         }
-                    })?;
-                    download_and_extract_component(
-                        &rust_std_url,
-                        &rust_std_hash,
-                        "rust-std",
-                        Compression::Xz,
-                        2,
-                        progress,
-                        async move |data: Vec<u8>| {
-                            let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
-                            let prepared = chunking::prepare_blob(&data);
-                            for ci in &prepared.chunks {
-                                let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
-                                this2
-                                    .storage
-                                    .put_chunk(&ci.hash, chunk_data)
-                                    .await
-                                    .map_err(|e| format!("failed to write chunk: {e}"))?;
-                            }
-                            let blob_node = if let Some(bn) = &prepared.blob_node {
-                                this2
-                                    .storage
-                                    .put_node(&bn.node_hash, &bn.serialized_bytes)
-                                    .await
-                                    .map_err(|e| format!("failed to write BlobNode: {e}"))?;
-                                Some(bn.node_hash)
-                            } else {
-                                None
-                            };
-                            std_info.lock().insert(
-                                content_hash.0,
-                                ExtractedFileInfo {
-                                    content_hash,
-                                    blob_node,
-                                    size: data.len() as u64,
-                                    executable: false,
-                                },
-                            );
-                            Ok(content_hash.0)
-                        },
-                    )
-                    .await
-                },
-            )
-            .await;
+                        let blob_node = if let Some(bn) = &prepared.blob_node {
+                            this2
+                                .storage
+                                .put_node(&bn.node_hash, &bn.serialized_bytes)
+                                .await
+                                .map_err(|e| format!("failed to write BlobNode: {e}"))?;
+                            Some(bn.node_hash)
+                        } else {
+                            None
+                        };
+                        std_info.lock().insert(
+                            content_hash.0,
+                            ExtractedFileInfo {
+                                content_hash,
+                                blob_node,
+                                size: data.len() as u64,
+                                executable: false,
+                            },
+                        );
+                        Ok(content_hash.0)
+                    },
+                )
+                .await
+            },
+        )
+        .await;
 
         let rustc_tree = match rustc_result {
             Ok(tree) => tree,

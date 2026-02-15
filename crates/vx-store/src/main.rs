@@ -128,7 +128,8 @@ async fn async_main() -> Result<()> {
     let boot_service = gate.boot_service();
 
     loop {
-        let (stream, peer_addr) = listener.accept().await?;
+        let (stream, peer_addr) =
+            peeps::tasks::peep!(listener.accept(), "store.listener.accept").await?;
         tracing::info!("accepted connection from {peer_addr}");
         let boot_service = boot_service.clone();
 
@@ -162,7 +163,8 @@ async fn async_main() -> Result<()> {
                 });
 
             // Accept virtual connections — each gets a StoreDispatcher.
-            while let Some(conn) = incoming.recv().await {
+            while let Some(conn) = peeps::tasks::peep!(incoming.recv(), "store.incoming.recv").await
+            {
                 let Some(store) = boot_service.gate().service() else {
                     conn.reject("boot not complete".into(), vec![]);
                     continue;
