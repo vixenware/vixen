@@ -1,9 +1,6 @@
-use std::sync::Arc;
-
 use camino::Utf8PathBuf;
 
 use crate::Result;
-use crate::vfs::CasVfs;
 
 /// No stuck mount cleanup on Windows (yet).
 pub async fn cleanup_stuck_mount(_mount_path: &Utf8PathBuf) -> Result<()> {
@@ -15,9 +12,6 @@ pub async fn run_sentinel(_mount_path: &Utf8PathBuf) -> Result<()> {
     tracing::error!("sentinel mode is not supported on Windows");
     Ok(())
 }
-
-/// No platform signal handler on Windows.
-pub fn setup_diagnostics_signal(_vfs: Arc<CasVfs>, _mount_path: Utf8PathBuf) {}
 
 /// No platform-specific diagnostics on Windows.
 pub async fn dump_platform_diagnostics(_mount_path: &Utf8PathBuf) {}

@@ -1,9 +1,6 @@
-use std::sync::Arc;
-
 use camino::Utf8PathBuf;
 
 use crate::Result;
-use crate::vfs::CasVfs;
 
 /// Sentinel mode: watch parent process, unmount when it dies.
 pub async fn run_sentinel(mount_path: &Utf8PathBuf) -> Result<()> {
@@ -27,25 +24,4 @@ pub async fn run_sentinel(mount_path: &Utf8PathBuf) -> Result<()> {
     super::os::unmount(mount_path);
 
     Ok(())
-}
-
-/// Register SIGUSR1 handler that dumps diagnostics.
-pub fn setup_diagnostics_signal(vfs: Arc<CasVfs>, mount_path: Utf8PathBuf) {
-    peeps::tasks::spawn_tracked("sigusr1_handler", async move {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut sigusr1 =
-            signal(SignalKind::user_defined1()).expect("failed to register SIGUSR1 handler");
-        loop {
-            sigusr1.recv().await;
-            tracing::info!("SIGUSR1 received, dumping diagnostics");
-            super::os::dump_platform_diagnostics(&mount_path).await;
-            vfs.dump_all_state();
-            eprint!("{}", roam_session::diagnostic::dump_all_diagnostics());
-            #[cfg(target_os = "macos")]
-            {
-                eprintln!("\n=== SHM STATE ===");
-                eprintln!("{}", roam_shm::dump_all_state());
-            }
-        }
-    });
 }

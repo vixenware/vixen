@@ -484,8 +484,6 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
                     return Err(format!("VFS smoke test failed: {reason}").into());
                 }
 
-                platform::setup_diagnostics_signal(vfs.clone(), mount_path.clone());
-
                 let vfs_mount_path = mount_path.clone();
                 peeps::tasks::spawn_tracked("vfs_death_watcher", async move {
                     loop {

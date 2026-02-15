@@ -1,9 +1,6 @@
-use std::sync::Arc;
-
 use camino::Utf8PathBuf;
 
 use crate::Result;
-use crate::vfs::CasVfs;
 
 // Platform-specific modules
 cfg_if::cfg_if! {
@@ -33,17 +30,6 @@ pub async fn run_sentinel(mount_path: &Utf8PathBuf) -> Result<()> {
             unix::run_sentinel(mount_path).await
         } else {
             os::run_sentinel(mount_path).await
-        }
-    }
-}
-
-/// Register platform signal handler for diagnostics dumps.
-pub fn setup_diagnostics_signal(vfs: Arc<CasVfs>, mount_path: Utf8PathBuf) {
-    cfg_if::cfg_if! {
-        if #[cfg(unix)] {
-            unix::setup_diagnostics_signal(vfs, mount_path);
-        } else {
-            os::setup_diagnostics_signal(vfs, mount_path);
         }
     }
 }

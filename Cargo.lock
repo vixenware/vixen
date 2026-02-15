@@ -1754,6 +1754,7 @@ dependencies = [
  "peeps-threads",
  "peeps-types",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
