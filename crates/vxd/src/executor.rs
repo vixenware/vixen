@@ -591,12 +591,12 @@ impl Executor {
             while let Some(node_idx) = self.ready_queue.pop_front() {
                 debug!("spawning action for node {:?}", node_idx);
                 self.states.insert(node_idx, ActionState::Running);
-                let permit = self
-                    .concurrency_limit
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .unwrap();
+                let permit = peeps::tasks::peep!(
+                    self.concurrency_limit.clone().acquire_owned(),
+                    "executor.concurrency.acquire_owned"
+                )
+                .await
+                .unwrap();
                 self.spawn_action(node_idx, permit);
             }
 
@@ -613,7 +613,7 @@ impl Executor {
             }
 
             // Wait for a completion message
-            match self.message_rx.recv().await {
+            match peeps::tasks::peep!(self.message_rx.recv(), "executor.message.recv").await {
                 Some(ExecutorMessage::ActionCompleted {
                     node_idx,
                     result,
@@ -1167,22 +1167,28 @@ impl Executor {
             // Spawn a task to forward StoreProgress → ActionProgress
             let forward_listener = progress_listener.clone();
             let forward_action_id = action_id;
-            let forward_handle = tokio::spawn(async move {
-                while let Ok(Some(sp)) = store_progress_rx.recv().await {
-                    if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
-                        let _ = listener
-                            .update_progress(
-                                id,
-                                ActionProgress {
-                                    message: sp.message,
-                                    current: sp.current,
-                                    total: sp.total,
-                                },
-                            )
-                            .await;
+            let forward_handle =
+                peeps::tasks::spawn_tracked("vxd_executor_store_progress_forward", async move {
+                    while let Ok(Some(sp)) = peeps::tasks::peep!(
+                        store_progress_rx.recv(),
+                        "executor.store_progress.recv"
+                    )
+                    .await
+                    {
+                        if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
+                            let _ = listener
+                                .update_progress(
+                                    id,
+                                    ActionProgress {
+                                        message: sp.message,
+                                        current: sp.current,
+                                        total: sp.total,
+                                    },
+                                )
+                                .await;
+                        }
                     }
-                }
-            });
+                });
 
             // Acquire a lane ID for timeline tracking
             let lane = free_lanes.lock().pop().unwrap_or(0);
