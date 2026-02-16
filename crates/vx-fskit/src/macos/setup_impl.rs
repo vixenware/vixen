@@ -134,6 +134,13 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
     if debug {
         source.push_str("&debug=1");
     }
+    if let Ok(addr) = std::env::var("PEEPS_DASHBOARD") {
+        let trimmed = addr.trim();
+        if !trimmed.is_empty() {
+            source.push_str("&peeps_dashboard=");
+            source.push_str(trimmed);
+        }
+    }
 
     let mount_output = match Command::new("/sbin/mount")
         .args(["-F", "-t", "vixenfs", &source, mount_path.as_str()])

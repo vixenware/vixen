@@ -1,12 +1,12 @@
 {
-  "originHash" : "d791adad678b25e75db12600bb18cfaf30675e6ec846dd214c6eeb55201b9105",
+  "originHash" : "be821e8ef224290395d9b7224268270fa4b496ff8a48c525d106ef8b1320f6f1",
   "pins" : [
     {
       "identity" : "roam",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/bearcove/roam.git",
       "state" : {
-        "revision" : "6c5e9007aa298a86010e1d356605c6c13afb24b2"
+        "revision" : "f90823a5d802acb66cc61af6371d9434a0c25c6f"
       }
     },
     {

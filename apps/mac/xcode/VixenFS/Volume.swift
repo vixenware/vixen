@@ -238,15 +238,27 @@ final class Volume: FSVolume {
         operation: StaticString = #function,
         _ body: (VfsClient) async throws -> T
     ) async throws -> T {
+        let operationName = String(describing: operation)
+        let requestID = await SwiftPeepsClient.shared.beginRequest(operation: operationName)
+
         let client: VfsClient
         do {
             client = try await VfsConnection.shared.getClient()
         } catch {
+            let errno = vixenPOSIXCode(for: error)
+            await SwiftPeepsClient.shared.finishRequest(
+                requestID: requestID, operation: operationName, errno: errno)
             throw vixenMappedFSError(error, operation: operation, logger: log)
         }
         do {
-            return try await body(client)
+            let value = try await body(client)
+            await SwiftPeepsClient.shared.finishRequest(
+                requestID: requestID, operation: operationName, errno: nil)
+            return value
         } catch {
+            let errno = vixenPOSIXCode(for: error)
+            await SwiftPeepsClient.shared.finishRequest(
+                requestID: requestID, operation: operationName, errno: errno)
             throw vixenMappedFSError(error, operation: operation, logger: log)
         }
     }

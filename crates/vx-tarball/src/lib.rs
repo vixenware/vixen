@@ -160,14 +160,14 @@ async fn extract_tar<R: AsyncRead + Unpin>(
 
         // Extract file
         let mut output_file =
-            tokio::fs::File::create(&target_path)
+            peeps::fs::File::create(&target_path)
                 .await
                 .map_err(|e| TarballError::CreateFile {
                     path: target_path.clone(),
                     source: e,
                 })?;
 
-        tokio::io::copy(&mut entry, &mut output_file)
+        tokio::io::copy(&mut entry, output_file.as_mut_tokio())
             .await
             .map_err(|e| TarballError::WriteFile {
                 path: target_path.clone(),

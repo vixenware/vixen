@@ -222,7 +222,7 @@ impl Listener {
                 }
 
                 if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
+                    peeps::fs::create_dir_all(parent).await?;
                 }
 
                 #[cfg(unix)]

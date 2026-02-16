@@ -268,6 +268,10 @@ actor VfsConnection {
         }
         let sid = mountOptions.sid
         debugEnabled = mountOptions.debug
+        await SwiftPeepsClient.shared.configure(
+            dashboardAddr: mountOptions.peepsDashboard,
+            debugFrames: mountOptions.debug
+        )
         if debugEnabled {
             log.notice("mount debug enabled for sid=\(sid, privacy: .public)")
         }
@@ -321,6 +325,7 @@ actor VfsConnection {
         await ConnectionHealth.shared.recordDisconnected(reason: "requested")
         disconnectRequested = true
         debugEnabled = false
+        await SwiftPeepsClient.shared.configure(dashboardAddr: nil, debugFrames: false)
         driverTask?.cancel()
         driverTask = nil
         client = nil
@@ -443,6 +448,7 @@ actor VfsConnection {
     private struct MountOptions {
         let sid: String
         let debug: Bool
+        let peepsDashboard: String?
     }
 
     private func parseMountOptions(from url: URL) -> MountOptions? {
@@ -456,7 +462,8 @@ actor VfsConnection {
         }
         let debugValue = items.first(where: { $0.name == "debug" })?.value?.lowercased()
         let debug = debugValue == "1" || debugValue == "true" || debugValue == "yes"
-        return MountOptions(sid: sid, debug: debug)
+        let peepsDashboard = items.first(where: { $0.name == "peeps_dashboard" })?.value
+        return MountOptions(sid: sid, debug: debug, peepsDashboard: peepsDashboard)
     }
 
     private func isValidSid(_ sid: String) -> Bool {
