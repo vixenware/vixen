@@ -255,6 +255,11 @@ final class Volume: FSVolume {
                 client = try await VfsConnection.shared.getClient()
             } catch {
                 let errno = vixenPOSIXCode(for: error)
+                if errno == POSIXError.ETIMEDOUT.rawValue {
+                    log.error(
+                        "\(operation): timeout request_id=\(requestID, privacy: .public) span_id=\(spanID, privacy: .public) phase=getClient"
+                    )
+                }
                 await SwiftPeepsClient.shared.finishRequest(
                     requestID: requestID, operation: operationName, errno: errno)
                 throw vixenMappedFSError(error, operation: operation, logger: log)
@@ -266,6 +271,11 @@ final class Volume: FSVolume {
                 return value
             } catch {
                 let errno = vixenPOSIXCode(for: error)
+                if errno == POSIXError.ETIMEDOUT.rawValue {
+                    log.error(
+                        "\(operation): timeout request_id=\(requestID, privacy: .public) span_id=\(spanID, privacy: .public) phase=rpc"
+                    )
+                }
                 await SwiftPeepsClient.shared.finishRequest(
                     requestID: requestID, operation: operationName, errno: errno)
                 throw vixenMappedFSError(error, operation: operation, logger: log)
