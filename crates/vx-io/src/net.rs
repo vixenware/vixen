@@ -151,10 +151,13 @@ impl AsyncWrite for Stream {
 }
 
 async fn connect_io(endpoint: &Endpoint) -> io::Result<Stream> {
+    let ep_display = endpoint.display();
     match endpoint {
         Endpoint::Tcp { host, port } => {
             let addr = format!("{host}:{port}");
-            let stream = tokio::net::TcpStream::connect(addr).await?;
+            let stream =
+                peeps::net::connect(tokio::net::TcpStream::connect(addr), &ep_display, "tcp")
+                    .await?;
             Ok(Stream::Tcp(stream))
         }
         Endpoint::Local(path) => {
@@ -163,7 +166,9 @@ async fn connect_io(endpoint: &Endpoint) -> io::Result<Stream> {
             #[cfg(windows)]
             let local_target = roam_local::path_to_pipe_name(path.as_std_path());
 
-            let stream = roam_local::connect(local_target).await?;
+            let stream =
+                peeps::net::connect(roam_local::connect(local_target), &ep_display, "local")
+                    .await?;
             Ok(Stream::Local(stream))
         }
     }
@@ -238,12 +243,17 @@ impl Listener {
     pub async fn accept(&mut self) -> Result<(Stream, String)> {
         match self {
             Listener::Tcp(listener) => {
+                let local_addr = listener
+                    .local_addr()
+                    .map(|a| a.to_string())
+                    .unwrap_or_default();
                 let (stream, addr) =
-                    peeps::peep!(listener.accept(), "net.listener.tcp.accept").await?;
+                    peeps::net::accept(listener.accept(), &local_addr, "tcp").await?;
                 Ok((Stream::Tcp(stream), addr.to_string()))
             }
-            Listener::Local { listener, .. } => {
-                let stream = peeps::peep!(listener.accept(), "net.listener.local.accept").await?;
+            Listener::Local { listener, endpoint } => {
+                let ep_display = format!("unix:{endpoint}");
+                let stream = peeps::net::accept(listener.accept(), &ep_display, "local").await?;
                 #[cfg(unix)]
                 return Ok((Stream::Local(stream), "local".to_string()));
                 #[cfg(windows)]
