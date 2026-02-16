@@ -3,8 +3,8 @@
 //! Usage: vx-reaper --parent-pid <PID> --mount-path <PATH> [--log-file <PATH>]
 //!
 //! Reads process group IDs from stdin (one per line) as vx-runner creates
-//! them. Watches the parent PID using kqueue EVFILT_PROC (with stdin EOF
-//! as fallback if EVFILT_PROC registration fails). When the parent exits:
+//! them. Polls parent PID liveness and also reacts to stdin EOF. When the
+//! parent exits:
 //!
 //! 1. SIGKILL all known child process groups
 //! 2. Brief sleep to let SIGKILL propagate
@@ -121,66 +121,15 @@ async fn async_main(parent_pid: libc::pid_t, mount_path: String) {
 
     let mut pgroups = std::collections::HashSet::<libc::pid_t>::new();
 
-    // Spawn a blocking task that watches the parent via kqueue EVFILT_PROC.
+    // Spawn an async task that polls parent PID liveness.
     let (parent_dead_tx, parent_dead_rx) = peeps::oneshot_channel::<()>("parent_dead");
-
-    peeps::spawn_blocking_tracked("reaper.kqueue_parent_watch", move || {
-        let kq = unsafe { libc::kqueue() };
-        if kq < 0 {
-            log!("kqueue() failed: {}", std::io::Error::last_os_error());
-            let _ = parent_dead_tx.send(());
-            return;
-        }
-
-        let proc_event = libc::kevent {
-            ident: parent_pid as usize,
-            filter: libc::EVFILT_PROC,
-            flags: libc::EV_ADD | libc::EV_ONESHOT,
-            fflags: libc::NOTE_EXIT,
-            data: 0,
-            udata: std::ptr::null_mut(),
-        };
-        let ret = unsafe {
-            libc::kevent(
-                kq,
-                &proc_event,
-                1,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null(),
-            )
-        };
-        if ret < 0 {
-            log!(
-                "EVFILT_PROC registration failed ({}), falling back to polling",
-                std::io::Error::last_os_error()
-            );
-            loop {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                if unsafe { libc::kill(parent_pid, 0) } != 0 {
-                    break;
-                }
-            }
-        } else {
-            let mut event: libc::kevent = unsafe { std::mem::zeroed() };
-            loop {
-                let n = unsafe {
-                    libc::kevent(kq, std::ptr::null(), 0, &mut event, 1, std::ptr::null())
-                };
-                if n > 0 {
-                    break;
-                }
-                if n < 0 {
-                    let err = std::io::Error::last_os_error();
-                    if err.kind() == std::io::ErrorKind::Interrupted {
-                        continue;
-                    }
-                    log!("kevent wait failed: {err}");
-                    break;
-                }
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if unsafe { libc::kill(parent_pid, 0) } != 0 {
+                break;
             }
         }
-        unsafe { libc::close(kq) };
         let _ = parent_dead_tx.send(());
     });
 
@@ -199,7 +148,7 @@ async fn async_main(parent_pid: libc::pid_t, mount_path: String) {
             log!("stdin EOF, starting cleanup");
         } => {}
         _ = parent_dead_rx.recv() => {
-            log!("parent exited (kqueue), starting cleanup");
+            log!("parent exited, starting cleanup");
         }
     }
 

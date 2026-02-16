@@ -3,7 +3,8 @@ use eyre::{Result, WrapErr};
 use facet::Facet;
 use figue as args;
 use roam_stream::NoDispatcher;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::SeekFrom;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use vx_io::net::Endpoint;
 use vx_store_proto::{
     Blake3Hash, BlobNode, CDC_AVG_CHUNK, CDC_MAX_CHUNK, CDC_MIN_CHUNK, CDC_PARAMS_ID, CasNode,
@@ -213,10 +214,10 @@ async fn async_main() -> Result<()> {
 
     // Wipe previous run (retry if needed, as filesystem may be settling)
     for attempt in 0..10 {
-        if !base.exists() {
+        if !tokio::fs::try_exists(&base).await? {
             break;
         }
-        match std::fs::remove_dir_all(&base) {
+        match tokio::fs::remove_dir_all(&base).await {
             Ok(_) => break,
             Err(e) if attempt < 9 => {
                 tracing::warn!(
@@ -224,7 +225,7 @@ async fn async_main() -> Result<()> {
                     error = %e,
                     "failed to remove directory, retrying in 1s"
                 );
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
             Err(e) => return Err(e.into()),
         }
@@ -235,8 +236,8 @@ async fn async_main() -> Result<()> {
     let store_socket = base.join("store.sock");
     let vfsd_socket = base.join("vfsd.sock");
 
-    std::fs::create_dir_all(&store_root)?;
-    std::fs::create_dir_all(&mount_point)?;
+    tokio::fs::create_dir_all(&store_root).await?;
+    tokio::fs::create_dir_all(&mount_point).await?;
 
     tracing::info!(%base, "working directory");
 
@@ -375,10 +376,11 @@ async fn async_main() -> Result<()> {
 
     // Write a small .rs file for compilation
     let source_file = base.join("hello.rs");
-    std::fs::write(
+    tokio::fs::write(
         &source_file,
         "fn main() { println!(\"hello from vfs-mounted rustc\"); }\n",
-    )?;
+    )
+    .await?;
 
     // Verify basic compilation works before spawning workers
     tracing::info!("verifying rustc works from VFS mount...");
@@ -438,7 +440,7 @@ async fn async_main() -> Result<()> {
     let source_path = std::sync::Arc::new(source_file.into_std_path_buf());
     let output_base = std::sync::Arc::new(base.into_std_path_buf());
     let large_file_info = std::sync::Arc::new(large_file_info);
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(args.workers));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(args.workers));
 
     tracing::info!(
         workers = args.workers,
@@ -448,13 +450,13 @@ async fn async_main() -> Result<()> {
         "starting parallel verification (compile + random reads)"
     );
 
-    // Reporter thread: print stats every 2 seconds
+    // Reporter task: print stats every 2 seconds
     let reporter_stats = stats.clone();
     let reporter_workers = args.workers as u64;
-    let reporter = std::thread::spawn(move || {
+    let reporter = tokio::spawn(async move {
         let start = std::time::Instant::now();
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             let done = reporter_stats.workers_done.load(Relaxed);
             if done >= reporter_workers {
                 break;
@@ -495,10 +497,10 @@ async fn async_main() -> Result<()> {
         let max_read_size = args.max_read_size;
         let seed = args.seed;
 
-        worker_handles.push(peeps::spawn_blocking_tracked("vfs-integrity.worker", move || {
+        worker_handles.push(tokio::spawn(async move {
             let mut rng = fastrand::Rng::with_seed(seed);
 
-            barrier.wait();
+            barrier.wait().await;
 
             let mut compile_failures = 0u64;
             let mut compile_runs = 0u64;
@@ -510,7 +512,7 @@ async fn async_main() -> Result<()> {
             for i in 0..compiles {
                 compile_runs += 1;
                 let output_path = output_base.join(format!("out_w{worker_id}_{i}"));
-                let mut cmd = std::process::Command::new(rustc_path.as_ref());
+                let mut cmd = tokio::process::Command::new(rustc_path.as_ref());
                 cmd.args(["--edition", "2021"])
                     .arg(source_path.as_ref())
                     .arg("-o")
@@ -521,7 +523,7 @@ async fn async_main() -> Result<()> {
                     .stderr(std::process::Stdio::piped());
 
                 let t0 = std::time::Instant::now();
-                match cmd.output() {
+                match cmd.output().await {
                     Ok(output) => {
                         let elapsed_ms = t0.elapsed().as_millis() as u64;
                         stats.compile_time_ms.fetch_add(elapsed_ms, Relaxed);
@@ -536,7 +538,7 @@ async fn async_main() -> Result<()> {
                             stats.compile_fail.fetch_add(1, Relaxed);
                         } else {
                             stats.compile_ok.fetch_add(1, Relaxed);
-                            let _ = std::fs::remove_file(&output_path);
+                            let _ = tokio::fs::remove_file(&output_path).await;
                         }
                     }
                     Err(e) => {
@@ -564,7 +566,7 @@ async fn async_main() -> Result<()> {
                     let remaining = file_size - offset;
                     let len = rng.usize(1..=remaining.min(max_read_size));
 
-                    let mut file = match std::fs::File::open(vfs_path) {
+                    let mut file = match tokio::fs::File::open(vfs_path).await {
                         Ok(f) => f,
                         Err(e) => {
                             eprintln!(
@@ -576,14 +578,14 @@ async fn async_main() -> Result<()> {
                             continue;
                         }
                     };
-                    if let Err(e) = file.seek(SeekFrom::Start(offset as u64)) {
+                    if let Err(e) = file.seek(SeekFrom::Start(offset as u64)).await {
                         eprintln!("READ SEEK ERROR worker {worker_id}: {e}");
                         read_corruptions += 1;
                         stats.read_corrupt.fetch_add(1, Relaxed);
                         continue;
                     }
                     let mut buf = vec![0u8; len];
-                    if let Err(e) = file.read_exact(&mut buf) {
+                    if let Err(e) = file.read_exact(&mut buf).await {
                         eprintln!(
                             "READ ERROR worker {worker_id}: read_exact({len} bytes at offset {offset}): {e}"
                         );
@@ -654,7 +656,7 @@ async fn async_main() -> Result<()> {
         total_bytes_read += b;
     }
 
-    let _ = reporter.join();
+    let _ = reporter.await;
 
     let failures = total_compile_failures + total_read_corruptions;
     if failures > 0 {

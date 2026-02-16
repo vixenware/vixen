@@ -5,6 +5,7 @@
 
 use camino::{Utf8Path, Utf8PathBuf};
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 use vx_store_proto::Blake3Hash;
 
 /// Errors that can occur during Zig toolchain operations
@@ -206,22 +207,10 @@ pub async fn extract_zig_tarball(
     // Create extraction directory
     tokio::fs::create_dir_all(extract_dir).await?;
 
-    // Decompress and extract off the async runtime threads.
-    let extract_dir_buf = extract_dir.as_std_path().to_path_buf();
-    let tarball_bytes = tarball.to_vec();
-    tokio::task::spawn_blocking(move || -> Result<(), ZigError> {
-        let mut decompressed = Vec::new();
-        lzma_rs::xz_decompress(&mut std::io::Cursor::new(tarball_bytes), &mut decompressed)
-            .map_err(|e| ZigError::ExtractionFailed(format!("xz decompression failed: {}", e)))?;
-
-        let mut archive = tar::Archive::new(decompressed.as_slice());
-        archive
-            .unpack(&extract_dir_buf)
-            .map_err(|e| ZigError::ExtractionFailed(format!("tar extraction failed: {}", e)))?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| ZigError::ExtractionFailed(format!("extract task failed: {}", e)))??;
+    let reader = bytes_reader(tarball);
+    vx_tarball::extract(reader, extract_dir, vx_tarball::Compression::Xz, 0)
+        .await
+        .map_err(|e| ZigError::ExtractionFailed(format!("tar extraction failed: {}", e)))?;
 
     // Find the zig directory (it's usually zig-{platform}-{version}/)
     let mut zig_dir: Option<Utf8PathBuf> = None;
@@ -439,19 +428,24 @@ pub async fn materialize_toolchain(
     let lib_dir = target_dir.join("lib");
     tokio::fs::create_dir_all(&lib_dir).await?;
 
-    let lib_dir_buf = lib_dir.as_std_path().to_path_buf();
-    let lib_bytes = lib_tarball.to_vec();
-    tokio::task::spawn_blocking(move || -> Result<(), ZigError> {
-        let mut archive = tar::Archive::new(lib_bytes.as_slice());
-        archive
-            .unpack(&lib_dir_buf)
-            .map_err(|e| ZigError::ExtractionFailed(format!("failed to unpack lib: {}", e)))?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| ZigError::ExtractionFailed(format!("materialize task failed: {}", e)))??;
+    let reader = bytes_reader(lib_tarball);
+    let mut archive = tokio_tar::Archive::new(reader);
+    archive
+        .unpack(lib_dir.as_std_path())
+        .await
+        .map_err(|e| ZigError::ExtractionFailed(format!("failed to unpack lib: {}", e)))?;
 
     Ok(MaterializedToolchain { zig_path, lib_dir })
+}
+
+fn bytes_reader(bytes: &[u8]) -> tokio::io::DuplexStream {
+    let (mut writer, reader) = tokio::io::duplex(64 * 1024);
+    let payload = bytes.to_vec();
+    tokio::spawn(async move {
+        let _ = writer.write_all(&payload).await;
+        let _ = writer.shutdown().await;
+    });
+    reader
 }
 
 /// A toolchain materialized to the filesystem, ready for use
