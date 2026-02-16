@@ -210,7 +210,7 @@ impl CasStore {
             .to_path_buf();
         let manifest_hex = manifest_hash.to_hex();
 
-        tokio::task::spawn_blocking(move || {
+        peeps::spawn_blocking_tracked("store.put_toolchain_spec", move || {
             use std::fs::{File, OpenOptions};
             use std::io::Write;
 
@@ -262,7 +262,7 @@ impl CasStore {
             .to_path_buf();
         let manifest_hex = manifest_hash.to_hex();
 
-        tokio::task::spawn_blocking(move || {
+        peeps::spawn_blocking_tracked("store.put_registry_spec", move || {
             use std::fs::{File, OpenOptions};
             use std::io::Write;
 

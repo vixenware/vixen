@@ -124,7 +124,7 @@ async fn async_main(parent_pid: libc::pid_t, mount_path: String) {
     // Spawn a blocking task that watches the parent via kqueue EVFILT_PROC.
     let (parent_dead_tx, parent_dead_rx) = peeps::oneshot_channel::<()>("parent_dead");
 
-    tokio::task::spawn_blocking(move || {
+    peeps::spawn_blocking_tracked("reaper.kqueue_parent_watch", move || {
         let kq = unsafe { libc::kqueue() };
         if kq < 0 {
             log!("kqueue() failed: {}", std::io::Error::last_os_error());
