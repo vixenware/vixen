@@ -822,7 +822,7 @@ impl VxdService {
             self.store.ensure_rust_toolchain(spec, progress_tx),
             "vxd.store.ensure_rust_toolchain",
             {
-                "request.method" => "Store.ensure_rust_toolchain",
+                "method" => "Store.ensure_rust_toolchain",
             }
         )
         .await
@@ -858,7 +858,7 @@ impl VxdService {
             self.store.get_toolchain_manifest(manifest_hash),
             "vxd.store.get_toolchain_manifest",
             {
-                "request.method" => "Store.get_toolchain_manifest",
+                "method" => "Store.get_toolchain_manifest",
             }
         )
         .await

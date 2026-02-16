@@ -102,7 +102,7 @@ private struct PeepsRequestAttrs: Encodable {
     let operation: String
     let startedMs: Int64
     let requestID: String
-    let requestMethod: String
+    let method: String
     let requestStatus: String
     let requestDeliveredAtNs: Int64
     let elapsedNs: Int64
@@ -113,7 +113,7 @@ private struct PeepsRequestAttrs: Encodable {
         case operation
         case startedMs = "started_ms"
         case requestID = "request.id"
-        case requestMethod = "request.method"
+        case method
         case requestStatus = "request.status"
         case requestDeliveredAtNs = "request.delivered_at_ns"
         case elapsedNs = "elapsed_ns"
@@ -201,7 +201,7 @@ private actor SwiftPeepsGraphState {
                     operation: req.operation,
                     startedMs: req.startedMs,
                     requestID: req.id,
-                    requestMethod: req.operation,
+                    method: req.operation,
                     requestStatus: "in_flight",
                     requestDeliveredAtNs: req.deliveredAtNs,
                     elapsedNs: elapsedNs,
