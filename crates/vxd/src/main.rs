@@ -134,7 +134,7 @@ impl SpawnTracker {
         if let Some(ref mut child) = self.store {
             let pid = child.id().unwrap_or(0);
             tracing::info!("Killing spawned vx-store (pid: {pid})");
-            if let Err(e) = child.kill() {
+            if let Err(e) = child.start_kill() {
                 tracing::warn!("Failed to kill vx-store (pid: {pid}): {e}");
             }
         }
@@ -142,7 +142,7 @@ impl SpawnTracker {
         if let Some(ref mut child) = self.runner {
             let pid = child.id().unwrap_or(0);
             tracing::info!("Killing spawned vx-runner (pid: {pid})");
-            if let Err(e) = child.kill() {
+            if let Err(e) = child.start_kill() {
                 tracing::warn!("Failed to kill vx-runner (pid: {pid}): {e}");
             }
         }
