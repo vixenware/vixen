@@ -32,6 +32,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use camino::Utf8PathBuf;
 use peeps::Mutex;
@@ -1049,10 +1050,11 @@ impl Vfs for CasVfs {
     }
 
     async fn read_dir(&self, _cx: &roam::Context, item_id: ItemId, cursor: u64) -> ReadDirResult {
-        tracing::trace!(item_id, cursor, "VFS read_dir");
+        let started = Instant::now();
+        tracing::trace!(item_id, cursor, "VFS read_dir.start");
 
         let state = self.state.lock();
-        match state.items.get(&item_id) {
+        let (result, child_count) = match state.items.get(&item_id) {
             Some(item) if item.item_type == ItemType::Directory => {
                 let children: Vec<_> = state.items.children_of(item_id).collect();
 
@@ -1078,23 +1080,59 @@ impl Vfs for CasVfs {
                     0
                 };
 
-                ReadDirResult {
-                    entries,
-                    next_cursor,
-                    error: errno::OK,
-                }
+                (
+                    ReadDirResult {
+                        entries,
+                        next_cursor,
+                        error: errno::OK,
+                    },
+                    Some(children.len()),
+                )
             }
-            Some(_) => ReadDirResult {
-                entries: Vec::new(),
-                next_cursor: 0,
-                error: errno::ENOTDIR,
-            },
-            None => ReadDirResult {
-                entries: Vec::new(),
-                next_cursor: 0,
-                error: errno::ENOENT,
-            },
+            Some(_) => (
+                ReadDirResult {
+                    entries: Vec::new(),
+                    next_cursor: 0,
+                    error: errno::ENOTDIR,
+                },
+                None,
+            ),
+            None => (
+                ReadDirResult {
+                    entries: Vec::new(),
+                    next_cursor: 0,
+                    error: errno::ENOENT,
+                },
+                None,
+            ),
+        };
+        drop(state);
+
+        let elapsed = started.elapsed();
+        tracing::trace!(
+            item_id,
+            cursor,
+            child_count = ?child_count,
+            entries = result.entries.len(),
+            next_cursor = result.next_cursor,
+            error = result.error,
+            elapsed_us = elapsed.as_micros(),
+            "VFS read_dir.done"
+        );
+        if elapsed >= Duration::from_millis(500) {
+            tracing::warn!(
+                item_id,
+                cursor,
+                child_count = ?child_count,
+                entries = result.entries.len(),
+                next_cursor = result.next_cursor,
+                error = result.error,
+                elapsed_ms = elapsed.as_millis(),
+                "VFS read_dir.slow"
+            );
         }
+
+        result
     }
 
     async fn read(
