@@ -2111,7 +2111,6 @@ dependencies = [
  "facet-json",
  "facet-postcard",
  "futures-util",
- "inventory",
  "libc",
  "libproc",
  "once_cell",

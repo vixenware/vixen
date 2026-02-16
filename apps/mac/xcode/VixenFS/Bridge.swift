@@ -46,8 +46,10 @@ func vixenPOSIXCode(for error: Error) -> Int32 {
             return POSIXError.ENOTCONN.rawValue
         case .wouldBlock:
             return POSIXError.EAGAIN.rawValue
-        case .decodeFailed:
+        case .frameDecoding, .frameEncoding, .protocolViolation:
             return POSIXError.EPROTO.rawValue
+        case .transportIO:
+            return POSIXError.EIO.rawValue
         }
     }
 
@@ -311,7 +313,8 @@ actor VfsConnection {
                 NSLog("VixenFS: Roam SHM driver exited cleanly (server gone)")
                 await self?.handleDriverExit(reason: "driver_exit_clean")
             } catch {
-                logger.error("Roam driver exited with error: \(String(describing: error), privacy: .public)")
+                logger.error(
+                    "Roam driver exited with error: \(String(describing: error), privacy: .public)")
                 NSLog("VixenFS: Roam SHM driver exited with error: \(String(describing: error))")
                 await self?.handleDriverExit(
                     reason: "driver_exit_error:\(String(describing: error))")
