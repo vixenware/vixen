@@ -34,6 +34,27 @@ private struct PeepsGraphReply: Encodable {
     }
 }
 
+private struct PeepsHandshake: Encodable {
+    let type: String
+    let process: String
+    let pid: UInt32
+    let procKey: String
+
+    init(process: String, pid: UInt32, procKey: String) {
+        self.type = "handshake"
+        self.process = process
+        self.pid = pid
+        self.procKey = procKey
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case process
+        case pid
+        case procKey = "proc_key"
+    }
+}
+
 private struct PeepsGraphSnapshot: Encodable {
     let processName: String
     let procKey: String
@@ -80,11 +101,23 @@ private struct PeepsRequestAttrs: Encodable {
     let spanID: String
     let operation: String
     let startedMs: Int64
+    let requestID: String
+    let requestMethod: String
+    let requestStatus: String
+    let requestDeliveredAtNs: Int64
+    let elapsedNs: Int64
+    let rpcConnection: String
 
     enum CodingKeys: String, CodingKey {
         case spanID = "span_id"
         case operation
         case startedMs = "started_ms"
+        case requestID = "request.id"
+        case requestMethod = "request.method"
+        case requestStatus = "request.status"
+        case requestDeliveredAtNs = "request.delivered_at_ns"
+        case elapsedNs = "elapsed_ns"
+        case rpcConnection = "rpc.connection"
     }
 }
 
@@ -110,6 +143,7 @@ private actor SwiftPeepsGraphState {
         let id: String
         let operation: String
         let startedMs: Int64
+        let deliveredAtNs: Int64
     }
 
     private struct SyscallEvent {
@@ -128,8 +162,14 @@ private actor SwiftPeepsGraphState {
         let spanID = newULID()
         let requestID = "request:\(spanID)"
         let startedMs = Self.nowMs()
+        let deliveredAtNs = Self.nowNs()
         inFlight[requestID] = InFlightRequest(
-            spanID: spanID, id: requestID, operation: operation, startedMs: startedMs)
+            spanID: spanID,
+            id: requestID,
+            operation: operation,
+            startedMs: startedMs,
+            deliveredAtNs: deliveredAtNs
+        )
         inFlightSyscalls[requestID] = SyscallEvent(
             id: "syscall:\(newULID())",
             requestID: requestID,
@@ -151,13 +191,21 @@ private actor SwiftPeepsGraphState {
     func snapshot(processName: String, pid: UInt32) -> PeepsGraphSnapshot {
         var nodes: [PeepsGraphNode] = []
         var edges: [PeepsGraphEdge] = []
+        let nowNs = Self.nowNs()
 
         for req in inFlight.values {
+            let elapsedNs = max(0, nowNs - req.deliveredAtNs)
             let attrs = encodeAttrs(
                 PeepsRequestAttrs(
                     spanID: req.spanID,
                     operation: req.operation,
-                    startedMs: req.startedMs
+                    startedMs: req.startedMs,
+                    requestID: req.id,
+                    requestMethod: req.operation,
+                    requestStatus: "in_flight",
+                    requestDeliveredAtNs: req.deliveredAtNs,
+                    elapsedNs: elapsedNs,
+                    rpcConnection: "client"
                 ))
             nodes.append(
                 PeepsGraphNode(
@@ -235,6 +283,10 @@ private actor SwiftPeepsGraphState {
 
     private static func nowMs() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    private static func nowNs() -> Int64 {
+        Int64(Date().timeIntervalSince1970 * 1_000_000_000)
     }
 }
 
@@ -317,8 +369,19 @@ actor SwiftPeepsClient {
         let (host, port) = try parseDashboardAddress(addr)
         let fd = try connectTCP(host: host, port: port)
         defer { _ = Darwin.close(fd) }
+        let procKey = canonicalProcKey(processName: processName, pid: UInt32(pid))
 
         log.info("Swift peeps connected host=\(host, privacy: .public) port=\(port, privacy: .public)")
+        let handshake = PeepsHandshake(
+            process: processName,
+            pid: UInt32(pid),
+            procKey: procKey
+        )
+        let handshakePayload = try JSONEncoder().encode(handshake)
+        if debugFrames, let handshakeStr = String(data: handshakePayload, encoding: .utf8) {
+            log.notice("Swift peeps handshake payload=\(handshakeStr, privacy: .public)")
+        }
+        try writeFrame(fd: fd, payload: handshakePayload)
 
         while !Task.isCancelled {
             guard let lenData = try readExact(fd: fd, count: 4) else {

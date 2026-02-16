@@ -256,8 +256,9 @@ final class Volume: FSVolume {
             } catch {
                 let errno = vixenPOSIXCode(for: error)
                 if errno == POSIXError.ETIMEDOUT.rawValue {
+                    let span = spanID ?? "none"
                     log.error(
-                        "\(operation): timeout request_id=\(requestID, privacy: .public) span_id=\(spanID, privacy: .public) phase=getClient"
+                        "\(operation): timeout request_id=\(requestID, privacy: .public) span_id=\(span, privacy: .public) phase=getClient"
                     )
                 }
                 await SwiftPeepsClient.shared.finishRequest(
@@ -272,8 +273,9 @@ final class Volume: FSVolume {
             } catch {
                 let errno = vixenPOSIXCode(for: error)
                 if errno == POSIXError.ETIMEDOUT.rawValue {
+                    let span = spanID ?? "none"
                     log.error(
-                        "\(operation): timeout request_id=\(requestID, privacy: .public) span_id=\(spanID, privacy: .public) phase=rpc"
+                        "\(operation): timeout request_id=\(requestID, privacy: .public) span_id=\(span, privacy: .public) phase=rpc"
                     )
                 }
                 await SwiftPeepsClient.shared.finishRequest(
