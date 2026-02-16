@@ -1,5 +1,5 @@
+use peeps::Command;
 use std::collections::HashMap;
-use tokio::process::Command;
 
 use super::Log;
 

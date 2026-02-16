@@ -959,7 +959,7 @@ impl VxdService {
                 for bin in &manifest.bins {
                     let source_path = project_dir.join(&bin.sources);
                     if source_path.exists() {
-                        let contents = tokio::fs::read(&source_path).await.map_err(|e| {
+                        let contents = peeps::fs::read(&source_path).await.map_err(|e| {
                             VxdError::FileRead {
                                 path: source_path.clone(),
                                 message: e.to_string(),
@@ -1249,7 +1249,7 @@ impl VxdService {
                     .unwrap_or_else(|| rules_path.clone());
 
                 info!(rules = %source_rel, "loading .vx rules file for RulePlan bridge");
-                let contents = tokio::fs::read_to_string(&rules_path).await.map_err(|e| {
+                let contents = peeps::fs::read_to_string(&rules_path).await.map_err(|e| {
                     VxdError::FileRead {
                         path: rules_path.clone(),
                         message: e.to_string(),

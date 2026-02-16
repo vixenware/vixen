@@ -14,12 +14,12 @@
 //!
 //! Also provides timeout enforcement and streamed output for all platforms.
 
+use peeps::Command;
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
 use std::process::ExitStatus;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use vx_store_proto::StoreProgress;
 
 use crate::service_vfs::ActionContext;
@@ -129,8 +129,8 @@ pub async fn run_sandboxed_command(
     }
 
     // Take ownership of stdout/stderr handles
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let stderr = child.stderr.take().expect("stderr was piped");
+    let stdout = child.take_stdout().expect("stdout was piped");
+    let stderr = child.take_stderr().expect("stderr was piped");
 
     // Merge stdout and stderr into a single combined output buffer.
     // Also track the latest line for progress reporting.
@@ -269,7 +269,7 @@ pub async fn run_sandboxed_command(
             if let Some(pid) = pid {
                 terminate_process_group(pid).await;
             }
-            let _ = child.kill().await;
+            let _ = child.kill();
 
             let _ = stdout_task.await;
             let _ = stderr_task.await;
@@ -292,7 +292,7 @@ pub async fn run_sandboxed_command(
             if let Some(pid) = pid {
                 terminate_process_group(pid).await;
             }
-            let _ = child.kill().await;
+            let _ = child.kill();
 
             let _ = stdout_task.await;
             let _ = stderr_task.await;

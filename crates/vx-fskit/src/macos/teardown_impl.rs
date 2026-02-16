@@ -2,7 +2,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use camino::Utf8PathBuf;
-use tokio::process::Command;
+use peeps::Command;
 
 use super::probe;
 use super::process;
@@ -22,7 +22,7 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
 
     let probe_result = probe::probe(mount_path, &candidates, &mut log, false).await;
 
-    let mount_exists = tokio::fs::metadata(mount_path.as_std_path()).await.is_ok();
+    let mount_exists = peeps::fs::metadata(mount_path.as_std_path()).await.is_ok();
 
     if probe_result.is_clean() && !mount_exists {
         log.ok("nothing mounted and no stale directory, nothing to do");
@@ -31,7 +31,7 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
 
     if probe_result.is_clean() && mount_exists {
         log.info("stale mountpoint directory, removing");
-        match tokio::fs::remove_dir(mount_path.as_std_path()).await {
+        match peeps::fs::remove_dir(mount_path.as_std_path()).await {
             Ok(()) => {
                 log.ok(format!("rmdir {mount_path}: ok"));
                 return FsKitResult::success(log.into_entries());
@@ -92,8 +92,8 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
 
         match tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
             Ok(Ok(status)) => {
-                let stdout = super::probe::read_pipe(child.stdout.take()).await;
-                let stderr = super::probe::read_pipe(child.stderr.take()).await;
+                let stdout = super::probe::read_pipe(child.take_stdout()).await;
+                let stderr = super::probe::read_pipe(child.take_stderr()).await;
                 let stdout = String::from_utf8_lossy(&stdout);
                 let stderr = String::from_utf8_lossy(&stderr);
                 if status.success() {
@@ -110,7 +110,7 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
             }
             Err(_) => {
                 log.fail("diskutil: timed out after 1s, killing");
-                let _ = child.kill().await;
+                let _ = child.kill();
             }
         }
     }
@@ -135,8 +135,8 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
 
     if after.is_clean() {
         // Clean up the stale directory if it exists
-        if tokio::fs::metadata(mount_path.as_std_path()).await.is_ok() {
-            let _ = tokio::fs::remove_dir(mount_path.as_std_path()).await;
+        if peeps::fs::metadata(mount_path.as_std_path()).await.is_ok() {
+            let _ = peeps::fs::remove_dir(mount_path.as_std_path()).await;
         }
         log.ok("teardown complete: mount is clean");
         return FsKitResult::success(log.into_entries());

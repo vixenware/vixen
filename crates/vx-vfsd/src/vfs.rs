@@ -304,10 +304,7 @@ impl CasVfs {
             next_id: AtomicU64::new(2), // 1=root
             disk_cache_dir,
             blobnode_cache: Mutex::new("CasVfs::blobnode_cache", HashMap::new()),
-            observed_identities: Mutex::new(
-                "CasVfs::observed_identities",
-                HashMap::new(),
-            ),
+            observed_identities: Mutex::new("CasVfs::observed_identities", HashMap::new()),
             mount_path,
         }
     }
@@ -351,7 +348,7 @@ impl CasVfs {
 
         // Try L2 disk cache first
         if let Some(path) = self.chunk_cache_path(&chunk_hash.0) {
-            match tokio::fs::read(path.as_std_path()).await {
+            match peeps::fs::read(path.as_std_path()).await {
                 Ok(data) => {
                     let actual_hash = Blake3Hash::from_bytes(&data);
                     if actual_hash == chunk_hash.0 {
@@ -365,7 +362,7 @@ impl CasVfs {
                         path = %path,
                         "L2 cache hash mismatch on hit, evicting corrupted entry"
                     );
-                    if let Err(e) = tokio::fs::remove_file(path.as_std_path()).await
+                    if let Err(e) = peeps::fs::remove_file(path.as_std_path()).await
                         && e.kind() != std::io::ErrorKind::NotFound
                     {
                         tracing::warn!(path = %path, error = %e, "failed to remove bad L2 cache file");
@@ -1478,7 +1475,7 @@ impl CasVfs {
                     }
                 }
             } else if path.is_file() {
-                match tokio::fs::read(&path).await {
+                match peeps::fs::read(&path).await {
                     Ok(data) => {
                         let size = data.len() as u64;
                         let content_hash = Blake3Hash::from_bytes(&data);

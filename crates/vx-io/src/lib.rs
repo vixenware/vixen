@@ -32,14 +32,7 @@ pub async fn atomic_write(
     let parent_dir = path.parent().unwrap_or_else(|| Utf8Path::new("."));
 
     // Create parent directory if it doesn't exist
-    peeps::peep!(
-        tokio::fs::create_dir_all(parent_dir),
-        "atomic_write.create_dir_all",
-        {
-            "resource.path" => path.as_str(),
-        }
-    )
-    .await?;
+    peeps::fs::create_dir_all(parent_dir).await?;
 
     // Create a temporary file in the same directory to ensure it's on the same filesystem
     let temp_file = peeps::peep!(
@@ -54,47 +47,20 @@ pub async fn atomic_write(
 
     // Get the temporary path and write contents to it
     let temp_path = temp_file.file_path();
-    peeps::peep!(tokio::fs::write(&temp_path, contents), "atomic_write.write", {
-        "resource.path" => path.as_str(),
-        "write.bytes" => contents.len(),
-    })
-    .await?;
+    peeps::fs::write(&temp_path, contents).await?;
 
     // Set executable bit if requested.
     #[cfg(unix)]
     if executable {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = peeps::peep!(
-            tokio::fs::metadata(&temp_path),
-            "atomic_write.metadata",
-            {
-                "resource.path" => path.as_str(),
-            }
-        )
-        .await?
-        .permissions();
+        let mut perms = peeps::fs::metadata(&temp_path).await?.permissions();
         perms.set_mode(perms.mode() | 0o111);
-        peeps::peep!(
-            tokio::fs::set_permissions(&temp_path, perms),
-            "atomic_write.set_permissions",
-            {
-                "resource.path" => path.as_str(),
-            }
-        )
-        .await?;
+        peeps::fs::set_permissions(&temp_path, perms).await?;
     }
 
     // Atomically move temp file to final path. rename() on the same filesystem is
     // atomic and overwrites any existing target, which is fine for our use case.
-    peeps::peep!(
-        tokio::fs::rename(temp_path.to_path_buf(), path.as_std_path()),
-        "atomic_write.rename",
-        {
-            "resource.path" => path.as_str(),
-            "write.executable" => executable,
-        }
-    )
-    .await
+    peeps::fs::rename(temp_path.to_path_buf(), path.as_std_path()).await
 }
 
 /// Create a unique scratch directory under the given base path.
@@ -108,14 +74,7 @@ pub async fn create_scratch_dir(base: &Utf8Path) -> Result<Utf8PathBuf, std::io:
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let scratch_base = base.join("scratch");
-    peeps::peep!(
-        tokio::fs::create_dir_all(&scratch_base),
-        "scratch.create_base_dir",
-        {
-            "resource.path" => scratch_base.as_str(),
-        }
-    )
-    .await?;
+    peeps::fs::create_dir_all(&scratch_base).await?;
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -126,14 +85,7 @@ pub async fn create_scratch_dir(base: &Utf8Path) -> Result<Utf8PathBuf, std::io:
     let id = format!("{:x}-{}-{}", timestamp, pid, count);
     let dir = scratch_base.join(&id);
 
-    peeps::peep!(
-        tokio::fs::create_dir_all(&dir),
-        "scratch.create_dir",
-        {
-            "resource.path" => dir.as_str(),
-        }
-    )
-    .await?;
+    peeps::fs::create_dir_all(&dir).await?;
 
     Ok(dir)
 }

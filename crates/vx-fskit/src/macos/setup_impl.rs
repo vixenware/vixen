@@ -1,5 +1,5 @@
 use camino::Utf8PathBuf;
-use tokio::process::Command;
+use peeps::Command;
 
 use super::probe::{self, HealthProbe};
 use super::{FsKitResult, Log, VIXEN_APP_PATH, VIXEN_EXTENSION_IDENTIFIER, mount_path_candidates};
@@ -53,7 +53,7 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
 
     // Extension not registered — dig deeper to give a useful diagnostic.
     if !extension_ok {
-        if tokio::fs::metadata(VIXEN_APP_PATH).await.is_err() {
+        if peeps::fs::metadata(VIXEN_APP_PATH).await.is_err() {
             log.fail(format!("{VIXEN_APP_PATH} not found"));
             return FsKitResult::failure(
                 log.into_entries(),
@@ -121,7 +121,7 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
     // --- Mount ---
 
     // Create mount point directory
-    if let Err(e) = tokio::fs::create_dir_all(mount_path.as_std_path()).await {
+    if let Err(e) = peeps::fs::create_dir_all(mount_path.as_std_path()).await {
         log.fail(format!("mkdir -p {mount_path}: {e}"));
         return FsKitResult::failure(
             log.into_entries(),

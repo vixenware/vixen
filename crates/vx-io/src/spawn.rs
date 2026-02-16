@@ -1,7 +1,7 @@
 use camino::Utf8PathBuf;
 use eyre::Result;
+use peeps::Child;
 use std::time::Duration;
-use tokio::process::Child;
 
 use crate::net::{Endpoint, EndpointConnector};
 
@@ -273,7 +273,7 @@ fn spawn_binary(
         binary_path.display()
     );
 
-    let mut cmd = tokio::process::Command::new(&binary_path);
+    let mut cmd = peeps::Command::new(&binary_path);
     cmd.arg("--listen").arg(&endpoint_display);
     cmd.args(extra_args);
     for (key, value) in env_vars {
@@ -303,5 +303,7 @@ fn spawn_binary(
         cmd.stderr(Stdio::null());
     }
 
-    ur_taking_me_with_you::spawn_dying_with_parent_async(cmd).map_err(Into::into)
+    ur_taking_me_with_you::spawn_dying_with_parent_async(cmd.into_inner())
+        .map(Into::into)
+        .map_err(Into::into)
 }

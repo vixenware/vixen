@@ -7,13 +7,13 @@
 //! - `vx-vfs`, which serves VFS connections over SHM.
 
 use crate::types::{VfsConfig, VfsError, VfsStart};
+use peeps::Command;
 use peeps::{Sender, WatchSender};
 use roam_shm::bootstrap::{SessionId, SessionPaths, unix as shm_bootstrap};
 use roam_shm::driver::MultiPeerHostDriver;
 use roam_shm::{AddPeerOptions, SegmentConfig, ShmHost};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tokio::process::Command;
 use vixenfs_proto::{Vfs, VfsDispatcher};
 use vx_vfs_types::{VIXEN_MOUNT_HELPER_PATH, VfsAction, VfsDiagnostic, VfsIssueCode};
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -345,7 +345,7 @@ async fn cleanup_session_dir(sid: &str) {
         }
     };
     let control_sock_path = control_socket_path_for_sid(&app_group_root, sid);
-    match tokio::fs::remove_file(&control_sock_path).await {
+    match peeps::fs::remove_file(&control_sock_path).await {
         Ok(()) => tracing::debug!(
             %sid,
             path = %control_sock_path.display(),
@@ -379,7 +379,7 @@ async fn cleanup_session_dir(sid: &str) {
         return;
     }
     let session_dir = session_paths.session_dir();
-    match tokio::fs::remove_dir_all(&session_dir).await {
+    match peeps::fs::remove_dir_all(&session_dir).await {
         Ok(()) => {
             tracing::debug!(%sid, path = %session_dir.display(), "removed SHM session directory");
         }

@@ -139,7 +139,7 @@ async fn extract_tar<R: AsyncRead + Unpin>(
 
         // Handle directories
         if entry.header().entry_type().is_dir() {
-            tokio::fs::create_dir_all(&target_path)
+            peeps::fs::create_dir_all(&target_path)
                 .await
                 .map_err(|e| TarballError::CreateDir {
                     path: target_path.clone(),
@@ -150,7 +150,7 @@ async fn extract_tar<R: AsyncRead + Unpin>(
 
         // Create parent directories
         if let Some(parent) = target_path.parent() {
-            tokio::fs::create_dir_all(parent)
+            peeps::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| TarballError::CreateDir {
                     path: parent.to_owned(),
@@ -182,7 +182,7 @@ async fn extract_tar<R: AsyncRead + Unpin>(
                 && mode & 0o111 != 0
             {
                 let perms = std::fs::Permissions::from_mode(mode);
-                tokio::fs::set_permissions(&target_path, perms)
+                peeps::fs::set_permissions(&target_path, perms)
                     .await
                     .map_err(|e| TarballError::SetPermissions {
                         path: target_path.clone(),
@@ -372,7 +372,7 @@ pub async fn materialize_tree(
     use vx_store_proto::TreeEntryKind;
 
     // Create destination directory
-    tokio::fs::create_dir_all(dest)
+    peeps::fs::create_dir_all(dest)
         .await
         .map_err(|e| TarballError::CreateDir {
             path: dest.to_owned(),
@@ -382,7 +382,7 @@ pub async fn materialize_tree(
     // First pass: create all directories (including empty ones)
     for path in manifest.directories() {
         let dir_path = dest.join(path);
-        tokio::fs::create_dir_all(&dir_path)
+        peeps::fs::create_dir_all(&dir_path)
             .await
             .map_err(|e| TarballError::CreateDir {
                 path: dir_path,
@@ -402,7 +402,7 @@ pub async fn materialize_tree(
             } => {
                 // Ensure parent directory exists
                 if let Some(parent) = target_path.parent() {
-                    tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    peeps::fs::create_dir_all(parent).await.map_err(|e| {
                         TarballError::CreateDir {
                             path: parent.to_owned(),
                             source: e,
@@ -414,7 +414,7 @@ pub async fn materialize_tree(
                 let contents = get_blob(*blob).await.map_err(TarballError::BlobStore)?;
 
                 // Write file
-                tokio::fs::write(&target_path, &contents)
+                peeps::fs::write(&target_path, &contents)
                     .await
                     .map_err(|e| TarballError::WriteFile {
                         path: target_path.clone(),
@@ -426,7 +426,7 @@ pub async fn materialize_tree(
                 if *_executable {
                     use std::os::unix::fs::PermissionsExt;
                     let perms = std::fs::Permissions::from_mode(0o755);
-                    tokio::fs::set_permissions(&target_path, perms)
+                    peeps::fs::set_permissions(&target_path, perms)
                         .await
                         .map_err(|e| TarballError::SetPermissions {
                             path: target_path.clone(),
@@ -438,7 +438,7 @@ pub async fn materialize_tree(
             TreeEntryKind::Symlink { target } => {
                 // Ensure parent directory exists
                 if let Some(parent) = target_path.parent() {
-                    tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    peeps::fs::create_dir_all(parent).await.map_err(|e| {
                         TarballError::CreateDir {
                             path: parent.to_owned(),
                             source: e,
@@ -447,7 +447,7 @@ pub async fn materialize_tree(
                 }
 
                 // Remove existing file/symlink if present
-                if let Err(e) = tokio::fs::remove_file(&target_path).await {
+                if let Err(e) = peeps::fs::remove_file(&target_path).await {
                     // NotFound is expected if the file doesn't exist
                     if e.kind() != std::io::ErrorKind::NotFound {
                         tracing::warn!("Failed to remove existing file at {}: {e}", target_path);
@@ -457,7 +457,7 @@ pub async fn materialize_tree(
                 // Create symlink
                 #[cfg(unix)]
                 {
-                    tokio::fs::symlink(target, &target_path)
+                    peeps::fs::symlink(target, &target_path)
                         .await
                         .map_err(|e| TarballError::WriteFile {
                             path: target_path.clone(),
@@ -468,7 +468,7 @@ pub async fn materialize_tree(
                 #[cfg(windows)]
                 {
                     // On Windows, try file symlink first
-                    tokio::fs::symlink_file(target, &target_path)
+                    peeps::fs::symlink_file(target, &target_path)
                         .await
                         .map_err(|e| TarballError::WriteFile {
                             path: target_path.clone(),

@@ -691,7 +691,7 @@ impl CliContext {
 
     async fn cmd_debug(&mut self, _args: DebugArgs) -> Result<()> {
         // Launch peeps dashboard server CLI.
-        let status = tokio::process::Command::new("peeps")
+        let status = peeps::Command::new("peeps")
             .status()
             .await
             .map_err(|e| eyre::eyre!("failed to launch `peeps` dashboard CLI: {e}"))?;

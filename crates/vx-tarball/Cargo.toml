@@ -13,6 +13,7 @@ camino = { workspace = true }
 futures-util = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+peeps = { workspace = true }
 tracing = { workspace = true }
 vx-store-proto = { workspace = true }
 

@@ -952,6 +952,7 @@ dependencies = [
  "futures-util",
  "libc",
  "nix",
+ "peeps",
  "tokio",
  "tracing",
  "trait-make",
@@ -3071,6 +3072,7 @@ dependencies = [
  "facet-json",
  "jiff",
  "libc",
+ "peeps",
  "tokio",
  "tracing",
 ]
@@ -3286,6 +3288,7 @@ dependencies = [
  "async-compression",
  "camino",
  "futures-util",
+ "peeps",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tar",

@@ -222,7 +222,7 @@ where
     cleanup_stale_projfs(&config.mount_path);
 
     // Ensure the mount directory exists
-    tokio::fs::create_dir_all(config.mount_path.as_std_path())
+    peeps::fs::create_dir_all(config.mount_path.as_std_path())
         .await
         .map_err(|error| VfsError::CommandFailed {
             program: "mount",

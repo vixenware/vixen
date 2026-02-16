@@ -187,7 +187,7 @@ pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
 
     // Process inventory
     writeln!(out, "\n{}", "--- Vixen processes ---".yellow().bold()).unwrap();
-    match tokio::process::Command::new("pgrep")
+    match peeps::Command::new("pgrep")
         .args(["-la", "(vx-|vixen)"])
         .output()
         .await

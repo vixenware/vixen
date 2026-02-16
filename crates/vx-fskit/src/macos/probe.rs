@@ -1,6 +1,6 @@
 use camino::Utf8PathBuf;
+use peeps::Command;
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 
 use super::Log;
 
@@ -182,8 +182,8 @@ async fn probe_health(mount_path: &Utf8PathBuf, log: &mut Log) -> HealthProbe {
 
     match tokio::time::timeout(std::time::Duration::from_secs(1), child.wait()).await {
         Ok(Ok(status)) => {
-            let stdout = read_pipe(child.stdout.take()).await;
-            let stderr = read_pipe(child.stderr.take()).await;
+            let stdout = read_pipe(child.take_stdout()).await;
+            let stderr = read_pipe(child.take_stderr()).await;
             if status.success() {
                 let json = String::from_utf8_lossy(&stdout).to_string();
                 log.ok(format!("health.json: {json}"));
@@ -204,7 +204,7 @@ async fn probe_health(mount_path: &Utf8PathBuf, log: &mut Log) -> HealthProbe {
         Err(_) => {
             // Timed out — kill the sacrificial process
             log.fail("health.json: /bin/cat timed out (mount is zombied), killing");
-            let _ = child.kill().await;
+            let _ = child.kill();
             HealthProbe::Timeout
         }
     }

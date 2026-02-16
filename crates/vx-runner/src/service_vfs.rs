@@ -44,7 +44,7 @@ impl ActionContext {
     ///
     /// Sets PATH (linker discovery), HOME, and temp dirs. On Windows the temp
     /// vars are critical — without them `GetTempPathW` falls back to `C:\WINDOWS`.
-    pub fn hermetic_env(&self, cmd: &mut tokio::process::Command) {
+    pub fn hermetic_env(&self, cmd: &mut peeps::Command) {
         cmd.env_clear();
         // Passthrough vars needed by compilers/linkers on the host.
         // On Windows, LIB/INCLUDE are required for MSVC link.exe to find

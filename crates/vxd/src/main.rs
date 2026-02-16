@@ -26,11 +26,11 @@ use camino::Utf8PathBuf;
 use eyre::Result;
 use facet::Facet;
 use figue as args;
+use peeps::Child;
 use peeps::Mutex;
 use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::process::Child;
 use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
 use vx_runner_proto::RunnerClient;
@@ -134,7 +134,7 @@ impl SpawnTracker {
         if let Some(ref mut child) = self.store {
             let pid = child.id().unwrap_or(0);
             tracing::info!("Killing spawned vx-store (pid: {pid})");
-            if let Err(e) = child.start_kill() {
+            if let Err(e) = child.kill() {
                 tracing::warn!("Failed to kill vx-store (pid: {pid}): {e}");
             }
         }
@@ -142,7 +142,7 @@ impl SpawnTracker {
         if let Some(ref mut child) = self.runner {
             let pid = child.id().unwrap_or(0);
             tracing::info!("Killing spawned vx-runner (pid: {pid})");
-            if let Err(e) = child.start_kill() {
+            if let Err(e) = child.kill() {
                 tracing::warn!("Failed to kill vx-runner (pid: {pid}): {e}");
             }
         }

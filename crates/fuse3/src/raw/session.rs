@@ -22,8 +22,8 @@ use futures_util::select;
 use futures_util::sink::{Sink, SinkExt};
 use futures_util::stream::StreamExt;
 use nix::mount;
+use peeps::Command;
 use tokio::fs::read_dir;
-use tokio::process::Command;
 use tokio::task::{self, JoinHandle};
 use tracing::{Instrument, Span, debug, debug_span, error, instrument, warn};
 

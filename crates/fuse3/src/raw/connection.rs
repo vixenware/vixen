@@ -22,9 +22,9 @@ use futures_util::{FutureExt, select};
 use nix::fcntl::{FcntlArg, FdFlag, OFlag};
 use nix::sys::socket::{self, AddressFamily, ControlMessageOwned, MsgFlags, SockFlag, SockType};
 use nix::sys::uio;
+use peeps::Command;
 use std::pin::pin;
 use tokio::io::unix::AsyncFd;
-use tokio::process::Command;
 use tokio::task;
 use tracing::debug;
 

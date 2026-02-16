@@ -1533,7 +1533,7 @@ async fn execute_action(
                 for rel_path in &paths {
                     let abs_path = workspace_root_path.join(rel_path);
                     let contents =
-                        tokio::fs::read(&abs_path)
+                        peeps::fs::read(&abs_path)
                             .await
                             .map_err(|e| VxdError::FileRead {
                                 path: abs_path.clone(),
@@ -1974,7 +1974,7 @@ async fn execute_action(
                         crate_name: label.clone(),
                         message: format!("Invalid output path: {out_path}"),
                     })?;
-                    tokio::fs::create_dir_all(parent)
+                    peeps::fs::create_dir_all(parent)
                         .await
                         .map_err(|e| VxdError::Compilation {
                             crate_name: label.clone(),
@@ -1997,7 +1997,7 @@ async fn execute_action(
                             message: format!("Failed to fetch output blob from CAS: {e}"),
                         })?;
 
-                    tokio::fs::write(&out_path, &data).await.map_err(|e| {
+                    peeps::fs::write(&out_path, &data).await.map_err(|e| {
                         VxdError::Compilation {
                             crate_name: label.clone(),
                             message: format!("Failed to write output to {out_path}: {e}"),
@@ -2008,7 +2008,7 @@ async fn execute_action(
                         #[cfg(unix)]
                         {
                             use std::os::unix::fs::PermissionsExt;
-                            let mut perms = tokio::fs::metadata(&out_path)
+                            let mut perms = peeps::fs::metadata(&out_path)
                                 .await
                                 .map_err(|e| VxdError::Compilation {
                                     crate_name: label.clone(),
@@ -2016,7 +2016,7 @@ async fn execute_action(
                                 })?
                                 .permissions();
                             perms.set_mode(0o755);
-                            tokio::fs::set_permissions(&out_path, perms)
+                            peeps::fs::set_permissions(&out_path, perms)
                                 .await
                                 .map_err(|e| VxdError::Compilation {
                                     crate_name: label.clone(),

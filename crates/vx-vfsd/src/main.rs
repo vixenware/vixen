@@ -393,7 +393,7 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
         platform::cleanup_stuck_mount(mount).await?;
 
         if platform::should_create_mount_dir(mount) {
-            tokio::fs::create_dir_all(mount.as_std_path())
+            peeps::fs::create_dir_all(mount.as_std_path())
                 .await
                 .map_err(|e| format!("failed to create mount directory {mount}: {e}"))?;
         }
@@ -428,7 +428,7 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
                 for attempt in 1..=MAX_ATTEMPTS {
                     let read_result = tokio::time::timeout(
                         smoke_timeout,
-                        tokio::fs::read(canary_fs_path.as_std_path()),
+                        peeps::fs::read(canary_fs_path.as_std_path()),
                     )
                     .await;
 
@@ -521,7 +521,7 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
         let temp_path = format!("/tmp/vfsd-diagnostics-{:016x}.txt", fastrand::u64(..));
         let diagnostic_content = format!("{error}\n{diagnostics}");
         let diagnostic_content = strip_ansi_escapes::strip_str(&diagnostic_content);
-        if let Err(e) = tokio::fs::write(&temp_path, &diagnostic_content).await {
+        if let Err(e) = peeps::fs::write(&temp_path, &diagnostic_content).await {
             tracing::error!("Failed to write VFS diagnostics to {}: {}", temp_path, e);
         } else {
             tracing::error!("==================================================");
