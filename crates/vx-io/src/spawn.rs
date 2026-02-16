@@ -303,7 +303,8 @@ fn spawn_binary(
         cmd.stderr(Stdio::null());
     }
 
-    ur_taking_me_with_you::spawn_dying_with_parent_async(cmd.into_inner())
-        .map(Into::into)
+    let (inner, diag) = cmd.into_inner_with_diagnostics();
+    ur_taking_me_with_you::spawn_dying_with_parent_async(inner)
+        .map(|child| Child::from_tokio_with_diagnostics(child, diag))
         .map_err(Into::into)
 }
