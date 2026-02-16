@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 default = []
-diagnostics = ["peeps/diagnostics", "roam-session/diagnostics"]
+diagnostics = ["peeps/diagnostics", "roam-session/diagnostics", "vx-vfsd/diagnostics"]
 
 [package.metadata]
 

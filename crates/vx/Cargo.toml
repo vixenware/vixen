@@ -38,5 +38,13 @@ unicode-width = { workspace = true }
 tempfile = { workspace = true }
 ulid = { workspace = true }
 
+[features]
+default = []
+diagnostics = [
+    "peeps/diagnostics",
+    "roam-stream/diagnostics",
+    "vx-vfs/diagnostics",
+]
+
 [lints]
 workspace = true
