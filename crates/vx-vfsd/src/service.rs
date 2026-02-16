@@ -413,3 +413,227 @@ impl VfsdService {
         Ok((node_hash, total_size))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use roam::Context;
+    use roam_stream::NoDispatcher;
+    use tempfile::TempDir;
+    use vixenfs_proto::{ItemType, Vfs, errno};
+    use vx_io::spawn::{ServiceBuilder, ServiceHandle};
+    use vx_store_proto::{Blake3Hash, CasNode, ChunkHash, StoreClient};
+
+    use super::*;
+    use crate::protocol::Vfsd;
+    use crate::vfs::CasVfs;
+
+    type StoreCaller = roam_stream::ConnectionHandle;
+
+    struct TestEnv {
+        _store_root: TempDir,
+        _vx_home: TempDir,
+        _store_service: ServiceHandle<NoDispatcher>,
+        cas: Arc<StoreClient<StoreCaller>>,
+        service: VfsdService,
+    }
+
+    impl TestEnv {
+        async fn new() -> Self {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .try_init();
+
+            let store_root = TempDir::new().expect("failed to create store root");
+            let vx_home = TempDir::new().expect("failed to create vx_home");
+            let mount_path = TempDir::new().expect("failed to create mount path");
+            let endpoint = free_local_endpoint();
+
+            let store_root_str = store_root.path().to_string_lossy().into_owned();
+            let vx_home_str = vx_home.path().to_string_lossy().into_owned();
+            let binary_path = resolve_vx_store_binary();
+
+            let store_service = ServiceBuilder::new(binary_path, endpoint, NoDispatcher)
+                .caller_name("vx-vfsd-flush-tests")
+                .args(&["--root", &store_root_str, "--vx-home", &vx_home_str])
+                .env("VX_TEST", "1")
+                .timeout(Duration::from_secs(10))
+                .connect()
+                .await
+                .expect("failed to spawn/connect vx-store");
+
+            let store_virtual = store_service
+                .boot_and_connect(None)
+                .await
+                .expect("failed to boot/connect vx-store");
+            let cas = Arc::new(StoreClient::new(store_virtual));
+
+            let vfs = Arc::new(CasVfs::new(
+                Arc::clone(&cas),
+                None,
+                mount_path.path().to_string_lossy().into_owned().into(),
+            ));
+            let service = VfsdService::new(vfs);
+
+            Self {
+                _store_root: store_root,
+                _vx_home: vx_home,
+                _store_service: store_service,
+                cas,
+                service,
+            }
+        }
+    }
+
+    fn cx() -> Context {
+        Context::new(
+            roam::wire::ConnectionId::ROOT,
+            roam::wire::RequestId::new(1),
+            roam::wire::MethodId::new(1),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    fn free_local_endpoint() -> vx_io::net::Endpoint {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind ephemeral port");
+        let addr = listener.local_addr().expect("failed to read local addr");
+        drop(listener);
+        vx_io::net::Endpoint::parse(&addr.to_string()).expect("failed to parse endpoint")
+    }
+
+    fn resolve_vx_store_binary() -> String {
+        if let Ok(path) = std::env::var("CARGO_BIN_EXE_vx-store")
+            && !path.is_empty()
+        {
+            return path;
+        }
+
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/debug/vx-store")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    async fn write_file(
+        env: &TestEnv,
+        prefix_id: &str,
+        rel_dir: &str,
+        file_name: &str,
+        data: &[u8],
+    ) {
+        Vfsd::mkdir(&env.service, &cx(), format!("/{prefix_id}/{rel_dir}"))
+            .await
+            .expect("mkdir failed");
+
+        let dir_id = {
+            let state = env.service.vfs.state.lock();
+            let prefix_root = state
+                .prefixes
+                .get(prefix_id)
+                .expect("prefix should exist")
+                .root_item_id;
+            state
+                .items
+                .lookup_child(prefix_root, rel_dir)
+                .expect("dir should exist")
+                .id
+        };
+
+        let create = Vfs::create(
+            &*env.service.vfs,
+            &cx(),
+            dir_id,
+            file_name.to_string(),
+            ItemType::File,
+        )
+        .await;
+        assert_eq!(
+            create.error,
+            errno::OK,
+            "create failed with errno {}",
+            create.error
+        );
+
+        let write = Vfs::write(&*env.service.vfs, &cx(), create.item_id, 0, data.to_vec()).await;
+        assert_eq!(
+            write.error,
+            errno::OK,
+            "write failed with errno {}",
+            write.error
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flush_writes_buffered_file_to_cas_and_returns_directory_hash() {
+        let env = TestEnv::new().await;
+        write_file(&env, "pfx-a", "out", "hello.txt", b"hello flush").await;
+
+        let root_hash = Vfsd::flush(&env.service, &cx(), "/pfx-a/out".to_string())
+            .await
+            .expect("flush failed");
+
+        let node_bytes = env
+            .cas
+            .get_node(vx_store_proto::NodeHash(root_hash))
+            .await
+            .expect("get_node RPC failed")
+            .expect("flushed root node not found in CAS");
+        let root_node =
+            CasNode::from_bytes(&node_bytes).expect("failed to decode root DirectoryNode");
+        let dir = match root_node {
+            CasNode::Directory(d) => d,
+            other => panic!("expected DirectoryNode, got {other:?}"),
+        };
+        assert_eq!(dir.entries.len(), 1);
+        assert_eq!(dir.entries[0].name, "hello.txt");
+
+        let expected_hash = Blake3Hash::from_bytes(b"hello flush");
+        let expected_chunk = ChunkHash(expected_hash);
+        let chunk = env
+            .cas
+            .get_chunk(expected_chunk)
+            .await
+            .expect("get_chunk RPC failed")
+            .expect("flushed chunk not found in CAS");
+        assert_eq!(chunk, b"hello flush");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flush_prefix_root_without_files_returns_empty_directory_node() {
+        let env = TestEnv::new().await;
+        Vfsd::mkdir(&env.service, &cx(), "/pfx-empty".to_string())
+            .await
+            .expect("mkdir failed");
+
+        let root_hash = Vfsd::flush(&env.service, &cx(), "/pfx-empty".to_string())
+            .await
+            .expect("flush failed");
+
+        let node_bytes = env
+            .cas
+            .get_node(vx_store_proto::NodeHash(root_hash))
+            .await
+            .expect("get_node RPC failed")
+            .expect("flushed empty node not found in CAS");
+        let root_node = CasNode::from_bytes(&node_bytes).expect("failed to decode empty root node");
+        let dir = match root_node {
+            CasNode::Directory(d) => d,
+            other => panic!("expected DirectoryNode, got {other:?}"),
+        };
+        assert!(dir.entries.is_empty(), "expected no entries");
+        assert_eq!(dir.total_size, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flush_missing_prefix_returns_error() {
+        let env = TestEnv::new().await;
+        let err = Vfsd::flush(&env.service, &cx(), "/does-not-exist/out".to_string())
+            .await
+            .expect_err("flush should fail for missing prefix");
+        assert!(err.contains("prefix"), "unexpected error: {err}");
+    }
+}
