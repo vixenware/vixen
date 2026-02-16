@@ -234,8 +234,37 @@ final class Volume: FSVolume {
 
     // MARK: - VFS Client Access
 
-    private func getClient() async throws -> VfsClient {
-        try await VfsConnection.shared.getClient()
+    private func withMappedClientCall<T>(
+        operation: StaticString = #function,
+        _ body: (VfsClient) async throws -> T
+    ) async throws -> T {
+        let client: VfsClient
+        do {
+            client = try await VfsConnection.shared.getClient()
+        } catch {
+            throw vixenMappedFSError(error, operation: operation, logger: log)
+        }
+        do {
+            return try await body(client)
+        } catch {
+            throw vixenMappedFSError(error, operation: operation, logger: log)
+        }
+    }
+
+    private func failPOSIX(
+        _ code: Int32,
+        operation: StaticString = #function,
+        details: String = ""
+    ) throws -> Never {
+        let message = String(cString: strerror(code))
+        if details.isEmpty {
+            log.error("\(operation): failing with errno=\(code) (\(message, privacy: .public))")
+        } else {
+            log.error(
+                "\(operation): failing with errno=\(code) (\(message, privacy: .public)) \(details, privacy: .public)"
+            )
+        }
+        throw fs_errorForPOSIXError(code)
     }
 
     private static func isImmutableFile(_ attrs: FSItem.Attributes) -> Bool {
@@ -305,10 +334,12 @@ extension Volume: FSVolume.Operations {
         await LifecycleTrace.shared.mark(log, event: "volume.activate.begin")
 
         let rootId = self.rootId
-        let result = try await getClient().getAttributes(itemId: rootId)
+        let result = try await withMappedClientCall {
+            try await $0.getAttributes(itemId: rootId)
+        }
 
         if result.error != 0 {
-            throw fs_errorForPOSIXError(result.error)
+            try failPOSIX(result.error, details: "itemId=\(rootId)")
         }
 
         let rootAttrs = FSItem.Attributes.fromVfs(
@@ -373,7 +404,9 @@ extension Volume: FSVolume.Operations {
             return cachedAttrs
         }
 
-        let result = try await getClient().getAttributes(itemId: item.itemId)
+        let result = try await withMappedClientCall {
+            try await $0.getAttributes(itemId: item.itemId)
+        }
         guard result.error == 0 else {
             log.debug(
                 "attributes: revalidate failed for itemId=\(item.itemId) error=\(result.error); using cached"
@@ -429,17 +462,20 @@ extension Volume: FSVolume.Operations {
         )
 
         let itemId = item.itemId
-        let client = try await getClient()
-        let result = try await client.setAttributes(itemId: itemId, params: params)
+        let result = try await withMappedClientCall {
+            try await $0.setAttributes(itemId: itemId, params: params)
+        }
 
         if result.error != 0 {
-            throw fs_errorForPOSIXError(result.error)
+            try failPOSIX(result.error, details: "itemId=\(itemId)")
         }
 
         newAttributes.consumedAttributes = consumed
 
         // Refresh attributes from server
-        let attrsResult = try await client.getAttributes(itemId: itemId)
+        let attrsResult = try await withMappedClientCall {
+            try await $0.getAttributes(itemId: itemId)
+        }
 
         if attrsResult.error == 0 {
             let cachedAttrs = item.cachedAttributes
@@ -511,12 +547,13 @@ extension Volume: FSVolume.Operations {
         }
 
         let dirId = dirItem.itemId
-        let client = try await getClient()
-        let result = try await client.lookup(parentId: dirId, name: nameStr)
+        let result = try await withMappedClientCall {
+            try await $0.lookup(parentId: dirId, name: nameStr)
+        }
 
         if result.error != 0 {
             log.debug("lookupItem: not found (error=\(result.error))")
-            throw fs_errorForPOSIXError(result.error)
+            try failPOSIX(result.error, details: "parentId=\(dirId) name=\(nameStr)")
         }
 
         let attrs = result.attrs
@@ -572,15 +609,18 @@ extension Volume: FSVolume.Operations {
 
         let vfsType: ItemType = (type == .directory) ? .directory : .file
         let dirId = dirItem.itemId
-        let client = try await getClient()
-        let result = try await client.create(parentId: dirId, name: nameStr, itemType: vfsType)
+        let result = try await withMappedClientCall {
+            try await $0.create(parentId: dirId, name: nameStr, itemType: vfsType)
+        }
 
         if result.error != 0 {
-            throw fs_errorForPOSIXError(result.error)
+            try failPOSIX(result.error, details: "parentId=\(dirId) name=\(nameStr)")
         }
 
         // Get attributes for new item
-        let attrsResult = try await client.getAttributes(itemId: result.itemId)
+        let attrsResult = try await withMappedClientCall {
+            try await $0.getAttributes(itemId: result.itemId)
+        }
 
         let fsAttrs = FSItem.Attributes.fromVfs(
             itemId: result.itemId,
@@ -630,10 +670,12 @@ extension Volume: FSVolume.Operations {
         }
 
         let itemId = item.itemId
-        let result = try await getClient().delete(itemId: itemId)
+        let result = try await withMappedClientCall {
+            try await $0.delete(itemId: itemId)
+        }
 
         if result.error != 0 {
-            throw fs_errorForPOSIXError(result.error)
+            try failPOSIX(result.error, details: "itemId=\(itemId)")
         }
 
         removeCachedItem(item.itemId)
@@ -659,11 +701,14 @@ extension Volume: FSVolume.Operations {
 
         let itemId = item.itemId
         let destDirId = destDir.itemId
-        let result = try await getClient().rename(
-            itemId: itemId, newParentId: destDirId, newName: destName)
+        let result = try await withMappedClientCall {
+            try await $0.rename(itemId: itemId, newParentId: destDirId, newName: destName)
+        }
 
         if result.error != 0 {
-            throw fs_errorForPOSIXError(result.error)
+            try failPOSIX(
+                result.error,
+                details: "itemId=\(itemId) newParentId=\(destDirId) newName=\(destName)")
         }
 
         return destinationName
@@ -727,10 +772,12 @@ extension Volume: FSVolume.Operations {
 
         let dirId = dirItem.itemId
         let cursor = cookie.rawValue
-        let result = try await getClient().readDir(itemId: dirId, cursor: cursor)
+        let result = try await withMappedClientCall {
+            try await $0.readDir(itemId: dirId, cursor: cursor)
+        }
 
         if result.error != 0 {
-            throw fs_errorForPOSIXError(result.error)
+            try failPOSIX(result.error, details: "itemId=\(dirId) cursor=\(cursor)")
         }
 
         var nextCookie: UInt64 = cursor + 1
@@ -806,14 +853,18 @@ extension Volume: FSVolume.ReadWriteOperations {
         do {
             let itemId = item.itemId
 
-            let result = try await getClient().read(
-                itemId: itemId,
-                offset: UInt64(offset),
-                len: UInt64(requestedBytes)
-            )
+            let result = try await withMappedClientCall {
+                try await $0.read(
+                    itemId: itemId,
+                    offset: UInt64(offset),
+                    len: UInt64(requestedBytes)
+                )
+            }
 
             if result.error != 0 {
-                throw fs_errorForPOSIXError(result.error)
+                try failPOSIX(
+                    result.error,
+                    details: "itemId=\(itemId) offset=\(offset) length=\(requestedBytes)")
             }
 
             let copyLen = min(buffer.length, result.data.count)
@@ -845,7 +896,7 @@ extension Volume: FSVolume.ReadWriteOperations {
                 latencyNs: elapsedNs,
                 isError: true
             )
-            throw error
+            throw vixenMappedFSError(error, operation: #function, logger: log)
         }
     }
 
@@ -869,11 +920,14 @@ extension Volume: FSVolume.ReadWriteOperations {
 
         let itemId = item.itemId
 
-        let result = try await getClient().write(
-            itemId: itemId, offset: UInt64(offset), data: Data(bytes))
+        let result = try await withMappedClientCall {
+            try await $0.write(itemId: itemId, offset: UInt64(offset), data: Data(bytes))
+        }
 
         if result.error != 0 {
-            throw fs_errorForPOSIXError(result.error)
+            try failPOSIX(
+                result.error,
+                details: "itemId=\(itemId) offset=\(offset) length=\(bytes.count)")
         }
 
         return Int(result.bytesWritten)

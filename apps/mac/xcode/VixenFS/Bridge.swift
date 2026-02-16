@@ -11,6 +11,107 @@ enum VixenFSConstants {
     static let shmBootstrapRetryDelayNs: UInt64 = 0
 }
 
+func vixenPOSIXCode(for error: Error) -> Int32 {
+    if let posix = error as? POSIXError {
+        return posix.code.rawValue
+    }
+
+    let nsError = error as NSError
+    if nsError.domain == NSPOSIXErrorDomain {
+        return Int32(nsError.code)
+    }
+
+    if error is CancellationError {
+        return POSIXError.ECANCELED.rawValue
+    }
+
+    if let err = error as? ConnectionError {
+        switch err {
+        case .connectionClosed:
+            return POSIXError.ENOTCONN.rawValue
+        case .timeout:
+            return POSIXError.ETIMEDOUT.rawValue
+        case .transportError:
+            return POSIXError.EIO.rawValue
+        case .goodbye:
+            return POSIXError.ECONNRESET.rawValue
+        case .protocolViolation, .handshakeFailed:
+            return POSIXError.EPROTO.rawValue
+        }
+    }
+
+    if let err = error as? TransportError {
+        switch err {
+        case .connectionClosed:
+            return POSIXError.ENOTCONN.rawValue
+        case .wouldBlock:
+            return POSIXError.EAGAIN.rawValue
+        case .decodeFailed:
+            return POSIXError.EPROTO.rawValue
+        }
+    }
+
+    if let err = error as? RoamError {
+        switch err {
+        case .unknownMethod, .notImplemented:
+            return POSIXError.ENOSYS.rawValue
+        case .decodeError, .encodeError:
+            return POSIXError.EPROTO.rawValue
+        case .connectionClosed:
+            return POSIXError.ENOTCONN.rawValue
+        case .timeout:
+            return POSIXError.ETIMEDOUT.rawValue
+        case .cancelled:
+            return POSIXError.ECANCELED.rawValue
+        }
+    }
+
+    if let err = error as? ShmBootstrapError {
+        switch err {
+        case .invalidSid, .invalidSocketPath, .invalidRequestEncoding:
+            return POSIXError.EINVAL.rawValue
+        case .unsupportedPlatform:
+            return POSIXError.ENOTSUP.rawValue
+        case .socketCreateFailed(let errno), .connectFailed(let errno), .writeFailed(let errno),
+            .readFailed(let errno):
+            return errno
+        case .eof:
+            return POSIXError.EPIPE.rawValue
+        case .invalidResponseMagic, .protocolError, .missingFileDescriptor:
+            return POSIXError.EPROTO.rawValue
+        }
+    }
+
+    if let err = error as? ShmRegionError {
+        switch err {
+        case .invalidSize, .invalidOffset, .resizeShrinkUnsupported:
+            return POSIXError.EINVAL.rawValue
+        case .createFailed(let errno), .openFailed(let errno), .statFailed(let errno),
+            .mmapFailed(let errno), .munmapFailed(let errno), .ftruncateFailed(let errno),
+            .fchmodFailed(let errno):
+            return errno
+        case .emptyFile:
+            return POSIXError.ENOENT.rawValue
+        }
+    }
+
+    return POSIXError.EIO.rawValue
+}
+
+func vixenMappedFSError(_ error: Error, operation: StaticString, logger: Logger) -> any Error {
+    let code = vixenPOSIXCode(for: error)
+    if code == POSIXError.ETIMEDOUT.rawValue {
+        logger.error(
+            "\(operation): timeout mapped to errno=\(code) (\(String(describing: error), privacy: .public))"
+        )
+        NSLog("VixenFS: timeout in \(operation)")
+    }
+    logger.error(
+        "\(operation): mapped \(String(describing: error), privacy: .public) to errno=\(code)"
+    )
+    return fs_errorForPOSIXError(code)
+}
+
 extension VfsClient: @unchecked Sendable {}
 
 actor LifecycleTrace {
@@ -163,9 +264,7 @@ actor VfsConnection {
             log, event: "vfs.connect.begin", details: "url=\(url.absoluteString)")
 
         guard let mountOptions = parseMountOptions(from: url) else {
-            throw NSError(
-                domain: "VFS", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Missing or invalid sid in URL: \(url)"])
+            throw POSIXError(.EINVAL)
         }
         let sid = mountOptions.sid
         debugEnabled = mountOptions.debug
@@ -210,7 +309,7 @@ actor VfsConnection {
             }
             await self?.handleDriverExit()
         }
-        client = VfsClient(connection: handle, timeout: 5.0)
+        client = VfsClient(connection: handle, timeout: 28.0)
         await ConnectionHealth.shared.recordConnected()
         log.info("Connected to \(url.absoluteString)")
         await LifecycleTrace.shared.mark(
@@ -229,8 +328,7 @@ actor VfsConnection {
 
     func getClient() throws -> VfsClient {
         guard let client = client else {
-            throw NSError(
-                domain: "VFS", code: -1, userInfo: [NSLocalizedDescriptionKey: "Not connected"])
+            throw POSIXError(.ENOTCONN)
         }
         return client
     }
@@ -480,7 +578,10 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
                 await LifecycleTrace.shared.mark(
                     self.log, event: "bridge.probeResource.failure",
                     details: "error=\(String(describing: error))")
-                sendable.handler(nil, error)
+                sendable.handler(
+                    nil,
+                    vixenMappedFSError(error, operation: #function, logger: self.log)
+                )
             }
         }
     }
@@ -520,7 +621,10 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
                 await LifecycleTrace.shared.mark(
                     self.log, event: "bridge.loadResource.failure",
                     details: "error=\(String(describing: error))")
-                sendable.handler(nil, fs_errorForPOSIXError(POSIXError.EIO.rawValue))
+                sendable.handler(
+                    nil,
+                    vixenMappedFSError(error, operation: #function, logger: self.log)
+                )
             }
         }
     }
