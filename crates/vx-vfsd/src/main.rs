@@ -107,9 +107,15 @@ impl Vfs for SharedVfs {
         self.inner.get_attributes(cx, item_id).await
     }
 
-    async fn read_dir(&self, cx: &roam::Context, item_id: ItemId, cursor: u64) -> ReadDirResult {
-        tracing::trace!(item_id, cursor, "read_dir");
-        self.inner.read_dir(cx, item_id, cursor).await
+    async fn read_dir(
+        &self,
+        cx: &roam::Context,
+        item_id: ItemId,
+        cookie: u64,
+        verifier: u64,
+    ) -> ReadDirResult {
+        tracing::trace!(item_id, cookie, verifier, "read_dir");
+        self.inner.read_dir(cx, item_id, cookie, verifier).await
     }
 
     async fn read(&self, cx: &roam::Context, item_id: ItemId, offset: u64, len: u64) -> ReadResult {

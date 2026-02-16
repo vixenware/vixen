@@ -51,7 +51,6 @@ pub(crate) struct StoreServiceInner {
         Mutex<std::collections::HashMap<(ToolchainSpecKey, RustComponent), BlobRef>>,
 
     /// Extracted Rust toolchain components by (spec_key, component)
-    pub(crate) rust_component_trees: Mutex<
-        std::collections::HashMap<(ToolchainSpecKey, RustComponent), ExtractedRustComponent>,
-    >,
+    pub(crate) rust_component_trees:
+        Mutex<std::collections::HashMap<(ToolchainSpecKey, RustComponent), ExtractedRustComponent>>,
 }

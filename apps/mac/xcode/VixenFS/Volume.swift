@@ -783,16 +783,20 @@ extension Volume: FSVolume.Operations {
         }
 
         let dirId = dirItem.itemId
-        let cursor = cookie.rawValue
+        let cookieValue = cookie.rawValue
+        let verifierValue = verifier.rawValue
         let result = try await withMappedClientCall {
-            try await $0.readDir(itemId: dirId, cursor: cursor)
+            try await $0.readDir(itemId: dirId, cookie: cookieValue, verifier: verifierValue)
         }
 
         if result.error != 0 {
-            try failPOSIX(result.error, details: "itemId=\(dirId) cursor=\(cursor)")
+            try failPOSIX(
+                result.error,
+                details:
+                    "itemId=\(dirId) cookie=\(cookieValue) verifier=\(verifierValue)")
         }
 
-        var nextCookie: UInt64 = cursor + 1
+        var nextCookie: UInt64 = cookieValue + 1
         for entry in result.entries {
             let entryAttrs = FSItem.Attributes.fromVfs(
                 itemId: entry.itemId,
@@ -821,7 +825,7 @@ extension Volume: FSVolume.Operations {
             nextCookie += 1
         }
 
-        return FSDirectoryVerifier(result.nextCursor)
+        return FSDirectoryVerifier(result.verifier)
     }
 }
 

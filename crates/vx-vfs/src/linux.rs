@@ -332,13 +332,15 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         let cx = dummy_context();
         Ok(ReplyDirectory {
             entries: try_stream! {
-                let mut cursor: u64 = 0;
+                let mut cookie: u64 = 0;
+                let mut verifier: u64 = 0;
                 let mut entry_offset: i64 = 1;
                 loop {
-                    let result = self.vfs.read_dir(&cx, parent, cursor).await;
+                    let result = self.vfs.read_dir(&cx, parent, cookie, verifier).await;
                     if result.error != 0 {
                         Err(errno_from_vfs(result.error))?;
                     }
+                    verifier = result.verifier;
                     for entry in result.entries {
                         if entry_offset > offset {
                             yield DirectoryEntry {
@@ -350,10 +352,10 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
                         }
                         entry_offset += 1;
                     }
-                    if result.next_cursor == 0 {
+                    if result.next_cookie == 0 {
                         break;
                     }
-                    cursor = result.next_cursor;
+                    cookie = result.next_cookie;
                 }
             },
         })
@@ -372,13 +374,15 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         let cx = dummy_context();
         Ok(ReplyDirectoryPlus {
             entries: try_stream! {
-                let mut cursor: u64 = 0;
+                let mut cookie: u64 = 0;
+                let mut verifier: u64 = 0;
                 let mut entry_offset: i64 = 1;
                 loop {
-                    let result = self.vfs.read_dir(&cx, parent, cursor).await;
+                    let result = self.vfs.read_dir(&cx, parent, cookie, verifier).await;
                     if result.error != 0 {
                         Err(errno_from_vfs(result.error))?;
                     }
+                    verifier = result.verifier;
                     for entry in result.entries {
                         if entry_offset > offset as i64 {
                             let attr_result = self.vfs.get_attributes(&cx, entry.item_id).await;
@@ -415,10 +419,10 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
                         }
                         entry_offset += 1;
                     }
-                    if result.next_cursor == 0 {
+                    if result.next_cookie == 0 {
                         break;
                     }
-                    cursor = result.next_cursor;
+                    cookie = result.next_cookie;
                 }
             },
         })

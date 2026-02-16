@@ -595,12 +595,14 @@ mod macos_bench {
             &self,
             _cx: &roam::Context,
             item_id: ItemId,
-            cursor: u64,
+            cookie: u64,
+            verifier: u64,
         ) -> ReadDirResult {
             let Some(node) = self.nodes.get(&item_id) else {
                 return ReadDirResult {
                     entries: Vec::new(),
-                    next_cursor: 0,
+                    next_cookie: 0,
+                    verifier: 0,
                     error: errno::ENOENT,
                 };
             };
@@ -608,7 +610,8 @@ mod macos_bench {
             if node.item_type != ItemType::Directory {
                 return ReadDirResult {
                     entries: Vec::new(),
-                    next_cursor: 0,
+                    next_cookie: 0,
+                    verifier: 0,
                     error: errno::ENOTDIR,
                 };
             }
@@ -621,11 +624,12 @@ mod macos_bench {
                     .unwrap_or_default()
             });
 
-            let start = cursor as usize;
+            let start = cookie as usize;
             if start >= children.len() {
                 return ReadDirResult {
                     entries: Vec::new(),
-                    next_cursor: 0,
+                    next_cookie: 0,
+                    verifier: verifier.max(1),
                     error: errno::OK,
                 };
             }
@@ -647,7 +651,8 @@ mod macos_bench {
 
             ReadDirResult {
                 entries,
-                next_cursor: 0,
+                next_cookie: 0,
+                verifier: verifier.max(1),
                 error: errno::OK,
             }
         }

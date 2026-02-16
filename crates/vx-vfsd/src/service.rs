@@ -701,4 +701,67 @@ mod tests {
             "unexpected flush error for SmallFile size mismatch: {err}"
         );
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_dir_rejects_stale_cookie_verifier_pair_after_mutation() {
+        let env = TestEnv::new().await;
+        Vfsd::mkdir(&env.service, &cx(), "/pfx-readdir/out".to_string())
+            .await
+            .expect("mkdir failed");
+
+        let out_id = {
+            let state = env.service.vfs.state.lock();
+            let prefix_root = state
+                .prefixes
+                .get("pfx-readdir")
+                .expect("prefix should exist")
+                .root_item_id;
+            state
+                .items
+                .lookup_child(prefix_root, "out")
+                .expect("out dir should exist")
+                .id
+        };
+
+        for i in 0..101 {
+            let create = Vfs::create(
+                &*env.service.vfs,
+                &cx(),
+                out_id,
+                format!("f-{i:03}.txt"),
+                ItemType::File,
+            )
+            .await;
+            assert_eq!(create.error, errno::OK, "create failed at {i}");
+        }
+
+        let first_page = Vfs::read_dir(&*env.service.vfs, &cx(), out_id, 0, 0).await;
+        assert_eq!(first_page.error, errno::OK);
+        assert_eq!(first_page.entries.len(), 100);
+        assert!(first_page.next_cookie > 0);
+        assert!(first_page.verifier > 0);
+
+        let added = Vfs::create(
+            &*env.service.vfs,
+            &cx(),
+            out_id,
+            "later.txt".to_string(),
+            ItemType::File,
+        )
+        .await;
+        assert_eq!(added.error, errno::OK);
+
+        let stale = Vfs::read_dir(
+            &*env.service.vfs,
+            &cx(),
+            out_id,
+            first_page.next_cookie,
+            first_page.verifier,
+        )
+        .await;
+        assert_eq!(stale.error, errno::ESTALE);
+        assert_eq!(stale.entries.len(), 0);
+        assert_eq!(stale.next_cookie, 0);
+        assert!(stale.verifier != first_page.verifier);
+    }
 }

@@ -81,14 +81,18 @@ impl<T: Vfs + Send + Sync + 'static> ProjectedFileSystemSource for ProjFsBridge<
 
         let cx = dummy_context();
         let mut entries = Vec::new();
-        let mut cursor: u64 = 0;
+        let mut cookie: u64 = 0;
+        let mut verifier: u64 = 0;
 
         loop {
-            let result = self.handle.block_on(self.vfs.read_dir(&cx, dir_id, cursor));
+            let result = self
+                .handle
+                .block_on(self.vfs.read_dir(&cx, dir_id, cookie, verifier));
             if result.error != 0 {
                 tracing::warn!(error = result.error, ?path, "read_dir failed");
                 return vec![];
             }
+            verifier = result.verifier;
 
             for entry in &result.entries {
                 let ft_created = unix_to_filetime(entry.created_time);
@@ -117,10 +121,10 @@ impl<T: Vfs + Send + Sync + 'static> ProjectedFileSystemSource for ProjFsBridge<
                 }
             }
 
-            if result.next_cursor == 0 {
+            if result.next_cookie == 0 {
                 break;
             }
-            cursor = result.next_cursor;
+            cookie = result.next_cookie;
         }
 
         // ProjFS requires entries sorted by name

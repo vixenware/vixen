@@ -210,29 +210,24 @@ impl CasStore {
             .to_path_buf();
         let manifest_hex = manifest_hash.to_hex();
 
-        peeps::spawn_blocking_tracked("store.put_toolchain_spec", move || {
-            use std::fs::{File, OpenOptions};
-            use std::io::Write;
+        peeps::fs::create_dir_all(&parent).await?;
 
-            std::fs::create_dir_all(&parent)?;
-
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut file) => {
-                    file.write_all(manifest_hex.as_bytes())?;
-                    file.sync_all()?;
-                    if let Ok(dir) = File::open(&parent)
-                        && let Err(e) = dir.sync_all()
-                    {
-                        tracing::warn!("failed to sync directory {}: {}", parent, e);
-                    }
-                    Ok(true)
+        let mut opts = peeps::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        match opts.open(&path).await {
+            Ok(mut file) => {
+                file.write_all(manifest_hex.as_bytes()).await?;
+                file.sync_all().await?;
+                if let Ok(dir) = peeps::fs::File::open(&parent).await
+                    && let Err(e) = dir.sync_all().await
+                {
+                    tracing::warn!("failed to sync directory {}: {}", parent, e);
                 }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
-                Err(e) => Err(e),
+                Ok(true)
             }
-        })
-        .await
-        .expect("spawn_blocking join failed")
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     // -- Registry specs (spec_key → manifest_hash mapping) --
@@ -262,29 +257,24 @@ impl CasStore {
             .to_path_buf();
         let manifest_hex = manifest_hash.to_hex();
 
-        peeps::spawn_blocking_tracked("store.put_registry_spec", move || {
-            use std::fs::{File, OpenOptions};
-            use std::io::Write;
+        peeps::fs::create_dir_all(&parent).await?;
 
-            std::fs::create_dir_all(&parent)?;
-
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut file) => {
-                    file.write_all(manifest_hex.as_bytes())?;
-                    file.sync_all()?;
-                    if let Ok(dir) = File::open(&parent)
-                        && let Err(e) = dir.sync_all()
-                    {
-                        tracing::warn!("failed to sync directory {}: {}", parent, e);
-                    }
-                    Ok(true)
+        let mut opts = peeps::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        match opts.open(&path).await {
+            Ok(mut file) => {
+                file.write_all(manifest_hex.as_bytes()).await?;
+                file.sync_all().await?;
+                if let Ok(dir) = peeps::fs::File::open(&parent).await
+                    && let Err(e) = dir.sync_all().await
+                {
+                    tracing::warn!("failed to sync directory {}: {}", parent, e);
                 }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
-                Err(e) => Err(e),
+                Ok(true)
             }
-        })
-        .await
-        .expect("spawn_blocking join failed")
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     // -- Cache (cache_key → node_hash mapping) --

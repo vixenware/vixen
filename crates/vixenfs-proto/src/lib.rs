@@ -18,7 +18,7 @@
 //!     }
 //!     // ... implement other methods
 //! #   async fn get_attributes(&self, _cx: &roam::session::Context, item_id: ItemId) -> GetAttributesResult { todo!() }
-//! #   async fn read_dir(&self, _cx: &roam::session::Context, item_id: ItemId, cursor: u64) -> ReadDirResult { todo!() }
+//! #   async fn read_dir(&self, _cx: &roam::session::Context, item_id: ItemId, cookie: u64, verifier: u64) -> ReadDirResult { todo!() }
 //! #   async fn read(&self, _cx: &roam::session::Context, item_id: ItemId, offset: u64, len: u64) -> ReadResult { todo!() }
 //! #   async fn write(&self, _cx: &roam::session::Context, item_id: ItemId, offset: u64, data: Vec<u8>) -> WriteResult { todo!() }
 //! #   async fn create(&self, _cx: &roam::session::Context, parent_id: ItemId, name: String, item_type: ItemType) -> CreateResult { todo!() }
@@ -108,8 +108,11 @@ pub struct DirEntry {
 #[derive(Debug, Clone, facet::Facet)]
 pub struct ReadDirResult {
     pub entries: Vec<DirEntry>,
-    /// Cursor for pagination (0 = no more entries)
-    pub next_cursor: u64,
+    /// Cookie for pagination (0 = no more entries)
+    pub next_cookie: u64,
+    /// Directory enumeration verifier.
+    /// Must be supplied unchanged with subsequent non-zero cookies.
+    pub verifier: u64,
     /// 0 = success, non-zero = errno-like error code
     pub error: i32,
 }
@@ -159,8 +162,9 @@ pub trait Vfs {
     async fn get_attributes(&self, item_id: ItemId) -> GetAttributesResult;
 
     /// Read directory contents.
-    /// Use cursor=0 for first page, then use returned next_cursor for subsequent pages.
-    async fn read_dir(&self, item_id: ItemId, cursor: u64) -> ReadDirResult;
+    /// Use cookie=0/verifier=0 for first page, then pass returned
+    /// next_cookie/verifier for subsequent pages.
+    async fn read_dir(&self, item_id: ItemId, cookie: u64, verifier: u64) -> ReadDirResult;
 
     /// Read file contents.
     async fn read(&self, item_id: ItemId, offset: u64, len: u64) -> ReadResult;
@@ -202,6 +206,8 @@ pub mod errno {
     pub const EISDIR: i32 = 21;
     /// Invalid argument
     pub const EINVAL: i32 = 22;
+    /// Stale file handle / stale directory cookie
+    pub const ESTALE: i32 = 116;
     /// No space left on device
     pub const ENOSPC: i32 = 28;
     /// Directory not empty

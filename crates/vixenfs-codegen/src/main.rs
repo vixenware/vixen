@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         roam_codegen::targets::swift::SwiftBindings::Client,
     );
 
-    let output = workspace_root.join("apps/mac/xcode/VixenFSExtension/VfsClient.swift");
+    let output = workspace_root.join("apps/mac/xcode/VixenFS/VfsClient.swift");
 
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;

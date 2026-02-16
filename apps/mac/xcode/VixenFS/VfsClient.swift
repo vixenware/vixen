@@ -9,7 +9,7 @@ import RoamRuntime
 public enum VfsMethodId {
     public static let lookup: UInt64 = 0x70460df96a9e3ebf
     public static let getAttributes: UInt64 = 0xc968b68989c3f020
-    public static let readDir: UInt64 = 0xd717690e60df5af3
+    public static let readDir: UInt64 = 0x2007dfb650199d2c
     public static let read: UInt64 = 0x9c80fd555999d0e1
     public static let write: UInt64 = 0x5d398e81123c3597
     public static let create: UInt64 = 0x2caaf8adf5eda0e1
@@ -87,12 +87,14 @@ public struct DirEntry: Codable, Sendable {
 
 public struct ReadDirResult: Codable, Sendable {
     public var entries: [DirEntry]
-    public var nextCursor: UInt64
+    public var nextCookie: UInt64
+    public var verifier: UInt64
     public var error: Int32
 
-    public init(entries: [DirEntry], nextCursor: UInt64, error: Int32) {
+    public init(entries: [DirEntry], nextCookie: UInt64, verifier: UInt64, error: Int32) {
         self.entries = entries
-        self.nextCursor = nextCursor
+        self.nextCookie = nextCookie
+        self.verifier = verifier
         self.error = error
     }
 }
@@ -156,8 +158,9 @@ public protocol VfsCaller {
     ///  Get attributes for an item.
     func getAttributes(itemId: UInt64) async throws -> GetAttributesResult
     ///  Read directory contents.
-    ///  Use cursor=0 for first page, then use returned next_cursor for subsequent pages.
-    func readDir(itemId: UInt64, cursor: UInt64) async throws -> ReadDirResult
+    ///  Use cookie=0/verifier=0 for first page, then pass returned
+    ///  next_cookie/verifier for subsequent pages.
+    func readDir(itemId: UInt64, cookie: UInt64, verifier: UInt64) async throws -> ReadDirResult
     ///  Read file contents.
     func read(itemId: UInt64, offset: UInt64, len: UInt64) async throws -> ReadResult
     ///  Write file contents.
@@ -244,15 +247,16 @@ public final class VfsClient: VfsCaller {
         return result
     }
 
-    public func readDir(itemId: UInt64, cursor: UInt64) async throws -> ReadDirResult {
+    public func readDir(itemId: UInt64, cookie: UInt64, verifier: UInt64) async throws -> ReadDirResult {
         var payloadBytes: [UInt8] = []
         payloadBytes += encodeVarint(itemId)
-        payloadBytes += encodeVarint(cursor)
+        payloadBytes += encodeVarint(cookie)
+        payloadBytes += encodeVarint(verifier)
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0xd717690e60df5af3, payload: payload, timeout: timeout)
-        var cursor_ = 0
-        try decodeRpcResult(from: response, offset: &cursor_)
-        let _result_entries = try decodeVec(from: response, offset: &cursor_, decoder: { data, off in
+        let response = try await connection.call(methodId: 0x2007dfb650199d2c, payload: payload, timeout: timeout)
+        var cursor = 0
+        try decodeRpcResult(from: response, offset: &cursor)
+        let _result_entries = try decodeVec(from: response, offset: &cursor, decoder: { data, off in
             let _name = try decodeString(from: data, offset: &off)
             let _itemId = try decodeVarint(from: data, offset: &off)
             let _itemType = try ({ data, off in
@@ -276,9 +280,10 @@ public final class VfsClient: VfsCaller {
             let _mode = try decodeU32(from: data, offset: &off)
             return DirEntry(name: _name, itemId: _itemId, itemType: _itemType, size: _size, modifiedTime: _modifiedTime, createdTime: _createdTime, mode: _mode)
         })
-        let _result_nextCursor = try decodeVarint(from: response, offset: &cursor_)
-        let _result_error = try decodeI32(from: response, offset: &cursor_)
-        let result = ReadDirResult(entries: _result_entries, nextCursor: _result_nextCursor, error: _result_error)
+        let _result_nextCookie = try decodeVarint(from: response, offset: &cursor)
+        let _result_verifier = try decodeVarint(from: response, offset: &cursor)
+        let _result_error = try decodeI32(from: response, offset: &cursor)
+        let result = ReadDirResult(entries: _result_entries, nextCookie: _result_nextCookie, verifier: _result_verifier, error: _result_error)
         return result
     }
 
@@ -390,7 +395,7 @@ public final class VfsClient: VfsCaller {
 public let vfs_schemas: [String: MethodSchema] = [
     "lookup": MethodSchema(args: [.u64, .string]),
     "getAttributes": MethodSchema(args: [.u64]),
-    "readDir": MethodSchema(args: [.u64, .u64]),
+    "readDir": MethodSchema(args: [.u64, .u64, .u64]),
     "read": MethodSchema(args: [.u64, .u64, .u64]),
     "write": MethodSchema(args: [.u64, .u64, .bytes]),
     "create": MethodSchema(args: [.u64, .string, .enum(variants: [("File", []), ("Directory", []), ("Symlink", [])])]),

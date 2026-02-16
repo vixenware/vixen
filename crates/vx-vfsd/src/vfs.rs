@@ -98,6 +98,8 @@ pub(crate) struct VfsItems {
     items: HashMap<ItemId, VfsItem>,
     /// parent_id → { child_name → child_id } (BTreeMap for deterministic iteration order)
     children: HashMap<ItemId, BTreeMap<String, ItemId>>,
+    /// Directory verifier generations keyed by directory ItemId.
+    dir_verifiers: HashMap<ItemId, u64>,
     /// In-memory write buffers for files being written (FUSE only).
     /// Stored separately from VfsItem so items can be cloned cheaply for snapshots.
     write_buffers: HashMap<ItemId, Vec<u8>>,
@@ -108,8 +110,23 @@ impl VfsItems {
         Self {
             items: HashMap::new(),
             children: HashMap::new(),
+            dir_verifiers: HashMap::new(),
             write_buffers: HashMap::new(),
         }
+    }
+
+    fn bump_dir_verifier(&mut self, dir_id: ItemId) {
+        let next = self
+            .dir_verifiers
+            .get(&dir_id)
+            .copied()
+            .unwrap_or(1)
+            .wrapping_add(1);
+        self.dir_verifiers.insert(dir_id, next.max(1));
+    }
+
+    fn dir_verifier(&self, dir_id: ItemId) -> u64 {
+        self.dir_verifiers.get(&dir_id).copied().unwrap_or(1)
     }
 
     /// Insert an item, updating the children index.
@@ -117,9 +134,14 @@ impl VfsItems {
         let id = item.id;
         let parent_id = item.parent_id;
         let name = item.name.clone();
+        let is_dir = item.item_type == ItemType::Directory;
         self.items.insert(id, item);
+        if is_dir {
+            self.dir_verifiers.entry(id).or_insert(1);
+        }
         if parent_id != 0 {
             self.children.entry(parent_id).or_default().insert(name, id);
+            self.bump_dir_verifier(parent_id);
         }
     }
 
@@ -135,10 +157,12 @@ impl VfsItems {
             if siblings.is_empty() {
                 self.children.remove(&item.parent_id);
             }
+            self.bump_dir_verifier(item.parent_id);
         }
         // Remove this item's children entry (even if non-empty — caller is
         // responsible for removing descendants first)
         self.children.remove(&id);
+        self.dir_verifiers.remove(&id);
         Some(item)
     }
 
@@ -183,7 +207,9 @@ impl VfsItems {
 
     /// Rename an item: update the children index for old and new parent.
     fn rename(&mut self, item_id: ItemId, new_parent_id: ItemId, new_name: String) {
+        let mut old_parent = None;
         if let Some(item) = self.items.get(&item_id) {
+            old_parent = Some(item.parent_id);
             let old_parent = item.parent_id;
             let old_name = item.name.clone();
             // Remove from old parent
@@ -201,6 +227,12 @@ impl VfsItems {
             .entry(new_parent_id)
             .or_default()
             .insert(new_name, item_id);
+        if let Some(old_parent_id) = old_parent {
+            self.bump_dir_verifier(old_parent_id);
+            if old_parent_id != new_parent_id {
+                self.bump_dir_verifier(new_parent_id);
+            }
+        }
     }
 
     /// Total number of items.
@@ -218,6 +250,7 @@ impl VfsItems {
         Self {
             items: self.items.clone(),
             children: self.children.clone(),
+            dir_verifiers: self.dir_verifiers.clone(),
             write_buffers: HashMap::new(),
         }
     }
@@ -1049,50 +1082,71 @@ impl Vfs for CasVfs {
         }
     }
 
-    async fn read_dir(&self, _cx: &roam::Context, item_id: ItemId, cursor: u64) -> ReadDirResult {
+    async fn read_dir(
+        &self,
+        _cx: &roam::Context,
+        item_id: ItemId,
+        cookie: u64,
+        verifier: u64,
+    ) -> ReadDirResult {
         let started = Instant::now();
-        tracing::trace!(item_id, cursor, "VFS read_dir.start");
+        tracing::trace!(item_id, cookie, verifier, "VFS read_dir.start");
 
         let state = self.state.lock();
         let (result, child_count) = match state.items.get(&item_id) {
             Some(item) if item.item_type == ItemType::Directory => {
-                let children: Vec<_> = state.items.children_of(item_id).collect();
-
-                let entries: Vec<DirEntry> = children
-                    .iter()
-                    .skip(cursor as usize)
-                    .take(100)
-                    .map(|child| DirEntry {
-                        name: child.name.clone(),
-                        item_id: child.id,
-                        item_type: child.item_type,
-                        size: child.size,
-                        modified_time: 0,
-                        created_time: 0,
-                        mode: child.mode,
-                    })
-                    .collect();
-
-                let has_more = children.len() > (cursor as usize + entries.len());
-                let next_cursor = if has_more {
-                    cursor + entries.len() as u64
+                let current_verifier = state.items.dir_verifier(item_id);
+                if cookie != 0 && verifier != current_verifier {
+                    (
+                        ReadDirResult {
+                            entries: Vec::new(),
+                            next_cookie: 0,
+                            verifier: current_verifier,
+                            error: errno::ESTALE,
+                        },
+                        Some(0),
+                    )
                 } else {
-                    0
-                };
+                    let children: Vec<_> = state.items.children_of(item_id).collect();
 
-                (
-                    ReadDirResult {
-                        entries,
-                        next_cursor,
-                        error: errno::OK,
-                    },
-                    Some(children.len()),
-                )
+                    let entries: Vec<DirEntry> = children
+                        .iter()
+                        .skip(cookie as usize)
+                        .take(100)
+                        .map(|child| DirEntry {
+                            name: child.name.clone(),
+                            item_id: child.id,
+                            item_type: child.item_type,
+                            size: child.size,
+                            modified_time: 0,
+                            created_time: 0,
+                            mode: child.mode,
+                        })
+                        .collect();
+
+                    let has_more = children.len() > (cookie as usize + entries.len());
+                    let next_cookie = if has_more {
+                        cookie + entries.len() as u64
+                    } else {
+                        0
+                    };
+
+                    (
+                        ReadDirResult {
+                            entries,
+                            next_cookie,
+                            verifier: current_verifier,
+                            error: errno::OK,
+                        },
+                        Some(children.len()),
+                    )
+                }
             }
             Some(_) => (
                 ReadDirResult {
                     entries: Vec::new(),
-                    next_cursor: 0,
+                    next_cookie: 0,
+                    verifier: 0,
                     error: errno::ENOTDIR,
                 },
                 None,
@@ -1100,7 +1154,8 @@ impl Vfs for CasVfs {
             None => (
                 ReadDirResult {
                     entries: Vec::new(),
-                    next_cursor: 0,
+                    next_cookie: 0,
+                    verifier: 0,
                     error: errno::ENOENT,
                 },
                 None,
@@ -1111,10 +1166,12 @@ impl Vfs for CasVfs {
         let elapsed = started.elapsed();
         tracing::trace!(
             item_id,
-            cursor,
+            cookie,
+            verifier,
             child_count = ?child_count,
             entries = result.entries.len(),
-            next_cursor = result.next_cursor,
+            next_cookie = result.next_cookie,
+            result_verifier = result.verifier,
             error = result.error,
             elapsed_us = elapsed.as_micros(),
             "VFS read_dir.done"
@@ -1122,10 +1179,12 @@ impl Vfs for CasVfs {
         if elapsed >= Duration::from_millis(500) {
             tracing::warn!(
                 item_id,
-                cursor,
+                cookie,
+                verifier,
                 child_count = ?child_count,
                 entries = result.entries.len(),
-                next_cursor = result.next_cursor,
+                next_cookie = result.next_cookie,
+                result_verifier = result.verifier,
                 error = result.error,
                 elapsed_ms = elapsed.as_millis(),
                 "VFS read_dir.slow"
@@ -1573,58 +1632,73 @@ impl CasVfs {
         let mut results = HashMap::new();
         let prefix_dir = self.mount_path.join(prefix_id);
 
-        let walker = match std::fs::read_dir(prefix_dir.as_std_path()) {
-            Ok(w) => w,
+        let files = match peeps::spawn_blocking_tracked("vfs.flush_prefix.walk_disk", {
+            let prefix_dir = prefix_dir.clone();
+            move || -> std::io::Result<Vec<(std::path::PathBuf, String)>> {
+                let walker = std::fs::read_dir(prefix_dir.as_std_path())?;
+                let mut files = Vec::new();
+
+                // Recursively walk and collect all files
+                let mut stack: Vec<(std::path::PathBuf, String)> = vec![];
+                for entry in walker.flatten() {
+                    stack.push((entry.path(), String::new()));
+                }
+
+                while let Some((path, rel_parent)) = stack.pop() {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    let rel_path = if rel_parent.is_empty() {
+                        name.to_string()
+                    } else {
+                        format!("{}/{}", rel_parent, name)
+                    };
+
+                    if path.is_dir() {
+                        if let Ok(entries) = std::fs::read_dir(&path) {
+                            for entry in entries.flatten() {
+                                stack.push((entry.path(), rel_path.clone()));
+                            }
+                        }
+                    } else if path.is_file() {
+                        files.push((path, rel_path));
+                    }
+                }
+
+                Ok(files)
+            }
+        })
+        .await
+        .expect("spawn_blocking join failed")
+        {
+            Ok(files) => files,
             Err(e) => {
                 tracing::error!(%prefix_dir, error = %e, "failed to read prefix dir from disk");
                 return results;
             }
         };
 
-        // Recursively walk and collect all files
-        let mut stack: Vec<(std::path::PathBuf, String)> = vec![];
-        for entry in walker.flatten() {
-            stack.push((entry.path(), String::new()));
-        }
-
-        while let Some((path, rel_parent)) = stack.pop() {
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            let rel_path = if rel_parent.is_empty() {
-                name.to_string()
-            } else {
-                format!("{}/{}", rel_parent, name)
-            };
-
-            if path.is_dir() {
-                if let Ok(entries) = std::fs::read_dir(&path) {
-                    for entry in entries.flatten() {
-                        stack.push((entry.path(), rel_path.clone()));
-                    }
-                }
-            } else if path.is_file() {
-                match peeps::fs::read(&path).await {
-                    Ok(data) => {
-                        let size = data.len() as u64;
-                        let content_hash = Blake3Hash::from_bytes(&data);
-                        let chunk_hash = ChunkHash(content_hash);
-                        match self.cas.put_chunk(chunk_hash, data).await {
-                            Ok(()) => {
-                                tracing::debug!(
-                                    path = %rel_path,
-                                    size,
-                                    hash = %content_hash,
-                                    "flushed file from disk to CAS"
-                                );
-                                results.insert(rel_path, (content_hash, size));
-                            }
-                            Err(e) => {
-                                tracing::error!(path = %rel_path, error = %e, "failed to put chunk");
-                            }
+        for (path, rel_path) in files {
+            match peeps::fs::read(&path).await {
+                Ok(data) => {
+                    let size = data.len() as u64;
+                    let content_hash = Blake3Hash::from_bytes(&data);
+                    let chunk_hash = ChunkHash(content_hash);
+                    match self.cas.put_chunk(chunk_hash, data).await {
+                        Ok(()) => {
+                            tracing::debug!(
+                                path = %rel_path,
+                                size,
+                                hash = %content_hash,
+                                "flushed file from disk to CAS"
+                            );
+                            results.insert(rel_path, (content_hash, size));
+                        }
+                        Err(e) => {
+                            tracing::error!(path = %rel_path, error = %e, "failed to put chunk");
                         }
                     }
-                    Err(e) => {
-                        tracing::error!(path = %rel_path, error = %e, "failed to read file from disk");
-                    }
+                }
+                Err(e) => {
+                    tracing::error!(path = %rel_path, error = %e, "failed to read file from disk");
                 }
             }
         }
