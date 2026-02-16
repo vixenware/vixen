@@ -228,13 +228,13 @@ final class Volume: FSVolume {
         _items.removeAll()
     }
 
-    private func getItem(_ fsItem: FSItem, fn: StaticString = #function) throws -> Item {
+    private func getItem(_ fsItem: FSItem?, fn: StaticString = #function) throws -> Item {
+        guard let fsItem else {
+            log.error("\(fn): fsItem is nil (likely stale FSKit object during teardown)")
+            throw fs_errorForPOSIXError(POSIXError.ESTALE.rawValue)
+        }
         guard let item = fsItem as? Item else {
-            let runtimeType = String(describing: type(of: fsItem))
-            let description = String(describing: fsItem)
-            log.error(
-                "\(fn): unexpected FSItem type runtimeType=\(runtimeType, privacy: .public) value=\(description, privacy: .public)"
-            )
+            log.error("\(fn): unexpected FSItem instance; expected Volume.Item")
             throw fs_errorForPOSIXError(POSIXError.EINVAL.rawValue)
         }
         return item
