@@ -1,117 +1,66 @@
-# `peeps::peepable` instrumentation guide
+# `peeps::peep!` instrumentation guide
 
 This is the quick reference for adding causal wait edges with `peeps`.
 
 ## What it does
 
-`peepable` wraps a future so `peeps` records:
+`peep!` wraps a future so `peeps` records:
 
-- which task was waiting
-- what resource it was waiting on
-- how often that wait stayed pending
-- total pending time
+- which parent node was waiting
+- what child wait node was touched
+- pending vs ready transitions over time
 
-Use it on real await points that can block progress (socket I/O, RPC waits, channel waits, lock waits).
+Use it for logical waits that are not already first-class resources.
 
 ## API
 
-Two equivalent forms:
+Use the macro form:
 
 ```rust
-use peeps::PeepableFutureExt;
-
-stream.read(&mut buf).peepable("socket.read").await?;
+let result = peeps::peep!(some_future(), "rpc.client.call").await;
 ```
+
+With metadata and explicit node kind:
 
 ```rust
-use peeps::peepable;
-
-peepable(stream.read(&mut buf), "socket.read").await?;
+let result = peeps::peep!(
+    some_future(),
+    "rpc.client.call",
+    kind = peeps_types::NodeKind::Future,
+    {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("rpc.method".to_string(), method_name.to_string());
+        m
+    }
+)
+.await;
 ```
 
-## Naming conventions
+## Important rule
 
-Use stable, low-cardinality names. Prefer dot-separated resource kinds.
+Do not wrap first-class resource operations manually.
 
-Good:
+That means no extra `peep!` around operations that already emit their own nodes/edges, such as:
 
-- `socket.connect`
-- `socket.accept`
-- `socket.read`
-- `socket.write_all.header`
-- `socket.write_all.payload`
-- `socket.flush`
-- `rpc.client.call`
-- `rpc.server.request`
-- `channel.recv`
-- `channel.send`
-- `lock.wait`
+- socket read/write/flush/connect/accept
+- channel send/recv
+- file operations (open/read/write/rename/metadata/etc.)
+- process/command execution wrappers
 
-Avoid:
+Those resources should instrument themselves once, at the wrapper level.
 
-- raw payload data in names
-- request-specific random IDs in names
-- very long dynamic strings
+## Where to instrument
 
-If you need IDs, keep them in RPC metadata/context, not in the resource name.
+Instrument logical wait boundaries instead:
 
-## Where to instrument in roam
-
-Minimum high-value points:
-
-1. Connector and listener waits
-- `connect().await` -> `socket.connect`
-- `accept().await` -> `socket.accept`
-
-2. Framing I/O
-- `read(...).await` -> `socket.read`
-- `write_all(header).await` -> `socket.write_all.header`
-- `write_all(payload).await` -> `socket.write_all.payload`
-- `flush().await` -> `socket.flush`
-
-3. RPC lifecycle waits
-- client call wait -> `rpc.client.call`
-- server handler wait -> `rpc.server.request`
-
-4. Sync primitives
-- `recv().await` -> `channel.recv`
-- bounded send waiting -> `channel.send`
-- lock contention waits -> `lock.wait`
-
-## Example patch pattern
-
-Before:
-
-```rust
-let n = self.stream.read(&mut tmp).await?;
-self.stream.write_all(&header).await?;
-```
-
-After:
-
-```rust
-use peeps::PeepableFutureExt;
-
-let n = self.stream.read(&mut tmp).peepable("socket.read").await?;
-self.stream
-    .write_all(&header)
-    .peepable("socket.write_all.header")
-    .await?;
-```
-
-## Context propagation (cross-process)
-
-`peepable` tracks local waiting edges. Cross-process causality still relies on RPC metadata propagation.
-
-For full chains across processes, keep both:
-
-- `peepable(...)` on blocking await points
-- RPC metadata propagation (`chain_id`, `span_id`, `parent_span_id`) on request boundaries
+- high-level RPC call waits
+- orchestrator futures (`select`, `join`, retry loops)
+- task-local control-flow waits where no first-class wrapper exists
 
 ## Agent checklist
 
-1. Add `use peeps::PeepableFutureExt;`
-2. Wrap every meaningful blocking `.await` with `.peepable("<resource>")`
-3. Keep names stable and low-cardinality
-4. Build and run checks
-5. Verify dashboard shows new wait resources under task/resource views
+1. Use `peeps::peep!(...)` (not `.peepable(...)` extension methods).
+2. Do not add duplicate instrumentation around first-class resource wrappers.
+3. Keep labels stable and low-cardinality.
+4. Build and run checks.
+5. Verify expected nodes/edges appear in the graph.

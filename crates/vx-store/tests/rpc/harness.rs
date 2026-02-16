@@ -4,7 +4,7 @@ use std::time::Duration;
 use roam_stream::NoDispatcher;
 use tempfile::TempDir;
 use vx_io::spawn::{ServiceBuilder, ServiceHandle};
-use vx_store_proto::StoreClient;
+use vx_store_proto::{Blake3Hash, CasNode, NodeHash, NodeId, NodeManifest, StoreClient};
 
 type Caller = roam_stream::ConnectionHandle;
 
@@ -50,6 +50,21 @@ impl StoreTestEnv {
             _service: service,
             client,
         }
+    }
+
+    pub async fn put_test_manifest_node(&self, seed: &str) -> NodeHash {
+        let node = CasNode::Manifest(NodeManifest {
+            node_id: NodeId(format!("manifest-{seed}")),
+            cache_key: Blake3Hash::from_bytes(seed.as_bytes()),
+            produced_at: "2026-02-16T00:00:00Z".to_string(),
+            outputs: Vec::new(),
+        });
+        let (bytes, hash) = node.to_bytes_and_hash();
+        self.client
+            .put_node(hash, bytes)
+            .await
+            .expect("failed to put test manifest node");
+        hash
     }
 }
 
