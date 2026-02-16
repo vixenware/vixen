@@ -52,12 +52,16 @@ strip-ansi-escapes.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+[dependencies.roam-shm]
+workspace = true
+optional = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 roam-shm = { workspace = true }
 
 [features]
 default = []
-diagnostics = ["peeps/diagnostics", "roam-session/diagnostics", "roam-shm/diagnostics"]
+diagnostics = ["peeps/diagnostics", "roam-session/diagnostics", "dep:roam-shm", "roam-shm/diagnostics"]
 
 [lints]
 workspace = true
