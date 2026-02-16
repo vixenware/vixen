@@ -28,7 +28,7 @@
 //! - ID 1: Root directory (`/`)
 //! - ID 2+: Dynamically allocated for prefixes and their contents
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -240,6 +240,66 @@ pub(crate) struct VfsState {
     pub(crate) prefixes: HashMap<String, ActionPrefix>,
 }
 
+struct ChunkL1Cache {
+    entries: HashMap<Blake3Hash, Arc<[u8]>>,
+    recency: VecDeque<Blake3Hash>,
+    current_bytes: usize,
+    max_bytes: usize,
+}
+
+impl ChunkL1Cache {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            recency: VecDeque::new(),
+            current_bytes: 0,
+            max_bytes,
+        }
+    }
+
+    fn get(&mut self, hash: &Blake3Hash) -> Option<Arc<[u8]>> {
+        let data = self.entries.get(hash).cloned()?;
+        self.touch(hash);
+        Some(data)
+    }
+
+    fn insert(&mut self, hash: Blake3Hash, data: Arc<[u8]>) {
+        let data_len = data.len();
+        if data_len > self.max_bytes {
+            return;
+        }
+
+        if let Some(prev) = self.entries.remove(&hash) {
+            self.current_bytes = self.current_bytes.saturating_sub(prev.len());
+            self.remove_from_recency(&hash);
+        }
+
+        while self.current_bytes + data_len > self.max_bytes {
+            let Some(oldest) = self.recency.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = self.entries.remove(&oldest) {
+                self.current_bytes = self.current_bytes.saturating_sub(evicted.len());
+            }
+        }
+
+        self.current_bytes += data_len;
+        self.recency.push_back(hash);
+        self.entries.insert(hash, data);
+    }
+
+    fn touch(&mut self, hash: &Blake3Hash) {
+        self.remove_from_recency(hash);
+        self.recency.push_back(*hash);
+    }
+
+    fn remove_from_recency(&mut self, hash: &Blake3Hash) {
+        if let Some(pos) = self.recency.iter().position(|h| h == hash) {
+            self.recency.remove(pos);
+        }
+    }
+}
+
 pub struct CasVfs {
     /// CAS client for fetching blobs
     pub(crate) cas: Arc<StoreClient<crate::StoreCaller>>,
@@ -255,6 +315,8 @@ pub struct CasVfs {
     /// BlobNodes are immutable (content-addressed) so caching is unconditionally safe.
     /// Small: each entry is ~100 bytes × MAX_CHUNKS_PER_BLOB chunk entries.
     blobnode_cache: Mutex<HashMap<NodeHash, Arc<BlobNode>>>,
+    /// L1 chunk cache (memory): ChunkHash → bytes, bounded by total bytes.
+    chunk_l1_cache: Mutex<ChunkL1Cache>,
     /// Diagnostic tracker for CAS-backed file identity stability.
     observed_identities: Mutex<HashMap<ItemId, ObservedIdentity>>,
     /// Mount path for reading back files written directly to disk (ProjFS on Windows).
@@ -304,6 +366,10 @@ impl CasVfs {
             next_id: AtomicU64::new(2), // 1=root
             disk_cache_dir,
             blobnode_cache: Mutex::new("CasVfs::blobnode_cache", HashMap::new()),
+            chunk_l1_cache: Mutex::new(
+                "CasVfs::chunk_l1_cache",
+                ChunkL1Cache::new(Self::chunk_l1_cache_max_bytes()),
+            ),
             observed_identities: Mutex::new("CasVfs::observed_identities", HashMap::new()),
             mount_path,
         }
@@ -314,6 +380,17 @@ impl CasVfs {
         self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
+    fn chunk_l1_cache_max_bytes() -> usize {
+        static MAX_BYTES: OnceLock<usize> = OnceLock::new();
+        *MAX_BYTES.get_or_init(|| {
+            std::env::var("VX_VFSD_L1_CHUNK_CACHE_BYTES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(256 * 1024 * 1024)
+        })
+    }
+
     /// Compute the disk cache path for a chunk.
     /// Layout: `{cache_dir}/{hex[..2]}/{hex}`
     fn chunk_cache_path(&self, hash: &Blake3Hash) -> Option<Utf8PathBuf> {
@@ -322,12 +399,12 @@ impl CasVfs {
         Some(dir.join(&hex[..2]).join(hex))
     }
 
-    /// Fetch a chunk with L2 disk cache. On miss, fetches from CAS and writes through.
-    async fn read_chunk_cached(&self, chunk_hash: ChunkHash) -> Result<Vec<u8>, String> {
+    /// Fetch a chunk with L1 memory + L2 disk cache. On miss, fetches from CAS and writes through.
+    async fn read_chunk_cached(&self, chunk_hash: ChunkHash) -> Result<Arc<[u8]>, String> {
         async fn fetch_from_cas(
             cas: &StoreClient<crate::StoreCaller>,
             chunk_hash: ChunkHash,
-        ) -> Result<Vec<u8>, String> {
+        ) -> Result<Arc<[u8]>, String> {
             let data = cas
                 .get_chunk(chunk_hash)
                 .await
@@ -343,7 +420,12 @@ impl CasVfs {
                 ));
             }
 
-            Ok(data)
+            Ok(data.into())
+        }
+
+        // Try L1 memory cache first
+        if let Some(data) = self.chunk_l1_cache.lock().get(&chunk_hash.0) {
+            return Ok(data);
         }
 
         // Try L2 disk cache first
@@ -352,6 +434,10 @@ impl CasVfs {
                 Ok(data) => {
                     let actual_hash = Blake3Hash::from_bytes(&data);
                     if actual_hash == chunk_hash.0 {
+                        let data: Arc<[u8]> = data.into();
+                        self.chunk_l1_cache
+                            .lock()
+                            .insert(chunk_hash.0, Arc::clone(&data));
                         return Ok(data);
                     }
 
@@ -384,11 +470,14 @@ impl CasVfs {
 
         // Write-through to L2
         if let Some(path) = self.chunk_cache_path(&chunk_hash.0)
-            && let Err(e) = vx_io::atomic_write(&path, &data, false).await
+            && let Err(e) = vx_io::atomic_write(&path, &data[..], false).await
         {
             tracing::warn!(hash = %chunk_hash.0, error = %e, "L2 cache write-through failed");
         }
 
+        self.chunk_l1_cache
+            .lock()
+            .insert(chunk_hash.0, Arc::clone(&data));
         Ok(data)
     }
 
@@ -509,7 +598,7 @@ impl CasVfs {
                     })
                     .collect();
 
-                let mut results: Vec<Option<(Vec<u8>, u64)>> = vec![None; needed_chunks.len()];
+                let mut results: Vec<Option<(Arc<[u8]>, u64)>> = vec![None; needed_chunks.len()];
 
                 // buffer_unordered(8): up to 8 concurrent chunk fetches
                 let mut stream = stream::iter(fetches).buffer_unordered(8);
