@@ -16,7 +16,7 @@ settings:
 packages:
   roam:
     url: https://github.com/bearcove/roam.git
-    revision: f79418d420bd4cbf1bb12458a4c897ee68c1bfcd
+    revision: 11cc31b02be62cfc5a89781949aed312b838b3f8
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle.git
     from: 2.8.1

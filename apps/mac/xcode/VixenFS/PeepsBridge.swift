@@ -98,6 +98,8 @@ private struct PeepsGraphEdge: Encodable {
 }
 
 private struct PeepsRequestAttrs: Encodable {
+    let createdAt: Int64
+    let source: String
     let spanID: String
     let operation: String
     let startedMs: Int64
@@ -109,6 +111,8 @@ private struct PeepsRequestAttrs: Encodable {
     let rpcConnection: String
 
     enum CodingKeys: String, CodingKey {
+        case createdAt = "created_at"
+        case source
         case spanID = "span_id"
         case operation
         case startedMs = "started_ms"
@@ -122,22 +126,28 @@ private struct PeepsRequestAttrs: Encodable {
 }
 
 private struct PeepsSyscallAttrs: Encodable {
+    let createdAt: Int64
+    let source: String
     let operation: String
     let phase: String
     let tsMs: Int64
     let errno: Int32?
-    let requestID: String?
+    let correlation: String?
 
     enum CodingKeys: String, CodingKey {
+        case createdAt = "created_at"
+        case source
         case operation
         case phase
         case tsMs = "ts_ms"
         case errno
-        case requestID = "request_id"
+        case correlation
     }
 }
 
 private actor SwiftPeepsGraphState {
+    private static let source = "/apps/mac/xcode/VixenFS/PeepsBridge.swift"
+
     private struct InFlightRequest {
         let spanID: String
         let id: String
@@ -197,6 +207,8 @@ private actor SwiftPeepsGraphState {
             let elapsedNs = max(0, nowNs - req.deliveredAtNs)
             let attrs = encodeAttrs(
                 PeepsRequestAttrs(
+                    createdAt: req.deliveredAtNs,
+                    source: Self.source,
                     spanID: req.spanID,
                     operation: req.operation,
                     startedMs: req.startedMs,
@@ -220,11 +232,13 @@ private actor SwiftPeepsGraphState {
         for syscall in inFlightSyscalls.values {
             let attrs = encodeAttrs(
                 PeepsSyscallAttrs(
+                    createdAt: max(1, syscall.tsMs * 1_000_000),
+                    source: Self.source,
                     operation: syscall.operation,
                     phase: syscall.phase,
                     tsMs: syscall.tsMs,
                     errno: syscall.errno,
-                    requestID: syscall.requestID
+                    correlation: syscall.requestID
                 )
             )
             nodes.append(
