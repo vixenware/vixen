@@ -465,7 +465,7 @@ where
     }
 
     // Clean up ghost mounts from previous runs that didn't unmount cleanly.
-    lazy_unmount_if_mounted(&config.mount_path);
+    lazy_unmount_if_mounted(&config.mount_path).await;
 
     let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<VfsStart, VfsError>>();
 
@@ -539,8 +539,8 @@ where
 
 /// If `mount_path` is already a mountpoint (ghost mount from a previous run),
 /// perform a lazy unmount (`fusermount3 -uz`) so we can re-mount cleanly.
-fn lazy_unmount_if_mounted(mount_path: &camino::Utf8Path) {
-    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+async fn lazy_unmount_if_mounted(mount_path: &camino::Utf8Path) {
+    let Ok(mounts) = peeps::fs::read_to_string("/proc/mounts").await else {
         return;
     };
     let is_mounted = mounts.lines().any(|line| {

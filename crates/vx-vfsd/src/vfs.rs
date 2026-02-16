@@ -1632,48 +1632,74 @@ impl CasVfs {
         let mut results = HashMap::new();
         let prefix_dir = self.mount_path.join(prefix_id);
 
-        let files = match peeps::spawn_blocking_tracked("vfs.flush_prefix.walk_disk", {
-            let prefix_dir = prefix_dir.clone();
-            move || -> std::io::Result<Vec<(std::path::PathBuf, String)>> {
-                let walker = std::fs::read_dir(prefix_dir.as_std_path())?;
-                let mut files = Vec::new();
+        let files = {
+            let mut files = Vec::new();
+            let mut stack: Vec<(std::path::PathBuf, String)> = Vec::new();
 
-                // Recursively walk and collect all files
-                let mut stack: Vec<(std::path::PathBuf, String)> = vec![];
-                for entry in walker.flatten() {
-                    stack.push((entry.path(), String::new()));
+            let mut root_entries = match tokio::fs::read_dir(prefix_dir.as_std_path()).await {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::error!(%prefix_dir, error = %e, "failed to read prefix dir from disk");
+                    return results;
                 }
+            };
 
-                while let Some((path, rel_parent)) = stack.pop() {
-                    let name = path.file_name().unwrap_or_default().to_string_lossy();
-                    let rel_path = if rel_parent.is_empty() {
-                        name.to_string()
-                    } else {
-                        format!("{}/{}", rel_parent, name)
-                    };
-
-                    if path.is_dir() {
-                        if let Ok(entries) = std::fs::read_dir(&path) {
-                            for entry in entries.flatten() {
-                                stack.push((entry.path(), rel_path.clone()));
-                            }
-                        }
-                    } else if path.is_file() {
-                        files.push((path, rel_path));
+            loop {
+                match root_entries.next_entry().await {
+                    Ok(Some(entry)) => stack.push((entry.path(), String::new())),
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::error!(%prefix_dir, error = %e, "failed to iterate prefix dir");
+                        break;
                     }
                 }
+            }
 
-                Ok(files)
+            while let Some((path, rel_parent)) = stack.pop() {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                let rel_path = if rel_parent.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{}/{}", rel_parent, name)
+                };
+
+                match tokio::fs::symlink_metadata(&path).await {
+                    Ok(metadata) if metadata.is_dir() => match tokio::fs::read_dir(&path).await {
+                        Ok(mut entries) => loop {
+                            match entries.next_entry().await {
+                                Ok(Some(entry)) => stack.push((entry.path(), rel_path.clone())),
+                                Ok(None) => break,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        path = %path.display(),
+                                        error = %e,
+                                        "failed to iterate directory while flushing prefix"
+                                    );
+                                    break;
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                error = %e,
+                                "failed to read directory while flushing prefix"
+                            );
+                        }
+                    },
+                    Ok(metadata) if metadata.is_file() => files.push((path, rel_path)),
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "failed to stat path while flushing prefix"
+                        );
+                    }
+                }
             }
-        })
-        .await
-        .expect("spawn_blocking join failed")
-        {
-            Ok(files) => files,
-            Err(e) => {
-                tracing::error!(%prefix_dir, error = %e, "failed to read prefix dir from disk");
-                return results;
-            }
+
+            files
         };
 
         for (path, rel_path) in files {

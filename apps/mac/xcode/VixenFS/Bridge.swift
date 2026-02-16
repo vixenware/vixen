@@ -253,6 +253,7 @@ actor VfsConnection {
     private var driverTask: Task<Void, Never>?
     private var disconnectRequested = false
     private var debugEnabled = false
+    private var terminalConnectionError: NSError?
     private let log = Logger(subsystem: VixenFSConstants.subsystem, category: "VfsConnection")
 
     func connect(url: URL) async throws {
@@ -301,17 +302,20 @@ actor VfsConnection {
         )
 
         disconnectRequested = false
+        terminalConnectionError = nil
         let logger = log
         driverTask = Task { [weak self] in
             do {
                 try await driver.run()
                 logger.error("Roam driver exited cleanly — server is gone")
                 NSLog("VixenFS: Roam SHM driver exited cleanly (server gone)")
+                await self?.handleDriverExit(reason: "driver_exit_clean")
             } catch {
                 logger.error("Roam driver exited with error: \(String(describing: error), privacy: .public)")
                 NSLog("VixenFS: Roam SHM driver exited with error: \(String(describing: error))")
+                await self?.handleDriverExit(
+                    reason: "driver_exit_error:\(String(describing: error))")
             }
-            await self?.handleDriverExit()
         }
         client = VfsClient(connection: handle, timeout: 28.0)
         await ConnectionHealth.shared.recordConnected()
@@ -324,6 +328,7 @@ actor VfsConnection {
         await LifecycleTrace.shared.mark(log, event: "vfs.disconnect")
         await ConnectionHealth.shared.recordDisconnected(reason: "requested")
         disconnectRequested = true
+        terminalConnectionError = nil
         debugEnabled = false
         await SwiftPeepsClient.shared.configure(dashboardAddr: nil, debugFrames: false)
         driverTask?.cancel()
@@ -333,18 +338,26 @@ actor VfsConnection {
 
     func getClient() throws -> VfsClient {
         guard let client = client else {
+            if let terminalConnectionError {
+                throw terminalConnectionError
+            }
             throw POSIXError(.ENOTCONN)
         }
         return client
     }
 
-    private func handleDriverExit() async {
+    private func handleDriverExit(reason: String) async {
         if disconnectRequested {
             log.info("VFS connection closed during normal unload")
             NSLog("VixenFS: SHM connection closed during unload")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.normal")
         } else {
-            await ConnectionHealth.shared.recordDisconnected(reason: "driver_exit")
+            terminalConnectionError = NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(POSIXError.ECONNRESET.rawValue),
+                userInfo: [NSLocalizedDescriptionKey: reason]
+            )
+            await ConnectionHealth.shared.recordDisconnected(reason: reason)
             log.error("Connection to VFS server lost; waiting for FSKit to unload/deactivate")
             NSLog("VixenFS: SHM connection dropped unexpectedly (driver_exit)")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.unexpected")

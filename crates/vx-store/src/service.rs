@@ -1,4 +1,3 @@
-use jiff::Timestamp;
 use vx_store_proto::Store;
 use vx_store_proto::{
     Blake3Hash, BlobRef, CDC_MAX_CHUNK, CacheKey, CasNode, ChunkHash, DirEntryKind, DirectoryNode,
@@ -16,13 +15,6 @@ use crate::types::StoreService;
 
 const CRATES_IO_REGISTRY: &str = "https://crates.io";
 const MATERIALIZATION_LAYOUT_VERSION: u32 = 2;
-
-fn now_utc_string() -> String {
-    match Timestamp::now().in_tz("UTC") {
-        Ok(ts) => ts.to_string(),
-        Err(_) => Timestamp::now().to_string(),
-    }
-}
 
 impl Store for StoreService {
     async fn version(&self, _cx: &roam::Context) -> ServiceVersion {
@@ -445,7 +437,6 @@ impl Store for StoreService {
                         schema_version: REGISTRY_MANIFEST_SCHEMA_VERSION,
                         spec: spec.clone(),
                         crate_tarball: tarball_ref.clone(),
-                        created_at: now_utc_string(),
                     };
 
                     let node = CasNode::RegistryCrate(manifest);

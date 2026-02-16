@@ -15,7 +15,6 @@ eyre = { workspace = true }
 tokio = { workspace = true }
 dirs = { workspace = true }
 async-tempfile = { workspace = true }
-tempfile = { workspace = true }
 tracing = { workspace = true }
 facet = { workspace = true }
 roam = { workspace = true }

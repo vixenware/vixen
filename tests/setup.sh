@@ -30,7 +30,7 @@ echo "HTTP cache dir is at ${VX_HTTP_CACHE_DIR}"
 # VX_HOME goes in /tmp — sockets and VFS mounts must NOT be in ~/Library/Caches
 # or any location that macOS services scan (Finder, Spotlight, etc.), because
 # stale mounts cause system-wide hangs.
-export VX_HOME="/tmp/.vx-test2"
+export VX_HOME="/tmp/.vx-test3"
 mkdir -p "${VX_HOME}"
 echo "Test VX_HOME will be ${VX_HOME}"
 

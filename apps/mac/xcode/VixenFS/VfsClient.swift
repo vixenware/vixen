@@ -180,10 +180,26 @@ public protocol VfsCaller {
 public final class VfsClient: VfsCaller {
     private let connection: RoamConnection
     private let timeout: TimeInterval?
+    private static let peepsSpanIDKey = "peeps.span_id"
 
     public init(connection: RoamConnection, timeout: TimeInterval? = 30.0) {
         self.connection = connection
         self.timeout = timeout
+    }
+
+    private func callWithPeepsMetadata(methodId: UInt64, payload: Data) async throws -> Data {
+        let metadata: [MetadataEntry]
+        if let spanID = PeepsRequestContext.spanID {
+            metadata = [(key: Self.peepsSpanIDKey, value: .string(spanID), flags: 0)]
+        } else {
+            metadata = []
+        }
+        return try await connection.call(
+            methodId: methodId,
+            metadata: metadata,
+            payload: payload,
+            timeout: timeout
+        )
     }
 
     public func lookup(parentId: UInt64, name: String) async throws -> LookupResult {
@@ -191,7 +207,7 @@ public final class VfsClient: VfsCaller {
         payloadBytes += encodeVarint(parentId)
         payloadBytes += encodeString(name)
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0x70460df96a9e3ebf, payload: payload, timeout: timeout)
+        let response = try await callWithPeepsMetadata(methodId: 0x70460df96a9e3ebf, payload: payload)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let __result_attrs_itemId = try decodeVarint(from: response, offset: &cursor)
@@ -221,7 +237,7 @@ public final class VfsClient: VfsCaller {
         var payloadBytes: [UInt8] = []
         payloadBytes += encodeVarint(itemId)
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0xc968b68989c3f020, payload: payload, timeout: timeout)
+        let response = try await callWithPeepsMetadata(methodId: 0xc968b68989c3f020, payload: payload)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let __result_attrs_itemId = try decodeVarint(from: response, offset: &cursor)
@@ -253,7 +269,7 @@ public final class VfsClient: VfsCaller {
         payloadBytes += encodeVarint(cookie)
         payloadBytes += encodeVarint(verifier)
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0x2007dfb650199d2c, payload: payload, timeout: timeout)
+        let response = try await callWithPeepsMetadata(methodId: 0x2007dfb650199d2c, payload: payload)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_entries = try decodeVec(from: response, offset: &cursor, decoder: { data, off in
@@ -293,7 +309,7 @@ public final class VfsClient: VfsCaller {
         payloadBytes += encodeVarint(offset)
         payloadBytes += encodeVarint(len)
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0x9c80fd555999d0e1, payload: payload, timeout: timeout)
+        let response = try await callWithPeepsMetadata(methodId: 0x9c80fd555999d0e1, payload: payload)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_data = try decodeBytes(from: response, offset: &cursor)
@@ -308,7 +324,7 @@ public final class VfsClient: VfsCaller {
         payloadBytes += encodeVarint(offset)
         payloadBytes += encodeBytes(Array(data))
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0x5d398e81123c3597, payload: payload, timeout: timeout)
+        let response = try await callWithPeepsMetadata(methodId: 0x5d398e81123c3597, payload: payload)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_bytesWritten = try decodeVarint(from: response, offset: &cursor)
@@ -332,7 +348,7 @@ public final class VfsClient: VfsCaller {
     }
 }(itemType)
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0x2caaf8adf5eda0e1, payload: payload, timeout: timeout)
+        let response = try await callWithPeepsMetadata(methodId: 0x2caaf8adf5eda0e1, payload: payload)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_itemId = try decodeVarint(from: response, offset: &cursor)
@@ -345,7 +361,7 @@ public final class VfsClient: VfsCaller {
         var payloadBytes: [UInt8] = []
         payloadBytes += encodeVarint(itemId)
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0xfa37cb27061e7e2a, payload: payload, timeout: timeout)
+        let response = try await callWithPeepsMetadata(methodId: 0xfa37cb27061e7e2a, payload: payload)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_error = try decodeI32(from: response, offset: &cursor)
@@ -359,7 +375,7 @@ public final class VfsClient: VfsCaller {
         payloadBytes += encodeVarint(newParentId)
         payloadBytes += encodeString(newName)
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0x4d68b4b3208a8c07, payload: payload, timeout: timeout)
+        let response = try await callWithPeepsMetadata(methodId: 0x4d68b4b3208a8c07, payload: payload)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_error = try decodeI32(from: response, offset: &cursor)
@@ -372,7 +388,7 @@ public final class VfsClient: VfsCaller {
         payloadBytes += encodeVarint(itemId)
         payloadBytes += encodeOption(params.mode, encoder: { encodeU32($0) }) + encodeOption(params.modifiedTime, encoder: { encodeVarint($0) }) + encodeOption(params.size, encoder: { encodeVarint($0) })
         let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0x320f6529a5a0e5ce, payload: payload, timeout: timeout)
+        let response = try await callWithPeepsMetadata(methodId: 0x320f6529a5a0e5ce, payload: payload)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_error = try decodeI32(from: response, offset: &cursor)
@@ -382,7 +398,7 @@ public final class VfsClient: VfsCaller {
 
     public func ping() async throws -> String {
         let payload = Data()
-        let response = try await connection.call(methodId: 0xe35cdfdca59ce5ab, payload: payload, timeout: timeout)
+        let response = try await callWithPeepsMetadata(methodId: 0xe35cdfdca59ce5ab, payload: payload)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let result = try decodeString(from: response, offset: &cursor)
@@ -446,4 +462,3 @@ public struct VfsSerializers: BindingSerializers {
         }
     }
 }
-

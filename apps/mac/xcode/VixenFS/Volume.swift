@@ -147,6 +147,10 @@ final class Volume: FSVolume {
     private static let vixenfsDirName = ".vixenfs"
     private static let statsJsonName = "stats.json"
     private static let healthJsonName = "health.json"
+    private static let volumeStatsLogIntervalNs: UInt64 = 2_000_000_000
+    private static let volumeStatsLogLock = NSLock()
+    nonisolated(unsafe) private static var volumeStatsLastLogNs: UInt64 = 0
+    nonisolated(unsafe) private static var volumeStatsSuppressed: UInt64 = 0
 
     private func isVirtualItem(_ itemId: UInt64) -> Bool {
         itemId == Volume.vixenfsDirId || itemId == Volume.statsJsonId
@@ -226,7 +230,11 @@ final class Volume: FSVolume {
 
     private func getItem(_ fsItem: FSItem, fn: StaticString = #function) throws -> Item {
         guard let item = fsItem as? Item else {
-            log.error("\(fn): unexpected FSItem type")
+            let runtimeType = String(describing: type(of: fsItem))
+            let description = String(describing: fsItem)
+            log.error(
+                "\(fn): unexpected FSItem type runtimeType=\(runtimeType, privacy: .public) value=\(description, privacy: .public)"
+            )
             throw fs_errorForPOSIXError(POSIXError.EINVAL.rawValue)
         }
         return item
@@ -240,26 +248,28 @@ final class Volume: FSVolume {
     ) async throws -> T {
         let operationName = String(describing: operation)
         let requestID = await SwiftPeepsClient.shared.beginRequest(operation: operationName)
-
-        let client: VfsClient
-        do {
-            client = try await VfsConnection.shared.getClient()
-        } catch {
-            let errno = vixenPOSIXCode(for: error)
-            await SwiftPeepsClient.shared.finishRequest(
-                requestID: requestID, operation: operationName, errno: errno)
-            throw vixenMappedFSError(error, operation: operation, logger: log)
-        }
-        do {
-            let value = try await body(client)
-            await SwiftPeepsClient.shared.finishRequest(
-                requestID: requestID, operation: operationName, errno: nil)
-            return value
-        } catch {
-            let errno = vixenPOSIXCode(for: error)
-            await SwiftPeepsClient.shared.finishRequest(
-                requestID: requestID, operation: operationName, errno: errno)
-            throw vixenMappedFSError(error, operation: operation, logger: log)
+        let spanID = PeepsRequestContext.spanID(fromRequestID: requestID)
+        return try await PeepsRequestContext.$spanID.withValue(spanID) {
+            let client: VfsClient
+            do {
+                client = try await VfsConnection.shared.getClient()
+            } catch {
+                let errno = vixenPOSIXCode(for: error)
+                await SwiftPeepsClient.shared.finishRequest(
+                    requestID: requestID, operation: operationName, errno: errno)
+                throw vixenMappedFSError(error, operation: operation, logger: log)
+            }
+            do {
+                let value = try await body(client)
+                await SwiftPeepsClient.shared.finishRequest(
+                    requestID: requestID, operation: operationName, errno: nil)
+                return value
+            } catch {
+                let errno = vixenPOSIXCode(for: error)
+                await SwiftPeepsClient.shared.finishRequest(
+                    requestID: requestID, operation: operationName, errno: errno)
+                throw vixenMappedFSError(error, operation: operation, logger: log)
+            }
         }
     }
 
@@ -306,7 +316,22 @@ extension Volume: FSVolume.Operations {
     }
 
     var volumeStatistics: FSStatFSResult {
-        log.debug("volumeStatistics")
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        var shouldLog = false
+        var suppressed = UInt64(0)
+        Volume.volumeStatsLogLock.lock()
+        if nowNs &- Volume.volumeStatsLastLogNs >= Volume.volumeStatsLogIntervalNs {
+            shouldLog = true
+            suppressed = Volume.volumeStatsSuppressed
+            Volume.volumeStatsSuppressed = 0
+            Volume.volumeStatsLastLogNs = nowNs
+        } else {
+            Volume.volumeStatsSuppressed &+= 1
+        }
+        Volume.volumeStatsLogLock.unlock()
+        if shouldLog {
+            log.debug("volumeStatistics suppressed_since_last=\(suppressed)")
+        }
         // TODO: query the VFS backend for real stats. These are placeholder values
         // so that tools like `df` don't error out. The numbers are meaningless.
         let stats = FSStatFSResult(fileSystemTypeName: "vixenfs")

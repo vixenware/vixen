@@ -15,8 +15,6 @@
 //! Also provides timeout enforcement and streamed output for all platforms.
 
 use peeps::Command;
-#[cfg(target_os = "macos")]
-use std::os::unix::fs::PermissionsExt;
 use std::process::ExitStatus;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -405,38 +403,6 @@ pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
         "sandboxed_command: wrapping with sandbox-exec"
     );
     tracing::trace!(profile = %SEATBELT_PROFILE, "seatbelt profile");
-
-    // Check if the program binary exists on disk before we try to run it.
-    // This helps distinguish "sandbox-exec not found" from "program not found".
-    let program_exists = std::path::Path::new(program).exists();
-    let program_is_file = std::path::Path::new(program)
-        .metadata()
-        .map(|m| m.is_file())
-        .unwrap_or(false);
-    let program_permissions = std::fs::metadata(program)
-        .map(|m| format!("{:o}", m.permissions().mode()))
-        .unwrap_or_else(|e| format!("error: {e}"));
-
-    tracing::trace!(
-        program,
-        program_exists,
-        program_is_file,
-        program_permissions,
-        "sandboxed_command: program binary check"
-    );
-
-    let sandbox_exec_exists = std::path::Path::new("/usr/bin/sandbox-exec").exists();
-    tracing::trace!(
-        sandbox_exec_exists,
-        "sandboxed_command: sandbox-exec binary check"
-    );
-
-    let write_dir_exists = action.out_path.as_std_path().exists();
-    tracing::trace!(
-        write_dir = %action.out_path,
-        write_dir_exists,
-        "sandboxed_command: write_dir check"
-    );
 
     let mut cmd = Command::new("/usr/bin/sandbox-exec");
     cmd.arg("-p").arg(SEATBELT_PROFILE);

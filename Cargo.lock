@@ -2297,15 +2297,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
-name = "same-file"
-version = "1.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
-dependencies = [
- "winapi-util",
-]
-
-[[package]]
 name = "schannel"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3094,15 +3085,16 @@ name = "vx-http"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "camino",
  "http-body-util",
  "hyper",
  "hyper-rustls",
  "hyper-util",
- "libc",
  "peeps",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "vx-io",
 ]
 
 [[package]]
@@ -3118,7 +3110,6 @@ dependencies = [
  "roam",
  "roam-local",
  "roam-stream",
- "tempfile",
  "tokio",
  "tracing",
  "ur-taking-me-with-you",
@@ -3176,6 +3167,7 @@ dependencies = [
  "camino",
  "facet",
  "facet-json",
+ "tokio",
  "ulid",
  "vx-plan",
 ]
@@ -3308,10 +3300,10 @@ dependencies = [
  "lzma-rs",
  "tar",
  "thiserror 2.0.18",
+ "tokio",
  "uuid",
  "vx-http",
  "vx-store-proto",
- "walkdir",
 ]
 
 [[package]]
@@ -3465,16 +3457,6 @@ dependencies = [
  "facet-postcard",
  "roam",
  "vx-store-proto",
-]
-
-[[package]]
-name = "walkdir"
-version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
-dependencies = [
- "same-file",
- "winapi-util",
 ]
 
 [[package]]

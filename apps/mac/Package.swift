@@ -14,7 +14,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/bearcove/roam.git",
-            revision: "f90823a5d802acb66cc61af6371d9434a0c25c6f"
+            revision: "bb2cd93fd98b826c59e3173fc9f3778c26cefb28"
         ),
         .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.8.1"),
     ],

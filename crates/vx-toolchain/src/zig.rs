@@ -3,8 +3,6 @@
 //! Downloads and manages Zig toolchains for hermetic C/C++ compilation.
 //! Uses `zig cc` as a drop-in hermetic C/C++ compiler.
 
-use std::io::Write;
-
 use camino::{Utf8Path, Utf8PathBuf};
 use thiserror::Error;
 use vx_store_proto::Blake3Hash;
@@ -201,32 +199,34 @@ fn version_uses_new_format(version_str: &str) -> bool {
 /// Extract a Zig tarball and return paths to the zig executable and lib directory
 ///
 /// Returns (zig_exe_path, lib_dir_path) within the extraction directory
-pub fn extract_zig_tarball(
+pub async fn extract_zig_tarball(
     tarball: &[u8],
     extract_dir: &Utf8Path,
 ) -> Result<(Utf8PathBuf, Utf8PathBuf), ZigError> {
-    use std::fs;
-
     // Create extraction directory
-    fs::create_dir_all(extract_dir)?;
+    tokio::fs::create_dir_all(extract_dir).await?;
 
-    // Decompress xz
-    let mut decompressed = Vec::new();
-    lzma_rs::xz_decompress(&mut std::io::Cursor::new(tarball), &mut decompressed)
-        .map_err(|e| ZigError::ExtractionFailed(format!("xz decompression failed: {}", e)))?;
+    // Decompress and extract off the async runtime threads.
+    let extract_dir_buf = extract_dir.as_std_path().to_path_buf();
+    let tarball_bytes = tarball.to_vec();
+    tokio::task::spawn_blocking(move || -> Result<(), ZigError> {
+        let mut decompressed = Vec::new();
+        lzma_rs::xz_decompress(&mut std::io::Cursor::new(tarball_bytes), &mut decompressed)
+            .map_err(|e| ZigError::ExtractionFailed(format!("xz decompression failed: {}", e)))?;
 
-    // Extract tar
-    let mut archive = tar::Archive::new(decompressed.as_slice());
-
-    // Extract all entries
-    archive
-        .unpack(extract_dir)
-        .map_err(|e| ZigError::ExtractionFailed(format!("tar extraction failed: {}", e)))?;
+        let mut archive = tar::Archive::new(decompressed.as_slice());
+        archive
+            .unpack(&extract_dir_buf)
+            .map_err(|e| ZigError::ExtractionFailed(format!("tar extraction failed: {}", e)))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| ZigError::ExtractionFailed(format!("extract task failed: {}", e)))??;
 
     // Find the zig directory (it's usually zig-{platform}-{version}/)
     let mut zig_dir: Option<Utf8PathBuf> = None;
-    for entry in fs::read_dir(extract_dir)? {
-        let entry = entry?;
+    let mut entries = tokio::fs::read_dir(extract_dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
         let path = Utf8PathBuf::try_from(entry.path())
             .map_err(|e| ZigError::ExtractionFailed(format!("non-UTF8 path: {}", e)))?;
         if path.file_name().is_some_and(|n| n.starts_with("zig-")) {
@@ -239,13 +239,13 @@ pub fn extract_zig_tarball(
 
     // Locate zig executable
     let zig_exe = zig_dir.join("zig");
-    if !zig_exe.exists() {
+    if !tokio::fs::try_exists(&zig_exe).await? {
         return Err(ZigError::ZigNotFound);
     }
 
     // Locate lib directory
     let lib_dir = zig_dir.join("lib");
-    if !lib_dir.exists() {
+    if !tokio::fs::try_exists(&lib_dir).await? {
         return Err(ZigError::LibNotFound);
     }
 
@@ -253,8 +253,8 @@ pub fn extract_zig_tarball(
 }
 
 /// Hash a file and return its Blake3 hash
-pub fn hash_file(path: &Utf8Path) -> Result<Blake3Hash, ZigError> {
-    let contents = std::fs::read(path)?;
+pub async fn hash_file(path: &Utf8Path) -> Result<Blake3Hash, ZigError> {
+    let contents = tokio::fs::read(path).await?;
     Ok(Blake3Hash::from_bytes(&contents))
 }
 
@@ -264,30 +264,44 @@ pub fn hash_file(path: &Utf8Path) -> Result<Blake3Hash, ZigError> {
 /// - Sorting entries
 /// - Setting fixed mtime/uid/gid
 /// - Using consistent permissions
-pub fn hash_directory_as_tar(dir: &Utf8Path) -> Result<(Vec<u8>, Blake3Hash), ZigError> {
+pub async fn hash_directory_as_tar(dir: &Utf8Path) -> Result<(Vec<u8>, Blake3Hash), ZigError> {
+    let mut stack = vec![dir.as_std_path().to_path_buf()];
+    let mut paths = Vec::new();
+
+    while let Some(current) = stack.pop() {
+        paths.push(current.clone());
+
+        let metadata = tokio::fs::symlink_metadata(&current)
+            .await
+            .map_err(|e| ZigError::ExtractionFailed(format!("failed to read metadata: {}", e)))?;
+        if metadata.is_dir() {
+            let mut entries = tokio::fs::read_dir(&current).await.map_err(|e| {
+                ZigError::ExtractionFailed(format!("failed to read directory: {}", e))
+            })?;
+            while let Some(entry) = entries.next_entry().await.map_err(|e| {
+                ZigError::ExtractionFailed(format!("failed to read directory entry: {}", e))
+            })? {
+                stack.push(entry.path());
+            }
+        }
+    }
+
     let mut builder = tar::Builder::new(Vec::new());
 
     // Collect entries and sort them for determinism
-    let mut entries: Vec<_> = walkdir::WalkDir::new(dir)
-        .sort_by_file_name()
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .collect();
+    paths.sort();
 
-    entries.sort_by(|a, b| a.path().cmp(b.path()));
-
-    for entry in entries {
-        let path = entry.path();
+    for path in paths {
         let rel_path = path
-            .strip_prefix(dir)
+            .strip_prefix(dir.as_std_path())
             .map_err(|e| ZigError::ExtractionFailed(format!("path prefix error: {}", e)))?;
 
         if rel_path.as_os_str().is_empty() {
             continue; // Skip the root directory itself
         }
 
-        let metadata = entry
-            .metadata()
+        let metadata = tokio::fs::symlink_metadata(&path)
+            .await
             .map_err(|e| ZigError::ExtractionFailed(format!("failed to read metadata: {}", e)))?;
 
         let mut header = tar::Header::new_gnu();
@@ -296,7 +310,7 @@ pub fn hash_directory_as_tar(dir: &Utf8Path) -> Result<(Vec<u8>, Blake3Hash), Zi
         header.set_gid(0);
 
         if metadata.is_file() {
-            let contents = std::fs::read(path)?;
+            let contents = tokio::fs::read(&path).await?;
             header.set_size(contents.len() as u64);
             header.set_mode(if is_executable(&metadata) {
                 0o755
@@ -323,7 +337,7 @@ pub fn hash_directory_as_tar(dir: &Utf8Path) -> Result<(Vec<u8>, Blake3Hash), Zi
                     ZigError::ExtractionFailed(format!("failed to add dir to tar: {}", e))
                 })?;
         } else if metadata.is_symlink() {
-            let target = std::fs::read_link(path)?;
+            let target = tokio::fs::read_link(&path).await?;
             header.set_size(0);
             header.set_mode(0o777);
             header.set_entry_type(tar::EntryType::Symlink);
@@ -390,9 +404,9 @@ impl AcquiredToolchain {
     }
 
     /// Clean up the extraction directory
-    pub fn cleanup(&self) -> Result<(), ZigError> {
-        if self.extract_dir.exists() {
-            std::fs::remove_dir_all(&self.extract_dir)?;
+    pub async fn cleanup(&self) -> Result<(), ZigError> {
+        if tokio::fs::try_exists(&self.extract_dir).await? {
+            tokio::fs::remove_dir_all(&self.extract_dir).await?;
         }
         Ok(())
     }
@@ -402,36 +416,40 @@ impl AcquiredToolchain {
 ///
 /// Given the zig executable and lib tarball from CAS, extract them to a directory
 /// suitable for running zig commands.
-pub fn materialize_toolchain(
+pub async fn materialize_toolchain(
     zig_exe: &[u8],
     lib_tarball: &[u8],
     target_dir: &Utf8Path,
 ) -> Result<MaterializedToolchain, ZigError> {
-    use std::fs;
-
     // Create target directory
-    fs::create_dir_all(target_dir)?;
+    tokio::fs::create_dir_all(target_dir).await?;
 
     // Write zig executable
     let zig_path = target_dir.join("zig");
-    let mut file = fs::File::create(&zig_path)?;
-    file.write_all(zig_exe)?;
+    tokio::fs::write(&zig_path, zig_exe).await?;
 
     // Make executable on Unix
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&zig_path, fs::Permissions::from_mode(0o755))?;
+        tokio::fs::set_permissions(&zig_path, std::fs::Permissions::from_mode(0o755)).await?;
     }
 
     // Extract lib tarball
     let lib_dir = target_dir.join("lib");
-    fs::create_dir_all(&lib_dir)?;
+    tokio::fs::create_dir_all(&lib_dir).await?;
 
-    let mut archive = tar::Archive::new(lib_tarball);
-    archive
-        .unpack(&lib_dir)
-        .map_err(|e| ZigError::ExtractionFailed(format!("failed to unpack lib: {}", e)))?;
+    let lib_dir_buf = lib_dir.as_std_path().to_path_buf();
+    let lib_bytes = lib_tarball.to_vec();
+    tokio::task::spawn_blocking(move || -> Result<(), ZigError> {
+        let mut archive = tar::Archive::new(lib_bytes.as_slice());
+        archive
+            .unpack(&lib_dir_buf)
+            .map_err(|e| ZigError::ExtractionFailed(format!("failed to unpack lib: {}", e)))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| ZigError::ExtractionFailed(format!("materialize task failed: {}", e)))??;
 
     Ok(MaterializedToolchain { zig_path, lib_dir })
 }
@@ -515,14 +533,14 @@ pub async fn acquire_zig_toolchain(
         camino::Utf8PathBuf::from(format!("/tmp/zig-acquire-{}", uuid::Uuid::new_v4()));
 
     // Extract tarball
-    let (zig_exe_path, lib_dir_path) = extract_zig_tarball(&tarball, &extract_dir)?;
+    let (zig_exe_path, lib_dir_path) = extract_zig_tarball(&tarball, &extract_dir).await?;
 
     // Hash the zig executable
-    let zig_exe_contents = std::fs::read(&zig_exe_path)?;
+    let zig_exe_contents = tokio::fs::read(&zig_exe_path).await?;
     let zig_exe_hash = Blake3Hash::from_bytes(&zig_exe_contents);
 
     // Hash the lib directory as tarball
-    let (lib_tarball, lib_hash) = hash_directory_as_tar(&lib_dir_path)?;
+    let (lib_tarball, lib_hash) = hash_directory_as_tar(&lib_dir_path).await?;
 
     // Create toolchain ID
     let id = ToolchainId::from_parts(&zig_exe_hash, &lib_hash);

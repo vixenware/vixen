@@ -1677,7 +1677,7 @@ impl VxdService {
 
         // Save the report to the project's .vx/runs/ directory
         let report_store = ReportStore::new(&graph.workspace_root);
-        if let Err(e) = report_store.save(&report) {
+        if let Err(e) = report_store.save(&report).await {
             warn!(error = %e, "failed to save build report");
         } else {
             debug!(run_id = %report.run_id, "saved build report");

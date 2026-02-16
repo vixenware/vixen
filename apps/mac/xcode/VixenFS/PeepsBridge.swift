@@ -88,26 +88,6 @@ private struct PeepsRequestAttrs: Encodable {
     }
 }
 
-private struct PeepsResponseAttrs: Encodable {
-    let spanID: String
-    let operation: String
-    let startedMs: Int64
-    let endedMs: Int64
-    let latencyMs: Int64
-    let status: String
-    let errno: Int32?
-
-    enum CodingKeys: String, CodingKey {
-        case spanID = "span_id"
-        case operation
-        case startedMs = "started_ms"
-        case endedMs = "ended_ms"
-        case latencyMs = "latency_ms"
-        case status
-        case errno
-    }
-}
-
 private struct PeepsSyscallAttrs: Encodable {
     let operation: String
     let phase: String
@@ -132,16 +112,6 @@ private actor SwiftPeepsGraphState {
         let startedMs: Int64
     }
 
-    private struct ResponseEvent {
-        let spanID: String
-        let id: String
-        let requestID: String
-        let operation: String
-        let startedMs: Int64
-        let endedMs: Int64
-        let errno: Int32?
-    }
-
     private struct SyscallEvent {
         let id: String
         let requestID: String?
@@ -151,12 +121,8 @@ private actor SwiftPeepsGraphState {
         let errno: Int32?
     }
 
-    private let maxResponses = 512
-    private let maxSyscalls = 1024
-
     private var inFlight: [String: InFlightRequest] = [:]
-    private var recentResponses: [ResponseEvent] = []
-    private var recentSyscalls: [SyscallEvent] = []
+    private var inFlightSyscalls: [String: SyscallEvent] = [:]
 
     func beginRequest(operation: String) -> String {
         let spanID = newULID()
@@ -164,48 +130,22 @@ private actor SwiftPeepsGraphState {
         let startedMs = Self.nowMs()
         inFlight[requestID] = InFlightRequest(
             spanID: spanID, id: requestID, operation: operation, startedMs: startedMs)
-        appendSyscall(
-            SyscallEvent(
-                id: "syscall:\(newULID())",
-                requestID: requestID,
-                operation: operation,
-                phase: "begin",
-                tsMs: startedMs,
-                errno: nil
-            )
+        inFlightSyscalls[requestID] = SyscallEvent(
+            id: "syscall:\(newULID())",
+            requestID: requestID,
+            operation: operation,
+            phase: "begin",
+            tsMs: startedMs,
+            errno: nil
         )
         return requestID
     }
 
     func finishRequest(requestID: String, operation: String, errno: Int32?) {
-        let endedMs = Self.nowMs()
-        let request = inFlight.removeValue(forKey: requestID)
-        let startedMs = request?.startedMs ?? endedMs
-        let spanID = request?.spanID ?? newULID()
-        let event = ResponseEvent(
-            spanID: spanID,
-            id: "response:\(spanID)",
-            requestID: requestID,
-            operation: operation,
-            startedMs: startedMs,
-            endedMs: endedMs,
-            errno: errno
-        )
-        recentResponses.append(event)
-        if recentResponses.count > maxResponses {
-            recentResponses.removeFirst(recentResponses.count - maxResponses)
-        }
-
-        appendSyscall(
-            SyscallEvent(
-                id: "syscall:\(newULID())",
-                requestID: requestID,
-                operation: operation,
-                phase: errno == nil ? "end" : "error",
-                tsMs: endedMs,
-                errno: errno
-            )
-        )
+        _ = operation
+        _ = errno
+        inFlightSyscalls.removeValue(forKey: requestID)
+        inFlight.removeValue(forKey: requestID)
     }
 
     func snapshot(processName: String, pid: UInt32) -> PeepsGraphSnapshot {
@@ -229,38 +169,7 @@ private actor SwiftPeepsGraphState {
             )
         }
 
-        for rsp in recentResponses {
-            let latencyMs = max(0, rsp.endedMs - rsp.startedMs)
-            let attrs = encodeAttrs(
-                PeepsResponseAttrs(
-                    spanID: rsp.spanID,
-                    operation: rsp.operation,
-                    startedMs: rsp.startedMs,
-                    endedMs: rsp.endedMs,
-                    latencyMs: latencyMs,
-                    status: rsp.errno == nil ? "ok" : "error",
-                    errno: rsp.errno
-                )
-            )
-            nodes.append(
-                PeepsGraphNode(
-                    id: rsp.id,
-                    kind: "Response",
-                    label: rsp.operation,
-                    attrsJSON: attrs
-                )
-            )
-            edges.append(
-                PeepsGraphEdge(
-                    src: rsp.requestID,
-                    dst: rsp.id,
-                    kind: "Touches",
-                    attrsJSON: "{}"
-                )
-            )
-        }
-
-        for syscall in recentSyscalls {
+        for syscall in inFlightSyscalls.values {
             let attrs = encodeAttrs(
                 PeepsSyscallAttrs(
                     operation: syscall.operation,
@@ -314,13 +223,6 @@ private actor SwiftPeepsGraphState {
             nodes: nodes,
             edges: edges
         )
-    }
-
-    private func appendSyscall(_ event: SyscallEvent) {
-        recentSyscalls.append(event)
-        if recentSyscalls.count > maxSyscalls {
-            recentSyscalls.removeFirst(recentSyscalls.count - maxSyscalls)
-        }
     }
 
     private func encodeAttrs<T: Encodable>(_ attrs: T) -> String {
@@ -450,8 +352,14 @@ actor SwiftPeepsClient {
             guard request.type == "snapshot_request" else {
                 continue
             }
+            log.info(
+                "Swift peeps snapshot_request snapshot_id=\(request.snapshotID) timeout_ms=\(request.timeoutMs)"
+            )
 
             let graph = await state.snapshot(processName: processName, pid: UInt32(pid))
+            log.info(
+                "Swift peeps graph_reply snapshot_id=\(request.snapshotID) nodes=\(graph.nodes.count) edges=\(graph.edges.count)"
+            )
             let reply = PeepsGraphReply(
                 type: "graph_reply",
                 snapshotID: request.snapshotID,

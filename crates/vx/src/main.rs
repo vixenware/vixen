@@ -594,7 +594,7 @@ impl CliContext {
         let cwd = Utf8PathBuf::try_from(std::env::current_dir()?)?;
         let report_store = ReportStore::new(&cwd);
 
-        let Some(report) = report_store.load_latest()? else {
+        let Some(report) = report_store.load_latest().await? else {
             println!(
                 "{} No build reports found. Run {} first.",
                 "Error:".red().bold(),

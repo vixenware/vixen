@@ -138,13 +138,16 @@ where
 
         let mut child = if spawn {
             tracing::info!("Spawning {binary_name}");
-            Some(spawn_binary(
-                &binary_name,
-                &endpoint,
-                &cli_args,
-                &env_vars,
-                log_path.as_deref(),
-            )?)
+            Some(
+                spawn_binary(
+                    &binary_name,
+                    &endpoint,
+                    &cli_args,
+                    &env_vars,
+                    log_path.as_deref(),
+                )
+                .await?,
+            )
         } else {
             tracing::info!("Connecting to {binary_name} at {endpoint}");
             None
@@ -247,7 +250,7 @@ where
 /// - In test mode (`VX_TEST` set): stdout/stderr inherited.
 /// - Otherwise: stdout/stderr redirected to `log_path` (or null if not set).
 /// - The child dies when the parent dies (via `ur_taking_me_with_you`).
-fn spawn_binary(
+async fn spawn_binary(
     binary_name: &str,
     endpoint: &Endpoint,
     extra_args: &[String],
@@ -285,19 +288,19 @@ fn spawn_binary(
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::inherit());
     } else if let Some(log_path) = log_path {
-        use std::fs::OpenOptions;
-
         if let Some(parent) = log_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            peeps::fs::create_dir_all(parent).await?;
         }
 
-        let log_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)?;
+        let mut opts = peeps::fs::OpenOptions::new();
+        opts.create(true).append(true);
+        let log_file = opts.open(log_path).await?;
+        let log_file_clone = log_file.try_clone().await?;
 
-        cmd.stdout(Stdio::from(log_file.try_clone()?));
-        cmd.stderr(Stdio::from(log_file));
+        let stdout_file = log_file_clone.into_inner().into_std().await;
+        let stderr_file = log_file.into_inner().into_std().await;
+        cmd.stdout(Stdio::from(stdout_file));
+        cmd.stderr(Stdio::from(stderr_file));
     } else {
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());

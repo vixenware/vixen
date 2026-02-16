@@ -144,7 +144,7 @@ where
                     }
                 };
 
-                if let Err(error) = gc_stale_sessions(&app_group_root, session_id.as_str(), SESSION_GC_AGE) {
+                if let Err(error) = gc_stale_sessions(&app_group_root, session_id.as_str(), SESSION_GC_AGE).await {
                     tracing::warn!(error = %error, "failed to garbage-collect stale SHM sessions");
                 }
 
@@ -159,8 +159,8 @@ where
                 }
 
                 let shm_path = session_paths.shm_path();
-                if shm_path.exists()
-                    && let Err(error) = std::fs::remove_file(&shm_path)
+                if peeps::fs::try_exists(&shm_path).await.unwrap_or(false)
+                    && let Err(error) = peeps::fs::remove_file(&shm_path).await
                 {
                     let _ = sid_tx.send(Err(format!(
                         "failed to remove stale shm file {}: {error}",
@@ -185,8 +185,10 @@ where
 
                 let control_sock_path =
                     control_socket_path_for_sid(&app_group_root, session_paths.sid().as_str());
-                if control_sock_path.exists()
-                    && let Err(error) = std::fs::remove_file(&control_sock_path)
+                if peeps::fs::try_exists(&control_sock_path)
+                    .await
+                    .unwrap_or(false)
+                    && let Err(error) = peeps::fs::remove_file(&control_sock_path).await
                 {
                     let _ = sid_tx.send(Err(format!(
                         "failed to remove stale SHM control socket {}: {error}",
@@ -289,17 +291,21 @@ fn random_sid_hex() -> String {
     sid
 }
 
-fn gc_stale_sessions(root: &Path, keep_sid: &str, max_age: Duration) -> Result<(), String> {
+async fn gc_stale_sessions(root: &Path, keep_sid: &str, max_age: Duration) -> Result<(), String> {
     let sessions_root = root.join("sessions");
-    if !sessions_root.exists() {
+    if !peeps::fs::try_exists(&sessions_root).await.unwrap_or(false) {
         return Ok(());
     }
-    let entries = std::fs::read_dir(&sessions_root)
+    let mut entries = tokio::fs::read_dir(&sessions_root)
+        .await
         .map_err(|error| format!("failed to list {}: {error}", sessions_root.display()))?;
     let now = std::time::SystemTime::now();
 
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("failed to read sessions entry: {error}"))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| format!("failed to read sessions entry: {error}"))?
+    {
         let path = entry.path();
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
@@ -308,7 +314,7 @@ fn gc_stale_sessions(root: &Path, keep_sid: &str, max_age: Duration) -> Result<(
         if name == keep_sid {
             continue;
         }
-        let metadata = match std::fs::symlink_metadata(&path) {
+        let metadata = match tokio::fs::symlink_metadata(&path).await {
             Ok(metadata) => metadata,
             Err(_) => continue,
         };
@@ -325,7 +331,7 @@ fn gc_stale_sessions(root: &Path, keep_sid: &str, max_age: Duration) -> Result<(
         if age < max_age {
             continue;
         }
-        if let Err(error) = std::fs::remove_dir_all(&path) {
+        if let Err(error) = peeps::fs::remove_dir_all(&path).await {
             tracing::warn!(path = %path.display(), %error, "failed to remove stale SHM session");
         }
     }

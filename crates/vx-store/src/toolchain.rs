@@ -1,7 +1,6 @@
 //! Toolchain Manager (Inflight Deduplication)
 
 use futures_util::{StreamExt, future::join};
-use jiff::Timestamp;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,13 +37,6 @@ const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_millis(25);
 
 async fn send_progress_best_effort(progress: &roam::Tx<StoreProgress>, update: StoreProgress) {
     let _ = tokio::time::timeout(PROGRESS_SEND_TIMEOUT, progress.send(&update)).await;
-}
-
-fn now_utc_string() -> String {
-    match Timestamp::now().in_tz("UTC") {
-        Ok(ts) => ts.to_string(),
-        Err(_) => Timestamp::now().to_string(),
-    }
 }
 
 // =============================================================================
@@ -1066,7 +1058,6 @@ impl StoreService {
             kind: ToolchainKind::Rust,
             spec_key,
             toolchain_id: toolchain_id.0,
-            created_at: now_utc_string(),
             rust_manifest_date: Some(manifest.date.clone()),
             rust_version: Some(manifest.rustc.version.clone()),
             zig_version: None,
@@ -1685,7 +1676,6 @@ impl StoreService {
             kind: ToolchainKind::Rust,
             spec_key,
             toolchain_id: toolchain_id.0,
-            created_at: now_utc_string(),
             rust_manifest_date: Some(manifest.date.clone()),
             rust_version: Some(manifest.rustc.version.clone()),
             zig_version: None,
@@ -2090,7 +2080,7 @@ impl StoreService {
             }
         };
 
-        if let Err(e) = acquired.cleanup() {
+        if let Err(e) = acquired.cleanup().await {
             tracing::warn!("failed to cleanup Zig extraction directory: {}", e);
         }
 
@@ -2108,7 +2098,6 @@ impl StoreService {
             kind: ToolchainKind::Zig,
             spec_key,
             toolchain_id,
-            created_at: now_utc_string(),
             rust_manifest_date: None,
             rust_version: None,
             zig_version: Some(version.version.clone()),
