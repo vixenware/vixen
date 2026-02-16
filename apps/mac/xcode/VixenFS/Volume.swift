@@ -289,6 +289,50 @@ final class Volume: FSVolume {
         throw fs_errorForPOSIXError(code)
     }
 
+    private func logOpStart(_ op: StaticString, details: String = "") {
+        let opName = String(describing: op)
+        if details.isEmpty {
+            log.notice("op.start \(opName, privacy: .public)")
+        } else {
+            log.notice("op.start \(opName, privacy: .public) \(details, privacy: .public)")
+        }
+    }
+
+    private func logOpSuccess(_ op: StaticString, details: String = "") {
+        let opName = String(describing: op)
+        if details.isEmpty {
+            log.notice("op.success \(opName, privacy: .public)")
+        } else {
+            log.notice("op.success \(opName, privacy: .public) \(details, privacy: .public)")
+        }
+    }
+
+    private func logOpFailure(_ op: StaticString, error: Error, details: String = "") {
+        let opName = String(describing: op)
+        let errno = vixenPOSIXCode(for: error)
+        if details.isEmpty {
+            log.error(
+                "op.failure \(opName, privacy: .public) errno=\(errno) error=\(String(describing: error), privacy: .public)"
+            )
+        } else {
+            log.error(
+                "op.failure \(opName, privacy: .public) errno=\(errno) \(details, privacy: .public) error=\(String(describing: error), privacy: .public)"
+            )
+        }
+    }
+
+    private func ensureConnectionAvailable(operation: StaticString = #function) async throws {
+        do {
+            _ = try await VfsConnection.shared.getClient()
+        } catch {
+            let code = vixenPOSIXCode(for: error)
+            log.error(
+                "\(operation): connection unavailable errno=\(code) error=\(String(describing: error), privacy: .public)"
+            )
+            throw fs_errorForPOSIXError(code)
+        }
+    }
+
     private static func isImmutableFile(_ attrs: FSItem.Attributes) -> Bool {
         guard attrs.type == .file else {
             return false
@@ -410,58 +454,75 @@ extension Volume: FSVolume.Operations {
         _ desiredAttributes: FSItem.GetAttributesRequest,
         of fsItem: FSItem
     ) async throws -> FSItem.Attributes {
-        let item = try getItem(fsItem)
+        let op: StaticString = #function
+        let item = try getItem(fsItem, fn: op)
+        logOpStart(op, details: "itemId=\(item.itemId)")
+        do {
+            // Virtual items: always fresh from Swift side
+            if item.itemId == Volume.vixenfsDirId {
+                let attrs = vixenfsDirAttributes()
+                item.updateAttributes(attrs)
+                logOpSuccess(op, details: "itemId=\(item.itemId) source=virtual")
+                return attrs
+            }
+            if item.itemId == Volume.statsJsonId {
+                let attrs = await statsJsonAttributes()
+                item.updateAttributes(attrs)
+                logOpSuccess(op, details: "itemId=\(item.itemId) source=virtual")
+                return attrs
+            }
+            if item.itemId == Volume.healthJsonId {
+                let attrs = await healthJsonAttributes()
+                item.updateAttributes(attrs)
+                logOpSuccess(op, details: "itemId=\(item.itemId) source=virtual")
+                return attrs
+            }
 
-        // Virtual items: always fresh from Swift side
-        if item.itemId == Volume.vixenfsDirId {
-            let attrs = vixenfsDirAttributes()
-            item.updateAttributes(attrs)
-            return attrs
-        }
-        if item.itemId == Volume.statsJsonId {
-            let attrs = await statsJsonAttributes()
-            item.updateAttributes(attrs)
-            return attrs
-        }
-        if item.itemId == Volume.healthJsonId {
-            let attrs = await healthJsonAttributes()
-            item.updateAttributes(attrs)
-            return attrs
-        }
+            // Avoid serving stale cached attributes when the underlying transport is terminal.
+            try await ensureConnectionAvailable(operation: op)
 
-        let nowNs = DispatchTime.now().uptimeNanoseconds
-        let snapshot = item.attributesSnapshot()
-        let cachedAttrs = snapshot.attrs
+            let nowNs = DispatchTime.now().uptimeNanoseconds
+            let snapshot = item.attributesSnapshot()
+            let cachedAttrs = snapshot.attrs
 
-        if Volume.isImmutableFile(cachedAttrs) {
-            return cachedAttrs
-        }
+            if Volume.isImmutableFile(cachedAttrs) {
+                logOpSuccess(op, details: "itemId=\(item.itemId) source=immutable-cache")
+                return cachedAttrs
+            }
 
-        if nowNs &- snapshot.lastValidationNs < Volume.mutableAttributesTTLNs {
-            return cachedAttrs
-        }
+            if nowNs &- snapshot.lastValidationNs < Volume.mutableAttributesTTLNs {
+                logOpSuccess(op, details: "itemId=\(item.itemId) source=ttl-cache")
+                return cachedAttrs
+            }
 
-        let result = try await withMappedClientCall {
-            try await $0.getAttributes(itemId: item.itemId)
-        }
-        guard result.error == 0 else {
-            log.debug(
-                "attributes: revalidate failed for itemId=\(item.itemId) error=\(result.error); using cached"
+            let result = try await withMappedClientCall {
+                try await $0.getAttributes(itemId: item.itemId)
+            }
+            guard result.error == 0 else {
+                log.debug(
+                    "attributes: revalidate failed for itemId=\(item.itemId) error=\(result.error); using cached"
+                )
+                logOpSuccess(
+                    op, details: "itemId=\(item.itemId) source=cache-after-revalidate-failure")
+                return cachedAttrs
+            }
+
+            let refreshedAttrs = FSItem.Attributes.fromVfs(
+                itemId: result.attrs.itemId,
+                parentId: cachedAttrs.parentID.rawValue,
+                itemType: result.attrs.itemType,
+                size: result.attrs.size,
+                modifiedTime: result.attrs.modifiedTime,
+                createdTime: result.attrs.createdTime,
+                mode: result.attrs.mode
             )
-            return cachedAttrs
+            item.updateAttributes(refreshedAttrs, validatedAtNs: nowNs)
+            logOpSuccess(op, details: "itemId=\(item.itemId) source=rpc-revalidated")
+            return refreshedAttrs
+        } catch {
+            logOpFailure(op, error: error, details: "itemId=\(item.itemId)")
+            throw error
         }
-
-        let refreshedAttrs = FSItem.Attributes.fromVfs(
-            itemId: result.attrs.itemId,
-            parentId: cachedAttrs.parentID.rawValue,
-            itemType: result.attrs.itemType,
-            size: result.attrs.size,
-            modifiedTime: result.attrs.modifiedTime,
-            createdTime: result.attrs.createdTime,
-            mode: result.attrs.mode
-        )
-        item.updateAttributes(refreshedAttrs, validatedAtNs: nowNs)
-        return refreshedAttrs
     }
 
     func setAttributes(
@@ -726,29 +787,48 @@ extension Volume: FSVolume.Operations {
         inDirectory destinationDirectory: FSItem,
         overItem: FSItem?
     ) async throws -> FSFileName {
-        let item = try getItem(fsItem)
-        let destDir = try getItem(destinationDirectory)
+        let op: StaticString = #function
+        let item = try getItem(fsItem, fn: op)
+        let destDir = try getItem(destinationDirectory, fn: op)
         let destName = destinationName.string ?? ""
         log.debug("renameItem: itemId=\(item.itemId) -> \(destName) in \(destDir.itemId)")
+        logOpStart(
+            op,
+            details:
+                "itemId=\(item.itemId) newParentId=\(destDir.itemId) newName=\(destName)")
+        do {
+            // Virtual items cannot be renamed
+            if isVirtualItem(item.itemId) || isVirtualItem(destDir.itemId) {
+                throw fs_errorForPOSIXError(POSIXError.EACCES.rawValue)
+            }
 
-        // Virtual items cannot be renamed
-        if isVirtualItem(item.itemId) || isVirtualItem(destDir.itemId) {
-            throw fs_errorForPOSIXError(POSIXError.EACCES.rawValue)
+            try await ensureConnectionAvailable(operation: op)
+
+            let itemId = item.itemId
+            let destDirId = destDir.itemId
+            let result = try await withMappedClientCall {
+                try await $0.rename(itemId: itemId, newParentId: destDirId, newName: destName)
+            }
+
+            if result.error != 0 {
+                try failPOSIX(
+                    result.error,
+                    details: "itemId=\(itemId) newParentId=\(destDirId) newName=\(destName)")
+            }
+
+            logOpSuccess(
+                op,
+                details:
+                    "itemId=\(item.itemId) newParentId=\(destDir.itemId) newName=\(destName)")
+            return destinationName
+        } catch {
+            logOpFailure(
+                op,
+                error: error,
+                details:
+                    "itemId=\(item.itemId) newParentId=\(destDir.itemId) newName=\(destName)")
+            throw error
         }
-
-        let itemId = item.itemId
-        let destDirId = destDir.itemId
-        let result = try await withMappedClientCall {
-            try await $0.rename(itemId: itemId, newParentId: destDirId, newName: destName)
-        }
-
-        if result.error != 0 {
-            try failPOSIX(
-                result.error,
-                details: "itemId=\(itemId) newParentId=\(destDirId) newName=\(destName)")
-        }
-
-        return destinationName
     }
 
     func enumerateDirectory(
@@ -758,24 +838,43 @@ extension Volume: FSVolume.Operations {
         attributes: FSItem.GetAttributesRequest?,
         packer: FSDirectoryEntryPacker
     ) async throws -> FSDirectoryVerifier {
-        let dirItem = try getItem(directory)
-        log.debug("enumerateDirectory: itemId=\(dirItem.itemId) cookie=\(cookie.rawValue)")
-
-        // Virtual .vixenfs directory: list virtual files
-        if dirItem.itemId == Volume.vixenfsDirId {
-            if cookie.rawValue == 0 {
-                let statsAttrs = await statsJsonAttributes()
-                let statsItem = Item(
-                    itemId: Volume.statsJsonId, name: Volume.statsJsonName, attributes: statsAttrs)
-                cacheItem(statsItem)
-                let shouldContinue = packer.packEntry(
-                    name: FSFileName(string: Volume.statsJsonName),
-                    itemType: .file,
-                    itemID: statsAttrs.fileID,
-                    nextCookie: FSDirectoryCookie(1),
-                    attributes: attributes != nil ? statsAttrs : nil
-                )
-                if shouldContinue {
+        let op: StaticString = #function
+        let dirItem = try getItem(directory, fn: op)
+        let cookieValue = cookie.rawValue
+        log.debug("enumerateDirectory: itemId=\(dirItem.itemId) cookie=\(cookieValue)")
+        logOpStart(op, details: "itemId=\(dirItem.itemId) cookie=\(cookieValue)")
+        do {
+            // Virtual .vixenfs directory: list virtual files
+            if dirItem.itemId == Volume.vixenfsDirId {
+                if cookieValue == 0 {
+                    let statsAttrs = await statsJsonAttributes()
+                    let statsItem = Item(
+                        itemId: Volume.statsJsonId, name: Volume.statsJsonName,
+                        attributes: statsAttrs)
+                    cacheItem(statsItem)
+                    let shouldContinue = packer.packEntry(
+                        name: FSFileName(string: Volume.statsJsonName),
+                        itemType: .file,
+                        itemID: statsAttrs.fileID,
+                        nextCookie: FSDirectoryCookie(1),
+                        attributes: attributes != nil ? statsAttrs : nil
+                    )
+                    if shouldContinue {
+                        let healthAttrs = await healthJsonAttributes()
+                        let healthItem = Item(
+                            itemId: Volume.healthJsonId, name: Volume.healthJsonName,
+                            attributes: healthAttrs)
+                        cacheItem(healthItem)
+                        _ = packer.packEntry(
+                            name: FSFileName(string: Volume.healthJsonName),
+                            itemType: .file,
+                            itemID: healthAttrs.fileID,
+                            nextCookie: FSDirectoryCookie(2),
+                            attributes: attributes != nil ? healthAttrs : nil
+                        )
+                    }
+                }
+                if cookieValue == 1 {
                     let healthAttrs = await healthJsonAttributes()
                     let healthItem = Item(
                         itemId: Volume.healthJsonId, name: Volume.healthJsonName,
@@ -789,68 +888,64 @@ extension Volume: FSVolume.Operations {
                         attributes: attributes != nil ? healthAttrs : nil
                     )
                 }
+                logOpSuccess(op, details: "itemId=\(dirItem.itemId) source=virtual")
+                return FSDirectoryVerifier(0)
             }
-            if cookie.rawValue == 1 {
-                let healthAttrs = await healthJsonAttributes()
-                let healthItem = Item(
-                    itemId: Volume.healthJsonId, name: Volume.healthJsonName,
-                    attributes: healthAttrs)
-                cacheItem(healthItem)
-                _ = packer.packEntry(
-                    name: FSFileName(string: Volume.healthJsonName),
-                    itemType: .file,
-                    itemID: healthAttrs.fileID,
-                    nextCookie: FSDirectoryCookie(2),
-                    attributes: attributes != nil ? healthAttrs : nil
+
+            try await ensureConnectionAvailable(operation: op)
+
+            let dirId = dirItem.itemId
+            let verifierValue = verifier.rawValue
+            let result = try await withMappedClientCall {
+                try await $0.readDir(itemId: dirId, cookie: cookieValue, verifier: verifierValue)
+            }
+
+            if result.error != 0 {
+                try failPOSIX(
+                    result.error,
+                    details:
+                        "itemId=\(dirId) cookie=\(cookieValue) verifier=\(verifierValue)")
+            }
+
+            var nextCookie: UInt64 = cookieValue + 1
+            for entry in result.entries {
+                let entryAttrs = FSItem.Attributes.fromVfs(
+                    itemId: entry.itemId,
+                    parentId: dirId,
+                    itemType: entry.itemType,
+                    size: entry.size,
+                    modifiedTime: entry.modifiedTime,
+                    createdTime: entry.createdTime,
+                    mode: entry.mode
                 )
+
+                let entryItem = Item(itemId: entry.itemId, name: entry.name, attributes: entryAttrs)
+                cacheItem(entryItem)
+
+                let shouldContinue = packer.packEntry(
+                    name: FSFileName(string: entry.name),
+                    itemType: entryAttrs.type,
+                    itemID: entryAttrs.fileID,
+                    nextCookie: FSDirectoryCookie(nextCookie),
+                    attributes: attributes != nil ? entryAttrs : nil
+                )
+
+                if !shouldContinue {
+                    break
+                }
+                nextCookie += 1
             }
-            return FSDirectoryVerifier(0)
-        }
 
-        let dirId = dirItem.itemId
-        let cookieValue = cookie.rawValue
-        let verifierValue = verifier.rawValue
-        let result = try await withMappedClientCall {
-            try await $0.readDir(itemId: dirId, cookie: cookieValue, verifier: verifierValue)
-        }
-
-        if result.error != 0 {
-            try failPOSIX(
-                result.error,
+            logOpSuccess(
+                op,
                 details:
-                    "itemId=\(dirId) cookie=\(cookieValue) verifier=\(verifierValue)")
-        }
-
-        var nextCookie: UInt64 = cookieValue + 1
-        for entry in result.entries {
-            let entryAttrs = FSItem.Attributes.fromVfs(
-                itemId: entry.itemId,
-                parentId: dirId,
-                itemType: entry.itemType,
-                size: entry.size,
-                modifiedTime: entry.modifiedTime,
-                createdTime: entry.createdTime,
-                mode: entry.mode
+                    "itemId=\(dirItem.itemId) entries=\(result.entries.count) verifier=\(result.verifier)"
             )
-
-            let entryItem = Item(itemId: entry.itemId, name: entry.name, attributes: entryAttrs)
-            cacheItem(entryItem)
-
-            let shouldContinue = packer.packEntry(
-                name: FSFileName(string: entry.name),
-                itemType: entryAttrs.type,
-                itemID: entryAttrs.fileID,
-                nextCookie: FSDirectoryCookie(nextCookie),
-                attributes: attributes != nil ? entryAttrs : nil
-            )
-
-            if !shouldContinue {
-                break
-            }
-            nextCookie += 1
+            return FSDirectoryVerifier(result.verifier)
+        } catch {
+            logOpFailure(op, error: error, details: "itemId=\(dirItem.itemId) cookie=\(cookieValue)")
+            throw error
         }
-
-        return FSDirectoryVerifier(result.verifier)
     }
 }
 
