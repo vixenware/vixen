@@ -39,7 +39,13 @@ vx-tarball = { workspace = true }
 vx-toolchain = { workspace = true }
 
 [dev-dependencies]
+blake3 = { workspace = true }
+roam-stream = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
+vx-io = { workspace = true }
+vx-store-proto = { workspace = true }
 
 [features]
 default = []
