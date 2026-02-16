@@ -495,7 +495,7 @@ async fn async_main() -> Result<()> {
         let max_read_size = args.max_read_size;
         let seed = args.seed;
 
-        worker_handles.push(tokio::task::spawn_blocking(move || {
+        worker_handles.push(peeps::spawn_blocking_tracked("vfs-integrity.worker", move || {
             let mut rng = fastrand::Rng::with_seed(seed);
 
             barrier.wait();

@@ -10,6 +10,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
 blake3 = { workspace = true }
+peeps = { workspace = true }
 http-body-util = "0.1"
 hyper = { version = "1.8", features = ["client", "http1", "http2"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "native-tokio", "aws-lc-rs", "tls12"] }

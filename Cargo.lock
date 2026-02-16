@@ -2139,6 +2139,7 @@ name = "roam-shm"
 version = "3.0.0"
 dependencies = [
  "facet",
+ "facet-json",
  "facet-postcard",
  "futures-util",
  "inventory",
@@ -3097,6 +3098,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "libc",
+ "peeps",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3365,6 +3367,7 @@ dependencies = [
  "fastcdc",
  "fastrand",
  "figue",
+ "peeps",
  "roam",
  "roam-stream",
  "tokio",

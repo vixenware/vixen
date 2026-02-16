@@ -201,7 +201,7 @@ async fn cache_get_bytes(cache_dir: &Path, url: &str) -> Result<Vec<u8>, HttpErr
     let data_path_clone = data_path.clone();
 
     // Do the blocking flock in a spawn_blocking so we don't stall the runtime
-    tokio::task::spawn_blocking(move || -> Result<Vec<u8>, HttpError> {
+    peeps::spawn_blocking_tracked("http.cache_fetch", move || -> Result<Vec<u8>, HttpError> {
         use std::fs::{File, OpenOptions};
         use std::io::Write;
 
