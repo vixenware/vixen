@@ -46,6 +46,8 @@ fn main() {
 }
 
 async fn async_main() {
+    peeps::init("vx");
+
     let cli: Cli = args::Driver::new(
         args::builder::<Cli>()
             .expect("failed to build CLI")
