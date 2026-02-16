@@ -203,8 +203,10 @@ actor VfsConnection {
             do {
                 try await driver.run()
                 logger.error("Roam driver exited cleanly — server is gone")
+                NSLog("VixenFS: Roam SHM driver exited cleanly (server gone)")
             } catch {
-                logger.error("Roam driver exited with error: \(error.localizedDescription)")
+                logger.error("Roam driver exited with error: \(String(describing: error), privacy: .public)")
+                NSLog("VixenFS: Roam SHM driver exited with error: \(String(describing: error))")
             }
             await self?.handleDriverExit()
         }
@@ -236,10 +238,12 @@ actor VfsConnection {
     private func handleDriverExit() async {
         if disconnectRequested {
             log.info("VFS connection closed during normal unload")
+            NSLog("VixenFS: SHM connection closed during unload")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.normal")
         } else {
             await ConnectionHealth.shared.recordDisconnected(reason: "driver_exit")
             log.error("Connection to VFS server lost; waiting for FSKit to unload/deactivate")
+            NSLog("VixenFS: SHM connection dropped unexpectedly (driver_exit)")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.unexpected")
         }
         client = nil
