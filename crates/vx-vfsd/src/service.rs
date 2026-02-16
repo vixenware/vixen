@@ -423,9 +423,9 @@ mod tests {
     use roam::Context;
     use roam_stream::NoDispatcher;
     use tempfile::TempDir;
-    use vixenfs_proto::{ItemType, Vfs, errno};
+    use vixenfs_proto::{ItemId, ItemType, SetAttributesParams, Vfs, errno};
     use vx_io::spawn::{ServiceBuilder, ServiceHandle};
-    use vx_store_proto::{Blake3Hash, CasNode, ChunkHash, StoreClient};
+    use vx_store_proto::{Blake3Hash, CDC_MAX_CHUNK, CasNode, ChunkHash, StoreClient};
 
     use super::*;
     use crate::protocol::Vfsd;
@@ -524,7 +524,7 @@ mod tests {
         rel_dir: &str,
         file_name: &str,
         data: &[u8],
-    ) {
+    ) -> (ItemId, ItemId) {
         Vfsd::mkdir(&env.service, &cx(), format!("/{prefix_id}/{rel_dir}"))
             .await
             .expect("mkdir failed");
@@ -565,6 +565,7 @@ mod tests {
             "write failed with errno {}",
             write.error
         );
+        (dir_id, create.item_id)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -635,5 +636,69 @@ mod tests {
             .await
             .expect_err("flush should fail for missing prefix");
         assert!(err.contains("prefix"), "unexpected error: {err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flush_rejects_entry_name_containing_slash() {
+        let env = TestEnv::new().await;
+        let (dir_id, file_id) = write_file(&env, "pfx-badname", "out", "ok.txt", b"hello").await;
+
+        let rename = Vfs::rename(
+            &*env.service.vfs,
+            &cx(),
+            file_id,
+            dir_id,
+            "bad/name".to_string(),
+        )
+        .await;
+        assert_eq!(
+            rename.error,
+            errno::OK,
+            "rename should currently succeed in VFS"
+        );
+
+        let err = Vfsd::flush(&env.service, &cx(), "/pfx-badname/out".to_string())
+            .await
+            .expect_err("flush should fail when entry name contains '/'");
+        assert!(
+            err.contains("contains '/'"),
+            "unexpected flush error for invalid entry name: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flush_rejects_smallfile_size_over_cdc_max() {
+        let env = TestEnv::new().await;
+        let (_dir_id, file_id) = write_file(&env, "pfx-big", "out", "a.bin", b"tiny").await;
+
+        Vfsd::flush(&env.service, &cx(), "/pfx-big/out".to_string())
+            .await
+            .expect("first flush should succeed");
+
+        let set = Vfs::set_attributes(
+            &*env.service.vfs,
+            &cx(),
+            file_id,
+            SetAttributesParams {
+                mode: None,
+                modified_time: None,
+                size: Some(CDC_MAX_CHUNK as u64 + 1),
+            },
+        )
+        .await;
+        assert_eq!(
+            set.error,
+            errno::OK,
+            "set_attributes failed with errno {}",
+            set.error
+        );
+
+        let err = Vfsd::flush(&env.service, &cx(), "/pfx-big/out".to_string())
+            .await
+            .expect_err("flush should fail when SmallFile size exceeds CDC_MAX_CHUNK");
+        assert!(
+            err.contains("SmallFile"),
+            "unexpected flush error for SmallFile size mismatch: {err}"
+        );
     }
 }
