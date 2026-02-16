@@ -2115,6 +2115,7 @@ dependencies = [
  "facet",
  "facet-core",
  "facet-format",
+ "facet-json",
  "facet-path",
  "facet-postcard",
  "facet-pretty",
