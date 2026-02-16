@@ -50,11 +50,15 @@ impl ActionContext {
         // On Windows, LIB/INCLUDE are required for MSVC link.exe to find
         // kernel32.lib and friends.
         const PASSTHROUGH: &[&str] = &[
-            "PATH", "HOME",
+            "PATH",
+            "HOME",
             // MSVC toolchain
-            "LIB", "INCLUDE", "LIBPATH",
+            "LIB",
+            "INCLUDE",
+            "LIBPATH",
             // Windows SDK
-            "WindowsSdkDir", "WindowsSDKVersion",
+            "WindowsSdkDir",
+            "WindowsSDKVersion",
         ];
         for var in PASSTHROUGH {
             if let Ok(val) = std::env::var(var) {
@@ -99,7 +103,11 @@ impl RunnerService {
         );
 
         // 1. Create action context
-        let action = self.create_action_context().await;
+        let action = peeps::peep!(
+            self.create_action_context(),
+            "runner.run_vfs.create_action_context"
+        )
+        .await;
         debug!(action.prefix_id = %action.prefix_id, action.prefix_path = %action.prefix_path, "created action prefix");
 
         // Helper to return an error result (cleanup is done before calling this)
@@ -120,9 +128,11 @@ impl RunnerService {
             "ensuring toolchain VFS prefix"
         );
         let before = Instant::now();
-        let toolchain_prefix_id = match self
-            .ensure_toolchain_prefix(request.toolchain_manifest)
-            .await
+        let toolchain_prefix_id = match peeps::peep!(
+            self.ensure_toolchain_prefix(request.toolchain_manifest),
+            "runner.run_vfs.ensure_toolchain_prefix"
+        )
+        .await
         {
             Ok(id) => id,
             Err(e) => {
@@ -1130,7 +1140,12 @@ impl RunnerService {
 
         // Mount CAS trees into the prefix.
         for mount in &request.tree_mounts {
-            match self.cas.get_node(NodeHash(mount.manifest)).await {
+            match peeps::peep!(
+                self.cas.get_node(NodeHash(mount.manifest)),
+                "runner.run_vfs.cas_get_tree_mount_manifest"
+            )
+            .await
+            {
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     self.remove_action_prefix(&action.prefix_id).await;
@@ -1161,10 +1176,12 @@ impl RunnerService {
                 }
             }
 
-            if let Err(e) = self
-                .vfs
-                .mount_tree(&action.prefix_id, &mount.mount, mount.manifest)
-                .await
+            if let Err(e) = peeps::peep!(
+                self.vfs
+                    .mount_tree(&action.prefix_id, &mount.mount, mount.manifest),
+                "runner.run_vfs.mount_tree"
+            )
+            .await
             {
                 self.remove_action_prefix(&action.prefix_id).await;
                 return RunResult {
@@ -1182,7 +1199,12 @@ impl RunnerService {
         // Materialize individual files from node manifests into a tree and mount it.
         if !request.file_mounts.is_empty() {
             for fm in &request.file_mounts {
-                let manifest = match self.cas.get_node(NodeHash(fm.manifest)).await {
+                let manifest = match peeps::peep!(
+                    self.cas.get_node(NodeHash(fm.manifest)),
+                    "runner.run_vfs.cas_get_file_mount_manifest"
+                )
+                .await
+                {
                     Ok(Some(node_data)) => match CasNode::from_bytes(&node_data) {
                         Ok(CasNode::Manifest(m)) => m,
                         Ok(_) => {
@@ -1267,16 +1289,17 @@ impl RunnerService {
                         content_hash, size, ..
                     } => (content_hash.0, *size),
                 };
-                if let Err(e) = self
-                    .vfs
-                    .add_file_to_prefix(
+                if let Err(e) = peeps::peep!(
+                    self.vfs.add_file_to_prefix(
                         &action.prefix_id,
                         &fm.path,
                         blob_hash,
                         blob_size,
                         entry.executable,
-                    )
-                    .await
+                    ),
+                    "runner.run_vfs.add_file_to_prefix"
+                )
+                .await
                 {
                     self.remove_action_prefix(&action.prefix_id).await;
                     return RunResult {
@@ -1296,7 +1319,11 @@ impl RunnerService {
         }
 
         // Ensure out/ exists.
-        self.create_output_dir_in_prefix(&action.prefix_id).await;
+        peeps::peep!(
+            self.create_output_dir_in_prefix(&action.prefix_id),
+            "runner.run_vfs.create_output_dir"
+        )
+        .await;
 
         // Validate outputs are under out/.
         for out in &request.outputs {
@@ -1363,12 +1390,9 @@ impl RunnerService {
             ActionKind::CcLink
         };
 
-        let output = match crate::sandbox::run_sandboxed_command(
-            cmd,
-            &action_kind,
-            &action_desc,
-            progress,
-            None,
+        let output = match peeps::peep!(
+            crate::sandbox::run_sandboxed_command(cmd, &action_kind, &action_desc, progress, None,),
+            "runner.run_vfs.run_sandboxed_command"
         )
         .await
         {
@@ -1439,7 +1463,11 @@ impl RunnerService {
             };
         }
 
-        let flushed = self.flush_prefix_outputs(&action.prefix_id).await;
+        let flushed = peeps::peep!(
+            self.flush_prefix_outputs(&action.prefix_id),
+            "runner.run_vfs.flush_prefix_outputs"
+        )
+        .await;
 
         let mut outputs = Vec::new();
         for out in &request.outputs {
@@ -1487,7 +1515,12 @@ impl RunnerService {
         let cas_node = CasNode::Manifest(manifest);
         let (node_bytes, node_hash) = cas_node.to_bytes_and_hash();
         let manifest_hash = node_hash.0;
-        if let Err(e) = self.cas.put_node(node_hash, node_bytes).await {
+        if let Err(e) = peeps::peep!(
+            self.cas.put_node(node_hash, node_bytes),
+            "runner.run_vfs.cas_put_manifest"
+        )
+        .await
+        {
             self.remove_action_prefix(&action.prefix_id).await;
             return RunResult {
                 success: false,

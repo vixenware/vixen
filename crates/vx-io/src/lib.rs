@@ -42,9 +42,15 @@ pub async fn atomic_write(
     .await?;
 
     // Create a temporary file in the same directory to ensure it's on the same filesystem
-    let temp_file = TempFile::new_in(parent_dir.as_std_path())
-        .await
-        .map_err(std::io::Error::other)?;
+    let temp_file = peeps::peep!(
+        TempFile::new_in(parent_dir.as_std_path()),
+        "atomic_write.create_tempfile",
+        {
+            "resource.path" => path.as_str(),
+        }
+    )
+    .await
+    .map_err(std::io::Error::other)?;
 
     // Get the temporary path and write contents to it
     let temp_path = temp_file.file_path();
@@ -58,7 +64,15 @@ pub async fn atomic_write(
     #[cfg(unix)]
     if executable {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = tokio::fs::metadata(&temp_path).await?.permissions();
+        let mut perms = peeps::peep!(
+            tokio::fs::metadata(&temp_path),
+            "atomic_write.metadata",
+            {
+                "resource.path" => path.as_str(),
+            }
+        )
+        .await?
+        .permissions();
         perms.set_mode(perms.mode() | 0o111);
         peeps::peep!(
             tokio::fs::set_permissions(&temp_path, perms),
@@ -94,7 +108,14 @@ pub async fn create_scratch_dir(base: &Utf8Path) -> Result<Utf8PathBuf, std::io:
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let scratch_base = base.join("scratch");
-    tokio::fs::create_dir_all(&scratch_base).await?;
+    peeps::peep!(
+        tokio::fs::create_dir_all(&scratch_base),
+        "scratch.create_base_dir",
+        {
+            "resource.path" => scratch_base.as_str(),
+        }
+    )
+    .await?;
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -105,7 +126,14 @@ pub async fn create_scratch_dir(base: &Utf8Path) -> Result<Utf8PathBuf, std::io:
     let id = format!("{:x}-{}-{}", timestamp, pid, count);
     let dir = scratch_base.join(&id);
 
-    tokio::fs::create_dir_all(&dir).await?;
+    peeps::peep!(
+        tokio::fs::create_dir_all(&dir),
+        "scratch.create_dir",
+        {
+            "resource.path" => dir.as_str(),
+        }
+    )
+    .await?;
 
     Ok(dir)
 }
