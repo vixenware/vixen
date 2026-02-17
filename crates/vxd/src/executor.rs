@@ -476,7 +476,7 @@ impl Executor {
             concurrency_limit: Arc::new(Semaphore::new(max_concurrency)),
             message_tx,
             message_rx,
-            in_flight: peeps::JoinSet::new(),
+            in_flight: peeps::JoinSet::named("vxd/executor_in_flight"),
             cancel_token: CancellationToken::new(),
             progress_listener,
             cas,
@@ -612,7 +612,7 @@ impl Executor {
             }
 
             // Wait for a completion message
-            match peeps::peep!(self.message_rx.recv(), "executor.message.recv").await {
+            match self.message_rx.recv().await {
                 Some(ExecutorMessage::ActionCompleted {
                     node_idx,
                     result,

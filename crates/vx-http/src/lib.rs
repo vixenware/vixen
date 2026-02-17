@@ -7,12 +7,12 @@ use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
+use peeps::{Mutex, Notify};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use thiserror::Error;
-use tokio::sync::{Mutex, Notify};
 
 type HttpsConnector =
     hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>;
@@ -60,7 +60,7 @@ fn cache_dir() -> Option<&'static PathBuf> {
 
 fn inflight_cache() -> &'static Mutex<HashMap<String, Arc<Notify>>> {
     static INFLIGHT: OnceLock<Mutex<HashMap<String, Arc<Notify>>>> = OnceLock::new();
-    INFLIGHT.get_or_init(|| Mutex::new(HashMap::new()))
+    INFLIGHT.get_or_init(|| Mutex::new("vx-http/inflight_cache", HashMap::new()))
 }
 
 /// Get a shared HTTPS client instance
@@ -196,11 +196,14 @@ async fn cache_get_bytes(cache_dir: &Path, url: &str) -> Result<Vec<u8>, HttpErr
         }
 
         let maybe_waiter = {
-            let mut inflight = inflight_cache().lock().await;
+            let mut inflight = inflight_cache().lock();
             if let Some(notify) = inflight.get(&key) {
                 Some(notify.clone())
             } else {
-                inflight.insert(key.clone(), Arc::new(Notify::new()));
+                inflight.insert(
+                    key.clone(),
+                    Arc::new(Notify::new("vx-http/cache_single_flight")),
+                );
                 None
             }
         };
@@ -238,7 +241,7 @@ async fn cache_get_bytes(cache_dir: &Path, url: &str) -> Result<Vec<u8>, HttpErr
         .await;
 
         let notify = {
-            let mut inflight = inflight_cache().lock().await;
+            let mut inflight = inflight_cache().lock();
             inflight
                 .remove(&key)
                 .expect("in-flight key must exist for owner")
