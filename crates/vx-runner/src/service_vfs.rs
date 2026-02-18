@@ -1141,7 +1141,7 @@ impl RunnerService {
         // Mount CAS trees into the prefix.
         for mount in &request.tree_mounts {
             match peeps::peep!(
-                self.cas.get_node(NodeHash(mount.manifest)),
+                async { self.cas.get_node(NodeHash(mount.manifest)).await },
                 "runner.run_vfs.cas_get_tree_mount_manifest"
             )
             .await
@@ -1200,7 +1200,7 @@ impl RunnerService {
         if !request.file_mounts.is_empty() {
             for fm in &request.file_mounts {
                 let manifest = match peeps::peep!(
-                    self.cas.get_node(NodeHash(fm.manifest)),
+                    async { self.cas.get_node(NodeHash(fm.manifest)).await },
                     "runner.run_vfs.cas_get_file_mount_manifest"
                 )
                 .await
@@ -1516,7 +1516,7 @@ impl RunnerService {
         let (node_bytes, node_hash) = cas_node.to_bytes_and_hash();
         let manifest_hash = node_hash.0;
         if let Err(e) = peeps::peep!(
-            self.cas.put_node(node_hash, node_bytes),
+            async { self.cas.put_node(node_hash, node_bytes).await },
             "runner.run_vfs.cas_put_manifest"
         )
         .await

@@ -10,7 +10,7 @@ repository = "https://github.com/bearcove/vx"
 
 [workspace.dependencies]
 # instrumentation
-peeps = { git = "https://github.com/bearcove/peeps", branch = "main", features = ["dashboard"] }
+peeps = { git = "https://github.com/bearcove/peeps", branch = "main", features = ["diagnostics"] }
 
 
 # internal crates

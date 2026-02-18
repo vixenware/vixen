@@ -819,7 +819,7 @@ impl VxdService {
         );
 
         let result = peeps::peep!(
-            self.store.ensure_rust_toolchain(spec, progress_tx),
+            async { self.store.ensure_rust_toolchain(spec, progress_tx).await },
             "vxd.store.ensure_rust_toolchain",
             {
                 "method" => "Store.ensure_rust_toolchain",
@@ -855,7 +855,7 @@ impl VxdService {
 
         // Get manifest for version info (and toolchain_id on cache hit)
         let manifest = peeps::peep!(
-            self.store.get_toolchain_manifest(manifest_hash),
+            async { self.store.get_toolchain_manifest(manifest_hash).await },
             "vxd.store.get_toolchain_manifest",
             {
                 "method" => "Store.get_toolchain_manifest",

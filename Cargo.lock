@@ -282,6 +282,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629a66d692cb9ff1a1c664e41771b3dcaf961985a9774c0eb0bd1b51cf60a48"
 
 [[package]]
+name = "castaway"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dec551ab6e7578819132c713a93c022a05d60159dc86e7a7050223577484c55a"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -343,6 +352,20 @@ dependencies = [
  "backtrace",
  "btparse",
  "termcolor",
+]
+
+[[package]]
+name = "compact_str"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fdb1325a1cece981e8a296ab8f0f9b63ae357bd0784a9faaf548cc7b480707a"
+dependencies = [
+ "castaway",
+ "cfg-if",
+ "itoa",
+ "rustversion",
+ "ryu",
+ "static_assertions",
 ]
 
 [[package]]
@@ -616,6 +639,7 @@ dependencies = [
  "autocfg",
  "bytes",
  "camino",
+ "compact_str",
  "const-fnv1a-hash",
  "iddqd",
  "impls",
@@ -1317,15 +1341,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inventory"
-version = "0.3.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc61209c082fbeb19919bee74b176221b27223e27b65d781eb91af24eb1fb46e"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "is-terminal"
 version = "0.4.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1715,21 +1730,33 @@ dependencies = [
 name = "peeps"
 version = "0.1.0"
 dependencies = [
- "facet",
+ "compact_str",
  "facet-json",
+ "facet-value",
  "parking_lot",
  "peeps-types",
+ "peeps-wire",
  "tokio",
- "tracing",
 ]
 
 [[package]]
 name = "peeps-types"
 version = "0.1.0"
 dependencies = [
+ "compact_str",
  "facet",
- "inventory",
- "ulid",
+ "facet-format",
+ "facet-value",
+]
+
+[[package]]
+name = "peeps-wire"
+version = "0.1.0"
+dependencies = [
+ "compact_str",
+ "facet",
+ "facet-json",
+ "peeps-types",
 ]
 
 [[package]]
@@ -2263,6 +2290,12 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+
+[[package]]
+name = "ryu"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "schannel"
