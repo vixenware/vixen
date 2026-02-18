@@ -1140,12 +1140,7 @@ impl RunnerService {
 
         // Mount CAS trees into the prefix.
         for mount in &request.tree_mounts {
-            match peeps::peep!(
-                async { self.cas.get_node(NodeHash(mount.manifest)).await },
-                "runner.run_vfs.cas_get_tree_mount_manifest"
-            )
-            .await
-            {
+            match self.cas.get_node(NodeHash(mount.manifest)).await {
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     self.remove_action_prefix(&action.prefix_id).await;
@@ -1199,12 +1194,7 @@ impl RunnerService {
         // Materialize individual files from node manifests into a tree and mount it.
         if !request.file_mounts.is_empty() {
             for fm in &request.file_mounts {
-                let manifest = match peeps::peep!(
-                    async { self.cas.get_node(NodeHash(fm.manifest)).await },
-                    "runner.run_vfs.cas_get_file_mount_manifest"
-                )
-                .await
-                {
+                let manifest = match self.cas.get_node(NodeHash(fm.manifest)).await {
                     Ok(Some(node_data)) => match CasNode::from_bytes(&node_data) {
                         Ok(CasNode::Manifest(m)) => m,
                         Ok(_) => {
@@ -1515,12 +1505,7 @@ impl RunnerService {
         let cas_node = CasNode::Manifest(manifest);
         let (node_bytes, node_hash) = cas_node.to_bytes_and_hash();
         let manifest_hash = node_hash.0;
-        if let Err(e) = peeps::peep!(
-            async { self.cas.put_node(node_hash, node_bytes).await },
-            "runner.run_vfs.cas_put_manifest"
-        )
-        .await
-        {
+        if let Err(e) = self.cas.put_node(node_hash, node_bytes).await {
             self.remove_action_prefix(&action.prefix_id).await;
             return RunResult {
                 success: false,

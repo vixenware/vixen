@@ -818,22 +818,18 @@ impl VxdService {
             },
         );
 
-        let result = peeps::peep!(
-            async { self.store.ensure_rust_toolchain(spec, progress_tx).await },
-            "vxd.store.ensure_rust_toolchain",
-            {
-                "method" => "Store.ensure_rust_toolchain",
-            }
-        )
-        .await
-        .map_err(|e| {
-            // Complete action on error
-            let this = self.clone();
-            peeps::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
-                this.report_complete_action(action_id).await
-            });
-            VxdError::CasRpc(e.to_string())
-        })?;
+        let result = self
+            .store
+            .ensure_rust_toolchain(spec, progress_tx)
+            .await
+            .map_err(|e| {
+                // Complete action on error
+                let this = self.clone();
+                peeps::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
+                    this.report_complete_action(action_id).await
+                });
+                VxdError::CasRpc(e.to_string())
+            })?;
 
         // Wait for progress forwarding to drain
         let _ = forward_handle.await;
@@ -854,28 +850,24 @@ impl VxdService {
         })?;
 
         // Get manifest for version info (and toolchain_id on cache hit)
-        let manifest = peeps::peep!(
-            async { self.store.get_toolchain_manifest(manifest_hash).await },
-            "vxd.store.get_toolchain_manifest",
-            {
-                "method" => "Store.get_toolchain_manifest",
-            }
-        )
-        .await
-        .map_err(|e| {
-            let this = self.clone();
-            peeps::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
-                this.report_complete_action(action_id).await
-            });
-            VxdError::CasRpc(e.to_string())
-        })?
-        .ok_or_else(|| {
-            let this = self.clone();
-            peeps::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
-                this.report_complete_action(action_id).await
-            });
-            VxdError::ToolchainManifestNotFound(manifest_hash)
-        })?;
+        let manifest = self
+            .store
+            .get_toolchain_manifest(manifest_hash)
+            .await
+            .map_err(|e| {
+                let this = self.clone();
+                peeps::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
+                    this.report_complete_action(action_id).await
+                });
+                VxdError::CasRpc(e.to_string())
+            })?
+            .ok_or_else(|| {
+                let this = self.clone();
+                peeps::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
+                    this.report_complete_action(action_id).await
+                });
+                VxdError::ToolchainManifestNotFound(manifest_hash)
+            })?;
 
         // On cache hit, toolchain_id comes from manifest; on download, it's in the result
         let toolchain_id = result.toolchain_id.unwrap_or(manifest.toolchain_id);
