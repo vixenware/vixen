@@ -7,153 +7,170 @@ private enum PeepsWire {
 }
 
 private struct PeepsSnapshotRequest: Decodable {
-    let type: String
     let snapshotID: Int64
     let timeoutMs: Int64
 
     enum CodingKeys: String, CodingKey {
-        case type
         case snapshotID = "snapshot_id"
         case timeoutMs = "timeout_ms"
     }
 }
 
-private struct PeepsGraphReply: Encodable {
-    let type: String
-    let snapshotID: Int64
-    let process: String
-    let pid: UInt32
-    let graph: PeepsGraphSnapshot?
+private struct PeepsCutRequest: Decodable {
+    let cutID: String
 
     enum CodingKeys: String, CodingKey {
-        case type
-        case snapshotID = "snapshot_id"
-        case process
-        case pid
-        case graph
+        case cutID = "cut_id"
+    }
+}
+
+private struct PeepsServerMessage: Decodable {
+    let snapshotRequest: PeepsSnapshotRequest?
+    let cutRequest: PeepsCutRequest?
+
+    enum CodingKeys: String, CodingKey {
+        case snapshotRequest = "snapshot_request"
+        case cutRequest = "cut_request"
     }
 }
 
 private struct PeepsHandshake: Encodable {
-    let type: String
-    let process: String
-    let pid: UInt32
-    let procKey: String
-
-    init(process: String, pid: UInt32, procKey: String) {
-        self.type = "handshake"
-        self.process = process
-        self.pid = pid
-        self.procKey = procKey
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case type
-        case process
-        case pid
-        case procKey = "proc_key"
-    }
-}
-
-private struct PeepsGraphSnapshot: Encodable {
     let processName: String
-    let procKey: String
-    let nodes: [PeepsGraphNode]
-    let edges: [PeepsGraphEdge]
+    let pid: UInt32
 
     enum CodingKeys: String, CodingKey {
         case processName = "process_name"
-        case procKey = "proc_key"
-        case nodes
-        case edges
+        case pid
     }
 }
 
-private struct PeepsGraphNode: Encodable {
-    let id: String
-    let kind: String
-    let label: String?
-    let attrsJSON: String
+private struct PeepsClientHandshakeMessage: Encodable {
+    let handshake: PeepsHandshake
+}
+
+private struct PeepsSnapshotReply: Encodable {
+    let snapshotID: Int64
+    let ptimeNowMs: UInt64
+    let snapshot: PeepsSnapshot
 
     enum CodingKeys: String, CodingKey {
-        case id
-        case kind
-        case label
-        case attrsJSON = "attrs_json"
+        case snapshotID = "snapshot_id"
+        case ptimeNowMs = "ptime_now_ms"
+        case snapshot
     }
 }
 
-private struct PeepsGraphEdge: Encodable {
+private struct PeepsClientSnapshotReplyMessage: Encodable {
+    let snapshotReply: PeepsSnapshotReply
+
+    enum CodingKeys: String, CodingKey {
+        case snapshotReply = "snapshot_reply"
+    }
+}
+
+private struct PeepsCursor: Encodable {
+    let streamID: String
+    let nextSeqNo: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case streamID = "stream_id"
+        case nextSeqNo = "next_seq_no"
+    }
+}
+
+private struct PeepsCutAck: Encodable {
+    let cutID: String
+    let cursor: PeepsCursor
+
+    enum CodingKeys: String, CodingKey {
+        case cutID = "cut_id"
+        case cursor
+    }
+}
+
+private struct PeepsClientCutAckMessage: Encodable {
+    let cutAck: PeepsCutAck
+
+    enum CodingKeys: String, CodingKey {
+        case cutAck = "cut_ack"
+    }
+}
+
+private struct PeepsSnapshot: Encodable {
+    let entities: [PeepsEntity]
+    let scopes: [PeepsScope]
+    let edges: [PeepsEdge]
+    let events: [PeepsEvent]
+}
+
+private struct PeepsEntity: Encodable {
+    let id: String
+    let birth: UInt64
+    let source: String
+    let krate: String?
+    let name: String
+    let body: PeepsEntityBody
+    let meta: [String: String]
+}
+
+private enum PeepsEntityBody: Encodable {
+    case request(method: String, argsPreview: String)
+    case fileOp(op: String, path: String)
+
+    private struct RequestBody: Encodable {
+        let method: String
+        let argsPreview: String
+
+        enum CodingKeys: String, CodingKey {
+            case method
+            case argsPreview = "args_preview"
+        }
+    }
+
+    private struct FileOpBody: Encodable {
+        let op: String
+        let path: String
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case request
+        case fileOp = "file_op"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .request(method, argsPreview):
+            try container.encode(RequestBody(method: method, argsPreview: argsPreview), forKey: .request)
+        case let .fileOp(op, path):
+            try container.encode(FileOpBody(op: op, path: path), forKey: .fileOp)
+        }
+    }
+}
+
+private struct PeepsScope: Encodable {}
+private struct PeepsEvent: Encodable {}
+
+private struct PeepsEdge: Encodable {
     let src: String
     let dst: String
     let kind: String
-    let attrsJSON: String
-
-    enum CodingKeys: String, CodingKey {
-        case src
-        case dst
-        case kind
-        case attrsJSON = "attrs_json"
-    }
-}
-
-private struct PeepsRequestAttrs: Encodable {
-    let createdAt: Int64
-    let source: String
-    let spanID: String
-    let operation: String
-    let startedMs: Int64
-    let correlation: String
-    let method: String
-    let status: String
-    let deliveredAtNs: Int64
-    let elapsedNs: Int64
-    let rpcConnection: String
-
-    enum CodingKeys: String, CodingKey {
-        case createdAt = "created_at"
-        case source
-        case spanID = "span_id"
-        case operation
-        case startedMs = "started_ms"
-        case correlation
-        case method
-        case status
-        case deliveredAtNs = "delivered_at_ns"
-        case elapsedNs = "elapsed_ns"
-        case rpcConnection = "rpc.connection"
-    }
-}
-
-private struct PeepsSyscallAttrs: Encodable {
-    let createdAt: Int64
-    let source: String
-    let operation: String
-    let phase: String
-    let tsMs: Int64
-    let errno: Int32?
-    let correlation: String?
-
-    enum CodingKeys: String, CodingKey {
-        case createdAt = "created_at"
-        case source
-        case operation
-        case phase
-        case tsMs = "ts_ms"
-        case errno
-        case correlation
-    }
+    let meta: [String: String]
 }
 
 private actor SwiftPeepsGraphState {
     private static let source = "/apps/mac/xcode/VixenFS/PeepsBridge.swift"
+    private static let processStartUptimeNs = DispatchTime.now().uptimeNanoseconds
+
+    static func ptimeNowMs() -> UInt64 {
+        (DispatchTime.now().uptimeNanoseconds - processStartUptimeNs) / 1_000_000
+    }
 
     private struct InFlightRequest {
         let spanID: String
         let id: String
         let operation: String
-        let startedMs: Int64
-        let deliveredAtNs: Int64
+        let birthPtimeMs: UInt64
     }
 
     private struct SyscallEvent {
@@ -161,7 +178,7 @@ private actor SwiftPeepsGraphState {
         let requestID: String?
         let operation: String
         let phase: String
-        let tsMs: Int64
+        let birthPtimeMs: UInt64
         let errno: Int32?
     }
 
@@ -171,21 +188,19 @@ private actor SwiftPeepsGraphState {
     func beginRequest(operation: String) -> String {
         let spanID = newULID()
         let requestID = "request:\(spanID)"
-        let startedMs = Self.nowMs()
-        let deliveredAtNs = Self.nowNs()
+        let birthPtimeMs = Self.ptimeNowMs()
         inFlight[requestID] = InFlightRequest(
             spanID: spanID,
             id: requestID,
             operation: operation,
-            startedMs: startedMs,
-            deliveredAtNs: deliveredAtNs
+            birthPtimeMs: birthPtimeMs
         )
         inFlightSyscalls[requestID] = SyscallEvent(
             id: "syscall:\(newULID())",
             requestID: requestID,
             operation: operation,
             phase: "begin",
-            tsMs: startedMs,
+            birthPtimeMs: birthPtimeMs,
             errno: nil
         )
         return requestID
@@ -198,112 +213,52 @@ private actor SwiftPeepsGraphState {
         inFlight.removeValue(forKey: requestID)
     }
 
-    func snapshot(processName: String, pid: UInt32) -> PeepsGraphSnapshot {
-        var nodes: [PeepsGraphNode] = []
-        var edges: [PeepsGraphEdge] = []
-        let nowNs = Self.nowNs()
+    func snapshot() -> PeepsSnapshot {
+        var entities: [PeepsEntity] = []
+        var edges: [PeepsEdge] = []
 
         for req in inFlight.values {
-            let elapsedNs = max(0, nowNs - req.deliveredAtNs)
-            let attrs = encodeAttrs(
-                PeepsRequestAttrs(
-                    createdAt: req.deliveredAtNs,
-                    source: Self.source,
-                    spanID: req.spanID,
-                    operation: req.operation,
-                    startedMs: req.startedMs,
-                    correlation: req.id,
-                    method: req.operation,
-                    status: "in_flight",
-                    deliveredAtNs: req.deliveredAtNs,
-                    elapsedNs: elapsedNs,
-                    rpcConnection: "client"
-                ))
-            nodes.append(
-                PeepsGraphNode(
+            entities.append(
+                PeepsEntity(
                     id: req.id,
-                    kind: "Request",
-                    label: req.operation,
-                    attrsJSON: attrs
+                    birth: req.birthPtimeMs,
+                    source: Self.source,
+                    krate: nil,
+                    name: req.operation,
+                    body: .request(method: req.operation, argsPreview: "(swift bridge)"),
+                    meta: ["span_id": req.spanID]
                 )
             )
         }
 
         for syscall in inFlightSyscalls.values {
-            let attrs = encodeAttrs(
-                PeepsSyscallAttrs(
-                    createdAt: max(1, syscall.tsMs * 1_000_000),
-                    source: Self.source,
-                    operation: syscall.operation,
-                    phase: syscall.phase,
-                    tsMs: syscall.tsMs,
-                    errno: syscall.errno,
-                    correlation: syscall.requestID
-                )
-            )
-            nodes.append(
-                PeepsGraphNode(
+            var meta = ["phase": syscall.phase]
+            if let errno = syscall.errno {
+                meta["errno"] = String(errno)
+            }
+            entities.append(
+                PeepsEntity(
                     id: syscall.id,
-                    kind: "Syscall",
-                    label: syscall.operation,
-                    attrsJSON: attrs
+                    birth: syscall.birthPtimeMs,
+                    source: Self.source,
+                    krate: nil,
+                    name: syscall.operation,
+                    body: .fileOp(op: "other", path: syscall.operation),
+                    meta: meta
                 )
             )
             if let requestID = syscall.requestID {
-                edges.append(
-                    PeepsGraphEdge(
-                        src: requestID,
-                        dst: syscall.id,
-                        kind: "Touches",
-                        attrsJSON: "{}"
-                    )
-                )
-                edges.append(
-                    PeepsGraphEdge(
-                        src: syscall.id,
-                        dst: requestID,
-                        kind: "Touches",
-                        attrsJSON: "{}"
-                    )
-                )
+                edges.append(PeepsEdge(src: requestID, dst: syscall.id, kind: "touches", meta: [:]))
+                edges.append(PeepsEdge(src: syscall.id, dst: requestID, kind: "touches", meta: [:]))
                 if syscall.phase == "begin" {
-                    edges.append(
-                        PeepsGraphEdge(
-                            src: requestID,
-                            dst: syscall.id,
-                            kind: "Needs",
-                            attrsJSON: "{}"
-                        )
-                    )
+                    edges.append(PeepsEdge(src: requestID, dst: syscall.id, kind: "needs", meta: [:]))
                 }
             }
         }
 
-        return PeepsGraphSnapshot(
-            processName: processName,
-            procKey: canonicalProcKey(processName: processName, pid: pid),
-            nodes: nodes,
-            edges: edges
-        )
-    }
-
-    private func encodeAttrs<T: Encodable>(_ attrs: T) -> String {
-        let encoder = JSONEncoder()
-        if let data = try? encoder.encode(attrs), let str = String(data: data, encoding: .utf8) {
-            return str
-        }
-        return "{}"
-    }
-
-    private static func nowMs() -> Int64 {
-        Int64(Date().timeIntervalSince1970 * 1000)
-    }
-
-    private static func nowNs() -> Int64 {
-        Int64(Date().timeIntervalSince1970 * 1_000_000_000)
+        return PeepsSnapshot(entities: entities, scopes: [], edges: edges, events: [])
     }
 }
-
 actor SwiftPeepsClient {
     static let shared = SwiftPeepsClient()
 
@@ -383,15 +338,13 @@ actor SwiftPeepsClient {
         let (host, port) = try parseDashboardAddress(addr)
         let fd = try connectTCP(host: host, port: port)
         defer { _ = Darwin.close(fd) }
-        let procKey = canonicalProcKey(processName: processName, pid: UInt32(pid))
 
         log.info("Swift peeps connected host=\(host, privacy: .public) port=\(port, privacy: .public)")
-        let handshake = PeepsHandshake(
-            process: processName,
-            pid: UInt32(pid),
-            procKey: procKey
+        let handshakePayload = try JSONEncoder().encode(
+            PeepsClientHandshakeMessage(
+                handshake: PeepsHandshake(processName: processName, pid: UInt32(pid))
+            )
         )
-        let handshakePayload = try JSONEncoder().encode(handshake)
         if debugFrames, let handshakeStr = String(data: handshakePayload, encoding: .utf8) {
             log.notice("Swift peeps handshake payload=\(handshakeStr, privacy: .public)")
         }
@@ -418,37 +371,56 @@ actor SwiftPeepsClient {
                 log.notice("Swift peeps request payload=\(payloadStr, privacy: .public)")
             }
 
-            let request: PeepsSnapshotRequest
+            let message: PeepsServerMessage
             do {
-                request = try JSONDecoder().decode(PeepsSnapshotRequest.self, from: payload)
+                message = try JSONDecoder().decode(PeepsServerMessage.self, from: payload)
             } catch {
                 log.error("Swift peeps decode request failed: \(String(describing: error), privacy: .public)")
                 continue
             }
 
-            guard request.type == "snapshot_request" else {
+            if let request = message.snapshotRequest {
+                log.info(
+                    "Swift peeps snapshot_request snapshot_id=\(request.snapshotID) timeout_ms=\(request.timeoutMs)"
+                )
+
+                let snapshot = await state.snapshot()
+                log.info(
+                    "Swift peeps snapshot_reply snapshot_id=\(request.snapshotID) entities=\(snapshot.entities.count) edges=\(snapshot.edges.count)"
+                )
+
+                let replyPayload = try JSONEncoder().encode(
+                    PeepsClientSnapshotReplyMessage(
+                        snapshotReply: PeepsSnapshotReply(
+                            snapshotID: request.snapshotID,
+                            ptimeNowMs: SwiftPeepsGraphState.ptimeNowMs(),
+                            snapshot: snapshot
+                        )
+                    )
+                )
+                if debugFrames, let replyStr = String(data: replyPayload, encoding: .utf8) {
+                    log.notice("Swift peeps reply payload=\(replyStr, privacy: .public)")
+                }
+                try writeFrame(fd: fd, payload: replyPayload)
                 continue
             }
-            log.info(
-                "Swift peeps snapshot_request snapshot_id=\(request.snapshotID) timeout_ms=\(request.timeoutMs)"
-            )
 
-            let graph = await state.snapshot(processName: processName, pid: UInt32(pid))
-            log.info(
-                "Swift peeps graph_reply snapshot_id=\(request.snapshotID) nodes=\(graph.nodes.count) edges=\(graph.edges.count)"
-            )
-            let reply = PeepsGraphReply(
-                type: "graph_reply",
-                snapshotID: request.snapshotID,
-                process: processName,
-                pid: UInt32(pid),
-                graph: graph
-            )
-            let replyPayload = try JSONEncoder().encode(reply)
-            if debugFrames, let replyStr = String(data: replyPayload, encoding: .utf8) {
-                log.notice("Swift peeps reply payload=\(replyStr, privacy: .public)")
+            if let cut = message.cutRequest {
+                let streamID = "\(processName)-\(UInt32(pid))"
+                let ackPayload = try JSONEncoder().encode(
+                    PeepsClientCutAckMessage(
+                        cutAck: PeepsCutAck(
+                            cutID: cut.cutID,
+                            cursor: PeepsCursor(streamID: streamID, nextSeqNo: 0)
+                        )
+                    )
+                )
+                if debugFrames, let ackStr = String(data: ackPayload, encoding: .utf8) {
+                    log.notice("Swift peeps cut_ack payload=\(ackStr, privacy: .public)")
+                }
+                try writeFrame(fd: fd, payload: ackPayload)
+                continue
             }
-            try writeFrame(fd: fd, payload: replyPayload)
         }
     }
 
@@ -561,25 +533,6 @@ actor SwiftPeepsClient {
         }
     }
 
-}
-
-private func canonicalProcKey(processName: String, pid: UInt32) -> String {
-    let slug = sanitizeIDSegment(processName)
-    return "\(slug)-\(pid)"
-}
-
-private func sanitizeIDSegment(_ raw: String) -> String {
-    String(raw.map { ch in
-        if ch.isASCII {
-            if ch.isLowercase || ch.isNumber || ch == "." || ch == "_" || ch == "-" {
-                return ch
-            }
-            if ch.isUppercase {
-                return Character(ch.lowercased())
-            }
-        }
-        return "-"
-    })
 }
 
 private let ulidAlphabet: [Character] = Array("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
