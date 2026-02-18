@@ -16,6 +16,8 @@ use vx_tarball::Compression;
 use crate::chunking;
 use crate::types::StoreService;
 
+const PEEPS_CX: peeps::PeepsContext = peeps::PeepsContext::new(env!("CARGO_MANIFEST_DIR"));
+
 #[derive(Debug, Clone)]
 pub(crate) struct ExtractedRustComponent {
     pub(crate) tree_root: NodeHash,
@@ -324,7 +326,7 @@ pub(crate) struct ToolchainManager {
 impl ToolchainManager {
     pub(crate) fn new() -> Self {
         Self {
-            inflight: peeps::Mutex::new("store/toolchain_inflight", HashMap::new()),
+            inflight: peeps::mutex!("store/toolchain_inflight", HashMap::new()),
         }
     }
 
@@ -345,17 +347,20 @@ impl ToolchainManager {
         }
 
         let cell = {
-            let mut inflight = self.inflight.lock();
+            let mut inflight = self.inflight.lock_with_cx(PEEPS_CX);
             inflight
                 .entry(spec_key)
-                .or_insert_with(|| Arc::new(peeps::OnceCell::new("toolchain_inflight")))
+                .or_insert_with(|| Arc::new(peeps::once_cell!("toolchain_inflight")))
                 .clone()
         };
 
         #[allow(clippy::redundant_closure)]
-        let result = cell.get_or_init(|| acquire_fn()).await.clone();
+        let result = cell
+            .get_or_init_with_cx(|| acquire_fn(), PEEPS_CX)
+            .await
+            .clone();
 
-        let mut inflight = self.inflight.lock();
+        let mut inflight = self.inflight.lock_with_cx(PEEPS_CX);
         if let Some(existing) = inflight.get(&spec_key)
             && Arc::ptr_eq(existing, &cell)
         {
@@ -844,9 +849,9 @@ impl StoreService {
         // Track per-file info: content_hash -> (blob_node, size)
         // This lets us build DirectoryNode entries after extraction.
         let rustc_file_info: Arc<peeps::Mutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
-            Arc::new(peeps::Mutex::new("store/rustc_file_info", HashMap::new()));
+            Arc::new(peeps::mutex!("store/rustc_file_info", HashMap::new()));
         let std_file_info: Arc<peeps::Mutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
-            Arc::new(peeps::Mutex::new("store/std_file_info", HashMap::new()));
+            Arc::new(peeps::mutex!("store/std_file_info", HashMap::new()));
 
         let this1 = self.clone();
         let this2 = self.clone();
@@ -900,7 +905,7 @@ impl StoreService {
                             None
                         };
                         // Track info
-                        rustc_info.lock().insert(
+                        rustc_info.lock_with_cx(PEEPS_CX).insert(
                             content_hash.0,
                             ExtractedFileInfo {
                                 content_hash,
@@ -957,7 +962,7 @@ impl StoreService {
                         } else {
                             None
                         };
-                        std_info.lock().insert(
+                        std_info.lock_with_cx(PEEPS_CX).insert(
                             content_hash.0,
                             ExtractedFileInfo {
                                 content_hash,
@@ -1044,11 +1049,11 @@ impl StoreService {
 
         // Count unique chunks
         let rustc_unique_chunks = {
-            let info = rustc_file_info.lock();
+            let info = rustc_file_info.lock_with_cx(PEEPS_CX);
             info.len() as u32
         };
         let std_unique_chunks = {
-            let info = std_file_info.lock();
+            let info = std_file_info.lock_with_cx(PEEPS_CX);
             info.len() as u32
         };
 
@@ -1245,7 +1250,12 @@ impl StoreService {
         }
 
         let key = (spec_key, component.clone());
-        if let Some(blob_ref) = self.rust_component_tarballs.lock().get(&key).cloned() {
+        if let Some(blob_ref) = self
+            .rust_component_tarballs
+            .lock_with_cx(PEEPS_CX)
+            .get(&key)
+            .cloned()
+        {
             return EnsureRustToolchainComponentResult {
                 spec_key: Some(spec_key),
                 component,
@@ -1332,7 +1342,7 @@ impl StoreService {
         };
 
         self.rust_component_tarballs
-            .lock()
+            .lock_with_cx(PEEPS_CX)
             .insert((spec_key, component.clone()), tarball_ref.clone());
 
         EnsureRustToolchainComponentResult {
@@ -1406,7 +1416,7 @@ impl StoreService {
         let extracted_key = (spec_key, component.clone());
         if let Some(existing) = self
             .rust_component_trees
-            .lock()
+            .lock_with_cx(PEEPS_CX)
             .get(&extracted_key)
             .cloned()
         {
@@ -1453,7 +1463,7 @@ impl StoreService {
 
         // Track per-file info during extraction
         let file_info: Arc<peeps::Mutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
-            Arc::new(peeps::Mutex::new("store/file_info", HashMap::new()));
+            Arc::new(peeps::mutex!("store/file_info", HashMap::new()));
         let file_info_clone = file_info.clone();
         let this = self.clone();
 
@@ -1480,7 +1490,7 @@ impl StoreService {
                 } else {
                     None
                 };
-                file_info_clone.lock().insert(
+                file_info_clone.lock_with_cx(PEEPS_CX).insert(
                     content_hash.0,
                     ExtractedFileInfo {
                         content_hash,
@@ -1528,9 +1538,9 @@ impl StoreService {
             RustComponent::Cargo => unreachable!("cargo is filtered above"),
         };
 
-        let unique_chunks = file_info.lock().len() as u32;
+        let unique_chunks = file_info.lock_with_cx(PEEPS_CX).len() as u32;
 
-        self.rust_component_trees.lock().insert(
+        self.rust_component_trees.lock_with_cx(PEEPS_CX).insert(
             extracted_key,
             ExtractedRustComponent {
                 tree_root,
@@ -1587,11 +1597,11 @@ impl StoreService {
         }
 
         let rustc_component = {
-            let lock = self.rust_component_trees.lock();
+            let lock = self.rust_component_trees.lock_with_cx(PEEPS_CX);
             lock.get(&(spec_key, RustComponent::Rustc)).cloned()
         };
         let rust_std_component = {
-            let lock = self.rust_component_trees.lock();
+            let lock = self.rust_component_trees.lock_with_cx(PEEPS_CX);
             lock.get(&(spec_key, RustComponent::RustStd)).cloned()
         };
 
@@ -2238,7 +2248,7 @@ async fn tree_manifest_to_merkle(
     use vx_store_proto::TreeEntryKind;
 
     let (files, symlinks) = {
-        let info = file_info.lock();
+        let info = file_info.lock_with_cx(PEEPS_CX);
 
         let mut files: Vec<(String, ExtractedFileInfo)> = Vec::new();
         let mut symlinks: Vec<(String, String)> = Vec::new();

@@ -11,11 +11,12 @@ use crate::db::Database;
 use crate::error::{Result, VxdError};
 use crate::executor::Executor;
 use crate::inputs::*;
+use ::peeps::Mutex;
 use camino::Utf8PathBuf;
 use facet::trace;
-use peeps::Mutex;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
+use roam_stream::peeps::prelude::*;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -707,8 +708,8 @@ impl VxdService {
             db: Arc::new(db),
             picante_cache: cache_path,
             picante_wal: wal_path,
-            wal_writer: Arc::new(Mutex::new("vxd/wal_writer", wal_writer)),
-            toolchains: Arc::new(Mutex::new(
+            wal_writer: Arc::new(::peeps::mutex!("vxd/wal_writer", wal_writer)),
+            toolchains: Arc::new(::peeps::mutex!(
                 "vxd/toolchains",
                 AcquiredToolchains {
                     rust: None,
@@ -716,9 +717,9 @@ impl VxdService {
                 },
             )),
             spawn_tracker,
-            progress_listener: Arc::new(Mutex::new("vxd/progress_listener", None)),
-            session_id: Arc::new(Mutex::new("vxd/session_id", String::new())),
-            active_build_cancel: Arc::new(Mutex::new("vxd/active_build_cancel", None)),
+            progress_listener: Arc::new(::peeps::mutex!("vxd/progress_listener", None)),
+            session_id: Arc::new(::peeps::mutex!("vxd/session_id", String::new())),
+            active_build_cancel: Arc::new(::peeps::mutex!("vxd/active_build_cancel", None)),
         }
     }
 
@@ -737,9 +738,9 @@ impl VxdService {
             toolchains: self.toolchains.clone(),
             spawn_tracker: self.spawn_tracker.clone(),
             // Per-connection state: fresh for each session
-            progress_listener: Arc::new(Mutex::new("vxd/progress_listener", None)),
-            session_id: Arc::new(Mutex::new("vxd/session_id", String::new())),
-            active_build_cancel: Arc::new(Mutex::new("vxd/active_build_cancel", None)),
+            progress_listener: Arc::new(::peeps::mutex!("vxd/progress_listener", None)),
+            session_id: Arc::new(::peeps::mutex!("vxd/session_id", String::new())),
+            active_build_cancel: Arc::new(::peeps::mutex!("vxd/active_build_cancel", None)),
         }
     }
 
@@ -796,11 +797,11 @@ impl VxdService {
         // Forward store progress to the CLI's ProgressListener
         let forward_listener = self.progress_listener.lock().clone();
         let forward_action_id = action_id;
-        let forward_handle = peeps::spawn_tracked(
+        let forward_handle = ::peeps::spawn_tracked!(
             format!("toolchain_progress_fwd_{:?}", action_id),
             async move {
                 while let Ok(Some(sp)) =
-                    peeps::peep!(progress_rx.recv(), "vxd.toolchain.progress.recv").await
+                    ::peeps::peep!(progress_rx.recv(), "vxd.toolchain.progress.recv").await
                 {
                     if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
                         let _ = listener
@@ -825,7 +826,7 @@ impl VxdService {
             .map_err(|e| {
                 // Complete action on error
                 let this = self.clone();
-                peeps::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
+                ::peeps::spawn_tracked!(format!("complete_action_{:?}", action_id), async move {
                     this.report_complete_action(action_id).await
                 });
                 VxdError::CasRpc(e.to_string())
@@ -843,7 +844,7 @@ impl VxdService {
 
         let manifest_hash = result.manifest_hash.ok_or_else(|| {
             let this = self.clone();
-            peeps::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
+            ::peeps::spawn_tracked!(format!("complete_action_{:?}", action_id), async move {
                 this.report_complete_action(action_id).await
             });
             VxdError::NoManifestHash
@@ -856,14 +857,14 @@ impl VxdService {
             .await
             .map_err(|e| {
                 let this = self.clone();
-                peeps::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
+                ::peeps::spawn_tracked!(format!("complete_action_{:?}", action_id), async move {
                     this.report_complete_action(action_id).await
                 });
                 VxdError::CasRpc(e.to_string())
             })?
             .ok_or_else(|| {
                 let this = self.clone();
-                peeps::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
+                ::peeps::spawn_tracked!(format!("complete_action_{:?}", action_id), async move {
                     this.report_complete_action(action_id).await
                 });
                 VxdError::ToolchainManifestNotFound(manifest_hash)
@@ -951,7 +952,7 @@ impl VxdService {
                 for bin in &manifest.bins {
                     let source_path = project_dir.join(&bin.sources);
                     if source_path.exists() {
-                        let contents = peeps::fs::read(&source_path).await.map_err(|e| {
+                        let contents = ::peeps::fs::read(&source_path).await.map_err(|e| {
                             VxdError::FileRead {
                                 path: source_path.clone(),
                                 message: e.to_string(),
@@ -1241,12 +1242,12 @@ impl VxdService {
                     .unwrap_or_else(|| rules_path.clone());
 
                 info!(rules = %source_rel, "loading .vx rules file for RulePlan bridge");
-                let contents = peeps::fs::read_to_string(&rules_path).await.map_err(|e| {
-                    VxdError::FileRead {
+                let contents = ::peeps::fs::read_to_string(&rules_path)
+                    .await
+                    .map_err(|e| VxdError::FileRead {
                         path: rules_path.clone(),
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
 
                 let source_id =
                     vx_plan::RulePlanSourceId::from(format!("vx:{}", source_rel.as_str()));

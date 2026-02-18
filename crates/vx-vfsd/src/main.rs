@@ -13,6 +13,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 use camino::Utf8PathBuf;
 use facet::Facet;
 use figue as args;
+use roam_stream::peeps::prelude::*;
 use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::sync::Arc;
 use vixenfs_proto::{
@@ -228,7 +229,7 @@ async fn async_main() -> Result<()> {
     ur_taking_me_with_you::die_with_parent();
 
     // Initialize peeps instrumentation
-    peeps::init("vx-vfsd");
+    peeps::init!();
 
     let args: Args = args::Driver::new(
         args::builder::<Args>()?
@@ -273,7 +274,7 @@ async fn async_main() -> Result<()> {
         let gate = Arc::clone(&gate);
         let store_addr = args.store.clone();
         let mount = args.mount.clone();
-        peeps::spawn_tracked("vfsd_boot", async move {
+        peeps::spawn_tracked!("vfsd_boot", async move {
             tracing::info!("Booting vx-vfsd");
             match boot_vfsd(&store_addr, &mount).await {
                 Ok(service) => {
@@ -295,7 +296,7 @@ async fn async_main() -> Result<()> {
         match vfsd_listener.accept().await {
             Ok((stream, peer_addr)) => {
                 let boot_service = boot_service.clone();
-                peeps::spawn_tracked(format!("vfsd_connection_{}", peer_addr), async move {
+                peeps::spawn_tracked!(format!("vfsd_connection_{}", peer_addr), async move {
                     tracing::debug!("vx-vfsd connection from {}", peer_addr);
 
                     // Root connection gets Boot service only.
@@ -323,7 +324,7 @@ async fn async_main() -> Result<()> {
 
                     // Drive the connection in the background.
                     let driver_handle =
-                        peeps::spawn_tracked(format!("vfsd_driver_{}", peer_addr), async move {
+                        peeps::spawn_tracked!(format!("vfsd_driver_{}", peer_addr), async move {
                             driver.run().await
                         });
 
@@ -478,7 +479,7 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
                 }
 
                 let vfs_mount_path = mount_path.clone();
-                peeps::spawn_tracked("vfs_death_watcher", async move {
+                peeps::spawn_tracked!("vfs_death_watcher", async move {
                     loop {
                         if vfs_dead.changed().await.is_err() || *vfs_dead.borrow() {
                             break;

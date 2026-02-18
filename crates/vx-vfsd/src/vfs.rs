@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 
 use camino::Utf8PathBuf;
 use peeps::Mutex;
+use roam_stream::peeps::prelude::*;
 use vixenfs_proto::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
     ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
@@ -390,7 +391,7 @@ impl CasVfs {
 
         Self {
             cas,
-            state: Mutex::new(
+            state: peeps::mutex!(
                 "CasVfs::state",
                 VfsState {
                     items,
@@ -399,12 +400,12 @@ impl CasVfs {
             ),
             next_id: AtomicU64::new(2), // 1=root
             disk_cache_dir,
-            blobnode_cache: Mutex::new("CasVfs::blobnode_cache", HashMap::new()),
-            chunk_l1_cache: Mutex::new(
+            blobnode_cache: peeps::mutex!("CasVfs::blobnode_cache", HashMap::new()),
+            chunk_l1_cache: peeps::mutex!(
                 "CasVfs::chunk_l1_cache",
                 ChunkL1Cache::new(Self::chunk_l1_cache_max_bytes()),
             ),
-            observed_identities: Mutex::new("CasVfs::observed_identities", HashMap::new()),
+            observed_identities: peeps::mutex!("CasVfs::observed_identities", HashMap::new()),
             mount_path,
         }
     }

@@ -33,6 +33,9 @@ macro_rules! log {
 #[cfg(target_os = "macos")]
 use figue as args;
 
+#[cfg(target_os = "macos")]
+const PEEPS_CX: peeps::PeepsContext = peeps::PeepsContext::new(env!("CARGO_MANIFEST_DIR"));
+
 /// vx-reaper - Process group reaper for macOS
 #[cfg(target_os = "macos")]
 #[derive(facet::Facet, Debug)]
@@ -122,7 +125,8 @@ async fn async_main(parent_pid: libc::pid_t, mount_path: String) {
     let mut pgroups = std::collections::HashSet::<libc::pid_t>::new();
 
     // Spawn an async task that polls parent PID liveness.
-    let (parent_dead_tx, parent_dead_rx) = peeps::oneshot_channel::<()>("parent_dead");
+    let (parent_dead_tx, parent_dead_rx) =
+        peeps::oneshot_channel::<()>("parent_dead", peeps::Source::caller());
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -130,7 +134,7 @@ async fn async_main(parent_pid: libc::pid_t, mount_path: String) {
                 break;
             }
         }
-        let _ = parent_dead_tx.send(());
+        let _ = parent_dead_tx.send_with_source((), peeps::Source::caller(), PEEPS_CX);
     });
 
     // Read PGIDs from stdin until parent dies or stdin closes.
@@ -147,7 +151,7 @@ async fn async_main(parent_pid: libc::pid_t, mount_path: String) {
             }
             log!("stdin EOF, starting cleanup");
         } => {}
-        _ = parent_dead_rx.recv() => {
+        _ = parent_dead_rx.recv_with_source(peeps::Source::caller(), PEEPS_CX) => {
             log!("parent exited, starting cleanup");
         }
     }

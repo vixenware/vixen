@@ -4,6 +4,8 @@ use tokio::io::AsyncReadExt;
 
 use super::Log;
 
+const PEEPS_CX: peeps::PeepsContext = peeps::PeepsContext::new(env!("CARGO_MANIFEST_DIR"));
+
 pub(crate) async fn read_pipe(pipe: Option<impl AsyncReadExt + Unpin>) -> Vec<u8> {
     let Some(mut pipe) = pipe else {
         return Vec::new();
@@ -126,7 +128,7 @@ fn probe_mkdir(mount_path: &Utf8PathBuf, log: &mut Log) -> bool {
 
 /// Check if any of the candidates appear in `df` output.
 async fn probe_df(candidates: &[String], log: &mut Log) -> bool {
-    let output = match Command::new("df").output().await {
+    let output = match Command::new("df").output_with_cx(PEEPS_CX).await {
         Ok(output) => output,
         Err(e) => {
             log.fail(format!("df: failed to run: {e}"));
@@ -146,7 +148,11 @@ async fn probe_df(candidates: &[String], log: &mut Log) -> bool {
 
 /// Check if the VixenFS extension process is running.
 pub(crate) async fn probe_pgrep(log: &mut Log) -> bool {
-    let output = match Command::new("pgrep").args(["-x", "VixenFS"]).output().await {
+    let output = match Command::new("pgrep")
+        .args(["-x", "VixenFS"])
+        .output_with_cx(PEEPS_CX)
+        .await
+    {
         Ok(output) => output,
         Err(e) => {
             log.fail(format!("pgrep: failed to run: {e}"));
@@ -171,7 +177,7 @@ async fn probe_health(mount_path: &Utf8PathBuf, log: &mut Log) -> HealthProbe {
         .arg(&health_path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()
+        .spawn_with_cx(PEEPS_CX)
     {
         Ok(child) => child,
         Err(e) => {
@@ -180,7 +186,12 @@ async fn probe_health(mount_path: &Utf8PathBuf, log: &mut Log) -> HealthProbe {
         }
     };
 
-    match tokio::time::timeout(std::time::Duration::from_secs(1), child.wait()).await {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        child.wait_with_cx(PEEPS_CX),
+    )
+    .await
+    {
         Ok(Ok(status)) => {
             let stdout = read_pipe(child.take_stdout()).await;
             let stderr = read_pipe(child.take_stderr()).await;

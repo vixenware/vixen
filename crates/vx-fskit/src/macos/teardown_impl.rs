@@ -8,6 +8,8 @@ use super::probe;
 use super::process;
 use super::{FsKitResult, Log, mount_path_candidates};
 
+const PEEPS_CX: peeps::PeepsContext = peeps::PeepsContext::new(env!("CARGO_MANIFEST_DIR"));
+
 /// Unmount a VixenFS filesystem.
 ///
 /// Kills processes with files open under the mount, force-unmounts,
@@ -81,7 +83,7 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
             .args(["unmount", "force", candidate])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .spawn_with_cx(PEEPS_CX)
         {
             Ok(child) => child,
             Err(e) => {
@@ -90,7 +92,7 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
             }
         };
 
-        match tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
+        match tokio::time::timeout(Duration::from_secs(1), child.wait_with_cx(PEEPS_CX)).await {
             Ok(Ok(status)) => {
                 let stdout = super::probe::read_pipe(child.take_stdout()).await;
                 let stderr = super::probe::read_pipe(child.take_stderr()).await;
@@ -119,7 +121,10 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
 
     if probe::probe_pgrep(&mut log).await {
         log.info("VixenFS extension still running after unmount, sending SIGTERM");
-        let _ = Command::new("pkill").args(["-x", "VixenFS"]).output().await;
+        let _ = Command::new("pkill")
+            .args(["-x", "VixenFS"])
+            .output_with_cx(PEEPS_CX)
+            .await;
         // Give it a moment to exit
         tokio::time::sleep(Duration::from_millis(500)).await;
         if probe::probe_pgrep(&mut log).await {

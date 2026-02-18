@@ -18,6 +18,7 @@ use vixenfs_proto::{Vfs, VfsDispatcher};
 use vx_vfs_types::{VIXEN_MOUNT_HELPER_PATH, VfsAction, VfsDiagnostic, VfsIssueCode};
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_GC_AGE: Duration = Duration::from_secs(6 * 60 * 60);
+const PEEPS_CX: peeps::PeepsContext = peeps::PeepsContext::new(env!("CARGO_MANIFEST_DIR"));
 
 pub(super) async fn mount<T>(config: VfsConfig, vfs: T) -> Result<VfsStart, VfsError>
 where
@@ -25,8 +26,8 @@ where
 {
     tracing::debug!(mount_path = %config.mount_path, "entering macos vfs startup");
 
-    let (mount_ready_tx, mut mount_ready_rx) = peeps::channel::<()>("mount_ready", 2);
-    let (vfs_dead_tx, vfs_dead_rx) = peeps::watch_channel("vfs_dead", false);
+    let (mount_ready_tx, mut mount_ready_rx) = peeps::channel!("mount_ready", 2);
+    let (vfs_dead_tx, vfs_dead_rx) = peeps::watch!("vfs_dead", false);
     let sid = spawn_shm_loop(vfs, mount_ready_tx, vfs_dead_tx)?;
 
     let debug_mode = std::env::var("VIXENFS_DEBUG").as_deref() == Ok("1");
@@ -71,7 +72,7 @@ where
     // Now wait for the SHM connection (extension connecting to our SHM segment).
     tracing::debug!("fskit mount ok, waiting for SHM readiness");
 
-    match tokio::time::timeout(MOUNT_TIMEOUT, mount_ready_rx.recv()).await {
+    match tokio::time::timeout(MOUNT_TIMEOUT, mount_ready_rx.recv_with_cx(PEEPS_CX)).await {
         Ok(Some(())) => {
             tracing::info!(mount_path = %config.mount_path, "VFS mounted and SHM connected");
             Ok(VfsStart::Mounted {
@@ -210,13 +211,13 @@ where
 
                 let _ = sid_tx.send(Ok(sid.clone()));
 
-                peeps::spawn_tracked("shm_host_driver", async move {
+                peeps::spawn_tracked!("shm_host_driver", async move {
                     if let Err(error) = driver.run().await {
                         tracing::debug!(%error, "SHM host driver exited with error");
                     } else {
                         tracing::debug!("SHM host driver exited cleanly");
                     }
-                    let _ = vfs_dead_tx.send(true);
+                    let _ = vfs_dead_tx.send_with_cx(true, PEEPS_CX);
                 });
 
                 loop {
@@ -410,7 +411,7 @@ async fn cleanup_session_dir(sid: &str) {
 pub async fn resolve_app_group_path() -> Result<PathBuf, String> {
     let output = Command::new(VIXEN_MOUNT_HELPER_PATH)
         .arg("--app-group-path")
-        .output()
+        .output_with_cx(PEEPS_CX)
         .await
         .map_err(|e| format!("failed to run {VIXEN_MOUNT_HELPER_PATH}: {e}"))?;
 

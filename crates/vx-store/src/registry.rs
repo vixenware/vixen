@@ -12,6 +12,8 @@ use thiserror::Error;
 use vx_store_proto::Blake3Hash;
 use vx_store_proto::{EnsureRegistryCrateResult, EnsureStatus, NodeHash, RegistrySpecKey};
 
+const PEEPS_CX: peeps::PeepsContext = peeps::PeepsContext::new(env!("CARGO_MANIFEST_DIR"));
+
 /// Maximum retry attempts for transient failures
 const MAX_RETRIES: u32 = 3;
 
@@ -55,7 +57,7 @@ pub struct RegistryManager {
 impl RegistryManager {
     pub fn new() -> Self {
         Self {
-            inflight: peeps::Mutex::new("store/registry_inflight", HashMap::new()),
+            inflight: peeps::mutex!("store/registry_inflight", HashMap::new()),
         }
     }
 
@@ -78,17 +80,20 @@ impl RegistryManager {
 
         // Get or create inflight entry
         let cell = {
-            let mut inflight = self.inflight.lock();
+            let mut inflight = self.inflight.lock_with_cx(PEEPS_CX);
             inflight
                 .entry(spec_key)
-                .or_insert_with(|| Arc::new(peeps::OnceCell::new("registry_inflight")))
+                .or_insert_with(|| Arc::new(peeps::once_cell!("registry_inflight")))
                 .clone()
         };
 
         // Initialize if we're first, otherwise wait
-        let result = cell.get_or_init(|| acquire_fn()).await.clone();
+        let result = cell
+            .get_or_init_with_cx(|| acquire_fn(), PEEPS_CX)
+            .await
+            .clone();
 
-        let mut inflight = self.inflight.lock();
+        let mut inflight = self.inflight.lock_with_cx(PEEPS_CX);
         if let Some(existing) = inflight.get(&spec_key)
             && Arc::ptr_eq(existing, &cell)
         {

@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use crate::net::{Endpoint, EndpointConnector};
 
+const PEEPS_CX: peeps::PeepsContext = peeps::PeepsContext::new(env!("CARGO_MANIFEST_DIR"));
+
 /// Result of a successful [`ServiceBuilder::connect`].
 pub struct ServiceHandle<D> {
     /// The spawned child process, if any (None in connect-only mode).
@@ -163,7 +165,7 @@ where
                     let caller = result?;
                     Ok(ServiceHandle { child, caller })
                 }
-                exit_status = child_proc.wait() => {
+                exit_status = child_proc.wait_with_cx(PEEPS_CX) => {
                     match exit_status {
                         Ok(status) if status.success() => {
                             // Child exited with status 0 — probably found lock held.
