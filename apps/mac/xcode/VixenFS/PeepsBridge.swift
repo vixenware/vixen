@@ -163,7 +163,14 @@ private actor SwiftPeepsGraphState {
     private static let processStartUptimeNs = DispatchTime.now().uptimeNanoseconds
 
     static func ptimeNowMs() -> UInt64 {
-        (DispatchTime.now().uptimeNanoseconds - processStartUptimeNs) / 1_000_000
+        // Force lazy static initialization before capturing "now" to avoid
+        // first-call underflow when "now" is read before processStartUptimeNs.
+        let startUptimeNs = processStartUptimeNs
+        let nowUptimeNs = DispatchTime.now().uptimeNanoseconds
+        guard nowUptimeNs >= startUptimeNs else {
+            return 0
+        }
+        return (nowUptimeNs - startUptimeNs) / 1_000_000
     }
 
     private struct InFlightRequest {
