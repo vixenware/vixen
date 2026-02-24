@@ -29,11 +29,12 @@ Compared to other hermetic build systems, vixen is deliberately Rust-first:
 
 ## Current status
 
-vixen is in early development. Today it builds a narrow Rust subset: single-crate,
-single-binary projects with no dependencies, no features, no build scripts
-(`build.rs`), no proc macros, and no tests/benches/examples/workspaces. If your
-project falls outside that box, vixen should fail clearly rather than attempt a
-partial build.
+vixen is in early development. Today it supports only a small slice of what
+Rust projects need in practice. The ambition is much larger, but the current
+focus is to make the fundamentals correct before widening scope.
+
+If your project sits outside what vixen currently handles, it should fail
+clearly rather than attempt a partial build.
 
 Important foundations are already in place (CAS, VFS, sandboxing), and the rest
 is being built incrementally. If you want to follow progress, join

@@ -18,13 +18,9 @@ The current implementation commits to the following behavior:
 
 ## Current scope
 
-vixen currently targets a restricted Rust subset:
-
-- Single-crate projects
-- Single binary target
-- No dependencies or features
-- No build scripts (`build.rs`) or proc macros
-- No workspaces
+vixen currently targets a restricted Rust subset. The implementation is
+intentionally narrow relative to the long-term goal, and support is expected to
+expand over time as core guarantees harden.
 
 ## Not yet specified
 
