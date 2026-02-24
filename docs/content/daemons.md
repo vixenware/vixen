@@ -3,130 +3,91 @@ title = "Daemon Topologies"
 insert_anchor_links = "heading"
 +++
 
-The vixen build system runs as a fleet of daemons, and one CLI front, `vx`.
+vixen is a multi-process system. The `vx` CLI talks to `vxd` (the coordinator),
+and `vxd` manages worker services.
 
 ```mermaid
 flowchart LR
+  vx["vx"]
   vxd["vxd"]
-  store["store"]
-  runner["runner"]
+  store["vx-store"]
+  runner["vx-runner"]
+  vfsd["vx-vfsd"]
 
-  vxd -->|"query/read/write CAS"| store
-  vxd -->|"dispatch actions"| runner
-  runner -->|"read/write artifacts"| store
+  vx -->|RPC| vxd
+  vxd -->|CAS RPC| store
+  vxd -->|runner RPC| runner
+  runner -->|VFS RPC| vfsd
+  vfsd -->|CAS RPC| store
 ```
 
-All those daemons talk to each other using [roam](https://roam.bearcove.eu/), an
-RPC system built on top of [facet](https://facet.rs)
+Daemon RPC uses [roam](https://roam.bearcove.eu/), which is built on
+[facet](https://facet.rs).
 
-This page describes who starts those demons, when, how, and for how long? 
+## Connect mode (`VXD` is set)
 
-## Connect Mode
+When `VXD` is set, `vx` only tries to connect to that endpoint.
 
-If the `VXD` environment variable is set, `vx` connects to an existing
-daemon over whatever transport is defined by the address, e.g. `VXD` can be
-something like:
+Examples:
 
-  * `unix://home/jane/.vx/vxd.sock`
-  * `tcp://10.200.0.4:9449`
+- `unix:/home/jane/.vx/vxd.sock`
+- `tcp://10.200.0.4:9449`
 
-```mermaid
-flowchart LR
-  vx["vx"]
-  subgraph daemons["pre-existing daemons"]
-    vxd["vxd"]
-    store["store"]
-    runner["runner"]
-  end
+If the daemon is unreachable, `vx` exits with an error. It does not try to
+spawn a fallback daemon in this mode.
 
-  vx -->|"connect"| vxd
-  vxd --> store
-  vxd --> runner
-  runner --> store
-```
+## Bootstrap mode (`VXD` is not set)
 
-If `vx` cannot connect on the first try, it immediately exits with an error.
+When `VXD` is not set, `vx` targets a local endpoint at
+`$VX_HOME/vxd.sock` (default: `~/.vx/vxd.sock`).
 
-## Bootstrap Mode
+- If `vxd` is already running, `vx` connects to it.
+- If not, `vx` spawns `vxd` locally.
+- `vxd` then ensures `vx-store` and `vx-runner` are available (connects to
+  `VX_STORE` / `VX_RUNNER` when provided, otherwise spawns local daemons).
 
-If the `VXD` environment variable is _not_ set, `vx` starts in bootstrap mode: it'll attempt
-to start all necessary daemons under `VX_HOME` (or `{home-dir}/.vx`, failing that, and yes it
-respects XDG).
+Local transports are Unix domain sockets on Linux/macOS and named pipes on
+Windows.
 
-Because it's starting all daemons locally, it will prefer Unix domain sockets on
-Linux and Mac, and named pipes on Windows. 
+## Lifecycle
 
-```mermaid
-flowchart RL
-  vx["vx"]
-  subgraph daemons["daemon set"]
-    vxd["vxd"]
-    store["store"]
-    runner["runner"]
-  end
+`vxd` tracks active client connections and shuts itself down after an idle
+period:
 
-  vxd -->|"UDS connect"| vx
-  store -->|"connect back"| vxd
-  runner -->|"connect back"| vxd
-  runner --> store
-```
+- Production mode: 2 hours
+- Test mode (`VX_TEST=1`): 2 seconds
 
-In this scenario the direction is reversed. Instead of starting `vxd` and waiting
-for it to listen, vx listens on an address and instructs `vxd` to connect to it.
+In test mode, `vxd` also watches the test harness process and exits as soon as
+the harness exits.
 
-> Because in roam RPC the there's no link between the requester and the connection initiator,
-> this works fine.
+Children spawned through the service launcher are tied to their parent process
+via [`ur-taking-me-with-you`](https://crates.io/crates/ur-taking-me-with-you),
+so they terminate when the parent disappears.
 
-### Standard output and error streams
+## Logging behavior
 
-When running in Bootstrap mode, it is okay for all of vxd's descendants to
-inherit its standard error and output streams — therefore, instead of logging to
-files, all the output is available in the terminal or CI output when running
-tests. 
+Logging differs by mode:
 
-### Spawned daemon lifecycle
+- Normal mode: daemon stdout/stderr is redirected to log files under `VX_HOME`
+- Test mode (`VX_TEST=1`): daemon stdout/stderr is inherited by the current
+  terminal (useful in CI and `cargo nextest`)
 
-When started by `vx` normally, `vxd` lives up to six hours after the last connection drops.
+## Multiplexing across tests
 
-All its descendants use the
-[ur-taking-me-with-you](https://crates.io/crates/ur-taking-me-with-you) crate to make sure
-that they die when their parent dies, no matter what.
+Parallel tests can race to start `vxd`. The daemon uses a lock file
+(`vxd.lock` in `VX_HOME`) to ensure only one instance becomes primary, and
+other contenders connect to the active instance.
 
-When running tests, we don't actually want vxd to survive that long, so we tie its lifetime
-to the test runner, `cargo-nextest`, by setting `VXD_DEATH_PACT_PID={cargo-nextest-pid}`.
+## Virtual filesystem daemon (`vx-vfsd`)
 
-This is achieved by a [nextest setup script](https://nexte.st/docs/configuration/setup-scripts/?h=setup)
+`vx-vfsd` runs VFS operations in a separate process from `vx-runner` to reduce
+tight coupling and simplify failure handling.
 
-### Multiplexing
+- `vx-runner` tells `vx-vfsd` what to mount and what outputs to flush
+- `vx-vfsd` reads and writes content through `vx-store`
 
-Even though in tests, VXD runs a relatively short amount of time, it is shared
-across different tests, which all run in their own processes. 
+Platform notes:
 
-Therefore, there is a race for the first `vx` to spawn `vxd`.
-
-## The virtual filesystem
-
-The diagrams presented above are not fully accurate. They are missing the VFS
-daemon. Those handle FUSE ops, FSKit operations, ProjFS... functions? From a process
-distinct from `vx-runner`, to avoid deadlocks.
-
-> `vx-vfsd` is connected to both `vx-runner` (which tells it what to mount and where)
-> and to `vx-store` (since you can mount entire store trees inside the VFS without
-> transferring them eagerly to vx-vfsd).
-
-### VFS cleanup per platform
-
-On Linux, the vfs daemon forks itself to await its doppelganger's death and
-clean up the FUSE mount gracefully.
-
-On Windows uh... the ProjFS PR is not merged yet at the time of this writing.
-I'm not sure what the plan is.
-
-On macOS, the `vixenfs-mount` helper (provided by the [Vixen mac app](vixen-mac-app))
-
-## Pending renames
-
-`vxd` breaks the `vx-{role}` pattern, it could be `vx-coord`, `vx-lead`, `vx-chef`,
-a number of things.
-
-`vx-vfsd` kind of a mouthful and has 'd' at the end, how about `vx-fs`, or `vx-filesystem`.
+- Linux: FUSE-based VFS, including sentinel-based cleanup for parent death
+- macOS: FSKit integration via helpers shipped in [Vixen mac app](/vixen-mac-app/)
+- Windows: ProjFS backend is present; sentinel-mode cleanup is not yet supported

@@ -3,15 +3,13 @@ title = "Brand"
 description = "Vixen brand palette and logo usage"
 +++
 
-# Vixen Brand
-
 ![Vixen fox logo](/img/fox.svg)
 
-## Primary Color
+## Primary color
 
 - `#E88602`
 
-## Supporting Colors
+## Supporting colors
 
 - `#EB6D3B` (ember)
 - `#EEDC9A` (sand)
@@ -20,5 +18,5 @@ description = "Vixen brand palette and logo usage"
 
 ## Assets
 
-- Logo: `/img/fox.svg`
-- Repository source: `art/fox.svg`
+- Logo (site): `/img/fox.svg`
+- Source file (repository): `art/fox.svg`
