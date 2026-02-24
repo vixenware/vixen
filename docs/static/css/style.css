@@ -34,7 +34,10 @@ html {
 
 body {
     font-family: var(--font-sans);
-    font-feature-settings: "liga" 1, "calt" 1, "cv11" 1;
+    font-feature-settings:
+        "liga" 1,
+        "calt" 1,
+        "cv11" 1;
     background: var(--bg);
     color: var(--fg);
     line-height: 1.7;
@@ -90,7 +93,9 @@ body {
     font-size: 0.9rem;
     padding: 0.35rem 0.6rem;
     border-radius: 5px;
-    transition: color 0.15s, background 0.15s;
+    transition:
+        color 0.15s,
+        background 0.15s;
 }
 
 .site-nav a:hover {
@@ -287,7 +292,9 @@ body {
     line-height: 1.4;
     padding: 0.2rem 0.4rem;
     border-radius: 4px;
-    transition: color 0.15s, background 0.15s;
+    transition:
+        color 0.15s,
+        background 0.15s;
 }
 
 .toc a:hover {
@@ -541,6 +548,11 @@ footer a {
 
 footer a:hover {
     color: var(--accent);
+}
+
+article p img {
+    max-width: 100%;
+    height: auto;
 }
 
 /* Responsive */
