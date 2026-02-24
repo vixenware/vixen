@@ -25,8 +25,11 @@ You can build the app locally:
 just apps/mac/install
 ```
 
-However, unsigned local builds do not provide a production-ready setup for end
-users. For normal usage, install the official release.
+Getting a local build to actually work with FSKit requires being a registered
+Apple developer and going through the full signing/notarization setup.
+
+In practice, this path is for core maintainer work (currently Amos Wenger), not
+for general users. For normal usage, install the official release.
 
 ## Install the official build
 
