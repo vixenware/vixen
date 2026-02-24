@@ -3,48 +3,50 @@ title = "Internals"
 insert_anchor_links = "heading"
 +++
 
-This page collects design ideas and directions for vixen's internals. Much of
-this is aspirational — things are moving fast and details change weekly.
+This page summarizes the current internal architecture of vixen and highlights
+areas that are still evolving.
 
 ## The store
 
-vx-store is content-addressed storage built on blake3. Everything is a blob:
-source files, compiler outputs, toolchain binaries.
+`vx-store` is content-addressed storage built on BLAKE3. Everything is stored as
+blobs: source files, compiler outputs, and toolchain payloads.
 
-Large blobs are split using content-defined chunking (CDC), so similar files
-share most of their chunks. Trees of files are represented as merkle trees —
-a tree manifest lists entries with their blob hashes, and the tree itself is
-just another blob.
+Large blobs are split with content-defined chunking (CDC), so similar files
+share most chunks. File trees are represented as Merkle trees: a manifest lists
+entries and blob hashes, and the manifest itself is also content-addressed.
 
-This means deduplication is automatic, integrity is verifiable, and syncing
-between a local store and a remote one is a matter of exchanging missing chunks.
+This provides automatic deduplication, verifiable integrity, and efficient sync
+between local and remote stores.
 
 ## The runner
 
-vx-runner executes build actions inside a sandbox, with inputs served from a
-virtual filesystem backed by the store. On macOS this is FSKit; on Linux it's
-FUSE.
+`vx-runner` executes build actions in a sandbox, with inputs served from a
+virtual filesystem backed by the store.
 
-The compiler only sees what's been explicitly placed in the VFS for that action.
-It can't reach the host filesystem. Outputs are written to a designated area in
-the VFS and flushed back to the store when the action completes.
+- macOS uses FSKit
+- Linux uses FUSE
+- Windows uses ProjFS
 
-This is how hermeticity works: the sandbox prevents the compiler from observing
-anything outside its inputs, so the cache key is actually meaningful.
+The compiler only sees declared inputs. Outputs are written inside the mounted
+build view and committed back to the store when the action finishes.
 
-## Debugging with peeps
+This is the basis of hermeticity in vixen: if an action cannot observe
+undeclared host state, cache keys remain meaningful.
 
-All vixen daemons are instrumented with [peeps](https://github.com/bearcove/peeps),
-a low-overhead diagnostics library. Locks, async tasks, and threads are all
-tracked. When a build is stuck, `vx debug` sends SIGUSR1 to every running
-daemon — each one dumps its internal state (in-flight tasks, lock holders,
-pending RPCs) to a JSON file, and `vx debug` aggregates them into a web
-dashboard showing exactly where things are blocked.
+## Debugging with moire
 
-## A language for rules
+All vixen daemons are instrumented with
+[moire](https://github.com/bearcove/moire), a low-overhead diagnostics system.
+Locks, async tasks, threads, and RPC state are tracked.
 
-We've started designing a rule language (built on [styx](https://styx-lang.dev))
-for describing build actions declaratively. The idea is that instead of
-hard-coding how to invoke rustc or zig, you write rules that describe inputs,
-outputs, and the command to run. This is early and likely to change
-significantly.
+When a build appears stuck, `vx debug` requests diagnostics from running daemons
+and aggregates the collected state into a local dashboard.
+
+## Rule language direction
+
+vixen is exploring a rule language (built on
+[styx](https://styx-lang.dev)) for declarative build action definitions.
+The intent is to describe inputs, outputs, and commands in rules rather than
+hard-coding tool invocations.
+
+This area is still under active design and may change substantially.

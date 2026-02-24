@@ -1,55 +1,47 @@
 +++
 title = "vixen"
-description = "The best build system that doesn't exist yet"
+description = "Experimental Rust build engine focused on hermetic builds and correct caching"
 +++
 
-## Why? {#why}
+## Why vixen? {#why}
 
-There's an unexplored middleground between the "spell it all out" Bazel/Buck2
-universe, and the "caching is best-effort" of cargo. Vixen aims to reconcile
-the properties of hermetic build systems with the user experience of cargo.
+vixen explores the space between fully explicit hermetic build systems
+(Bazel/Buck2-style) and Cargo's default developer experience.
 
-To this end, vixen:
+The current design goals are:
 
-  * Treats orchestration, storage, action execution as separate concerns
-    that do not necessarily occur on the same node.
-  * Enforces use of a virtual filesystem, and a sandboxing mechanism, on all
-    three supported platforms (macOS, Linux, Windows)
+- Keep build execution hermetic and cache-safe
+- Keep setup and day-to-day workflow lightweight
+- Separate orchestration, execution, and storage so they can run on one host or across multiple hosts
 
-This set of constraints alone makes it impossible for vixen to be a _successor_
-to cargo. cargo must work everywhere, for everyone, on every platform, without
-any additional requirements.
-
-Compared to other hermetic build system, vixen aims to have better support for
-Rust through:
-
-  * A rule language designed to accomodate Rust's peculiar build system needs
-    (without requiring pre-build file generation)
-  * Support for a "Cargo.toml only" mode of operation
-  * A (planned) "fixup package manager" for crates with special needs (creative
-    build scripts or proc macros) — but only if we can't figure out a way for
-    vixen to "just magically support everything". Wouldn't that be neat.
-
-The rule language is in flux, that's why you don't see it documented here.
-
-- [Prerequisites](/prerequisites/) - Platform requirements (Linux, macOS, Windows)
-- [Download](/download/) - Install vixen on macOS
-- [Specification](/spec/) - Full specification document
-- [Internals](/internals/) - How vixen builds things under the hood
-- [GitHub](https://github.com/bearcove/vixen)
+vixen is not a Cargo replacement. Cargo needs to work in many environments where
+vixen's virtual filesystem and sandbox requirements are not available.
 
 ## Current status
 
-vixen is in early development. It can build single-crate Rust projects with no
-dependencies, no proc macros, no build scripts, and a single binary target.
+vixen is in early development. Today it supports a narrow Rust subset:
 
-It will certainly not build your project at this stage.
+- Single-crate projects
+- Single binary target
+- No dependencies
+- No features
+- No build scripts (`build.rs`)
+- No proc macros
+- No tests, benches, or examples
+- No workspaces
 
-However, important foundations are here (CAS, vfs, sandboxing) and the rest will
-fall into place over time. You're welcome to hang out in [the discord](https://discord.gg/GJadP5ggXs)
-if you want to chat about the progress.
+If your project falls outside these constraints, expect a clear error rather than
+partial behavior.
+
+## Getting started
+
+- [Prerequisites](/prerequisites/) - Platform requirements for Linux, macOS, and Windows
+- [Download](/download/) - Install the macOS app and CLI entrypoints
+- [GitHub](https://github.com/bearcove/vixen)
 
 ## Documentation
 
-- [Internals](/internals/) — How vixen builds things under the hood
-- [Daemon Topologies](/daemons/) — Local vs distributed daemon lifecycle model
+- [Specification](/spec/) - Current guarantees, scope, and planned specification work
+- [Internals](/internals/) - Storage, runner, diagnostics, and rules direction
+- [Daemon topologies](/daemons/) - How `vx` and daemon processes are started and managed
+- [Vixen mac app](/vixen-mac-app/) - Why the app exists and how FSKit integration works

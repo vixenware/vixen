@@ -5,15 +5,13 @@ description = "Install vixen on macOS"
 
 ## Install via Homebrew (recommended)
 
-The fastest way to get vixen on macOS:
-
-```
+```shell
 brew install --cask bearcove/tap/vixen
 ```
 
-This installs the vixen macOS app.
+This installs the Vixen macOS app and associated runtime components.
 
-## Direct Download
+## Direct download
 
 Download the latest `.dmg` from GitHub Releases:
 
@@ -24,27 +22,24 @@ Download the latest `.dmg` from GitHub Releases:
 - macOS 26 (Tahoe) or later
 - Apple Silicon (arm64)
 
-### Installation
+### Installation steps
 
-1. Open the downloaded `.dmg` file
-2. Drag Vixen to the Applications folder
-3. Open Vixen from Applications
-4. Follow the in-app prompt to enable the VixenFS extension in System Settings > General > Login Items & Extensions > File System Extensions
+1. Open the downloaded `.dmg`
+2. Drag `Vixen.app` to `Applications`
+3. Open `Vixen.app`
+4. Follow the in-app prompt to enable the VixenFS extension in: `System Settings > General > Login Items & Extensions > File System Extensions`
 
-## CLI Tools
+## CLI tools
 
-The standalone CLI tools (`vx`, `vxd`) will be available via Homebrew:
+A standalone CLI Homebrew formula (`vixen-cli`) is planned but not published yet.
+For now, build from source.
 
-```
-brew install bearcove/tap/vixen-cli
-```
+## Build from source
 
-This is not yet published. For now, build from source.
+The macOS app must be code-signed with a Developer ID certificate to provide
+FSKit functionality. Local source builds require:
 
-## Building from Source
-
-The macOS app must be code-signed with a Developer ID certificate to function
-(the FSKit extension requires it). Building from source for local development
-requires Xcode 26 and a valid Apple Developer account.
+- Xcode 26
+- An Apple Developer account with signing capability
 
 See the [contributing guide](https://github.com/bearcove/vixen) for details.

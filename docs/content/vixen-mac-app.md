@@ -3,26 +3,37 @@ title = "Vixen Mac app"
 insert_anchor_links = "heading"
 +++
 
-Why a mac app? Because we need a VFS, which you can only get through:
+## Why a mac app exists
 
-  * Networked file systems (meh)
-  * MacFUSE Kernel extension (requires rebooting in safe mode and lowering the security of your mac)
-  * FSKit (the new shiny thing)
-  
-And, well, you need a (signed, notarized) app to register an FSKit Filesystem
-Extension, and it also serves as a nice onboarding to remind you to _actually turn on_
-the extension:
+On macOS, vixen needs a virtual filesystem provider for hermetic execution.
+The supported path is FSKit, which requires a signed and notarized host app to
+register a File System Extension.
 
-![The vixen mac app showing settings](/static/vixen-app.png)
+`Vixen.app` provides:
 
-You can build `Vixen.app` and friends yourself (`just apps/mac/install`) but you won't
-be able to do anything useful with it, because it won't be signed by the right team,
-and changing the bundle ID won't work either.
+- The FSKit extension (`VixenFS`)
+- The `vixenfs-mount` helper used by the CLI runtime
+- Onboarding UI that guides users through enabling the extension in System Settings
 
-Use the official build from the cask:
+![The Vixen mac app showing settings](/img/vixen-app.png)
+
+## Local development build
+
+You can build the app locally:
 
 ```shell
-$ brew install --cask bearcove/tap/vixen
+just apps/mac/install
 ```
 
-Which is hosted at <https://github.com/bearcove/vixen-mac-app>.
+However, unsigned local builds do not provide a production-ready setup for end
+users. For normal usage, install the official release.
+
+## Install the official build
+
+```shell
+brew install --cask bearcove/tap/vixen
+```
+
+Release artifacts are published from:
+
+- [bearcove/vixen-mac-app](https://github.com/bearcove/vixen-mac-app)
