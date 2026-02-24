@@ -16,9 +16,9 @@ The current implementation commits to the following behavior:
 - Build actions run in a sandboxed virtual filesystem
 - Unsupported project shapes fail explicitly instead of silently degrading
 
-## Current scope
+## Current support
 
-vixen currently targets a restricted Rust subset. The implementation is
+vixen currently supports a restricted Rust subset. Current support is
 intentionally narrow relative to the long-term goal, and support is expected to
 expand over time as core guarantees harden.
 

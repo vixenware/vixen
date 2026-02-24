@@ -31,7 +31,7 @@ Compared to other hermetic build systems, vixen is deliberately Rust-first:
 
 vixen is in early development. Today it supports only a small slice of what
 Rust projects need in practice. The ambition is much larger, but the current
-focus is to make the fundamentals correct before widening scope.
+focus is to make the fundamentals correct before broadening support.
 
 If your project sits outside what vixen currently handles, it should fail
 clearly rather than attempt a partial build.
@@ -48,7 +48,7 @@ is being built incrementally. If you want to follow progress, join
 
 ## Documentation
 
-- [Specification](/spec/) - Current guarantees, scope, and specification roadmap
+- [Specification](/spec/) - Current guarantees, support, and specification roadmap
 - [Internals](/internals/) - How vixen works under the hood
 - [Daemon topologies](/daemons/) - Local vs distributed daemon lifecycle model
 - [Vixen mac app](/vixen-mac-app/) - Why the app exists and how FSKit integration works
