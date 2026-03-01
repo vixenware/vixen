@@ -163,6 +163,7 @@ async fn load_manifest(
     let node_bytes = cas
         .get_node(manifest_hash)
         .await
+        .map(|resp| resp.ret.clone())
         .map_err(|e| VxdError::Compilation {
             crate_name: crate_name.to_string(),
             message: format!("Failed to fetch manifest from CAS: {e}"),
@@ -194,7 +195,8 @@ async fn fetch_blob_from_ref(
             let data = cas
                 .get_chunk(*chunk)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .map(|resp| resp.ret.clone())
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
                 .ok_or_else(|| VxdError::BlobNotFound(format!("chunk {}", chunk.to_hex())))?;
             Ok(data)
         }
@@ -206,7 +208,8 @@ async fn fetch_blob_from_ref(
             let node_bytes = cas
                 .get_node(*blob_node)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .map(|resp| resp.ret.clone())
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
                 .ok_or_else(|| VxdError::BlobNotFound(format!("blob node {}", blob_node)))?;
             let blob_node_data = match CasNode::from_bytes(&node_bytes) {
                 Ok(CasNode::Blob(b)) => b,
@@ -216,7 +219,7 @@ async fn fetch_blob_from_ref(
                         blob_node.to_hex()
                     )));
                 }
-                Err(e) => return Err(VxdError::CasRpc(e.to_string())),
+                Err(e) => return Err(VxdError::CasRpc(format!("{e:?}"))),
             };
 
             let mut result = Vec::with_capacity(blob_node_data.total_size as usize);
@@ -224,7 +227,8 @@ async fn fetch_blob_from_ref(
                 let chunk_data = cas
                     .get_chunk(chunk_entry.hash)
                     .await
-                    .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                    .map(|resp| resp.ret.clone())
+                    .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
                     .ok_or_else(|| {
                         VxdError::BlobNotFound(format!("chunk {}", chunk_entry.hash.to_hex()))
                     })?;
@@ -244,7 +248,8 @@ async fn fetch_output_blob_data(
             let data = cas
                 .get_chunk(*chunk)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .map(|resp| resp.ret.clone())
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
                 .ok_or_else(|| VxdError::BlobNotFound(format!("chunk {}", chunk)))?;
             Ok(data)
         }
@@ -256,7 +261,8 @@ async fn fetch_output_blob_data(
             let node_bytes = cas
                 .get_node(*blob_node)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .map(|resp| resp.ret.clone())
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
                 .ok_or_else(|| VxdError::BlobNotFound(format!("blob node {}", blob_node)))?;
             let blob_node_data = match CasNode::from_bytes(&node_bytes) {
                 Ok(CasNode::Blob(b)) => b,
@@ -279,7 +285,8 @@ async fn fetch_output_blob_data(
                 let chunk_data = cas
                     .get_chunk(chunk_entry.hash)
                     .await
-                    .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                    .map(|resp| resp.ret.clone())
+                    .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
                     .ok_or_else(|| VxdError::BlobNotFound(format!("chunk {}", chunk_entry.hash)))?;
                 result.extend_from_slice(&chunk_data);
             }
@@ -346,7 +353,7 @@ pub struct Executor {
     cancel_token: CancellationToken,
 
     /// Progress listener client (for reporting progress to vx CLI)
-    progress_listener: Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>,
+    progress_listener: Option<Arc<ProgressListenerClient<crate::UpstreamCaller>>>,
 
     /// CAS client (CAS)
     cas: Arc<StoreClient<crate::UpstreamCaller>>,
@@ -393,7 +400,7 @@ impl Executor {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         graph: ActionGraph,
-        progress_listener: Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>,
+        progress_listener: Option<Arc<ProgressListenerClient<crate::UpstreamCaller>>>,
         cas: Arc<StoreClient<crate::UpstreamCaller>>,
         exec: Arc<RunnerClient<crate::UpstreamCaller>>,
         db: Arc<crate::db::Database>,
@@ -1154,7 +1161,11 @@ impl Executor {
             // Start progress tracking
             let action_type = action.to_progress_action_type();
             let action_id = if let Some(ref listener) = progress_listener {
-                listener.start_action(action_type).await.ok()
+                listener
+                    .start_action(action_type)
+                    .await
+                    .ok()
+                    .map(|resp| resp.ret)
             } else {
                 None
             };
@@ -1299,7 +1310,8 @@ async fn execute_action(
             let result = cas
                 .download_rust_toolchain_component(spec, component.clone(), progress)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                .map(|resp| resp.ret.clone())
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
             if result.status == EnsureStatus::Failed {
                 return Err(VxdError::ToolchainAcquisition(
@@ -1360,7 +1372,8 @@ async fn execute_action(
             let result = cas
                 .extract_rust_toolchain_component(spec, component.clone(), tarball, progress)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                .map(|resp| resp.ret.clone())
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
             if result.status == EnsureStatus::Failed {
                 return Err(VxdError::ToolchainAcquisition(
@@ -1394,7 +1407,8 @@ async fn execute_action(
             let result = cas
                 .ensure_registry_crate(spec, progress)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                .map(|resp| resp.ret.clone())
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
             match result.status {
                 EnsureStatus::Hit | EnsureStatus::Downloaded => {
@@ -1439,7 +1453,8 @@ async fn execute_action(
             let finalize_result = cas
                 .finalize_rust_toolchain(spec)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                .map(|resp| resp.ret.clone())
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
             if finalize_result.status == EnsureStatus::Failed {
                 return Err(VxdError::ToolchainAcquisition(
                     finalize_result
@@ -1455,7 +1470,8 @@ async fn execute_action(
             let manifest = cas
                 .get_toolchain_manifest(toolchain_manifest)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .map(|resp| resp.ret.clone())
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
                 .ok_or(VxdError::ToolchainManifestNotFound(toolchain_manifest))?;
             let toolchain_id = finalize_result
                 .toolchain_id
@@ -1530,7 +1546,8 @@ async fn execute_action(
             let (source_manifest, was_cached) = if let Some(cached) = cas
                 .lookup(cache_key)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .map(|resp| resp.ret.clone())
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
             {
                 (cached.0, true)
             } else {
@@ -1549,7 +1566,8 @@ async fn execute_action(
                     let chunk_hash = ChunkHash(content_hash.0);
                     cas.put_chunk(chunk_hash, contents)
                         .await
-                        .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                        .map(|_| ())
+                        .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
                     tree_files.push(crate::cas_tree::TreeFile {
                         path: rel_path.to_string(),
@@ -1569,7 +1587,8 @@ async fn execute_action(
 
                 cas.publish(cache_key, source_node_hash)
                     .await
-                    .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                    .map(|_| ())
+                    .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
                 (source_manifest, false)
             };
@@ -1621,14 +1640,16 @@ async fn execute_action(
             let (source_manifest, was_cached) = if let Some(cached) = cas
                 .lookup(cache_key)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .map(|resp| resp.ret.clone())
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
             {
                 (cached.0, true)
             } else {
                 let manifest = cas
                     .get_registry_manifest(NodeHash(registry_manifest))
                     .await
-                    .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                    .map(|resp| resp.ret.clone())
+                    .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
                     .ok_or_else(|| VxdError::RegistryCrateNoManifest {
                         name: name.clone(),
                         version: version.clone(),
@@ -1646,6 +1667,7 @@ async fn execute_action(
                         cas_for_blobs
                             .put_chunk(ChunkHash(hash), data)
                             .await
+                            .map(|_| ())
                             .map_err(|e| e.to_string())?;
                         Ok(hash)
                     },
@@ -1686,7 +1708,8 @@ async fn execute_action(
 
                 cas.publish(cache_key, source_node_hash)
                     .await
-                    .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                    .map(|_| ())
+                    .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
                 (source_manifest, false)
             };
@@ -1727,7 +1750,8 @@ async fn execute_action(
             let result = cas
                 .ensure_zig_toolchain(spec, progress)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                .map(|resp| resp.ret.clone())
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
             if result.status == EnsureStatus::Failed {
                 return Err(VxdError::ToolchainAcquisition(
@@ -1749,6 +1773,7 @@ async fn execute_action(
                 let manifest = cas
                     .get_toolchain_manifest(manifest_hash)
                     .await
+                    .map(|resp| resp.ret.clone())
                     .map_err(|e| VxdError::Compilation {
                         crate_name: format!("zig-{}", version),
                         message: format!("Failed to fetch toolchain manifest: {}", e),
@@ -1929,14 +1954,16 @@ async fn execute_action(
             let (output_manifest, was_cached) = if let Some(cached) = cas
                 .lookup(cache_key)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .map(|resp| resp.ret.clone())
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
             {
                 (cached.0, true)
             } else {
                 let result = exec
                     .run(request, progress)
                     .await
-                    .map_err(|e| VxdError::ExecRpc(e.to_string()))?;
+                    .map(|resp| resp.ret.clone())
+                    .map_err(|e| VxdError::ExecRpc(format!("{e:?}")))?;
                 if !result.success {
                     return Err(VxdError::Compilation {
                         crate_name: label.clone(),
@@ -1952,7 +1979,8 @@ async fn execute_action(
 
                 cas.publish(cache_key, NodeHash(output_manifest))
                     .await
-                    .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                    .map(|_| ())
+                    .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
                 (output_manifest, false)
             };

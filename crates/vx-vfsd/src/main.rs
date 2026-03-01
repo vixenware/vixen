@@ -13,11 +13,15 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 use camino::Utf8PathBuf;
 use facet::Facet;
 use figue as args;
-use roam_stream::{HandshakeConfig, NoDispatcher, accept};
+use moire::task::FutureExt;
+use roam_core::acceptor;
+use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
+use roam_stream::StreamLink;
+use roam_types::{ConnectionSettings, Metadata, Parity};
 use std::sync::Arc;
 use vixenfs_proto::{
     CreateResult, GetAttributesResult, ItemId, LookupResult, ReadDirResult, ReadResult,
-    SetAttributesParams, Vfs, VfsResult, WriteResult,
+    SetAttributesParams, VfsResult, VfsServer as Vfs, WriteResult,
 };
 use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
@@ -28,7 +32,7 @@ use crate::protocol::VfsdDispatcher;
 use crate::service::VfsdService;
 use crate::vfs::CasVfs;
 
-pub type StoreCaller = roam_stream::ConnectionHandle;
+pub type StoreCaller = roam_core::DriverCaller;
 
 /// Wrapper for CasVfs that implements Vfs by delegating to the inner CasVfs.
 ///
@@ -82,8 +86,8 @@ impl SharedVfs {
     }
 }
 
-impl Vfs for SharedVfs {
-    async fn lookup(&self, cx: &roam::Context, parent_id: ItemId, name: String) -> LookupResult {
+impl SharedVfs {
+    async fn lookup(&self, parent_id: ItemId, name: String) -> LookupResult {
         if parent_id == ROOT_ITEM_ID && name == self.canary.name {
             tracing::trace!(parent_id, %name, item_id = self.canary.item_id, "canary lookup hit");
             return LookupResult {
@@ -92,10 +96,10 @@ impl Vfs for SharedVfs {
             };
         }
         tracing::trace!(parent_id, %name, "lookup");
-        self.inner.lookup(cx, parent_id, name).await
+        CasVfs::lookup(self.inner.as_ref(), parent_id, name).await
     }
 
-    async fn get_attributes(&self, cx: &roam::Context, item_id: ItemId) -> GetAttributesResult {
+    async fn get_attributes(&self, item_id: ItemId) -> GetAttributesResult {
         if item_id == self.canary.item_id {
             tracing::trace!(item_id, "canary get_attributes hit");
             return GetAttributesResult {
@@ -104,21 +108,15 @@ impl Vfs for SharedVfs {
             };
         }
         tracing::trace!(item_id, "get_attributes");
-        self.inner.get_attributes(cx, item_id).await
+        CasVfs::get_attributes(self.inner.as_ref(), item_id).await
     }
 
-    async fn read_dir(
-        &self,
-        cx: &roam::Context,
-        item_id: ItemId,
-        cookie: u64,
-        verifier: u64,
-    ) -> ReadDirResult {
+    async fn read_dir(&self, item_id: ItemId, cookie: u64, verifier: u64) -> ReadDirResult {
         tracing::trace!(item_id, cookie, verifier, "read_dir");
-        self.inner.read_dir(cx, item_id, cookie, verifier).await
+        CasVfs::read_dir(self.inner.as_ref(), item_id, cookie, verifier).await
     }
 
-    async fn read(&self, cx: &roam::Context, item_id: ItemId, offset: u64, len: u64) -> ReadResult {
+    async fn read(&self, item_id: ItemId, offset: u64, len: u64) -> ReadResult {
         if item_id == self.canary.item_id {
             tracing::trace!(item_id, offset, len, "canary read hit");
             let content = &self.canary.content;
@@ -130,62 +128,177 @@ impl Vfs for SharedVfs {
             };
         }
         tracing::trace!(item_id, offset, len, "read");
-        self.inner.read(cx, item_id, offset, len).await
+        CasVfs::read(self.inner.as_ref(), item_id, offset, len).await
     }
 
-    async fn write(
-        &self,
-        cx: &roam::Context,
-        item_id: ItemId,
-        offset: u64,
-        data: Vec<u8>,
-    ) -> WriteResult {
+    async fn write(&self, item_id: ItemId, offset: u64, data: Vec<u8>) -> WriteResult {
         tracing::trace!(item_id, offset, len = data.len(), "write");
-        self.inner.write(cx, item_id, offset, data).await
+        CasVfs::write(self.inner.as_ref(), item_id, offset, data).await
     }
 
     async fn create(
         &self,
-        cx: &roam::Context,
         parent_id: ItemId,
         name: String,
         item_type: vixenfs_proto::ItemType,
     ) -> CreateResult {
         tracing::trace!(parent_id, %name, ?item_type, "create");
-        self.inner.create(cx, parent_id, name, item_type).await
+        CasVfs::create(self.inner.as_ref(), parent_id, name, item_type).await
     }
 
-    async fn delete(&self, cx: &roam::Context, item_id: ItemId) -> VfsResult {
+    async fn delete(&self, item_id: ItemId) -> VfsResult {
         tracing::trace!(item_id, "delete");
-        self.inner.delete(cx, item_id).await
+        CasVfs::delete(self.inner.as_ref(), item_id).await
+    }
+
+    async fn rename(&self, item_id: ItemId, new_parent_id: ItemId, new_name: String) -> VfsResult {
+        tracing::trace!(item_id, new_parent_id, %new_name, "rename");
+        CasVfs::rename(self.inner.as_ref(), item_id, new_parent_id, new_name).await
+    }
+
+    async fn set_attributes(&self, item_id: ItemId, params: SetAttributesParams) -> VfsResult {
+        tracing::trace!(item_id, "set_attributes");
+        CasVfs::set_attributes(self.inner.as_ref(), item_id, params).await
+    }
+
+    async fn ping(&self) -> String {
+        tracing::trace!("ping");
+        "vx-vfsd".to_string()
+    }
+}
+
+impl Vfs for SharedVfs {
+    async fn lookup(
+        &self,
+        call: impl roam::Call<LookupResult, core::convert::Infallible>,
+        parent_id: ItemId,
+        name: String,
+    ) {
+        call.ok(SharedVfs::lookup(self, parent_id, name).await)
+            .await;
+    }
+
+    async fn get_attributes(
+        &self,
+        call: impl roam::Call<GetAttributesResult, core::convert::Infallible>,
+        item_id: ItemId,
+    ) {
+        call.ok(SharedVfs::get_attributes(self, item_id).await)
+            .await;
+    }
+
+    async fn read_dir(
+        &self,
+        call: impl roam::Call<ReadDirResult, core::convert::Infallible>,
+        item_id: ItemId,
+        cookie: u64,
+        verifier: u64,
+    ) {
+        call.ok(SharedVfs::read_dir(self, item_id, cookie, verifier).await)
+            .await;
+    }
+
+    async fn read(
+        &self,
+        call: impl roam::Call<ReadResult, core::convert::Infallible>,
+        item_id: ItemId,
+        offset: u64,
+        len: u64,
+    ) {
+        call.ok(SharedVfs::read(self, item_id, offset, len).await)
+            .await;
+    }
+
+    async fn write(
+        &self,
+        call: impl roam::Call<WriteResult, core::convert::Infallible>,
+        item_id: ItemId,
+        offset: u64,
+        data: Vec<u8>,
+    ) {
+        call.ok(SharedVfs::write(self, item_id, offset, data).await)
+            .await;
+    }
+
+    async fn create(
+        &self,
+        call: impl roam::Call<CreateResult, core::convert::Infallible>,
+        parent_id: ItemId,
+        name: String,
+        item_type: vixenfs_proto::ItemType,
+    ) {
+        call.ok(SharedVfs::create(self, parent_id, name, item_type).await)
+            .await;
+    }
+
+    async fn delete(
+        &self,
+        call: impl roam::Call<VfsResult, core::convert::Infallible>,
+        item_id: ItemId,
+    ) {
+        call.ok(SharedVfs::delete(self, item_id).await).await;
     }
 
     async fn rename(
         &self,
-        cx: &roam::Context,
+        call: impl roam::Call<VfsResult, core::convert::Infallible>,
         item_id: ItemId,
         new_parent_id: ItemId,
         new_name: String,
-    ) -> VfsResult {
-        tracing::trace!(item_id, new_parent_id, %new_name, "rename");
-        self.inner
-            .rename(cx, item_id, new_parent_id, new_name)
-            .await
+    ) {
+        call.ok(SharedVfs::rename(self, item_id, new_parent_id, new_name).await)
+            .await;
     }
 
     async fn set_attributes(
         &self,
-        cx: &roam::Context,
+        call: impl roam::Call<VfsResult, core::convert::Infallible>,
         item_id: ItemId,
         params: SetAttributesParams,
-    ) -> VfsResult {
-        tracing::trace!(item_id, "set_attributes");
-        self.inner.set_attributes(cx, item_id, params).await
+    ) {
+        call.ok(SharedVfs::set_attributes(self, item_id, params).await)
+            .await;
     }
 
-    async fn ping(&self, _cx: &roam::Context) -> String {
-        tracing::trace!("ping");
-        "vx-vfsd".to_string()
+    async fn ping(&self, call: impl roam::Call<String, core::convert::Infallible>) {
+        call.ok(SharedVfs::ping(self).await).await;
+    }
+}
+
+#[derive(Clone)]
+struct VfsdVirtualAcceptor {
+    boot_service: vx_io::boot::BootService<VfsdService>,
+}
+
+impl ConnectionAcceptor for VfsdVirtualAcceptor {
+    fn accept(
+        &self,
+        _conn_id: roam_types::ConnectionId,
+        peer_settings: &ConnectionSettings,
+        _metadata: &[roam_types::MetadataEntry],
+    ) -> std::result::Result<AcceptedConnection, Metadata<'static>> {
+        let Some(service) = self.boot_service.gate().service().cloned() else {
+            return Err(vec![]);
+        };
+
+        let parity = peer_settings.parity.other();
+        Ok(AcceptedConnection {
+            settings: ConnectionSettings {
+                parity,
+                max_concurrent_requests: peer_settings.max_concurrent_requests,
+            },
+            metadata: vec![],
+            setup: Box::new(move |handle| {
+                let dispatcher = VfsdDispatcher::new(service);
+                moire::task::spawn(
+                    async move {
+                        let mut driver = Driver::new(handle, dispatcher, parity);
+                        driver.run().await;
+                    }
+                    .named("vfsd_virtual_driver"),
+                );
+            }),
+        })
     }
 }
 
@@ -301,18 +414,18 @@ async fn async_main() -> Result<()> {
 
                         // Root connection gets Boot service only.
                         let boot_dispatcher = BootDispatcher::new(boot_service.clone());
-                        let (_handle, mut incoming, driver) = match accept(
-                            stream,
-                            HandshakeConfig {
-                                max_payload_size: 256 * 1024 * 1024, // 256 MiB
-                                name: Some("vx-vfsd".into()),
-                                ..Default::default()
-                            },
-                            boot_dispatcher,
-                        )
-                        .await
+                        let (reader, writer) = tokio::io::split(stream);
+                        let conduit = BareConduit::<roam_types::MessageFamily, _>::new(
+                            StreamLink::new(reader, writer),
+                        );
+                        let (mut session, root_handle, _session_handle) = match acceptor(conduit)
+                            .on_connection(VfsdVirtualAcceptor {
+                                boot_service: boot_service.clone(),
+                            })
+                            .establish()
+                            .await
                         {
-                            Ok(v) => v,
+                            Ok(parts) => parts,
                             Err(e) => {
                                 tracing::warn!(
                                     "Failed to accept vx-vfsd connection from {}: {e}",
@@ -322,28 +435,14 @@ async fn async_main() -> Result<()> {
                             }
                         };
 
-                        // Drive the connection in the background.
-                        let driver_handle = moire::task::spawn(
-                            async move { driver.run().await }.named("vfsd_driver"),
+                        let session_handle = moire::task::spawn(
+                            async move { session.run().await }.named("vfsd_session"),
                         );
-
-                        // Accept virtual connections — each gets a VfsdDispatcher.
-                        while let Some(conn) = incoming.recv().named("vfsd.incoming.recv").await {
-                            let Some(service) = boot_service.gate().service() else {
-                                conn.reject("boot not complete".into(), vec![]);
-                                continue;
-                            };
-                            let dispatcher = VfsdDispatcher::new(service.clone());
-                            if let Err(e) = conn.accept(vec![], Some(Box::new(dispatcher))).await {
-                                tracing::warn!(
-                                    "Failed to accept virtual connection from {}: {e}",
-                                    peer_addr
-                                );
-                            }
-                        }
-
-                        if let Err(e) = driver_handle.await {
-                            tracing::warn!("Driver error from {}: {e:?}", peer_addr);
+                        let mut root_driver =
+                            Driver::new(root_handle, boot_dispatcher, Parity::Even);
+                        root_driver.run().await;
+                        if let Err(e) = session_handle.await {
+                            tracing::warn!("Session task error from {}: {e:?}", peer_addr);
                         }
                         tracing::debug!("vx-vfsd session closed with {}", peer_addr);
                     }
@@ -358,24 +457,16 @@ async fn async_main() -> Result<()> {
 }
 
 /// Connect to vx-store using the boot protocol.
-async fn connect_to_store(endpoint_str: &str) -> Result<StoreClient<StoreCaller>> {
+async fn connect_to_store(endpoint_str: &str) -> Result<StoreClient<roam_core::DriverCaller>> {
     let endpoint = Endpoint::parse(endpoint_str)?;
-    let caller = vx_io::net::reconnecting_client_named(
-        endpoint.clone(),
-        NoDispatcher,
-        Some("vx-vfsd".into()),
-    );
-
-    let root_handle = caller
-        .handle()
+    let (root_caller, session_handle) = vx_io::net::connect_session(&endpoint)
         .await
         .map_err(|e| format!("failed to connect to vx-store at {}: {}", endpoint, e))?;
-
-    let virtual_handle = vx_io::boot::boot_and_connect(&root_handle, None)
+    let virtual_caller = vx_io::boot::boot_and_connect(&root_caller, &session_handle)
         .await
         .map_err(|e| format!("vx-store boot failed: {e:#}"))?;
 
-    Ok(StoreClient::new(virtual_handle))
+    Ok(StoreClient::new(virtual_caller))
 }
 
 /// Full boot sequence: connect to store, create VFS, mount, smoke test.

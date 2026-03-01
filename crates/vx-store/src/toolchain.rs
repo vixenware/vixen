@@ -36,7 +36,7 @@ struct ExtractedFileInfo {
 const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_millis(25);
 
 async fn send_progress_best_effort(progress: &roam::Tx<StoreProgress>, update: StoreProgress) {
-    let _ = tokio::time::timeout(PROGRESS_SEND_TIMEOUT, progress.send(&update)).await;
+    let _ = tokio::time::timeout(PROGRESS_SEND_TIMEOUT, progress.send(update)).await;
 }
 
 // =============================================================================

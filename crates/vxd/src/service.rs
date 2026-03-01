@@ -32,7 +32,7 @@ use vx_store_proto::{
 };
 use vxd_proto::{
     ActionType, BuildRequest, BuildResult, ProgressListenerClient, UnpublishResult,
-    VXD_PROTOCOL_VERSION, Vxd,
+    VXD_PROTOCOL_VERSION, VxdServer as VxdRpc,
 };
 
 /// Toolchain information (manifest-only, no materialization)
@@ -88,8 +88,7 @@ pub struct VxdService {
     spawn_tracker: Arc<SyncMutex<SpawnTracker>>,
 
     /// Progress listener client (for reporting progress to vx CLI)
-    progress_listener:
-        Arc<SyncMutex<Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>>>,
+    progress_listener: Arc<SyncMutex<Option<Arc<ProgressListenerClient<crate::UpstreamCaller>>>>>,
 
     /// Session ID for cache key namespacing. Empty = session zero (shared).
     /// Per-connection state — each connection handler gets its own instance.
@@ -617,7 +616,11 @@ impl VxdService {
     async fn report_start_action(&self, action_type: ActionType) -> Option<u64> {
         let listener = self.progress_listener.lock().clone();
         if let Some(ref listener) = listener {
-            listener.start_action(action_type).await.ok()
+            listener
+                .start_action(action_type)
+                .await
+                .ok()
+                .map(|resp| resp.ret)
         } else {
             None
         }
@@ -751,7 +754,7 @@ impl VxdService {
     /// Update the progress listener for the current connection
     pub async fn set_progress_listener(
         &self,
-        listener: Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>,
+        listener: Option<Arc<ProgressListenerClient<crate::UpstreamCaller>>>,
     ) {
         *self.progress_listener.lock() = listener;
     }
@@ -824,6 +827,7 @@ impl VxdService {
             .store
             .ensure_rust_toolchain(spec, progress_tx)
             .await
+            .map(|resp| resp.ret.clone())
             .map_err(|e| {
                 // Complete action on error
                 let this = self.clone();
@@ -831,7 +835,7 @@ impl VxdService {
                     async move { this.report_complete_action(action_id).await }
                         .named("complete_action"),
                 );
-                VxdError::CasRpc(e.to_string())
+                VxdError::CasRpc(format!("{e:?}"))
             })?;
 
         // Wait for progress forwarding to drain
@@ -858,13 +862,14 @@ impl VxdService {
             .store
             .get_toolchain_manifest(manifest_hash)
             .await
+            .map(|resp| resp.ret.clone())
             .map_err(|e| {
                 let this = self.clone();
                 moire::task::spawn(
                     async move { this.report_complete_action(action_id).await }
                         .named("complete_action"),
                 );
-                VxdError::CasRpc(e.to_string())
+                VxdError::CasRpc(format!("{e:?}"))
             })?
             .ok_or_else(|| {
                 let this = self.clone();
@@ -972,7 +977,8 @@ impl VxdService {
                         self.store
                             .put_chunk(chunk_hash, contents)
                             .await
-                            .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                            .map(|_| ())
+                            .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
                         tree_files.push(crate::cas_tree::TreeFile {
                             path: bin.sources.clone(),
@@ -1721,9 +1727,13 @@ impl vx_io::boot::GracefulShutdown for VxdService {
     }
 }
 
-impl Vxd for VxdService {
-    async fn build(&self, _cx: &roam::Context, request: BuildRequest) -> BuildResult {
-        match self.do_build(request).await {
+impl VxdRpc for VxdService {
+    async fn build(
+        &self,
+        call: impl roam::Call<BuildResult, core::convert::Infallible>,
+        request: BuildRequest,
+    ) {
+        let result = match self.do_build(request).await {
             Ok(result) => result,
             Err(e) => BuildResult {
                 success: false,
@@ -1738,38 +1748,51 @@ impl Vxd for VxdService {
                 rebuilt: 0,
                 cancelled: 0,
             },
-        }
+        };
+        call.ok(result).await;
     }
 
-    async fn set_session(&self, _cx: &roam::Context, session_id: String) {
+    async fn set_session(
+        &self,
+        call: impl roam::Call<(), core::convert::Infallible>,
+        session_id: String,
+    ) {
         info!(session_id = %session_id, "session ID set");
         *self.session_id.lock() = session_id;
+        call.ok(()).await;
     }
 
     async fn unpublish_cache_keys(
         &self,
-        _cx: &roam::Context,
+        call: impl roam::Call<UnpublishResult, core::convert::Infallible>,
         cache_keys: Vec<vx_store_proto::CacheKey>,
-    ) -> UnpublishResult {
+    ) {
         let mut removed = 0u32;
         let mut not_found = 0u32;
 
         for key in cache_keys {
-            if self.store.unpublish(key).await.unwrap_or(false) {
+            if self
+                .store
+                .unpublish(key)
+                .await
+                .map(|resp| resp.ret)
+                .unwrap_or(false)
+            {
                 removed += 1;
             } else {
                 not_found += 1;
             }
         }
 
-        UnpublishResult { removed, not_found }
+        call.ok(UnpublishResult { removed, not_found }).await;
     }
 
-    async fn version(&self, _cx: &roam::Context) -> ServiceVersion {
-        ServiceVersion {
+    async fn version(&self, call: impl roam::Call<ServiceVersion, core::convert::Infallible>) {
+        call.ok(ServiceVersion {
             service: "vxd".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: VXD_PROTOCOL_VERSION,
-        }
+        })
+        .await;
     }
 }

@@ -9,10 +9,11 @@ mod tui;
 mod types;
 
 use camino::Utf8PathBuf;
-use eyre::{Result, bail};
+use eyre::{Result, bail, eyre};
 use figue as args;
 use owo_colors::OwoColorize;
-use roam_stream::ConnectionHandle;
+use roam_core::Driver;
+use roam_types::{ConnectionSettings, Parity};
 use tui::emit_osc_progress;
 use vx_io::spawn::ServiceBuilder;
 use vx_report::ReportStore;
@@ -306,9 +307,7 @@ impl CliContext {
     ///
     /// The progress dispatcher is created here because it's tightly coupled
     /// to the vx CLI's display logic.
-    async fn ensure_vxd(&self) -> Result<VxdClient<ConnectionHandle>> {
-        use roam_stream::NoDispatcher;
-
+    async fn ensure_vxd(&self) -> Result<VxdClient<roam_core::DriverCaller>> {
         let vx_home = vx_io::vx_home();
 
         // Connect to daemon — root connection only has the Boot service.
@@ -326,11 +325,37 @@ impl CliContext {
 
         // Boot protocol: call boot(), then open virtual connection with
         // ProgressListener dispatcher for callbacks from the daemon.
+        let boot_client = vx_io::boot::BootClient::new(handle.caller.clone());
+        let boot_result = boot_client
+            .boot()
+            .await
+            .map_err(|e| eyre!("boot RPC failed: {e:?}"))?;
+        if !boot_result.ret.success {
+            let msg = boot_result
+                .ret
+                .error
+                .clone()
+                .unwrap_or_else(|| "unknown boot error".to_string());
+            bail!("{msg}");
+        }
+
         let progress_listener = ProgressListenerImpl::new(self.mode.clone());
         let dispatcher = vxd_proto::ProgressListenerDispatcher::new(progress_listener);
-        let virtual_handle = handle.boot_and_connect(Some(Box::new(dispatcher))).await?;
+        let virtual_handle = handle
+            .session_handle
+            .open_connection(
+                ConnectionSettings {
+                    parity: Parity::Odd,
+                    max_concurrent_requests: 64,
+                },
+                vec![],
+            )
+            .await?;
+        let mut driver = Driver::new(virtual_handle, dispatcher, Parity::Odd);
+        let caller = driver.caller();
+        tokio::spawn(async move { driver.run().await });
 
-        Ok(VxdClient::new(virtual_handle))
+        Ok(VxdClient::new(caller))
     }
 
     // ─── Commands ───────────────────────────────────────────────────────
@@ -350,7 +375,10 @@ impl CliContext {
         // When running under the test harness, set the session ID so cache keys
         // are namespaced per-test (isolating parallel tests from each other).
         if let Ok(session_id) = std::env::var("VX_TEST_SESSION") {
-            daemon.set_session(session_id).await?;
+            daemon
+                .set_session(session_id)
+                .await
+                .map_err(|e| eyre!("set_session RPC failed: {e:?}"))?;
         }
 
         let request = BuildRequest {
@@ -362,7 +390,9 @@ impl CliContext {
         // the TUI cleanly and exit. The daemon detects the dropped connection and
         // cancels the in-flight build on its own.
         let result = tokio::select! {
-            result = daemon.build(request) => result?,
+            result = daemon.build(request) => result
+                .map(|resp| resp.ret.clone())
+                .map_err(|e| eyre!("build RPC failed: {e:?}"))?,
             _ = tokio::signal::ctrl_c() => {
                 if let CliMode::Tui(tui) = &self.mode {
                     tui.shutdown().await;
@@ -487,7 +517,11 @@ impl CliContext {
         tracing::info!("✓ daemon is running");
 
         // Ping to verify connection
-        let version = daemon.version().await?;
+        let version = daemon
+            .version()
+            .await
+            .map(|resp| resp.ret.clone())
+            .map_err(|e| eyre!("version RPC failed: {e:?}"))?;
 
         tracing::info!("✓ connected to vxd");
         tracing::info!("   {}", version);
@@ -499,13 +533,16 @@ impl CliContext {
         // Ping only connects, never spawns
         self.strat = self.strat.clone().connect_only();
         let daemon = self.ensure_vxd().await?;
-        let version = daemon.version().await?;
+        let version = daemon
+            .version()
+            .await
+            .map(|resp| resp.ret.clone())
+            .map_err(|e| eyre!("version RPC failed: {e:?}"))?;
         println!("{version}");
         Ok(())
     }
 
     async fn cmd_kill(&mut self, _args: KillArgs) -> Result<()> {
-        use roam_stream::NoDispatcher;
         use vx_io::boot::BootClient;
         use vx_io::spawn::ServiceBuilder;
 
@@ -519,12 +556,11 @@ impl CliContext {
         match builder.connect().await {
             Ok(handle) => {
                 tracing::info!("Stopping daemon at {}", endpoint);
-                let root_handle = handle.caller.handle().await?;
-                let boot_client = BootClient::new(root_handle);
+                let boot_client = BootClient::new(handle.caller.clone());
                 if let Err(e) = boot_client.shutdown().await {
                     // shutdown() calls process::exit(0) on the daemon side, so the
                     // connection closing is expected — not an error.
-                    tracing::debug!("shutdown RPC returned: {e} (expected — daemon exited)");
+                    tracing::debug!("shutdown RPC returned: {e:?} (expected — daemon exited)");
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 tracing::info!("Daemon stopped");
@@ -631,7 +667,11 @@ impl CliContext {
         // Connect to daemon (spawns it if needed), unpublish via RPC
         let daemon = self.ensure_vxd().await?;
 
-        let result = daemon.unpublish_cache_keys(cache_keys).await?;
+        let result = daemon
+            .unpublish_cache_keys(cache_keys)
+            .await
+            .map(|resp| resp.ret.clone())
+            .map_err(|e| eyre!("unpublish_cache_keys RPC failed: {e:?}"))?;
 
         // Clear picante cache so the daemon recomputes everything on next build
         let picante_cache = vx_home.join("picante.cache");

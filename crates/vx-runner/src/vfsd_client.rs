@@ -82,7 +82,7 @@ impl VfsdClient {
         self.cas
             .put_node(leaf_hash, leaf_bytes)
             .await
-            .map_err(|e| format!("failed to store DirectoryNode for {}: {}", path, e))?;
+            .map_err(|e| format!("failed to store DirectoryNode for {}: {:?}", path, e))?;
 
         // Build parent directories from inside out (skip the filename)
         let mut current_hash = leaf_hash;
@@ -99,10 +99,9 @@ impl VfsdClient {
                 total_size: current_size,
             });
             let (dir_bytes, dir_hash) = dir_node.to_bytes_and_hash();
-            self.cas
-                .put_node(dir_hash, dir_bytes)
-                .await
-                .map_err(|e| format!("failed to store parent DirectoryNode for {}: {}", path, e))?;
+            self.cas.put_node(dir_hash, dir_bytes).await.map_err(|e| {
+                format!("failed to store parent DirectoryNode for {}: {:?}", path, e)
+            })?;
             current_hash = dir_hash;
         }
 
@@ -129,7 +128,8 @@ impl VfsdClient {
         self.client
             .mount(path, tree_hash)
             .await
-            .map_err(|e| e.to_string())
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"))
     }
 
     /// Flush all written files in a prefix to CAS
@@ -167,6 +167,8 @@ impl VfsdClient {
             .get_node(node_hash)
             .await
             .map_err(|e| format!("failed to fetch DirectoryNode: {:?}", e))?
+            .ret
+            .clone()
             .ok_or_else(|| format!("DirectoryNode {} not found in CAS", node_hash))?;
 
         let node = CasNode::from_bytes(&node_data)
@@ -224,7 +226,11 @@ impl VfsdClient {
         } else {
             format!("/{}/{}", prefix_id, subpath)
         };
-        self.client.flush(path).await.map_err(|e| e.to_string())
+        self.client
+            .flush(path)
+            .await
+            .map(|resp| resp.ret)
+            .map_err(|e| format!("{e:?}"))
     }
 
     /// Remove an action prefix

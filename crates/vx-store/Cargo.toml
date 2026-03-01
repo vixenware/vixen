@@ -21,6 +21,8 @@ hex = { workspace = true }
 http-body-util = "0.1"
 pin-project-lite = { workspace = true }
 roam = { workspace = true }
+roam-core = { workspace = true }
+roam-types = { workspace = true }
 moire = { workspace = true }
 roam-stream = { workspace = true }
 sha2 = "0.10"

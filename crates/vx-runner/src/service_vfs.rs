@@ -5,6 +5,7 @@
 
 use camino::Utf8PathBuf;
 use jiff::Zoned;
+use moire::task::FutureExt;
 use std::time::Instant;
 use tracing::{debug, info};
 use vx_runner_proto::{
@@ -780,7 +781,12 @@ impl RunnerService {
         let mut object_paths = Vec::with_capacity(request.object_manifests.len());
 
         for (idx, manifest_hash) in request.object_manifests.iter().enumerate() {
-            let manifest = match self.cas.get_node(NodeHash(*manifest_hash)).await {
+            let manifest = match self
+                .cas
+                .get_node(NodeHash(*manifest_hash))
+                .await
+                .map(|resp| resp.ret.clone())
+            {
                 Ok(Some(data)) => match CasNode::from_bytes(&data) {
                     Ok(CasNode::Manifest(m)) => m,
                     Ok(_) => {
@@ -899,7 +905,7 @@ impl RunnerService {
                 duration_ms: start.elapsed().as_millis() as u64,
                 output_manifest: None,
                 error: Some(format!(
-                    "failed to store object files directory node to CAS: {}",
+                    "failed to store object files directory node to CAS: {:?}",
                     e
                 )),
             };
@@ -927,7 +933,10 @@ impl RunnerService {
                 stderr: String::new(),
                 duration_ms: start.elapsed().as_millis() as u64,
                 output_manifest: None,
-                error: Some(format!("failed to store root directory node to CAS: {}", e)),
+                error: Some(format!(
+                    "failed to store root directory node to CAS: {:?}",
+                    e
+                )),
             };
         }
 
@@ -1147,7 +1156,12 @@ impl RunnerService {
 
         // Mount CAS trees into the prefix.
         for mount in &request.tree_mounts {
-            match self.cas.get_node(NodeHash(mount.manifest)).await {
+            match self
+                .cas
+                .get_node(NodeHash(mount.manifest))
+                .await
+                .map(|resp| resp.ret.clone())
+            {
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     self.remove_action_prefix(&action.prefix_id).await;
@@ -1200,7 +1214,12 @@ impl RunnerService {
         // Materialize individual files from node manifests into a tree and mount it.
         if !request.file_mounts.is_empty() {
             for fm in &request.file_mounts {
-                let manifest = match self.cas.get_node(NodeHash(fm.manifest)).await {
+                let manifest = match self
+                    .cas
+                    .get_node(NodeHash(fm.manifest))
+                    .await
+                    .map(|resp| resp.ret.clone())
+                {
                     Ok(Some(node_data)) => match CasNode::from_bytes(&node_data) {
                         Ok(CasNode::Manifest(m)) => m,
                         Ok(_) => {

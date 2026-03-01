@@ -21,7 +21,11 @@ use camino::Utf8PathBuf;
 use eyre::Result;
 use facet::Facet;
 use figue as args;
-use roam_stream::{HandshakeConfig, NoDispatcher, accept};
+use moire::task::FutureExt;
+use roam_core::acceptor;
+use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
+use roam_stream::StreamLink;
+use roam_types::{ConnectionSettings, Metadata, Parity};
 use std::collections::HashMap;
 use std::sync::Arc;
 use vx_io::boot::{BootDispatcher, BootGate};
@@ -31,8 +35,45 @@ use vx_store_proto::{Blake3Hash, StoreClient};
 
 use crate::vfsd_client::VfsdClient as VfsClient;
 
-pub type CasCaller = roam_stream::ConnectionHandle;
-pub type VfsdCaller = roam_stream::ConnectionHandle;
+pub type CasCaller = roam_core::DriverCaller;
+pub type VfsdCaller = roam_core::DriverCaller;
+
+#[derive(Clone)]
+struct RunnerVirtualAcceptor {
+    boot_service: vx_io::boot::BootService<RunnerService>,
+}
+
+impl ConnectionAcceptor for RunnerVirtualAcceptor {
+    fn accept(
+        &self,
+        _conn_id: roam_types::ConnectionId,
+        peer_settings: &ConnectionSettings,
+        _metadata: &[roam_types::MetadataEntry],
+    ) -> std::result::Result<AcceptedConnection, Metadata<'static>> {
+        let Some(exec) = self.boot_service.gate().service().cloned() else {
+            return Err(vec![]);
+        };
+
+        let parity = peer_settings.parity.other();
+        Ok(AcceptedConnection {
+            settings: ConnectionSettings {
+                parity,
+                max_concurrent_requests: peer_settings.max_concurrent_requests,
+            },
+            metadata: vec![],
+            setup: Box::new(move |handle| {
+                let dispatcher = RunnerDispatcher::new(exec);
+                moire::task::spawn(
+                    async move {
+                        let mut driver = Driver::new(handle, dispatcher, parity);
+                        driver.run().await;
+                    }
+                    .named("runner_virtual_driver"),
+                );
+            }),
+        })
+    }
+}
 
 pub(crate) fn runner_mount_base() -> Utf8PathBuf {
     // Option 1: VX_HOME-based path (works with FSKit, but has system policy restrictions on unsigned binaries)
@@ -148,46 +189,32 @@ async fn async_main() -> Result<()> {
 
                         // Root connection gets Boot service only.
                         let boot_dispatcher = BootDispatcher::new(boot_service.clone());
-                        let (_handle, mut incoming, driver) = match accept(
-                            stream,
-                            HandshakeConfig {
-                                max_payload_size: 256 * 1024 * 1024, // 256 MiB
-                                name: Some("vx-runner".into()),
-                                ..Default::default()
-                            },
-                            boot_dispatcher,
-                        )
-                        .await
+                        let (reader, writer) = tokio::io::split(stream);
+                        let conduit = BareConduit::<roam_types::MessageFamily, _>::new(
+                            StreamLink::new(reader, writer),
+                        );
+                        let (mut session, root_handle, _session_handle) = match acceptor(conduit)
+                            .on_connection(RunnerVirtualAcceptor {
+                                boot_service: boot_service.clone(),
+                            })
+                            .establish()
+                            .await
                         {
-                            Ok(v) => v,
+                            Ok(parts) => parts,
                             Err(e) => {
                                 tracing::debug!("Runner handshake error from {}: {e}", peer_addr);
                                 return;
                             }
                         };
 
-                        // Drive the connection in the background.
-                        let driver_handle = moire::task::spawn(
-                            async move { driver.run().await }.named("runner_driver"),
+                        let session_handle = moire::task::spawn(
+                            async move { session.run().await }.named("runner_session"),
                         );
-
-                        // Accept virtual connections — each gets a RunnerDispatcher.
-                        while let Some(conn) = incoming.recv().await {
-                            let Some(exec) = boot_service.gate().service() else {
-                                conn.reject("boot not complete".into(), vec![]);
-                                continue;
-                            };
-                            let dispatcher = RunnerDispatcher::new(exec.clone());
-                            if let Err(e) = conn.accept(vec![], Some(Box::new(dispatcher))).await {
-                                tracing::warn!(
-                                    "Failed to accept virtual connection from {}: {e}",
-                                    peer_addr
-                                );
-                            }
-                        }
-
-                        if let Err(e) = driver_handle.await {
-                            tracing::warn!("Driver error from {}: {e:?}", peer_addr);
+                        let mut root_driver =
+                            Driver::new(root_handle, boot_dispatcher, Parity::Even);
+                        root_driver.run().await;
+                        if let Err(e) = session_handle.await {
+                            tracing::warn!("Session error from {}: {e:?}", peer_addr);
                         }
                         tracing::debug!("Runner connection from {} closed", peer_addr);
                     }
@@ -385,7 +412,7 @@ impl RunnerService {
             .get_or_init(|| async {
                 self.populate_toolchain_prefix(toolchain_manifest_hash)
                     .await
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| format!("{e:?}"))
             })
             .await;
         match result {
@@ -411,6 +438,8 @@ impl RunnerService {
             .cas
             .get_toolchain_manifest(vx_store_proto::NodeHash(toolchain_manifest_hash))
             .await?
+            .ret
+            .clone()
             .ok_or(RunnerError::ToolchainManifestNotFound(
                 toolchain_manifest_hash,
             ))?;
@@ -535,6 +564,8 @@ impl RunnerService {
             .cas
             .get_node(vx_store_proto::NodeHash(manifest_hash))
             .await?
+            .ret
+            .clone()
             .ok_or(RunnerError::DependencyManifestNotFound(manifest_hash))?;
 
         let manifest = match vx_store_proto::CasNode::from_bytes(&node_data) {

@@ -1,6 +1,6 @@
 //! RPC service implementation for vx-vfsd.
 
-use crate::protocol::Vfsd;
+use crate::protocol::VfsdServer as Vfsd;
 use crate::vfs::CasVfs;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -73,11 +73,13 @@ impl VfsdService {
             let node_data = cas
                 .get_node(dir_hash)
                 .await
-                .map_err(|e| format!("failed to fetch DirectoryNode: {e}"))?
+                .map_err(|e| format!("failed to fetch DirectoryNode: {:?}", e))?
+                .ret
+                .clone()
                 .ok_or_else(|| format!("DirectoryNode {} not found in CAS", dir_hash.to_hex()))?;
 
             let node = CasNode::from_bytes(&node_data)
-                .map_err(|e| format!("failed to deserialize DirectoryNode: {e}"))?;
+                .map_err(|e| format!("failed to deserialize DirectoryNode: {:?}", e))?;
 
             let dir = match node {
                 CasNode::Directory(d) => d,
@@ -142,8 +144,8 @@ impl VfsdService {
     }
 }
 
-impl Vfsd for VfsdService {
-    async fn mkdir(&self, _cx: &roam::Context, path: String) -> Result<(), String> {
+impl VfsdService {
+    async fn mkdir(&self, path: String) -> Result<(), String> {
         tracing::debug!(%path, "mkdir");
 
         let (prefix_id, rel_path) = Self::parse_path(&path)?;
@@ -165,12 +167,7 @@ impl Vfsd for VfsdService {
         }
     }
 
-    async fn mount(
-        &self,
-        _cx: &roam::Context,
-        path: String,
-        tree_hash: Blake3Hash,
-    ) -> Result<(), String> {
+    async fn mount(&self, path: String, tree_hash: Blake3Hash) -> Result<(), String> {
         tracing::debug!(%path, %tree_hash, "mount");
 
         let (prefix_id, rel_path) = Self::parse_path(&path)?;
@@ -195,7 +192,7 @@ impl Vfsd for VfsdService {
         Ok(())
     }
 
-    async fn flush(&self, _cx: &roam::Context, path: String) -> Result<Blake3Hash, String> {
+    async fn flush(&self, path: String) -> Result<Blake3Hash, String> {
         tracing::debug!(%path, "flush");
 
         let (prefix_id, rel_path) = Self::parse_path(&path)?;
@@ -251,7 +248,7 @@ impl Vfsd for VfsdService {
         Ok(root_hash.0)
     }
 
-    async fn rm_rf(&self, _cx: &roam::Context, path: String) -> Result<(), String> {
+    async fn rm_rf(&self, path: String) -> Result<(), String> {
         tracing::debug!(%path, "rm_rf");
 
         let (prefix_id, rel_path) = Self::parse_path(&path)?;
@@ -299,14 +296,58 @@ impl Vfsd for VfsdService {
         }
     }
 
-    async fn ping(&self, _cx: &roam::Context) -> Result<(), String> {
+    async fn ping(&self) -> Result<(), String> {
         Ok(())
     }
 
-    async fn dump_state(&self, _cx: &roam::Context, prefix_id: String) -> Result<(), String> {
+    async fn dump_state(&self, prefix_id: String) -> Result<(), String> {
         tracing::info!("Dumping state for prefix: {prefix_id}");
         self.vfs.dump_state(&prefix_id).await;
         Ok(())
+    }
+}
+
+impl Vfsd for VfsdService {
+    async fn mkdir(&self, call: impl roam::Call<(), String>, path: String) {
+        match VfsdService::mkdir(self, path).await {
+            Ok(_) => call.ok(()).await,
+            Err(error) => call.err(error).await,
+        }
+    }
+
+    async fn mount(&self, call: impl roam::Call<(), String>, path: String, tree_hash: Blake3Hash) {
+        match VfsdService::mount(self, path, tree_hash).await {
+            Ok(_) => call.ok(()).await,
+            Err(error) => call.err(error).await,
+        }
+    }
+
+    async fn flush(&self, call: impl roam::Call<Blake3Hash, String>, path: String) {
+        match VfsdService::flush(self, path).await {
+            Ok(root_hash) => call.ok(root_hash).await,
+            Err(error) => call.err(error).await,
+        }
+    }
+
+    async fn rm_rf(&self, call: impl roam::Call<(), String>, path: String) {
+        match VfsdService::rm_rf(self, path).await {
+            Ok(_) => call.ok(()).await,
+            Err(error) => call.err(error).await,
+        }
+    }
+
+    async fn ping(&self, call: impl roam::Call<(), String>) {
+        match VfsdService::ping(self).await {
+            Ok(_) => call.ok(()).await,
+            Err(error) => call.err(error).await,
+        }
+    }
+
+    async fn dump_state(&self, call: impl roam::Call<(), String>, prefix_id: String) {
+        match VfsdService::dump_state(self, prefix_id).await {
+            Ok(_) => call.ok(()).await,
+            Err(error) => call.err(error).await,
+        }
     }
 }
 
@@ -406,7 +447,7 @@ impl VfsdService {
         let (node_bytes, node_hash) = dir_node.to_bytes_and_hash();
         cas.put_node(node_hash, node_bytes.to_vec())
             .await
-            .map_err(|e| format!("failed to store DirectoryNode: {e}"))?;
+            .map_err(|e| format!("failed to store DirectoryNode: {:?}", e))?;
 
         visited.remove(&dir_item_id);
 
@@ -420,24 +461,20 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use roam::Context;
-    use roam_stream::NoDispatcher;
     use tempfile::TempDir;
-    use vixenfs_proto::{ItemId, ItemType, SetAttributesParams, Vfs, errno};
+    use vixenfs_proto::{ItemId, ItemType, SetAttributesParams, VfsServer as Vfs, errno};
     use vx_io::spawn::{ServiceBuilder, ServiceHandle};
     use vx_store_proto::{Blake3Hash, CDC_MAX_CHUNK, CasNode, ChunkHash, StoreClient};
 
     use super::*;
-    use crate::protocol::Vfsd;
+    use crate::protocol::VfsdServer as Vfsd;
     use crate::vfs::CasVfs;
-
-    type StoreCaller = roam_stream::ConnectionHandle;
 
     struct TestEnv {
         _store_root: TempDir,
         _vx_home: TempDir,
-        _store_service: ServiceHandle<NoDispatcher>,
-        cas: Arc<StoreClient<StoreCaller>>,
+        _store_service: ServiceHandle,
+        cas: Arc<StoreClient<roam_core::DriverCaller>>,
         service: VfsdService,
     }
 
@@ -488,16 +525,6 @@ mod tests {
         }
     }
 
-    fn cx() -> Context {
-        Context::new(
-            roam::wire::ConnectionId::ROOT,
-            roam::wire::RequestId::new(1),
-            roam::wire::MethodId::new(1),
-            Vec::new(),
-            Vec::new(),
-        )
-    }
-
     fn free_local_endpoint() -> vx_io::net::Endpoint {
         let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind ephemeral port");
         let addr = listener.local_addr().expect("failed to read local addr");
@@ -525,7 +552,8 @@ mod tests {
         file_name: &str,
         data: &[u8],
     ) -> (ItemId, ItemId) {
-        Vfsd::mkdir(&env.service, &cx(), format!("/{prefix_id}/{rel_dir}"))
+        env.service
+            .mkdir(format!("/{prefix_id}/{rel_dir}"))
             .await
             .expect("mkdir failed");
 
@@ -543,14 +571,11 @@ mod tests {
                 .id
         };
 
-        let create = Vfs::create(
-            &*env.service.vfs,
-            &cx(),
-            dir_id,
-            file_name.to_string(),
-            ItemType::File,
-        )
-        .await;
+        let create = env
+            .service
+            .vfs
+            .create(dir_id, file_name.to_string(), ItemType::File)
+            .await;
         assert_eq!(
             create.error,
             errno::OK,
@@ -558,7 +583,11 @@ mod tests {
             create.error
         );
 
-        let write = Vfs::write(&*env.service.vfs, &cx(), create.item_id, 0, data.to_vec()).await;
+        let write = env
+            .service
+            .vfs
+            .write(create.item_id, 0, data.to_vec())
+            .await;
         assert_eq!(
             write.error,
             errno::OK,
@@ -573,7 +602,9 @@ mod tests {
         let env = TestEnv::new().await;
         write_file(&env, "pfx-a", "out", "hello.txt", b"hello flush").await;
 
-        let root_hash = Vfsd::flush(&env.service, &cx(), "/pfx-a/out".to_string())
+        let root_hash = env
+            .service
+            .flush("/pfx-a/out".to_string())
             .await
             .expect("flush failed");
 
@@ -606,11 +637,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn flush_prefix_root_without_files_returns_empty_directory_node() {
         let env = TestEnv::new().await;
-        Vfsd::mkdir(&env.service, &cx(), "/pfx-empty".to_string())
+        env.service
+            .mkdir("/pfx-empty".to_string())
             .await
             .expect("mkdir failed");
 
-        let root_hash = Vfsd::flush(&env.service, &cx(), "/pfx-empty".to_string())
+        let root_hash = env
+            .service
+            .flush("/pfx-empty".to_string())
             .await
             .expect("flush failed");
 
@@ -632,7 +666,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn flush_missing_prefix_returns_error() {
         let env = TestEnv::new().await;
-        let err = Vfsd::flush(&env.service, &cx(), "/does-not-exist/out".to_string())
+        let err = env
+            .service
+            .flush("/does-not-exist/out".to_string())
             .await
             .expect_err("flush should fail for missing prefix");
         assert!(err.contains("prefix"), "unexpected error: {err}");
@@ -643,21 +679,20 @@ mod tests {
         let env = TestEnv::new().await;
         let (dir_id, file_id) = write_file(&env, "pfx-badname", "out", "ok.txt", b"hello").await;
 
-        let rename = Vfs::rename(
-            &*env.service.vfs,
-            &cx(),
-            file_id,
-            dir_id,
-            "bad/name".to_string(),
-        )
-        .await;
+        let rename = env
+            .service
+            .vfs
+            .rename(file_id, dir_id, "bad/name".to_string())
+            .await;
         assert_eq!(
             rename.error,
             errno::OK,
             "rename should currently succeed in VFS"
         );
 
-        let err = Vfsd::flush(&env.service, &cx(), "/pfx-badname/out".to_string())
+        let err = env
+            .service
+            .flush("/pfx-badname/out".to_string())
             .await
             .expect_err("flush should fail when entry name contains '/'");
         assert!(
@@ -671,21 +706,23 @@ mod tests {
         let env = TestEnv::new().await;
         let (_dir_id, file_id) = write_file(&env, "pfx-big", "out", "a.bin", b"tiny").await;
 
-        Vfsd::flush(&env.service, &cx(), "/pfx-big/out".to_string())
+        env.service
+            .flush("/pfx-big/out".to_string())
             .await
             .expect("first flush should succeed");
 
-        let set = Vfs::set_attributes(
-            &*env.service.vfs,
-            &cx(),
-            file_id,
-            SetAttributesParams {
-                mode: None,
-                modified_time: None,
-                size: Some(CDC_MAX_CHUNK as u64 + 1),
-            },
-        )
-        .await;
+        let set = env
+            .service
+            .vfs
+            .set_attributes(
+                file_id,
+                SetAttributesParams {
+                    mode: None,
+                    modified_time: None,
+                    size: Some(CDC_MAX_CHUNK as u64 + 1),
+                },
+            )
+            .await;
         assert_eq!(
             set.error,
             errno::OK,
@@ -693,7 +730,9 @@ mod tests {
             set.error
         );
 
-        let err = Vfsd::flush(&env.service, &cx(), "/pfx-big/out".to_string())
+        let err = env
+            .service
+            .flush("/pfx-big/out".to_string())
             .await
             .expect_err("flush should fail when SmallFile size exceeds CDC_MAX_CHUNK");
         assert!(
@@ -705,7 +744,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn read_dir_rejects_stale_cookie_verifier_pair_after_mutation() {
         let env = TestEnv::new().await;
-        Vfsd::mkdir(&env.service, &cx(), "/pfx-readdir/out".to_string())
+        env.service
+            .mkdir("/pfx-readdir/out".to_string())
             .await
             .expect("mkdir failed");
 
@@ -724,41 +764,32 @@ mod tests {
         };
 
         for i in 0..101 {
-            let create = Vfs::create(
-                &*env.service.vfs,
-                &cx(),
-                out_id,
-                format!("f-{i:03}.txt"),
-                ItemType::File,
-            )
-            .await;
+            let create = env
+                .service
+                .vfs
+                .create(out_id, format!("f-{i:03}.txt"), ItemType::File)
+                .await;
             assert_eq!(create.error, errno::OK, "create failed at {i}");
         }
 
-        let first_page = Vfs::read_dir(&*env.service.vfs, &cx(), out_id, 0, 0).await;
+        let first_page = env.service.vfs.read_dir(out_id, 0, 0).await;
         assert_eq!(first_page.error, errno::OK);
         assert_eq!(first_page.entries.len(), 100);
         assert!(first_page.next_cookie > 0);
         assert!(first_page.verifier > 0);
 
-        let added = Vfs::create(
-            &*env.service.vfs,
-            &cx(),
-            out_id,
-            "later.txt".to_string(),
-            ItemType::File,
-        )
-        .await;
+        let added = env
+            .service
+            .vfs
+            .create(out_id, "later.txt".to_string(), ItemType::File)
+            .await;
         assert_eq!(added.error, errno::OK);
 
-        let stale = Vfs::read_dir(
-            &*env.service.vfs,
-            &cx(),
-            out_id,
-            first_page.next_cookie,
-            first_page.verifier,
-        )
-        .await;
+        let stale = env
+            .service
+            .vfs
+            .read_dir(out_id, first_page.next_cookie, first_page.verifier)
+            .await;
         assert_eq!(stale.error, errno::ESTALE);
         assert_eq!(stale.entries.len(), 0);
         assert_eq!(stale.next_cookie, 0);

@@ -38,7 +38,8 @@ use camino::Utf8PathBuf;
 use moire::sync::SyncMutex;
 use vixenfs_proto::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
-    ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
+    ReadDirResult, ReadResult, SetAttributesParams, VfsResult, VfsServer as Vfs, WriteResult,
+    errno, mode,
 };
 use vx_store_proto::{Blake3Hash, BlobNode, CasNode, ChunkHash, NodeHash, StoreClient};
 
@@ -442,7 +443,9 @@ impl CasVfs {
             let data = cas
                 .get_chunk(chunk_hash)
                 .await
-                .map_err(|e| format!("CAS chunk read error: {e}"))?
+                .map_err(|e| format!("CAS chunk read error: {:?}", e))?
+                .ret
+                .clone()
                 .ok_or_else(|| format!("chunk {} not found", chunk_hash.to_hex()))?;
 
             let actual_hash = Blake3Hash::from_bytes(&data);
@@ -485,7 +488,7 @@ impl CasVfs {
                     if let Err(e) = moire::fs::remove_file(path.as_std_path()).await
                         && e.kind() != std::io::ErrorKind::NotFound
                     {
-                        tracing::warn!(path = %path, error = %e, "failed to remove bad L2 cache file");
+                        tracing::warn!(path = %path, error = ?e, "failed to remove bad L2 cache file");
                     }
                     // Fall through to CAS refetch.
                 }
@@ -493,7 +496,7 @@ impl CasVfs {
                     // Cache miss — fall through to RPC
                 }
                 Err(e) => {
-                    tracing::warn!(hash = %chunk_hash.0, error = %e, "L2 cache read error");
+                    tracing::warn!(hash = %chunk_hash.0, error = ?e, "L2 cache read error");
                     // Fall through to RPC
                 }
             }
@@ -506,7 +509,7 @@ impl CasVfs {
         if let Some(path) = self.chunk_cache_path(&chunk_hash.0)
             && let Err(e) = vx_io::atomic_write(&path, &data[..], false).await
         {
-            tracing::warn!(hash = %chunk_hash.0, error = %e, "L2 cache write-through failed");
+            tracing::warn!(hash = %chunk_hash.0, error = ?e, "L2 cache write-through failed");
         }
 
         self.chunk_l1_cache
@@ -530,11 +533,13 @@ impl CasVfs {
             .cas
             .get_node(blob_node_hash)
             .await
-            .map_err(|e| format!("failed to read BlobNode: {e}"))?
+            .map_err(|e| format!("failed to read BlobNode: {:?}", e))?
+            .ret
+            .clone()
             .ok_or_else(|| format!("BlobNode {} not found", blob_node_hash.to_hex()))?;
 
         let node = CasNode::from_bytes(&node_data)
-            .map_err(|e| format!("failed to deserialize BlobNode: {e}"))?;
+            .map_err(|e| format!("failed to deserialize BlobNode: {:?}", e))?;
 
         let blob = match node {
             CasNode::Blob(b) => b,
@@ -756,7 +761,7 @@ impl CasVfs {
                     context,
                     hash = %identity.cas_hash,
                     blob_node = ?identity.blob_node,
-                    error = %e,
+                    error = ?e,
                     "failed to compute CAS truth size for consistency check"
                 );
             }
@@ -989,8 +994,8 @@ impl CasVfs {
     }
 }
 
-impl Vfs for CasVfs {
-    async fn lookup(&self, _cx: &roam::Context, parent_id: ItemId, name: String) -> LookupResult {
+impl CasVfs {
+    pub(crate) async fn lookup(&self, parent_id: ItemId, name: String) -> LookupResult {
         tracing::trace!(parent_id, name = %name, "VFS lookup");
 
         let state = self.state.lock();
@@ -1023,7 +1028,7 @@ impl Vfs for CasVfs {
         }
     }
 
-    async fn get_attributes(&self, _cx: &roam::Context, item_id: ItemId) -> GetAttributesResult {
+    pub(crate) async fn get_attributes(&self, item_id: ItemId) -> GetAttributesResult {
         tracing::trace!(item_id, "VFS get_attributes");
 
         let (attrs, identity_to_check) = {
@@ -1082,9 +1087,8 @@ impl Vfs for CasVfs {
         }
     }
 
-    async fn read_dir(
+    pub(crate) async fn read_dir(
         &self,
-        _cx: &roam::Context,
         item_id: ItemId,
         cookie: u64,
         verifier: u64,
@@ -1194,13 +1198,7 @@ impl Vfs for CasVfs {
         result
     }
 
-    async fn read(
-        &self,
-        _cx: &roam::Context,
-        item_id: ItemId,
-        offset: u64,
-        len: u64,
-    ) -> ReadResult {
+    pub(crate) async fn read(&self, item_id: ItemId, offset: u64, len: u64) -> ReadResult {
         tracing::trace!(item_id, offset, len, "VFS read");
 
         // Extract what we need while holding the read lock — slice the write buffer
@@ -1282,7 +1280,7 @@ impl Vfs for CasVfs {
                 }
             }
             Err(e) => {
-                tracing::error!(hash = %hash, error = %e, "failed to read blob range");
+                tracing::error!(hash = %hash, error = ?e, "failed to read blob range");
                 ReadResult {
                     data: Vec::new(),
                     error: errno::EIO,
@@ -1291,13 +1289,7 @@ impl Vfs for CasVfs {
         }
     }
 
-    async fn write(
-        &self,
-        _cx: &roam::Context,
-        item_id: ItemId,
-        offset: u64,
-        data: Vec<u8>,
-    ) -> WriteResult {
+    pub(crate) async fn write(&self, item_id: ItemId, offset: u64, data: Vec<u8>) -> WriteResult {
         tracing::trace!(item_id, offset, len = data.len(), "write");
 
         let mut state = self.state.lock();
@@ -1342,9 +1334,8 @@ impl Vfs for CasVfs {
         }
     }
 
-    async fn create(
+    pub(crate) async fn create(
         &self,
-        _cx: &roam::Context,
         parent_id: ItemId,
         name: String,
         item_type: ItemType,
@@ -1403,7 +1394,7 @@ impl Vfs for CasVfs {
         }
     }
 
-    async fn delete(&self, _cx: &roam::Context, item_id: ItemId) -> VfsResult {
+    pub(crate) async fn delete(&self, item_id: ItemId) -> VfsResult {
         tracing::trace!(item_id, "delete");
 
         if item_id == ROOT_ITEM_ID {
@@ -1433,9 +1424,8 @@ impl Vfs for CasVfs {
         VfsResult { error: errno::OK }
     }
 
-    async fn rename(
+    pub(crate) async fn rename(
         &self,
-        _cx: &roam::Context,
         item_id: ItemId,
         new_parent_id: ItemId,
         new_name: String,
@@ -1487,9 +1477,8 @@ impl Vfs for CasVfs {
         VfsResult { error: errno::OK }
     }
 
-    async fn set_attributes(
+    pub(crate) async fn set_attributes(
         &self,
-        _cx: &roam::Context,
         item_id: ItemId,
         params: SetAttributesParams,
     ) -> VfsResult {
@@ -1525,8 +1514,104 @@ impl Vfs for CasVfs {
         VfsResult { error: errno::OK }
     }
 
-    async fn ping(&self, _cx: &roam::Context) -> String {
+    pub(crate) async fn ping(&self) -> String {
         "pong from vx-runner CAS VFS".to_string()
+    }
+}
+
+impl Vfs for CasVfs {
+    async fn lookup(
+        &self,
+        call: impl roam::Call<LookupResult, core::convert::Infallible>,
+        parent_id: ItemId,
+        name: String,
+    ) {
+        call.ok(CasVfs::lookup(self, parent_id, name).await).await;
+    }
+
+    async fn get_attributes(
+        &self,
+        call: impl roam::Call<GetAttributesResult, core::convert::Infallible>,
+        item_id: ItemId,
+    ) {
+        call.ok(CasVfs::get_attributes(self, item_id).await).await;
+    }
+
+    async fn read_dir(
+        &self,
+        call: impl roam::Call<ReadDirResult, core::convert::Infallible>,
+        item_id: ItemId,
+        cookie: u64,
+        verifier: u64,
+    ) {
+        call.ok(CasVfs::read_dir(self, item_id, cookie, verifier).await)
+            .await;
+    }
+
+    async fn read(
+        &self,
+        call: impl roam::Call<ReadResult, core::convert::Infallible>,
+        item_id: ItemId,
+        offset: u64,
+        len: u64,
+    ) {
+        call.ok(CasVfs::read(self, item_id, offset, len).await)
+            .await;
+    }
+
+    async fn write(
+        &self,
+        call: impl roam::Call<WriteResult, core::convert::Infallible>,
+        item_id: ItemId,
+        offset: u64,
+        data: Vec<u8>,
+    ) {
+        call.ok(CasVfs::write(self, item_id, offset, data).await)
+            .await;
+    }
+
+    async fn create(
+        &self,
+        call: impl roam::Call<CreateResult, core::convert::Infallible>,
+        parent_id: ItemId,
+        name: String,
+        item_type: ItemType,
+    ) {
+        call.ok(CasVfs::create(self, parent_id, name, item_type).await)
+            .await;
+    }
+
+    async fn delete(
+        &self,
+        call: impl roam::Call<VfsResult, core::convert::Infallible>,
+        item_id: ItemId,
+    ) {
+        call.ok(CasVfs::delete(self, item_id).await).await;
+    }
+
+    async fn rename(
+        &self,
+        call: impl roam::Call<VfsResult, core::convert::Infallible>,
+        item_id: ItemId,
+        new_parent_id: ItemId,
+        new_name: String,
+    ) {
+        call.ok(CasVfs::rename(self, item_id, new_parent_id, new_name).await)
+            .await;
+    }
+
+    async fn set_attributes(
+        &self,
+        call: impl roam::Call<VfsResult, core::convert::Infallible>,
+        item_id: ItemId,
+        params: SetAttributesParams,
+    ) {
+        call.ok(CasVfs::set_attributes(self, item_id, params).await)
+            .await;
+    }
+
+    async fn ping(&self, call: impl roam::Call<String, core::convert::Infallible>) {
+        call.ok(CasVfs::ping(self).await).await;
     }
 }
 
@@ -1547,7 +1632,7 @@ impl CasVfs {
         let content_hash = Blake3Hash::from_bytes(&data);
         let chunk_hash = ChunkHash(content_hash);
         match self.cas.put_chunk(chunk_hash, data.clone()).await {
-            Ok(()) => {
+            Ok(_) => {
                 let mut state = self.state.lock();
                 if let Some(item) = state.items.get_mut(&item_id) {
                     item.cas_hash = Some(content_hash);
@@ -1559,7 +1644,7 @@ impl CasVfs {
                 Some((content_hash, size))
             }
             Err(e) => {
-                tracing::error!(item_id, error = %e, "failed to flush to CAS, restoring write buffer");
+                tracing::error!(item_id, error = ?e, "failed to flush to CAS, restoring write buffer");
                 // Restore the write buffer so data isn't lost
                 let mut state = self.state.lock();
                 if let Some(item) = state.items.get_mut(&item_id) {
@@ -1639,7 +1724,7 @@ impl CasVfs {
             let mut root_entries = match tokio::fs::read_dir(prefix_dir.as_std_path()).await {
                 Ok(entries) => entries,
                 Err(e) => {
-                    tracing::error!(%prefix_dir, error = %e, "failed to read prefix dir from disk");
+                    tracing::error!(%prefix_dir, error = ?e, "failed to read prefix dir from disk");
                     return results;
                 }
             };
@@ -1649,7 +1734,7 @@ impl CasVfs {
                     Ok(Some(entry)) => stack.push((entry.path(), String::new())),
                     Ok(None) => break,
                     Err(e) => {
-                        tracing::error!(%prefix_dir, error = %e, "failed to iterate prefix dir");
+                        tracing::error!(%prefix_dir, error = ?e, "failed to iterate prefix dir");
                         break;
                     }
                 }
@@ -1672,7 +1757,7 @@ impl CasVfs {
                                 Err(e) => {
                                     tracing::warn!(
                                         path = %path.display(),
-                                        error = %e,
+                                        error = ?e,
                                         "failed to iterate directory while flushing prefix"
                                     );
                                     break;
@@ -1682,7 +1767,7 @@ impl CasVfs {
                         Err(e) => {
                             tracing::warn!(
                                 path = %path.display(),
-                                error = %e,
+                                error = ?e,
                                 "failed to read directory while flushing prefix"
                             );
                         }
@@ -1692,7 +1777,7 @@ impl CasVfs {
                     Err(e) => {
                         tracing::warn!(
                             path = %path.display(),
-                            error = %e,
+                            error = ?e,
                             "failed to stat path while flushing prefix"
                         );
                     }
@@ -1709,7 +1794,7 @@ impl CasVfs {
                     let content_hash = Blake3Hash::from_bytes(&data);
                     let chunk_hash = ChunkHash(content_hash);
                     match self.cas.put_chunk(chunk_hash, data).await {
-                        Ok(()) => {
+                        Ok(_) => {
                             tracing::debug!(
                                 path = %rel_path,
                                 size,
@@ -1719,12 +1804,12 @@ impl CasVfs {
                             results.insert(rel_path, (content_hash, size));
                         }
                         Err(e) => {
-                            tracing::error!(path = %rel_path, error = %e, "failed to put chunk");
+                            tracing::error!(path = %rel_path, error = ?e, "failed to put chunk");
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::error!(path = %rel_path, error = %e, "failed to read file from disk");
+                    tracing::error!(path = %rel_path, error = ?e, "failed to read file from disk");
                 }
             }
         }

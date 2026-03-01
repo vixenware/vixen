@@ -1,17 +1,16 @@
 use std::net::TcpListener;
 use std::time::Duration;
 
-use roam_stream::NoDispatcher;
 use tempfile::TempDir;
 use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_store_proto::{Blake3Hash, CasNode, NodeHash, NodeId, NodeManifest, StoreClient};
 
-type Caller = roam_stream::ConnectionHandle;
+type Caller = roam_core::DriverCaller;
 
 pub struct StoreTestEnv {
     _root: TempDir,
     _vx_home: TempDir,
-    _service: ServiceHandle<NoDispatcher>,
+    _service: ServiceHandle,
     pub client: StoreClient<Caller>,
 }
 

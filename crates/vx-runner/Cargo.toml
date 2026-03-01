@@ -19,6 +19,8 @@ facet = { workspace = true }
 figue = { workspace = true }
 thiserror = { workspace = true }
 roam = { workspace = true }
+roam-core = { workspace = true }
+roam-types = { workspace = true }
 roam-stream = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

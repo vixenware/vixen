@@ -11,26 +11,36 @@
 //!
 //! struct MyVfs;
 //!
-//! impl Vfs for MyVfs {
-//!     async fn lookup(&self, _cx: &roam::session::Context, parent_id: ItemId, name: String) -> LookupResult {
+//! impl VfsServer for MyVfs {
+//!     async fn lookup(&self, call: impl roam::Call<LookupResult, core::convert::Infallible>, parent_id: ItemId, name: String) {
 //!         // Your implementation here
-//!         todo!()
+//!         call.ok(LookupResult {
+//!             attrs: ItemAttributes {
+//!                 item_id: parent_id,
+//!                 item_type: ItemType::Directory,
+//!                 size: 0,
+//!                 modified_time: 0,
+//!                 created_time: 0,
+//!                 mode: mode::DIR_REGULAR,
+//!             },
+//!             error: errno::OK,
+//!         }).await;
 //!     }
 //!     // ... implement other methods
-//! #   async fn get_attributes(&self, _cx: &roam::session::Context, item_id: ItemId) -> GetAttributesResult { todo!() }
-//! #   async fn read_dir(&self, _cx: &roam::session::Context, item_id: ItemId, cookie: u64, verifier: u64) -> ReadDirResult { todo!() }
-//! #   async fn read(&self, _cx: &roam::session::Context, item_id: ItemId, offset: u64, len: u64) -> ReadResult { todo!() }
-//! #   async fn write(&self, _cx: &roam::session::Context, item_id: ItemId, offset: u64, data: Vec<u8>) -> WriteResult { todo!() }
-//! #   async fn create(&self, _cx: &roam::session::Context, parent_id: ItemId, name: String, item_type: ItemType) -> CreateResult { todo!() }
-//! #   async fn delete(&self, _cx: &roam::session::Context, item_id: ItemId) -> VfsResult { todo!() }
-//! #   async fn rename(&self, _cx: &roam::session::Context, item_id: ItemId, new_parent_id: ItemId, new_name: String) -> VfsResult { todo!() }
-//! #   async fn set_attributes(&self, _cx: &roam::session::Context, item_id: ItemId, params: SetAttributesParams) -> VfsResult { todo!() }
-//! #   async fn ping(&self, _cx: &roam::session::Context) -> String { todo!() }
+//! #   async fn get_attributes(&self, call: impl roam::Call<GetAttributesResult, core::convert::Infallible>, _item_id: ItemId) { call.ok(GetAttributesResult { attrs: ItemAttributes { item_id: 1, item_type: ItemType::Directory, size: 0, modified_time: 0, created_time: 0, mode: mode::DIR_REGULAR }, error: errno::OK }).await; }
+//! #   async fn read_dir(&self, call: impl roam::Call<ReadDirResult, core::convert::Infallible>, _item_id: ItemId, _cookie: u64, _verifier: u64) { call.ok(ReadDirResult { entries: vec![], next_cookie: 0, verifier: 0, error: errno::OK }).await; }
+//! #   async fn read(&self, call: impl roam::Call<ReadResult, core::convert::Infallible>, _item_id: ItemId, _offset: u64, _len: u64) { call.ok(ReadResult { data: vec![], error: errno::OK }).await; }
+//! #   async fn write(&self, call: impl roam::Call<WriteResult, core::convert::Infallible>, _item_id: ItemId, _offset: u64, _data: Vec<u8>) { call.ok(WriteResult { bytes_written: 0, error: errno::OK }).await; }
+//! #   async fn create(&self, call: impl roam::Call<CreateResult, core::convert::Infallible>, _parent_id: ItemId, _name: String, _item_type: ItemType) { call.ok(CreateResult { item_id: 1, error: errno::OK }).await; }
+//! #   async fn delete(&self, call: impl roam::Call<VfsResult, core::convert::Infallible>, _item_id: ItemId) { call.ok(VfsResult { error: errno::OK }).await; }
+//! #   async fn rename(&self, call: impl roam::Call<VfsResult, core::convert::Infallible>, _item_id: ItemId, _new_parent_id: ItemId, _new_name: String) { call.ok(VfsResult { error: errno::OK }).await; }
+//! #   async fn set_attributes(&self, call: impl roam::Call<VfsResult, core::convert::Infallible>, _item_id: ItemId, _params: SetAttributesParams) { call.ok(VfsResult { error: errno::OK }).await; }
+//! #   async fn ping(&self, call: impl roam::Call<String, core::convert::Infallible>) { call.ok("pong".to_string()).await; }
 
 //! }
 //! ```
 //!
-//! Then serve it over TCP using the generated `VfsDispatcher` with `roam_stream::accept`.
+//! Then serve it over TCP using `VfsDispatcher` with `roam_core::acceptor` and `roam_core::Driver`.
 //!
 //! ## Architecture
 //!

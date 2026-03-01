@@ -85,9 +85,9 @@ pub enum RunnerError {
     CasManifestStore(String),
 }
 
-impl<E: std::fmt::Debug> From<roam::session::CallError<E>> for RunnerError {
-    fn from(e: roam::session::CallError<E>) -> Self {
-        RunnerError::CasRpc(e.to_string())
+impl<E: std::fmt::Debug> From<roam::RoamError<E>> for RunnerError {
+    fn from(e: roam::RoamError<E>) -> Self {
+        RunnerError::CasRpc(format!("{e:?}"))
     }
 }
 

@@ -24,6 +24,8 @@ vx-vfs = { workspace = true }
 
 # RPC
 roam = { workspace = true }
+roam-core = { workspace = true }
+roam-types = { workspace = true }
 moire = { workspace = true }
 roam-stream = { workspace = true }
 vx-io = { workspace = true }

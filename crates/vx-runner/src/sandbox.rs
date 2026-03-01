@@ -15,6 +15,7 @@
 //! Also provides timeout enforcement and streamed output for all platforms.
 
 use moire::process::Command;
+use moire::task::FutureExt;
 use std::process::ExitStatus;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -202,7 +203,7 @@ pub async fn run_sandboxed_command(
                 let current = latest_for_tick.lock().clone();
                 if current != last_sent && !current.is_empty() {
                     let _ = progress
-                        .send(&StoreProgress {
+                        .send(StoreProgress {
                             message: format!("{action_desc_owned}: {current}"),
                             current: None,
                             total: None,

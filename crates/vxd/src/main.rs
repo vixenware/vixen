@@ -28,7 +28,11 @@ use camino::Utf8PathBuf;
 use eyre::Result;
 use facet::Facet;
 use figue as args;
-use roam_stream::{HandshakeConfig, NoDispatcher, accept};
+use moire::task::FutureExt;
+use roam_core::acceptor;
+use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
+use roam_stream::StreamLink;
+use roam_types::{ConnectionSettings, Metadata, Parity};
 use std::sync::Arc;
 use std::time::Duration;
 use vx_io::boot::{BootDispatcher, BootGate};
@@ -42,7 +46,7 @@ pub use inputs::*;
 pub use queries::*;
 pub use service::VxdService;
 
-pub type UpstreamCaller = roam_stream::ConnectionHandle;
+pub type UpstreamCaller = roam_core::DriverCaller;
 
 /// vxd - Build orchestration daemon
 #[derive(Facet, Debug)]
@@ -155,11 +159,54 @@ struct ServiceClients {
     exec: Arc<RunnerClient<UpstreamCaller>>,
 }
 
+#[derive(Clone)]
+struct VxdVirtualAcceptor {
+    boot_service: vx_io::boot::BootService<Arc<VxdService>>,
+}
+
+impl ConnectionAcceptor for VxdVirtualAcceptor {
+    fn accept(
+        &self,
+        _conn_id: roam_types::ConnectionId,
+        peer_settings: &ConnectionSettings,
+        _metadata: &[roam_types::MetadataEntry],
+    ) -> std::result::Result<AcceptedConnection, Metadata<'static>> {
+        let Some(daemon) = self.boot_service.gate().service().cloned() else {
+            return Err(vec![]);
+        };
+
+        let parity = peer_settings.parity.other();
+        let session = daemon.new_session();
+        Ok(AcceptedConnection {
+            settings: ConnectionSettings {
+                parity,
+                max_concurrent_requests: peer_settings.max_concurrent_requests,
+            },
+            metadata: vec![],
+            setup: Box::new(move |handle| {
+                let session = session.clone();
+                moire::task::spawn(
+                    async move {
+                        let dispatcher = VxdDispatcher::new(session.clone());
+                        let mut driver = Driver::new(handle, dispatcher, parity);
+                        let progress_listener =
+                            Arc::new(vxd_proto::ProgressListenerClient::new(driver.caller()));
+                        session.set_progress_listener(Some(progress_listener)).await;
+                        driver.run().await;
+                        session.cancel_active_build().await;
+                    }
+                    .named("vxd_virtual_driver"),
+                );
+            }),
+        })
+    }
+}
+
 /// Ensure services are running (spawning them if necessary), run the boot
 /// protocol on each, and return connected roam clients.
 async fn ensure_services(
     args: &Args,
-    spawn_tracker: &Arc<Mutex<SpawnTracker>>,
+    spawn_tracker: &Arc<SyncMutex<SpawnTracker>>,
 ) -> Result<ServiceClients> {
     use vx_io::spawn::ServiceBuilder;
 
@@ -448,90 +495,58 @@ async fn async_main() -> Result<()> {
         let boot_service = boot_service.clone();
 
         let conn_name = format!("vxd_connection_{peer_addr}");
-        moire::task::spawn(async move {
-            tracing::debug!("New connection from {}", peer_addr);
+        moire::task::spawn(
+            async move {
+                tracing::debug!("New connection from {}", peer_addr);
 
-            // Root connection gets Boot service only — clients must call boot()
-            // then open a virtual connection for the real Vxd service.
-            let boot_dispatcher = BootDispatcher::new(boot_service.clone());
-            let (_handle, mut incoming, driver) = match accept(
-                stream,
-                HandshakeConfig {
-                    max_payload_size: 256 * 1024 * 1024, // 256 MiB
-                    name: Some("vxd".into()),
-                    ..Default::default()
-                },
-                boot_dispatcher,
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("Handshake error from {}: {e}", peer_addr);
-                    let count =
-                        active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) - 1;
-                    tracing::trace!(
-                        %peer_addr,
-                        active_connections = count,
-                        "connection dropped after handshake error"
-                    );
-                    *last_disconnect.lock() = Some(tokio::time::Instant::now());
-                    return;
-                }
-            };
-
-            // Drive the connection in the background
-            let driver_handle =
-                moire::task::spawn(async move {
-                    driver.run().await
-                }.named("vxd_driver"));
-
-            // Accept virtual connections — each gets a per-session VxdDispatcher.
-            // Reject if boot hasn't completed (client should call boot() first).
-            while let Some(conn) = incoming.recv().await {
-                let Some(daemon) = boot_service.gate().service() else {
-                    tracing::trace!(%peer_addr, "rejecting virtual connection: boot not complete");
-                    conn.reject("boot not complete".into(), vec![]);
-                    continue;
-                };
-                let session = daemon.new_session();
-                let dispatcher = VxdDispatcher::new(session.clone());
-
-                match conn.accept(vec![], Some(Box::new(dispatcher))).await {
-                    Ok(virtual_handle) => {
-                        let progress_listener = Arc::new(vxd_proto::ProgressListenerClient::new(
-                            virtual_handle.clone(),
-                        ));
-                        session.set_progress_listener(Some(progress_listener)).await;
-                        tracing::debug!("Virtual connection accepted from {}", peer_addr);
-                        // Note: cancel_active_build is handled when the root
-                        // connection's driver finishes (all virtual connections
-                        // close with it). Per-virtual-conn cancellation can be
-                        // added later if we support multiple virtual connections
-                        // per root connection.
-                    }
+                // Root connection gets Boot service only — clients must call boot(),
+                // then open a virtual connection for the real Vxd service.
+                let (reader, writer) = tokio::io::split(stream);
+                let conduit = BareConduit::<roam_types::MessageFamily, _>::new(StreamLink::new(
+                    reader, writer,
+                ));
+                let (mut session, root_handle, _session_handle) = match acceptor(conduit)
+                    .on_connection(VxdVirtualAcceptor {
+                        boot_service: boot_service.clone(),
+                    })
+                    .establish()
+                    .await
+                {
+                    Ok(parts) => parts,
                     Err(e) => {
-                        tracing::warn!(
-                            "Failed to accept virtual connection from {}: {e}",
-                            peer_addr
+                        tracing::warn!("Handshake error from {}: {e}", peer_addr);
+                        let count = active_connections
+                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
+                            - 1;
+                        tracing::trace!(
+                            %peer_addr,
+                            active_connections = count,
+                            "connection dropped after handshake error"
                         );
+                        *last_disconnect.lock() = Some(tokio::time::Instant::now());
+                        return;
                     }
+                };
+
+                let session_handle =
+                    moire::task::spawn(async move { session.run().await }.named("vxd_session"));
+                let boot_dispatcher = BootDispatcher::new(boot_service.clone());
+                let mut root_driver = Driver::new(root_handle, boot_dispatcher, Parity::Even);
+                root_driver.run().await;
+                if let Err(e) = session_handle.await {
+                    tracing::warn!("Session error from {}: {e:?}", peer_addr);
                 }
-            }
 
-            // incoming channel closed — root connection is done
-            tracing::trace!(%peer_addr, "incoming virtual connection channel closed, awaiting driver");
-            if let Err(e) = driver_handle.await {
-                tracing::warn!("Driver error from {}: {e:?}", peer_addr);
+                let count =
+                    active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) - 1;
+                tracing::debug!(
+                    %peer_addr,
+                    active_connections = count,
+                    "connection closed"
+                );
+                *last_disconnect.lock() = Some(tokio::time::Instant::now());
             }
-
-            let count = active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) - 1;
-            tracing::debug!(
-                %peer_addr,
-                active_connections = count,
-                "connection closed"
-            );
-            *last_disconnect.lock() = Some(tokio::time::Instant::now());
-        }.named(conn_name));
+            .named(conn_name),
+        );
     }
 }

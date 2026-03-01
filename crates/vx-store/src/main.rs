@@ -18,7 +18,11 @@ use camino::Utf8PathBuf;
 use eyre::Result;
 use facet::Facet;
 use figue as args;
-use roam_stream::{HandshakeConfig, accept};
+use moire::task::FutureExt;
+use roam_core::acceptor;
+use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
+use roam_stream::StreamLink;
+use roam_types::{ConnectionSettings, Metadata, Parity};
 use std::sync::Arc;
 use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
@@ -42,6 +46,43 @@ struct Args {
     /// Standard CLI options (--help, --version, --completions)
     #[facet(flatten)]
     builtins: args::FigueBuiltins,
+}
+
+#[derive(Clone)]
+struct StoreVirtualAcceptor {
+    boot_service: vx_io::boot::BootService<StoreService>,
+}
+
+impl ConnectionAcceptor for StoreVirtualAcceptor {
+    fn accept(
+        &self,
+        _conn_id: roam_types::ConnectionId,
+        peer_settings: &ConnectionSettings,
+        _metadata: &[roam_types::MetadataEntry],
+    ) -> std::result::Result<AcceptedConnection, Metadata<'static>> {
+        let Some(store) = self.boot_service.gate().service().cloned() else {
+            return Err(vec![]);
+        };
+
+        let parity = peer_settings.parity.other();
+        Ok(AcceptedConnection {
+            settings: ConnectionSettings {
+                parity,
+                max_concurrent_requests: peer_settings.max_concurrent_requests,
+            },
+            metadata: vec![],
+            setup: Box::new(move |handle| {
+                let dispatcher = StoreDispatcher::new(store);
+                moire::task::spawn(
+                    async move {
+                        let mut driver = Driver::new(handle, dispatcher, parity);
+                        driver.run().await;
+                    }
+                    .named("store_virtual_driver"),
+                );
+            }),
+        })
+    }
 }
 
 fn main() -> Result<()> {
@@ -127,45 +168,30 @@ async fn async_main() -> Result<()> {
 
                 // Root connection gets Boot service only.
                 let boot_dispatcher = BootDispatcher::new(boot_service.clone());
-                let (_handle, mut incoming, driver) = match accept(
-                    stream,
-                    HandshakeConfig {
-                        max_payload_size: 256 * 1024 * 1024, // 256 MiB
-                        name: Some("vx-store".into()),
-                        ..Default::default()
-                    },
-                    boot_dispatcher,
-                )
-                .await
+                let (reader, writer) = tokio::io::split(stream);
+                let conduit = BareConduit::<roam_types::MessageFamily, _>::new(StreamLink::new(
+                    reader, writer,
+                ));
+                let (mut session, root_handle, _session_handle) = match acceptor(conduit)
+                    .on_connection(StoreVirtualAcceptor {
+                        boot_service: boot_service.clone(),
+                    })
+                    .establish()
+                    .await
                 {
-                    Ok(v) => v,
+                    Ok(parts) => parts,
                     Err(e) => {
                         tracing::debug!("Handshake failed for {}: {e}", peer_addr);
                         return;
                     }
                 };
 
-                // Drive the connection in the background.
-                let driver_handle =
-                    moire::task::spawn(async move { driver.run().await }.named("store_driver"));
-
-                // Accept virtual connections — each gets a StoreDispatcher.
-                while let Some(conn) = incoming.recv().await {
-                    let Some(store) = boot_service.gate().service() else {
-                        conn.reject("boot not complete".into(), vec![]);
-                        continue;
-                    };
-                    let dispatcher = StoreDispatcher::new(store.clone());
-                    if let Err(e) = conn.accept(vec![], Some(Box::new(dispatcher))).await {
-                        tracing::warn!(
-                            "Failed to accept virtual connection from {}: {e}",
-                            peer_addr
-                        );
-                    }
-                }
-
-                if let Err(e) = driver_handle.await {
-                    tracing::warn!("Driver error from {}: {e:?}", peer_addr);
+                let session_handle =
+                    moire::task::spawn(async move { session.run().await }.named("store_session"));
+                let mut root_driver = Driver::new(root_handle, boot_dispatcher, Parity::Even);
+                root_driver.run().await;
+                if let Err(e) = session_handle.await {
+                    tracing::warn!("Session error from {}: {e:?}", peer_addr);
                 }
                 tracing::debug!("Connection from {} closed", peer_addr);
             }

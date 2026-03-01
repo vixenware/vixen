@@ -1,4 +1,4 @@
-use vx_store_proto::Store;
+use vx_store_proto::StoreServer as StoreRpc;
 use vx_store_proto::{
     Blake3Hash, BlobRef, CDC_MAX_CHUNK, CacheKey, CasNode, ChunkHash, DirEntryKind, DirectoryNode,
     EnsureRegistryCrateResult, EnsureRustToolchainComponentResult, EnsureStatus,
@@ -12,12 +12,13 @@ use vx_store_proto::{
 use crate::chunking;
 use crate::registry::download_crate;
 use crate::types::StoreService;
+use moire::task::FutureExt;
 
 const CRATES_IO_REGISTRY: &str = "https://crates.io";
 const MATERIALIZATION_LAYOUT_VERSION: u32 = 2;
 
-impl Store for StoreService {
-    async fn version(&self, _cx: &roam::Context) -> ServiceVersion {
+impl StoreService {
+    async fn version(&self) -> ServiceVersion {
         ServiceVersion {
             service: "vx-store".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -29,12 +30,7 @@ impl Store for StoreService {
     // Chunk operations
     // =========================================================================
 
-    async fn put_chunk(
-        &self,
-        _cx: &roam::Context,
-        hash: ChunkHash,
-        data: Vec<u8>,
-    ) -> Result<(), String> {
+    async fn put_chunk(&self, hash: ChunkHash, data: Vec<u8>) -> Result<(), String> {
         // Validate size
         if data.len() > CDC_MAX_CHUNK as usize {
             return Err(format!(
@@ -61,19 +57,15 @@ impl Store for StoreService {
             .map_err(|e| format!("storage error: {e}"))
     }
 
-    async fn get_chunk(&self, _cx: &roam::Context, hash: ChunkHash) -> Option<Vec<u8>> {
+    async fn get_chunk(&self, hash: ChunkHash) -> Option<Vec<u8>> {
         self.storage.get_chunk(&hash).await.ok().flatten()
     }
 
-    async fn has_chunk(&self, _cx: &roam::Context, hash: ChunkHash) -> bool {
+    async fn has_chunk(&self, hash: ChunkHash) -> bool {
         self.storage.has_chunk(&hash).await.unwrap_or(false)
     }
 
-    async fn list_missing_chunks(
-        &self,
-        _cx: &roam::Context,
-        hashes: Vec<ChunkHash>,
-    ) -> Vec<ChunkHash> {
+    async fn list_missing_chunks(&self, hashes: Vec<ChunkHash>) -> Vec<ChunkHash> {
         let hashes = if hashes.len() > MAX_MISSING_CHUNKS_BATCH {
             tracing::warn!(
                 count = hashes.len(),
@@ -99,12 +91,7 @@ impl Store for StoreService {
     // Node operations
     // =========================================================================
 
-    async fn put_node(
-        &self,
-        _cx: &roam::Context,
-        hash: NodeHash,
-        data: Vec<u8>,
-    ) -> Result<(), String> {
+    async fn put_node(&self, hash: NodeHash, data: Vec<u8>) -> Result<(), String> {
         // Validate size
         if data.len() > MAX_NODE_BYTES {
             return Err(format!(
@@ -140,11 +127,11 @@ impl Store for StoreService {
             .map_err(|e| format!("storage error: {e}"))
     }
 
-    async fn get_node(&self, _cx: &roam::Context, hash: NodeHash) -> Option<Vec<u8>> {
+    async fn get_node(&self, hash: NodeHash) -> Option<Vec<u8>> {
         self.storage.get_node(&hash).await.ok().flatten()
     }
 
-    async fn has_node(&self, _cx: &roam::Context, hash: NodeHash) -> bool {
+    async fn has_node(&self, hash: NodeHash) -> bool {
         self.storage.has_node(&hash).await.unwrap_or(false)
     }
 
@@ -152,7 +139,7 @@ impl Store for StoreService {
     // Cache key operations
     // =========================================================================
 
-    async fn lookup(&self, _cx: &roam::Context, cache_key: CacheKey) -> Option<NodeHash> {
+    async fn lookup(&self, cache_key: CacheKey) -> Option<NodeHash> {
         self.storage
             .get_cache(&cache_key)
             .await
@@ -161,12 +148,7 @@ impl Store for StoreService {
             .map(NodeHash)
     }
 
-    async fn publish(
-        &self,
-        _cx: &roam::Context,
-        cache_key: CacheKey,
-        manifest_hash: NodeHash,
-    ) -> PublishResult {
+    async fn publish(&self, cache_key: CacheKey, manifest_hash: NodeHash) -> PublishResult {
         // Validate node exists
         if !self.storage.has_node(&manifest_hash).await.unwrap_or(false) {
             return PublishResult {
@@ -191,7 +173,7 @@ impl Store for StoreService {
         }
     }
 
-    async fn unpublish(&self, _cx: &roam::Context, cache_key: CacheKey) -> bool {
+    async fn unpublish(&self, cache_key: CacheKey) -> bool {
         match self.storage.delete_cache(&cache_key).await {
             Ok(deleted) => deleted,
             Err(e) => {
@@ -201,64 +183,7 @@ impl Store for StoreService {
         }
     }
 
-    // =========================================================================
-    // Toolchain operations (delegate to inherent methods)
-    // =========================================================================
-
-    #[tracing::instrument(skip(self, progress), fields(name = ?spec.channel))]
-    async fn ensure_rust_toolchain(
-        &self,
-        _cx: &roam::Context,
-        spec: RustToolchainSpec,
-        progress: roam::Tx<StoreProgress>,
-    ) -> EnsureToolchainResult {
-        StoreService::ensure_rust_toolchain(self, spec, progress).await
-    }
-
-    async fn download_rust_toolchain_component(
-        &self,
-        _cx: &roam::Context,
-        spec: RustToolchainSpec,
-        component: RustComponent,
-        progress: roam::Tx<StoreProgress>,
-    ) -> EnsureRustToolchainComponentResult {
-        StoreService::download_rust_toolchain_component(self, spec, component, progress).await
-    }
-
-    async fn extract_rust_toolchain_component(
-        &self,
-        _cx: &roam::Context,
-        spec: RustToolchainSpec,
-        component: RustComponent,
-        tarball: BlobRef,
-        progress: roam::Tx<StoreProgress>,
-    ) -> EnsureRustToolchainComponentResult {
-        StoreService::extract_rust_toolchain_component(self, spec, component, tarball, progress)
-            .await
-    }
-
-    async fn finalize_rust_toolchain(
-        &self,
-        _cx: &roam::Context,
-        spec: RustToolchainSpec,
-    ) -> EnsureToolchainResult {
-        StoreService::finalize_rust_toolchain(self, spec).await
-    }
-
-    async fn ensure_zig_toolchain(
-        &self,
-        _cx: &roam::Context,
-        spec: ZigToolchainSpec,
-        progress: roam::Tx<StoreProgress>,
-    ) -> EnsureToolchainResult {
-        StoreService::ensure_zig_toolchain(self, spec, progress).await
-    }
-
-    async fn lookup_toolchain_spec(
-        &self,
-        _cx: &roam::Context,
-        spec_key: ToolchainSpecKey,
-    ) -> Option<NodeHash> {
+    async fn lookup_toolchain_spec(&self, spec_key: ToolchainSpecKey) -> Option<NodeHash> {
         self.storage
             .get_toolchain_spec(&spec_key)
             .await
@@ -267,11 +192,7 @@ impl Store for StoreService {
             .map(NodeHash)
     }
 
-    async fn get_toolchain_manifest(
-        &self,
-        _cx: &roam::Context,
-        manifest_hash: NodeHash,
-    ) -> Option<ToolchainManifest> {
+    async fn get_toolchain_manifest(&self, manifest_hash: NodeHash) -> Option<ToolchainManifest> {
         let data = self.storage.get_node(&manifest_hash).await.ok().flatten()?;
         let node = CasNode::from_bytes(&data).ok()?;
         match node {
@@ -288,10 +209,9 @@ impl Store for StoreService {
 
     async fn get_materialization_plan(
         &self,
-        _cx: &roam::Context,
         manifest_hash: NodeHash,
     ) -> Option<MaterializationPlan> {
-        let manifest = Store::get_toolchain_manifest(self, _cx, manifest_hash).await?;
+        let manifest = StoreService::get_toolchain_manifest(self, manifest_hash).await?;
 
         // Pure function: manifest → plan (no heuristics, bit-for-bit stable)
         let steps = match manifest.kind {
@@ -338,7 +258,6 @@ impl Store for StoreService {
     #[tracing::instrument(skip(self, progress), fields(name = %spec.name, version = %spec.version))]
     async fn ensure_registry_crate(
         &self,
-        _cx: &roam::Context,
         spec: RegistrySpec,
         progress: roam::Tx<StoreProgress>,
     ) -> EnsureRegistryCrateResult {
@@ -383,7 +302,7 @@ impl Store for StoreService {
                 },
                 async move || {
                     let _ = progress
-                        .send(&StoreProgress {
+                        .send(StoreProgress {
                             message: format!("downloading {}@{}", spec.name, spec.version),
                             current: None,
                             total: None,
@@ -405,7 +324,7 @@ impl Store for StoreService {
                         };
 
                     let _ = progress
-                        .send(&StoreProgress {
+                        .send(StoreProgress {
                             message: format!("storing {}@{}", spec.name, spec.version),
                             current: None,
                             total: None,
@@ -534,7 +453,6 @@ impl Store for StoreService {
 
     async fn get_registry_manifest(
         &self,
-        _cx: &roam::Context,
         manifest_hash: NodeHash,
     ) -> Option<RegistryCrateManifest> {
         let data = self.storage.get_node(&manifest_hash).await.ok().flatten()?;
@@ -551,17 +469,213 @@ impl Store for StoreService {
         }
     }
 
-    async fn lookup_registry_spec(
-        &self,
-        _cx: &roam::Context,
-        spec_key: RegistrySpecKey,
-    ) -> Option<NodeHash> {
+    async fn lookup_registry_spec(&self, spec_key: RegistrySpecKey) -> Option<NodeHash> {
         self.storage
             .get_registry_spec(&spec_key)
             .await
             .ok()
             .flatten()
             .map(NodeHash)
+    }
+}
+
+impl StoreRpc for StoreService {
+    async fn version(&self, call: impl roam::Call<ServiceVersion, core::convert::Infallible>) {
+        call.ok(StoreService::version(self).await).await;
+    }
+
+    async fn put_chunk(&self, call: impl roam::Call<(), String>, hash: ChunkHash, data: Vec<u8>) {
+        match StoreService::put_chunk(self, hash, data).await {
+            Ok(()) => call.ok(()).await,
+            Err(error) => call.err(error).await,
+        }
+    }
+
+    async fn get_chunk(
+        &self,
+        call: impl roam::Call<Option<Vec<u8>>, core::convert::Infallible>,
+        hash: ChunkHash,
+    ) {
+        call.ok(StoreService::get_chunk(self, hash).await).await;
+    }
+
+    async fn has_chunk(
+        &self,
+        call: impl roam::Call<bool, core::convert::Infallible>,
+        hash: ChunkHash,
+    ) {
+        call.ok(StoreService::has_chunk(self, hash).await).await;
+    }
+
+    async fn list_missing_chunks(
+        &self,
+        call: impl roam::Call<Vec<ChunkHash>, core::convert::Infallible>,
+        hashes: Vec<ChunkHash>,
+    ) {
+        call.ok(StoreService::list_missing_chunks(self, hashes).await)
+            .await;
+    }
+
+    async fn put_node(&self, call: impl roam::Call<(), String>, hash: NodeHash, data: Vec<u8>) {
+        match StoreService::put_node(self, hash, data).await {
+            Ok(()) => call.ok(()).await,
+            Err(error) => call.err(error).await,
+        }
+    }
+
+    async fn get_node(
+        &self,
+        call: impl roam::Call<Option<Vec<u8>>, core::convert::Infallible>,
+        hash: NodeHash,
+    ) {
+        call.ok(StoreService::get_node(self, hash).await).await;
+    }
+
+    async fn has_node(
+        &self,
+        call: impl roam::Call<bool, core::convert::Infallible>,
+        hash: NodeHash,
+    ) {
+        call.ok(StoreService::has_node(self, hash).await).await;
+    }
+
+    async fn lookup(
+        &self,
+        call: impl roam::Call<Option<NodeHash>, core::convert::Infallible>,
+        cache_key: CacheKey,
+    ) {
+        call.ok(StoreService::lookup(self, cache_key).await).await;
+    }
+
+    async fn publish(
+        &self,
+        call: impl roam::Call<PublishResult, core::convert::Infallible>,
+        cache_key: CacheKey,
+        manifest_hash: NodeHash,
+    ) {
+        call.ok(StoreService::publish(self, cache_key, manifest_hash).await)
+            .await;
+    }
+
+    async fn unpublish(
+        &self,
+        call: impl roam::Call<bool, core::convert::Infallible>,
+        cache_key: CacheKey,
+    ) {
+        call.ok(StoreService::unpublish(self, cache_key).await)
+            .await;
+    }
+
+    async fn ensure_rust_toolchain(
+        &self,
+        call: impl roam::Call<EnsureToolchainResult, core::convert::Infallible>,
+        spec: RustToolchainSpec,
+        progress: roam::Tx<StoreProgress>,
+    ) {
+        call.ok(StoreService::ensure_rust_toolchain(self, spec, progress).await)
+            .await;
+    }
+
+    async fn download_rust_toolchain_component(
+        &self,
+        call: impl roam::Call<EnsureRustToolchainComponentResult, core::convert::Infallible>,
+        spec: RustToolchainSpec,
+        component: RustComponent,
+        progress: roam::Tx<StoreProgress>,
+    ) {
+        call.ok(
+            StoreService::download_rust_toolchain_component(self, spec, component, progress).await,
+        )
+        .await;
+    }
+
+    async fn extract_rust_toolchain_component(
+        &self,
+        call: impl roam::Call<EnsureRustToolchainComponentResult, core::convert::Infallible>,
+        spec: RustToolchainSpec,
+        component: RustComponent,
+        tarball: BlobRef,
+        progress: roam::Tx<StoreProgress>,
+    ) {
+        call.ok(StoreService::extract_rust_toolchain_component(
+            self, spec, component, tarball, progress,
+        )
+        .await)
+            .await;
+    }
+
+    async fn finalize_rust_toolchain(
+        &self,
+        call: impl roam::Call<EnsureToolchainResult, core::convert::Infallible>,
+        spec: RustToolchainSpec,
+    ) {
+        call.ok(StoreService::finalize_rust_toolchain(self, spec).await)
+            .await;
+    }
+
+    async fn ensure_zig_toolchain(
+        &self,
+        call: impl roam::Call<EnsureToolchainResult, core::convert::Infallible>,
+        spec: ZigToolchainSpec,
+        progress: roam::Tx<StoreProgress>,
+    ) {
+        call.ok(StoreService::ensure_zig_toolchain(self, spec, progress).await)
+            .await;
+    }
+
+    async fn get_toolchain_manifest(
+        &self,
+        call: impl roam::Call<Option<ToolchainManifest>, core::convert::Infallible>,
+        manifest_hash: NodeHash,
+    ) {
+        call.ok(StoreService::get_toolchain_manifest(self, manifest_hash).await)
+            .await;
+    }
+
+    async fn get_materialization_plan(
+        &self,
+        call: impl roam::Call<Option<MaterializationPlan>, core::convert::Infallible>,
+        manifest_hash: NodeHash,
+    ) {
+        call.ok(StoreService::get_materialization_plan(self, manifest_hash).await)
+            .await;
+    }
+
+    async fn lookup_toolchain_spec(
+        &self,
+        call: impl roam::Call<Option<NodeHash>, core::convert::Infallible>,
+        spec_key: ToolchainSpecKey,
+    ) {
+        call.ok(StoreService::lookup_toolchain_spec(self, spec_key).await)
+            .await;
+    }
+
+    async fn ensure_registry_crate(
+        &self,
+        call: impl roam::Call<EnsureRegistryCrateResult, core::convert::Infallible>,
+        spec: RegistrySpec,
+        progress: roam::Tx<StoreProgress>,
+    ) {
+        call.ok(StoreService::ensure_registry_crate(self, spec, progress).await)
+            .await;
+    }
+
+    async fn get_registry_manifest(
+        &self,
+        call: impl roam::Call<Option<RegistryCrateManifest>, core::convert::Infallible>,
+        manifest_hash: NodeHash,
+    ) {
+        call.ok(StoreService::get_registry_manifest(self, manifest_hash).await)
+            .await;
+    }
+
+    async fn lookup_registry_spec(
+        &self,
+        call: impl roam::Call<Option<NodeHash>, core::convert::Infallible>,
+        spec_key: RegistrySpecKey,
+    ) {
+        call.ok(StoreService::lookup_registry_spec(self, spec_key).await)
+            .await;
     }
 }
 

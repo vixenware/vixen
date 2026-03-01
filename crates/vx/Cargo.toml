@@ -22,6 +22,8 @@ tracing = { workspace = true }
 vx-tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 roam = { workspace = true }
+roam-core = { workspace = true }
+roam-types = { workspace = true }
 roam-stream = { workspace = true }
 indicatif = { workspace = true }
 vxd-proto = { workspace = true }

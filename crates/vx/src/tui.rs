@@ -7,6 +7,7 @@
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use moire::sync::{SyncMutex, oneshot};
+use moire::task::FutureExt;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

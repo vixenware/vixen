@@ -12,6 +12,7 @@
 use std::io;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use tokio::io::AsyncWriteExt;
 use vx_io::atomic_write;
 use vx_store_proto::{
     Blake3Hash, CacheKey, ChunkHash, ManifestHash, NodeHash, RegistrySpecKey, ToolchainSpecKey,

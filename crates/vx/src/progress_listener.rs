@@ -4,7 +4,7 @@ use crate::{
     types::CliMode,
 };
 use std::sync::atomic::{self, AtomicU64};
-use vxd_proto::{ActionProgress, ActionType, ProgressListener};
+use vxd_proto::{ActionProgress, ActionType, ProgressListenerServer as ProgressListener};
 
 /// Progress listener that dispatches to TUI, JSON, or plain text output.
 pub(crate) struct ProgressListenerImpl {
@@ -42,10 +42,8 @@ impl ProgressListenerImpl {
     fn next_id(&self) -> u64 {
         self.next_action_id.fetch_add(1, atomic::Ordering::SeqCst)
     }
-}
 
-impl ProgressListener for ProgressListenerImpl {
-    async fn set_total(&self, _cx: &roam::Context, total: u64) {
+    async fn set_total_impl(&self, total: u64) {
         match &self.mode {
             CliMode::Json => {
                 build_json::emit(&build_json::BuildStarted {
@@ -64,7 +62,7 @@ impl ProgressListener for ProgressListenerImpl {
         }
     }
 
-    async fn start_action(&self, _cx: &roam::Context, action_type: ActionType) -> u64 {
+    async fn start_action_impl(&self, action_type: ActionType) -> u64 {
         match &self.mode {
             CliMode::Json => {
                 let id = self.next_id();
@@ -84,7 +82,7 @@ impl ProgressListener for ProgressListenerImpl {
         }
     }
 
-    async fn update_progress(&self, _cx: &roam::Context, action_id: u64, progress: ActionProgress) {
+    async fn update_progress_impl(&self, action_id: u64, progress: ActionProgress) {
         match &self.mode {
             CliMode::Json => {
                 build_json::emit(&build_json::ActionProgress {
@@ -116,7 +114,7 @@ impl ProgressListener for ProgressListenerImpl {
         }
     }
 
-    async fn complete_action(&self, _cx: &roam::Context, action_id: u64) {
+    async fn complete_action_impl(&self, action_id: u64) {
         match &self.mode {
             CliMode::Json => {
                 build_json::emit(&build_json::ActionCompleted {
@@ -142,7 +140,7 @@ impl ProgressListener for ProgressListenerImpl {
         }
     }
 
-    async fn log_message(&self, _cx: &roam::Context, message: String) {
+    async fn log_message_impl(&self, message: String) {
         match &self.mode {
             CliMode::Json => {
                 build_json::emit(&build_json::LogMessage {
@@ -157,5 +155,48 @@ impl ProgressListener for ProgressListenerImpl {
                 tracing::info!("{message}");
             }
         }
+    }
+}
+
+impl ProgressListener for ProgressListenerImpl {
+    async fn set_total(&self, call: impl roam::Call<(), core::convert::Infallible>, total: u64) {
+        self.set_total_impl(total).await;
+        call.ok(()).await;
+    }
+
+    async fn start_action(
+        &self,
+        call: impl roam::Call<u64, core::convert::Infallible>,
+        action_type: ActionType,
+    ) {
+        call.ok(self.start_action_impl(action_type).await).await;
+    }
+
+    async fn update_progress(
+        &self,
+        call: impl roam::Call<(), core::convert::Infallible>,
+        action_id: u64,
+        progress: ActionProgress,
+    ) {
+        self.update_progress_impl(action_id, progress).await;
+        call.ok(()).await;
+    }
+
+    async fn complete_action(
+        &self,
+        call: impl roam::Call<(), core::convert::Infallible>,
+        action_id: u64,
+    ) {
+        self.complete_action_impl(action_id).await;
+        call.ok(()).await;
+    }
+
+    async fn log_message(
+        &self,
+        call: impl roam::Call<(), core::convert::Infallible>,
+        message: String,
+    ) {
+        self.log_message_impl(message).await;
+        call.ok(()).await;
     }
 }
