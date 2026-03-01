@@ -35,8 +35,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use camino::Utf8PathBuf;
-use peeps::Mutex;
-use roam_stream::peeps::prelude::*;
+use moire::Mutex;
+use roam_stream::moire::prelude::*;
 use vixenfs_proto::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
     ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
@@ -391,7 +391,7 @@ impl CasVfs {
 
         Self {
             cas,
-            state: peeps::mutex!(
+            state: moire::mutex!(
                 "CasVfs::state",
                 VfsState {
                     items,
@@ -400,12 +400,12 @@ impl CasVfs {
             ),
             next_id: AtomicU64::new(2), // 1=root
             disk_cache_dir,
-            blobnode_cache: peeps::mutex!("CasVfs::blobnode_cache", HashMap::new()),
-            chunk_l1_cache: peeps::mutex!(
+            blobnode_cache: moire::mutex!("CasVfs::blobnode_cache", HashMap::new()),
+            chunk_l1_cache: moire::mutex!(
                 "CasVfs::chunk_l1_cache",
                 ChunkL1Cache::new(Self::chunk_l1_cache_max_bytes()),
             ),
-            observed_identities: peeps::mutex!("CasVfs::observed_identities", HashMap::new()),
+            observed_identities: moire::mutex!("CasVfs::observed_identities", HashMap::new()),
             mount_path,
         }
     }
@@ -465,7 +465,7 @@ impl CasVfs {
 
         // Try L2 disk cache first
         if let Some(path) = self.chunk_cache_path(&chunk_hash.0) {
-            match peeps::fs::read(path.as_std_path()).await {
+            match moire::fs::read(path.as_std_path()).await {
                 Ok(data) => {
                     let actual_hash = Blake3Hash::from_bytes(&data);
                     if actual_hash == chunk_hash.0 {
@@ -483,7 +483,7 @@ impl CasVfs {
                         path = %path,
                         "L2 cache hash mismatch on hit, evicting corrupted entry"
                     );
-                    if let Err(e) = peeps::fs::remove_file(path.as_std_path()).await
+                    if let Err(e) = moire::fs::remove_file(path.as_std_path()).await
                         && e.kind() != std::io::ErrorKind::NotFound
                     {
                         tracing::warn!(path = %path, error = %e, "failed to remove bad L2 cache file");
@@ -1704,7 +1704,7 @@ impl CasVfs {
         };
 
         for (path, rel_path) in files {
-            match peeps::fs::read(&path).await {
+            match moire::fs::read(&path).await {
                 Ok(data) => {
                     let size = data.len() as u64;
                     let content_hash = Blake3Hash::from_bytes(&data);

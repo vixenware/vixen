@@ -5,7 +5,7 @@ use crate::Result;
 /// Clean up stuck FUSE mount if needed.
 pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
     // Check if mount exists in /proc/mounts
-    let mounts = match peeps::fs::read_to_string("/proc/mounts").await {
+    let mounts = match moire::fs::read_to_string("/proc/mounts").await {
         Ok(content) => content,
         Err(_) => return Ok(()), // Can't read mounts, skip cleanup
     };
@@ -16,7 +16,7 @@ pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
     }
 
     // Try to stat the mount point to see if it's stuck
-    match peeps::fs::metadata(mount_path.as_std_path()).await {
+    match moire::fs::metadata(mount_path.as_std_path()).await {
         Ok(_) => {
             // stat succeeded, mount is healthy
             return Ok(());
@@ -68,8 +68,8 @@ pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
     if let Ok(mut entries) = tokio::fs::read_dir("/sys/fs/fuse/connections").await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let abort_path = entry.path().join("abort");
-            if peeps::fs::try_exists(&abort_path).await.unwrap_or(false) {
-                let _ = peeps::fs::write(&abort_path, b"1").await;
+            if moire::fs::try_exists(&abort_path).await.unwrap_or(false) {
+                let _ = moire::fs::write(&abort_path, b"1").await;
             }
         }
     }
@@ -113,7 +113,7 @@ pub async fn dump_platform_diagnostics(_mount_path: &Utf8PathBuf) {
     if let Ok(mut entries) = tokio::fs::read_dir("/sys/fs/fuse/connections").await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let waiting_path = entry.path().join("waiting");
-            if let Ok(val) = peeps::fs::read_to_string(&waiting_path).await {
+            if let Ok(val) = moire::fs::read_to_string(&waiting_path).await {
                 eprintln!("  {}: waiting={}", entry.path().display(), val.trim());
             }
         }
@@ -123,10 +123,10 @@ pub async fn dump_platform_diagnostics(_mount_path: &Utf8PathBuf) {
     if let Ok(mut tasks) = tokio::fs::read_dir("/proc/self/task").await {
         while let Ok(Some(task)) = tasks.next_entry().await {
             let tid = task.file_name();
-            let comm = peeps::fs::read_to_string(task.path().join("comm"))
+            let comm = moire::fs::read_to_string(task.path().join("comm"))
                 .await
                 .unwrap_or_default();
-            let stack = peeps::fs::read_to_string(task.path().join("stack"))
+            let stack = moire::fs::read_to_string(task.path().join("stack"))
                 .await
                 .unwrap_or_default();
             if !stack.trim().is_empty() {
@@ -161,7 +161,7 @@ pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
 
     // Check /proc/mounts for FUSE entries
     writeln!(out, "{}", "--- FUSE mounts ---".yellow().bold()).unwrap();
-    match peeps::fs::read_to_string("/proc/mounts").await {
+    match moire::fs::read_to_string("/proc/mounts").await {
         Ok(mounts) => {
             let fuse_lines: Vec<&str> = mounts
                 .lines()
@@ -183,7 +183,7 @@ pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
     if let Ok(mut entries) = tokio::fs::read_dir("/sys/fs/fuse/connections").await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let waiting_path = entry.path().join("waiting");
-            if let Ok(val) = peeps::fs::read_to_string(&waiting_path).await {
+            if let Ok(val) = moire::fs::read_to_string(&waiting_path).await {
                 writeln!(out, "  {}: waiting={}", entry.path().display(), val.trim()).unwrap();
             }
         }
@@ -191,7 +191,7 @@ pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
 
     // Process inventory
     writeln!(out, "\n{}", "--- Vixen processes ---".yellow().bold()).unwrap();
-    match peeps::Command::new("pgrep")
+    match moire::Command::new("pgrep")
         .args(["-la", "(vx-|vixen)"])
         .output()
         .await

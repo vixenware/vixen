@@ -271,8 +271,8 @@ actor VfsConnection {
         }
         let sid = mountOptions.sid
         debugEnabled = mountOptions.debug
-        await SwiftPeepsClient.shared.configure(
-            dashboardAddr: mountOptions.peepsDashboard,
+        await SwiftmoireClient.shared.configure(
+            dashboardAddr: mountOptions.moireDashboard,
             debugFrames: mountOptions.debug
         )
         if debugEnabled {
@@ -333,7 +333,7 @@ actor VfsConnection {
         disconnectRequested = true
         terminalConnectionError = nil
         debugEnabled = false
-        await SwiftPeepsClient.shared.configure(dashboardAddr: nil, debugFrames: false)
+        await SwiftmoireClient.shared.configure(dashboardAddr: nil, debugFrames: false)
         driverTask?.cancel()
         driverTask = nil
         client = nil
@@ -464,7 +464,7 @@ actor VfsConnection {
     private struct MountOptions {
         let sid: String
         let debug: Bool
-        let peepsDashboard: String?
+        let moireDashboard: String?
     }
 
     private func parseMountOptions(from url: URL) -> MountOptions? {
@@ -478,8 +478,8 @@ actor VfsConnection {
         }
         let debugValue = items.first(where: { $0.name == "debug" })?.value?.lowercased()
         let debug = debugValue == "1" || debugValue == "true" || debugValue == "yes"
-        let peepsDashboard = items.first(where: { $0.name == "peeps_dashboard" })?.value
-        return MountOptions(sid: sid, debug: debug, peepsDashboard: peepsDashboard)
+        let moireDashboard = items.first(where: { $0.name == "moire_dashboard" })?.value
+        return MountOptions(sid: sid, debug: debug, moireDashboard: moireDashboard)
     }
 
     private func isValidSid(_ sid: String) -> Bool {

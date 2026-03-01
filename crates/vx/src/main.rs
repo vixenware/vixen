@@ -13,7 +13,7 @@ use eyre::{Result, bail};
 use figue as args;
 use owo_colors::OwoColorize;
 use roam_stream::ConnectionHandle;
-use roam_stream::peeps::prelude::*;
+use roam_stream::moire::prelude::*;
 use tui::emit_osc_progress;
 use vx_io::spawn::ServiceBuilder;
 use vx_report::ReportStore;
@@ -47,7 +47,7 @@ fn main() {
 }
 
 async fn async_main() {
-    peeps::init!();
+    moire::init!();
 
     let cli: Cli = args::Driver::new(
         args::builder::<Cli>()
@@ -691,13 +691,13 @@ impl CliContext {
     }
 
     async fn cmd_debug(&mut self, _args: DebugArgs) -> Result<()> {
-        // Launch peeps dashboard server CLI.
-        let status = peeps::Command::new("peeps")
+        // Launch moire dashboard server CLI.
+        let status = moire::Command::new("moire")
             .status()
             .await
-            .map_err(|e| eyre::eyre!("failed to launch `peeps` dashboard CLI: {e}"))?;
+            .map_err(|e| eyre::eyre!("failed to launch `moire` dashboard CLI: {e}"))?;
         if !status.success() {
-            eyre::bail!("`peeps` exited with status: {status}");
+            eyre::bail!("`moire` exited with status: {status}");
         }
         Ok(())
     }

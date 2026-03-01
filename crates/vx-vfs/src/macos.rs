@@ -7,8 +7,8 @@
 //! - `vx-vfs`, which serves VFS connections over SHM.
 
 use crate::types::{VfsConfig, VfsError, VfsStart};
-use peeps::Command;
-use peeps::{Sender, WatchSender};
+use moire::Command;
+use moire::{Sender, WatchSender};
 use roam_shm::bootstrap::{SessionId, SessionPaths, unix as shm_bootstrap};
 use roam_shm::driver::MultiPeerHostDriver;
 use roam_shm::{AddPeerOptions, SegmentConfig, ShmHost};
@@ -18,7 +18,7 @@ use vixenfs_proto::{Vfs, VfsDispatcher};
 use vx_vfs_types::{VIXEN_MOUNT_HELPER_PATH, VfsAction, VfsDiagnostic, VfsIssueCode};
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_GC_AGE: Duration = Duration::from_secs(6 * 60 * 60);
-const PEEPS_CX: peeps::PeepsContext = peeps::PeepsContext::new(env!("CARGO_MANIFEST_DIR"));
+const moire_CX: moire::moireContext = moire::moireContext::new(env!("CARGO_MANIFEST_DIR"));
 
 pub(super) async fn mount<T>(config: VfsConfig, vfs: T) -> Result<VfsStart, VfsError>
 where
@@ -26,8 +26,8 @@ where
 {
     tracing::debug!(mount_path = %config.mount_path, "entering macos vfs startup");
 
-    let (mount_ready_tx, mut mount_ready_rx) = peeps::channel!("mount_ready", 2);
-    let (vfs_dead_tx, vfs_dead_rx) = peeps::watch!("vfs_dead", false);
+    let (mount_ready_tx, mut mount_ready_rx) = moire::channel!("mount_ready", 2);
+    let (vfs_dead_tx, vfs_dead_rx) = moire::watch!("vfs_dead", false);
     let sid = spawn_shm_loop(vfs, mount_ready_tx, vfs_dead_tx)?;
 
     let debug_mode = std::env::var("VIXENFS_DEBUG").as_deref() == Ok("1");
@@ -72,7 +72,7 @@ where
     // Now wait for the SHM connection (extension connecting to our SHM segment).
     tracing::debug!("fskit mount ok, waiting for SHM readiness");
 
-    match tokio::time::timeout(MOUNT_TIMEOUT, mount_ready_rx.recv_with_cx(PEEPS_CX)).await {
+    match tokio::time::timeout(MOUNT_TIMEOUT, mount_ready_rx.recv_with_cx(moire_CX)).await {
         Ok(Some(())) => {
             tracing::info!(mount_path = %config.mount_path, "VFS mounted and SHM connected");
             Ok(VfsStart::Mounted {
@@ -160,8 +160,8 @@ where
                 }
 
                 let shm_path = session_paths.shm_path();
-                if peeps::fs::try_exists(&shm_path).await.unwrap_or(false)
-                    && let Err(error) = peeps::fs::remove_file(&shm_path).await
+                if moire::fs::try_exists(&shm_path).await.unwrap_or(false)
+                    && let Err(error) = moire::fs::remove_file(&shm_path).await
                 {
                     let _ = sid_tx.send(Err(format!(
                         "failed to remove stale shm file {}: {error}",
@@ -186,10 +186,10 @@ where
 
                 let control_sock_path =
                     control_socket_path_for_sid(&app_group_root, session_paths.sid().as_str());
-                if peeps::fs::try_exists(&control_sock_path)
+                if moire::fs::try_exists(&control_sock_path)
                     .await
                     .unwrap_or(false)
-                    && let Err(error) = peeps::fs::remove_file(&control_sock_path).await
+                    && let Err(error) = moire::fs::remove_file(&control_sock_path).await
                 {
                     let _ = sid_tx.send(Err(format!(
                         "failed to remove stale SHM control socket {}: {error}",
@@ -211,13 +211,13 @@ where
 
                 let _ = sid_tx.send(Ok(sid.clone()));
 
-                peeps::spawn_tracked!("shm_host_driver", async move {
+                moire::spawn_tracked!("shm_host_driver", async move {
                     if let Err(error) = driver.run().await {
                         tracing::debug!(%error, "SHM host driver exited with error");
                     } else {
                         tracing::debug!("SHM host driver exited cleanly");
                     }
-                    let _ = vfs_dead_tx.send_with_cx(true, PEEPS_CX);
+                    let _ = vfs_dead_tx.send_with_cx(true, moire_CX);
                 });
 
                 loop {
@@ -294,7 +294,7 @@ fn random_sid_hex() -> String {
 
 async fn gc_stale_sessions(root: &Path, keep_sid: &str, max_age: Duration) -> Result<(), String> {
     let sessions_root = root.join("sessions");
-    if !peeps::fs::try_exists(&sessions_root).await.unwrap_or(false) {
+    if !moire::fs::try_exists(&sessions_root).await.unwrap_or(false) {
         return Ok(());
     }
     let mut entries = tokio::fs::read_dir(&sessions_root)
@@ -332,7 +332,7 @@ async fn gc_stale_sessions(root: &Path, keep_sid: &str, max_age: Duration) -> Re
         if age < max_age {
             continue;
         }
-        if let Err(error) = peeps::fs::remove_dir_all(&path).await {
+        if let Err(error) = moire::fs::remove_dir_all(&path).await {
             tracing::warn!(path = %path.display(), %error, "failed to remove stale SHM session");
         }
     }
@@ -352,7 +352,7 @@ async fn cleanup_session_dir(sid: &str) {
         }
     };
     let control_sock_path = control_socket_path_for_sid(&app_group_root, sid);
-    match peeps::fs::remove_file(&control_sock_path).await {
+    match moire::fs::remove_file(&control_sock_path).await {
         Ok(()) => tracing::debug!(
             %sid,
             path = %control_sock_path.display(),
@@ -386,7 +386,7 @@ async fn cleanup_session_dir(sid: &str) {
         return;
     }
     let session_dir = session_paths.session_dir();
-    match peeps::fs::remove_dir_all(&session_dir).await {
+    match moire::fs::remove_dir_all(&session_dir).await {
         Ok(()) => {
             tracing::debug!(%sid, path = %session_dir.display(), "removed SHM session directory");
         }
@@ -411,7 +411,7 @@ async fn cleanup_session_dir(sid: &str) {
 pub async fn resolve_app_group_path() -> Result<PathBuf, String> {
     let output = Command::new(VIXEN_MOUNT_HELPER_PATH)
         .arg("--app-group-path")
-        .output_with_cx(PEEPS_CX)
+        .output_with_cx(moire_CX)
         .await
         .map_err(|e| format!("failed to run {VIXEN_MOUNT_HELPER_PATH}: {e}"))?;
 

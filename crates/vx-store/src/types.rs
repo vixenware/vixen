@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use camino::Utf8PathBuf;
-use peeps::Mutex;
+use moire::Mutex;
 use tokio::sync::Semaphore;
 use vx_store_proto::{BlobRef, RustComponent, ToolchainSpecKey};
 

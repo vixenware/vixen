@@ -3,10 +3,10 @@
 //! This module implements the execution engine that schedules and runs actions
 //! from the action graph with optimal parallelism while respecting dependencies.
 
-use ::peeps::Mutex;
+use ::moire::Mutex;
 use petgraph::Direction::Incoming;
 use petgraph::graph::NodeIndex;
-use roam_stream::peeps::prelude::*;
+use roam_stream::moire::prelude::*;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
@@ -146,7 +146,7 @@ enum ExecutorMessage {
 /// fires. This guard ensures the executor always receives a completion message.
 struct CompletionGuard {
     node_idx: NodeIndex,
-    tx: Option<::peeps::UnboundedSender<ExecutorMessage>>,
+    tx: Option<::moire::UnboundedSender<ExecutorMessage>>,
 }
 
 impl CompletionGuard {
@@ -337,11 +337,11 @@ pub struct Executor {
     concurrency_limit: Arc<Semaphore>,
 
     /// Channel for messages from spawned tasks
-    message_tx: ::peeps::UnboundedSender<ExecutorMessage>,
-    message_rx: ::peeps::UnboundedReceiver<ExecutorMessage>,
+    message_tx: ::moire::UnboundedSender<ExecutorMessage>,
+    message_rx: ::moire::UnboundedReceiver<ExecutorMessage>,
 
     /// In-flight action tasks (for waiting on cancellation)
-    in_flight: ::peeps::JoinSet<()>,
+    in_flight: ::moire::JoinSet<()>,
 
     /// Cancellation token — cancel all in-flight actions
     cancel_token: CancellationToken,
@@ -443,7 +443,7 @@ impl Executor {
             debug!("ready[{}] = {:?} {}", i, node_idx, action.display_name());
         }
 
-        let (message_tx, message_rx) = ::peeps::unbounded_channel!("executor_messages");
+        let (message_tx, message_rx) = ::moire::unbounded_channel!("executor_messages");
 
         // Detect CommandLineTools version on macOS
         #[cfg(target_os = "macos")]
@@ -471,13 +471,13 @@ impl Executor {
         Self {
             graph,
             states: HashMap::new(),
-            results: Arc::new(::peeps::mutex!("vxd/executor_results", HashMap::new())),
+            results: Arc::new(::moire::mutex!("vxd/executor_results", HashMap::new())),
             remaining_deps,
             ready_queue,
             concurrency_limit: Arc::new(Semaphore::new(max_concurrency)),
             message_tx,
             message_rx,
-            in_flight: ::peeps::JoinSet::named("vxd/executor_in_flight", ::peeps::Source::caller()),
+            in_flight: ::moire::JoinSet::named("vxd/executor_in_flight", ::moire::Source::caller()),
             cancel_token: CancellationToken::new(),
             progress_listener,
             cas,
@@ -485,7 +485,7 @@ impl Executor {
             db,
             node_timings: HashMap::new(),
             build_start: std::time::Instant::now(),
-            free_lanes: Arc::new(::peeps::mutex!(
+            free_lanes: Arc::new(::moire::mutex!(
                 "vxd/executor_free_lanes",
                 (0..max_concurrency as u32).collect(),
             )),
@@ -591,7 +591,7 @@ impl Executor {
             while let Some(node_idx) = self.ready_queue.pop_front() {
                 debug!("spawning action for node {:?}", node_idx);
                 self.states.insert(node_idx, ActionState::Running);
-                let permit = ::peeps::peep!(
+                let permit = ::moire::peep!(
                     self.concurrency_limit.clone().acquire_owned(),
                     "executor.concurrency.acquire_owned"
                 )
@@ -1168,9 +1168,9 @@ impl Executor {
             let forward_listener = progress_listener.clone();
             let forward_action_id = action_id;
             let forward_handle =
-                ::peeps::spawn_tracked!("vxd_executor_store_progress_forward", async move {
+                ::moire::spawn_tracked!("vxd_executor_store_progress_forward", async move {
                     while let Ok(Some(sp)) =
-                        ::peeps::peep!(store_progress_rx.recv(), "executor.store_progress.recv")
+                        ::moire::peep!(store_progress_rx.recv(), "executor.store_progress.recv")
                             .await
                     {
                         if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
@@ -1535,7 +1535,7 @@ async fn execute_action(
                 for rel_path in &paths {
                     let abs_path = workspace_root_path.join(rel_path);
                     let contents =
-                        ::peeps::fs::read(&abs_path)
+                        ::moire::fs::read(&abs_path)
                             .await
                             .map_err(|e| VxdError::FileRead {
                                 path: abs_path.clone(),
@@ -1976,7 +1976,7 @@ async fn execute_action(
                         crate_name: label.clone(),
                         message: format!("Invalid output path: {out_path}"),
                     })?;
-                    ::peeps::fs::create_dir_all(parent).await.map_err(|e| {
+                    ::moire::fs::create_dir_all(parent).await.map_err(|e| {
                         VxdError::Compilation {
                             crate_name: label.clone(),
                             message: format!("Failed to create output directory: {e}"),
@@ -1999,7 +1999,7 @@ async fn execute_action(
                             message: format!("Failed to fetch output blob from CAS: {e}"),
                         })?;
 
-                    ::peeps::fs::write(&out_path, &data).await.map_err(|e| {
+                    ::moire::fs::write(&out_path, &data).await.map_err(|e| {
                         VxdError::Compilation {
                             crate_name: label.clone(),
                             message: format!("Failed to write output to {out_path}: {e}"),
@@ -2010,7 +2010,7 @@ async fn execute_action(
                         #[cfg(unix)]
                         {
                             use std::os::unix::fs::PermissionsExt;
-                            let mut perms = ::peeps::fs::metadata(&out_path)
+                            let mut perms = ::moire::fs::metadata(&out_path)
                                 .await
                                 .map_err(|e| VxdError::Compilation {
                                     crate_name: label.clone(),
@@ -2018,7 +2018,7 @@ async fn execute_action(
                                 })?
                                 .permissions();
                             perms.set_mode(0o755);
-                            ::peeps::fs::set_permissions(&out_path, perms)
+                            ::moire::fs::set_permissions(&out_path, perms)
                                 .await
                                 .map_err(|e| VxdError::Compilation {
                                     crate_name: label.clone(),

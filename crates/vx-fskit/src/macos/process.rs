@@ -1,9 +1,9 @@
-use peeps::Command;
+use moire::Command;
 use std::collections::HashMap;
 
 use super::Log;
 
-const PEEPS_CX: peeps::PeepsContext = peeps::PeepsContext::new(env!("CARGO_MANIFEST_DIR"));
+const moire_CX: moire::moireContext = moire::moireContext::new(env!("CARGO_MANIFEST_DIR"));
 
 /// Information about a process with files open under the mount.
 pub(crate) struct OpenProcess {
@@ -21,7 +21,7 @@ pub(crate) struct OpenProcess {
 pub(crate) async fn find_open_processes(candidates: &[String], log: &mut Log) -> Vec<OpenProcess> {
     let output = match Command::new("lsof")
         .args(["-n", "-P", "-Fpcn"])
-        .output_with_cx(PEEPS_CX)
+        .output_with_cx(moire_CX)
         .await
     {
         Ok(output) => output,

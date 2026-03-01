@@ -24,7 +24,7 @@ use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
 use vx_store_proto::StoreDispatcher;
 
-const PEEPS_CX: peeps::PeepsContext = peeps::PeepsContext::new(env!("CARGO_MANIFEST_DIR"));
+const moire_CX: moire::moireContext = moire::moireContext::new(env!("CARGO_MANIFEST_DIR"));
 
 /// vx-store - Content-Addressed Storage daemon
 #[derive(Facet, Debug)]
@@ -61,8 +61,8 @@ async fn async_main() -> Result<()> {
     // Initialize tracing
     vx_tracing::init_service("vx_store=info");
 
-    // Initialize peeps instrumentation
-    peeps::init!();
+    // Initialize moire instrumentation
+    moire::init!();
 
     tracing::info!("hello from vixen-store");
 
@@ -92,7 +92,7 @@ async fn async_main() -> Result<()> {
         let gate = Arc::clone(&gate);
         let root = args.root.clone();
         let vx_home = args.vx_home.clone();
-        peeps::spawn_tracked!("store_boot", async move {
+        moire::spawn_tracked!("store_boot", async move {
             tracing::info!("Booting vx-store");
             match async {
                 let storage = CasStore::new(FsStorage::new(root));
@@ -118,11 +118,11 @@ async fn async_main() -> Result<()> {
     let boot_service = gate.boot_service();
 
     loop {
-        let (stream, peer_addr) = peeps::peep!(listener.accept(), "store.listener.accept").await?;
+        let (stream, peer_addr) = moire::peep!(listener.accept(), "store.listener.accept").await?;
         tracing::info!("accepted connection from {peer_addr}");
         let boot_service = boot_service.clone();
 
-        peeps::spawn_tracked!(format!("store_connection_{}", peer_addr), async move {
+        moire::spawn_tracked!(format!("store_connection_{}", peer_addr), async move {
             tracing::debug!("New connection from {}", peer_addr);
 
             // Root connection gets Boot service only.
@@ -147,13 +147,13 @@ async fn async_main() -> Result<()> {
 
             // Drive the connection in the background.
             let driver_handle =
-                peeps::spawn_tracked!(format!("store_driver_{}", peer_addr), async move {
+                moire::spawn_tracked!(format!("store_driver_{}", peer_addr), async move {
                     driver.run().await
                 });
 
             // Accept virtual connections — each gets a StoreDispatcher.
             while let Some(conn) =
-                peeps::peep!(incoming.recv_with_cx(PEEPS_CX), "store.incoming.recv").await
+                moire::peep!(incoming.recv_with_cx(moire_CX), "store.incoming.recv").await
             {
                 let Some(store) = boot_service.gate().service() else {
                     conn.reject("boot not complete".into(), vec![]);
@@ -185,11 +185,11 @@ impl StoreService {
                 toolchain_manager: ToolchainManager::new(),
                 registry_manager: RegistryManager::new(),
                 download_semaphore: Arc::new(tokio::sync::Semaphore::new(32)),
-                rust_component_tarballs: peeps::mutex!(
+                rust_component_tarballs: moire::mutex!(
                     "store/rust_component_tarballs",
                     std::collections::HashMap::new(),
                 ),
-                rust_component_trees: peeps::mutex!(
+                rust_component_trees: moire::mutex!(
                     "store/rust_component_trees",
                     std::collections::HashMap::new(),
                 ),

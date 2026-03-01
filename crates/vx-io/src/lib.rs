@@ -32,10 +32,10 @@ pub async fn atomic_write(
     let parent_dir = path.parent().unwrap_or_else(|| Utf8Path::new("."));
 
     // Create parent directory if it doesn't exist
-    peeps::fs::create_dir_all(parent_dir).await?;
+    moire::fs::create_dir_all(parent_dir).await?;
 
     // Create a temporary file in the same directory to ensure it's on the same filesystem
-    let temp_file = peeps::peep!(
+    let temp_file = moire::peep!(
         TempFile::new_in(parent_dir.as_std_path()),
         "atomic_write.create_tempfile",
         {
@@ -47,20 +47,20 @@ pub async fn atomic_write(
 
     // Get the temporary path and write contents to it
     let temp_path = temp_file.file_path();
-    peeps::fs::write(&temp_path, contents).await?;
+    moire::fs::write(&temp_path, contents).await?;
 
     // Set executable bit if requested.
     #[cfg(unix)]
     if executable {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = peeps::fs::metadata(&temp_path).await?.permissions();
+        let mut perms = moire::fs::metadata(&temp_path).await?.permissions();
         perms.set_mode(perms.mode() | 0o111);
-        peeps::fs::set_permissions(&temp_path, perms).await?;
+        moire::fs::set_permissions(&temp_path, perms).await?;
     }
 
     // Atomically move temp file to final path. rename() on the same filesystem is
     // atomic and overwrites any existing target, which is fine for our use case.
-    peeps::fs::rename(temp_path.to_path_buf(), path.as_std_path()).await
+    moire::fs::rename(temp_path.to_path_buf(), path.as_std_path()).await
 }
 
 /// Create a unique scratch directory under the given base path.
@@ -74,7 +74,7 @@ pub async fn create_scratch_dir(base: &Utf8Path) -> Result<Utf8PathBuf, std::io:
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let scratch_base = base.join("scratch");
-    peeps::fs::create_dir_all(&scratch_base).await?;
+    moire::fs::create_dir_all(&scratch_base).await?;
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -85,7 +85,7 @@ pub async fn create_scratch_dir(base: &Utf8Path) -> Result<Utf8PathBuf, std::io:
     let id = format!("{:x}-{}-{}", timestamp, pid, count);
     let dir = scratch_base.join(&id);
 
-    peeps::fs::create_dir_all(&dir).await?;
+    moire::fs::create_dir_all(&dir).await?;
 
     Ok(dir)
 }

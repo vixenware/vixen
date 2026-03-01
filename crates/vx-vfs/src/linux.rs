@@ -452,7 +452,7 @@ where
 {
     // Skip creating mount directory for system-managed mount points
     if !config.mount_path.starts_with("/media/") {
-        peeps::fs::create_dir_all(config.mount_path.as_std_path())
+        moire::fs::create_dir_all(config.mount_path.as_std_path())
             .await
             .map_err(|error| VfsError::CommandFailed {
                 program: "mount",
@@ -511,7 +511,7 @@ where
                     }
                 };
 
-                let (vfs_dead_tx, vfs_dead_rx) = peeps::watch_channel("vfs_dead", false);
+                let (vfs_dead_tx, vfs_dead_rx) = moire::watch_channel("vfs_dead", false);
 
                 let _ = result_tx.send(Ok(VfsStart::Mounted {
                     mount_path,
@@ -540,7 +540,7 @@ where
 /// If `mount_path` is already a mountpoint (ghost mount from a previous run),
 /// perform a lazy unmount (`fusermount3 -uz`) so we can re-mount cleanly.
 async fn lazy_unmount_if_mounted(mount_path: &camino::Utf8Path) {
-    let Ok(mounts) = peeps::fs::read_to_string("/proc/mounts").await else {
+    let Ok(mounts) = moire::fs::read_to_string("/proc/mounts").await else {
         return;
     };
     let is_mounted = mounts.lines().any(|line| {

@@ -247,9 +247,9 @@ final class Volume: FSVolume {
         _ body: (VfsClient) async throws -> T
     ) async throws -> T {
         let operationName = String(describing: operation)
-        let requestID = await SwiftPeepsClient.shared.beginRequest(operation: operationName)
-        let spanID = PeepsRequestContext.spanID(fromRequestID: requestID)
-        return try await PeepsRequestContext.$spanID.withValue(spanID) {
+        let requestID = await SwiftmoireClient.shared.beginRequest(operation: operationName)
+        let spanID = moireRequestContext.spanID(fromRequestID: requestID)
+        return try await moireRequestContext.$spanID.withValue(spanID) {
             let client: VfsClient
             do {
                 client = try await VfsConnection.shared.getClient()
@@ -261,13 +261,13 @@ final class Volume: FSVolume {
                         "\(operation): timeout request_id=\(requestID, privacy: .public) span_id=\(span, privacy: .public) phase=getClient"
                     )
                 }
-                await SwiftPeepsClient.shared.finishRequest(
+                await SwiftmoireClient.shared.finishRequest(
                     requestID: requestID, operation: operationName, errno: errno)
                 throw vixenMappedFSError(error, operation: operation, logger: log)
             }
             do {
                 let value = try await body(client)
-                await SwiftPeepsClient.shared.finishRequest(
+                await SwiftmoireClient.shared.finishRequest(
                     requestID: requestID, operation: operationName, errno: nil)
                 return value
             } catch {
@@ -278,7 +278,7 @@ final class Volume: FSVolume {
                         "\(operation): timeout request_id=\(requestID, privacy: .public) span_id=\(span, privacy: .public) phase=rpc"
                     )
                 }
-                await SwiftPeepsClient.shared.finishRequest(
+                await SwiftmoireClient.shared.finishRequest(
                     requestID: requestID, operation: operationName, errno: errno)
                 throw vixenMappedFSError(error, operation: operation, logger: log)
             }
@@ -955,7 +955,8 @@ extension Volume: FSVolume.Operations {
             )
             return FSDirectoryVerifier(result.verifier)
         } catch {
-            logOpFailure(op, error: error, details: "itemId=\(dirItem.itemId) cookie=\(cookieValue)")
+            logOpFailure(
+                op, error: error, details: "itemId=\(dirItem.itemId) cookie=\(cookieValue)")
             throw error
         }
     }

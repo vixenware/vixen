@@ -7,14 +7,14 @@ use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use peeps::{Mutex, Notify};
+use moire::{Mutex, Notify};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use thiserror::Error;
 
-const PEEPS_CX: peeps::PeepsContext = peeps::PeepsContext::new(env!("CARGO_MANIFEST_DIR"));
+const moire_CX: moire::moireContext = moire::moireContext::new(env!("CARGO_MANIFEST_DIR"));
 
 type HttpsConnector =
     hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>;
@@ -66,7 +66,7 @@ fn inflight_cache() -> &'static Mutex<HashMap<String, Arc<Notify>>> {
         Mutex::new(
             "vx-http/inflight_cache",
             HashMap::new(),
-            peeps::Source::caller(),
+            moire::Source::caller(),
         )
     })
 }
@@ -192,7 +192,7 @@ async fn cache_get_bytes(cache_dir: &Path, url: &str) -> Result<Vec<u8>, HttpErr
     let t0 = Instant::now();
 
     loop {
-        if let Ok(data) = peeps::fs::read(&data_path).await {
+        if let Ok(data) = moire::fs::read(&data_path).await {
             let elapsed = t0.elapsed();
             tracing::debug!(
                 url = %url,
@@ -204,7 +204,7 @@ async fn cache_get_bytes(cache_dir: &Path, url: &str) -> Result<Vec<u8>, HttpErr
         }
 
         let maybe_waiter = {
-            let mut inflight = inflight_cache().lock_with_cx(PEEPS_CX);
+            let mut inflight = inflight_cache().lock_with_cx(moire_CX);
             if let Some(notify) = inflight.get(&key) {
                 Some(notify.clone())
             } else {
@@ -212,7 +212,7 @@ async fn cache_get_bytes(cache_dir: &Path, url: &str) -> Result<Vec<u8>, HttpErr
                     key.clone(),
                     Arc::new(Notify::new(
                         "vx-http/cache_single_flight",
-                        peeps::Source::caller(),
+                        moire::Source::caller(),
                     )),
                 );
                 None
@@ -220,13 +220,13 @@ async fn cache_get_bytes(cache_dir: &Path, url: &str) -> Result<Vec<u8>, HttpErr
         };
 
         if let Some(notify) = maybe_waiter {
-            notify.notified_with_cx(PEEPS_CX).await;
+            notify.notified_with_cx(moire_CX).await;
             continue;
         }
 
         // We are the single-flight owner for this cache key.
         let result = async {
-            peeps::fs::create_dir_all(cache_dir).await?;
+            moire::fs::create_dir_all(cache_dir).await?;
             let fetch_t0 = Instant::now();
             let bytes = get_bytes_network(url).await?;
             let fetch_elapsed = fetch_t0.elapsed();
@@ -252,7 +252,7 @@ async fn cache_get_bytes(cache_dir: &Path, url: &str) -> Result<Vec<u8>, HttpErr
         .await;
 
         let notify = {
-            let mut inflight = inflight_cache().lock_with_cx(PEEPS_CX);
+            let mut inflight = inflight_cache().lock_with_cx(moire_CX);
             inflight
                 .remove(&key)
                 .expect("in-flight key must exist for owner")

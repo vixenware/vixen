@@ -2,11 +2,11 @@ import Darwin
 import Foundation
 import os
 
-private enum PeepsWire {
+private enum moireWire {
     static let maxFrameSize = 128 * 1024 * 1024
 }
 
-private struct PeepsSnapshotRequest: Decodable {
+private struct moireSnapshotRequest: Decodable {
     let snapshotID: Int64
     let timeoutMs: Int64
 
@@ -16,7 +16,7 @@ private struct PeepsSnapshotRequest: Decodable {
     }
 }
 
-private struct PeepsCutRequest: Decodable {
+private struct moireCutRequest: Decodable {
     let cutID: String
 
     enum CodingKeys: String, CodingKey {
@@ -24,9 +24,9 @@ private struct PeepsCutRequest: Decodable {
     }
 }
 
-private struct PeepsServerMessage: Decodable {
-    let snapshotRequest: PeepsSnapshotRequest?
-    let cutRequest: PeepsCutRequest?
+private struct moireServerMessage: Decodable {
+    let snapshotRequest: moireSnapshotRequest?
+    let cutRequest: moireCutRequest?
 
     enum CodingKeys: String, CodingKey {
         case snapshotRequest = "snapshot_request"
@@ -34,7 +34,7 @@ private struct PeepsServerMessage: Decodable {
     }
 }
 
-private struct PeepsHandshake: Encodable {
+private struct moireHandshake: Encodable {
     let processName: String
     let pid: UInt32
 
@@ -44,14 +44,14 @@ private struct PeepsHandshake: Encodable {
     }
 }
 
-private struct PeepsClientHandshakeMessage: Encodable {
-    let handshake: PeepsHandshake
+private struct moireClientHandshakeMessage: Encodable {
+    let handshake: moireHandshake
 }
 
-private struct PeepsSnapshotReply: Encodable {
+private struct moireSnapshotReply: Encodable {
     let snapshotID: Int64
     let ptimeNowMs: UInt64
-    let snapshot: PeepsSnapshot
+    let snapshot: moireSnapshot
 
     enum CodingKeys: String, CodingKey {
         case snapshotID = "snapshot_id"
@@ -60,15 +60,15 @@ private struct PeepsSnapshotReply: Encodable {
     }
 }
 
-private struct PeepsClientSnapshotReplyMessage: Encodable {
-    let snapshotReply: PeepsSnapshotReply
+private struct moireClientSnapshotReplyMessage: Encodable {
+    let snapshotReply: moireSnapshotReply
 
     enum CodingKeys: String, CodingKey {
         case snapshotReply = "snapshot_reply"
     }
 }
 
-private struct PeepsCursor: Encodable {
+private struct moireCursor: Encodable {
     let streamID: String
     let nextSeqNo: UInt64
 
@@ -78,9 +78,9 @@ private struct PeepsCursor: Encodable {
     }
 }
 
-private struct PeepsCutAck: Encodable {
+private struct moireCutAck: Encodable {
     let cutID: String
-    let cursor: PeepsCursor
+    let cursor: moireCursor
 
     enum CodingKeys: String, CodingKey {
         case cutID = "cut_id"
@@ -88,32 +88,32 @@ private struct PeepsCutAck: Encodable {
     }
 }
 
-private struct PeepsClientCutAckMessage: Encodable {
-    let cutAck: PeepsCutAck
+private struct moireClientCutAckMessage: Encodable {
+    let cutAck: moireCutAck
 
     enum CodingKeys: String, CodingKey {
         case cutAck = "cut_ack"
     }
 }
 
-private struct PeepsSnapshot: Encodable {
-    let entities: [PeepsEntity]
-    let scopes: [PeepsScope]
-    let edges: [PeepsEdge]
-    let events: [PeepsEvent]
+private struct moireSnapshot: Encodable {
+    let entities: [moireEntity]
+    let scopes: [moireScope]
+    let edges: [moireEdge]
+    let events: [moireEvent]
 }
 
-private struct PeepsEntity: Encodable {
+private struct moireEntity: Encodable {
     let id: String
     let birth: UInt64
     let source: String
     let krate: String?
     let name: String
-    let body: PeepsEntityBody
+    let body: moireEntityBody
     let meta: [String: String]
 }
 
-private enum PeepsEntityBody: Encodable {
+private enum moireEntityBody: Encodable {
     case request(method: String, argsPreview: String)
     case fileOp(op: String, path: String)
 
@@ -140,26 +140,27 @@ private enum PeepsEntityBody: Encodable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case let .request(method, argsPreview):
-            try container.encode(RequestBody(method: method, argsPreview: argsPreview), forKey: .request)
-        case let .fileOp(op, path):
+        case .request(let method, let argsPreview):
+            try container.encode(
+                RequestBody(method: method, argsPreview: argsPreview), forKey: .request)
+        case .fileOp(let op, let path):
             try container.encode(FileOpBody(op: op, path: path), forKey: .fileOp)
         }
     }
 }
 
-private struct PeepsScope: Encodable {}
-private struct PeepsEvent: Encodable {}
+private struct moireScope: Encodable {}
+private struct moireEvent: Encodable {}
 
-private struct PeepsEdge: Encodable {
+private struct moireEdge: Encodable {
     let src: String
     let dst: String
     let kind: String
     let meta: [String: String]
 }
 
-private actor SwiftPeepsGraphState {
-    private static let source = "/apps/mac/xcode/VixenFS/PeepsBridge.swift"
+private actor SwiftmoireGraphState {
+    private static let source = "/apps/mac/xcode/VixenFS/moireBridge.swift"
     private static let processStartUptimeNs = DispatchTime.now().uptimeNanoseconds
 
     static func ptimeNowMs() -> UInt64 {
@@ -220,13 +221,13 @@ private actor SwiftPeepsGraphState {
         inFlight.removeValue(forKey: requestID)
     }
 
-    func snapshot() -> PeepsSnapshot {
-        var entities: [PeepsEntity] = []
-        var edges: [PeepsEdge] = []
+    func snapshot() -> moireSnapshot {
+        var entities: [moireEntity] = []
+        var edges: [moireEdge] = []
 
         for req in inFlight.values {
             entities.append(
-                PeepsEntity(
+                moireEntity(
                     id: req.id,
                     birth: req.birthPtimeMs,
                     source: Self.source,
@@ -244,7 +245,7 @@ private actor SwiftPeepsGraphState {
                 meta["errno"] = String(errno)
             }
             entities.append(
-                PeepsEntity(
+                moireEntity(
                     id: syscall.id,
                     birth: syscall.birthPtimeMs,
                     source: Self.source,
@@ -255,22 +256,23 @@ private actor SwiftPeepsGraphState {
                 )
             )
             if let requestID = syscall.requestID {
-                edges.append(PeepsEdge(src: requestID, dst: syscall.id, kind: "touches", meta: [:]))
-                edges.append(PeepsEdge(src: syscall.id, dst: requestID, kind: "touches", meta: [:]))
+                edges.append(moireEdge(src: requestID, dst: syscall.id, kind: "touches", meta: [:]))
+                edges.append(moireEdge(src: syscall.id, dst: requestID, kind: "touches", meta: [:]))
                 if syscall.phase == "begin" {
-                    edges.append(PeepsEdge(src: requestID, dst: syscall.id, kind: "needs", meta: [:]))
+                    edges.append(
+                        moireEdge(src: requestID, dst: syscall.id, kind: "needs", meta: [:]))
                 }
             }
         }
 
-        return PeepsSnapshot(entities: entities, scopes: [], edges: edges, events: [])
+        return moireSnapshot(entities: entities, scopes: [], edges: edges, events: [])
     }
 }
-actor SwiftPeepsClient {
-    static let shared = SwiftPeepsClient()
+actor SwiftmoireClient {
+    static let shared = SwiftmoireClient()
 
-    private let log = Logger(subsystem: VixenFSConstants.subsystem, category: "SwiftPeeps")
-    private let state = SwiftPeepsGraphState()
+    private let log = Logger(subsystem: VixenFSConstants.subsystem, category: "Swiftmoire")
+    private let state = SwiftmoireGraphState()
     private var loopTask: Task<Void, Never>?
     private var configuredAddr: String?
     private var debugFrames = false
@@ -292,11 +294,11 @@ actor SwiftPeepsClient {
         configuredAddr = normalized
 
         guard let addr = normalized else {
-            log.info("Swift peeps pull loop disabled")
+            log.info("Swift moire pull loop disabled")
             return
         }
 
-        log.info("Swift peeps pull loop enabled addr=\(addr, privacy: .public)")
+        log.info("Swift moire pull loop enabled addr=\(addr, privacy: .public)")
         let state = self.state
         let processName = self.processName
         let pid = self.pid
@@ -315,7 +317,8 @@ actor SwiftPeepsClient {
                         debugFrames: debugEnabled
                     )
                 } catch {
-                    logger.error("Swift peeps session error: \(String(describing: error), privacy: .public)")
+                    logger.error(
+                        "Swift moire session error: \(String(describing: error), privacy: .public)")
                 }
 
                 if Task.isCancelled {
@@ -336,7 +339,7 @@ actor SwiftPeepsClient {
 
     private static func runPullSession(
         addr: String,
-        state: SwiftPeepsGraphState,
+        state: SwiftmoireGraphState,
         processName: String,
         pid: Int32,
         log: Logger,
@@ -346,14 +349,15 @@ actor SwiftPeepsClient {
         let fd = try connectTCP(host: host, port: port)
         defer { _ = Darwin.close(fd) }
 
-        log.info("Swift peeps connected host=\(host, privacy: .public) port=\(port, privacy: .public)")
+        log.info(
+            "Swift moire connected host=\(host, privacy: .public) port=\(port, privacy: .public)")
         let handshakePayload = try JSONEncoder().encode(
-            PeepsClientHandshakeMessage(
-                handshake: PeepsHandshake(processName: processName, pid: UInt32(pid))
+            moireClientHandshakeMessage(
+                handshake: moireHandshake(processName: processName, pid: UInt32(pid))
             )
         )
         if debugFrames, let handshakeStr = String(data: handshakePayload, encoding: .utf8) {
-            log.notice("Swift peeps handshake payload=\(handshakeStr, privacy: .public)")
+            log.notice("Swift moire handshake payload=\(handshakeStr, privacy: .public)")
         }
         try writeFrame(fd: fd, payload: handshakePayload)
 
@@ -362,12 +366,13 @@ actor SwiftPeepsClient {
                 return
             }
             let frameLen = Int(
-                UInt32(bigEndian: lenData.withUnsafeBytes { raw in
-                    raw.load(as: UInt32.self)
-                }))
-            if frameLen <= 0 || frameLen > PeepsWire.maxFrameSize {
+                UInt32(
+                    bigEndian: lenData.withUnsafeBytes { raw in
+                        raw.load(as: UInt32.self)
+                    }))
+            if frameLen <= 0 || frameLen > moireWire.maxFrameSize {
                 throw NSError(
-                    domain: "SwiftPeeps", code: 2,
+                    domain: "Swiftmoire", code: 2,
                     userInfo: [NSLocalizedDescriptionKey: "invalid frame length \(frameLen)"])
             }
             guard let payload = try readExact(fd: fd, count: frameLen) else {
@@ -375,38 +380,40 @@ actor SwiftPeepsClient {
             }
 
             if debugFrames, let payloadStr = String(data: payload, encoding: .utf8) {
-                log.notice("Swift peeps request payload=\(payloadStr, privacy: .public)")
+                log.notice("Swift moire request payload=\(payloadStr, privacy: .public)")
             }
 
-            let message: PeepsServerMessage
+            let message: moireServerMessage
             do {
-                message = try JSONDecoder().decode(PeepsServerMessage.self, from: payload)
+                message = try JSONDecoder().decode(moireServerMessage.self, from: payload)
             } catch {
-                log.error("Swift peeps decode request failed: \(String(describing: error), privacy: .public)")
+                log.error(
+                    "Swift moire decode request failed: \(String(describing: error), privacy: .public)"
+                )
                 continue
             }
 
             if let request = message.snapshotRequest {
                 log.info(
-                    "Swift peeps snapshot_request snapshot_id=\(request.snapshotID) timeout_ms=\(request.timeoutMs)"
+                    "Swift moire snapshot_request snapshot_id=\(request.snapshotID) timeout_ms=\(request.timeoutMs)"
                 )
 
                 let snapshot = await state.snapshot()
                 log.info(
-                    "Swift peeps snapshot_reply snapshot_id=\(request.snapshotID) entities=\(snapshot.entities.count) edges=\(snapshot.edges.count)"
+                    "Swift moire snapshot_reply snapshot_id=\(request.snapshotID) entities=\(snapshot.entities.count) edges=\(snapshot.edges.count)"
                 )
 
                 let replyPayload = try JSONEncoder().encode(
-                    PeepsClientSnapshotReplyMessage(
-                        snapshotReply: PeepsSnapshotReply(
+                    moireClientSnapshotReplyMessage(
+                        snapshotReply: moireSnapshotReply(
                             snapshotID: request.snapshotID,
-                            ptimeNowMs: SwiftPeepsGraphState.ptimeNowMs(),
+                            ptimeNowMs: SwiftmoireGraphState.ptimeNowMs(),
                             snapshot: snapshot
                         )
                     )
                 )
                 if debugFrames, let replyStr = String(data: replyPayload, encoding: .utf8) {
-                    log.notice("Swift peeps reply payload=\(replyStr, privacy: .public)")
+                    log.notice("Swift moire reply payload=\(replyStr, privacy: .public)")
                 }
                 try writeFrame(fd: fd, payload: replyPayload)
                 continue
@@ -415,15 +422,15 @@ actor SwiftPeepsClient {
             if let cut = message.cutRequest {
                 let streamID = "\(processName)-\(UInt32(pid))"
                 let ackPayload = try JSONEncoder().encode(
-                    PeepsClientCutAckMessage(
-                        cutAck: PeepsCutAck(
+                    moireClientCutAckMessage(
+                        cutAck: moireCutAck(
                             cutID: cut.cutID,
-                            cursor: PeepsCursor(streamID: streamID, nextSeqNo: 0)
+                            cursor: moireCursor(streamID: streamID, nextSeqNo: 0)
                         )
                     )
                 )
                 if debugFrames, let ackStr = String(data: ackPayload, encoding: .utf8) {
-                    log.notice("Swift peeps cut_ack payload=\(ackStr, privacy: .public)")
+                    log.notice("Swift moire cut_ack payload=\(ackStr, privacy: .public)")
                 }
                 try writeFrame(fd: fd, payload: ackPayload)
                 continue
@@ -434,24 +441,32 @@ actor SwiftPeepsClient {
     private static func parseDashboardAddress(_ raw: String) throws -> (String, String) {
         if raw.hasPrefix("[") {
             guard let close = raw.firstIndex(of: "]") else {
-                throw NSError(domain: "SwiftPeeps", code: 3, userInfo: [NSLocalizedDescriptionKey: "invalid IPv6 dashboard address"])
+                throw NSError(
+                    domain: "Swiftmoire", code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "invalid IPv6 dashboard address"])
             }
             let host = String(raw[raw.index(after: raw.startIndex)..<close])
             let remainder = raw[close...]
             guard remainder.hasPrefix("]:") else {
-                throw NSError(domain: "SwiftPeeps", code: 3, userInfo: [NSLocalizedDescriptionKey: "missing port in dashboard address"])
+                throw NSError(
+                    domain: "Swiftmoire", code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "missing port in dashboard address"])
             }
             let port = String(remainder.dropFirst(2))
             return (host, port)
         }
 
         guard let idx = raw.lastIndex(of: ":") else {
-            throw NSError(domain: "SwiftPeeps", code: 3, userInfo: [NSLocalizedDescriptionKey: "missing port in dashboard address"])
+            throw NSError(
+                domain: "Swiftmoire", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "missing port in dashboard address"])
         }
         let host = String(raw[..<idx])
         let port = String(raw[raw.index(after: idx)...])
         if host.isEmpty || port.isEmpty {
-            throw NSError(domain: "SwiftPeeps", code: 3, userInfo: [NSLocalizedDescriptionKey: "invalid dashboard address"])
+            throw NSError(
+                domain: "Swiftmoire", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "invalid dashboard address"])
         }
         return (host, port)
     }
@@ -470,7 +485,9 @@ actor SwiftPeepsClient {
         var result: UnsafeMutablePointer<addrinfo>?
         let rc = getaddrinfo(host, port, &hints, &result)
         guard rc == 0, let first = result else {
-            throw NSError(domain: "SwiftPeeps", code: 4, userInfo: [NSLocalizedDescriptionKey: String(cString: gai_strerror(rc))])
+            throw NSError(
+                domain: "Swiftmoire", code: 4,
+                userInfo: [NSLocalizedDescriptionKey: String(cString: gai_strerror(rc))])
         }
         defer { freeaddrinfo(first) }
 
@@ -480,7 +497,8 @@ actor SwiftPeepsClient {
             if fd >= 0 {
                 var yes: Int32 = 1
                 _ = withUnsafePointer(to: &yes) {
-                    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, $0, socklen_t(MemoryLayout<Int32>.size))
+                    setsockopt(
+                        fd, SOL_SOCKET, SO_NOSIGPIPE, $0, socklen_t(MemoryLayout<Int32>.size))
                 }
                 if Darwin.connect(fd, ai.pointee.ai_addr, ai.pointee.ai_addrlen) == 0 {
                     return fd
@@ -490,7 +508,9 @@ actor SwiftPeepsClient {
             ptr = ai.pointee.ai_next
         }
 
-        throw NSError(domain: "SwiftPeeps", code: 5, userInfo: [NSLocalizedDescriptionKey: "failed to connect TCP socket"])
+        throw NSError(
+            domain: "Swiftmoire", code: 5,
+            userInfo: [NSLocalizedDescriptionKey: "failed to connect TCP socket"])
     }
 
     private static func readExact(fd: Int32, count: Int) throws -> Data? {
@@ -503,9 +523,11 @@ actor SwiftPeepsClient {
                 return Darwin.recv(fd, ptr, count - offset, 0)
             }
             if readCount == 0 {
-                return offset == 0 ? nil : {
-                    return nil
-                }()
+                return offset == 0
+                    ? nil
+                    : {
+                        return nil
+                    }()
             }
             if readCount < 0 {
                 throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
@@ -566,13 +588,17 @@ private func newULID() -> String {
 private func encodeULIDBytes(_ bytes: [UInt8]) -> String {
     precondition(bytes.count == 16, "ULID must be 16 bytes")
 
-    let v0 = (UInt32(bytes[0]) << 24) | (UInt32(bytes[1]) << 16) | (UInt32(bytes[2]) << 8)
+    let v0 =
+        (UInt32(bytes[0]) << 24) | (UInt32(bytes[1]) << 16) | (UInt32(bytes[2]) << 8)
         | UInt32(bytes[3])
-    let v1 = (UInt32(bytes[4]) << 24) | (UInt32(bytes[5]) << 16) | (UInt32(bytes[6]) << 8)
+    let v1 =
+        (UInt32(bytes[4]) << 24) | (UInt32(bytes[5]) << 16) | (UInt32(bytes[6]) << 8)
         | UInt32(bytes[7])
-    let v2 = (UInt32(bytes[8]) << 24) | (UInt32(bytes[9]) << 16) | (UInt32(bytes[10]) << 8)
+    let v2 =
+        (UInt32(bytes[8]) << 24) | (UInt32(bytes[9]) << 16) | (UInt32(bytes[10]) << 8)
         | UInt32(bytes[11])
-    let v3 = (UInt32(bytes[12]) << 24) | (UInt32(bytes[13]) << 16) | (UInt32(bytes[14]) << 8)
+    let v3 =
+        (UInt32(bytes[12]) << 24) | (UInt32(bytes[13]) << 16) | (UInt32(bytes[14]) << 8)
         | UInt32(bytes[15])
 
     let i0 = Int((v0 >> 27) & 0x1F)

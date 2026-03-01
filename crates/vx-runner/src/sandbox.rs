@@ -14,8 +14,8 @@
 //!
 //! Also provides timeout enforcement and streamed output for all platforms.
 
-use peeps::Command;
-use roam_stream::peeps::prelude::*;
+use moire::Command;
+use roam_stream::moire::prelude::*;
 use std::process::ExitStatus;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -134,14 +134,14 @@ pub async fn run_sandboxed_command(
     // Merge stdout and stderr into a single combined output buffer.
     // Also track the latest line for progress reporting.
     let combined_output =
-        std::sync::Arc::new(peeps::mutex!("runner/combined_output", String::new()));
-    let latest_line = std::sync::Arc::new(peeps::mutex!("runner/latest_line", String::new()));
+        std::sync::Arc::new(moire::mutex!("runner/combined_output", String::new()));
+    let latest_line = std::sync::Arc::new(moire::mutex!("runner/latest_line", String::new()));
 
     // Spawn readers for both streams
     let combined_for_stdout = combined_output.clone();
     let latest_for_stdout = latest_line.clone();
     let stdout_task =
-        peeps::spawn_tracked!(format!("sandbox_stdout_{}", action_desc), async move {
+        moire::spawn_tracked!(format!("sandbox_stdout_{}", action_desc), async move {
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
             loop {
@@ -163,7 +163,7 @@ pub async fn run_sandboxed_command(
     let combined_for_stderr = combined_output.clone();
     let latest_for_stderr = latest_line.clone();
     let stderr_task =
-        peeps::spawn_tracked!(format!("sandbox_stderr_{}", action_desc), async move {
+        moire::spawn_tracked!(format!("sandbox_stderr_{}", action_desc), async move {
             let mut reader = BufReader::new(stderr);
             let mut line = String::new();
             loop {
@@ -185,7 +185,7 @@ pub async fn run_sandboxed_command(
     // Progress tick task: every 250ms, send the latest line if it changed
     let latest_for_tick = latest_line.clone();
     let action_desc_owned = action_desc.to_string();
-    let tick_task = peeps::spawn_tracked!(format!("sandbox_tick_{}", action_desc), async move {
+    let tick_task = moire::spawn_tracked!(format!("sandbox_tick_{}", action_desc), async move {
         let mut last_sent = String::new();
         let mut interval = tokio::time::interval(PROGRESS_TICK_INTERVAL);
         loop {

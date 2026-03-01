@@ -143,7 +143,7 @@ async fn mount_path_candidates(mount_path: &Utf8PathBuf) -> Vec<String> {
 /// itself — which may be a dead FSKit mount that hangs on any access.
 async fn canonicalize_without_stat(mount_path: &Utf8PathBuf) -> Utf8PathBuf {
     if let Some(parent) = mount_path.parent()
-        && let Ok(canonical_parent) = peeps::fs::canonicalize(parent.as_std_path()).await
+        && let Ok(canonical_parent) = moire::fs::canonicalize(parent.as_std_path()).await
         && let Ok(canonical_parent) = Utf8PathBuf::try_from(canonical_parent)
         && let Some(name) = mount_path.file_name()
     {

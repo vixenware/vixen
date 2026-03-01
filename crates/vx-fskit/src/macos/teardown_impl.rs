@@ -2,13 +2,13 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use camino::Utf8PathBuf;
-use peeps::Command;
+use moire::Command;
 
 use super::probe;
 use super::process;
 use super::{FsKitResult, Log, mount_path_candidates};
 
-const PEEPS_CX: peeps::PeepsContext = peeps::PeepsContext::new(env!("CARGO_MANIFEST_DIR"));
+const moire_CX: moire::moireContext = moire::moireContext::new(env!("CARGO_MANIFEST_DIR"));
 
 /// Unmount a VixenFS filesystem.
 ///
@@ -24,7 +24,7 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
 
     let probe_result = probe::probe(mount_path, &candidates, &mut log, false).await;
 
-    let mount_exists = peeps::fs::metadata(mount_path.as_std_path()).await.is_ok();
+    let mount_exists = moire::fs::metadata(mount_path.as_std_path()).await.is_ok();
 
     if probe_result.is_clean() && !mount_exists {
         log.ok("nothing mounted and no stale directory, nothing to do");
@@ -33,7 +33,7 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
 
     if probe_result.is_clean() && mount_exists {
         log.info("stale mountpoint directory, removing");
-        match peeps::fs::remove_dir(mount_path.as_std_path()).await {
+        match moire::fs::remove_dir(mount_path.as_std_path()).await {
             Ok(()) => {
                 log.ok(format!("rmdir {mount_path}: ok"));
                 return FsKitResult::success(log.into_entries());
@@ -83,7 +83,7 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
             .args(["unmount", "force", candidate])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn_with_cx(PEEPS_CX)
+            .spawn_with_cx(moire_CX)
         {
             Ok(child) => child,
             Err(e) => {
@@ -92,7 +92,7 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
             }
         };
 
-        match tokio::time::timeout(Duration::from_secs(1), child.wait_with_cx(PEEPS_CX)).await {
+        match tokio::time::timeout(Duration::from_secs(1), child.wait_with_cx(moire_CX)).await {
             Ok(Ok(status)) => {
                 let stdout = super::probe::read_pipe(child.take_stdout()).await;
                 let stderr = super::probe::read_pipe(child.take_stderr()).await;
@@ -123,7 +123,7 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
         log.info("VixenFS extension still running after unmount, sending SIGTERM");
         let _ = Command::new("pkill")
             .args(["-x", "VixenFS"])
-            .output_with_cx(PEEPS_CX)
+            .output_with_cx(moire_CX)
             .await;
         // Give it a moment to exit
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -140,8 +140,8 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
 
     if after.is_clean() {
         // Clean up the stale directory if it exists
-        if peeps::fs::metadata(mount_path.as_std_path()).await.is_ok() {
-            let _ = peeps::fs::remove_dir(mount_path.as_std_path()).await;
+        if moire::fs::metadata(mount_path.as_std_path()).await.is_ok() {
+            let _ = moire::fs::remove_dir(mount_path.as_std_path()).await;
         }
         log.ok("teardown complete: mount is clean");
         return FsKitResult::success(log.into_entries());

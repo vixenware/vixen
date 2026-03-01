@@ -44,7 +44,7 @@ impl ActionContext {
     ///
     /// Sets PATH (linker discovery), HOME, and temp dirs. On Windows the temp
     /// vars are critical — without them `GetTempPathW` falls back to `C:\WINDOWS`.
-    pub fn hermetic_env(&self, cmd: &mut peeps::Command) {
+    pub fn hermetic_env(&self, cmd: &mut moire::Command) {
         cmd.env_clear();
         // Passthrough vars needed by compilers/linkers on the host.
         // On Windows, LIB/INCLUDE are required for MSVC link.exe to find
@@ -103,7 +103,7 @@ impl RunnerService {
         );
 
         // 1. Create action context
-        let action = peeps::peep!(
+        let action = moire::peep!(
             self.create_action_context(),
             "runner.run_vfs.create_action_context"
         )
@@ -128,7 +128,7 @@ impl RunnerService {
             "ensuring toolchain VFS prefix"
         );
         let before = Instant::now();
-        let toolchain_prefix_id = match peeps::peep!(
+        let toolchain_prefix_id = match moire::peep!(
             self.ensure_toolchain_prefix(request.toolchain_manifest),
             "runner.run_vfs.ensure_toolchain_prefix"
         )
@@ -1171,7 +1171,7 @@ impl RunnerService {
                 }
             }
 
-            if let Err(e) = peeps::peep!(
+            if let Err(e) = moire::peep!(
                 self.vfs
                     .mount_tree(&action.prefix_id, &mount.mount, mount.manifest),
                 "runner.run_vfs.mount_tree"
@@ -1279,7 +1279,7 @@ impl RunnerService {
                         content_hash, size, ..
                     } => (content_hash.0, *size),
                 };
-                if let Err(e) = peeps::peep!(
+                if let Err(e) = moire::peep!(
                     self.vfs.add_file_to_prefix(
                         &action.prefix_id,
                         &fm.path,
@@ -1309,7 +1309,7 @@ impl RunnerService {
         }
 
         // Ensure out/ exists.
-        peeps::peep!(
+        moire::peep!(
             self.create_output_dir_in_prefix(&action.prefix_id),
             "runner.run_vfs.create_output_dir"
         )
@@ -1380,7 +1380,7 @@ impl RunnerService {
             ActionKind::CcLink
         };
 
-        let output = match peeps::peep!(
+        let output = match moire::peep!(
             crate::sandbox::run_sandboxed_command(cmd, &action_kind, &action_desc, progress, None,),
             "runner.run_vfs.run_sandboxed_command"
         )
@@ -1453,7 +1453,7 @@ impl RunnerService {
             };
         }
 
-        let flushed = peeps::peep!(
+        let flushed = moire::peep!(
             self.flush_prefix_outputs(&action.prefix_id),
             "runner.run_vfs.flush_prefix_outputs"
         )

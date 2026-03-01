@@ -21,7 +21,7 @@ use camino::Utf8PathBuf;
 use eyre::Result;
 use facet::Facet;
 use figue as args;
-use roam_stream::peeps::prelude::*;
+use roam_stream::moire::prelude::*;
 use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -89,8 +89,8 @@ async fn async_main() -> Result<()> {
     // Initialize tracing
     vx_tracing::init_service("vx_runner=info");
 
-    // Initialize peeps instrumentation
-    peeps::init!();
+    // Initialize moire instrumentation
+    moire::init!();
 
     tracing::info!("hello from vixen-runner");
 
@@ -121,7 +121,7 @@ async fn async_main() -> Result<()> {
         let store_addr = args.store.clone();
         let vfsd_addr = args.vfsd.clone();
         let vx_home = args.vx_home.clone();
-        peeps::spawn_tracked!("runner_boot", async move {
+        moire::spawn_tracked!("runner_boot", async move {
             tracing::info!("Booting vx-runner");
             match boot_runner(&store_addr, &vfsd_addr, &vx_home).await {
                 Ok(service) => {
@@ -143,7 +143,7 @@ async fn async_main() -> Result<()> {
         match runner_listener.accept().await {
             Ok((stream, peer_addr)) => {
                 let boot_service = boot_service.clone();
-                peeps::spawn_tracked!(format!("runner_connection_{}", peer_addr), async move {
+                moire::spawn_tracked!(format!("runner_connection_{}", peer_addr), async move {
                     tracing::debug!("Runner connection from {}", peer_addr);
 
                     // Root connection gets Boot service only.
@@ -168,13 +168,13 @@ async fn async_main() -> Result<()> {
 
                     // Drive the connection in the background.
                     let driver_handle =
-                        peeps::spawn_tracked!(format!("runner_driver_{}", peer_addr), async move {
+                        moire::spawn_tracked!(format!("runner_driver_{}", peer_addr), async move {
                             driver.run().await
                         });
 
                     // Accept virtual connections — each gets a RunnerDispatcher.
                     while let Some(conn) =
-                        peeps::peep!(incoming.recv(), "runner.incoming.recv").await
+                        moire::peep!(incoming.recv(), "runner.incoming.recv").await
                     {
                         let Some(exec) = boot_service.gate().service() else {
                             conn.reject("boot not complete".into(), vec![]);
@@ -234,7 +234,7 @@ async fn boot_runner(
 
     // Watch for vx-vfsd dying — if it does, we're useless.
     if let Some(mut vfsd_child) = vfsd_handle.child.take() {
-        peeps::spawn_tracked!("vfsd_death_watcher", async move {
+        moire::spawn_tracked!("vfsd_death_watcher", async move {
             let status = vfsd_child.wait().await;
             tracing::error!(?status, "vx-vfsd exited unexpectedly");
             std::process::exit(1);
@@ -272,7 +272,7 @@ pub struct RunnerServiceInner {
     /// toolchain manifest won't fix itself without a new runner session.
     #[allow(clippy::type_complexity)]
     toolchain_flights:
-        peeps::Mutex<HashMap<Blake3Hash, Arc<peeps::OnceCell<Result<String, String>>>>>,
+        moire::Mutex<HashMap<Blake3Hash, Arc<moire::OnceCell<Result<String, String>>>>>,
 
     /// Track created prefix IDs to avoid collisions
     created_prefixes: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -302,7 +302,7 @@ impl RunnerService {
             inner: Arc::new(RunnerServiceInner {
                 cas,
                 vfs,
-                toolchain_flights: peeps::mutex!("runner/toolchain_flights", HashMap::new()),
+                toolchain_flights: moire::mutex!("runner/toolchain_flights", HashMap::new()),
                 created_prefixes: std::sync::Mutex::new(std::collections::HashSet::new()),
             }),
         }
@@ -372,7 +372,7 @@ impl RunnerService {
             let mut flights = self.toolchain_flights.lock();
             flights
                 .entry(toolchain_manifest_hash)
-                .or_insert_with(|| Arc::new(peeps::once_cell!("toolchain_prefix_flight")))
+                .or_insert_with(|| Arc::new(moire::once_cell!("toolchain_prefix_flight")))
                 .clone()
         };
         let result = cell

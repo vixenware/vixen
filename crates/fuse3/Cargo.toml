@@ -25,4 +25,4 @@ tracing = "0.1.40"
 trait-make = "0.1"
 which = "6"
 tokio = { version = "1.45", features = ["fs", "rt", "sync", "net", "macros", "process", "time"] }
-peeps = { workspace = true }
+moire = { workspace = true }

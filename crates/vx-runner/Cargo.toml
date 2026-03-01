@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 default = []
-diagnostics = ["peeps/diagnostics", "roam-session/diagnostics", "vx-vfsd/diagnostics"]
+diagnostics = ["moire/diagnostics", "roam-session/diagnostics", "vx-vfsd/diagnostics"]
 
 [package.metadata]
 
@@ -36,7 +36,7 @@ vx-vfsd = { path = "../vx-vfsd" }
 vx-io = { workspace = true }
 libc = { workspace = true }
 roam-session = { workspace = true }
-peeps = { workspace = true }
+moire = { workspace = true }
 
 [lints]
 workspace = true

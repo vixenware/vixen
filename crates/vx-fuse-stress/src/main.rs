@@ -143,7 +143,7 @@ fn write_project_source(dir: &Path, index: usize, round: usize) -> Result<()> {
 fn dump_hang_diagnostics(vx_home: &Path) {
     eprintln!("\n=== HANG DIAGNOSTICS ===\n");
 
-    // Trigger peeps dumps via SIGUSR1 to all vixen processes
+    // Trigger moire dumps via SIGUSR1 to all vixen processes
     #[cfg(unix)]
     let pids = find_vixen_pids();
     #[cfg(not(unix))]
@@ -160,10 +160,10 @@ fn dump_hang_diagnostics(vx_home: &Path) {
         std::thread::sleep(Duration::from_millis(500));
     }
 
-    // Read peeps dumps
-    let dump_dir = Path::new("/tmp/peeps-dumps");
+    // Read moire dumps
+    let dump_dir = Path::new("/tmp/moire-dumps");
     if dump_dir.exists() {
-        eprintln!("\n--- peeps dumps ---");
+        eprintln!("\n--- moire dumps ---");
         if let Ok(entries) = std::fs::read_dir(dump_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();

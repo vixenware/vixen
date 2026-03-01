@@ -226,7 +226,7 @@ where
     cleanup_stale_projfs(&config.mount_path);
 
     // Ensure the mount directory exists
-    peeps::fs::create_dir_all(config.mount_path.as_std_path())
+    moire::fs::create_dir_all(config.mount_path.as_std_path())
         .await
         .map_err(|error| VfsError::CommandFailed {
             program: "mount",
@@ -267,7 +267,7 @@ where
                 }
             };
 
-            let (vfs_dead_tx, vfs_dead_rx) = peeps::watch_channel("vfs_dead", false);
+            let (vfs_dead_tx, vfs_dead_rx) = moire::watch_channel("vfs_dead", false);
 
             let _ = result_tx.send(Ok(VfsStart::Mounted {
                 mount_path,

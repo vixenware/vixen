@@ -24,7 +24,7 @@ roam-stream = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }
-peeps = { workspace = true }
+moire = { workspace = true }
 
 # CLI
 facet = { workspace = true }

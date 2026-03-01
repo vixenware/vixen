@@ -156,7 +156,7 @@ async fn connect_io(endpoint: &Endpoint) -> io::Result<Stream> {
         Endpoint::Tcp { host, port } => {
             let addr = format!("{host}:{port}");
             let stream =
-                peeps::net::connect(tokio::net::TcpStream::connect(addr), &ep_display, "tcp")
+                moire::net::connect(tokio::net::TcpStream::connect(addr), &ep_display, "tcp")
                     .await?;
             Ok(Stream::Tcp(stream))
         }
@@ -167,7 +167,7 @@ async fn connect_io(endpoint: &Endpoint) -> io::Result<Stream> {
             let local_target = roam_local::path_to_pipe_name(path.as_std_path());
 
             let stream =
-                peeps::net::connect(roam_local::connect(local_target), &ep_display, "local")
+                moire::net::connect(roam_local::connect(local_target), &ep_display, "local")
                     .await?;
             Ok(Stream::Local(stream))
         }
@@ -222,7 +222,7 @@ impl Listener {
                 }
 
                 if let Some(parent) = path.parent() {
-                    peeps::fs::create_dir_all(parent).await?;
+                    moire::fs::create_dir_all(parent).await?;
                 }
 
                 #[cfg(unix)]
@@ -248,12 +248,12 @@ impl Listener {
                     .map(|a| a.to_string())
                     .unwrap_or_default();
                 let (stream, addr) =
-                    peeps::net::accept(listener.accept(), &local_addr, "tcp").await?;
+                    moire::net::accept(listener.accept(), &local_addr, "tcp").await?;
                 Ok((Stream::Tcp(stream), addr.to_string()))
             }
             Listener::Local { listener, endpoint } => {
                 let ep_display = format!("unix:{endpoint}");
-                let stream = peeps::net::accept(listener.accept(), &ep_display, "local").await?;
+                let stream = moire::net::accept(listener.accept(), &ep_display, "local").await?;
                 #[cfg(unix)]
                 return Ok((Stream::Local(stream), "local".to_string()));
                 #[cfg(windows)]

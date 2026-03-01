@@ -6,8 +6,8 @@
 //! - 10 text bars for scrolling log buffer (last 10 messages)
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use peeps::{Mutex, OneshotReceiver, OneshotSender};
-use roam_stream::peeps::prelude::*;
+use moire::{Mutex, OneshotReceiver, OneshotSender};
+use roam_stream::moire::prelude::*;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -117,16 +117,16 @@ impl Clone for TuiHandle {
 impl TuiHandle {
     /// Create a new TUI handle and spawn the display task
     pub fn new() -> Self {
-        let state = Arc::new(peeps::mutex!("vx/tui_state", TuiState::new()));
-        let (shutdown_tx, shutdown_rx) = peeps::oneshot!("tui_shutdown");
+        let state = Arc::new(moire::mutex!("vx/tui_state", TuiState::new()));
+        let (shutdown_tx, shutdown_rx) = moire::oneshot!("tui_shutdown");
 
         let handle = Self {
             state: state.clone(),
-            shutdown_rx: Arc::new(peeps::mutex!("vx/tui_shutdown", Some(shutdown_rx))),
+            shutdown_rx: Arc::new(moire::mutex!("vx/tui_shutdown", Some(shutdown_rx))),
         };
 
         // Spawn the display task
-        peeps::spawn_tracked!("vx_tui_display", Self::display_task(state, shutdown_tx));
+        moire::spawn_tracked!("vx_tui_display", Self::display_task(state, shutdown_tx));
 
         handle
     }

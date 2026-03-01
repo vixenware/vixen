@@ -1,6 +1,6 @@
 import Foundation
 
-enum PeepsRequestContext {
+enum moireRequestContext {
     @TaskLocal static var spanID: String?
 
     static func spanID(fromRequestID requestID: String) -> String? {
@@ -12,4 +12,3 @@ enum PeepsRequestContext {
         return span.isEmpty ? nil : span
     }
 }
-

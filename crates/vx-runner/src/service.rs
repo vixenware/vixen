@@ -48,6 +48,6 @@ impl Runner for RunnerService {
         request: RunRequest,
         progress: roam::Tx<StoreProgress>,
     ) -> RunResult {
-        peeps::peep!(self.run_vfs(request, progress), "runner.run_vfs").await
+        moire::peep!(self.run_vfs(request, progress), "runner.run_vfs").await
     }
 }

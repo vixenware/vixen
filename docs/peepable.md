@@ -1,10 +1,10 @@
-# `peeps::peep!` instrumentation guide
+# `moire::peep!` instrumentation guide
 
-This is the quick reference for adding causal wait edges with `peeps`.
+This is the quick reference for adding causal wait edges with `moire`.
 
 ## What it does
 
-`peep!` wraps a future so `peeps` records:
+`peep!` wraps a future so `moire` records:
 
 - which parent node was waiting
 - what child wait node was touched
@@ -17,16 +17,16 @@ Use it for logical waits that are not already first-class resources.
 Use the macro form:
 
 ```rust
-let result = peeps::peep!(some_future(), "rpc.client.call").await;
+let result = moire::peep!(some_future(), "rpc.client.call").await;
 ```
 
 With metadata and explicit node kind:
 
 ```rust
-let result = peeps::peep!(
+let result = moire::peep!(
     some_future(),
     "rpc.client.call",
-    kind = peeps_types::NodeKind::Future,
+    kind = moire_types::NodeKind::Future,
     {
         let mut m = std::collections::BTreeMap::new();
         m.insert("rpc.method".to_string(), method_name.to_string());
@@ -59,7 +59,7 @@ Instrument logical wait boundaries instead:
 
 ## Agent checklist
 
-1. Use `peeps::peep!(...)` (not `.peepable(...)` extension methods).
+1. Use `moire::peep!(...)` (not `.peepable(...)` extension methods).
 2. Do not add duplicate instrumentation around first-class resource wrappers.
 3. Keep labels stable and low-cardinality.
 4. Build and run checks.

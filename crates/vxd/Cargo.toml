@@ -14,7 +14,7 @@ facet = { workspace = true }
 figue = { workspace = true }
 picante = { workspace = true }
 roam = { workspace = true }
-peeps = { workspace = true }
+moire = { workspace = true }
 roam-stream = { workspace = true }
 tokio = { workspace = true }
 blake3 = { workspace = true }
@@ -43,7 +43,7 @@ vx-tarball = { workspace = true }
 
 [features]
 default = []
-diagnostics = ["peeps/diagnostics", "roam-stream/diagnostics"]
+diagnostics = ["moire/diagnostics", "roam-stream/diagnostics"]
 
 [lints]
 workspace = true

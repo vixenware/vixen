@@ -12,7 +12,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tokio = { workspace = true }
-peeps = { workspace = true }
+moire = { workspace = true }
 tracing = { workspace = true }
 camino = { workspace = true }
 jiff = { workspace = true }

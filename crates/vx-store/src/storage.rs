@@ -60,7 +60,7 @@ impl FsStorage {
 
     pub(crate) async fn get_chunk(&self, hash: &ChunkHash) -> io::Result<Option<Vec<u8>>> {
         let path = self.chunk_path_for(hash);
-        match peeps::fs::read(&path).await {
+        match moire::fs::read(&path).await {
             Ok(data) => Ok(Some(data)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
@@ -73,7 +73,7 @@ impl FsStorage {
 
     pub(crate) async fn has_chunk(&self, hash: &ChunkHash) -> io::Result<bool> {
         let path = self.chunk_path_for(hash);
-        match peeps::fs::try_exists(&path).await {
+        match moire::fs::try_exists(&path).await {
             Ok(exists) => Ok(exists),
             Err(e) => Err(e),
         }
@@ -83,7 +83,7 @@ impl FsStorage {
 
     pub(crate) async fn get_node(&self, hash: &NodeHash) -> io::Result<Option<Vec<u8>>> {
         let path = self.node_path_for(hash);
-        match peeps::fs::read(&path).await {
+        match moire::fs::read(&path).await {
             Ok(data) => Ok(Some(data)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
@@ -96,7 +96,7 @@ impl FsStorage {
 
     pub(crate) async fn has_node(&self, hash: &NodeHash) -> io::Result<bool> {
         let path = self.node_path_for(hash);
-        match peeps::fs::try_exists(&path).await {
+        match moire::fs::try_exists(&path).await {
             Ok(exists) => Ok(exists),
             Err(e) => Err(e),
         }
@@ -121,12 +121,12 @@ impl CasStore {
     /// Create all required subdirectories.
     pub(crate) async fn init(&self) -> io::Result<()> {
         let root = self.primary.root();
-        peeps::fs::create_dir_all(root.join("chunks/blake3")).await?;
-        peeps::fs::create_dir_all(root.join("nodes/blake3")).await?;
-        peeps::fs::create_dir_all(root.join("cache/blake3")).await?;
-        peeps::fs::create_dir_all(root.join("tmp")).await?;
-        peeps::fs::create_dir_all(root.join("toolchains")).await?;
-        peeps::fs::create_dir_all(root.join("registry/spec")).await?;
+        moire::fs::create_dir_all(root.join("chunks/blake3")).await?;
+        moire::fs::create_dir_all(root.join("nodes/blake3")).await?;
+        moire::fs::create_dir_all(root.join("cache/blake3")).await?;
+        moire::fs::create_dir_all(root.join("tmp")).await?;
+        moire::fs::create_dir_all(root.join("toolchains")).await?;
+        moire::fs::create_dir_all(root.join("registry/spec")).await?;
         Ok(())
     }
 
@@ -176,7 +176,7 @@ impl CasStore {
         hash: &ManifestHash,
     ) -> io::Result<Option<String>> {
         let path = Self::tree_manifest_path(self.primary.root(), hash);
-        match peeps::fs::read_to_string(&path).await {
+        match moire::fs::read_to_string(&path).await {
             Ok(json) => Ok(Some(json)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
@@ -210,15 +210,15 @@ impl CasStore {
             .to_path_buf();
         let manifest_hex = manifest_hash.to_hex();
 
-        peeps::fs::create_dir_all(&parent).await?;
+        moire::fs::create_dir_all(&parent).await?;
 
-        let mut opts = peeps::fs::OpenOptions::new();
+        let mut opts = moire::fs::OpenOptions::new();
         opts.write(true).create_new(true);
         match opts.open(&path).await {
             Ok(mut file) => {
                 file.write_all(manifest_hex.as_bytes()).await?;
                 file.sync_all().await?;
-                if let Ok(dir) = peeps::fs::File::open(&parent).await
+                if let Ok(dir) = moire::fs::File::open(&parent).await
                     && let Err(e) = dir.sync_all().await
                 {
                     tracing::warn!("failed to sync directory {}: {}", parent, e);
@@ -257,15 +257,15 @@ impl CasStore {
             .to_path_buf();
         let manifest_hex = manifest_hash.to_hex();
 
-        peeps::fs::create_dir_all(&parent).await?;
+        moire::fs::create_dir_all(&parent).await?;
 
-        let mut opts = peeps::fs::OpenOptions::new();
+        let mut opts = moire::fs::OpenOptions::new();
         opts.write(true).create_new(true);
         match opts.open(&path).await {
             Ok(mut file) => {
                 file.write_all(manifest_hex.as_bytes()).await?;
                 file.sync_all().await?;
-                if let Ok(dir) = peeps::fs::File::open(&parent).await
+                if let Ok(dir) = moire::fs::File::open(&parent).await
                     && let Err(e) = dir.sync_all().await
                 {
                     tracing::warn!("failed to sync directory {}: {}", parent, e);
@@ -300,7 +300,7 @@ impl CasStore {
 
     pub(crate) async fn delete_cache(&self, key: &CacheKey) -> io::Result<bool> {
         let path = Self::cache_path(self.primary.root(), key);
-        match peeps::fs::remove_file(path).await {
+        match moire::fs::remove_file(path).await {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e),
@@ -313,7 +313,7 @@ impl CasStore {
 // =============================================================================
 
 async fn read_hash_mapping(path: &Utf8Path) -> io::Result<Option<Blake3Hash>> {
-    match peeps::fs::read_to_string(path).await {
+    match moire::fs::read_to_string(path).await {
         Ok(content) => Ok(Blake3Hash::from_hex(content.trim())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),

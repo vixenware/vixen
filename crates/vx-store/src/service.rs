@@ -54,7 +54,7 @@ impl Store for StoreService {
             ));
         }
 
-        peeps::peep!(
+        moire::peep!(
             self.storage.put_chunk(&hash, &data),
             "storage.put_chunk",
             {

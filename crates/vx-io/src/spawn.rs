@@ -1,11 +1,11 @@
 use camino::Utf8PathBuf;
 use eyre::Result;
-use peeps::Child;
+use moire::Child;
 use std::time::Duration;
 
 use crate::net::{Endpoint, EndpointConnector};
 
-const PEEPS_CX: peeps::PeepsContext = peeps::PeepsContext::new(env!("CARGO_MANIFEST_DIR"));
+const moire_CX: moire::moireContext = moire::moireContext::new(env!("CARGO_MANIFEST_DIR"));
 
 /// Result of a successful [`ServiceBuilder::connect`].
 pub struct ServiceHandle<D> {
@@ -165,7 +165,7 @@ where
                     let caller = result?;
                     Ok(ServiceHandle { child, caller })
                 }
-                exit_status = child_proc.wait_with_cx(PEEPS_CX) => {
+                exit_status = child_proc.wait_with_cx(moire_CX) => {
                     match exit_status {
                         Ok(status) if status.success() => {
                             // Child exited with status 0 — probably found lock held.
@@ -278,7 +278,7 @@ async fn spawn_binary(
         binary_path.display()
     );
 
-    let mut cmd = peeps::Command::new(&binary_path);
+    let mut cmd = moire::Command::new(&binary_path);
     cmd.arg("--listen").arg(&endpoint_display);
     cmd.args(extra_args);
     for (key, value) in env_vars {
@@ -291,10 +291,10 @@ async fn spawn_binary(
         cmd.stderr(Stdio::inherit());
     } else if let Some(log_path) = log_path {
         if let Some(parent) = log_path.parent() {
-            peeps::fs::create_dir_all(parent).await?;
+            moire::fs::create_dir_all(parent).await?;
         }
 
-        let mut opts = peeps::fs::OpenOptions::new();
+        let mut opts = moire::fs::OpenOptions::new();
         opts.create(true).append(true);
         let log_file = opts.open(log_path).await?;
         let log_file_clone = log_file.try_clone().await?;
