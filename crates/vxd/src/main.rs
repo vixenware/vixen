@@ -236,7 +236,6 @@ fn main() -> Result<()> {
 async fn async_main() -> Result<()> {
     // Initialize tracing (logs will go to ~/.vx/vxd.log via spawn_service redirection)
     vx_tracing::init_service("vxd=info");
-    ::moire::init!();
 
     let in_test = std::env::var("VX_TEST").is_ok();
 
@@ -283,10 +282,7 @@ async fn async_main() -> Result<()> {
     // Keep lock_file alive for the daemon's lifetime
     let _lock_guard = lock_file;
 
-    let spawn_tracker = Arc::new(::moire::mutex!(
-        "vxd/spawn_tracker",
-        SpawnTracker::default()
-    ));
+    let spawn_tracker = Arc::new(SyncMutex::new("vxd/spawn_tracker", SpawnTracker::default()));
 
     // Resolve host triple early — this is cheap and can fail fast.
     let exec_host_triple = match std::env::var("VX_RUNNER_HOST_TRIPLE") {
@@ -331,31 +327,34 @@ async fn async_main() -> Result<()> {
         let vx_home = args.vx_home.clone();
         let exec_host_triple = exec_host_triple.clone();
         let boot_failed = boot_failed.clone();
-        ::moire::spawn_tracked!("service_boot", async move {
-            tracing::info!("Booting services (vx-store, vx-runner)");
-            match ensure_services(&args_for_boot, &spawn_tracker).await {
-                Ok(clients) => {
-                    tracing::info!("Services booted successfully");
-                    let daemon = Arc::new(
-                        VxdService::new(
-                            vx_home,
-                            exec_host_triple,
-                            spawn_tracker,
-                            clients.store,
-                            clients.exec,
-                        )
-                        .await,
-                    );
-                    gate.set_service(daemon);
-                    boot_tx.ready();
-                }
-                Err(e) => {
-                    tracing::error!(e = %format!("{e:#}"), "Service boot failed");
-                    boot_failed.store(true, std::sync::atomic::Ordering::Relaxed);
-                    boot_tx.failed(format!("{e:#}"));
+        moire::task::spawn(
+            async move {
+                tracing::info!("Booting services (vx-store, vx-runner)");
+                match ensure_services(&args_for_boot, &spawn_tracker).await {
+                    Ok(clients) => {
+                        tracing::info!("Services booted successfully");
+                        let daemon = Arc::new(
+                            VxdService::new(
+                                vx_home,
+                                exec_host_triple,
+                                spawn_tracker,
+                                clients.store,
+                                clients.exec,
+                            )
+                            .await,
+                        );
+                        gate.set_service(daemon);
+                        boot_tx.ready();
+                    }
+                    Err(e) => {
+                        tracing::error!(e = %format!("{e:#}"), "Service boot failed");
+                        boot_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                        boot_tx.failed(format!("{e:#}"));
+                    }
                 }
             }
-        });
+            .named("service_boot"),
+        );
     }
 
     let boot_service = gate.boot_service();
@@ -363,7 +362,7 @@ async fn async_main() -> Result<()> {
     // Track active connections and shut down after idle timeout.
     // Normal: 2 hours, test mode: 2s, boot failed: 2s.
     let active_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let last_disconnect = Arc::new(::moire::mutex!(
+    let last_disconnect = Arc::new(SyncMutex::new(
         "vxd/last_disconnect",
         Option::<tokio::time::Instant>::None,
     ));
@@ -377,57 +376,60 @@ async fn async_main() -> Result<()> {
         let active_connections = active_connections.clone();
         let last_disconnect = last_disconnect.clone();
         let boot_failed = boot_failed.clone();
-        ::moire::spawn_tracked!("idle_shutdown_monitor", async move {
-            tracing::trace!(
-                idle_timeout = ?normal_idle_timeout,
-                "idle watchdog started"
-            );
-            let mut idle_timeout = normal_idle_timeout;
-            let mut saw_boot_failure = false;
-            loop {
-                tokio::time::sleep(Duration::from_millis(400)).await;
+        moire::task::spawn(
+            async move {
+                tracing::trace!(
+                    idle_timeout = ?normal_idle_timeout,
+                    "idle watchdog started"
+                );
+                let mut idle_timeout = normal_idle_timeout;
+                let mut saw_boot_failure = false;
+                loop {
+                    tokio::time::sleep(Duration::from_millis(400)).await;
 
-                // If boot failed, shrink idle timeout so we exit quickly
-                // once the client disconnects after receiving the error.
-                if !saw_boot_failure && boot_failed.load(std::sync::atomic::Ordering::Relaxed) {
-                    tracing::trace!("boot failed, shrinking idle timeout");
-                    idle_timeout = Duration::from_secs(1);
-                    saw_boot_failure = true;
-                }
-
-                let count = active_connections.load(std::sync::atomic::Ordering::Relaxed);
-                if count == 0 {
-                    let idle_long_enough = match *last_disconnect.lock() {
-                        Some(when) => {
-                            let elapsed = when.elapsed();
-                            tracing::trace!(
-                                ?elapsed,
-                                ?idle_timeout,
-                                "idle watchdog tick: no active connections"
-                            );
-                            elapsed >= idle_timeout
-                        }
-                        // No client ever connected — only shut down if boot failed.
-                        None => {
-                            tracing::trace!(
-                                saw_boot_failure,
-                                "idle watchdog tick: no connections ever established"
-                            );
-                            saw_boot_failure
-                        }
-                    };
-                    if idle_long_enough {
-                        tracing::info!("no connections for {idle_timeout:?}, shutting down");
-                        std::process::exit(0);
+                    // If boot failed, shrink idle timeout so we exit quickly
+                    // once the client disconnects after receiving the error.
+                    if !saw_boot_failure && boot_failed.load(std::sync::atomic::Ordering::Relaxed) {
+                        tracing::trace!("boot failed, shrinking idle timeout");
+                        idle_timeout = Duration::from_secs(1);
+                        saw_boot_failure = true;
                     }
-                } else {
-                    tracing::trace!(
-                        active_connections = count,
-                        "idle watchdog tick: connections active"
-                    );
+
+                    let count = active_connections.load(std::sync::atomic::Ordering::Relaxed);
+                    if count == 0 {
+                        let idle_long_enough = match *last_disconnect.lock() {
+                            Some(when) => {
+                                let elapsed = when.elapsed();
+                                tracing::trace!(
+                                    ?elapsed,
+                                    ?idle_timeout,
+                                    "idle watchdog tick: no active connections"
+                                );
+                                elapsed >= idle_timeout
+                            }
+                            // No client ever connected — only shut down if boot failed.
+                            None => {
+                                tracing::trace!(
+                                    saw_boot_failure,
+                                    "idle watchdog tick: no connections ever established"
+                                );
+                                saw_boot_failure
+                            }
+                        };
+                        if idle_long_enough {
+                            tracing::info!("no connections for {idle_timeout:?}, shutting down");
+                            std::process::exit(0);
+                        }
+                    } else {
+                        tracing::trace!(
+                            active_connections = count,
+                            "idle watchdog tick: connections active"
+                        );
+                    }
                 }
             }
-        });
+            .named("idle_shutdown_monitor"),
+        );
     }
 
     tracing::trace!("Starting accept loop");
@@ -445,7 +447,8 @@ async fn async_main() -> Result<()> {
 
         let boot_service = boot_service.clone();
 
-        ::moire::spawn_tracked!(format!("vxd_connection_{}", peer_addr), async move {
+        let conn_name = format!("vxd_connection_{peer_addr}");
+        moire::task::spawn(async move {
             tracing::debug!("New connection from {}", peer_addr);
 
             // Root connection gets Boot service only — clients must call boot()
@@ -479,13 +482,13 @@ async fn async_main() -> Result<()> {
 
             // Drive the connection in the background
             let driver_handle =
-                ::moire::spawn_tracked!(format!("vxd_driver_{}", peer_addr), async move {
+                moire::task::spawn(async move {
                     driver.run().await
-                });
+                }.named("vxd_driver"));
 
             // Accept virtual connections — each gets a per-session VxdDispatcher.
             // Reject if boot hasn't completed (client should call boot() first).
-            while let Some(conn) = ::moire::peep!(incoming.recv(), "vxd.incoming.recv").await {
+            while let Some(conn) = incoming.recv().await {
                 let Some(daemon) = boot_service.gate().service() else {
                     tracing::trace!(%peer_addr, "rejecting virtual connection: boot not complete");
                     conn.reject("boot not complete".into(), vec![]);
@@ -529,6 +532,6 @@ async fn async_main() -> Result<()> {
                 "connection closed"
             );
             *last_disconnect.lock() = Some(tokio::time::Instant::now());
-        });
+        }.named(conn_name));
     }
 }

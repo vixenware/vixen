@@ -218,7 +218,7 @@ where
                         tracing::debug!("SHM host driver exited cleanly");
                     }
                     let _ = vfs_dead_tx.send(true);
-                });
+                }.named("shm_host_driver"));
 
                 loop {
                     let ticket = match driver_handle.create_peer(AddPeerOptions::default()).await {

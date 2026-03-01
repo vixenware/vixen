@@ -88,27 +88,30 @@ async fn async_main() -> Result<()> {
         let gate = Arc::clone(&gate);
         let root = args.root.clone();
         let vx_home = args.vx_home.clone();
-        moire::task::spawn(async move {
-            tracing::info!("Booting vx-store");
-            match async {
-                let storage = CasStore::new(FsStorage::new(root));
-                storage.init().await?;
-                let store = StoreService::new(storage, vx_home);
-                Ok::<_, eyre::Report>(store)
-            }
-            .await
-            {
-                Ok(store) => {
-                    tracing::info!("vx-store boot succeeded");
-                    gate.set_service(store);
-                    boot_tx.ready();
+        moire::task::spawn(
+            async move {
+                tracing::info!("Booting vx-store");
+                match async {
+                    let storage = CasStore::new(FsStorage::new(root));
+                    storage.init().await?;
+                    let store = StoreService::new(storage, vx_home);
+                    Ok::<_, eyre::Report>(store)
                 }
-                Err(e) => {
-                    tracing::error!("vx-store boot failed: {e:#}");
-                    boot_tx.failed(format!("{e:#}"));
+                .await
+                {
+                    Ok(store) => {
+                        tracing::info!("vx-store boot succeeded");
+                        gate.set_service(store);
+                        boot_tx.ready();
+                    }
+                    Err(e) => {
+                        tracing::error!("vx-store boot failed: {e:#}");
+                        boot_tx.failed(format!("{e:#}"));
+                    }
                 }
             }
-        });
+            .named("store_boot"),
+        );
     }
 
     let boot_service = gate.boot_service();
@@ -118,52 +121,56 @@ async fn async_main() -> Result<()> {
         tracing::info!("accepted connection from {peer_addr}");
         let boot_service = boot_service.clone();
 
-        moire::task::spawn(async move {
-            tracing::debug!("New connection from {}", peer_addr);
+        moire::task::spawn(
+            async move {
+                tracing::debug!("New connection from {}", peer_addr);
 
-            // Root connection gets Boot service only.
-            let boot_dispatcher = BootDispatcher::new(boot_service.clone());
-            let (_handle, mut incoming, driver) = match accept(
-                stream,
-                HandshakeConfig {
-                    max_payload_size: 256 * 1024 * 1024, // 256 MiB
-                    name: Some("vx-store".into()),
-                    ..Default::default()
-                },
-                boot_dispatcher,
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::debug!("Handshake failed for {}: {e}", peer_addr);
-                    return;
-                }
-            };
-
-            // Drive the connection in the background.
-            let driver_handle = moire::task::spawn(async move { driver.run().await });
-
-            // Accept virtual connections — each gets a StoreDispatcher.
-            while let Some(conn) = incoming.recv().await {
-                let Some(store) = boot_service.gate().service() else {
-                    conn.reject("boot not complete".into(), vec![]);
-                    continue;
+                // Root connection gets Boot service only.
+                let boot_dispatcher = BootDispatcher::new(boot_service.clone());
+                let (_handle, mut incoming, driver) = match accept(
+                    stream,
+                    HandshakeConfig {
+                        max_payload_size: 256 * 1024 * 1024, // 256 MiB
+                        name: Some("vx-store".into()),
+                        ..Default::default()
+                    },
+                    boot_dispatcher,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::debug!("Handshake failed for {}: {e}", peer_addr);
+                        return;
+                    }
                 };
-                let dispatcher = StoreDispatcher::new(store.clone());
-                if let Err(e) = conn.accept(vec![], Some(Box::new(dispatcher))).await {
-                    tracing::warn!(
-                        "Failed to accept virtual connection from {}: {e}",
-                        peer_addr
-                    );
-                }
-            }
 
-            if let Err(e) = driver_handle.await {
-                tracing::warn!("Driver error from {}: {e:?}", peer_addr);
+                // Drive the connection in the background.
+                let driver_handle =
+                    moire::task::spawn(async move { driver.run().await }.named("store_driver"));
+
+                // Accept virtual connections — each gets a StoreDispatcher.
+                while let Some(conn) = incoming.recv().await {
+                    let Some(store) = boot_service.gate().service() else {
+                        conn.reject("boot not complete".into(), vec![]);
+                        continue;
+                    };
+                    let dispatcher = StoreDispatcher::new(store.clone());
+                    if let Err(e) = conn.accept(vec![], Some(Box::new(dispatcher))).await {
+                        tracing::warn!(
+                            "Failed to accept virtual connection from {}: {e}",
+                            peer_addr
+                        );
+                    }
+                }
+
+                if let Err(e) = driver_handle.await {
+                    tracing::warn!("Driver error from {}: {e:?}", peer_addr);
+                }
+                tracing::debug!("Connection from {} closed", peer_addr);
             }
-            tracing::debug!("Connection from {} closed", peer_addr);
-        });
+            .named("store_connection"),
+        );
     }
 }
 

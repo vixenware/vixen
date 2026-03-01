@@ -11,12 +11,11 @@ use crate::db::Database;
 use crate::error::{Result, VxdError};
 use crate::executor::Executor;
 use crate::inputs::*;
-use ::moire::Mutex;
+use ::moire::sync::SyncMutex;
 use camino::Utf8PathBuf;
 use facet::trace;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
-use roam_stream::moire::prelude::*;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -80,25 +79,25 @@ pub struct VxdService {
     picante_wal: Utf8PathBuf,
 
     /// WAL writer for incremental persistence (kept open across builds)
-    wal_writer: Arc<Mutex<Option<WalWriter>>>,
+    wal_writer: Arc<SyncMutex<Option<WalWriter>>>,
 
     /// Acquired toolchains (manifest references only)
-    toolchains: Arc<Mutex<AcquiredToolchains>>,
+    toolchains: Arc<SyncMutex<AcquiredToolchains>>,
 
     /// Spawn tracker for child services
-    spawn_tracker: Arc<Mutex<SpawnTracker>>,
+    spawn_tracker: Arc<SyncMutex<SpawnTracker>>,
 
     /// Progress listener client (for reporting progress to vx CLI)
     progress_listener:
-        Arc<Mutex<Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>>>,
+        Arc<SyncMutex<Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>>>,
 
     /// Session ID for cache key namespacing. Empty = session zero (shared).
     /// Per-connection state — each connection handler gets its own instance.
-    session_id: Arc<Mutex<String>>,
+    session_id: Arc<SyncMutex<String>>,
 
     /// Cancellation token for the build active on this session (if any).
     /// Per-connection: when the CLI disconnects, only this session's build is cancelled.
-    active_build_cancel: Arc<Mutex<Option<CancellationToken>>>,
+    active_build_cancel: Arc<SyncMutex<Option<CancellationToken>>>,
 }
 
 fn rule_plan_bridge_enabled() -> bool {
@@ -647,7 +646,7 @@ impl VxdService {
     pub async fn new(
         vx_home: Utf8PathBuf,
         exec_host_triple: String,
-        spawn_tracker: Arc<Mutex<SpawnTracker>>,
+        spawn_tracker: Arc<SyncMutex<SpawnTracker>>,
         store: Arc<StoreClient<crate::UpstreamCaller>>,
         exec: Arc<RunnerClient<crate::UpstreamCaller>>,
     ) -> Self {
@@ -708,8 +707,8 @@ impl VxdService {
             db: Arc::new(db),
             picante_cache: cache_path,
             picante_wal: wal_path,
-            wal_writer: Arc::new(::moire::mutex!("vxd/wal_writer", wal_writer)),
-            toolchains: Arc::new(::moire::mutex!(
+            wal_writer: Arc::new(SyncMutex::new("vxd/wal_writer", wal_writer)),
+            toolchains: Arc::new(SyncMutex::new(
                 "vxd/toolchains",
                 AcquiredToolchains {
                     rust: None,
@@ -717,9 +716,9 @@ impl VxdService {
                 },
             )),
             spawn_tracker,
-            progress_listener: Arc::new(::moire::mutex!("vxd/progress_listener", None)),
-            session_id: Arc::new(::moire::mutex!("vxd/session_id", String::new())),
-            active_build_cancel: Arc::new(::moire::mutex!("vxd/active_build_cancel", None)),
+            progress_listener: Arc::new(SyncMutex::new("vxd/progress_listener", None)),
+            session_id: Arc::new(SyncMutex::new("vxd/session_id", String::new())),
+            active_build_cancel: Arc::new(SyncMutex::new("vxd/active_build_cancel", None)),
         }
     }
 
@@ -738,9 +737,9 @@ impl VxdService {
             toolchains: self.toolchains.clone(),
             spawn_tracker: self.spawn_tracker.clone(),
             // Per-connection state: fresh for each session
-            progress_listener: Arc::new(::moire::mutex!("vxd/progress_listener", None)),
-            session_id: Arc::new(::moire::mutex!("vxd/session_id", String::new())),
-            active_build_cancel: Arc::new(::moire::mutex!("vxd/active_build_cancel", None)),
+            progress_listener: Arc::new(SyncMutex::new("vxd/progress_listener", None)),
+            session_id: Arc::new(SyncMutex::new("vxd/session_id", String::new())),
+            active_build_cancel: Arc::new(SyncMutex::new("vxd/active_build_cancel", None)),
         }
     }
 
@@ -797,11 +796,12 @@ impl VxdService {
         // Forward store progress to the CLI's ProgressListener
         let forward_listener = self.progress_listener.lock().clone();
         let forward_action_id = action_id;
-        let forward_handle = ::moire::spawn_tracked!(
-            format!("toolchain_progress_fwd_{:?}", action_id),
+        let forward_handle = moire::task::spawn(
             async move {
-                while let Ok(Some(sp)) =
-                    ::moire::peep!(progress_rx.recv(), "vxd.toolchain.progress.recv").await
+                while let Ok(Some(sp)) = progress_rx
+                    .recv()
+                    .named("vxd.toolchain.progress.recv")
+                    .await
                 {
                     if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
                         let _ = listener
@@ -816,7 +816,8 @@ impl VxdService {
                             .await;
                     }
                 }
-            },
+            }
+            .named("toolchain_progress_fwd"),
         );
 
         let result = self
@@ -826,9 +827,10 @@ impl VxdService {
             .map_err(|e| {
                 // Complete action on error
                 let this = self.clone();
-                ::moire::spawn_tracked!(format!("complete_action_{:?}", action_id), async move {
-                    this.report_complete_action(action_id).await
-                });
+                moire::task::spawn(
+                    async move { this.report_complete_action(action_id).await }
+                        .named("complete_action"),
+                );
                 VxdError::CasRpc(e.to_string())
             })?;
 
@@ -844,9 +846,10 @@ impl VxdService {
 
         let manifest_hash = result.manifest_hash.ok_or_else(|| {
             let this = self.clone();
-            ::moire::spawn_tracked!(format!("complete_action_{:?}", action_id), async move {
-                this.report_complete_action(action_id).await
-            });
+            moire::task::spawn(
+                async move { this.report_complete_action(action_id).await }
+                    .named("complete_action"),
+            );
             VxdError::NoManifestHash
         })?;
 
@@ -857,16 +860,18 @@ impl VxdService {
             .await
             .map_err(|e| {
                 let this = self.clone();
-                ::moire::spawn_tracked!(format!("complete_action_{:?}", action_id), async move {
-                    this.report_complete_action(action_id).await
-                });
+                moire::task::spawn(
+                    async move { this.report_complete_action(action_id).await }
+                        .named("complete_action"),
+                );
                 VxdError::CasRpc(e.to_string())
             })?
             .ok_or_else(|| {
                 let this = self.clone();
-                ::moire::spawn_tracked!(format!("complete_action_{:?}", action_id), async move {
-                    this.report_complete_action(action_id).await
-                });
+                moire::task::spawn(
+                    async move { this.report_complete_action(action_id).await }
+                        .named("complete_action"),
+                );
                 VxdError::ToolchainManifestNotFound(manifest_hash)
             })?;
 

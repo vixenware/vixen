@@ -125,7 +125,7 @@ impl TuiHandle {
         };
 
         // Spawn the display task
-        moire::task::spawn(Self::display_task(state, shutdown_tx));
+        moire::task::spawn(Self::display_task(state, shutdown_tx).named("vx_tui_display"));
 
         handle
     }

@@ -2,7 +2,6 @@
 
 use crate::protocol::Vfsd;
 use crate::vfs::CasVfs;
-use roam_stream::moire::prelude::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 use vx_store_proto::{

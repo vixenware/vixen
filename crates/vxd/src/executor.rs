@@ -3,10 +3,9 @@
 //! This module implements the execution engine that schedules and runs actions
 //! from the action graph with optimal parallelism while respecting dependencies.
 
-use ::moire::Mutex;
+use ::moire::sync::SyncMutex;
 use petgraph::Direction::Incoming;
 use petgraph::graph::NodeIndex;
-use roam_stream::moire::prelude::*;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
@@ -146,7 +145,7 @@ enum ExecutorMessage {
 /// fires. This guard ensures the executor always receives a completion message.
 struct CompletionGuard {
     node_idx: NodeIndex,
-    tx: Option<::moire::UnboundedSender<ExecutorMessage>>,
+    tx: Option<moire::sync::mpsc::UnboundedSender<ExecutorMessage>>,
 }
 
 impl CompletionGuard {
@@ -325,7 +324,7 @@ pub struct Executor {
     states: HashMap<NodeIndex, ActionState>,
 
     /// Results from completed actions (shared read-only with spawned tasks)
-    results: Arc<Mutex<HashMap<NodeIndex, ActionResult>>>,
+    results: Arc<SyncMutex<HashMap<NodeIndex, ActionResult>>>,
 
     /// Remaining dependency count for each action (owned by executor)
     remaining_deps: HashMap<NodeIndex, usize>,
@@ -337,11 +336,11 @@ pub struct Executor {
     concurrency_limit: Arc<Semaphore>,
 
     /// Channel for messages from spawned tasks
-    message_tx: ::moire::UnboundedSender<ExecutorMessage>,
-    message_rx: ::moire::UnboundedReceiver<ExecutorMessage>,
+    message_tx: moire::sync::mpsc::UnboundedSender<ExecutorMessage>,
+    message_rx: moire::sync::mpsc::UnboundedReceiver<ExecutorMessage>,
 
     /// In-flight action tasks (for waiting on cancellation)
-    in_flight: ::moire::JoinSet<()>,
+    in_flight: moire::task::JoinSet<()>,
 
     /// Cancellation token — cancel all in-flight actions
     cancel_token: CancellationToken,
@@ -365,7 +364,7 @@ pub struct Executor {
     build_start: std::time::Instant,
 
     /// Free-list of concurrency lane IDs (0..max_concurrency)
-    free_lanes: Arc<Mutex<Vec<u32>>>,
+    free_lanes: Arc<SyncMutex<Vec<u32>>>,
 
     /// Execution statistics (owned by executor)
     stats: ExecutionStats,
@@ -443,7 +442,7 @@ impl Executor {
             debug!("ready[{}] = {:?} {}", i, node_idx, action.display_name());
         }
 
-        let (message_tx, message_rx) = ::moire::unbounded_channel!("executor_messages");
+        let (message_tx, message_rx) = moire::sync::mpsc::unbounded_channel("executor_messages");
 
         // Detect CommandLineTools version on macOS
         #[cfg(target_os = "macos")]
@@ -471,13 +470,13 @@ impl Executor {
         Self {
             graph,
             states: HashMap::new(),
-            results: Arc::new(::moire::mutex!("vxd/executor_results", HashMap::new())),
+            results: Arc::new(SyncMutex::new("vxd/executor_results", HashMap::new())),
             remaining_deps,
             ready_queue,
             concurrency_limit: Arc::new(Semaphore::new(max_concurrency)),
             message_tx,
             message_rx,
-            in_flight: ::moire::JoinSet::named("vxd/executor_in_flight", ::moire::Source::caller()),
+            in_flight: moire::task::JoinSet::named("vxd/executor_in_flight"),
             cancel_token: CancellationToken::new(),
             progress_listener,
             cas,
@@ -485,7 +484,7 @@ impl Executor {
             db,
             node_timings: HashMap::new(),
             build_start: std::time::Instant::now(),
-            free_lanes: Arc::new(::moire::mutex!(
+            free_lanes: Arc::new(SyncMutex::new(
                 "vxd/executor_free_lanes",
                 (0..max_concurrency as u32).collect(),
             )),
@@ -591,12 +590,13 @@ impl Executor {
             while let Some(node_idx) = self.ready_queue.pop_front() {
                 debug!("spawning action for node {:?}", node_idx);
                 self.states.insert(node_idx, ActionState::Running);
-                let permit = ::moire::peep!(
-                    self.concurrency_limit.clone().acquire_owned(),
-                    "executor.concurrency.acquire_owned"
-                )
-                .await
-                .unwrap();
+                let permit = self
+                    .concurrency_limit
+                    .clone()
+                    .acquire_owned()
+                    .named("executor.concurrency.acquire_owned")
+                    .await
+                    .unwrap();
                 self.spawn_action(node_idx, permit);
             }
 
@@ -1167,11 +1167,12 @@ impl Executor {
             // Spawn a task to forward StoreProgress → ActionProgress
             let forward_listener = progress_listener.clone();
             let forward_action_id = action_id;
-            let forward_handle =
-                ::moire::spawn_tracked!("vxd_executor_store_progress_forward", async move {
-                    while let Ok(Some(sp)) =
-                        ::moire::peep!(store_progress_rx.recv(), "executor.store_progress.recv")
-                            .await
+            let forward_handle = moire::task::spawn(
+                async move {
+                    while let Ok(Some(sp)) = store_progress_rx
+                        .recv()
+                        .named("executor.store_progress.recv")
+                        .await
                     {
                         if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
                             let _ = listener
@@ -1186,7 +1187,9 @@ impl Executor {
                                 .await;
                         }
                     }
-                });
+                }
+                .named("store_progress_forward"),
+            );
 
             // Acquire a lane ID for timeline tracking
             let lane = free_lanes.lock().pop().unwrap_or(0);
@@ -1263,7 +1266,7 @@ async fn execute_action(
     cas: &Arc<StoreClient<crate::UpstreamCaller>>,
     exec: &Arc<RunnerClient<crate::UpstreamCaller>>,
     db: &Arc<crate::db::Database>,
-    results: &Arc<Mutex<HashMap<NodeIndex, ActionResult>>>,
+    results: &Arc<SyncMutex<HashMap<NodeIndex, ActionResult>>>,
     workspace_root: &camino::Utf8PathBuf,
     _target_triple: &str,
     _profile: &str,

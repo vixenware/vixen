@@ -21,7 +21,6 @@ use camino::Utf8PathBuf;
 use eyre::Result;
 use facet::Facet;
 use figue as args;
-use roam_stream::moire::prelude::*;
 use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -89,9 +88,6 @@ async fn async_main() -> Result<()> {
     // Initialize tracing
     vx_tracing::init_service("vx_runner=info");
 
-    // Initialize moire instrumentation
-    moire::init!();
-
     tracing::info!("hello from vixen-runner");
 
     let args: Args = args::Driver::new(
@@ -121,20 +117,23 @@ async fn async_main() -> Result<()> {
         let store_addr = args.store.clone();
         let vfsd_addr = args.vfsd.clone();
         let vx_home = args.vx_home.clone();
-        moire::spawn_tracked!("runner_boot", async move {
-            tracing::info!("Booting vx-runner");
-            match boot_runner(&store_addr, &vfsd_addr, &vx_home).await {
-                Ok(service) => {
-                    tracing::info!("vx-runner boot succeeded");
-                    gate.set_service(service);
-                    boot_tx.ready();
-                }
-                Err(e) => {
-                    tracing::error!("vx-runner boot failed: {e:#}");
-                    boot_tx.failed(format!("{e:#}"));
+        moire::task::spawn(
+            async move {
+                tracing::info!("Booting vx-runner");
+                match boot_runner(&store_addr, &vfsd_addr, &vx_home).await {
+                    Ok(service) => {
+                        tracing::info!("vx-runner boot succeeded");
+                        gate.set_service(service);
+                        boot_tx.ready();
+                    }
+                    Err(e) => {
+                        tracing::error!("vx-runner boot failed: {e:#}");
+                        boot_tx.failed(format!("{e:#}"));
+                    }
                 }
             }
-        });
+            .named("runner_boot"),
+        );
     }
 
     let boot_service = gate.boot_service();
@@ -143,57 +142,57 @@ async fn async_main() -> Result<()> {
         match runner_listener.accept().await {
             Ok((stream, peer_addr)) => {
                 let boot_service = boot_service.clone();
-                moire::spawn_tracked!(format!("runner_connection_{}", peer_addr), async move {
-                    tracing::debug!("Runner connection from {}", peer_addr);
+                moire::task::spawn(
+                    async move {
+                        tracing::debug!("Runner connection from {}", peer_addr);
 
-                    // Root connection gets Boot service only.
-                    let boot_dispatcher = BootDispatcher::new(boot_service.clone());
-                    let (_handle, mut incoming, driver) = match accept(
-                        stream,
-                        HandshakeConfig {
-                            max_payload_size: 256 * 1024 * 1024, // 256 MiB
-                            name: Some("vx-runner".into()),
-                            ..Default::default()
-                        },
-                        boot_dispatcher,
-                    )
-                    .await
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::debug!("Runner handshake error from {}: {e}", peer_addr);
-                            return;
-                        }
-                    };
-
-                    // Drive the connection in the background.
-                    let driver_handle =
-                        moire::spawn_tracked!(format!("runner_driver_{}", peer_addr), async move {
-                            driver.run().await
-                        });
-
-                    // Accept virtual connections — each gets a RunnerDispatcher.
-                    while let Some(conn) =
-                        moire::peep!(incoming.recv(), "runner.incoming.recv").await
-                    {
-                        let Some(exec) = boot_service.gate().service() else {
-                            conn.reject("boot not complete".into(), vec![]);
-                            continue;
+                        // Root connection gets Boot service only.
+                        let boot_dispatcher = BootDispatcher::new(boot_service.clone());
+                        let (_handle, mut incoming, driver) = match accept(
+                            stream,
+                            HandshakeConfig {
+                                max_payload_size: 256 * 1024 * 1024, // 256 MiB
+                                name: Some("vx-runner".into()),
+                                ..Default::default()
+                            },
+                            boot_dispatcher,
+                        )
+                        .await
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::debug!("Runner handshake error from {}: {e}", peer_addr);
+                                return;
+                            }
                         };
-                        let dispatcher = RunnerDispatcher::new(exec.clone());
-                        if let Err(e) = conn.accept(vec![], Some(Box::new(dispatcher))).await {
-                            tracing::warn!(
-                                "Failed to accept virtual connection from {}: {e}",
-                                peer_addr
-                            );
-                        }
-                    }
 
-                    if let Err(e) = driver_handle.await {
-                        tracing::warn!("Driver error from {}: {e:?}", peer_addr);
+                        // Drive the connection in the background.
+                        let driver_handle = moire::task::spawn(
+                            async move { driver.run().await }.named("runner_driver"),
+                        );
+
+                        // Accept virtual connections — each gets a RunnerDispatcher.
+                        while let Some(conn) = incoming.recv().await {
+                            let Some(exec) = boot_service.gate().service() else {
+                                conn.reject("boot not complete".into(), vec![]);
+                                continue;
+                            };
+                            let dispatcher = RunnerDispatcher::new(exec.clone());
+                            if let Err(e) = conn.accept(vec![], Some(Box::new(dispatcher))).await {
+                                tracing::warn!(
+                                    "Failed to accept virtual connection from {}: {e}",
+                                    peer_addr
+                                );
+                            }
+                        }
+
+                        if let Err(e) = driver_handle.await {
+                            tracing::warn!("Driver error from {}: {e:?}", peer_addr);
+                        }
+                        tracing::debug!("Runner connection from {} closed", peer_addr);
                     }
-                    tracing::debug!("Runner connection from {} closed", peer_addr);
-                });
+                    .named("runner_connection"),
+                );
             }
             Err(e) => {
                 tracing::debug!("Runner accept error: {}", e);
@@ -234,11 +233,14 @@ async fn boot_runner(
 
     // Watch for vx-vfsd dying — if it does, we're useless.
     if let Some(mut vfsd_child) = vfsd_handle.child.take() {
-        moire::spawn_tracked!("vfsd_death_watcher", async move {
-            let status = vfsd_child.wait().await;
-            tracing::error!(?status, "vx-vfsd exited unexpectedly");
-            std::process::exit(1);
-        });
+        moire::task::spawn(
+            async move {
+                let status = vfsd_child.wait().await;
+                tracing::error!(?status, "vx-vfsd exited unexpectedly");
+                std::process::exit(1);
+            }
+            .named("vfsd_death_watcher"),
+        );
     }
 
     // Run boot protocol on both services.
@@ -271,8 +273,9 @@ pub struct RunnerServiceInner {
     /// Stores Ok(prefix_id) or Err(message) — errors are cached too, since a missing
     /// toolchain manifest won't fix itself without a new runner session.
     #[allow(clippy::type_complexity)]
-    toolchain_flights:
-        moire::Mutex<HashMap<Blake3Hash, Arc<moire::OnceCell<Result<String, String>>>>>,
+    toolchain_flights: moire::sync::SyncMutex<
+        HashMap<Blake3Hash, Arc<moire::sync::OnceCell<Result<String, String>>>>,
+    >,
 
     /// Track created prefix IDs to avoid collisions
     created_prefixes: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -302,7 +305,10 @@ impl RunnerService {
             inner: Arc::new(RunnerServiceInner {
                 cas,
                 vfs,
-                toolchain_flights: moire::mutex!("runner/toolchain_flights", HashMap::new()),
+                toolchain_flights: moire::sync::SyncMutex::new(
+                    "runner/toolchain_flights",
+                    HashMap::new(),
+                ),
                 created_prefixes: std::sync::Mutex::new(std::collections::HashSet::new()),
             }),
         }
@@ -372,7 +378,7 @@ impl RunnerService {
             let mut flights = self.toolchain_flights.lock();
             flights
                 .entry(toolchain_manifest_hash)
-                .or_insert_with(|| Arc::new(moire::once_cell!("toolchain_prefix_flight")))
+                .or_insert_with(|| Arc::new(moire::sync::OnceCell::new("toolchain_prefix_flight")))
                 .clone()
         };
         let result = cell

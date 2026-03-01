@@ -35,8 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use camino::Utf8PathBuf;
-use moire::Mutex;
-use roam_stream::moire::prelude::*;
+use moire::sync::SyncMutex;
 use vixenfs_proto::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
     ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
@@ -339,7 +338,7 @@ pub struct CasVfs {
     /// CAS client for fetching blobs
     pub(crate) cas: Arc<StoreClient<crate::StoreCaller>>,
     /// Unified VFS state lock: items + prefixes
-    pub(crate) state: Mutex<VfsState>,
+    pub(crate) state: SyncMutex<VfsState>,
     /// Next available ItemId
     next_id: AtomicU64,
     /// L2 chunk cache (disk): persistent across vx-vfsd restarts.
@@ -349,11 +348,11 @@ pub struct CasVfs {
     /// BlobNode metadata cache: NodeHash → parsed BlobNode.
     /// BlobNodes are immutable (content-addressed) so caching is unconditionally safe.
     /// Small: each entry is ~100 bytes × MAX_CHUNKS_PER_BLOB chunk entries.
-    blobnode_cache: Mutex<HashMap<NodeHash, Arc<BlobNode>>>,
+    blobnode_cache: SyncMutex<HashMap<NodeHash, Arc<BlobNode>>>,
     /// L1 chunk cache (memory): ChunkHash → bytes, bounded by total bytes.
-    chunk_l1_cache: Mutex<ChunkL1Cache>,
+    chunk_l1_cache: SyncMutex<ChunkL1Cache>,
     /// Diagnostic tracker for CAS-backed file identity stability.
-    observed_identities: Mutex<HashMap<ItemId, ObservedIdentity>>,
+    observed_identities: SyncMutex<HashMap<ItemId, ObservedIdentity>>,
     /// Mount path for reading back files written directly to disk (ProjFS on Windows).
     mount_path: Utf8PathBuf,
 }
@@ -391,7 +390,7 @@ impl CasVfs {
 
         Self {
             cas,
-            state: moire::mutex!(
+            state: SyncMutex::new(
                 "CasVfs::state",
                 VfsState {
                     items,
@@ -400,12 +399,12 @@ impl CasVfs {
             ),
             next_id: AtomicU64::new(2), // 1=root
             disk_cache_dir,
-            blobnode_cache: moire::mutex!("CasVfs::blobnode_cache", HashMap::new()),
-            chunk_l1_cache: moire::mutex!(
+            blobnode_cache: SyncMutex::new("CasVfs::blobnode_cache", HashMap::new()),
+            chunk_l1_cache: SyncMutex::new(
                 "CasVfs::chunk_l1_cache",
                 ChunkL1Cache::new(Self::chunk_l1_cache_max_bytes()),
             ),
-            observed_identities: moire::mutex!("CasVfs::observed_identities", HashMap::new()),
+            observed_identities: SyncMutex::new("CasVfs::observed_identities", HashMap::new()),
             mount_path,
         }
     }

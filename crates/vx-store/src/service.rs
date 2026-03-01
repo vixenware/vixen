@@ -56,6 +56,7 @@ impl Store for StoreService {
 
         self.storage
             .put_chunk(&hash, &data)
+            .named("storage.put_chunk")
             .await
             .map_err(|e| format!("storage error: {e}"))
     }

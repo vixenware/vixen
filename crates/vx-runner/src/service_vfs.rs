@@ -103,11 +103,10 @@ impl RunnerService {
         );
 
         // 1. Create action context
-        let action = moire::peep!(
-            self.create_action_context(),
-            "runner.run_vfs.create_action_context"
-        )
-        .await;
+        let action = self
+            .create_action_context()
+            .named("runner.run_vfs.create_action_context")
+            .await;
         debug!(action.prefix_id = %action.prefix_id, action.prefix_path = %action.prefix_path, "created action prefix");
 
         // Helper to return an error result (cleanup is done before calling this)
@@ -128,11 +127,10 @@ impl RunnerService {
             "ensuring toolchain VFS prefix"
         );
         let before = Instant::now();
-        let toolchain_prefix_id = match moire::peep!(
-            self.ensure_toolchain_prefix(request.toolchain_manifest),
-            "runner.run_vfs.ensure_toolchain_prefix"
-        )
-        .await
+        let toolchain_prefix_id = match self
+            .ensure_toolchain_prefix(request.toolchain_manifest)
+            .named("runner.run_vfs.ensure_toolchain_prefix")
+            .await
         {
             Ok(id) => id,
             Err(e) => {
@@ -471,7 +469,10 @@ impl RunnerService {
         );
 
         // 1. Create action context
-        let action = self.create_action_context().await;
+        let action = self
+            .create_action_context()
+            .named("runner.run_vfs.create_action_context")
+            .await;
 
         // 2. Ensure Zig toolchain prefix exists
         let toolchain_prefix_id = match self
@@ -745,7 +746,10 @@ impl RunnerService {
     ) -> CcLinkResult {
         let start = Instant::now();
 
-        let action = self.create_action_context().await;
+        let action = self
+            .create_action_context()
+            .named("runner.run_vfs.create_action_context")
+            .await;
 
         let _toolchain_prefix_id = match self
             .ensure_toolchain_prefix(request.toolchain_manifest)
@@ -1114,7 +1118,10 @@ impl RunnerService {
     ) -> RunResult {
         let start = Instant::now();
 
-        let action = self.create_action_context().await;
+        let action = self
+            .create_action_context()
+            .named("runner.run_vfs.create_action_context")
+            .await;
 
         let toolchain_prefix_id = match self
             .ensure_toolchain_prefix(request.toolchain_manifest)
@@ -1171,12 +1178,11 @@ impl RunnerService {
                 }
             }
 
-            if let Err(e) = moire::peep!(
-                self.vfs
-                    .mount_tree(&action.prefix_id, &mount.mount, mount.manifest),
-                "runner.run_vfs.mount_tree"
-            )
-            .await
+            if let Err(e) = self
+                .vfs
+                .mount_tree(&action.prefix_id, &mount.mount, mount.manifest)
+                .named("runner.run_vfs.mount_tree")
+                .await
             {
                 self.remove_action_prefix(&action.prefix_id).await;
                 return RunResult {
@@ -1279,17 +1285,17 @@ impl RunnerService {
                         content_hash, size, ..
                     } => (content_hash.0, *size),
                 };
-                if let Err(e) = moire::peep!(
-                    self.vfs.add_file_to_prefix(
+                if let Err(e) = self
+                    .vfs
+                    .add_file_to_prefix(
                         &action.prefix_id,
                         &fm.path,
                         blob_hash,
                         blob_size,
                         entry.executable,
-                    ),
-                    "runner.run_vfs.add_file_to_prefix"
-                )
-                .await
+                    )
+                    .named("runner.run_vfs.add_file_to_prefix")
+                    .await
                 {
                     self.remove_action_prefix(&action.prefix_id).await;
                     return RunResult {
@@ -1309,11 +1315,9 @@ impl RunnerService {
         }
 
         // Ensure out/ exists.
-        moire::peep!(
-            self.create_output_dir_in_prefix(&action.prefix_id),
-            "runner.run_vfs.create_output_dir"
-        )
-        .await;
+        self.create_output_dir_in_prefix(&action.prefix_id)
+            .named("runner.run_vfs.create_output_dir")
+            .await;
 
         // Validate outputs are under out/.
         for out in &request.outputs {
@@ -1380,10 +1384,14 @@ impl RunnerService {
             ActionKind::CcLink
         };
 
-        let output = match moire::peep!(
-            crate::sandbox::run_sandboxed_command(cmd, &action_kind, &action_desc, progress, None,),
-            "runner.run_vfs.run_sandboxed_command"
+        let output = match crate::sandbox::run_sandboxed_command(
+            cmd,
+            &action_kind,
+            &action_desc,
+            progress,
+            None,
         )
+        .named("runner.run_vfs.run_sandboxed_command")
         .await
         {
             Ok(o) => o,
@@ -1453,11 +1461,10 @@ impl RunnerService {
             };
         }
 
-        let flushed = moire::peep!(
-            self.flush_prefix_outputs(&action.prefix_id),
-            "runner.run_vfs.flush_prefix_outputs"
-        )
-        .await;
+        let flushed = self
+            .flush_prefix_outputs(&action.prefix_id)
+            .named("runner.run_vfs.flush_prefix_outputs")
+            .await;
 
         let mut outputs = Vec::new();
         for out in &request.outputs {
