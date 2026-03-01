@@ -194,9 +194,15 @@ public final class VfsClient: VfsCaller {
     }
 
     private func callWithmoireMetadata(methodId: UInt64, payload: Data) async throws -> Data {
-        let metadata: [MetadataEntry]
+        let metadata: [MetadataEntryV7]
         if let spanID = moireRequestContext.spanID {
-            metadata = [(key: Self.moireSpanIDKey, value: .string(spanID), flags: 0)]
+            metadata = [
+                MetadataEntryV7(
+                    key: Self.moireSpanIDKey,
+                    value: .string(spanID),
+                    flags: 0
+                )
+            ]
         } else {
             metadata = []
         }
