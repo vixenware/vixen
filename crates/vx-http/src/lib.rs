@@ -7,14 +7,12 @@ use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use moire::{Mutex, Notify};
+use moire::sync::{Notify, SyncMutex};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use thiserror::Error;
-
-const moire_CX: moire::moireContext = moire::moireContext::new(env!("CARGO_MANIFEST_DIR"));
 
 type HttpsConnector =
     hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>;
@@ -60,15 +58,9 @@ fn cache_dir() -> Option<&'static PathBuf> {
         .as_ref()
 }
 
-fn inflight_cache() -> &'static Mutex<HashMap<String, Arc<Notify>>> {
-    static INFLIGHT: OnceLock<Mutex<HashMap<String, Arc<Notify>>>> = OnceLock::new();
-    INFLIGHT.get_or_init(|| {
-        Mutex::new(
-            "vx-http/inflight_cache",
-            HashMap::new(),
-            moire::Source::caller(),
-        )
-    })
+fn inflight_cache() -> &'static SyncMutex<HashMap<String, Arc<Notify>>> {
+    static INFLIGHT: OnceLock<SyncMutex<HashMap<String, Arc<Notify>>>> = OnceLock::new();
+    INFLIGHT.get_or_init(|| SyncMutex::new("vx-http/inflight_cache", HashMap::new()))
 }
 
 /// Get a shared HTTPS client instance
@@ -204,23 +196,20 @@ async fn cache_get_bytes(cache_dir: &Path, url: &str) -> Result<Vec<u8>, HttpErr
         }
 
         let maybe_waiter = {
-            let mut inflight = inflight_cache().lock_with_cx(moire_CX);
+            let mut inflight = inflight_cache().lock();
             if let Some(notify) = inflight.get(&key) {
                 Some(notify.clone())
             } else {
                 inflight.insert(
                     key.clone(),
-                    Arc::new(Notify::new(
-                        "vx-http/cache_single_flight",
-                        moire::Source::caller(),
-                    )),
+                    Arc::new(Notify::new("vx-http/cache_single_flight")),
                 );
                 None
             }
         };
 
         if let Some(notify) = maybe_waiter {
-            notify.notified_with_cx(moire_CX).await;
+            notify.notified().await;
             continue;
         }
 
@@ -252,7 +241,7 @@ async fn cache_get_bytes(cache_dir: &Path, url: &str) -> Result<Vec<u8>, HttpErr
         .await;
 
         let notify = {
-            let mut inflight = inflight_cache().lock_with_cx(moire_CX);
+            let mut inflight = inflight_cache().lock();
             inflight
                 .remove(&key)
                 .expect("in-flight key must exist for owner")

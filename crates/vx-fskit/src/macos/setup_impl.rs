@@ -4,8 +4,6 @@ use moire::process::Command;
 use super::probe::{self, HealthProbe};
 use super::{FsKitResult, Log, VIXEN_APP_PATH, VIXEN_EXTENSION_IDENTIFIER, mount_path_candidates};
 
-const moire_CX: moire::moireContext = moire::moireContext::new(env!("CARGO_MANIFEST_DIR"));
-
 /// Mount a VixenFS filesystem.
 ///
 /// Checks prerequisites (app installed, codesign, extension registered+enabled),
@@ -20,7 +18,7 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
     // necessarily installed and properly signed, so we can skip those checks.
     let extension_ok = match Command::new("pluginkit")
         .args(["-m", "-p", "com.apple.fskit.fsmodule"])
-        .output_with_cx(moire_CX)
+        .output()
         .await
     {
         Ok(output) => {
@@ -69,7 +67,7 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
         match Command::new("codesign")
             .args(["--verify", "--deep", "--strict"])
             .arg(VIXEN_APP_PATH)
-            .output_with_cx(moire_CX)
+            .output()
             .await
         {
             Ok(output) if output.status.success() => {
@@ -146,7 +144,7 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
 
     let mount_output = match Command::new("/sbin/mount")
         .args(["-F", "-t", "vixenfs", &source, mount_path.as_str()])
-        .output_with_cx(moire_CX)
+        .output()
         .await
     {
         Ok(output) => output,

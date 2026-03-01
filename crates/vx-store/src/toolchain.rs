@@ -16,8 +16,6 @@ use vx_tarball::Compression;
 use crate::chunking;
 use crate::types::StoreService;
 
-const moire_CX: moire::moireContext = moire::moireContext::new(env!("CARGO_MANIFEST_DIR"));
-
 #[derive(Debug, Clone)]
 pub(crate) struct ExtractedRustComponent {
     pub(crate) tree_root: NodeHash,
@@ -316,17 +314,17 @@ fn rust_component_name(component: &RustComponent) -> Option<&'static str> {
     }
 }
 
-type InflightFuture = Arc<moire::OnceCell<EnsureToolchainResult>>;
+type InflightFuture = Arc<moire::sync::OnceCell<EnsureToolchainResult>>;
 
 /// Manages in-flight toolchain acquisitions with deduplication.
 pub(crate) struct ToolchainManager {
-    inflight: moire::Mutex<HashMap<ToolchainSpecKey, InflightFuture>>,
+    inflight: moire::sync::SyncMutex<HashMap<ToolchainSpecKey, InflightFuture>>,
 }
 
 impl ToolchainManager {
     pub(crate) fn new() -> Self {
         Self {
-            inflight: moire::mutex!("store/toolchain_inflight", HashMap::new()),
+            inflight: moire::sync::SyncMutex::new("store/toolchain_inflight", HashMap::new()),
         }
     }
 
@@ -347,20 +345,17 @@ impl ToolchainManager {
         }
 
         let cell = {
-            let mut inflight = self.inflight.lock_with_cx(moire_CX);
+            let mut inflight = self.inflight.lock();
             inflight
                 .entry(spec_key)
-                .or_insert_with(|| Arc::new(moire::once_cell!("toolchain_inflight")))
+                .or_insert_with(|| Arc::new(moire::sync::OnceCell::new("toolchain_inflight")))
                 .clone()
         };
 
         #[allow(clippy::redundant_closure)]
-        let result = cell
-            .get_or_init_with_cx(|| acquire_fn(), moire_CX)
-            .await
-            .clone();
+        let result = cell.get_or_init(|| acquire_fn()).await.clone();
 
-        let mut inflight = self.inflight.lock_with_cx(moire_CX);
+        let mut inflight = self.inflight.lock();
         if let Some(existing) = inflight.get(&spec_key)
             && Arc::ptr_eq(existing, &cell)
         {
@@ -848,136 +843,131 @@ impl StoreService {
 
         // Track per-file info: content_hash -> (blob_node, size)
         // This lets us build DirectoryNode entries after extraction.
-        let rustc_file_info: Arc<moire::Mutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
-            Arc::new(moire::mutex!("store/rustc_file_info", HashMap::new()));
-        let std_file_info: Arc<moire::Mutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
-            Arc::new(moire::mutex!("store/std_file_info", HashMap::new()));
+        let rustc_file_info: Arc<moire::sync::SyncMutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
+            Arc::new(moire::sync::SyncMutex::new(
+                "store/rustc_file_info",
+                HashMap::new(),
+            ));
+        let std_file_info: Arc<moire::sync::SyncMutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
+            Arc::new(moire::sync::SyncMutex::new(
+                "store/std_file_info",
+                HashMap::new(),
+            ));
 
         let this1 = self.clone();
         let this2 = self.clone();
         let rustc_info = rustc_file_info.clone();
         let std_info = std_file_info.clone();
 
-        let (rustc_result, rust_std_result) = join(
-            async {
-                let _permit = moire::peep!(
-                    sem.acquire(),
-                    "store.toolchain.download_permit.acquire",
-                    {
-                        "resource.kind" => "semaphore",
-                    }
-                )
-                .await
-                .map_err(|e| vx_toolchain::ToolchainError::FetchError {
-                    url: rustc_url.clone(),
-                    source: Box::new(std::io::Error::other(format!(
-                        "download semaphore closed: {e}"
-                    ))),
-                })?;
-                download_and_extract_component(
-                    &rustc_url,
-                    &rustc_hash,
-                    "rustc",
-                    Compression::Xz,
-                    2,
-                    progress,
-                    async move |data: Vec<u8>| {
-                        let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
-                        let prepared = chunking::prepare_blob(&data);
-                        // Store chunks
-                        for ci in &prepared.chunks {
-                            let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
-                            this1
-                                .storage
-                                .put_chunk(&ci.hash, chunk_data)
-                                .await
-                                .map_err(|e| format!("failed to write chunk: {e}"))?;
+        let (rustc_result, rust_std_result) =
+            join(
+                async {
+                    let _permit = sem.acquire().await.map_err(|e| {
+                        vx_toolchain::ToolchainError::FetchError {
+                            url: rustc_url.clone(),
+                            source: Box::new(std::io::Error::other(format!(
+                                "download semaphore closed: {e}"
+                            ))),
                         }
-                        // Store blob node if multi-chunk
-                        let blob_node = if let Some(bn) = &prepared.blob_node {
-                            this1
-                                .storage
-                                .put_node(&bn.node_hash, &bn.serialized_bytes)
-                                .await
-                                .map_err(|e| format!("failed to write BlobNode: {e}"))?;
-                            Some(bn.node_hash)
-                        } else {
-                            None
-                        };
-                        // Track info
-                        rustc_info.lock_with_cx(moire_CX).insert(
-                            content_hash.0,
-                            ExtractedFileInfo {
-                                content_hash,
-                                blob_node,
-                                size: data.len() as u64,
-                                executable: false, // will be set from tree manifest
-                            },
-                        );
-                        Ok(content_hash.0)
-                    },
-                )
-                .await
-            },
-            async {
-                let _permit = moire::peep!(
-                    sem.acquire(),
-                    "store.toolchain.download_permit.acquire",
-                    {
-                        "resource.kind" => "semaphore",
-                    }
-                )
-                .await
-                .map_err(|e| vx_toolchain::ToolchainError::FetchError {
-                    url: rust_std_url.clone(),
-                    source: Box::new(std::io::Error::other(format!(
-                        "download semaphore closed: {e}"
-                    ))),
-                })?;
-                download_and_extract_component(
-                    &rust_std_url,
-                    &rust_std_hash,
-                    "rust-std",
-                    Compression::Xz,
-                    2,
-                    progress,
-                    async move |data: Vec<u8>| {
-                        let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
-                        let prepared = chunking::prepare_blob(&data);
-                        for ci in &prepared.chunks {
-                            let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
-                            this2
-                                .storage
-                                .put_chunk(&ci.hash, chunk_data)
-                                .await
-                                .map_err(|e| format!("failed to write chunk: {e}"))?;
+                    })?;
+                    download_and_extract_component(
+                        &rustc_url,
+                        &rustc_hash,
+                        "rustc",
+                        Compression::Xz,
+                        2,
+                        progress,
+                        async move |data: Vec<u8>| {
+                            let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
+                            let prepared = chunking::prepare_blob(&data);
+                            // Store chunks
+                            for ci in &prepared.chunks {
+                                let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
+                                this1
+                                    .storage
+                                    .put_chunk(&ci.hash, chunk_data)
+                                    .await
+                                    .map_err(|e| format!("failed to write chunk: {e}"))?;
+                            }
+                            // Store blob node if multi-chunk
+                            let blob_node = if let Some(bn) = &prepared.blob_node {
+                                this1
+                                    .storage
+                                    .put_node(&bn.node_hash, &bn.serialized_bytes)
+                                    .await
+                                    .map_err(|e| format!("failed to write BlobNode: {e}"))?;
+                                Some(bn.node_hash)
+                            } else {
+                                None
+                            };
+                            // Track info
+                            rustc_info.lock().insert(
+                                content_hash.0,
+                                ExtractedFileInfo {
+                                    content_hash,
+                                    blob_node,
+                                    size: data.len() as u64,
+                                    executable: false, // will be set from tree manifest
+                                },
+                            );
+                            Ok(content_hash.0)
+                        },
+                    )
+                    .await
+                },
+                async {
+                    let _permit = sem.acquire().await.map_err(|e| {
+                        vx_toolchain::ToolchainError::FetchError {
+                            url: rust_std_url.clone(),
+                            source: Box::new(std::io::Error::other(format!(
+                                "download semaphore closed: {e}"
+                            ))),
                         }
-                        let blob_node = if let Some(bn) = &prepared.blob_node {
-                            this2
-                                .storage
-                                .put_node(&bn.node_hash, &bn.serialized_bytes)
-                                .await
-                                .map_err(|e| format!("failed to write BlobNode: {e}"))?;
-                            Some(bn.node_hash)
-                        } else {
-                            None
-                        };
-                        std_info.lock_with_cx(moire_CX).insert(
-                            content_hash.0,
-                            ExtractedFileInfo {
-                                content_hash,
-                                blob_node,
-                                size: data.len() as u64,
-                                executable: false,
-                            },
-                        );
-                        Ok(content_hash.0)
-                    },
-                )
-                .await
-            },
-        )
-        .await;
+                    })?;
+                    download_and_extract_component(
+                        &rust_std_url,
+                        &rust_std_hash,
+                        "rust-std",
+                        Compression::Xz,
+                        2,
+                        progress,
+                        async move |data: Vec<u8>| {
+                            let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
+                            let prepared = chunking::prepare_blob(&data);
+                            for ci in &prepared.chunks {
+                                let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
+                                this2
+                                    .storage
+                                    .put_chunk(&ci.hash, chunk_data)
+                                    .await
+                                    .map_err(|e| format!("failed to write chunk: {e}"))?;
+                            }
+                            let blob_node = if let Some(bn) = &prepared.blob_node {
+                                this2
+                                    .storage
+                                    .put_node(&bn.node_hash, &bn.serialized_bytes)
+                                    .await
+                                    .map_err(|e| format!("failed to write BlobNode: {e}"))?;
+                                Some(bn.node_hash)
+                            } else {
+                                None
+                            };
+                            std_info.lock().insert(
+                                content_hash.0,
+                                ExtractedFileInfo {
+                                    content_hash,
+                                    blob_node,
+                                    size: data.len() as u64,
+                                    executable: false,
+                                },
+                            );
+                            Ok(content_hash.0)
+                        },
+                    )
+                    .await
+                },
+            )
+            .await;
 
         let rustc_tree = match rustc_result {
             Ok(tree) => tree,
@@ -1049,11 +1039,11 @@ impl StoreService {
 
         // Count unique chunks
         let rustc_unique_chunks = {
-            let info = rustc_file_info.lock_with_cx(moire_CX);
+            let info = rustc_file_info.lock();
             info.len() as u32
         };
         let std_unique_chunks = {
-            let info = std_file_info.lock_with_cx(moire_CX);
+            let info = std_file_info.lock();
             info.len() as u32
         };
 
@@ -1250,12 +1240,7 @@ impl StoreService {
         }
 
         let key = (spec_key, component.clone());
-        if let Some(blob_ref) = self
-            .rust_component_tarballs
-            .lock_with_cx(moire_CX)
-            .get(&key)
-            .cloned()
-        {
+        if let Some(blob_ref) = self.rust_component_tarballs.lock().get(&key).cloned() {
             return EnsureRustToolchainComponentResult {
                 spec_key: Some(spec_key),
                 component,
@@ -1342,7 +1327,7 @@ impl StoreService {
         };
 
         self.rust_component_tarballs
-            .lock_with_cx(moire_CX)
+            .lock()
             .insert((spec_key, component.clone()), tarball_ref.clone());
 
         EnsureRustToolchainComponentResult {
@@ -1416,7 +1401,7 @@ impl StoreService {
         let extracted_key = (spec_key, component.clone());
         if let Some(existing) = self
             .rust_component_trees
-            .lock_with_cx(moire_CX)
+            .lock()
             .get(&extracted_key)
             .cloned()
         {
@@ -1462,8 +1447,11 @@ impl StoreService {
         };
 
         // Track per-file info during extraction
-        let file_info: Arc<moire::Mutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
-            Arc::new(moire::mutex!("store/file_info", HashMap::new()));
+        let file_info: Arc<moire::sync::SyncMutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
+            Arc::new(moire::sync::SyncMutex::new(
+                "store/file_info",
+                HashMap::new(),
+            ));
         let file_info_clone = file_info.clone();
         let this = self.clone();
 
@@ -1490,7 +1478,7 @@ impl StoreService {
                 } else {
                     None
                 };
-                file_info_clone.lock_with_cx(moire_CX).insert(
+                file_info_clone.lock().insert(
                     content_hash.0,
                     ExtractedFileInfo {
                         content_hash,
@@ -1538,9 +1526,9 @@ impl StoreService {
             RustComponent::Cargo => unreachable!("cargo is filtered above"),
         };
 
-        let unique_chunks = file_info.lock_with_cx(moire_CX).len() as u32;
+        let unique_chunks = file_info.lock().len() as u32;
 
-        self.rust_component_trees.lock_with_cx(moire_CX).insert(
+        self.rust_component_trees.lock().insert(
             extracted_key,
             ExtractedRustComponent {
                 tree_root,
@@ -1597,11 +1585,11 @@ impl StoreService {
         }
 
         let rustc_component = {
-            let lock = self.rust_component_trees.lock_with_cx(moire_CX);
+            let lock = self.rust_component_trees.lock();
             lock.get(&(spec_key, RustComponent::Rustc)).cloned()
         };
         let rust_std_component = {
-            let lock = self.rust_component_trees.lock_with_cx(moire_CX);
+            let lock = self.rust_component_trees.lock();
             lock.get(&(spec_key, RustComponent::RustStd)).cloned()
         };
 
@@ -2243,12 +2231,12 @@ impl StoreService {
 async fn tree_manifest_to_merkle(
     service: &StoreService,
     tree: &vx_store_proto::TreeManifest,
-    file_info: &Arc<moire::Mutex<HashMap<Blake3Hash, ExtractedFileInfo>>>,
+    file_info: &Arc<moire::sync::SyncMutex<HashMap<Blake3Hash, ExtractedFileInfo>>>,
 ) -> Result<(NodeHash, u64), String> {
     use vx_store_proto::TreeEntryKind;
 
     let (files, symlinks) = {
-        let info = file_info.lock_with_cx(moire_CX);
+        let info = file_info.lock();
 
         let mut files: Vec<(String, ExtractedFileInfo)> = Vec::new();
         let mut symlinks: Vec<(String, String)> = Vec::new();

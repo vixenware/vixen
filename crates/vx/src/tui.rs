@@ -6,8 +6,7 @@
 //! - 10 text bars for scrolling log buffer (last 10 messages)
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use moire::{Mutex, OneshotReceiver, OneshotSender};
-use roam_stream::moire::prelude::*;
+use moire::sync::{SyncMutex, oneshot};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -100,9 +99,9 @@ impl TuiState {
 
 /// Handle for interacting with the TUI
 pub struct TuiHandle {
-    state: Arc<Mutex<TuiState>>,
+    state: Arc<SyncMutex<TuiState>>,
     /// Receiver that signals when display task has finished cleanup
-    shutdown_rx: Arc<Mutex<Option<OneshotReceiver<()>>>>,
+    shutdown_rx: Arc<SyncMutex<Option<oneshot::Receiver<()>>>>,
 }
 
 impl Clone for TuiHandle {
@@ -117,16 +116,16 @@ impl Clone for TuiHandle {
 impl TuiHandle {
     /// Create a new TUI handle and spawn the display task
     pub fn new() -> Self {
-        let state = Arc::new(moire::mutex!("vx/tui_state", TuiState::new()));
-        let (shutdown_tx, shutdown_rx) = moire::oneshot!("tui_shutdown");
+        let state = Arc::new(SyncMutex::new("vx/tui_state", TuiState::new()));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel("tui_shutdown");
 
         let handle = Self {
             state: state.clone(),
-            shutdown_rx: Arc::new(moire::mutex!("vx/tui_shutdown", Some(shutdown_rx))),
+            shutdown_rx: Arc::new(SyncMutex::new("vx/tui_shutdown", Some(shutdown_rx))),
         };
 
         // Spawn the display task
-        moire::spawn_tracked!("vx_tui_display", Self::display_task(state, shutdown_tx));
+        moire::task::spawn(Self::display_task(state, shutdown_tx));
 
         handle
     }
@@ -198,12 +197,12 @@ impl TuiHandle {
         // Wait for the display task to signal completion
         let rx = self.shutdown_rx.lock().take();
         if let Some(rx) = rx {
-            let _ = rx.recv().await; // Ignore errors (channel closed is fine)
+            let _ = rx.await; // Ignore errors (channel closed is fine)
         }
     }
 
     /// Background task that updates the display at ~15fps
-    async fn display_task(state: Arc<Mutex<TuiState>>, shutdown_tx: OneshotSender<()>) {
+    async fn display_task(state: Arc<SyncMutex<TuiState>>, shutdown_tx: oneshot::Sender<()>) {
         let multi = MultiProgress::new();
         multi.set_move_cursor(false); // can't set it to true, we add/remove tasks dynamically
 

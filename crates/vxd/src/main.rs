@@ -22,13 +22,12 @@ mod service;
 #[cfg(test)]
 mod tests;
 
-use ::moire::Child;
-use ::moire::Mutex;
+use ::moire::process::Child;
+use ::moire::sync::SyncMutex;
 use camino::Utf8PathBuf;
 use eyre::Result;
 use facet::Facet;
 use figue as args;
-use roam_stream::moire::prelude::*;
 use roam_stream::{HandshakeConfig, NoDispatcher, accept};
 use std::sync::Arc;
 use std::time::Duration;

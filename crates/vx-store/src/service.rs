@@ -54,16 +54,10 @@ impl Store for StoreService {
             ));
         }
 
-        moire::peep!(
-            self.storage.put_chunk(&hash, &data),
-            "storage.put_chunk",
-            {
-                "method" => "Store.put_chunk",
-                "chunk.bytes" => data.len(),
-            }
-        )
-        .await
-        .map_err(|e| format!("storage error: {e}"))
+        self.storage
+            .put_chunk(&hash, &data)
+            .await
+            .map_err(|e| format!("storage error: {e}"))
     }
 
     async fn get_chunk(&self, _cx: &roam::Context, hash: ChunkHash) -> Option<Vec<u8>> {

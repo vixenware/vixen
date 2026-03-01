@@ -19,11 +19,9 @@ use std::sync::Arc;
 
 use eyre::Result;
 use facet::Facet;
-use moire::{WatchReceiver, WatchSender};
+use moire::sync::watch;
 use roam_core::{ConnectionHandle, Driver, DriverCaller, SessionHandle};
 use roam_types::{ConnectionSettings, Parity};
-
-const moire_CX: moire::moireContext = moire::moireContext::new(env!("CARGO_MANIFEST_DIR"));
 
 /// Optional cleanup hook for services that need to do work before exit.
 pub trait GracefulShutdown {
@@ -85,34 +83,34 @@ pub enum BootState {
 /// The gate provides a [`Boot`] service implementation and gates virtual
 /// connection acceptance.
 pub struct BootGate<S> {
-    boot_rx: WatchReceiver<BootState>,
-    service: moire::OnceCell<S>,
+    boot_rx: watch::Receiver<BootState>,
+    service: moire::sync::OnceCell<S>,
 }
 
 /// Sender half — used by the daemon's boot task to signal completion.
 pub struct BootTx {
-    tx: WatchSender<BootState>,
+    tx: watch::Sender<BootState>,
 }
 
 impl BootTx {
     /// Signal that boot succeeded.
     pub fn ready(self) {
-        let _ = self.tx.send_with_cx(BootState::Ready, moire_CX);
+        let _ = self.tx.send(BootState::Ready);
     }
 
     /// Signal that boot failed.
     pub fn failed(self, msg: String) {
-        let _ = self.tx.send_with_cx(BootState::Failed(msg), moire_CX);
+        let _ = self.tx.send(BootState::Failed(msg));
     }
 }
 
 impl<S: Send + Sync + 'static> BootGate<S> {
     /// Create a new boot gate and its sender.
     pub fn new() -> (Arc<Self>, BootTx) {
-        let (tx, rx) = moire::watch!("boot_state", BootState::Booting);
+        let (tx, rx) = moire::sync::watch::channel("boot_state", BootState::Booting);
         let gate = Arc::new(Self {
             boot_rx: rx,
-            service: moire::once_cell!("boot_service"),
+            service: moire::sync::OnceCell::new("boot_service"),
         });
         let boot_tx = BootTx { tx };
         (gate, boot_tx)
@@ -132,7 +130,7 @@ impl<S: Send + Sync + 'static> BootGate<S> {
     }
 
     /// Subscribe to boot state changes.
-    pub fn subscribe(&self) -> WatchReceiver<BootState> {
+    pub fn subscribe(&self) -> watch::Receiver<BootState> {
         self.boot_rx.clone()
     }
 
@@ -187,7 +185,7 @@ impl<S: GracefulShutdown + Send + Sync + 'static> BootServer for BootService<S> 
                         };
                     }
                 }
-                if rx.changed_with_cx(moire_CX).await.is_err() {
+                if rx.changed().await.is_err() {
                     break BootResult {
                         success: false,
                         error: Some("boot state channel closed".to_string()),

@@ -35,15 +35,9 @@ pub async fn atomic_write(
     moire::fs::create_dir_all(parent_dir).await?;
 
     // Create a temporary file in the same directory to ensure it's on the same filesystem
-    let temp_file = moire::peep!(
-        TempFile::new_in(parent_dir.as_std_path()),
-        "atomic_write.create_tempfile",
-        {
-            "resource.path" => path.as_str(),
-        }
-    )
-    .await
-    .map_err(std::io::Error::other)?;
+    let temp_file = TempFile::new_in(parent_dir.as_std_path())
+        .await
+        .map_err(std::io::Error::other)?;
 
     // Get the temporary path and write contents to it
     let temp_path = temp_file.file_path();

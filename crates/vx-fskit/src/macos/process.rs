@@ -3,8 +3,6 @@ use std::collections::HashMap;
 
 use super::Log;
 
-const moire_CX: moire::moireContext = moire::moireContext::new(env!("CARGO_MANIFEST_DIR"));
-
 /// Information about a process with files open under the mount.
 pub(crate) struct OpenProcess {
     pub pid: u32,
@@ -21,7 +19,7 @@ pub(crate) struct OpenProcess {
 pub(crate) async fn find_open_processes(candidates: &[String], log: &mut Log) -> Vec<OpenProcess> {
     let output = match Command::new("lsof")
         .args(["-n", "-P", "-Fpcn"])
-        .output_with_cx(moire_CX)
+        .output()
         .await
     {
         Ok(output) => output,

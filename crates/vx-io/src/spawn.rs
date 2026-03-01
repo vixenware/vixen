@@ -1,11 +1,9 @@
 use camino::Utf8PathBuf;
 use eyre::Result;
-use moire::Child;
+use moire::process::Child;
 use std::time::Duration;
 
 use crate::net::Endpoint;
-
-const moire_CX: moire::moireContext = moire::moireContext::new(env!("CARGO_MANIFEST_DIR"));
 
 /// Result of a successful [`ServiceBuilder::connect`].
 pub struct ServiceHandle {
@@ -151,7 +149,7 @@ impl ServiceBuilder {
                     let (caller, session_handle) = result?;
                     Ok(ServiceHandle { child, caller, session_handle })
                 }
-                exit_status = child_proc.wait_with_cx(moire_CX) => {
+                exit_status = child_proc.wait() => {
                     match exit_status {
                         Ok(status) if status.success() => {
                             // Child exited with status 0 — probably found lock held.

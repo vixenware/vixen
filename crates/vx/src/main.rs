@@ -13,7 +13,6 @@ use eyre::{Result, bail};
 use figue as args;
 use owo_colors::OwoColorize;
 use roam_stream::ConnectionHandle;
-use roam_stream::moire::prelude::*;
 use tui::emit_osc_progress;
 use vx_io::spawn::ServiceBuilder;
 use vx_report::ReportStore;
@@ -47,8 +46,6 @@ fn main() {
 }
 
 async fn async_main() {
-    moire::init!();
-
     let cli: Cli = args::Driver::new(
         args::builder::<Cli>()
             .expect("failed to build CLI")

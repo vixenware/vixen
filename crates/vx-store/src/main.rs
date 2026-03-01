@@ -24,8 +24,6 @@ use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
 use vx_store_proto::StoreDispatcher;
 
-const moire_CX: moire::moireContext = moire::moireContext::new(env!("CARGO_MANIFEST_DIR"));
-
 /// vx-store - Content-Addressed Storage daemon
 #[derive(Facet, Debug)]
 struct Args {
@@ -62,8 +60,6 @@ async fn async_main() -> Result<()> {
     vx_tracing::init_service("vx_store=info");
 
     // Initialize moire instrumentation
-    moire::init!();
-
     tracing::info!("hello from vixen-store");
 
     let args: Args = args::Driver::new(
@@ -92,7 +88,7 @@ async fn async_main() -> Result<()> {
         let gate = Arc::clone(&gate);
         let root = args.root.clone();
         let vx_home = args.vx_home.clone();
-        moire::spawn_tracked!("store_boot", async move {
+        moire::task::spawn(async move {
             tracing::info!("Booting vx-store");
             match async {
                 let storage = CasStore::new(FsStorage::new(root));
@@ -118,11 +114,11 @@ async fn async_main() -> Result<()> {
     let boot_service = gate.boot_service();
 
     loop {
-        let (stream, peer_addr) = moire::peep!(listener.accept(), "store.listener.accept").await?;
+        let (stream, peer_addr) = listener.accept().await?;
         tracing::info!("accepted connection from {peer_addr}");
         let boot_service = boot_service.clone();
 
-        moire::spawn_tracked!(format!("store_connection_{}", peer_addr), async move {
+        moire::task::spawn(async move {
             tracing::debug!("New connection from {}", peer_addr);
 
             // Root connection gets Boot service only.
@@ -146,15 +142,10 @@ async fn async_main() -> Result<()> {
             };
 
             // Drive the connection in the background.
-            let driver_handle =
-                moire::spawn_tracked!(format!("store_driver_{}", peer_addr), async move {
-                    driver.run().await
-                });
+            let driver_handle = moire::task::spawn(async move { driver.run().await });
 
             // Accept virtual connections — each gets a StoreDispatcher.
-            while let Some(conn) =
-                moire::peep!(incoming.recv_with_cx(moire_CX), "store.incoming.recv").await
-            {
+            while let Some(conn) = incoming.recv().await {
                 let Some(store) = boot_service.gate().service() else {
                     conn.reject("boot not complete".into(), vec![]);
                     continue;
@@ -185,11 +176,11 @@ impl StoreService {
                 toolchain_manager: ToolchainManager::new(),
                 registry_manager: RegistryManager::new(),
                 download_semaphore: Arc::new(tokio::sync::Semaphore::new(32)),
-                rust_component_tarballs: moire::mutex!(
+                rust_component_tarballs: moire::sync::SyncMutex::new(
                     "store/rust_component_tarballs",
                     std::collections::HashMap::new(),
                 ),
-                rust_component_trees: moire::mutex!(
+                rust_component_trees: moire::sync::SyncMutex::new(
                     "store/rust_component_trees",
                     std::collections::HashMap::new(),
                 ),
