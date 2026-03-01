@@ -43,7 +43,7 @@ ignored = ["facet-error"]
 
 [features]
 default = []
-diagnostics = ["moire/diagnostics", "dep:roam-shm", "roam-shm/diagnostics"]
+diagnostics = ["moire/diagnostics", "dep:roam-shm"]
 
 [lints]
 workspace = true

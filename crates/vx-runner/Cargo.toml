@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 default = []
-diagnostics = ["moire/diagnostics", "roam-session/diagnostics", "vx-vfsd/diagnostics"]
+diagnostics = ["moire/diagnostics", "vx-vfsd/diagnostics"]
 
 [package.metadata]
 
@@ -35,7 +35,6 @@ vx-runner-proto = { workspace = true }
 vx-vfsd = { path = "../vx-vfsd" }
 vx-io = { workspace = true }
 libc = { workspace = true }
-roam-session = { workspace = true }
 moire = { workspace = true }
 
 [lints]

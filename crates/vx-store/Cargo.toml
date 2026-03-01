@@ -21,7 +21,6 @@ hex = { workspace = true }
 http-body-util = "0.1"
 pin-project-lite = { workspace = true }
 roam = { workspace = true }
-roam-session = { workspace = true }
 moire = { workspace = true }
 roam-stream = { workspace = true }
 sha2 = "0.10"
@@ -49,7 +48,7 @@ vx-store-proto = { workspace = true }
 
 [features]
 default = []
-diagnostics = ["moire/diagnostics", "roam-session/diagnostics"]
+diagnostics = ["moire/diagnostics"]
 
 [lints]
 workspace = true

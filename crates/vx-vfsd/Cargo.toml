@@ -24,7 +24,6 @@ vx-vfs = { workspace = true }
 
 # RPC
 roam = { workspace = true }
-roam-session = { workspace = true }
 moire = { workspace = true }
 roam-stream = { workspace = true }
 vx-io = { workspace = true }
@@ -65,12 +64,7 @@ roam-shm = { workspace = true }
 
 [features]
 default = []
-diagnostics = [
-  "moire/diagnostics",
-  "roam-session/diagnostics",
-  "dep:roam-shm",
-  "roam-shm/diagnostics",
-]
+diagnostics = ["moire/diagnostics", "dep:roam-shm"]
 
 [lints]
 workspace = true
