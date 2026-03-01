@@ -14,6 +14,7 @@ use crate::inputs::*;
 use ::moire::sync::SyncMutex;
 use camino::Utf8PathBuf;
 use facet::trace;
+use moire::task::FutureExt;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
 use std::sync::Arc;
@@ -811,7 +812,7 @@ impl VxdService {
                             .update_progress(
                                 id,
                                 vxd_proto::ActionProgress {
-                                    message: sp.message,
+                                    message: sp.message.clone(),
                                     current: sp.current,
                                     total: sp.total,
                                 },

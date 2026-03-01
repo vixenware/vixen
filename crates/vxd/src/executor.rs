@@ -4,6 +4,7 @@
 //! from the action graph with optimal parallelism while respecting dependencies.
 
 use ::moire::sync::SyncMutex;
+use moire::task::FutureExt;
 use petgraph::Direction::Incoming;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, VecDeque};
@@ -166,7 +167,7 @@ async fn load_manifest(
         .map(|resp| resp.ret.clone())
         .map_err(|e| VxdError::Compilation {
             crate_name: crate_name.to_string(),
-            message: format!("Failed to fetch manifest from CAS: {e}"),
+            message: format!("Failed to fetch manifest from CAS: {e:?}"),
         })?
         .ok_or(VxdError::OutputManifestNotFound(manifest_hash))?;
     match CasNode::from_bytes(&node_bytes) {
@@ -1147,7 +1148,7 @@ impl Executor {
         let free_lanes = self.free_lanes.clone();
         let build_start = self.build_start;
 
-        self.in_flight.spawn("vxd_executor_action", async move {
+        self.in_flight.spawn(async move {
             // Drop guard: if this task is aborted (e.g. by JoinSet::abort_all), send
             // a Cancelled result back so the executor doesn't lose track of this action.
             let guard_tx = message_tx.clone();
@@ -1190,7 +1191,7 @@ impl Executor {
                                 .update_progress(
                                     id,
                                     ActionProgress {
-                                        message: sp.message,
+                                        message: sp.message.clone(),
                                         current: sp.current,
                                         total: sp.total,
                                     },
@@ -1668,7 +1669,7 @@ async fn execute_action(
                             .put_chunk(ChunkHash(hash), data)
                             .await
                             .map(|_| ())
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| format!("{e:?}"))?;
                         Ok(hash)
                     },
                 )
@@ -1776,7 +1777,7 @@ async fn execute_action(
                     .map(|resp| resp.ret.clone())
                     .map_err(|e| VxdError::Compilation {
                         crate_name: format!("zig-{}", version),
-                        message: format!("Failed to fetch toolchain manifest: {}", e),
+                        message: format!("Failed to fetch toolchain manifest: {e:?}"),
                     })?
                     .ok_or(VxdError::ToolchainManifestNotFound(manifest_hash))?;
                 manifest.toolchain_id

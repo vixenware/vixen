@@ -130,7 +130,8 @@ async fn store_file_data(
         store
             .put_chunk(chunk_hash, data.to_vec())
             .await
-            .map_err(|e| eyre::eyre!("put_chunk: {e}"))?;
+            .map(|_| ())
+            .map_err(|e| eyre::eyre!("put_chunk: {e:?}"))?;
 
         Ok(DirEntryKind::SmallFile {
             content_hash,
@@ -148,7 +149,8 @@ async fn store_file_data(
             store
                 .put_chunk(hash, chunk_data.to_vec())
                 .await
-                .map_err(|e| eyre::eyre!("put_chunk: {e}"))?;
+                .map(|_| ())
+                .map_err(|e| eyre::eyre!("put_chunk: {e:?}"))?;
             chunk_entries.push(ChunkEntry {
                 hash,
                 size: chunk.length as u32,
@@ -165,7 +167,8 @@ async fn store_file_data(
         store
             .put_node(node_hash, node_bytes)
             .await
-            .map_err(|e| eyre::eyre!("put_node blob: {e}"))?;
+            .map(|_| ())
+            .map_err(|e| eyre::eyre!("put_node blob: {e:?}"))?;
 
         Ok(DirEntryKind::LargeFile {
             content_hash,
@@ -327,7 +330,8 @@ async fn async_main() -> Result<()> {
     vfsd_client
         .ping()
         .await
-        .map_err(|e| eyre::eyre!("vfsd ping: {e}"))?;
+        .map(|_| ())
+        .map_err(|e| eyre::eyre!("vfsd ping: {e:?}"))?;
     tracing::info!("vfsd ready");
 
     // Store all files and build merkle tree
@@ -363,11 +367,13 @@ async fn async_main() -> Result<()> {
     vfsd_client
         .mkdir(format!("/{prefix}"))
         .await
-        .map_err(|e| eyre::eyre!("mkdir: {e}"))?;
+        .map(|_| ())
+        .map_err(|e| eyre::eyre!("mkdir: {e:?}"))?;
     vfsd_client
         .mount(format!("/{prefix}"), root_hash.0)
         .await
-        .map_err(|e| eyre::eyre!("mount: {e}"))?;
+        .map(|_| ())
+        .map_err(|e| eyre::eyre!("mount: {e:?}"))?;
     tracing::info!("mounted at /{prefix}");
 
     let tc_mount = mount_point.join(prefix);

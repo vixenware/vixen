@@ -754,7 +754,6 @@ dependencies = [
 [[package]]
 name = "facet-styx"
 version = "1.0.1"
-source = "git+https://github.com/bearcove/styx?branch=main#49c2002cc00c82d8b8e69c72ae465079c1ab3cb8"
 dependencies = [
  "ariadne",
  "facet",
@@ -2474,7 +2473,6 @@ dependencies = [
 [[package]]
 name = "styx-cst"
 version = "1.0.1"
-source = "git+https://github.com/bearcove/styx?branch=main#49c2002cc00c82d8b8e69c72ae465079c1ab3cb8"
 dependencies = [
  "rowan",
  "styx-tokenizer",
@@ -2483,7 +2481,6 @@ dependencies = [
 [[package]]
 name = "styx-format"
 version = "1.0.1"
-source = "git+https://github.com/bearcove/styx?branch=main#49c2002cc00c82d8b8e69c72ae465079c1ab3cb8"
 dependencies = [
  "styx-cst",
  "styx-parse",
@@ -2493,7 +2490,6 @@ dependencies = [
 [[package]]
 name = "styx-parse"
 version = "1.0.1"
-source = "git+https://github.com/bearcove/styx?branch=main#49c2002cc00c82d8b8e69c72ae465079c1ab3cb8"
 dependencies = [
  "styx-tokenizer",
  "tracing",
@@ -2502,7 +2498,6 @@ dependencies = [
 [[package]]
 name = "styx-tokenizer"
 version = "1.0.0"
-source = "git+https://github.com/bearcove/styx?branch=main#49c2002cc00c82d8b8e69c72ae465079c1ab3cb8"
 dependencies = [
  "tracing",
 ]
@@ -2510,7 +2505,6 @@ dependencies = [
 [[package]]
 name = "styx-tree"
 version = "1.0.1"
-source = "git+https://github.com/bearcove/styx?branch=main#49c2002cc00c82d8b8e69c72ae465079c1ab3cb8"
 dependencies = [
  "ariadne",
  "facet-testhelpers",
@@ -3334,6 +3328,7 @@ dependencies = [
  "figue",
  "moire",
  "roam",
+ "roam-core",
  "roam-stream",
  "tokio",
  "tracing",

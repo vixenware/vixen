@@ -17,6 +17,7 @@ async fn publish_rejects_missing_manifest_node() {
     assert!(!result.success, "publish unexpectedly succeeded");
     let error = result
         .error
+        .clone()
         .expect("publish failure should include an error");
     assert!(
         error.contains("does not exist"),

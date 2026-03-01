@@ -189,6 +189,13 @@ roam-local = { path = "/Users/amos/bearcove/roam/rust/roam-local" }
 roam-codegen = { path = "/Users/amos/bearcove/roam/rust/roam-codegen" }
 ur-taking-me-with-you = { path = "/Users/amos/bearcove/roam/rust/ur-taking-me-with-you" }
 
+[patch."https://github.com/bearcove/styx"]
+facet-styx = { path = "/Users/amos/bearcove/styx/crates/facet-styx" }
+styx-cst = { path = "/Users/amos/bearcove/styx/crates/styx-cst" }
+styx-parse = { path = "/Users/amos/bearcove/styx/crates/styx-parse" }
+styx-tokenizer = { path = "/Users/amos/bearcove/styx/crates/styx-tokenizer" }
+styx-tree = { path = "/Users/amos/bearcove/styx/crates/styx-tree" }
+
 [profile.samply]
 inherits = "release"
 debug = true
