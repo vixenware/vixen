@@ -317,25 +317,22 @@ public final class VfsClient: VfsCaller {
         return result
     }
 
-    public func create(parentId: UInt64, name: String, itemType: ItemType) async throws
-        -> CreateResult
-    {
+    public func create(parentId: UInt64, name: String, itemType: ItemType) async throws -> CreateResult {
         var payloadBytes: [UInt8] = []
         payloadBytes += encodeVarint(parentId)
         payloadBytes += encodeString(name)
         payloadBytes += { v in
-            switch v {
-            case .file:
-                return [UInt8(0)]
-            case .directory:
-                return [UInt8(1)]
-            case .symlink:
-                return [UInt8(2)]
-            }
-        }(itemType)
+    switch v {
+    case .file:
+        return encodeVarint(UInt64(0))
+    case .directory:
+        return encodeVarint(UInt64(1))
+    case .symlink:
+        return encodeVarint(UInt64(2))
+    }
+}(itemType)
         let payload = Data(payloadBytes)
-        let response = try await callWithmoireMetadata(
-            methodId: 0x2caa_f8ad_f5ed_a0e1, payload: payload)
+        let response = try await connection.call(methodId: 0x2caaf8adf5eda0e1, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_itemId = try decodeVarint(from: response, offset: &cursor)
@@ -348,8 +345,7 @@ public final class VfsClient: VfsCaller {
         var payloadBytes: [UInt8] = []
         payloadBytes += encodeVarint(itemId)
         let payload = Data(payloadBytes)
-        let response = try await callWithmoireMetadata(
-            methodId: 0xfa37_cb27_061e_7e2a, payload: payload)
+        let response = try await connection.call(methodId: 0xfa37cb27061e7e2a, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_error = try decodeI32(from: response, offset: &cursor)
@@ -357,16 +353,13 @@ public final class VfsClient: VfsCaller {
         return result
     }
 
-    public func rename(itemId: UInt64, newParentId: UInt64, newName: String) async throws
-        -> VfsResult
-    {
+    public func rename(itemId: UInt64, newParentId: UInt64, newName: String) async throws -> VfsResult {
         var payloadBytes: [UInt8] = []
         payloadBytes += encodeVarint(itemId)
         payloadBytes += encodeVarint(newParentId)
         payloadBytes += encodeString(newName)
         let payload = Data(payloadBytes)
-        let response = try await callWithmoireMetadata(
-            methodId: 0x4d68_b4b3_208a_8c07, payload: payload)
+        let response = try await connection.call(methodId: 0x4d68b4b3208a8c07, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_error = try decodeI32(from: response, offset: &cursor)
@@ -374,17 +367,12 @@ public final class VfsClient: VfsCaller {
         return result
     }
 
-    public func setAttributes(itemId: UInt64, params: SetAttributesParams) async throws -> VfsResult
-    {
+    public func setAttributes(itemId: UInt64, params: SetAttributesParams) async throws -> VfsResult {
         var payloadBytes: [UInt8] = []
         payloadBytes += encodeVarint(itemId)
-        payloadBytes +=
-            encodeOption(params.mode, encoder: { encodeU32($0) })
-            + encodeOption(params.modifiedTime, encoder: { encodeVarint($0) })
-            + encodeOption(params.size, encoder: { encodeVarint($0) })
+        payloadBytes += encodeOption(params.mode, encoder: { encodeU32($0) }) + encodeOption(params.modifiedTime, encoder: { encodeVarint($0) }) + encodeOption(params.size, encoder: { encodeVarint($0) })
         let payload = Data(payloadBytes)
-        let response = try await callWithmoireMetadata(
-            methodId: 0x320f_6529_a5a0_e5ce, payload: payload)
+        let response = try await connection.call(methodId: 0x320f6529a5a0e5ce, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_error = try decodeI32(from: response, offset: &cursor)
@@ -394,8 +382,7 @@ public final class VfsClient: VfsCaller {
 
     public func ping() async throws -> String {
         let payload = Data()
-        let response = try await callWithmoireMetadata(
-            methodId: 0xe35c_dfdc_a59c_e5ab, payload: payload)
+        let response = try await connection.call(methodId: 0xbf89334f8d104575, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let result = try decodeString(from: response, offset: &cursor)
@@ -411,18 +398,10 @@ public let vfs_schemas: [String: MethodSchema] = [
     "readDir": MethodSchema(args: [.u64, .u64, .u64]),
     "read": MethodSchema(args: [.u64, .u64, .u64]),
     "write": MethodSchema(args: [.u64, .u64, .bytes]),
-    "create": MethodSchema(args: [
-        .u64, .string, .enum(variants: [("File", []), ("Directory", []), ("Symlink", [])]),
-    ]),
+    "create": MethodSchema(args: [.u64, .string, .enum(variants: [("File", []), ("Directory", []), ("Symlink", [])])]),
     "delete": MethodSchema(args: [.u64]),
     "rename": MethodSchema(args: [.u64, .u64, .string]),
-    "setAttributes": MethodSchema(args: [
-        .u64,
-        .struct(fields: [
-            ("mode", .option(inner: .u32)), ("modified_time", .option(inner: .u64)),
-            ("size", .option(inner: .u64)),
-        ]),
-    ]),
+    "setAttributes": MethodSchema(args: [.u64, .struct(fields: [("mode", .option(inner: .u32)), ("modified_time", .option(inner: .u64)), ("size", .option(inner: .u64))])]),
     "ping": MethodSchema(args: []),
 ]
 
@@ -450,68 +429,21 @@ public struct VfsSerializers: BindingSerializers {
 
     public func rxDeserializer(for schema: Schema) -> @Sendable ([UInt8]) throws -> Any {
         switch schema {
-        case .bool:
-            return {
-                var o = 0
-                return try decodeBool(from: Data($0), offset: &o)
-            }
-        case .u8:
-            return {
-                var o = 0
-                return try decodeU8(from: Data($0), offset: &o)
-            }
-        case .i8:
-            return {
-                var o = 0
-                return try decodeI8(from: Data($0), offset: &o)
-            }
-        case .u16:
-            return {
-                var o = 0
-                return try decodeU16(from: Data($0), offset: &o)
-            }
-        case .i16:
-            return {
-                var o = 0
-                return try decodeI16(from: Data($0), offset: &o)
-            }
-        case .u32:
-            return {
-                var o = 0
-                return try decodeU32(from: Data($0), offset: &o)
-            }
-        case .i32:
-            return {
-                var o = 0
-                return try decodeI32(from: Data($0), offset: &o)
-            }
-        case .u64:
-            return {
-                var o = 0
-                return try decodeVarint(from: Data($0), offset: &o)
-            }
-        case .i64:
-            return {
-                var o = 0
-                return try decodeI64(from: Data($0), offset: &o)
-            }
-        case .f32:
-            return {
-                var o = 0
-                return try decodeF32(from: Data($0), offset: &o)
-            }
-        case .f64:
-            return {
-                var o = 0
-                return try decodeF64(from: Data($0), offset: &o)
-            }
-        case .string:
-            return {
-                var o = 0
-                return try decodeString(from: Data($0), offset: &o)
-            }
+        case .bool: return { var o = 0; return try decodeBool(from: Data($0), offset: &o) }
+        case .u8: return { var o = 0; return try decodeU8(from: Data($0), offset: &o) }
+        case .i8: return { var o = 0; return try decodeI8(from: Data($0), offset: &o) }
+        case .u16: return { var o = 0; return try decodeU16(from: Data($0), offset: &o) }
+        case .i16: return { var o = 0; return try decodeI16(from: Data($0), offset: &o) }
+        case .u32: return { var o = 0; return try decodeU32(from: Data($0), offset: &o) }
+        case .i32: return { var o = 0; return try decodeI32(from: Data($0), offset: &o) }
+        case .u64: return { var o = 0; return try decodeVarint(from: Data($0), offset: &o) }
+        case .i64: return { var o = 0; return try decodeI64(from: Data($0), offset: &o) }
+        case .f32: return { var o = 0; return try decodeF32(from: Data($0), offset: &o) }
+        case .f64: return { var o = 0; return try decodeF64(from: Data($0), offset: &o) }
+        case .string: return { var o = 0; return try decodeString(from: Data($0), offset: &o) }
         case .bytes: return { Data($0) }
         default: fatalError("Unsupported schema for Rx deserialization: \(schema)")
         }
     }
 }
+
