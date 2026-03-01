@@ -59,7 +59,7 @@ pub enum VfsError {
     /// VFS mount failed: {message}
     MountFailed {
         message: String,
-        diagnostics: Vec<VfsDiagnostic>,
+        _diagnostics: Vec<VfsDiagnostic>,
     },
 }
 
@@ -68,7 +68,7 @@ impl VfsError {
         match self {
             VfsError::CommandTimedOut { .. } => &[],
             VfsError::CommandFailed { _diagnostics, .. } => _diagnostics,
-            VfsError::MountFailed { diagnostics, .. } => diagnostics,
+            VfsError::MountFailed { _diagnostics, .. } => _diagnostics,
         }
     }
 }

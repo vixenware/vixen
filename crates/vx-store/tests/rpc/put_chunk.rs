@@ -13,13 +13,13 @@ async fn put_chunk_roundtrip_success() {
         .await
         .expect("put_chunk call failed");
 
-    let fetched = env
+    let response = env
         .client
         .get_chunk(hash)
         .await
-        .expect("get_chunk RPC failed")
-        .expect("chunk not found after put_chunk");
-    assert_eq!(fetched, data);
+        .expect("get_chunk RPC failed");
+    let fetched = response.as_ref().expect("chunk not found after put_chunk");
+    assert_eq!(fetched, &data);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -28,14 +28,10 @@ async fn put_chunk_rejects_hash_mismatch() {
     let data = b"chunk bytes".to_vec();
     let wrong_hash = ChunkHash(Blake3Hash::from_bytes(b"something else"));
 
-    let err = env
-        .client
-        .put_chunk(wrong_hash, data)
-        .await
-        .expect_err("expected put_chunk rejection for hash mismatch");
+    let err = env.client.put_chunk(wrong_hash, data).await.unwrap_err();
     assert!(
-        err.to_string().contains("hash mismatch"),
-        "unexpected error: {err}"
+        format!("{err:?}").contains("hash mismatch"),
+        "unexpected error: {err:?}"
     );
 }
 
@@ -45,13 +41,9 @@ async fn put_chunk_rejects_oversized_payload() {
     let data = vec![0xAB; CDC_MAX_CHUNK as usize + 1];
     let hash = ChunkHash(Blake3Hash::from_bytes(&data));
 
-    let err = env
-        .client
-        .put_chunk(hash, data)
-        .await
-        .expect_err("expected put_chunk rejection for oversized payload");
+    let err = env.client.put_chunk(hash, data).await.unwrap_err();
     assert!(
-        err.to_string().contains("chunk too large"),
-        "unexpected error: {err}"
+        format!("{err:?}").contains("chunk too large"),
+        "unexpected error: {err:?}"
     );
 }

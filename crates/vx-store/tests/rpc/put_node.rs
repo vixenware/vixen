@@ -21,12 +21,12 @@ async fn put_node_roundtrip_success() {
         .await
         .expect("put_node call failed");
 
-    let fetched = env
+    let response = env
         .client
         .get_node(hash)
         .await
-        .expect("get_node RPC failed")
-        .expect("node not found after put_node");
+        .expect("get_node RPC failed");
+    let fetched = response.expect("node not found after put_node");
     assert_eq!(fetched, bytes);
 }
 
@@ -42,14 +42,10 @@ async fn put_node_rejects_hash_mismatch() {
     let (bytes, _) = node.to_bytes_and_hash();
     let wrong_hash = NodeHash(Blake3Hash::from_bytes(b"wrong"));
 
-    let err = env
-        .client
-        .put_node(wrong_hash, bytes)
-        .await
-        .expect_err("expected put_node rejection for hash mismatch");
+    let err = env.client.put_node(wrong_hash, bytes).await.unwrap_err();
     assert!(
-        err.to_string().contains("hash mismatch"),
-        "unexpected error: {err}"
+        format!("{err:?}").contains("hash mismatch"),
+        "unexpected error: {err:?}"
     );
 }
 
@@ -60,14 +56,10 @@ async fn put_node_rejects_invalid_postcard_payload() {
     bytes.extend_from_slice(&[1, 2, 3, 4, 5]);
     let hash = NodeHash(Blake3Hash::from_bytes(&bytes));
 
-    let err = env
-        .client
-        .put_node(hash, bytes)
-        .await
-        .expect_err("expected put_node rejection for invalid payload");
+    let err = env.client.put_node(hash, bytes).await.unwrap_err();
     assert!(
-        err.to_string().contains("invalid node"),
-        "unexpected error: {err}"
+        format!("{err:?}").contains("invalid node"),
+        "unexpected error: {err:?}"
     );
 }
 
@@ -87,13 +79,9 @@ async fn put_node_rejects_invalid_blob_structure() {
     let node = CasNode::Blob(invalid_blob);
     let (bytes, hash) = node.to_bytes_and_hash();
 
-    let err = env
-        .client
-        .put_node(hash, bytes)
-        .await
-        .expect_err("expected put_node rejection for invalid blob structure");
+    let err = env.client.put_node(hash, bytes).await.unwrap_err();
     assert!(
-        err.to_string().contains("at least 2 chunks"),
-        "unexpected error for invalid blob node: {err}"
+        format!("{err:?}").contains("at least 2 chunks"),
+        "unexpected error for invalid blob node: {err:?}"
     );
 }

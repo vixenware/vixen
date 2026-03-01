@@ -74,7 +74,6 @@ impl VfsdService {
                 .get_node(dir_hash)
                 .await
                 .map_err(|e| format!("failed to fetch DirectoryNode: {:?}", e))?
-                .ret
                 .clone()
                 .ok_or_else(|| format!("DirectoryNode {} not found in CAS", dir_hash.to_hex()))?;
 

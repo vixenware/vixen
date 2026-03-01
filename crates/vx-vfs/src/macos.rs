@@ -115,7 +115,7 @@ where
             .join("\n");
         return Err(VfsError::MountFailed {
             message: error.summary.clone(),
-            diagnostics: vec![VfsDiagnostic {
+            _diagnostics: vec![VfsDiagnostic {
                 code: VfsIssueCode::MountFailed,
                 summary: error.summary.clone(),
                 detail: Some(log_detail),
@@ -319,7 +319,7 @@ where
                     };
                     let peer_id = prepared.host_peer.peer_id();
                     if let Err(error) =
-                        prepared.send_success_unix(control_stream.as_raw_fd(), &segment, true)
+                        prepared.send_success_unix(control_stream.as_raw_fd(), &segment)
                     {
                         tracing::warn!(%error, peer = %peer_id.get(), "failed SHM bootstrap ticket exchange");
                         prepared.host_peer.release_reservation();

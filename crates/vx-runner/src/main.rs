@@ -278,9 +278,9 @@ async fn boot_runner(
 
     let store = Arc::new(StoreClient::new(store_virtual));
     let vfsd_protocol = vx_vfsd::protocol::VfsdClient::new(vfsd_virtual);
-    let vfs = VfsClient::new(vfsd_protocol, store.clone());
+    let vfs = VfsClient::new(vfsd_protocol, Arc::clone(&store));
 
-    let exec = RunnerService::new(store.clone(), Arc::new(vfs));
+    let exec = RunnerService::new(store, Arc::new(vfs));
 
     tracing::info!("VFS provided by vx-vfsd at {}", runner_mount_base());
 
@@ -438,8 +438,6 @@ impl RunnerService {
             .cas
             .get_toolchain_manifest(vx_store_proto::NodeHash(toolchain_manifest_hash))
             .await?
-            .ret
-            .clone()
             .ok_or(RunnerError::ToolchainManifestNotFound(
                 toolchain_manifest_hash,
             ))?;
@@ -564,8 +562,6 @@ impl RunnerService {
             .cas
             .get_node(vx_store_proto::NodeHash(manifest_hash))
             .await?
-            .ret
-            .clone()
             .ok_or(RunnerError::DependencyManifestNotFound(manifest_hash))?;
 
         let manifest = match vx_store_proto::CasNode::from_bytes(&node_data) {

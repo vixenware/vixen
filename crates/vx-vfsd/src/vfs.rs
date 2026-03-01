@@ -444,8 +444,6 @@ impl CasVfs {
                 .get_chunk(chunk_hash)
                 .await
                 .map_err(|e| format!("CAS chunk read error: {:?}", e))?
-                .ret
-                .clone()
                 .ok_or_else(|| format!("chunk {} not found", chunk_hash.to_hex()))?;
 
             let actual_hash = Blake3Hash::from_bytes(&data);
@@ -534,8 +532,6 @@ impl CasVfs {
             .get_node(blob_node_hash)
             .await
             .map_err(|e| format!("failed to read BlobNode: {:?}", e))?
-            .ret
-            .clone()
             .ok_or_else(|| format!("BlobNode {} not found", blob_node_hash.to_hex()))?;
 
         let node = CasNode::from_bytes(&node_data)

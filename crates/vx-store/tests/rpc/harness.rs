@@ -83,9 +83,8 @@ fn resolve_vx_store_binary() -> String {
         return path;
     }
 
-    let fallback = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/debug/vx-store")
         .to_string_lossy()
-        .into_owned();
-    fallback
+        .into_owned()
 }

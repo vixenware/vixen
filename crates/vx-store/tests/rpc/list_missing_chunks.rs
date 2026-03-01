@@ -30,7 +30,7 @@ async fn list_missing_chunks_returns_only_missing_in_input_order() {
         .await
         .expect("list_missing_chunks call failed");
 
-    assert_eq!(&missing.ret[..], &[missing_a, missing_b]);
+    assert_eq!(&missing[..], &[missing_a, missing_b]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -47,5 +47,5 @@ async fn list_missing_chunks_truncates_to_batch_cap() {
         .expect("list_missing_chunks call failed");
 
     assert_eq!(missing.len(), MAX_MISSING_CHUNKS_BATCH);
-    assert_eq!(&missing.ret, &requested[..MAX_MISSING_CHUNKS_BATCH]);
+    assert_eq!(&missing, &requested[..MAX_MISSING_CHUNKS_BATCH]);
 }

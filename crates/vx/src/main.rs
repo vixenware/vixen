@@ -330,9 +330,8 @@ impl CliContext {
             .boot()
             .await
             .map_err(|e| eyre!("boot RPC failed: {e:?}"))?;
-        if !boot_result.ret.success {
+        if !boot_result.success {
             let msg = boot_result
-                .ret
                 .error
                 .clone()
                 .unwrap_or_else(|| "unknown boot error".to_string());
@@ -391,7 +390,7 @@ impl CliContext {
         // cancels the in-flight build on its own.
         let result = tokio::select! {
             result = daemon.build(request) => result
-                .map(|resp| resp.ret.clone())
+
                 .map_err(|e| eyre!("build RPC failed: {e:?}"))?,
             _ = tokio::signal::ctrl_c() => {
                 if let CliMode::Tui(tui) = &self.mode {
@@ -520,7 +519,6 @@ impl CliContext {
         let version = daemon
             .version()
             .await
-            .map(|resp| resp.ret.clone())
             .map_err(|e| eyre!("version RPC failed: {e:?}"))?;
 
         tracing::info!("✓ connected to vxd");
@@ -536,7 +534,6 @@ impl CliContext {
         let version = daemon
             .version()
             .await
-            .map(|resp| resp.ret.clone())
             .map_err(|e| eyre!("version RPC failed: {e:?}"))?;
         println!("{version}");
         Ok(())
@@ -670,7 +667,6 @@ impl CliContext {
         let result = daemon
             .unpublish_cache_keys(cache_keys)
             .await
-            .map(|resp| resp.ret.clone())
             .map_err(|e| eyre!("unpublish_cache_keys RPC failed: {e:?}"))?;
 
         // Clear picante cache so the daemon recomputes everything on next build

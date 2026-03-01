@@ -41,7 +41,6 @@ async fn async_main() -> Result<()> {
     let retrieved = client
         .get_chunk(chunk_hash)
         .await
-        .map(|resp| resp.ret.clone())
         .map_err(|e| eyre::eyre!("get_chunk failed: {e:?}"))?;
     match retrieved {
         Some(data) => {
@@ -59,7 +58,6 @@ async fn async_main() -> Result<()> {
     let exists = client
         .has_chunk(chunk_hash)
         .await
-        .map(|resp| resp.ret)
         .map_err(|e| eyre::eyre!("has_chunk failed: {e:?}"))?;
     tracing::info!("Chunk exists: {}", exists);
 

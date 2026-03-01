@@ -284,6 +284,10 @@ impl EndpointConnector {
     pub fn new(endpoint: Endpoint) -> Self {
         Self { endpoint }
     }
+
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
 }
 
 /// Connect to an endpoint and establish a roam session, returning a caller and session handle.

@@ -617,11 +617,7 @@ impl VxdService {
     async fn report_start_action(&self, action_type: ActionType) -> Option<u64> {
         let listener = self.progress_listener.lock().clone();
         if let Some(ref listener) = listener {
-            listener
-                .start_action(action_type)
-                .await
-                .ok()
-                .map(|resp| resp.ret)
+            listener.start_action(action_type).await.ok()
         } else {
             None
         }
@@ -828,7 +824,6 @@ impl VxdService {
             .store
             .ensure_rust_toolchain(spec, progress_tx)
             .await
-            .map(|resp| resp.ret.clone())
             .map_err(|e| {
                 // Complete action on error
                 let this = self.clone();
@@ -863,7 +858,6 @@ impl VxdService {
             .store
             .get_toolchain_manifest(manifest_hash)
             .await
-            .map(|resp| resp.ret.clone())
             .map_err(|e| {
                 let this = self.clone();
                 moire::task::spawn(
@@ -1772,13 +1766,7 @@ impl VxdRpc for VxdService {
         let mut not_found = 0u32;
 
         for key in cache_keys {
-            if self
-                .store
-                .unpublish(key)
-                .await
-                .map(|resp| resp.ret)
-                .unwrap_or(false)
-            {
+            if self.store.unpublish(key).await.unwrap_or(false) {
                 removed += 1;
             } else {
                 not_found += 1;

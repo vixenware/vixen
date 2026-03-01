@@ -167,8 +167,6 @@ impl VfsdClient {
             .get_node(node_hash)
             .await
             .map_err(|e| format!("failed to fetch DirectoryNode: {:?}", e))?
-            .ret
-            .clone()
             .ok_or_else(|| format!("DirectoryNode {} not found in CAS", node_hash))?;
 
         let node = CasNode::from_bytes(&node_data)
@@ -226,11 +224,7 @@ impl VfsdClient {
         } else {
             format!("/{}/{}", prefix_id, subpath)
         };
-        self.client
-            .flush(path)
-            .await
-            .map(|resp| resp.ret)
-            .map_err(|e| format!("{e:?}"))
+        self.client.flush(path).await.map_err(|e| format!("{e:?}"))
     }
 
     /// Remove an action prefix
