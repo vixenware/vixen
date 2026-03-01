@@ -164,7 +164,7 @@ where
 fn spawn_shm_loop<T>(
     vfs: T,
     mount_ready_tx: mpsc::Sender<()>,
-    _vfs_dead_tx: watch::Sender<bool>,
+    vfs_dead_tx: watch::Sender<bool>,
 ) -> Result<String, VfsError>
 where
     T: Vfs + Clone + Send + Sync + 'static,
@@ -335,6 +335,7 @@ where
                     let _ = mount_ready_tx.try_send(());
 
                     let vfs_dispatcher = VfsDispatcher::new(vfs.clone());
+                    let vfs_dead_tx_for_peer = vfs_dead_tx.clone();
                     moire::task::spawn(
                         async move {
                             let link = match host_peer.into_link() {
@@ -345,6 +346,7 @@ where
                                         peer = %peer_id.get(),
                                         "failed to build host link for peer"
                                     );
+                                    let _ = vfs_dead_tx_for_peer.send(true);
                                     return;
                                 }
                             };
@@ -361,6 +363,7 @@ where
                                         peer = %peer_id.get(),
                                         "failed SHM session establish"
                                     );
+                                    let _ = vfs_dead_tx_for_peer.send(true);
                                     return;
                                 }
                             };
@@ -370,6 +373,7 @@ where
                             let mut driver = Driver::new(handle, vfs_dispatcher, Parity::Even);
                             driver.run().await;
                             tracing::debug!(peer = %peer_id.get(), "SHM peer driver exited");
+                            let _ = vfs_dead_tx_for_peer.send(true);
                         }
                         .named("shm_host_driver"),
                     );
