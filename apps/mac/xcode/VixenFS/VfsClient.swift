@@ -7,16 +7,16 @@ import RoamRuntime
 // MARK: - Vfs Method IDs
 
 public enum VfsMethodId {
-    public static let lookup: UInt64 = 0x7046_0df9_6a9e_3ebf
-    public static let getAttributes: UInt64 = 0xc968_b689_89c3_f020
-    public static let readDir: UInt64 = 0x2007_dfb6_5019_9d2c
-    public static let read: UInt64 = 0x9c80_fd55_5999_d0e1
-    public static let write: UInt64 = 0x5d39_8e81_123c_3597
-    public static let create: UInt64 = 0x2caa_f8ad_f5ed_a0e1
-    public static let delete: UInt64 = 0xfa37_cb27_061e_7e2a
-    public static let rename: UInt64 = 0x4d68_b4b3_208a_8c07
-    public static let setAttributes: UInt64 = 0x320f_6529_a5a0_e5ce
-    public static let ping: UInt64 = 0xe35c_dfdc_a59c_e5ab
+    public static let lookup: UInt64 = 0x70460df96a9e3ebf
+    public static let getAttributes: UInt64 = 0xc968b68989c3f020
+    public static let readDir: UInt64 = 0x2007dfb650199d2c
+    public static let read: UInt64 = 0x9c80fd555999d0e1
+    public static let write: UInt64 = 0x5d398e81123c3597
+    public static let create: UInt64 = 0x2caaf8adf5eda0e1
+    public static let delete: UInt64 = 0xfa37cb27061e7e2a
+    public static let rename: UInt64 = 0x4d68b4b3208a8c07
+    public static let setAttributes: UInt64 = 0x320f6529a5a0e5ce
+    public static let ping: UInt64 = 0xbf89334f8d104575
 }
 
 // MARK: - Vfs Types
@@ -35,10 +35,7 @@ public struct ItemAttributes: Codable, Sendable {
     public var createdTime: UInt64
     public var mode: UInt32
 
-    public init(
-        itemId: UInt64, itemType: ItemType, size: UInt64, modifiedTime: UInt64, createdTime: UInt64,
-        mode: UInt32
-    ) {
+    public init(itemId: UInt64, itemType: ItemType, size: UInt64, modifiedTime: UInt64, createdTime: UInt64, mode: UInt32) {
         self.itemId = itemId
         self.itemType = itemType
         self.size = size
@@ -77,10 +74,7 @@ public struct DirEntry: Codable, Sendable {
     public var createdTime: UInt64
     public var mode: UInt32
 
-    public init(
-        name: String, itemId: UInt64, itemType: ItemType, size: UInt64, modifiedTime: UInt64,
-        createdTime: UInt64, mode: UInt32
-    ) {
+    public init(name: String, itemId: UInt64, itemType: ItemType, size: UInt64, modifiedTime: UInt64, createdTime: UInt64, mode: UInt32) {
         self.name = name
         self.itemId = itemId
         self.itemType = itemType
@@ -186,32 +180,10 @@ public protocol VfsCaller {
 public final class VfsClient: VfsCaller {
     private let connection: RoamConnection
     private let timeout: TimeInterval?
-    private static let moireSpanIDKey = "moire.span_id"
 
     public init(connection: RoamConnection, timeout: TimeInterval? = 30.0) {
         self.connection = connection
         self.timeout = timeout
-    }
-
-    private func callWithmoireMetadata(methodId: UInt64, payload: Data) async throws -> Data {
-        let metadata: [MetadataEntry]
-        if let spanID = moireRequestContext.spanID {
-            metadata = [
-                MetadataEntry(
-                    key: Self.moireSpanIDKey,
-                    value: .string(spanID),
-                    flags: 0
-                )
-            ]
-        } else {
-            metadata = []
-        }
-        return try await connection.call(
-            methodId: methodId,
-            metadata: metadata,
-            payload: payload,
-            timeout: timeout
-        )
     }
 
     public func lookup(parentId: UInt64, name: String) async throws -> LookupResult {
@@ -219,12 +191,11 @@ public final class VfsClient: VfsCaller {
         payloadBytes += encodeVarint(parentId)
         payloadBytes += encodeString(name)
         let payload = Data(payloadBytes)
-        let response = try await callWithmoireMetadata(
-            methodId: 0x7046_0df9_6a9e_3ebf, payload: payload)
+        let response = try await connection.call(methodId: 0x70460df96a9e3ebf, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let __result_attrs_itemId = try decodeVarint(from: response, offset: &cursor)
-        let ___result_attrs_itemType_disc = try decodeU8(from: response, offset: &cursor)
+        let ___result_attrs_itemType_disc = try decodeVarint(from: response, offset: &cursor)
         let __result_attrs_itemType: ItemType
         switch ___result_attrs_itemType_disc {
         case 0:
@@ -240,10 +211,7 @@ public final class VfsClient: VfsCaller {
         let __result_attrs_modifiedTime = try decodeVarint(from: response, offset: &cursor)
         let __result_attrs_createdTime = try decodeVarint(from: response, offset: &cursor)
         let __result_attrs_mode = try decodeU32(from: response, offset: &cursor)
-        let _result_attrs = ItemAttributes(
-            itemId: __result_attrs_itemId, itemType: __result_attrs_itemType,
-            size: __result_attrs_size, modifiedTime: __result_attrs_modifiedTime,
-            createdTime: __result_attrs_createdTime, mode: __result_attrs_mode)
+        let _result_attrs = ItemAttributes(itemId: __result_attrs_itemId, itemType: __result_attrs_itemType, size: __result_attrs_size, modifiedTime: __result_attrs_modifiedTime, createdTime: __result_attrs_createdTime, mode: __result_attrs_mode)
         let _result_error = try decodeI32(from: response, offset: &cursor)
         let result = LookupResult(attrs: _result_attrs, error: _result_error)
         return result
@@ -253,12 +221,11 @@ public final class VfsClient: VfsCaller {
         var payloadBytes: [UInt8] = []
         payloadBytes += encodeVarint(itemId)
         let payload = Data(payloadBytes)
-        let response = try await callWithmoireMetadata(
-            methodId: 0xc968_b689_89c3_f020, payload: payload)
+        let response = try await connection.call(methodId: 0xc968b68989c3f020, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let __result_attrs_itemId = try decodeVarint(from: response, offset: &cursor)
-        let ___result_attrs_itemType_disc = try decodeU8(from: response, offset: &cursor)
+        let ___result_attrs_itemType_disc = try decodeVarint(from: response, offset: &cursor)
         let __result_attrs_itemType: ItemType
         switch ___result_attrs_itemType_disc {
         case 0:
@@ -274,62 +241,49 @@ public final class VfsClient: VfsCaller {
         let __result_attrs_modifiedTime = try decodeVarint(from: response, offset: &cursor)
         let __result_attrs_createdTime = try decodeVarint(from: response, offset: &cursor)
         let __result_attrs_mode = try decodeU32(from: response, offset: &cursor)
-        let _result_attrs = ItemAttributes(
-            itemId: __result_attrs_itemId, itemType: __result_attrs_itemType,
-            size: __result_attrs_size, modifiedTime: __result_attrs_modifiedTime,
-            createdTime: __result_attrs_createdTime, mode: __result_attrs_mode)
+        let _result_attrs = ItemAttributes(itemId: __result_attrs_itemId, itemType: __result_attrs_itemType, size: __result_attrs_size, modifiedTime: __result_attrs_modifiedTime, createdTime: __result_attrs_createdTime, mode: __result_attrs_mode)
         let _result_error = try decodeI32(from: response, offset: &cursor)
         let result = GetAttributesResult(attrs: _result_attrs, error: _result_error)
         return result
     }
 
-    public func readDir(itemId: UInt64, cookie: UInt64, verifier: UInt64) async throws
-        -> ReadDirResult
-    {
+    public func readDir(itemId: UInt64, cookie: UInt64, verifier: UInt64) async throws -> ReadDirResult {
         var payloadBytes: [UInt8] = []
         payloadBytes += encodeVarint(itemId)
         payloadBytes += encodeVarint(cookie)
         payloadBytes += encodeVarint(verifier)
         let payload = Data(payloadBytes)
-        let response = try await callWithmoireMetadata(
-            methodId: 0x2007_dfb6_5019_9d2c, payload: payload)
+        let response = try await connection.call(methodId: 0x2007dfb650199d2c, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
-        let _result_entries = try decodeVec(
-            from: response, offset: &cursor,
-            decoder: { data, off in
-                let _name = try decodeString(from: data, offset: &off)
-                let _itemId = try decodeVarint(from: data, offset: &off)
-                let _itemType = try
-                    ({ data, off in
-                        let disc = try decodeU8(from: data, offset: &off)
-                        let result: ItemType
-                        switch disc {
-                        case 0:
-                            result = .file
-                        case 1:
-                            result = .directory
-                        case 2:
-                            result = .symlink
-                        default:
-                            throw RoamError.decodeError("unknown enum variant")
-                        }
-                        return result
-                    })(data, &off)
-                let _size = try decodeVarint(from: data, offset: &off)
-                let _modifiedTime = try decodeVarint(from: data, offset: &off)
-                let _createdTime = try decodeVarint(from: data, offset: &off)
-                let _mode = try decodeU32(from: data, offset: &off)
-                return DirEntry(
-                    name: _name, itemId: _itemId, itemType: _itemType, size: _size,
-                    modifiedTime: _modifiedTime, createdTime: _createdTime, mode: _mode)
-            })
+        let _result_entries = try decodeVec(from: response, offset: &cursor, decoder: { data, off in
+            let _name = try decodeString(from: data, offset: &off)
+            let _itemId = try decodeVarint(from: data, offset: &off)
+            let _itemType = try ({ data, off in
+            let disc = try decodeVarint(from: data, offset: &off)
+            let result: ItemType
+            switch disc {
+            case 0:
+                result = .file
+            case 1:
+                result = .directory
+            case 2:
+                result = .symlink
+            default:
+                throw RoamError.decodeError("unknown enum variant")
+            }
+            return result
+        })(data, &off)
+            let _size = try decodeVarint(from: data, offset: &off)
+            let _modifiedTime = try decodeVarint(from: data, offset: &off)
+            let _createdTime = try decodeVarint(from: data, offset: &off)
+            let _mode = try decodeU32(from: data, offset: &off)
+            return DirEntry(name: _name, itemId: _itemId, itemType: _itemType, size: _size, modifiedTime: _modifiedTime, createdTime: _createdTime, mode: _mode)
+        })
         let _result_nextCookie = try decodeVarint(from: response, offset: &cursor)
         let _result_verifier = try decodeVarint(from: response, offset: &cursor)
         let _result_error = try decodeI32(from: response, offset: &cursor)
-        let result = ReadDirResult(
-            entries: _result_entries, nextCookie: _result_nextCookie, verifier: _result_verifier,
-            error: _result_error)
+        let result = ReadDirResult(entries: _result_entries, nextCookie: _result_nextCookie, verifier: _result_verifier, error: _result_error)
         return result
     }
 
@@ -339,8 +293,7 @@ public final class VfsClient: VfsCaller {
         payloadBytes += encodeVarint(offset)
         payloadBytes += encodeVarint(len)
         let payload = Data(payloadBytes)
-        let response = try await callWithmoireMetadata(
-            methodId: 0x9c80_fd55_5999_d0e1, payload: payload)
+        let response = try await connection.call(methodId: 0x9c80fd555999d0e1, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_data = try decodeBytes(from: response, offset: &cursor)
@@ -355,8 +308,7 @@ public final class VfsClient: VfsCaller {
         payloadBytes += encodeVarint(offset)
         payloadBytes += encodeBytes(Array(data))
         let payload = Data(payloadBytes)
-        let response = try await callWithmoireMetadata(
-            methodId: 0x5d39_8e81_123c_3597, payload: payload)
+        let response = try await connection.call(methodId: 0x5d398e81123c3597, payload: payload, timeout: timeout)
         var cursor = 0
         try decodeRpcResult(from: response, offset: &cursor)
         let _result_bytesWritten = try decodeVarint(from: response, offset: &cursor)

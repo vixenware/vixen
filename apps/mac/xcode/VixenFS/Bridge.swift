@@ -298,7 +298,7 @@ actor VfsConnection {
             throw error
         }
 
-        let (handle, driver) = establishShmGuest(
+        let (handle, driver) = try await establishShmGuest(
             transport: transport,
             dispatcher: NoopDispatcher()
         )
