@@ -22,6 +22,10 @@ roam-shm = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 roam-shm = { workspace = true }
+roam-core = { workspace = true }
+roam-types = { workspace = true }
+shm-primitives = { workspace = true }
+libc = { workspace = true }
 facet-json = { workspace = true }
 fastrand = { workspace = true }
 vx-fskit = { path = "../vx-fskit" }

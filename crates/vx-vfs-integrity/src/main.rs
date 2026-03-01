@@ -2,7 +2,6 @@ use camino::Utf8PathBuf;
 use eyre::{Result, WrapErr};
 use facet::Facet;
 use figue as args;
-use roam_stream::NoDispatcher;
 use std::io::SeekFrom;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use vx_io::net::Endpoint;
@@ -38,8 +37,6 @@ struct Args {
     #[facet(flatten)]
     builtins: args::FigueBuiltins,
 }
-
-type Caller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
 
 struct StoredFile {
     rel_path: String,
@@ -122,7 +119,10 @@ fn walk_toolchain(root: &std::path::Path) -> Result<Vec<StoredFile>> {
     Ok(files)
 }
 
-async fn store_file_data(store: &StoreClient<Caller>, data: &[u8]) -> Result<DirEntryKind> {
+async fn store_file_data(
+    store: &StoreClient<roam_core::DriverCaller>,
+    data: &[u8],
+) -> Result<DirEntryKind> {
     let content_hash = ContentHash(Blake3Hash(blake3::hash(data).into()));
 
     if data.len() <= CDC_MAX_CHUNK as usize {
@@ -315,13 +315,13 @@ async fn async_main() -> Result<()> {
     wait_for_socket(&vfsd_endpoint).await?;
 
     // Connect RPC clients
-    let store_caller = vx_io::net::reconnecting_client(store_endpoint.clone(), NoDispatcher);
-    store_caller.handle().await?;
-    let store_client = StoreClient::new(store_caller);
+    let (store_root, store_session) = vx_io::net::connect_session(&store_endpoint).await?;
+    let store_virtual = vx_io::boot::boot_and_connect(&store_root, &store_session).await?;
+    let store_client = StoreClient::new(store_virtual);
 
-    let vfsd_caller = vx_io::net::reconnecting_client(vfsd_endpoint.clone(), NoDispatcher);
-    vfsd_caller.handle().await?;
-    let vfsd_client = VfsdClient::new(vfsd_caller);
+    let (vfsd_root, vfsd_session) = vx_io::net::connect_session(&vfsd_endpoint).await?;
+    let vfsd_virtual = vx_io::boot::boot_and_connect(&vfsd_root, &vfsd_session).await?;
+    let vfsd_client = VfsdClient::new(vfsd_virtual);
 
     // Wait for vfsd to be ready
     vfsd_client

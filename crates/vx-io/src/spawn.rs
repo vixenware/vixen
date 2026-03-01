@@ -277,8 +277,8 @@ async fn spawn_binary(
         let log_file = opts.open(log_path).await?;
         let log_file_clone = log_file.try_clone().await?;
 
-        let stdout_file = log_file_clone.into_inner().into_std().await;
-        let stderr_file = log_file.into_inner().into_std().await;
+        let stdout_file = log_file_clone.into_std().await;
+        let stderr_file = log_file.into_std().await;
         cmd.stdout(Stdio::from(stdout_file));
         cmd.stderr(Stdio::from(stderr_file));
     } else {

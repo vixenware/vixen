@@ -29,7 +29,7 @@ impl StoreTestEnv {
         let vx_home_str = vx_home.path().to_string_lossy().into_owned();
         let binary_path = resolve_vx_store_binary();
 
-        let service = ServiceBuilder::new(binary_path, endpoint, NoDispatcher)
+        let service = ServiceBuilder::new(binary_path, endpoint)
             .caller_name("vx-store-rpc-tests")
             .args(&["--root", &root_str, "--vx-home", &vx_home_str])
             .env("VX_TEST", "1")
@@ -39,7 +39,7 @@ impl StoreTestEnv {
             .expect("failed to spawn/connect vx-store");
 
         let virtual_handle = service
-            .boot_and_connect(None)
+            .boot_and_connect()
             .await
             .expect("failed to boot/connect vx-store virtual connection");
         let client = StoreClient::new(virtual_handle);

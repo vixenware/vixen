@@ -312,8 +312,8 @@ impl CliContext {
         let vx_home = vx_io::vx_home();
 
         // Connect to daemon — root connection only has the Boot service.
-        let mut builder = ServiceBuilder::new("vxd", self.strat.endpoint().clone(), NoDispatcher)
-            .caller_name("vx");
+        let mut builder =
+            ServiceBuilder::new("vxd", self.strat.endpoint().clone()).caller_name("vx");
 
         builder = match &self.strat {
             DaemonStrategy::Connect(_) => builder.connect_only(),
@@ -512,7 +512,7 @@ impl CliContext {
         // Connect to the root connection only — don't boot, don't open virtual connections.
         // shutdown() lives on the Boot service, so it's always reachable even if boot failed.
         let endpoint = self.strat.endpoint().clone();
-        let builder = ServiceBuilder::new("vxd", endpoint.clone(), NoDispatcher)
+        let builder = ServiceBuilder::new("vxd", endpoint.clone())
             .caller_name("vx")
             .connect_only();
 

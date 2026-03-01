@@ -37,7 +37,7 @@ fn ensure_parent_dirs(dir_entries: &mut BTreeMap<String, Vec<DirEntry>>, dir: &s
 
 /// Build a Merkle directory tree from flat file entries and store all nodes
 /// in the CAS. Returns the root (NodeHash, total_size).
-pub async fn build_merkle_tree<C: roam_stream::Caller>(
+pub async fn build_merkle_tree<C: roam::Caller>(
     cas: &StoreClient<C>,
     files: Vec<MerkleTreeFile>,
 ) -> Result<(NodeHash, u64), String> {
@@ -104,7 +104,7 @@ pub async fn build_merkle_tree<C: roam_stream::Caller>(
         let (node_bytes, node_hash) = dir_node.to_bytes_and_hash();
         cas.put_node(node_hash, node_bytes)
             .await
-            .map_err(|e| format!("failed to store DirectoryNode for '{}': {e}", dir_path))?;
+            .map_err(|e| format!("failed to store DirectoryNode for '{}': {e:?}", dir_path))?;
 
         dir_hashes.insert(dir_path.clone(), (node_hash, total_size));
 

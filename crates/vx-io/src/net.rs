@@ -290,7 +290,7 @@ impl EndpointConnector {
 pub async fn connect_session(
     endpoint: &Endpoint,
 ) -> Result<(roam_core::DriverCaller, roam_core::SessionHandle)> {
-    use roam_core::{BareConduit, Driver, session::initiator};
+    use roam_core::{BareConduit, Driver, initiator};
     use roam_stream::StreamLink;
     use roam_types::{MessageFamily, Parity};
 

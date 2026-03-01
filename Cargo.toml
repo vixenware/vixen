@@ -59,6 +59,7 @@ roam-core = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-types = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-stream = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-shm = { git = "https://github.com/bearcove/roam", branch = "main" }
+shm-primitives = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-local = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-codegen = { git = "https://github.com/bearcove/roam", branch = "main" }
 ur-taking-me-with-you = { git = "https://github.com/bearcove/roam", branch = "main", features = [
@@ -183,6 +184,7 @@ roam-core = { path = "/Users/amos/bearcove/roam/rust/roam-core" }
 roam-types = { path = "/Users/amos/bearcove/roam/rust/roam-types" }
 roam-stream = { path = "/Users/amos/bearcove/roam/rust/roam-stream" }
 roam-shm = { path = "/Users/amos/bearcove/roam/rust/roam-shm" }
+shm-primitives = { path = "/Users/amos/bearcove/roam/rust/shm-primitives" }
 roam-local = { path = "/Users/amos/bearcove/roam/rust/roam-local" }
 roam-codegen = { path = "/Users/amos/bearcove/roam/rust/roam-codegen" }
 ur-taking-me-with-you = { path = "/Users/amos/bearcove/roam/rust/ur-taking-me-with-you" }

@@ -167,7 +167,7 @@ async fn extract_tar<R: AsyncRead + Unpin>(
                     source: e,
                 })?;
 
-        tokio::io::copy(&mut entry, output_file.as_mut_tokio())
+        tokio::io::copy(&mut entry, &mut output_file)
             .await
             .map_err(|e| TarballError::WriteFile {
                 path: target_path.clone(),

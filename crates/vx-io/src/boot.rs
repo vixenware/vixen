@@ -20,7 +20,7 @@ use std::sync::Arc;
 use eyre::Result;
 use facet::Facet;
 use moire::sync::watch;
-use roam_core::{ConnectionHandle, Driver, DriverCaller, SessionHandle};
+use roam_core::{Driver, DriverCaller, SessionHandle};
 use roam_types::{ConnectionSettings, Parity};
 
 /// Optional cleanup hook for services that need to do work before exit.
@@ -215,6 +215,7 @@ pub async fn boot_and_connect(
     if !boot_result.success {
         let msg = boot_result
             .error
+            .clone()
             .unwrap_or_else(|| "unknown boot error".into());
         eyre::bail!("{msg}");
     }

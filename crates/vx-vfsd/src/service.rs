@@ -456,7 +456,7 @@ mod tests {
             let vx_home_str = vx_home.path().to_string_lossy().into_owned();
             let binary_path = resolve_vx_store_binary();
 
-            let store_service = ServiceBuilder::new(binary_path, endpoint, NoDispatcher)
+            let store_service = ServiceBuilder::new(binary_path, endpoint)
                 .caller_name("vx-vfsd-flush-tests")
                 .args(&["--root", &store_root_str, "--vx-home", &vx_home_str])
                 .env("VX_TEST", "1")
@@ -466,7 +466,7 @@ mod tests {
                 .expect("failed to spawn/connect vx-store");
 
             let store_virtual = store_service
-                .boot_and_connect(None)
+                .boot_and_connect()
                 .await
                 .expect("failed to boot/connect vx-store");
             let cas = Arc::new(StoreClient::new(store_virtual));

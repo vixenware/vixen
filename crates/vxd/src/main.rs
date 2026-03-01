@@ -174,7 +174,7 @@ async fn ensure_services(
     let vfsd_endpoint = vx_io::net::default_local_endpoint(&args.vx_home, "vfsd");
     let store_root = args.vx_home.join("store");
 
-    let mut store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone(), NoDispatcher)
+    let mut store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone())
         .caller_name("vxd")
         .args(&[
             "--root",
@@ -187,7 +187,7 @@ async fn ensure_services(
         store_builder = store_builder.connect_only();
     }
 
-    let mut runner_builder = ServiceBuilder::new("vx-runner", exec_endpoint.clone(), NoDispatcher)
+    let mut runner_builder = ServiceBuilder::new("vx-runner", exec_endpoint.clone())
         .caller_name("vxd")
         .args(&[
             "--store",
@@ -215,8 +215,8 @@ async fn ensure_services(
 
     // Run boot protocol on both services in parallel.
     let (store_virtual, runner_virtual) = tokio::try_join!(
-        store_handle.boot_and_connect(None),
-        runner_handle.boot_and_connect(None),
+        store_handle.boot_and_connect(),
+        runner_handle.boot_and_connect(),
     )?;
 
     Ok(ServiceClients {

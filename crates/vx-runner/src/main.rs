@@ -213,11 +213,11 @@ async fn boot_runner(
     let vfsd_endpoint = Endpoint::parse(vfsd_addr)?;
     let mount_path = runner_mount_base();
 
-    let store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone(), NoDispatcher)
+    let store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone())
         .caller_name("vx-runner")
         .connect_only();
 
-    let vfsd_builder = ServiceBuilder::new("vx-vfsd", vfsd_endpoint.clone(), NoDispatcher)
+    let vfsd_builder = ServiceBuilder::new("vx-vfsd", vfsd_endpoint.clone())
         .caller_name("vx-runner")
         .args(&[
             "--mount",
@@ -245,8 +245,8 @@ async fn boot_runner(
 
     // Run boot protocol on both services.
     let (store_virtual, vfsd_virtual) = tokio::try_join!(
-        store_handle.boot_and_connect(None),
-        vfsd_handle.boot_and_connect(None),
+        store_handle.boot_and_connect(),
+        vfsd_handle.boot_and_connect(),
     )?;
 
     let store = Arc::new(StoreClient::new(store_virtual));
