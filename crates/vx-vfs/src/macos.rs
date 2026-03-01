@@ -13,7 +13,8 @@ use moire::sync::watch;
 use moire::task::FutureExt;
 use roam_core::acceptor;
 use roam_core::{BareConduit, Driver};
-use roam_shm::{AddPeerOptions, Segment, SegmentConfig, ShmHost, SizeClassConfig};
+use roam_shm::bootstrap::{self, decode_request};
+use roam_shm::{HostHub, Segment, SegmentConfig, SizeClassConfig};
 use roam_types::Parity;
 use shm_primitives::FileCleanup;
 use std::os::fd::AsRawFd;
@@ -23,10 +24,6 @@ use vixenfs_proto::{VfsDispatcher, VfsServer as Vfs};
 use vx_vfs_types::{VIXEN_MOUNT_HELPER_PATH, VfsAction, VfsDiagnostic, VfsIssueCode};
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_GC_AGE: Duration = Duration::from_secs(6 * 60 * 60);
-const SHM_BOOTSTRAP_REQ_MAGIC: &[u8; 4] = b"RSH0";
-const SHM_BOOTSTRAP_RESP_MAGIC: &[u8; 4] = b"RSP0";
-const SHM_BOOTSTRAP_STATUS_OK: u8 = 0;
-const SHM_BOOTSTRAP_STATUS_ERR: u8 = 1;
 
 #[derive(Clone, Debug)]
 struct SessionPaths {
@@ -254,7 +251,7 @@ where
                     }
                 };
 
-                let host = ShmHost::new(segment.clone());
+                let host = HostHub::new(segment.clone());
 
                 let control_sock_path = control_socket_path_for_sid(&app_group_root, session_paths.sid());
                 if moire::fs::try_exists(&control_sock_path)
@@ -299,7 +296,7 @@ where
                         }
                     };
                     if request_sid != session_paths.sid() {
-                        let _ = send_bootstrap_error(&mut control_stream, "sid mismatch").await;
+                        let _ = send_bootstrap_error(&control_stream, "sid mismatch");
                         tracing::warn!(
                             expected = %session_paths.sid(),
                             got = %request_sid,
@@ -308,57 +305,27 @@ where
                         continue;
                     }
 
-                    let prepared = match host.add_peer(AddPeerOptions::default()) {
+                    let hub_path = shm_path.to_string_lossy().to_string();
+                    let prepared = match host.prepare_bootstrap_success(hub_path.as_bytes()) {
                         Ok(prepared) => prepared,
                         Err(error) => {
                             let _ = send_bootstrap_error(
-                                &mut control_stream,
+                                &control_stream,
                                 format!("failed to reserve peer: {error}"),
-                            )
-                            .await;
+                            );
                             tracing::warn!(%error, "failed to reserve SHM peer ticket");
                             continue;
                         }
                     };
-                    let (host_peer, guest_ticket) = prepared.into_parts();
-                    let peer_id = host_peer.peer_id();
-                    let hub_path = shm_path.to_string_lossy().to_string();
-                    let doorbell_fd = guest_ticket.doorbell.as_raw_fd();
-                    let mmap_control_fd = guest_ticket.mmap_tx_fd;
-
-                    let shm_file = match std::fs::File::open(&shm_path) {
-                        Ok(file) => file,
-                        Err(error) => {
-                            let _ = send_bootstrap_error(
-                                &mut control_stream,
-                                format!("failed to open shm file: {error}"),
-                            )
-                            .await;
-                            tracing::warn!(%error, "failed to open SHM file");
-                            host_peer.release_reservation();
-                            continue;
-                        }
-                    };
-                    let shm_fd = shm_file.as_raw_fd();
-
-                    let send_result = send_bootstrap_ok(
-                        &mut control_stream,
-                        peer_id.get(),
-                        &hub_path,
-                        &[doorbell_fd, shm_fd, mmap_control_fd],
-                    )
-                    .await;
-                    drop(shm_file);
-                    // mmap tx fd is an owned raw fd on our side; close after passing.
-                    unsafe {
-                        libc::close(mmap_control_fd);
-                    }
-
-                    if let Err(error) = send_result {
+                    let peer_id = prepared.host_peer.peer_id();
+                    if let Err(error) =
+                        prepared.send_success_unix(control_stream.as_raw_fd(), &segment, true)
+                    {
                         tracing::warn!(%error, peer = %peer_id.get(), "failed SHM bootstrap ticket exchange");
-                        host_peer.release_reservation();
+                        prepared.host_peer.release_reservation();
                         continue;
                     }
+                    let host_peer = prepared.host_peer;
 
                     tracing::debug!(
                         sid = %session_paths.sid(),
@@ -456,127 +423,41 @@ fn is_valid_sid(sid: &str) -> bool {
 async fn recv_bootstrap_request(stream: &mut tokio::net::UnixStream) -> Result<String, String> {
     use tokio::io::AsyncReadExt;
 
-    let mut magic = [0u8; 4];
+    let mut header = [0u8; bootstrap::BOOTSTRAP_REQUEST_HEADER_LEN];
     stream
-        .read_exact(&mut magic)
+        .read_exact(&mut header)
         .await
-        .map_err(|e| format!("read bootstrap magic: {e}"))?;
-    if &magic != SHM_BOOTSTRAP_REQ_MAGIC {
-        return Err("invalid bootstrap request magic".to_string());
-    }
+        .map_err(|e| format!("read bootstrap request header: {e}"))?;
 
-    let mut len_bytes = [0u8; 2];
-    stream
-        .read_exact(&mut len_bytes)
-        .await
-        .map_err(|e| format!("read sid length: {e}"))?;
-    let sid_len = u16::from_le_bytes(len_bytes) as usize;
+    let sid_len = u16::from_le_bytes([header[4], header[5]]) as usize;
     let mut sid_bytes = vec![0u8; sid_len];
     stream
         .read_exact(&mut sid_bytes)
         .await
         .map_err(|e| format!("read sid payload: {e}"))?;
-    let sid = String::from_utf8(sid_bytes).map_err(|e| format!("sid not utf-8: {e}"))?;
+    let mut frame = Vec::with_capacity(bootstrap::BOOTSTRAP_REQUEST_HEADER_LEN + sid_len);
+    frame.extend_from_slice(&header);
+    frame.extend_from_slice(&sid_bytes);
+    let request = decode_request(&frame).map_err(|e| format!("invalid bootstrap request: {e}"))?;
+    let sid = String::from_utf8(request.sid.to_vec()).map_err(|e| format!("sid not utf-8: {e}"))?;
     if !is_valid_sid(&sid) {
         return Err("invalid sid encoding".to_string());
     }
     Ok(sid)
 }
 
-async fn send_bootstrap_error(
-    stream: &mut tokio::net::UnixStream,
+fn send_bootstrap_error(
+    stream: &tokio::net::UnixStream,
     message: impl AsRef<str>,
 ) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
-
-    let payload = message.as_ref().as_bytes();
-    let len = u16::try_from(payload.len()).unwrap_or(u16::MAX);
-    let payload = &payload[..usize::from(len)];
-
-    let mut response = Vec::with_capacity(8 + payload.len());
-    response.extend_from_slice(SHM_BOOTSTRAP_RESP_MAGIC);
-    response.push(SHM_BOOTSTRAP_STATUS_ERR);
-    response.push(0);
-    response.extend_from_slice(&len.to_le_bytes());
-    response.extend_from_slice(payload);
-    stream.write_all(&response).await
-}
-
-async fn send_bootstrap_ok(
-    stream: &mut tokio::net::UnixStream,
-    peer_id: u8,
-    hub_path: &str,
-    fds: &[i32],
-) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
-
-    let payload = hub_path.as_bytes();
-    let len = u16::try_from(payload.len()).unwrap_or(u16::MAX);
-    let payload = &payload[..usize::from(len)];
-
-    let mut response = Vec::with_capacity(8 + payload.len());
-    response.extend_from_slice(SHM_BOOTSTRAP_RESP_MAGIC);
-    response.push(SHM_BOOTSTRAP_STATUS_OK);
-    response.push(peer_id);
-    response.extend_from_slice(&len.to_le_bytes());
-    response.extend_from_slice(payload);
-    stream.write_all(&response).await?;
-    send_fds(stream.as_raw_fd(), fds)
-}
-
-fn send_fds(sock_fd: i32, fds: &[i32]) -> std::io::Result<()> {
-    if fds.is_empty() {
-        return Ok(());
-    }
-
-    let mut data = [0xA5u8];
-    let mut iov = libc::iovec {
-        iov_base: data.as_mut_ptr().cast(),
-        iov_len: data.len(),
-    };
-
-    // SAFETY: size is computed from fds slice length.
-    let control_len =
-        unsafe { libc::CMSG_SPACE((std::mem::size_of::<i32>() * fds.len()) as u32) } as usize;
-    let mut control = vec![0u8; control_len];
-
-    // SAFETY: zeroed msghdr is valid before initialization.
-    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-    msg.msg_iov = &mut iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = control.as_mut_ptr().cast();
-    msg.msg_controllen = control.len() as _;
-
-    // SAFETY: cmsg buffer is allocated with CMSG_SPACE above.
-    let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
-    if cmsg.is_null() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "failed to allocate control message header",
-        ));
-    }
-
-    // SAFETY: cmsg points into msg control buffer and has enough space for fds.
-    unsafe {
-        (*cmsg).cmsg_level = libc::SOL_SOCKET;
-        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg).cmsg_len = libc::CMSG_LEN((std::mem::size_of::<i32>() * fds.len()) as u32) as _;
-        let data_ptr = libc::CMSG_DATA(cmsg).cast::<i32>();
-        std::ptr::copy_nonoverlapping(fds.as_ptr(), data_ptr, fds.len());
-    }
-
-    // SAFETY: msghdr points to valid buffers.
-    let sent = unsafe { libc::sendmsg(sock_fd, &msg, 0) };
-    if sent < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if sent == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::WriteZero,
-            "sendmsg wrote zero bytes",
-        ));
-    }
-    Ok(())
+    shm_primitives::bootstrap::send_response_unix(
+        stream.as_raw_fd(),
+        shm_primitives::bootstrap::BootstrapStatus::Error,
+        0,
+        message.as_ref().as_bytes(),
+        None,
+    )
+    .map_err(|e| std::io::Error::other(format!("bootstrap error response send failed: {e}")))
 }
 
 async fn gc_stale_sessions(root: &Path, keep_sid: &str, max_age: Duration) -> Result<(), String> {
