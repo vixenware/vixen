@@ -14,7 +14,7 @@
 //!
 //! Also provides timeout enforcement and streamed output for all platforms.
 
-use moire::Command;
+use moire::process::Command;
 use roam_stream::moire::prelude::*;
 use std::process::ExitStatus;
 use std::time::Duration;

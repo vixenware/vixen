@@ -2,7 +2,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use camino::Utf8PathBuf;
-use moire::Command;
+use moire::process::Command;
 
 use super::probe;
 use super::process;

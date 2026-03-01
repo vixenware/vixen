@@ -20,7 +20,8 @@ use std::sync::Arc;
 use eyre::Result;
 use facet::Facet;
 use moire::{WatchReceiver, WatchSender};
-use roam_stream::{ConnectionHandle, ServiceDispatcher};
+use roam_core::{ConnectionHandle, Driver, DriverCaller, SessionHandle};
+use roam_types::{ConnectionSettings, Parity};
 
 const moire_CX: moire::moireContext = moire::moireContext::new(env!("CARGO_MANIFEST_DIR"));
 
@@ -156,43 +157,45 @@ impl<S> BootService<S> {
     }
 }
 
-impl<S: GracefulShutdown + Send + Sync + 'static> Boot for BootService<S> {
-    async fn shutdown(&self, _cx: &roam::Context) {
+impl<S: GracefulShutdown + Send + Sync + 'static> BootServer for BootService<S> {
+    async fn shutdown(&self, call: impl roam::Call<(), core::convert::Infallible>) {
         tracing::info!("Shutdown requested via Boot service");
         if let Some(service) = self.gate.service() {
             service.graceful_shutdown().await;
         }
+        call.ok(()).await;
         std::process::exit(0);
     }
 
-    async fn boot(&self, _cx: &roam::Context) -> BootResult {
-        let mut rx = self.gate.boot_rx.clone();
-        loop {
-            {
+    async fn boot(&self, call: impl roam::Call<BootResult, core::convert::Infallible>) {
+        let result = {
+            let mut rx = self.gate.boot_rx.clone();
+            loop {
                 let state = rx.borrow().clone();
                 match state {
                     BootState::Booting => { /* wait */ }
                     BootState::Ready => {
-                        return BootResult {
+                        break BootResult {
                             success: true,
                             error: None,
                         };
                     }
                     BootState::Failed(msg) => {
-                        return BootResult {
+                        break BootResult {
                             success: false,
                             error: Some(msg),
                         };
                     }
                 }
+                if rx.changed_with_cx(moire_CX).await.is_err() {
+                    break BootResult {
+                        success: false,
+                        error: Some("boot state channel closed".to_string()),
+                    };
+                }
             }
-            if rx.changed_with_cx(moire_CX).await.is_err() {
-                return BootResult {
-                    success: false,
-                    error: Some("boot state channel closed".to_string()),
-                };
-            }
-        }
+        };
+        call.ok(result).await;
     }
 }
 
@@ -206,11 +209,11 @@ impl<S: GracefulShutdown + Send + Sync + 'static> Boot for BootService<S> {
 /// 3. Open a virtual connection (optionally with a dispatcher for callbacks)
 /// 4. Return the virtual connection handle
 pub async fn boot_and_connect(
-    root_handle: &ConnectionHandle,
-    dispatcher: Option<Box<dyn ServiceDispatcher>>,
-) -> Result<ConnectionHandle> {
-    let boot_client = BootClient::new(root_handle.clone());
-    let boot_result = boot_client.boot().await?;
+    caller: &DriverCaller,
+    session_handle: &SessionHandle,
+) -> Result<DriverCaller> {
+    let boot_client = BootClient::new(caller.clone());
+    let boot_result = boot_client.boot().await.map_err(|e| eyre::eyre!("{e:?}"))?;
     if !boot_result.success {
         let msg = boot_result
             .error
@@ -218,10 +221,19 @@ pub async fn boot_and_connect(
         eyre::bail!("{msg}");
     }
 
-    let virtual_handle = root_handle
-        .connect(vec![], dispatcher)
+    let virtual_handle = session_handle
+        .open_connection(
+            ConnectionSettings {
+                parity: Parity::Odd,
+                max_concurrent_requests: 64,
+            },
+            vec![],
+        )
         .await
         .map_err(|e| eyre::eyre!("failed to open virtual connection: {e}"))?;
 
-    Ok(virtual_handle)
+    let mut driver = Driver::new(virtual_handle, (), Parity::Odd);
+    let virtual_caller = driver.caller();
+    tokio::spawn(async move { driver.run().await });
+    Ok(virtual_caller)
 }

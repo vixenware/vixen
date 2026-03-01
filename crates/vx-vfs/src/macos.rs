@@ -7,7 +7,7 @@
 //! - `vx-vfs`, which serves VFS connections over SHM.
 
 use crate::types::{VfsConfig, VfsError, VfsStart};
-use moire::Command;
+use moire::process::Command;
 use moire::{Sender, WatchSender};
 use roam_shm::bootstrap::{SessionId, SessionPaths, unix as shm_bootstrap};
 use roam_shm::driver::MultiPeerHostDriver;

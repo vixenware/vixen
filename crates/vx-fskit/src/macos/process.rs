@@ -1,4 +1,4 @@
-use moire::Command;
+use moire::process::Command;
 use std::collections::HashMap;
 
 use super::Log;

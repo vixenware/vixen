@@ -1,10 +1,8 @@
 use camino::Utf8PathBuf;
-use moire::Command;
+use moire::process::Command;
 use tokio::io::AsyncReadExt;
 
 use super::Log;
-
-const moire_CX: moire::moireContext = moire::moireContext::new(env!("CARGO_MANIFEST_DIR"));
 
 pub(crate) async fn read_pipe(pipe: Option<impl AsyncReadExt + Unpin>) -> Vec<u8> {
     let Some(mut pipe) = pipe else {

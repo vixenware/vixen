@@ -692,7 +692,7 @@ impl CliContext {
 
     async fn cmd_debug(&mut self, _args: DebugArgs) -> Result<()> {
         // Launch moire dashboard server CLI.
-        let status = moire::Command::new("moire")
+        let status = moire::process::Command::new("moire")
             .status()
             .await
             .map_err(|e| eyre::eyre!("failed to launch `moire` dashboard CLI: {e}"))?;

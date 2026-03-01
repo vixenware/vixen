@@ -1,5 +1,5 @@
 use camino::Utf8PathBuf;
-use moire::Command;
+use moire::process::Command;
 
 use super::probe::{self, HealthProbe};
 use super::{FsKitResult, Log, VIXEN_APP_PATH, VIXEN_EXTENSION_IDENTIFIER, mount_path_candidates};

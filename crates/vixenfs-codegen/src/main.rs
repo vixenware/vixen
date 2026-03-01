@@ -7,9 +7,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("failed to locate workspace root")?
         .to_path_buf();
 
-    let service = vixenfs_proto::vfs_service_detail();
+    let service = vixenfs_proto::vfs_service_descriptor();
     let swift = roam_codegen::targets::swift::generate_service_with_bindings(
-        &service,
+        service,
         roam_codegen::targets::swift::SwiftBindings::Client,
     );
 

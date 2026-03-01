@@ -584,7 +584,7 @@ source = "git+https://github.com/bearcove/facet-cargo-toml?branch=main#c4dd2db9d
 dependencies = [
  "camino",
  "facet",
- "facet-error",
+ "facet-error 0.43.2 (git+https://github.com/facet-rs/facet?branch=main)",
  "facet-format",
  "facet-reflect",
  "facet-toml",
@@ -613,6 +613,15 @@ source = "git+https://github.com/facet-rs/facet?branch=main#8a5a4685bce7a2959a17
 dependencies = [
  "facet-core",
  "facet-reflect",
+]
+
+[[package]]
+name = "facet-error"
+version = "0.43.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb1b895a18277dc1993136d37489e67394482bcd08085166772f27d7e21434c1"
+dependencies = [
+ "facet",
 ]
 
 [[package]]
@@ -822,7 +831,7 @@ dependencies = [
  "camino",
  "facet",
  "facet-core",
- "facet-error",
+ "facet-error 0.43.2 (git+https://github.com/facet-rs/facet?branch=main)",
  "facet-format",
  "facet-json",
  "facet-pretty",
@@ -1017,9 +1026,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi",
  "wasip2",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2010,6 +2021,25 @@ dependencies = [
  "heck",
  "roam-hash",
  "roam-types",
+]
+
+[[package]]
+name = "roam-core"
+version = "3.0.0"
+dependencies = [
+ "facet",
+ "facet-core",
+ "facet-error 0.43.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "facet-format",
+ "facet-postcard",
+ "facet-reflect",
+ "getrandom 0.3.4",
+ "moire",
+ "roam-types",
+ "smallvec 1.15.1",
+ "tokio",
+ "tracing",
+ "zerocopy",
 ]
 
 [[package]]
@@ -3030,8 +3060,10 @@ dependencies = [
  "facet",
  "moire",
  "roam",
+ "roam-core",
  "roam-local",
  "roam-stream",
+ "roam-types",
  "tokio",
  "tracing",
  "ur-taking-me-with-you",
@@ -3243,7 +3275,7 @@ dependencies = [
  "camino",
  "cfg-if",
  "facet",
- "facet-error",
+ "facet-error 0.43.2 (git+https://github.com/facet-rs/facet?branch=main)",
  "facet-json",
  "fastrand",
  "fuse3",

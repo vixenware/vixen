@@ -19,7 +19,7 @@ use std::task::{Context, Poll};
 use async_notify::Notify;
 use futures_util::lock::Mutex;
 use futures_util::{FutureExt, select};
-use moire::Command;
+use moire::process::Command;
 use nix::fcntl::{FcntlArg, FdFlag, OFlag};
 use nix::sys::socket::{self, AddressFamily, ControlMessageOwned, MsgFlags, SockFlag, SockType};
 use nix::sys::uio;

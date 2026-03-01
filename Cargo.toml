@@ -55,6 +55,8 @@ picante = { git = "https://github.com/bearcove/picante", branch = "main", featur
 
 # RPC
 roam = { git = "https://github.com/bearcove/roam", branch = "main" }
+roam-core = { git = "https://github.com/bearcove/roam", branch = "main" }
+roam-types = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-stream = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-shm = { git = "https://github.com/bearcove/roam", branch = "main" }
 roam-local = { git = "https://github.com/bearcove/roam", branch = "main" }
@@ -177,6 +179,8 @@ moire-types = { path = "/Users/amos/bearcove/moire/crates/moire-types" }
 
 [patch."https://github.com/bearcove/roam"]
 roam = { path = "/Users/amos/bearcove/roam/rust/roam" }
+roam-core = { path = "/Users/amos/bearcove/roam/rust/roam-core" }
+roam-types = { path = "/Users/amos/bearcove/roam/rust/roam-types" }
 roam-stream = { path = "/Users/amos/bearcove/roam/rust/roam-stream" }
 roam-shm = { path = "/Users/amos/bearcove/roam/rust/roam-shm" }
 roam-local = { path = "/Users/amos/bearcove/roam/rust/roam-local" }

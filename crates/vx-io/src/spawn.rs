@@ -3,49 +3,42 @@ use eyre::Result;
 use moire::Child;
 use std::time::Duration;
 
-use crate::net::{Endpoint, EndpointConnector};
+use crate::net::Endpoint;
 
 const moire_CX: moire::moireContext = moire::moireContext::new(env!("CARGO_MANIFEST_DIR"));
 
 /// Result of a successful [`ServiceBuilder::connect`].
-pub struct ServiceHandle<D> {
+pub struct ServiceHandle {
     /// The spawned child process, if any (None in connect-only mode).
     pub child: Option<Child>,
-    /// A connected roam client.
-    pub caller: roam_stream::Client<EndpointConnector, D>,
+    /// Caller for making RPC calls on the root connection.
+    pub caller: roam_core::DriverCaller,
+    /// Session handle for opening virtual connections.
+    pub session_handle: roam_core::SessionHandle,
 }
 
-impl<D> ServiceHandle<D>
-where
-    D: roam_stream::ServiceDispatcher + Clone + 'static,
-{
+impl ServiceHandle {
     /// Run the boot protocol and open a virtual connection.
     ///
-    /// 1. Gets the root connection handle
-    /// 2. Calls `boot()` — waits for the daemon to initialize
-    /// 3. Opens a virtual connection for the real service
+    /// 1. Calls `boot()` — waits for the daemon to initialize
+    /// 2. Opens a virtual connection for the real service
     ///
-    /// Returns the virtual connection handle.
-    pub async fn boot_and_connect(
-        &self,
-        dispatcher: Option<Box<dyn roam_stream::ServiceDispatcher>>,
-    ) -> Result<roam_stream::ConnectionHandle> {
-        let root_handle = self.caller.handle().await?;
-        crate::boot::boot_and_connect(&root_handle, dispatcher).await
+    /// Returns a caller for the virtual connection.
+    pub async fn boot_and_connect(&self) -> Result<roam_core::DriverCaller> {
+        crate::boot::boot_and_connect(&self.caller, &self.session_handle).await
     }
 }
 
 /// Builder for spawning a vixen service and connecting to it via roam.
 ///
 /// The typical flow is:
-/// 1. Create a builder with `ServiceBuilder::new("vx-store", endpoint, dispatcher)`
+/// 1. Create a builder with `ServiceBuilder::new("vx-store", endpoint)`
 /// 2. Configure with `.caller_name()`, `.args()`, `.log_path()`, `.timeout()`
 /// 3. Optionally call `.connect_only()` to skip spawning
 /// 4. Call `.connect()` to spawn (if needed) and wait for the roam handshake
-pub struct ServiceBuilder<D> {
+pub struct ServiceBuilder {
     binary_name: String,
     endpoint: Endpoint,
-    dispatcher: D,
     caller_name: Option<String>,
     cli_args: Vec<String>,
     env_vars: Vec<(String, String)>,
@@ -54,21 +47,16 @@ pub struct ServiceBuilder<D> {
     spawn: bool,
 }
 
-impl<D> ServiceBuilder<D>
-where
-    D: roam_stream::ServiceDispatcher + Clone + 'static,
-{
+impl ServiceBuilder {
     /// Start building a service connection.
     ///
     /// - `binary_name`: the binary to spawn (e.g. "vx-store"), resolved as a sibling of the
     ///   current executable, falling back to PATH.
     /// - `endpoint`: where to connect. When spawning, `--listen <endpoint>` is prepended to args.
-    /// - `dispatcher`: roam dispatcher for incoming RPCs on this connection.
-    pub fn new(binary_name: impl Into<String>, endpoint: Endpoint, dispatcher: D) -> Self {
+    pub fn new(binary_name: impl Into<String>, endpoint: Endpoint) -> Self {
         Self {
             binary_name: binary_name.into(),
             endpoint,
-            dispatcher,
             caller_name: None,
             cli_args: Vec::new(),
             env_vars: Vec::new(),
@@ -125,11 +113,10 @@ where
     /// we fail immediately instead of retrying until timeout.
     ///
     /// When connect-only, retries with backoff until timeout.
-    pub async fn connect(self) -> Result<ServiceHandle<D>> {
+    pub async fn connect(self) -> Result<ServiceHandle> {
         let Self {
             binary_name,
             endpoint,
-            dispatcher,
             caller_name,
             cli_args,
             env_vars,
@@ -155,15 +142,14 @@ where
             None
         };
 
-        let connect_fut =
-            connect_with_backoff(&binary_name, &endpoint, &dispatcher, &caller_name, timeout);
+        let connect_fut = connect_with_backoff(&binary_name, &endpoint, &caller_name, timeout);
 
         if let Some(ref mut child_proc) = child {
             // Race: connect loop vs child dying.
             tokio::select! {
                 result = connect_fut => {
-                    let caller = result?;
-                    Ok(ServiceHandle { child, caller })
+                    let (caller, session_handle) = result?;
+                    Ok(ServiceHandle { child, caller, session_handle })
                 }
                 exit_status = child_proc.wait_with_cx(moire_CX) => {
                     match exit_status {
@@ -171,8 +157,8 @@ where
                             // Child exited with status 0 — probably found lock held.
                             // Another instance is likely running, so try to connect.
                             tracing::debug!("{binary_name} exited cleanly (lock held?), trying to connect to existing instance");
-                            let caller = connect_with_backoff(&binary_name, &endpoint, &dispatcher, &caller_name, timeout).await?;
-                            Ok(ServiceHandle { child: None, caller })
+                            let (caller, session_handle) = connect_with_backoff(&binary_name, &endpoint, &caller_name, timeout).await?;
+                            Ok(ServiceHandle { child: None, caller, session_handle })
                         }
                         Ok(status) => eyre::bail!(
                             "{binary_name} exited with {status} before becoming ready at {endpoint}",
@@ -184,34 +170,28 @@ where
                 }
             }
         } else {
-            let caller = connect_fut.await?;
-            Ok(ServiceHandle { child, caller })
+            let (caller, session_handle) = connect_fut.await?;
+            Ok(ServiceHandle {
+                child,
+                caller,
+                session_handle,
+            })
         }
     }
 }
 
 /// Retry connection with exponential backoff until timeout.
-async fn connect_with_backoff<D>(
+async fn connect_with_backoff(
     binary_name: &str,
     endpoint: &Endpoint,
-    dispatcher: &D,
-    caller_name: &Option<String>,
+    _caller_name: &Option<String>,
     timeout: Duration,
-) -> Result<roam_stream::Client<EndpointConnector, D>>
-where
-    D: roam_stream::ServiceDispatcher + Clone + 'static,
-{
+) -> Result<(roam_core::DriverCaller, roam_core::SessionHandle)> {
     let deadline = tokio::time::Instant::now() + timeout;
     let backoff_ms = [10, 25, 50, 100, 250, 500, 1000];
     let mut last_err = None;
 
     for delay in backoff_ms.iter().copied().chain(std::iter::repeat(1000)) {
-        let attempt_caller = crate::net::reconnecting_client_named(
-            endpoint.clone(),
-            dispatcher.clone(),
-            caller_name.clone(),
-        );
-
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             break;
@@ -219,13 +199,13 @@ where
 
         match tokio::time::timeout(
             remaining.min(Duration::from_secs(1)),
-            attempt_caller.handle(),
+            crate::net::connect_session(endpoint),
         )
         .await
         {
-            Ok(Ok(_)) => {
+            Ok(Ok((caller, session_handle))) => {
                 tracing::debug!("{binary_name} is ready at {endpoint}");
-                return Ok(attempt_caller);
+                return Ok((caller, session_handle));
             }
             Ok(Err(e)) => {
                 tracing::trace!("{binary_name} not ready yet at {endpoint}: {e}");
@@ -278,7 +258,7 @@ async fn spawn_binary(
         binary_path.display()
     );
 
-    let mut cmd = moire::Command::new(&binary_path);
+    let mut cmd = moire::process::Command::new(&binary_path);
     cmd.arg("--listen").arg(&endpoint_display);
     cmd.args(extra_args);
     for (key, value) in env_vars {

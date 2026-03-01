@@ -21,7 +21,7 @@ use futures_util::future::{Either, FutureExt};
 use futures_util::select;
 use futures_util::sink::{Sink, SinkExt};
 use futures_util::stream::StreamExt;
-use moire::Command;
+use moire::process::Command;
 use nix::mount;
 use tokio::fs::read_dir;
 use tokio::task::{self, JoinHandle};
