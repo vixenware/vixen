@@ -35,20 +35,15 @@ vx-vfs-types = { path = "crates/vx-vfs-types" }
 parking_lot = "0.12"
 
 # facet ecosystem
-facet = { git = "https://github.com/facet-rs/facet", branch = "main", features = [
-  "jiff02",
-  "camino",
-] }
-facet-error = { git = "https://github.com/facet-rs/facet", branch = "main" }
-figue = { git = "https://github.com/bearcove/figue", branch = "main" }
-facet-json = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-styx = { git = "https://github.com/bearcove/styx", branch = "main" }
-facet-toml = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-postcard = { git = "https://github.com/facet-rs/facet", branch = "main", features = [
-  "jiff02",
-  "camino",
-] }
-facet-cargo-toml = { git = "https://github.com/bearcove/facet-cargo-toml", branch = "main" }
+facet = { version = "0.44.0", features = ["jiff02", "camino"] }
+facet-error = { version = "0.44.0" }
+facet-json = { version = "0.44.0" }
+facet-toml = { version = "0.44.0" }
+facet-postcard = { version = "0.44.0", features = ["jiff02", "camino"] }
+facet-cargo-toml = { version = "0.44.0" }
+
+# cmdline parsing
+figue = { version = "2.0.0" }
 
 # incremental computation
 picante = { git = "https://github.com/bearcove/picante", branch = "main", features = ["macros"] }
@@ -65,6 +60,9 @@ roam-codegen = { git = "https://github.com/bearcove/roam", branch = "main" }
 ur-taking-me-with-you = { git = "https://github.com/bearcove/roam", branch = "main", features = [
   "tokio",
 ] }
+
+# config files
+facet-styx = { git = "https://github.com/bearcove/styx", branch = "main" }
 
 # process management
 
@@ -122,7 +120,7 @@ jiff = "0.2"
 
 # paths
 camino = "1"
-strid = "8.0.0"
+strid = "9.0.0"
 
 # system
 libc = "0.2"
@@ -155,20 +153,20 @@ debug = 1
 split-debuginfo = "unpacked"
 strip = "none"
 
-[patch.crates-io]
-facet = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-core = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-macros = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-macros-impl = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-macro-parse = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-macro-types = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-reflect = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-json = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-toml = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-postcard = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-value = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-format = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# [patch.crates-io]
+# facet = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-core = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-macros = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-macros-impl = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-macro-parse = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-macro-types = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-reflect = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-json = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-toml = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-postcard = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-value = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-format = { git = "https://github.com/facet-rs/facet", branch = "main" }
+# facet-path = { git = "https://github.com/facet-rs/facet", branch = "main" }
 
 # [patch."https://github.com/bearcove/picante"]
 # picante = { path = "../picante/crates/picante" }
