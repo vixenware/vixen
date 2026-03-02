@@ -302,6 +302,21 @@ fn namespaced_run_cache_key(base: Blake3Hash, session_id: &str) -> Blake3Hash {
     Blake3Hash(*hasher.finalize().as_bytes())
 }
 
+fn namespaced_action_cache_key(base: Blake3Hash, session_id: &str, domain: &str) -> Blake3Hash {
+    if session_id.is_empty() {
+        return base;
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"vx-action-session-v1\n");
+    hasher.update(b"domain:");
+    hasher.update(domain.as_bytes());
+    hasher.update(b"\nsession:");
+    hasher.update(session_id.as_bytes());
+    hasher.update(b"\nbase:");
+    hasher.update(&base.0);
+    Blake3Hash(*hasher.finalize().as_bytes())
+}
+
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
         if let Some(tx) = self.tx.take() {
@@ -1525,7 +1540,8 @@ async fn execute_action(
                 let mut h = blake3::Hasher::new();
                 h.update(b"vx-ingest-rust-src-v1\n");
                 h.update(&closure_hash.0);
-                Blake3Hash(*h.finalize().as_bytes())
+                let base = Blake3Hash(*h.finalize().as_bytes());
+                namespaced_action_cache_key(base, session_id, "ingest-rust-source")
             };
 
             let (source_manifest, was_cached) = if let Some(cached) = cas
@@ -1618,7 +1634,8 @@ async fn execute_action(
                 let mut h = blake3::Hasher::new();
                 h.update(b"vx-extract-registry-v1\n");
                 h.update(&registry_manifest.0);
-                Blake3Hash(*h.finalize().as_bytes())
+                let base = Blake3Hash(*h.finalize().as_bytes());
+                namespaced_action_cache_key(base, session_id, "extract-registry-tree")
             };
 
             let (source_manifest, was_cached) = if let Some(cached) = cas
