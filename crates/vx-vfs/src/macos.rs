@@ -24,6 +24,7 @@ use vixenfs_proto::{VfsDispatcher, VfsServer as Vfs};
 use vx_vfs_types::{VIXEN_MOUNT_HELPER_PATH, VfsAction, VfsDiagnostic, VfsIssueCode};
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_GC_AGE: Duration = Duration::from_secs(6 * 60 * 60);
+const SHM_MAX_PAYLOAD_SIZE: u32 = 2_u32 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 struct SessionPaths {
@@ -174,6 +175,7 @@ where
     std::thread::Builder::new()
         .name("vfs-runtime".into())
         .spawn(move || {
+            let vfs_dead_tx_for_shutdown = vfs_dead_tx.clone();
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(4)
                 .thread_name("vfs-worker")
@@ -234,7 +236,7 @@ where
                     SegmentConfig {
                         max_guests: 16,
                         bipbuf_capacity: 64 * 1024,
-                        max_payload_size: 1024 * 1024,
+                        max_payload_size: SHM_MAX_PAYLOAD_SIZE,
                         inline_threshold: 256,
                         heartbeat_interval: 0,
                         size_classes: &classes,
@@ -335,7 +337,6 @@ where
                     let _ = mount_ready_tx.try_send(());
 
                     let vfs_dispatcher = VfsDispatcher::new(vfs.clone());
-                    let vfs_dead_tx_for_peer = vfs_dead_tx.clone();
                     moire::task::spawn(
                         async move {
                             let link = match host_peer.into_link() {
@@ -346,7 +347,6 @@ where
                                         peer = %peer_id.get(),
                                         "failed to build host link for peer"
                                     );
-                                    let _ = vfs_dead_tx_for_peer.send(true);
                                     return;
                                 }
                             };
@@ -355,7 +355,7 @@ where
                             let (mut session, handle, _session_handle) = match acceptor(conduit)
                                 .establish()
                                 .await
-                            {
+                                {
                                 Ok(parts) => parts,
                                 Err(error) => {
                                     tracing::warn!(
@@ -363,7 +363,6 @@ where
                                         peer = %peer_id.get(),
                                         "failed SHM session establish"
                                     );
-                                    let _ = vfs_dead_tx_for_peer.send(true);
                                     return;
                                 }
                             };
@@ -373,12 +372,12 @@ where
                             let mut driver = Driver::new(handle, vfs_dispatcher, Parity::Even);
                             driver.run().await;
                             tracing::debug!(peer = %peer_id.get(), "SHM peer driver exited");
-                            let _ = vfs_dead_tx_for_peer.send(true);
                         }
                         .named("shm_host_driver"),
                     );
                 }
             });
+            let _ = vfs_dead_tx_for_shutdown.send(true);
         })
         .expect("failed to spawn VFS runtime thread");
 
