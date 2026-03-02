@@ -63,8 +63,6 @@ pub struct VfsItem {
 /// An action prefix - represents a build directory like `/build-01JFX.../`
 #[derive(Debug)]
 pub struct ActionPrefix {
-    /// Unique ID for this prefix (e.g., ULID)
-    pub id: String,
     /// The ItemId of this prefix's root directory
     pub root_item_id: ItemId,
     /// Mapping of paths within prefix to CAS hashes
@@ -792,7 +790,6 @@ impl CasVfs {
             state.prefixes.insert(
                 prefix_id.clone(),
                 ActionPrefix {
-                    id: prefix_id.clone(),
                     root_item_id: prefix_root_id,
                     path_mappings: HashMap::new(),
                 },
@@ -1756,30 +1753,6 @@ impl CasVfs {
         }
 
         results
-    }
-
-    /// Dump VFS state for debugging
-    #[cfg(unix)]
-    pub fn dump_all_state(&self) {
-        let state = self.state.lock();
-
-        eprintln!("\n=== VFS STATE DUMP ===");
-        eprintln!("Total items: {}", state.items.len());
-        eprintln!("Total prefixes: {}", state.prefixes.len());
-
-        for (prefix_id, prefix) in state.prefixes.iter() {
-            eprintln!(
-                "\nPrefix '{}' root_item_id={}",
-                prefix_id, prefix.root_item_id
-            );
-
-            let children: Vec<_> = state
-                .items
-                .children_of(prefix.root_item_id)
-                .map(|i| format!("{} (type={:?})", i.name, i.item_type))
-                .collect();
-            eprintln!("  Children: {:?}", children);
-        }
     }
 
     pub async fn dump_state(&self, prefix_id: &str) {

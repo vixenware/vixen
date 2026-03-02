@@ -225,12 +225,7 @@ async fn ensure_services(
 
     let mut store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone())
         .caller_name("vxd")
-        .args(&[
-            "--root",
-            store_root.as_str(),
-            "--vx-home",
-            args.vx_home.as_str(),
-        ])
+        .args(&["--root", store_root.as_str()])
         .log_path(args.vx_home.join("store.log"));
     if args.store_endpoint.is_some() {
         store_builder = store_builder.connect_only();

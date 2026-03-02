@@ -25,12 +25,11 @@ impl StoreTestEnv {
         let endpoint = free_local_endpoint();
 
         let root_str = root.path().to_string_lossy().into_owned();
-        let vx_home_str = vx_home.path().to_string_lossy().into_owned();
         let binary_path = resolve_vx_store_binary();
 
         let service = ServiceBuilder::new(binary_path, endpoint)
             .caller_name("vx-store-rpc-tests")
-            .args(&["--root", &root_str, "--vx-home", &vx_home_str])
+            .args(&["--root", &root_str])
             .env("VX_TEST", "1")
             .timeout(Duration::from_secs(10))
             .connect()

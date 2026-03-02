@@ -35,10 +35,6 @@ struct Args {
     #[facet(args::named)]
     root: Utf8PathBuf,
 
-    /// VX home directory
-    #[facet(args::named)]
-    vx_home: Utf8PathBuf,
-
     /// Listen endpoint (host:port or unix:/path/to/socket)
     #[facet(args::named)]
     listen: String,
@@ -128,14 +124,13 @@ async fn async_main() -> Result<()> {
     {
         let gate = Arc::clone(&gate);
         let root = args.root.clone();
-        let vx_home = args.vx_home.clone();
         moire::task::spawn(
             async move {
                 tracing::info!("Booting vx-store");
                 match async {
                     let storage = CasStore::new(FsStorage::new(root));
                     storage.init().await?;
-                    let store = StoreService::new(storage, vx_home);
+                    let store = StoreService::new(storage);
                     Ok::<_, eyre::Report>(store)
                 }
                 .await
@@ -201,11 +196,10 @@ async fn async_main() -> Result<()> {
 }
 
 impl StoreService {
-    fn new(storage: CasStore, vx_home: Utf8PathBuf) -> Self {
+    fn new(storage: CasStore) -> Self {
         Self {
             inner: Arc::new(StoreServiceInner {
                 storage,
-                vx_home,
                 toolchain_manager: ToolchainManager::new(),
                 registry_manager: RegistryManager::new(),
                 download_semaphore: Arc::new(tokio::sync::Semaphore::new(32)),

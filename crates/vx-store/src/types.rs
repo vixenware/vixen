@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use camino::Utf8PathBuf;
 use moire::sync::SyncMutex;
 use tokio::sync::Semaphore;
 use vx_store_proto::{BlobRef, RustComponent, ToolchainSpecKey};
@@ -33,9 +32,6 @@ impl std::ops::Deref for StoreService {
 pub(crate) struct StoreServiceInner {
     /// Storage backend (filesystem, optionally layered with read-only base)
     pub(crate) storage: crate::storage::CasStore,
-
-    /// VX home directory (typically .vx) - parent of root, used for toolchain spec mappings
-    pub(crate) vx_home: Utf8PathBuf,
 
     /// Toolchain acquisition manager (handles inflight deduplication)
     pub(crate) toolchain_manager: ToolchainManager,

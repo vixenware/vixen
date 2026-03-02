@@ -282,8 +282,6 @@ async fn async_main() -> Result<()> {
             &store_endpoint_str,
             "--root",
             store_root.as_str(),
-            "--vx-home",
-            base.as_str(),
         ]);
         cmd.stdout(std::process::Stdio::inherit());
         cmd.stderr(std::process::Stdio::inherit());

@@ -52,9 +52,6 @@ pub struct ToolchainInfo {
 pub struct AcquiredToolchains {
     /// Rust toolchain (if acquired)
     pub rust: Option<ToolchainInfo>,
-
-    /// Zig toolchain (if acquired)
-    pub zig: Option<ToolchainInfo>,
 }
 
 /// The daemon service implementation
@@ -316,6 +313,7 @@ pub(crate) fn compare_rule_plan_edge_parity(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn selected_crates_from_rule_plan(
     plan: &RulePlan,
     graph: &CrateGraph,
@@ -377,6 +375,7 @@ pub(crate) fn selected_crates_from_rule_plan(
     Ok(selected)
 }
 
+#[cfg(test)]
 pub(crate) fn transitive_closure_crates(
     graph: &CrateGraph,
     selected: &std::collections::HashSet<vx_rs::crate_graph::CrateId>,
@@ -710,10 +709,7 @@ impl VxdService {
             wal_writer: Arc::new(SyncMutex::new("vxd/wal_writer", wal_writer)),
             toolchains: Arc::new(SyncMutex::new(
                 "vxd/toolchains",
-                AcquiredToolchains {
-                    rust: None,
-                    zig: None,
-                },
+                AcquiredToolchains { rust: None },
             )),
             spawn_tracker,
             progress_listener: Arc::new(SyncMutex::new("vxd/progress_listener", None)),

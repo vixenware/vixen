@@ -12,11 +12,6 @@ pub fn unmount(_mount_path: &Utf8PathBuf) {
     // Noop — vx-reaper calls vx_fskit::teardown() on macOS.
 }
 
-/// Dump platform diagnostics to stderr.
-pub async fn dump_platform_diagnostics(_mount_path: &Utf8PathBuf) {
-    // vx-fskit returns structured logs; diagnostics live there now.
-}
-
 /// Diagnostics now come from vx-fskit's structured log entries.
 pub async fn collect_vfs_diagnostics(_mount_path: &Utf8PathBuf) -> String {
     String::new()

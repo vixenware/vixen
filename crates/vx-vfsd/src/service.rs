@@ -443,12 +443,11 @@ mod tests {
     use std::time::Duration;
 
     use tempfile::TempDir;
-    use vixenfs_proto::{ItemId, ItemType, SetAttributesParams, VfsServer as Vfs, errno};
+    use vixenfs_proto::{ItemId, ItemType, SetAttributesParams, errno};
     use vx_io::spawn::{ServiceBuilder, ServiceHandle};
     use vx_store_proto::{Blake3Hash, CDC_MAX_CHUNK, CasNode, ChunkHash, StoreClient};
 
     use super::*;
-    use crate::protocol::Vfsd;
     use crate::vfs::CasVfs;
 
     struct TestEnv {
@@ -471,12 +470,11 @@ mod tests {
             let endpoint = free_local_endpoint();
 
             let store_root_str = store_root.path().to_string_lossy().into_owned();
-            let vx_home_str = vx_home.path().to_string_lossy().into_owned();
             let binary_path = resolve_vx_store_binary();
 
             let store_service = ServiceBuilder::new(binary_path, endpoint)
                 .caller_name("vx-vfsd-flush-tests")
-                .args(&["--root", &store_root_str, "--vx-home", &vx_home_str])
+                .args(&["--root", &store_root_str])
                 .env("VX_TEST", "1")
                 .timeout(Duration::from_secs(10))
                 .connect()

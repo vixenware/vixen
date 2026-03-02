@@ -15,7 +15,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use tokio::io::AsyncWriteExt;
 use vx_io::atomic_write;
 use vx_store_proto::{
-    Blake3Hash, CacheKey, ChunkHash, ManifestHash, NodeHash, RegistrySpecKey, ToolchainSpecKey,
+    Blake3Hash, CacheKey, ChunkHash, NodeHash, RegistrySpecKey, ToolchainSpecKey,
 };
 
 // =============================================================================
@@ -131,10 +131,6 @@ impl CasStore {
         Ok(())
     }
 
-    pub(crate) fn tmp_dir(&self) -> Utf8PathBuf {
-        self.primary.root().join("tmp")
-    }
-
     // -- Chunk operations --
 
     pub(crate) async fn get_chunk(&self, hash: &ChunkHash) -> io::Result<Option<Vec<u8>>> {
@@ -161,27 +157,6 @@ impl CasStore {
 
     pub(crate) async fn has_node(&self, hash: &NodeHash) -> io::Result<bool> {
         self.primary.has_node(hash).await
-    }
-
-    // -- Tree manifests (stored in trees/blake3/) --
-
-    fn tree_manifest_path(root: &Utf8Path, hash: &ManifestHash) -> Utf8PathBuf {
-        let hex = hash.to_hex();
-        root.join("trees/blake3")
-            .join(&hex[..2])
-            .join(format!("{}.json", hex))
-    }
-
-    pub(crate) async fn get_tree_manifest(
-        &self,
-        hash: &ManifestHash,
-    ) -> io::Result<Option<String>> {
-        let path = Self::tree_manifest_path(self.primary.root(), hash);
-        match moire::fs::read_to_string(&path).await {
-            Ok(json) => Ok(Some(json)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
-        }
     }
 
     // -- Toolchain specs (spec_key → manifest_hash mapping) --
