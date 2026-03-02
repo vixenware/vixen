@@ -155,45 +155,41 @@ impl<S> BootService<S> {
     }
 }
 
-impl<S: GracefulShutdown + Send + Sync + 'static> BootServer for BootService<S> {
-    async fn shutdown(&self, call: impl roam::Call<(), core::convert::Infallible>) {
+impl<S: GracefulShutdown + Send + Sync + 'static> Boot for BootService<S> {
+    async fn shutdown(&self) {
         tracing::info!("Shutdown requested via Boot service");
         if let Some(service) = self.gate.service() {
             service.graceful_shutdown().await;
         }
-        call.ok(()).await;
         std::process::exit(0);
     }
 
-    async fn boot(&self, call: impl roam::Call<BootResult, core::convert::Infallible>) {
-        let result = {
-            let mut rx = self.gate.boot_rx.clone();
-            loop {
-                let state = rx.borrow().clone();
-                match state {
-                    BootState::Booting => { /* wait */ }
-                    BootState::Ready => {
-                        break BootResult {
-                            success: true,
-                            error: None,
-                        };
-                    }
-                    BootState::Failed(msg) => {
-                        break BootResult {
-                            success: false,
-                            error: Some(msg),
-                        };
-                    }
+    async fn boot(&self) -> BootResult {
+        let mut rx = self.gate.boot_rx.clone();
+        loop {
+            let state = rx.borrow().clone();
+            match state {
+                BootState::Booting => { /* wait */ }
+                BootState::Ready => {
+                    return BootResult {
+                        success: true,
+                        error: None,
+                    };
                 }
-                if rx.changed().await.is_err() {
-                    break BootResult {
+                BootState::Failed(msg) => {
+                    return BootResult {
                         success: false,
-                        error: Some("boot state channel closed".to_string()),
+                        error: Some(msg),
                     };
                 }
             }
-        };
-        call.ok(result).await;
+            if rx.changed().await.is_err() {
+                return BootResult {
+                    success: false,
+                    error: Some("boot state channel closed".to_string()),
+                };
+            }
+        }
     }
 }
 

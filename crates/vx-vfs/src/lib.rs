@@ -3,7 +3,7 @@
 //! This crate owns VFS server startup, platform checks, mount, and verification.
 
 use cfg_if::cfg_if;
-use vixenfs_proto::VfsServer as Vfs;
+use vixenfs_proto::Vfs;
 
 #[cfg(target_os = "linux")]
 mod linux;

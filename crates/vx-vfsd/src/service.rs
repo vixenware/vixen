@@ -1,6 +1,6 @@
 //! RPC service implementation for vx-vfsd.
 
-use crate::protocol::VfsdServer as Vfsd;
+use crate::protocol::Vfsd;
 use crate::vfs::CasVfs;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -307,46 +307,28 @@ impl VfsdService {
 }
 
 impl Vfsd for VfsdService {
-    async fn mkdir(&self, call: impl roam::Call<(), String>, path: String) {
-        match VfsdService::mkdir(self, path).await {
-            Ok(_) => call.ok(()).await,
-            Err(error) => call.err(error).await,
-        }
+    async fn mkdir(&self, path: String) -> Result<(), String> {
+        VfsdService::mkdir(self, path).await
     }
 
-    async fn mount(&self, call: impl roam::Call<(), String>, path: String, tree_hash: Blake3Hash) {
-        match VfsdService::mount(self, path, tree_hash).await {
-            Ok(_) => call.ok(()).await,
-            Err(error) => call.err(error).await,
-        }
+    async fn mount(&self, path: String, tree_hash: Blake3Hash) -> Result<(), String> {
+        VfsdService::mount(self, path, tree_hash).await
     }
 
-    async fn flush(&self, call: impl roam::Call<Blake3Hash, String>, path: String) {
-        match VfsdService::flush(self, path).await {
-            Ok(root_hash) => call.ok(root_hash).await,
-            Err(error) => call.err(error).await,
-        }
+    async fn flush(&self, path: String) -> Result<Blake3Hash, String> {
+        VfsdService::flush(self, path).await
     }
 
-    async fn rm_rf(&self, call: impl roam::Call<(), String>, path: String) {
-        match VfsdService::rm_rf(self, path).await {
-            Ok(_) => call.ok(()).await,
-            Err(error) => call.err(error).await,
-        }
+    async fn rm_rf(&self, path: String) -> Result<(), String> {
+        VfsdService::rm_rf(self, path).await
     }
 
-    async fn ping(&self, call: impl roam::Call<(), String>) {
-        match VfsdService::ping(self).await {
-            Ok(_) => call.ok(()).await,
-            Err(error) => call.err(error).await,
-        }
+    async fn ping(&self) -> Result<(), String> {
+        VfsdService::ping(self).await
     }
 
-    async fn dump_state(&self, call: impl roam::Call<(), String>, prefix_id: String) {
-        match VfsdService::dump_state(self, prefix_id).await {
-            Ok(_) => call.ok(()).await,
-            Err(error) => call.err(error).await,
-        }
+    async fn dump_state(&self, prefix_id: String) -> Result<(), String> {
+        VfsdService::dump_state(self, prefix_id).await
     }
 }
 
@@ -466,7 +448,7 @@ mod tests {
     use vx_store_proto::{Blake3Hash, CDC_MAX_CHUNK, CasNode, ChunkHash, StoreClient};
 
     use super::*;
-    use crate::protocol::VfsdServer as Vfsd;
+    use crate::protocol::Vfsd;
     use crate::vfs::CasVfs;
 
     struct TestEnv {

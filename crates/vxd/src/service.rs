@@ -33,7 +33,7 @@ use vx_store_proto::{
 };
 use vxd_proto::{
     ActionType, BuildRequest, BuildResult, ProgressListenerClient, UnpublishResult,
-    VXD_PROTOCOL_VERSION, VxdServer as VxdRpc,
+    VXD_PROTOCOL_VERSION, Vxd as VxdRpc,
 };
 
 /// Toolchain information (manifest-only, no materialization)
@@ -1723,12 +1723,8 @@ impl vx_io::boot::GracefulShutdown for VxdService {
 }
 
 impl VxdRpc for VxdService {
-    async fn build(
-        &self,
-        call: impl roam::Call<BuildResult, core::convert::Infallible>,
-        request: BuildRequest,
-    ) {
-        let result = match self.do_build(request).await {
+    async fn build(&self, request: BuildRequest) -> BuildResult {
+        match self.do_build(request).await {
             Ok(result) => result,
             Err(e) => BuildResult {
                 success: false,
@@ -1743,25 +1739,18 @@ impl VxdRpc for VxdService {
                 rebuilt: 0,
                 cancelled: 0,
             },
-        };
-        call.ok(result).await;
+        }
     }
 
-    async fn set_session(
-        &self,
-        call: impl roam::Call<(), core::convert::Infallible>,
-        session_id: String,
-    ) {
+    async fn set_session(&self, session_id: String) {
         info!(session_id = %session_id, "session ID set");
         *self.session_id.lock() = session_id;
-        call.ok(()).await;
     }
 
     async fn unpublish_cache_keys(
         &self,
-        call: impl roam::Call<UnpublishResult, core::convert::Infallible>,
         cache_keys: Vec<vx_store_proto::CacheKey>,
-    ) {
+    ) -> UnpublishResult {
         let mut removed = 0u32;
         let mut not_found = 0u32;
 
@@ -1773,15 +1762,14 @@ impl VxdRpc for VxdService {
             }
         }
 
-        call.ok(UnpublishResult { removed, not_found }).await;
+        UnpublishResult { removed, not_found }
     }
 
-    async fn version(&self, call: impl roam::Call<ServiceVersion, core::convert::Infallible>) {
-        call.ok(ServiceVersion {
+    async fn version(&self) -> ServiceVersion {
+        ServiceVersion {
             service: "vxd".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: VXD_PROTOCOL_VERSION,
-        })
-        .await;
+        }
     }
 }

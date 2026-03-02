@@ -21,7 +21,7 @@ use roam_types::{ConnectionSettings, Metadata, Parity};
 use std::sync::Arc;
 use vixenfs_proto::{
     CreateResult, GetAttributesResult, ItemId, LookupResult, ReadDirResult, ReadResult,
-    SetAttributesParams, VfsResult, VfsServer as Vfs, WriteResult,
+    SetAttributesParams, Vfs, VfsResult, WriteResult,
 };
 use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
@@ -168,100 +168,49 @@ impl SharedVfs {
 }
 
 impl Vfs for SharedVfs {
-    async fn lookup(
-        &self,
-        call: impl roam::Call<LookupResult, core::convert::Infallible>,
-        parent_id: ItemId,
-        name: String,
-    ) {
-        call.ok(SharedVfs::lookup(self, parent_id, name).await)
-            .await;
+    async fn lookup(&self, parent_id: ItemId, name: String) -> LookupResult {
+        SharedVfs::lookup(self, parent_id, name).await
     }
 
-    async fn get_attributes(
-        &self,
-        call: impl roam::Call<GetAttributesResult, core::convert::Infallible>,
-        item_id: ItemId,
-    ) {
-        call.ok(SharedVfs::get_attributes(self, item_id).await)
-            .await;
+    async fn get_attributes(&self, item_id: ItemId) -> GetAttributesResult {
+        SharedVfs::get_attributes(self, item_id).await
     }
 
-    async fn read_dir(
-        &self,
-        call: impl roam::Call<ReadDirResult, core::convert::Infallible>,
-        item_id: ItemId,
-        cookie: u64,
-        verifier: u64,
-    ) {
-        call.ok(SharedVfs::read_dir(self, item_id, cookie, verifier).await)
-            .await;
+    async fn read_dir(&self, item_id: ItemId, cookie: u64, verifier: u64) -> ReadDirResult {
+        SharedVfs::read_dir(self, item_id, cookie, verifier).await
     }
 
-    async fn read(
-        &self,
-        call: impl roam::Call<ReadResult, core::convert::Infallible>,
-        item_id: ItemId,
-        offset: u64,
-        len: u64,
-    ) {
-        call.ok(SharedVfs::read(self, item_id, offset, len).await)
-            .await;
+    async fn read(&self, item_id: ItemId, offset: u64, len: u64) -> ReadResult {
+        SharedVfs::read(self, item_id, offset, len).await
     }
 
-    async fn write(
-        &self,
-        call: impl roam::Call<WriteResult, core::convert::Infallible>,
-        item_id: ItemId,
-        offset: u64,
-        data: Vec<u8>,
-    ) {
-        call.ok(SharedVfs::write(self, item_id, offset, data).await)
-            .await;
+    async fn write(&self, item_id: ItemId, offset: u64, data: Vec<u8>) -> WriteResult {
+        SharedVfs::write(self, item_id, offset, data).await
     }
 
     async fn create(
         &self,
-        call: impl roam::Call<CreateResult, core::convert::Infallible>,
         parent_id: ItemId,
         name: String,
         item_type: vixenfs_proto::ItemType,
-    ) {
-        call.ok(SharedVfs::create(self, parent_id, name, item_type).await)
-            .await;
+    ) -> CreateResult {
+        SharedVfs::create(self, parent_id, name, item_type).await
     }
 
-    async fn delete(
-        &self,
-        call: impl roam::Call<VfsResult, core::convert::Infallible>,
-        item_id: ItemId,
-    ) {
-        call.ok(SharedVfs::delete(self, item_id).await).await;
+    async fn delete(&self, item_id: ItemId) -> VfsResult {
+        SharedVfs::delete(self, item_id).await
     }
 
-    async fn rename(
-        &self,
-        call: impl roam::Call<VfsResult, core::convert::Infallible>,
-        item_id: ItemId,
-        new_parent_id: ItemId,
-        new_name: String,
-    ) {
-        call.ok(SharedVfs::rename(self, item_id, new_parent_id, new_name).await)
-            .await;
+    async fn rename(&self, item_id: ItemId, new_parent_id: ItemId, new_name: String) -> VfsResult {
+        SharedVfs::rename(self, item_id, new_parent_id, new_name).await
     }
 
-    async fn set_attributes(
-        &self,
-        call: impl roam::Call<VfsResult, core::convert::Infallible>,
-        item_id: ItemId,
-        params: SetAttributesParams,
-    ) {
-        call.ok(SharedVfs::set_attributes(self, item_id, params).await)
-            .await;
+    async fn set_attributes(&self, item_id: ItemId, params: SetAttributesParams) -> VfsResult {
+        SharedVfs::set_attributes(self, item_id, params).await
     }
 
-    async fn ping(&self, call: impl roam::Call<String, core::convert::Infallible>) {
-        call.ok(SharedVfs::ping(self).await).await;
+    async fn ping(&self) -> String {
+        SharedVfs::ping(self).await
     }
 }
 

@@ -4,7 +4,7 @@ use crate::{
     types::CliMode,
 };
 use std::sync::atomic::{self, AtomicU64};
-use vxd_proto::{ActionProgress, ActionType, ProgressListenerServer as ProgressListener};
+use vxd_proto::{ActionProgress, ActionType, ProgressListener};
 
 /// Progress listener that dispatches to TUI, JSON, or plain text output.
 pub(crate) struct ProgressListenerImpl {
@@ -159,44 +159,23 @@ impl ProgressListenerImpl {
 }
 
 impl ProgressListener for ProgressListenerImpl {
-    async fn set_total(&self, call: impl roam::Call<(), core::convert::Infallible>, total: u64) {
+    async fn set_total(&self, total: u64) {
         self.set_total_impl(total).await;
-        call.ok(()).await;
     }
 
-    async fn start_action(
-        &self,
-        call: impl roam::Call<u64, core::convert::Infallible>,
-        action_type: ActionType,
-    ) {
-        call.ok(self.start_action_impl(action_type).await).await;
+    async fn start_action(&self, action_type: ActionType) -> u64 {
+        self.start_action_impl(action_type).await
     }
 
-    async fn update_progress(
-        &self,
-        call: impl roam::Call<(), core::convert::Infallible>,
-        action_id: u64,
-        progress: ActionProgress,
-    ) {
+    async fn update_progress(&self, action_id: u64, progress: ActionProgress) {
         self.update_progress_impl(action_id, progress).await;
-        call.ok(()).await;
     }
 
-    async fn complete_action(
-        &self,
-        call: impl roam::Call<(), core::convert::Infallible>,
-        action_id: u64,
-    ) {
+    async fn complete_action(&self, action_id: u64) {
         self.complete_action_impl(action_id).await;
-        call.ok(()).await;
     }
 
-    async fn log_message(
-        &self,
-        call: impl roam::Call<(), core::convert::Infallible>,
-        message: String,
-    ) {
+    async fn log_message(&self, message: String) {
         self.log_message_impl(message).await;
-        call.ok(()).await;
     }
 }

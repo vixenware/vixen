@@ -16,8 +16,8 @@ mod macos_bench {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use vixenfs_proto::{
         CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType,
-        LookupResult, ReadDirResult, ReadResult, SetAttributesParams, VfsResult, VfsServer as Vfs,
-        WriteResult, errno, mode,
+        LookupResult, ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult,
+        errno, mode,
     };
     use vx_vfs::{VfsConfig, VfsStart};
 
@@ -524,13 +524,8 @@ mod macos_bench {
     }
 
     impl Vfs for SyntheticVfs {
-        async fn lookup(
-            &self,
-            call: impl roam::Call<LookupResult, core::convert::Infallible>,
-            parent_id: ItemId,
-            name: String,
-        ) {
-            let result = match self.child_lookup.get(&(parent_id, name)).copied() {
+        async fn lookup(&self, parent_id: ItemId, name: String) -> LookupResult {
+            match self.child_lookup.get(&(parent_id, name)).copied() {
                 Some(id) => {
                     let node = self.nodes.get(&id);
                     LookupResult {
@@ -556,16 +551,11 @@ mod macos_bench {
                     },
                     error: errno::ENOENT,
                 },
-            };
-            call.ok(result).await;
+            }
         }
 
-        async fn get_attributes(
-            &self,
-            call: impl roam::Call<GetAttributesResult, core::convert::Infallible>,
-            item_id: ItemId,
-        ) {
-            let result = match self.nodes.get(&item_id) {
+        async fn get_attributes(&self, item_id: ItemId) -> GetAttributesResult {
+            match self.nodes.get(&item_id) {
                 Some(node) => GetAttributesResult {
                     attrs: ItemAttributes {
                         item_id: node.id,
@@ -588,37 +578,26 @@ mod macos_bench {
                     },
                     error: errno::ENOENT,
                 },
-            };
-            call.ok(result).await;
+            }
         }
 
-        async fn read_dir(
-            &self,
-            call: impl roam::Call<ReadDirResult, core::convert::Infallible>,
-            item_id: ItemId,
-            cookie: u64,
-            verifier: u64,
-        ) {
+        async fn read_dir(&self, item_id: ItemId, cookie: u64, verifier: u64) -> ReadDirResult {
             let Some(node) = self.nodes.get(&item_id) else {
-                call.ok(ReadDirResult {
+                return ReadDirResult {
                     entries: Vec::new(),
                     next_cookie: 0,
                     verifier: 0,
                     error: errno::ENOENT,
-                })
-                .await;
-                return;
+                };
             };
 
             if node.item_type != ItemType::Directory {
-                call.ok(ReadDirResult {
+                return ReadDirResult {
                     entries: Vec::new(),
                     next_cookie: 0,
                     verifier: 0,
                     error: errno::ENOTDIR,
-                })
-                .await;
-                return;
+                };
             }
 
             let mut children = node.children.clone();
@@ -631,14 +610,12 @@ mod macos_bench {
 
             let start = cookie as usize;
             if start >= children.len() {
-                call.ok(ReadDirResult {
+                return ReadDirResult {
                     entries: Vec::new(),
                     next_cookie: 0,
                     verifier: verifier.max(1),
                     error: errno::OK,
-                })
-                .await;
-                return;
+                };
             }
 
             let mut entries = Vec::new();
@@ -656,22 +633,15 @@ mod macos_bench {
                 }
             }
 
-            call.ok(ReadDirResult {
+            ReadDirResult {
                 entries,
                 next_cookie: 0,
                 verifier: verifier.max(1),
                 error: errno::OK,
-            })
-            .await;
+            }
         }
 
-        async fn read(
-            &self,
-            call: impl roam::Call<ReadResult, core::convert::Infallible>,
-            item_id: ItemId,
-            offset: u64,
-            len: u64,
-        ) {
+        async fn read(&self, item_id: ItemId, offset: u64, len: u64) -> ReadResult {
             let start = Instant::now();
 
             let result = match self.nodes.get(&item_id) {
@@ -706,75 +676,57 @@ mod macos_bench {
                 result.error != errno::OK,
             );
 
-            call.ok(result).await;
+            result
         }
 
-        async fn write(
-            &self,
-            call: impl roam::Call<WriteResult, core::convert::Infallible>,
-            _item_id: ItemId,
-            _offset: u64,
-            _data: Vec<u8>,
-        ) {
-            call.ok(WriteResult {
+        async fn write(&self, _item_id: ItemId, _offset: u64, _data: Vec<u8>) -> WriteResult {
+            WriteResult {
                 bytes_written: 0,
                 error: errno::EACCES,
-            })
-            .await;
+            }
         }
 
         async fn create(
             &self,
-            call: impl roam::Call<CreateResult, core::convert::Infallible>,
             _parent_id: ItemId,
             _name: String,
             _item_type: ItemType,
-        ) {
-            call.ok(CreateResult {
+        ) -> CreateResult {
+            CreateResult {
                 item_id: 0,
                 error: errno::EACCES,
-            })
-            .await;
+            }
         }
 
-        async fn delete(
-            &self,
-            call: impl roam::Call<VfsResult, core::convert::Infallible>,
-            _item_id: ItemId,
-        ) {
-            call.ok(VfsResult {
+        async fn delete(&self, _item_id: ItemId) -> VfsResult {
+            VfsResult {
                 error: errno::EACCES,
-            })
-            .await;
+            }
         }
 
         async fn rename(
             &self,
-            call: impl roam::Call<VfsResult, core::convert::Infallible>,
             _item_id: ItemId,
             _new_parent_id: ItemId,
             _new_name: String,
-        ) {
-            call.ok(VfsResult {
+        ) -> VfsResult {
+            VfsResult {
                 error: errno::EACCES,
-            })
-            .await;
+            }
         }
 
         async fn set_attributes(
             &self,
-            call: impl roam::Call<VfsResult, core::convert::Infallible>,
             _item_id: ItemId,
             _params: SetAttributesParams,
-        ) {
-            call.ok(VfsResult {
+        ) -> VfsResult {
+            VfsResult {
                 error: errno::EACCES,
-            })
-            .await;
+            }
         }
 
-        async fn ping(&self, call: impl roam::Call<String, core::convert::Infallible>) {
-            call.ok("pong from vx-vfs-bench".to_string()).await;
+        async fn ping(&self) -> String {
+            "pong from vx-vfs-bench".to_string()
         }
     }
 

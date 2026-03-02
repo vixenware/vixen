@@ -1,6 +1,6 @@
 use vx_runner_proto::{
     CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RUNNER_PROTOCOL_VERSION,
-    RunRequest, RunResult, RunnerServer as Runner, RustCompileRequest, RustCompileResult,
+    RunRequest, RunResult, Runner, RustCompileRequest, RustCompileResult,
 };
 use vx_store_proto::{ServiceVersion, StoreProgress};
 
@@ -48,47 +48,35 @@ impl RunnerService {
 }
 
 impl Runner for RunnerService {
-    async fn version(&self, call: impl roam::Call<ServiceVersion, core::convert::Infallible>) {
-        call.ok(RunnerService::version(self).await).await;
+    async fn version(&self) -> ServiceVersion {
+        RunnerService::version(self).await
     }
 
     async fn compile_rust(
         &self,
-        call: impl roam::Call<RustCompileResult, core::convert::Infallible>,
         request: RustCompileRequest,
         progress: roam::Tx<StoreProgress>,
-    ) {
-        call.ok(RunnerService::compile_rust(self, request, progress).await)
-            .await;
+    ) -> RustCompileResult {
+        RunnerService::compile_rust(self, request, progress).await
     }
 
     async fn compile_cc(
         &self,
-        call: impl roam::Call<CcCompileResult, core::convert::Infallible>,
         request: CcCompileRequest,
         progress: roam::Tx<StoreProgress>,
-    ) {
-        call.ok(RunnerService::compile_cc(self, request, progress).await)
-            .await;
+    ) -> CcCompileResult {
+        RunnerService::compile_cc(self, request, progress).await
     }
 
     async fn link_cc(
         &self,
-        call: impl roam::Call<CcLinkResult, core::convert::Infallible>,
         request: CcLinkRequest,
         progress: roam::Tx<StoreProgress>,
-    ) {
-        call.ok(RunnerService::link_cc(self, request, progress).await)
-            .await;
+    ) -> CcLinkResult {
+        RunnerService::link_cc(self, request, progress).await
     }
 
-    async fn run(
-        &self,
-        call: impl roam::Call<RunResult, core::convert::Infallible>,
-        request: RunRequest,
-        progress: roam::Tx<StoreProgress>,
-    ) {
-        call.ok(RunnerService::run(self, request, progress).await)
-            .await;
+    async fn run(&self, request: RunRequest, progress: roam::Tx<StoreProgress>) -> RunResult {
+        RunnerService::run(self, request, progress).await
     }
 }
