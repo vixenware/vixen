@@ -669,12 +669,16 @@ impl CliContext {
             .await
             .map_err(|e| eyre!("unpublish_cache_keys RPC failed: {e:?}"))?;
 
-        // Clear picante cache so the daemon recomputes everything on next build
-        let picante_cache = vx_home.join("picante.cache");
-        let picante_wal = vx_home.join("picante.wal");
-        for path in [&picante_cache, &picante_wal] {
-            if path.exists() {
-                std::fs::remove_file(path)?;
+        // Clear persisted picante state so a fresh daemon recomputes on next build.
+        // In integration tests, VX_TEST_SESSION is per-test while the daemon is shared,
+        // so removing global files here would invalidate other tests racing in parallel.
+        if std::env::var("VX_TEST_SESSION").is_err() {
+            let picante_cache = vx_home.join("picante.cache");
+            let picante_wal = vx_home.join("picante.wal");
+            for path in [&picante_cache, &picante_wal] {
+                if path.exists() {
+                    std::fs::remove_file(path)?;
+                }
             }
         }
 
