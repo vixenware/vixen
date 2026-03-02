@@ -48,6 +48,8 @@ pub use service::VxdService;
 
 pub type UpstreamCaller = roam_core::DriverCaller;
 
+const RECOMMENDED_NOFILE_SOFT_LIMIT: u64 = 65_536;
+
 /// vxd - Build orchestration daemon
 #[derive(Facet, Debug)]
 struct CliArgs {
@@ -280,9 +282,68 @@ fn main() -> Result<()> {
     rt.block_on(async_main())
 }
 
+#[cfg(unix)]
+fn maybe_raise_nofile_limit() {
+    let mut limits: libc::rlimit = unsafe { std::mem::zeroed() };
+    let get_rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) };
+    if get_rc != 0 {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            "failed to read RLIMIT_NOFILE",
+        );
+        return;
+    }
+
+    let initial_soft = limits.rlim_cur as u64;
+    let hard = limits.rlim_max as u64;
+    if initial_soft >= RECOMMENDED_NOFILE_SOFT_LIMIT {
+        return;
+    }
+
+    let desired = RECOMMENDED_NOFILE_SOFT_LIMIT.min(hard);
+    if desired > initial_soft {
+        limits.rlim_cur = desired as libc::rlim_t;
+        let set_rc = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limits) };
+        if set_rc != 0 {
+            tracing::debug!(
+                error = %std::io::Error::last_os_error(),
+                initial_soft,
+                desired_soft = desired,
+                hard_limit = hard,
+                "failed to raise RLIMIT_NOFILE",
+            );
+        }
+    }
+
+    let mut after: libc::rlimit = unsafe { std::mem::zeroed() };
+    let after_rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut after) };
+    if after_rc != 0 {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            "failed to re-read RLIMIT_NOFILE after adjustment",
+        );
+        return;
+    }
+
+    let current_soft = after.rlim_cur as u64;
+    let current_hard = after.rlim_max as u64;
+    if current_soft < RECOMMENDED_NOFILE_SOFT_LIMIT {
+        tracing::warn!(
+            soft_limit = current_soft,
+            hard_limit = current_hard,
+            recommended_soft_limit = RECOMMENDED_NOFILE_SOFT_LIMIT,
+            "vxd may hit file-descriptor limits under load; consider increasing max open files (shell: `ulimit -n 65536`; launchd: `sudo launchctl limit maxfiles 65536 200000`; systemd: `LimitNOFILE=65536`)",
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn maybe_raise_nofile_limit() {}
+
 async fn async_main() -> Result<()> {
     // Initialize tracing (logs will go to ~/.vx/vxd.log via spawn_service redirection)
     vx_tracing::init_service("vxd=info");
+    maybe_raise_nofile_limit();
 
     let in_test = std::env::var("VX_TEST").is_ok();
 
