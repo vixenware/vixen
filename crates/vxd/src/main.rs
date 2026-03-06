@@ -32,7 +32,7 @@ use moire::task::FutureExt;
 use roam_core::acceptor;
 use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
 use roam_stream::StreamLink;
-use roam_types::{ConnectionSettings, Metadata, Parity};
+use roam_types::{ConnectionSettings, Metadata};
 use std::sync::Arc;
 use std::time::Duration;
 use vx_io::boot::{BootDispatcher, BootGate};
@@ -157,8 +157,8 @@ impl SpawnTracker {
 }
 
 struct ServiceClients {
-    store: Arc<StoreClient<UpstreamCaller>>,
-    exec: Arc<RunnerClient<UpstreamCaller>>,
+    store: Arc<StoreClient>,
+    exec: Arc<RunnerClient>,
 }
 
 #[derive(Clone)]
@@ -190,7 +190,7 @@ impl ConnectionAcceptor for VxdVirtualAcceptor {
                 moire::task::spawn(
                     async move {
                         let dispatcher = VxdDispatcher::new(session.clone());
-                        let mut driver = Driver::new(handle, dispatcher, parity);
+                        let mut driver = Driver::new(handle, dispatcher);
                         let progress_listener =
                             Arc::new(vxd_proto::ProgressListenerClient::new(driver.caller()));
                         session.set_progress_listener(Some(progress_listener)).await;
@@ -561,11 +561,12 @@ async fn async_main() -> Result<()> {
                 let conduit = BareConduit::<roam_types::MessageFamily, _>::new(StreamLink::new(
                     reader, writer,
                 ));
-                let (mut session, root_handle, _session_handle) = match acceptor(conduit)
+                let boot_dispatcher = BootDispatcher::new(boot_service.clone());
+                let (_client, _session_handle) = match acceptor(conduit)
                     .on_connection(VxdVirtualAcceptor {
                         boot_service: boot_service.clone(),
                     })
-                    .establish()
+                    .establish::<()>(boot_dispatcher)
                     .await
                 {
                     Ok(parts) => parts,
@@ -584,21 +585,12 @@ async fn async_main() -> Result<()> {
                     }
                 };
 
-                let session_handle =
-                    moire::task::spawn(async move { session.run().await }.named("vxd_session"));
-                let boot_dispatcher = BootDispatcher::new(boot_service.clone());
-                let mut root_driver = Driver::new(root_handle, boot_dispatcher, Parity::Even);
-                root_driver.run().await;
-                if let Err(e) = session_handle.await {
-                    tracing::warn!("Session error from {}: {e:?}", peer_addr);
-                }
-
                 let count =
                     active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) - 1;
                 tracing::debug!(
                     %peer_addr,
                     active_connections = count,
-                    "connection closed"
+                    "connection established"
                 );
                 *last_disconnect.lock() = Some(tokio::time::Instant::now());
             }

@@ -11,7 +11,7 @@ pub struct StoreTestEnv {
     _root: TempDir,
     _vx_home: TempDir,
     _service: ServiceHandle,
-    pub client: StoreClient<Caller>,
+    pub client: StoreClient,
 }
 
 impl StoreTestEnv {

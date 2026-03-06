@@ -227,7 +227,7 @@ pub async fn boot_and_connect(
         .await
         .map_err(|e| eyre::eyre!("failed to open virtual connection: {e}"))?;
 
-    let mut driver = Driver::new(virtual_handle, (), Parity::Odd);
+    let mut driver = Driver::new(virtual_handle, ());
     let virtual_caller = driver.caller();
     tokio::spawn(async move { driver.run().await });
     Ok(virtual_caller)

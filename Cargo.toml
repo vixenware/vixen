@@ -35,18 +35,18 @@ vx-vfs-types = { path = "crates/vx-vfs-types" }
 parking_lot = "0.12"
 
 # facet ecosystem
-facet = { version = "0.44.0", features = ["jiff02", "camino"] }
-facet-error = { version = "0.44.0" }
-facet-json = { version = "0.44.0" }
-facet-toml = { version = "0.44.0" }
-facet-postcard = { version = "0.44.0", features = ["jiff02", "camino"] }
+facet = { version = "0.44.1", features = ["jiff02", "camino"] }
+facet-error = { version = "0.44.1" }
+facet-json = { version = "0.44.1" }
+facet-toml = { version = "0.44.1" }
+facet-postcard = { version = "0.44.1", features = ["jiff02", "camino"] }
 facet-cargo-toml = { version = "0.44.0" }
 
 # cmdline parsing
 figue = { version = "2.0.0" }
 
 # incremental computation
-picante = { git = "https://github.com/bearcove/picante", branch = "main", features = ["macros"] }
+picante = { version = "1.0.0", features = ["macros"] }
 
 # RPC
 roam = { git = "https://github.com/bearcove/roam", branch = "main" }

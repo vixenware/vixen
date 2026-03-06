@@ -294,25 +294,19 @@ impl EndpointConnector {
 pub async fn connect_session(
     endpoint: &Endpoint,
 ) -> Result<(roam_core::DriverCaller, roam_core::SessionHandle)> {
-    use roam_core::{BareConduit, Driver, initiator};
+    use roam_core::{BareConduit, initiator};
     use roam_stream::StreamLink;
-    use roam_types::{MessageFamily, Parity};
+    use roam_types::MessageFamily;
 
     let stream = connect_io(endpoint).await?;
     let (r, w) = tokio::io::split(stream);
     let link = StreamLink::new(r, w);
     let conduit = BareConduit::<MessageFamily, _>::new(link);
 
-    let (mut session, root_handle, session_handle) = initiator(conduit)
-        .establish()
+    let (caller, session_handle) = initiator(conduit)
+        .establish(())
         .await
         .map_err(|e| eyre::eyre!("session establishment failed: {e}"))?;
-
-    let mut driver = Driver::new(root_handle, (), Parity::Odd);
-    let caller = driver.caller();
-
-    tokio::spawn(async move { session.run().await });
-    tokio::spawn(async move { driver.run().await });
 
     Ok((caller, session_handle))
 }

@@ -17,7 +17,7 @@ moire = { workspace = true }
 tracing = { workspace = true }
 vx-store-proto = { workspace = true }
 
-async-compression = { version = "0.4.36", default-features = false, features = [
+async-compression = { version = "0.4.41", default-features = false, features = [
   "tokio",
   "gzip",
   "xz",

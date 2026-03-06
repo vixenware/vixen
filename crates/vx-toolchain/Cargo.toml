@@ -20,7 +20,7 @@ thiserror = { workspace = true }
 vx-store-proto = { workspace = true }
 vx-http = { workspace = true }
 vx-tarball = { workspace = true }
-uuid = { version = "1.19.0", features = ["v4"] }
+uuid = { version = "1.21.0", features = ["v4"] }
 tokio = { workspace = true }
 tokio-tar = "0.3"
 

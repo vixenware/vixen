@@ -334,7 +334,7 @@ impl ChunkL1Cache {
 
 pub struct CasVfs {
     /// CAS client for fetching blobs
-    pub(crate) cas: Arc<StoreClient<crate::StoreCaller>>,
+    pub(crate) cas: Arc<StoreClient>,
     /// Unified VFS state lock: items + prefixes
     pub(crate) state: SyncMutex<VfsState>,
     /// Next available ItemId
@@ -368,7 +368,7 @@ impl CasVfs {
     /// `disk_cache_dir` enables persistent L2 blob cache across restarts.
     /// Pass `None` to disable (L1 memory-only).
     pub fn new(
-        cas: Arc<StoreClient<crate::StoreCaller>>,
+        cas: Arc<StoreClient>,
         disk_cache_dir: Option<Utf8PathBuf>,
         mount_path: Utf8PathBuf,
     ) -> Self {
@@ -434,7 +434,7 @@ impl CasVfs {
     /// Fetch a chunk with L1 memory + L2 disk cache. On miss, fetches from CAS and writes through.
     async fn read_chunk_cached(&self, chunk_hash: ChunkHash) -> Result<Arc<[u8]>, String> {
         async fn fetch_from_cas(
-            cas: &StoreClient<crate::StoreCaller>,
+            cas: &StoreClient,
             chunk_hash: ChunkHash,
         ) -> Result<Arc<[u8]>, String> {
             let data = cas

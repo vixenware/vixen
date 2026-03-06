@@ -22,7 +22,7 @@ use moire::task::FutureExt;
 use roam_core::acceptor;
 use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
 use roam_stream::StreamLink;
-use roam_types::{ConnectionSettings, Metadata, Parity};
+use roam_types::{ConnectionSettings, Metadata};
 use std::sync::Arc;
 use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
@@ -71,7 +71,7 @@ impl ConnectionAcceptor for StoreVirtualAcceptor {
                 let dispatcher = StoreDispatcher::new(store);
                 moire::task::spawn(
                     async move {
-                        let mut driver = Driver::new(handle, dispatcher, parity);
+                        let mut driver = Driver::new(handle, dispatcher);
                         driver.run().await;
                     }
                     .named("store_virtual_driver"),
@@ -162,16 +162,16 @@ async fn async_main() -> Result<()> {
                 tracing::debug!("New connection from {}", peer_addr);
 
                 // Root connection gets Boot service only.
-                let boot_dispatcher = BootDispatcher::new(boot_service.clone());
                 let (reader, writer) = tokio::io::split(stream);
                 let conduit = BareConduit::<roam_types::MessageFamily, _>::new(StreamLink::new(
                     reader, writer,
                 ));
-                let (mut session, root_handle, _session_handle) = match acceptor(conduit)
+                let boot_dispatcher = BootDispatcher::new(boot_service.clone());
+                let (_client, _session_handle) = match acceptor(conduit)
                     .on_connection(StoreVirtualAcceptor {
                         boot_service: boot_service.clone(),
                     })
-                    .establish()
+                    .establish::<()>(boot_dispatcher)
                     .await
                 {
                     Ok(parts) => parts,
@@ -181,14 +181,7 @@ async fn async_main() -> Result<()> {
                     }
                 };
 
-                let session_handle =
-                    moire::task::spawn(async move { session.run().await }.named("store_session"));
-                let mut root_driver = Driver::new(root_handle, boot_dispatcher, Parity::Even);
-                root_driver.run().await;
-                if let Err(e) = session_handle.await {
-                    tracing::warn!("Session error from {}: {e:?}", peer_addr);
-                }
-                tracing::debug!("Connection from {} closed", peer_addr);
+                tracing::debug!("Connection from {} established", peer_addr);
             }
             .named("store_connection"),
         );

@@ -307,7 +307,7 @@ impl CliContext {
     ///
     /// The progress dispatcher is created here because it's tightly coupled
     /// to the vx CLI's display logic.
-    async fn ensure_vxd(&self) -> Result<VxdClient<roam_core::DriverCaller>> {
+    async fn ensure_vxd(&self) -> Result<VxdClient> {
         let vx_home = vx_io::vx_home();
 
         // Connect to daemon — root connection only has the Boot service.
@@ -350,7 +350,7 @@ impl CliContext {
                 vec![],
             )
             .await?;
-        let mut driver = Driver::new(virtual_handle, dispatcher, Parity::Odd);
+        let mut driver = Driver::new(virtual_handle, dispatcher);
         let caller = driver.caller();
         tokio::spawn(async move { driver.run().await });
 

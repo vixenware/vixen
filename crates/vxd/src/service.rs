@@ -58,8 +58,8 @@ pub struct AcquiredToolchains {
 // TODO: group some of those locks together?
 #[derive(Clone)]
 pub struct VxdService {
-    store: Arc<StoreClient<crate::UpstreamCaller>>,
-    exec: Arc<RunnerClient<crate::UpstreamCaller>>,
+    store: Arc<StoreClient>,
+    exec: Arc<RunnerClient>,
 
     /// The host triple of the execd machine (used for toolchain selection + cache keys).
     exec_host_triple: String,
@@ -86,7 +86,7 @@ pub struct VxdService {
     spawn_tracker: Arc<SyncMutex<SpawnTracker>>,
 
     /// Progress listener client (for reporting progress to vx CLI)
-    progress_listener: Arc<SyncMutex<Option<Arc<ProgressListenerClient<crate::UpstreamCaller>>>>>,
+    progress_listener: Arc<SyncMutex<Option<Arc<ProgressListenerClient>>>>,
 
     /// Session ID for cache key namespacing. Empty = session zero (shared).
     /// Per-connection state — each connection handler gets its own instance.
@@ -646,8 +646,8 @@ impl VxdService {
         vx_home: Utf8PathBuf,
         exec_host_triple: String,
         spawn_tracker: Arc<SyncMutex<SpawnTracker>>,
-        store: Arc<StoreClient<crate::UpstreamCaller>>,
-        exec: Arc<RunnerClient<crate::UpstreamCaller>>,
+        store: Arc<StoreClient>,
+        exec: Arc<RunnerClient>,
     ) -> Self {
         let db = Database::new();
         let cache_path = vx_home.join("picante.cache");
@@ -747,7 +747,7 @@ impl VxdService {
     /// Update the progress listener for the current connection
     pub async fn set_progress_listener(
         &self,
-        listener: Option<Arc<ProgressListenerClient<crate::UpstreamCaller>>>,
+        listener: Option<Arc<ProgressListenerClient>>,
     ) {
         *self.progress_listener.lock() = listener;
     }

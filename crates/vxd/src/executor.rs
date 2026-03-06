@@ -156,7 +156,7 @@ impl CompletionGuard {
 }
 
 async fn load_manifest(
-    cas: &Arc<StoreClient<crate::UpstreamCaller>>,
+    cas: &Arc<StoreClient>,
     manifest_hash: NodeHash,
     crate_name: &str,
 ) -> Result<vx_store_proto::NodeManifest, VxdError> {
@@ -186,7 +186,7 @@ async fn load_manifest(
 }
 
 async fn fetch_blob_from_ref(
-    cas: &Arc<StoreClient<crate::UpstreamCaller>>,
+    cas: &Arc<StoreClient>,
     blob_ref: &BlobRef,
 ) -> Result<Vec<u8>, VxdError> {
     match blob_ref {
@@ -236,7 +236,7 @@ async fn fetch_blob_from_ref(
 }
 
 async fn fetch_output_blob_data(
-    cas: &Arc<StoreClient<crate::UpstreamCaller>>,
+    cas: &Arc<StoreClient>,
     blob_ref: &OutputBlobRef,
 ) -> Result<Vec<u8>, VxdError> {
     match blob_ref {
@@ -361,13 +361,13 @@ pub struct Executor {
     cancel_token: CancellationToken,
 
     /// Progress listener client (for reporting progress to vx CLI)
-    progress_listener: Option<Arc<ProgressListenerClient<crate::UpstreamCaller>>>,
+    progress_listener: Option<Arc<ProgressListenerClient>>,
 
     /// CAS client (CAS)
-    cas: Arc<StoreClient<crate::UpstreamCaller>>,
+    cas: Arc<StoreClient>,
 
     /// Runner client for execution
-    exec: Arc<RunnerClient<crate::UpstreamCaller>>,
+    exec: Arc<RunnerClient>,
 
     /// Picante database (Arc-shareable with internal synchronization)
     db: Arc<crate::db::Database>,
@@ -408,9 +408,9 @@ impl Executor {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         graph: ActionGraph,
-        progress_listener: Option<Arc<ProgressListenerClient<crate::UpstreamCaller>>>,
-        cas: Arc<StoreClient<crate::UpstreamCaller>>,
-        exec: Arc<RunnerClient<crate::UpstreamCaller>>,
+        progress_listener: Option<Arc<ProgressListenerClient>>,
+        cas: Arc<StoreClient>,
+        exec: Arc<RunnerClient>,
         db: Arc<crate::db::Database>,
         workspace_root: camino::Utf8PathBuf,
         target_triple: String,
@@ -1278,8 +1278,8 @@ impl Executor {
 async fn execute_action(
     action: Action,
     deps: Vec<NodeIndex>,
-    cas: &Arc<StoreClient<crate::UpstreamCaller>>,
-    exec: &Arc<RunnerClient<crate::UpstreamCaller>>,
+    cas: &Arc<StoreClient>,
+    exec: &Arc<RunnerClient>,
     db: &Arc<crate::db::Database>,
     results: &Arc<SyncMutex<HashMap<NodeIndex, ActionResult>>>,
     workspace_root: &camino::Utf8PathBuf,

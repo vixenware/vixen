@@ -337,7 +337,7 @@ impl VfsdService {
     /// Uses the VfsItems children index for O(children) per directory instead of O(N) scans.
     async fn build_directory_node(
         &self,
-        cas: &Arc<StoreClient<crate::StoreCaller>>,
+        cas: &Arc<StoreClient>,
         items: &crate::vfs::VfsItems,
         dir_item_id: vixenfs_proto::ItemId,
     ) -> Result<NodeHash, String> {
@@ -351,7 +351,7 @@ impl VfsdService {
     /// Inner recursive builder that returns (NodeHash, total_size).
     async fn build_directory_node_inner(
         &self,
-        cas: &Arc<StoreClient<crate::StoreCaller>>,
+        cas: &Arc<StoreClient>,
         items: &crate::vfs::VfsItems,
         dir_item_id: vixenfs_proto::ItemId,
         visited: &mut HashSet<vixenfs_proto::ItemId>,
@@ -454,7 +454,7 @@ mod tests {
         _store_root: TempDir,
         _vx_home: TempDir,
         _store_service: ServiceHandle,
-        cas: Arc<StoreClient<roam_core::DriverCaller>>,
+        cas: Arc<StoreClient>,
         service: VfsdService,
     }
 

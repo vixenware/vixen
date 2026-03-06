@@ -120,7 +120,7 @@ fn walk_toolchain(root: &std::path::Path) -> Result<Vec<StoredFile>> {
 }
 
 async fn store_file_data(
-    store: &StoreClient<roam_core::DriverCaller>,
+    store: &StoreClient,
     data: &[u8],
 ) -> Result<DirEntryKind> {
     let content_hash = ContentHash(Blake3Hash(blake3::hash(data).into()));

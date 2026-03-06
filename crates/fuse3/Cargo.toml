@@ -15,14 +15,14 @@ telemetry = []
 
 [dependencies]
 async-notify = "0.3"
-bincode-next = { version = "2.0.4", default-features = false, features = ["derive", "std"] }
-bytes = "1.5"
-futures-channel = { version = "0.3.30", features = ["sink"] }
-futures-util = { version = "0.3.30", features = ["sink"] }
-libc = "0.2.168"
-nix = { version = "0.29.0", default-features = false, features = ["fs", "mount", "user", "socket"] }
-tracing = "0.1.40"
+bincode-next = { version = "2.1.0", default-features = false, features = ["derive", "std"] }
+bytes = "1.11"
+futures-channel = { version = "0.3.32", features = ["sink"] }
+futures-util = { version = "0.3.32", features = ["sink"] }
+libc = "0.2.182"
+nix = { version = "0.31.2", default-features = false, features = ["fs", "mount", "user", "socket"] }
+tracing = "0.1.44"
 trait-make = "0.1"
-which = "6"
-tokio = { version = "1.45", features = ["fs", "rt", "sync", "net", "macros", "process", "time"] }
+which = "8"
+tokio = { version = "1.50", features = ["fs", "rt", "sync", "net", "macros", "process", "time"] }
 moire = { workspace = true }

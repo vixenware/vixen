@@ -6,17 +6,17 @@ use vx_store_proto::{
     Blake3Hash, CasNode, ContentHash, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient,
 };
 
-type RpcClient = vx_vfsd::protocol::VfsdClient<crate::VfsdCaller>;
+type RpcClient = vx_vfsd::protocol::VfsdClient;
 
 /// Client wrapper for vx-vfsd RPC operations
 #[derive(Clone)]
 pub struct VfsdClient {
     client: Arc<RpcClient>,
-    cas: Arc<StoreClient<crate::CasCaller>>,
+    cas: Arc<StoreClient>,
 }
 
 impl VfsdClient {
-    pub fn new(client: RpcClient, cas: Arc<StoreClient<crate::CasCaller>>) -> Self {
+    pub fn new(client: RpcClient, cas: Arc<StoreClient>) -> Self {
         Self {
             client: Arc::new(client),
             cas,

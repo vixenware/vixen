@@ -17,7 +17,7 @@ use moire::task::FutureExt;
 use roam_core::acceptor;
 use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
 use roam_stream::StreamLink;
-use roam_types::{ConnectionSettings, Metadata, Parity};
+use roam_types::{ConnectionSettings, Metadata};
 use std::sync::Arc;
 use vixenfs_proto::{
     CreateResult, GetAttributesResult, ItemId, LookupResult, ReadDirResult, ReadResult,
@@ -241,7 +241,7 @@ impl ConnectionAcceptor for VfsdVirtualAcceptor {
                 let dispatcher = VfsdDispatcher::new(service);
                 moire::task::spawn(
                     async move {
-                        let mut driver = Driver::new(handle, dispatcher, parity);
+                        let mut driver = Driver::new(handle, dispatcher);
                         driver.run().await;
                     }
                     .named("vfsd_virtual_driver"),
@@ -362,16 +362,16 @@ async fn async_main() -> Result<()> {
                         tracing::debug!("vx-vfsd connection from {}", peer_addr);
 
                         // Root connection gets Boot service only.
-                        let boot_dispatcher = BootDispatcher::new(boot_service.clone());
                         let (reader, writer) = tokio::io::split(stream);
                         let conduit = BareConduit::<roam_types::MessageFamily, _>::new(
                             StreamLink::new(reader, writer),
                         );
-                        let (mut session, root_handle, _session_handle) = match acceptor(conduit)
+                        let boot_dispatcher = BootDispatcher::new(boot_service.clone());
+                        let (_client, _session_handle) = match acceptor(conduit)
                             .on_connection(VfsdVirtualAcceptor {
                                 boot_service: boot_service.clone(),
                             })
-                            .establish()
+                            .establish::<()>(boot_dispatcher)
                             .await
                         {
                             Ok(parts) => parts,
@@ -384,16 +384,7 @@ async fn async_main() -> Result<()> {
                             }
                         };
 
-                        let session_handle = moire::task::spawn(
-                            async move { session.run().await }.named("vfsd_session"),
-                        );
-                        let mut root_driver =
-                            Driver::new(root_handle, boot_dispatcher, Parity::Even);
-                        root_driver.run().await;
-                        if let Err(e) = session_handle.await {
-                            tracing::warn!("Session task error from {}: {e:?}", peer_addr);
-                        }
-                        tracing::debug!("vx-vfsd session closed with {}", peer_addr);
+                        tracing::debug!("vx-vfsd session established with {}", peer_addr);
                     }
                     .named("vfsd_connection"),
                 );
@@ -406,7 +397,7 @@ async fn async_main() -> Result<()> {
 }
 
 /// Connect to vx-store using the boot protocol.
-async fn connect_to_store(endpoint_str: &str) -> Result<StoreClient<roam_core::DriverCaller>> {
+async fn connect_to_store(endpoint_str: &str) -> Result<StoreClient> {
     let endpoint = Endpoint::parse(endpoint_str)?;
     let (root_caller, session_handle) = vx_io::net::connect_session(&endpoint)
         .await
