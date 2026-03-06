@@ -32,6 +32,7 @@ Recent active exploration has moved in a few non-baseline directions:
 - toward treating `Type{...}` and `callee{...}` as one named-payload shape
 - toward writing those named payloads with a space: `Type { ... }`
 - toward `name! = expr` as mutable-binding introduction/shadowing syntax
+- toward `place.method!(args)` as rebinding sugar on mutable places
 - away from Styx-style `@variant` notation and back toward Rust-style enums
 
 Those ideas are still exploratory, but they are the live frontier now.

@@ -101,7 +101,7 @@ With the reading:
 
 - `name = expr` introduces an immutable binding
 - `name! = expr` introduces a mutable binding by shadowing earlier bindings
-- `name.method!(args)` is sugar for rebinding the current mutable `name`
+- `place.method!(args)` is sugar for rebinding the current mutable place
 
 So:
 
@@ -116,9 +116,10 @@ behaves like repeated rebinding of the same mutable local, without needing
 
 In v0, the receiver for `method!` should probably stay narrow:
 
-- the receiver must be a mutable binding name, not an arbitrary expression
+- the receiver must be a place expression rooted in a mutable binding
 - `nodes.push!(node)` is fine
-- `graph.crates.push!(node)` should probably be invalid
+- `graph.crates.push!(node)` is fine if `graph` is a mutable binding
+- `make_graph().crates.push!(node)` should probably be invalid
 
 That keeps the sugar explicit about what is being rebound.
 
