@@ -218,9 +218,7 @@ path:
 
 ```text
 fn validate_registry_entry(name: String, version: String) -> Unit throws InputError {
-  result = catch cargo::registry_package_exists(name, version)
-
-  match result {
+  match catch cargo::registry_package_exists(name, version) {
     Result::Ok(exists) => {
       if !exists {
         fail MissingRegistryCrate {
@@ -240,6 +238,16 @@ This is exactly the inversion from Rust:
 
 - propagation is implicit
 - local interception is explicit
+
+If the caught result needs to be reused, binding it first is still fine:
+
+```text
+result = catch cargo::registry_package_exists(name, version)
+match result { ... }
+```
+
+But that is not a special limitation of `catch`. The direct `match catch ...`
+form should be considered the normal one.
 
 ## Sketch 5: Validation stays control-flow-shaped
 
