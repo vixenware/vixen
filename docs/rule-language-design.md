@@ -152,18 +152,21 @@ struct Node {
     id: NodeId,
     kind: NodeKind,
     label: String,
+    metadata: Map<String, String>,
 }
 
 struct Edge {
     from: NodeId,
     to: NodeId,
     kind: EdgeKind,
+    metadata: Map<String, String>,
 }
 
 struct Fact {
     id: FactId,
     node_id: NodeId,
     value: String,
+    metadata: Map<String, String>,
 }
 
 // Rust domain types (provided by the rust rule pack)
@@ -214,9 +217,9 @@ NodeKind::Action
 [1, 2, 3]
 {name: "foo", version: "1.0"}
 
-// Let bindings
-let graph = rust.crate_graph()
-let root = rust.root(graph)
+// Let bindings (type inferred from RHS)
+let graph: CrateGraph = rust.crate_graph()
+let root: Crate = rust.root(graph)
 
 // Control flow
 if crate.crate_type == CrateType::Bin {
@@ -224,6 +227,7 @@ if crate.crate_type == CrateType::Bin {
         id: NodeId { value: str.cat("compile-bin:", crate.name) },
         kind: NodeKind::Action,
         label: str.cat("compile ", crate.name),
+        metadata: {"crate_name": crate.name, "crate_type": "bin"},
     })
 }
 
@@ -233,6 +237,7 @@ for crate in closure {
         id: NodeId { value: str.cat("compile-rlib:", crate.name) },
         kind: NodeKind::Action,
         label: str.cat("compile ", crate.name),
+        metadata: {"crate_name": crate.name, "crate_type": "lib"},
     })
 }
 
@@ -248,12 +253,13 @@ crate.name
 crate.deps.len()
 
 // Function definitions
-fn plan_compile(crate: Crate, profile: String) {
-    let node_id = NodeId { value: str.cat("compile:", crate.name) }
+fn plan_compile(crate: Crate, profile: String) -> Unit {
+    let node_id: NodeId = NodeId { value: str.cat("compile:", crate.name) }
     emit.node(Node {
         id: node_id,
         kind: NodeKind::Action,
         label: str.cat("compile ", crate.name),
+        metadata: {"crate_name": crate.name, "crate_type": crate.crate_type.as_str()},
     })
 }
 ```
@@ -278,18 +284,45 @@ rust.transitive_closure(graph: CrateGraph, roots: List<Crate>) -> List<Crate>
 env.profile() -> String
 env.target_triple() -> String
 
-// Transforms
+// Transforms (v0: no closures, use for loops instead)
 str.cat(parts: List<String>) -> String   // or variadic: str.cat(a, b, c)
 list.len<T>(list: List<T>) -> Int
-list.map<T, U>(list: List<T>, f: fn(T) -> U) -> List<U>
-list.filter<T>(list: List<T>, f: fn(T) -> Bool) -> List<T>
-list.sort_by<T>(list: List<T>, f: fn(T) -> String) -> List<T>
+list.contains<T>(list: List<T>, item: T) -> Bool
+list.sort<T>(list: List<T>) -> List<T>
 map.keys<K, V>(map: Map<K, V>) -> List<K>
 map.get<K, V>(map: Map<K, V>, key: K) -> Option<V>
+
+// Higher-order builtins (deferred until closures are designed):
+//   list.map, list.filter, list.sort_by
+// Until then, use for loops to build result lists.
 ```
 
 Builtins use positional arguments for simple cases and named struct arguments
 for complex cases. The type checker validates all call sites.
+
+### Metadata and the lowering contract
+
+The `metadata: Map<String, String>` field on Node, Edge, and Fact is how rule
+programs communicate domain-specific information to the ActionGraph lowering
+bridge. This is the same mechanism as the current `RulePlanProvenance.metadata`
+field — the typed surface just makes it an explicit struct field rather than
+hiding it in the provenance bag.
+
+The executable lowering bridge (`ActionGraph::from_rule_plan_executable`)
+currently reads these metadata keys:
+
+- **Compile nodes**: `crate_name`, `crate_type`, `legacy_node_id`
+- **Registry nodes**: `registry_name`, `registry_version`, `registry_checksum`
+
+The `emit.node` host implementation merges the struct's `metadata` map into
+`RulePlanProvenance.metadata`, exactly as the current `RulePlanHost` does with
+the optional `meta` argument. Provenance fields (rule_id, source_id, span) are
+still auto-populated from the call site by the host — rule authors do not set
+those manually.
+
+This means the lowering bridge does not change. A rule program that populates
+the right metadata keys produces the same `RulePlan` that the current system
+produces, and the bridge extracts the same fields it always has.
 
 ## Pipeline
 
@@ -312,6 +345,13 @@ for complex cases. The type checker validates all call sites.
                                     │ Name resolver │
                                     │ + type checker│
                                     │  (typed IR)   │
+                                    └──────┬───────┘
+                                           │
+                                    ┌──────▼───────┐
+                                    │  Capability   │
+                                    │   checker     │
+                                    │ (typed IR +   │
+                                    │  policy)      │
                                     └──────┬───────┘
                                            │
                               ┌────────────┴────────────┐
@@ -361,7 +401,7 @@ enum SurfaceExpr {
     For(String, Box<SurfaceExpr>, Block, Span),
     Match(Box<SurfaceExpr>, Vec<MatchArm>, Span),
     Let(String, Option<SurfaceType>, Box<SurfaceExpr>, Span),
-    FnDef(String, Vec<Param>, Option<SurfaceType>, Block, Span),
+    FnDef(String, Vec<Param>, SurfaceType, Block, Span),  // return type required
     Block(Vec<SurfaceExpr>, Span),
 }
 ```
@@ -390,25 +430,50 @@ enum Type {
     Option(Box<Type>),
     Struct(StructId),
     Enum(EnumId),
-    Fn(Vec<Type>, Box<Type>),
     Unit,
 }
 ```
 
-The type checker is a single forward pass — no inference, no unification. Types
-are always known from declarations, literals, and builtin signatures. This keeps
-the checker simple and the error messages direct.
+The type checker uses **limited local inference**: the type of a `let` binding
+is determined from its RHS expression, and the type of a struct literal is
+determined from its constructor name. This is trivial propagation from known
+types, not unification — every expression's type is fully determined by its
+immediate context. Function parameters and return types require explicit
+annotations. There are no closure types in v0 (see open question #3).
+
+### Stage 3b: Capability checking (separate from typing)
+
+Capability checking is **not** part of the type checker. The same typed program
+may run under different policies (e.g., deterministic in production, relaxed in
+tests). Baking policy into the type system would require re-typechecking when
+policy changes, which is wrong.
+
+Instead, capability checking is a separate pass over the typed IR, parameterized
+by a `PlannerPolicy`. It walks the call graph and rejects any builtin whose
+required capability is not in the policy's allow set. This is structurally the
+same check as the current `runtime.rs:534` gate, but runs before execution
+rather than during it. The typed IR makes this a simple walk: every `Call` node
+has a resolved builtin ID, and every builtin ID maps to a `PlannerCapability`.
+
+The pipeline becomes:
+
+1. Parse (surface AST)
+2. Type check (typed IR) — structural correctness only
+3. Capability check (typed IR + policy) — effect/policy correctness
+4. Interpret or compile
+
+This means a typed program can be cached and re-checked against different
+policies without re-parsing or re-typechecking.
 
 ### Stage 4a: Interpreter (rewrite, immediate)
 
 A tree-walking interpreter over `TypedExpr`. Simpler than the current
 `PlannerRuntime` because type checking already happened — no need to validate
-argument shapes at runtime.
+argument shapes at runtime. Capability checking already happened — no need for
+runtime policy gates.
 
 The interpreter still uses `PlannerHost` for side effects, but the host trait
-methods receive typed arguments instead of `PlannerBuiltinArgs`. The capability
-check moves to the type checker (calling `env.profile()` in a deterministic
-context is a type error, not a runtime error).
+methods receive typed arguments instead of `PlannerBuiltinArgs`.
 
 ### Stage 4b: Kajit lowering (later)
 
@@ -466,8 +531,12 @@ abstractions.
 - **Full closures**: `|params| { stmts }`. Full generality, more complex to
   type-check and lower to Kajit.
 
-Recommendation: expression closures for v0. They cover the common cases (map,
-filter, sort_by) without requiring a full closure implementation.
+Recommendation: **no closures for v0**. Closures require a `Fn` type in the
+type system, parameter type inference (or annotation syntax for closure params),
+and capture semantics — all of which add complexity that isn't needed when `for`
+loops work. The v0 builtin surface omits `list.map`, `list.filter`, and
+`list.sort_by` accordingly. Closures are a natural v1 extension once the base
+type system is solid.
 
 ### 4. String interpolation vs str.cat
 
@@ -510,7 +579,7 @@ restructuring.
 | Struct construction | Map literals `{id: n1, kind: action}` | Typed struct literals `Node { id: ..., kind: ... }` |
 | Function defs | None | `fn name(params) -> ReturnType { body }` |
 | Match | None | `match expr { Pattern => expr }` |
-| Error detection | Runtime (wrong type passed to builtin) | Type checker (before execution) |
+| Error detection | Runtime (wrong type passed to builtin) | Type checker (structural) + capability checker (policy) |
 | Generic types | None | `List<T>`, `Map<K, V>`, `Option<T>` |
 | Parser output | `PlannerExpr` (runtime AST) | `SurfaceExpr` -> `TypedExpr` (two stages) |
 | Interpreter | `PlannerRuntime<H: PlannerHost>` | Same pattern, typed host interface |
