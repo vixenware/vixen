@@ -131,12 +131,14 @@ usable.
 
 Current assumption:
 
+- methods use value receivers, not references
+- `self` is just a normal receiver binding
+- `mut self` means the receiver binding is mutable inside the method body
 - methods in v0 are surface sugar over statically-known builtins or host/domain
-  operations
+  operations, unless/until real method definitions are added
 - `.` on values is primarily field access
 - if method syntax exists, it should desugar cleanly
 - user-defined method definitions are still deferred
-- receiver syntax is still open
 
 Example:
 
@@ -145,7 +147,21 @@ deps.len()
 graph.root()
 ```
 
-This does **not** imply traits or full Rust-style method resolution in v0.
+Receiver mutability should follow the ordinary binding rules:
+
+```rust
+fn insert(mut self, key: String, value: String) -> Self {
+    self
+}
+
+fn rewrite(self) -> Self {
+    let mut this = self;
+    this
+}
+```
+
+This does **not** imply traits, references, or full Rust-style method
+resolution in v0.
 
 ### Error handling
 
@@ -195,8 +211,37 @@ The following are deliberately **not** being committed yet:
 - typed lowering to Kajit HIR
 - interpreter semantics for the new language
 - final builtin execution model
-- ownership/borrowing semantics beyond ordinary mutable locals/fields
+- ownership/borrowing semantics beyond ordinary mutable bindings
 - exact module/import model
+
+## Value Semantics
+
+Current design bias:
+
+- the language has value semantics
+- the language does **not** expose mutable references or aliasing semantics
+- methods and functions conceptually receive values, not references
+
+That does **not** mean implementations must perform deep copies.
+
+Implementation freedom should include:
+
+- structural sharing
+- copy-on-write
+- uniqueness-based in-place mutation
+- field-splitting
+- scalar replacement
+- other equivalent optimizations
+
+The rule is:
+
+- programs behave *as if* values are passed and returned by value
+- implementations may optimize representation and update strategy as long as the
+  observable behavior matches value semantics
+
+This matters especially for large collections used in build planning. The
+language model should stay simple even when the runtime representation is highly
+optimized.
 
 ## Capabilities
 
@@ -212,16 +257,14 @@ But the exact capability model should be documented separately from syntax.
 
 ## Open Questions
 
-1. What should future receiver syntax look like if/when method definitions are
-   added?
-2. Do we eventually want limited inherent `impl` blocks without traits, or keep
+1. Do we eventually want limited inherent `impl` blocks without traits, or keep
    methods as sugar over builtins/domain ops for longer?
-3. What is the smallest acceptable module system once multi-file becomes
+2. What is the smallest acceptable module system once multi-file becomes
    necessary?
-4. What collection APIs exist in v0 if closures are absent?
-5. What operators are actually needed for real rule code, beyond arithmetic,
+3. What collection APIs exist in v0 if closures are absent?
+4. What operators are actually needed for real rule code, beyond arithmetic,
    comparison, and boolean logic?
-6. What syntax should construct sets, if/when sets become necessary?
+5. What syntax should construct sets, if/when sets become necessary?
 
 ## Next Safe Work
 
