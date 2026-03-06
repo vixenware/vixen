@@ -3335,7 +3335,6 @@ dependencies = [
  "futures-util",
  "libc",
  "moire",
- "roam",
  "roam-core",
  "roam-shm",
  "roam-types",
