@@ -5,8 +5,6 @@ use tempfile::TempDir;
 use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_store_proto::{Blake3Hash, CasNode, NodeHash, NodeId, NodeManifest, StoreClient};
 
-type Caller = roam_core::DriverCaller;
-
 pub struct StoreTestEnv {
     _root: TempDir,
     _vx_home: TempDir,
