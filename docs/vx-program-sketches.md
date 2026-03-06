@@ -13,6 +13,9 @@ Related experiments:
 - [vx-program-sketches-do-end.md](/Users/amos/bearcove/vixen/docs/vx-program-sketches-do-end.md)
   isolates `do/end` block syntax without bundling in every other stylistic
   decision.
+- [vx-program-sketches-minimal-forms.md](/Users/amos/bearcove/vixen/docs/vx-program-sketches-minimal-forms.md)
+  explores a more holistic minimal grammar with `do/end`, `:=`, and
+  payload-shaped calls and headers.
 
 Neither note is the current baseline.
 
