@@ -7,6 +7,10 @@ authorize semantic implementation against a speculative Kajit HIR. Kajit-backed
 typed semantics remain blocked until Kajit has a real HIR crate and internal
 producer/consumer path.
 
+Styx-inspired simplification experiments are tracked separately in
+[vx-styx-inspiration.md](/Users/amos/bearcove/vixen/docs/vx-styx-inspiration.md)
+so the baseline and the experimental direction stay distinct.
+
 ## Status
 
 Current intent:
