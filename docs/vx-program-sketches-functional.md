@@ -100,7 +100,7 @@ nodes!.push(node)
 With the reading:
 
 - `name = expr` introduces an immutable binding
-- `name! = expr` introduces a mutable binding, possibly by shadowing
+- `name! = expr` introduces a mutable binding by shadowing earlier bindings
 - `name!.method(args)` is sugar for rebinding the current mutable `name`
 
 So:
@@ -113,6 +113,17 @@ nodes!.push(other)
 
 behaves like repeated rebinding of the same mutable local, without needing
 `let mut` or `nodes = nodes.push(...)`.
+
+This also means:
+
+- bindings do not share mutable identity by default
+- later shadowing does not retroactively change previously captured values
+- closures see the value they captured, not a shared mutable cell
+
+That is probably acceptable for transform-oriented rule code.
+If Vixen ever genuinely needs shared mutable identity, it should probably use an
+explicit cell/reference type rather than making it the default meaning of
+bindings.
 
 ## Closure Surface
 
