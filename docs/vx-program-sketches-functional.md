@@ -7,33 +7,85 @@ The point is not "replace all control flow with combinators". The point is:
 - make collection transforms first-class
 - let rule code read more like graph/data derivation
 - avoid encoding obvious transforms as manual accumulation loops
+- improve on Rust's error-handling surface instead of inheriting it blindly
 
-This branch has moved away from the earlier assumptions:
+This branch now assumes:
 
 - no `do/end`
 - no `:=`
-- no block closures in v0
+- no `?`
+- no Styx-style `@variant` notation
 
 ## Working Assumptions
 
 This variant assumes:
 
-- ordinary blocks still use `{ ... }`
+- ordinary blocks use `{ ... }`
 - closures exist in v0
 - v0 closures are expression closures only: `|x| expr`
 - collection APIs like `map`, `filter`, `flat_map`, `fold`, and `each` are
   first-class
 - recursion is still out
 - higher-order collection operations are still bounded by input collections
-- `?` is allowed inside closures
+- enum variants use Rust-style spelling
+- named payloads use a space before `{ ... }`
 
-The important non-Rust rule is:
+That means:
 
-- `?` inside a closure propagates out of the enclosing fallible rule, not out
-  of the closure itself
+```text
+Node { ... }
+emit::node { ... }
+CrateType::Bin
+NodeKind::Action
+```
 
-That is possible because Vixen does not need Rust's "closures are just ordinary
-functions" rule.
+The constructor/call rule is now:
+
+- `callee(...)` for positional payload
+- `callee { ... }` for named payload
+
+where `callee` can be:
+
+- a function
+- a method
+- a type/constructor
+
+## Error Model: Default Propagation, Explicit Local Handling
+
+This branch flips Rust's default.
+
+Inside a fallible rule:
+
+- fallible calls produce their success value on the happy path
+- errors propagate automatically by default
+- `fail expr` exits the current rule with an error
+- `catch expr` suppresses propagation and yields the error-carrying value for
+  local handling
+
+So instead of:
+
+```text
+value = lookup(x)?
+```
+
+the default is just:
+
+```text
+value = lookup(x)
+```
+
+And if you actually want to inspect the error locally:
+
+```text
+result = catch lookup(x)
+match result {
+  Result::Ok(value) => ...
+  Result::Err(err) => ...
+}
+```
+
+This is still result-like under the hood. It just makes propagation the quiet
+path and local interception the noisy one.
 
 ## Binding and Mutation Surface
 
@@ -62,18 +114,12 @@ nodes!.push(other)
 behaves like repeated rebinding of the same mutable local, without needing
 `let mut` or `nodes = nodes.push(...)`.
 
-This keeps:
-
-- immutable bindings quiet
-- mutation explicit
-- `!` attached to the mutable binding, not to method names
-
 ## Closure Surface
 
 The smallest plausible closure surface is probably:
 
 ```text
-|krate| krate.crate_type == @bin
+|krate| krate.crate_type == CrateType::Bin
 |krate| make_compile_node(krate)
 |plan, node| plan.add_node(node)
 ```
@@ -91,7 +137,7 @@ That keeps closures simple while still unlocking the highest-value cases.
 
 ```text
 fn binary_crates(graph: CrateGraph) -> [CrateNode] {
-  graph.crates.filter(|krate| krate.crate_type == @bin)
+  graph.crates.filter(|krate| krate.crate_type == CrateType::Bin)
 }
 ```
 
@@ -105,19 +151,19 @@ means.
 ```text
 fn plan_crates(graph: CrateGraph) -> Unit {
   graph.crates
-    .filter(|krate| krate.crate_type == @bin)
+    .filter(|krate| krate.crate_type == CrateType::Bin)
     .map(|krate| make_compile_node(krate))
-    .each(|node| emit::node{node})
+    .each(|node| emit::node { node })
 }
 
 fn make_compile_node(krate: CrateNode) -> Node {
-  Node{
+  Node {
     id: format::compile_node_id(krate.crate_name, krate.crate_type),
-    kind: @action,
+    kind: NodeKind::Action,
     label: `compile ${krate.crate_name}`,
     metadata: {
-      crate_name: krate.crate_name,
-      crate_type: "bin",
+      "crate_name": krate.crate_name,
+      "crate_type": "bin",
     },
   }
 }
@@ -129,77 +175,100 @@ What this shows:
 - constructor calls and named-payload calls coexist naturally
 - expression closures are enough if helper extraction is cheap
 
-## Sketch 3: `?` inside closures, but not Rust-style
+## Sketch 3: Auto-propagating fallible closures
 
 ```text
-fn plan_edges(graph: CrateGraph) -> Result<Unit, InputError> {
+fn plan_edges(graph: CrateGraph) -> Unit throws InputError {
   graph.crates
-    .flat_map(|krate| edges_for_crate(graph, krate)?)
-    .each(|edge| emit::edge{edge})
-
-  Ok(())
+    .flat_map(|krate| edges_for_crate(graph, krate))
+    .each(|edge| emit::edge { edge })
 }
 
-fn edges_for_crate(graph: CrateGraph, krate: CrateNode) -> Result<[Edge], InputError> {
+fn edges_for_crate(graph: CrateGraph, krate: CrateNode) -> [Edge] throws InputError {
   compile_id = format::compile_node_id(krate.crate_name, krate.crate_type)
 
-  krate.deps.map(|dep| edge_for_dep(graph, compile_id, dep)?)
+  krate.deps.map(|dep| edge_for_dep(graph, compile_id, dep))
 }
 
-fn edge_for_dep(graph: CrateGraph, compile_id: NodeId, dep: DepEdge) -> Result<Edge, InputError> {
-  dep_krate = graph.lookup_crate(dep.crate_id)?
+fn edge_for_dep(graph: CrateGraph, compile_id: NodeId, dep: DepEdge) -> Edge throws InputError {
+  dep_krate = graph.lookup_crate(dep.crate_id)
   dep_id = format::compile_node_id(dep_krate.crate_name, dep_krate.crate_type)
 
-  Ok(Edge{
+  Edge {
     from: dep_id,
     to: compile_id,
-    kind: @always,
+    kind: EdgeKind::Always,
     metadata: {},
-  })
+  }
 }
 ```
 
 What this shows:
 
 - expression closures can still be useful in fallible pipelines
-- `?` inside `flat_map` and `map` closures can mean what users actually want
-- helper extraction keeps closure syntax small without losing the functional
-  shape
+- no `?` is needed
+- errors still propagate out of the enclosing rule automatically
 
 This is the main place where Vixen can improve on Rust instead of copying it.
 
-## Sketch 4: Validation stays control-flow-shaped
+## Sketch 4: Local error handling is explicit
+
+If a rule actually wants to inspect the error locally, that becomes the noisy
+path:
+
+```text
+fn validate_registry_entry(name: String, version: String) -> Unit throws InputError {
+  result = catch cargo::registry_package_exists(name, version)
+
+  match result {
+    Result::Ok(exists) => {
+      if !exists {
+        fail MissingRegistryCrate {
+          name: name,
+          version: version,
+        }
+      }
+    }
+    Result::Err(err) => {
+      fail err
+    }
+  }
+}
+```
+
+This is exactly the inversion from Rust:
+
+- propagation is implicit
+- local interception is explicit
+
+## Sketch 5: Validation stays control-flow-shaped
 
 Not everything should be a pipeline.
 
 ```text
-fn validate_registry_dependencies(graph: CrateGraph) -> Result<Unit, InputError> {
+fn validate_registry_dependencies(graph: CrateGraph) -> Unit throws InputError {
   for krate in graph.crates {
     match krate.source {
-      @registry{name, version, checksum} => {
-        exists = cargo::registry_package_exists(name, version)?
+      CrateSource::Registry { name, version, checksum } => {
+        exists = cargo::registry_package_exists(name, version)
         if !exists {
-          return Err{
-            kind: @missing_registry_crate,
+          fail MissingRegistryCrate {
             name: name,
             version: version,
           }
         }
 
-        valid = cargo::registry_checksum_matches(name, version, checksum)?
+        valid = cargo::registry_checksum_matches(name, version, checksum)
         if !valid {
-          return Err{
-            kind: @checksum_mismatch,
+          fail ChecksumMismatch {
             name: name,
             version: version,
           }
         }
       }
-      @path{} => {}
+      CrateSource::Path { .. } => {}
     }
   }
-
-  Ok(())
 }
 ```
 
@@ -210,7 +279,7 @@ This is the important hybrid point:
 
 The language does not need to be ideologically pure.
 
-## Sketch 5: Mutable locals with bang-binding sugar
+## Sketch 6: Mutable locals with bang-binding sugar
 
 Some rules will still want small local accumulators.
 
@@ -233,16 +302,16 @@ metadata = metadata.insert(...)
 
 and does not require making mutation the default.
 
-## Sketch 6: Optional pipeline operator
+## Sketch 7: Optional pipeline operator
 
 If this branch becomes central, a pipeline operator may earn its keep:
 
 ```text
 fn plan_crates(graph: CrateGraph) -> Unit {
   graph.crates
-    |> filter(|krate| krate.crate_type == @bin)
+    |> filter(|krate| krate.crate_type == CrateType::Bin)
     |> map(|krate| make_compile_node(krate))
-    |> each(|node| emit::node{node})
+    |> each(|node| emit::node { node })
 }
 ```
 
@@ -280,7 +349,9 @@ shape of the work.
 - closures are now in v0
 - closure typing needs a real design
 - capture semantics need a design
-- `?` propagation through closures becomes part of the language contract
+- default propagation from within closures becomes part of the language
+  contract
+- `throws`-style function signatures need a real surface design
 - method-like rebinding sugar for `name!.push(x)` needs explicit rules
 
 Those are real costs. They are not free.
@@ -301,10 +372,11 @@ It is:
 My strongest current take is:
 
 - expression closures belong earlier than block closures
-- `?` inside closures is worth designing properly
+- removing `?` is probably correct if propagation becomes the default
+- `fail` is better than overloading `return Err(...)`
 - `name!.push(x)`-style sugar is better than `:=`
-- `emit::node{...}` remains one of the strongest surface ideas across all
-  branches
+- `emit::node { ... }` and `Node { ... }` feel right as one named-payload
+  family
 
 The next good questions for this branch are:
 
@@ -315,3 +387,5 @@ The next good questions for this branch are:
    language model?
 4. Does the language want a pipeline operator in v0, or is method chaining
    enough?
+5. What exact surface should replace `Result<T, E>` and `throws E` in function
+   signatures?

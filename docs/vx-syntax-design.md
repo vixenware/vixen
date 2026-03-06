@@ -27,8 +27,12 @@ Recent active exploration has moved in a few non-baseline directions:
 - away from `:=`
 - toward expression closures for collection transforms
 - toward allowing `?` inside closures with propagation to the enclosing rule
+- toward removing `?` entirely and making propagation the default
+- toward an explicit `fail`-style error path and `catch` for local interception
 - toward treating `Type{...}` and `callee{...}` as one named-payload shape
+- toward writing those named payloads with a space: `Type { ... }`
 - toward `name! = expr` as mutable-binding introduction/shadowing syntax
+- away from Styx-style `@variant` notation and back toward Rust-style enums
 
 Those ideas are still exploratory, but they are the live frontier now.
 
