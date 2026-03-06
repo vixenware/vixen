@@ -8,8 +8,9 @@ typed semantics remain blocked until Kajit has a real HIR crate and internal
 producer/consumer path.
 
 Styx-inspired simplification experiments are tracked separately in
-[vx-styx-inspiration.md](/Users/amos/bearcove/vixen/docs/vx-styx-inspiration.md)
-so the baseline and the experimental direction stay distinct.
+[vx-styx-inspiration.md](/Users/amos/bearcove/vixen/docs/vx-styx-inspiration.md),
+but the active sketch direction is now the functional branch in
+[vx-program-sketches-functional.md](/Users/amos/bearcove/vixen/docs/vx-program-sketches-functional.md).
 
 ## Status
 
@@ -21,35 +22,16 @@ Current intent:
 - do **not** treat `vx-plan`'s current `vx_lang` prototype as the new source of
   truth
 
-Recent active exploration has moved in a few non-baseline directions:
+The current design direction is:
 
-- away from `do/end`
-- away from `:=`
-- toward expression closures for collection transforms
-- toward allowing `?` inside closures with propagation to the enclosing rule
-- toward removing `?` entirely and making propagation the default
-- toward an explicit `fail`-style error path and `catch` for local interception
-- toward treating `Type{...}` and `callee{...}` as one named-payload shape
-- toward writing those named payloads with a space: `Type { ... }`
-- toward `name! = expr` as mutable-binding introduction/shadowing syntax
-- toward `place.method!(args)` as rebinding sugar on mutable places
-- away from Styx-style `@variant` notation and back toward Rust-style enums
-
-Those ideas are still exploratory, but they are the live frontier now.
-
-## Overall Direction
-
-The language should feel Rust-like, but with sharp limits similar in spirit to
-what Starlark is to Python:
-
-- familiar syntax
-- much smaller surface
-- intentionally restricted power
-- deterministic by default
-- not Turing-complete by design
-
-The current prototype in [vx_lang.rs](/Users/amos/bearcove/vixen/crates/vx-plan/src/vx_lang.rs)
-is a legacy design artifact, not the target language.
+- no `do/end`
+- no `?`
+- no Styx-style `@tag` values
+- no separate mutable-binding sigil
+- method chaining instead of a pipeline operator, for now
+- default error propagation with explicit `catch` / `fail`
+- `match` as the branching surface
+- short unqualified variant/constructor forms inferred from type context
 
 ## Parsing Architecture
 
@@ -65,175 +47,369 @@ That means:
 - the real parser is not tree-sitter
 - the CST is the front-end structural backbone
 
-## Syntax Decisions So Far
+## Surface Model
 
-### General feel
+### Blocks, values, and punctuation
 
-- Rust-like surface syntax
-- explicit syntax over clever magic
-- familiar punctuation and declarations where possible
-
-### Statements and blocks
-
-- statements end with `;`
-- the last expression in a block may omit `;`
-- blocks use `{ ... }`
-- grouping and calls use `( ... )`
+- ordinary blocks use `{ ... }`
+- bare `{ ... }` in expression position is a map/object literal
+- bare `{}` in expression position means an empty map/object
+- `()` is the unit value
 - list literals use `[ ... ]`
-- map literals use `{ key: value, ... }`
-
-### Bindings and mutation
-
-- `let` introduces bindings
-- assignment is separate from binding
-- values are immutable by default
-- `mut` is explicit, Rust-style
-- field assignment is allowed
-- index assignment is allowed
-- collection mutation is allowed
+- template strings use backticks with `${expr}` interpolation
 
 Examples:
 
-```rust
-let x = 1;
-let mut plan = RulePlan::new();
-node.label = "compile";
-items[i] = value;
+```text
+metadata = { crate_name: krate.crate_name, crate_type: "bin" }
+unit = ()
+label = `compile ${krate.crate_name}`
 ```
 
-### Collections
+The exact punctuation policy is still open. Current sketches intentionally use
+light punctuation and usually omit semicolons.
 
-- list literals use `[ ... ]`
-- map literals use `{ key: value, ... }`
-- `[]` is reserved for list indexing
-- maps should use methods such as `get`, `insert`, and `remove`
+### Bindings, shadowing, and places
 
-Current bias:
+Plain assignment always introduces a fresh binding, even in the same scope.
 
-- avoid ambiguous missing-key behavior for maps in v0
-- defer set literal syntax until there is a real need
-
-### Strings
-
-- ordinary string literals use double quotes
-- template strings use backticks
-- interpolation uses TypeScript-style `${expr}`
-
-Examples:
-
-```rust
-"compile"
-`compile ${krate.crate_name}`
+```text
+x = 1
+x = x + 1
 ```
 
-Current bias:
+This means `=` is binding/shadowing, not slot update. That matches the current
+value-semantics direction.
 
-- template strings should be the preferred ergonomic way to build labels and
-  similar user-facing strings
-- `format::concat(...)`-style construction should not be the default surface
-  style
+Explicit place updates still exist:
 
-### Functions
+```text
+node.label = "compile"
+items[i] = value
+```
 
-- functions use `fn`
-- type annotations look Rust-like
-- local type inference is allowed where obvious
+Method-like writeback uses a bang to mark the hidden rewrite:
 
-Example:
+```text
+items.push!(node)
+map.insert!(key, value)
+graph.crates.push!(node)
+```
 
-```rust
-fn plan_crates(graph: CrateGraph) -> RulePlan {
-    graph.into_plan()
+The intended reading is:
+
+```text
+items = items.push(node)
+map = map.insert(key, value)
+graph.crates = graph.crates.push(node)
+```
+
+Current rules:
+
+- `place.method!(...)` is only valid for a place expression
+- the rewritten call must return **exactly** the same type as the place
+- plain field/index assignment stays explicit and does not need `!`
+- because `=` shadows, closures capture values, not shared mutable cells
+
+There is currently no separate `name! = expr` mutable-binding form.
+
+### Constructors, variants, and type-directed short forms
+
+Both qualified and short forms are legal:
+
+```text
+CrateType::Bin
+Bin
+
+CrateSource::Registry { name, version, checksum }
+Registry { name, version, checksum }
+```
+
+The rule is:
+
+- short forms are allowed in any position
+- the compiler uses whole-program type information to infer the missing enum or
+  type name
+- inference only succeeds when there is a real source of expected type and the
+  result is unambiguous
+- otherwise it is an error and the user must write the qualified form
+
+This is **not** a namespace search rule for ordinary calls. It is specifically
+about type-directed resolution of constructors and variants.
+
+The same construction surface is used for structs and enum variants:
+
+```text
+Node { id, kind, label }
+Registry { name, version, checksum }
+```
+
+`Foo::Bar` is also a real type:
+
+```text
+enum Foo {
+  Bar { x: U32 }
+}
+
+bar: Foo::Bar = Bar { x: 1 }
+value: Foo = bar
+```
+
+Current intent:
+
+- a variant type coerces to its parent enum where needed
+- refinement in the other direction uses `as`
+
+```text
+bar = value as Foo::Bar
+```
+
+which returns `Option<Foo::Bar>`.
+
+### Maps and objects
+
+Plain brace literals are ordinary maps/objects and can omit quotes around
+identifier keys:
+
+```text
+metadata = { crate_name: krate.crate_name, crate_type: "bin" }
+```
+
+Typed construction uses the same field surface with a leading type or variant:
+
+```text
+Node { id, kind, label, metadata }
+Registry { name, version, checksum }
+```
+
+This keeps the parser and the surface coherent:
+
+- `{ foo: bar }` is a plain object/map literal
+- `Node { foo: bar }` is typed construction
+
+### Functions, closures, and methods
+
+Functions use `fn` and require parameter annotations:
+
+```text
+fn make_node(krate: CrateNode) -> Node { ... }
+```
+
+Closures use arrow syntax and infer parameter types from context:
+
+```text
+(x) => x.name
+(x, y) => combine(x, y)
+() => None
+```
+
+Both single-expression and block-bodied closures are allowed:
+
+```text
+(dep) => edge_for_dep(graph, compile_id, dep)
+
+(dep) => {
+  dep_krate = graph.lookup_crate(dep.crate_id)
+  Edge { ... }
 }
 ```
 
-### Types
+The last expression in a block-bodied closure is its value by default.
 
-- user-defined `struct` is wanted
-- user-defined `enum` is wanted
-- `Option` and `Result` are in
-- type syntax should look Rust-like
-- no trait machinery in v0
+Methods are surface sugar over ordinary functions. There is no distinct method
+declaration form in v0.
+
+```text
+x.f(y, z)
+```
+
+desugars to:
+
+```text
+f(x, y, z)
+```
+
+Current working assumptions:
+
+- method lookup is static
+- any **visible** function/prelude item whose first parameter matches the
+  receiver type may be called with method syntax
+- if multiple candidates fit, it is an ambiguity error
+- if none fit, it is an error
+- there is no dynamic dispatch, trait machinery, or overloading-based method
+  system in v0
 
 ### Control flow
 
-- `if`
-- `for .. in ..`
-- `match`
-- `return`
+The current direction is `match`-centric and intentionally experiments with no
+`if`.
 
-`match` should support enum destructuring early enough to make enums actually
-usable.
+There are two distinct `match` forms.
 
-### Methods
+Scrutinee match:
 
-- method-call syntax is wanted
-
-Current assumption:
-
-- methods use value receivers, not references
-- `self` is just a normal receiver binding
-- `mut self` means the receiver binding is mutable inside the method body
-- methods in v0 are surface sugar over statically-known builtins or host/domain
-  operations, unless/until real method definitions are added
-- `.` on values is primarily field access
-- if method syntax exists, it should desugar cleanly
-- user-defined method definitions are still deferred
-
-Example:
-
-```rust
-deps.len()
-graph.root()
-```
-
-Receiver mutability should follow the ordinary binding rules:
-
-```rust
-fn insert(mut self, key: String, value: String) -> Self {
-    self
-}
-
-fn rewrite(self) -> Self {
-    let mut this = self;
-    this
+```text
+match source {
+  Registry { name, version, checksum } => ...
+  Path { path } => ...
+  _ => ...
 }
 ```
 
-This does **not** imply traits, references, or full Rust-style method
-resolution in v0.
+Guard-only branching:
 
-### Namespaces
+```text
+match {
+  x > 0 => positive
+  x < 0 => negative
+  _ => zero
+}
+```
 
-- namespace-qualified items use Rust-style `::`
-- `.` is reserved for field access and method calls on values
+Rules:
+
+- scrutinee match and guard-only match are separate forms
+- scrutinee-match arms do **not** have extra guards in v0
+- guard-only match is checked top-to-bottom; the first matching arm wins
+- `_` is the fallback arm
+- patterns support literals plus record/variant destructuring
+- field punning and rename are allowed
 
 Examples:
 
-```rust
-format::compile_node_id(name, crate_type)
-emit::node(node)
-env::profile()
+```text
+Registry { name, version }
+Registry { name: crate_name, version }
+Some(value)
+Ok(result)
+Err(err)
 ```
 
-This keeps call syntax unambiguous:
+Exhaustiveness is intentionally conservative for now. The current bias is:
 
-- `foo.bar` means field or method
-- `foo::bar(...)` means namespaced item
+- require `_` unless coverage is locally obvious enough to prove cheaply
 
-### Error handling
+### Breakable scopes, `return`, and `continue`
 
-- `Option`
-- `Result`
-- `match`
-- `return`
-- `?` is acceptable in v0 if it is only exact-type early-return sugar
+Blocks, closures, and loops are breakable.
+
+```text
+@choose {
+  break choose 42
+}
+```
+
+Labels use an `@name` marker on the target and a plain name in the `break`:
+
+```text
+loop @outer {
+  break outer
+}
+
+@choose {
+  break choose 42
+}
+```
+
+Current intent:
+
+- plain `break value` exits the nearest breakable thing
+- closures are breakable too
+- `continue` is loop-only
+- `return value` exits the enclosing function, even from inside a closure
+
+That gives a useful split:
+
+- `break value` is local to the nearest breakable scope/closure/loop
+- `return value` is non-local to the enclosing function
+
+## Errors and Absence
+
+Errors are surfaced at function boundaries with `throws`:
+
+```text
+fn plan_edges(graph: CrateGraph) -> Unit throws InputError { ... }
+```
+
+Inside a throwing function:
+
+- fallible calls yield their success value on the happy path
+- errors propagate automatically by default
+- `fail err` exits the current `throws` boundary with an error
+- `catch expr` suppresses propagation and yields an ordinary `Result`
+
+Example:
+
+```text
+dep_krate = graph.lookup_crate(dep.crate_id)
+
+match catch cargo::registry_package_exists(name, version) {
+  Ok(exists) => ...
+  Err(err) => fail err
+}
+```
+
+Absence is modeled with `Option`, not `null`.
+
+```text
+None
+Some(value)
+```
+
+`or` has `??`-style semantics:
+
+- it falls back only on absence
+- it does **not** treat `false` or `0` as absent
+
+Examples:
+
+```text
+name = maybe_name or "default"
+registry = value as CrateSource::Registry or fail ExpectedRegistrySource { value }
+```
+
+### Result and Option surface
+
+`Option` and `Result` keep Rust-style variants:
+
+```text
+Some(value)
+None
+Ok(value)
+Err(err)
+```
+
+Pattern matching uses those variants directly because they are ordinary enums.
+
+The default vocabulary/prelude should also make these ordinary helper methods
+available:
+
+```text
+value.some()
+value.ok()
+value.err()
+```
+
+These are intended as ordinary prelude methods, not magical syntax forms.
+
+## Default Vocabulary
+
+Vixen should have a real default vocabulary.
 
 Current bias:
 
-- support straightforward typed error handling
-- avoid Rust trait-heavy conversion machinery
-- no exception model in v0 unless a compelling reason appears
+- collection combinators and utilities are in the prelude
+- method chaining is the primary composition style
+- no pipeline operator in v0
+
+Examples of the intended feel:
+
+```text
+graph.crates
+  .filter((krate) => krate.crate_type == Bin)
+  .map((krate) => make_compile_node(krate))
+  .each((node) => emit::node { node })
+```
 
 ## Explicit v0 Restrictions
 
@@ -241,102 +417,20 @@ These restrictions are intentional, not temporary accidents.
 
 - no recursion
 - no `while`
-- no bare `loop`
-- no closures in v0
-- no traits in v0
-- no imports in v0
 - no references (`&`, `&mut`) in v0
-- no set literal syntax in v0
-- no bitwise operators in v0 unless a real need appears
+- no traits / impl blocks / dynamic dispatch in v0
+- no pipeline operator in v0
 
 Termination constraint:
 
 - the language is intended to be non-Turing-complete
 - iteration must be over finite collections or other obviously bounded domains
 
-## Multi-file and Modules
+## Still Open
 
-This is still open, but the current position is:
-
-- multi-file will probably matter
-- imports/modules are not part of the first parser pass
-- do not design the first syntax pass around a module system yet
-
-## Semantics Deferred on Purpose
-
-The following are deliberately **not** being committed yet:
-
-- typed lowering to Kajit HIR
-- interpreter semantics for the new language
-- final builtin execution model
-- ownership/borrowing semantics beyond ordinary mutable bindings
-- exact module/import model
-
-## Value Semantics
-
-Current design bias:
-
-- the language has value semantics
-- the language does **not** expose mutable references or aliasing semantics
-- methods and functions conceptually receive values, not references
-
-That does **not** mean implementations must perform deep copies.
-
-Implementation freedom should include:
-
-- structural sharing
-- copy-on-write
-- uniqueness-based in-place mutation
-- field-splitting
-- scalar replacement
-- other equivalent optimizations
-
-The rule is:
-
-- programs behave *as if* values are passed and returned by value
-- implementations may optimize representation and update strategy as long as the
-  observable behavior matches value semantics
-
-This matters especially for large collections used in build planning. The
-language model should stay simple even when the runtime representation is highly
-optimized.
-
-## Capabilities
-
-This needs a dedicated follow-up discussion.
-
-Current high-level view:
-
-- rules mostly describe build steps, graph nodes, and edges
-- the language should not casually expose ambient side effects
-- deterministic/default-safe behavior matters
-
-But the exact capability model should be documented separately from syntax.
-
-## Open Questions
-
-1. Do we eventually want limited inherent `impl` blocks without traits, or keep
-   methods as sugar over builtins/domain ops for longer?
-2. What is the smallest acceptable module system once multi-file becomes
-   necessary?
-3. What collection APIs exist in v0 if closures are absent?
-4. What operators are actually needed for real rule code, beyond arithmetic,
-   comparison, and boolean logic?
-5. What syntax should construct sets, if/when sets become necessary?
-
-## Next Safe Work
-
-Safe to build now:
-
-- syntax examples and corpus
-- `rowan` CST crate
-- tree-sitter grammar
-- syntax highlighting queries
-- parser diagnostics and spans
-- CST-backed LSP features
-
-Not safe yet:
-
-- new typed semantic IR
-- new interpreter
-- Kajit-targeted lowering
+- exact module/import system
+- exact punctuation policy, including semicolons and commas
+- casing/style conventions for constructors and variants
+- exact strength of v0 exhaustiveness checking
+- whether method lookup should stay strictly limited to visible names plus the
+  prelude, or gain a broader discovery rule later

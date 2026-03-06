@@ -10,7 +10,7 @@ The current active branch is:
 
 - [vx-program-sketches-functional.md](/Users/amos/bearcove/vixen/docs/vx-program-sketches-functional.md)
   explores a more expression-oriented direction with closures, collection
-  combinators, and pipelines.
+  combinators, `match`-centric control flow, and default error propagation.
 
 Older sketch branches were intentionally removed once the design moved away from
 them.
@@ -25,14 +25,14 @@ Current constraints for these sketches:
 - closures now belong in the active exploration
 - no recursion
 - functional transforms now look closer to the actual shape of Vixen rule code
-- pipelines are under active consideration
+- method chaining is preferred over a pipeline operator, for now
 - error handling is being rethought away from Rust's `?`/`Result` surface
 - the real pressure point is now less about methods and more about where we
-  still want explicit reassignment, output emission, and typed diagnostics
+  still want explicit writeback, output emission, and typed diagnostics
 
 That suggests the next syntax discussion should focus less on `self` and more
 on:
 
-- local mutation model
+- local writeback model
 - output-emission model
 - error/reporting model
