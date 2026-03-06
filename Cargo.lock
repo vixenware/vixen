@@ -3058,7 +3058,6 @@ name = "vx"
 version = "0.1.0"
 dependencies = [
  "camino",
- "dirs",
  "eyre",
  "facet",
  "facet-json",
@@ -3067,7 +3066,6 @@ dependencies = [
  "libc",
  "moire 1.0.0",
  "owo-colors",
- "roam",
  "roam-core",
  "roam-stream",
  "roam-types",
@@ -3078,7 +3076,6 @@ dependencies = [
  "tracing-subscriber",
  "ulid",
  "unicode-width",
- "vx-http",
  "vx-io",
  "vx-report",
  "vx-store-proto",
@@ -3144,7 +3141,6 @@ dependencies = [
  "hyper-util",
  "moire 1.0.0",
  "thiserror 2.0.18",
- "tokio",
  "tracing",
  "vx-io",
 ]
@@ -3294,7 +3290,6 @@ dependencies = [
  "futures-util",
  "hex",
  "http-body-util",
- "jiff",
  "moire 1.0.0",
  "pin-project-lite",
  "roam",
@@ -3327,7 +3322,6 @@ dependencies = [
  "facet-postcard",
  "hex",
  "roam",
- "roam-stream",
 ]
 
 [[package]]
@@ -3380,7 +3374,6 @@ dependencies = [
  "cfg-if",
  "facet",
  "facet-error",
- "facet-json",
  "fastrand",
  "fuse3",
  "futures-util",
@@ -3404,7 +3397,6 @@ name = "vx-vfs-bench"
 version = "0.1.0"
 dependencies = [
  "camino",
- "roam",
  "tokio",
  "tracing-subscriber",
  "vixenfs-proto",
@@ -3422,13 +3414,8 @@ dependencies = [
  "fastcdc",
  "fastrand",
  "figue",
- "moire 1.0.0",
- "roam",
- "roam-core",
- "roam-stream",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "ur-taking-me-with-you",
  "vx-io",
  "vx-store-proto",
@@ -3496,7 +3483,6 @@ dependencies = [
  "tokio-test-lite",
  "tokio-util",
  "tracing",
- "ur-taking-me-with-you",
  "vx-cache",
  "vx-io",
  "vx-manifest",

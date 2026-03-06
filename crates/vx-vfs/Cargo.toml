@@ -26,7 +26,6 @@ roam-core = { workspace = true }
 roam-types = { workspace = true }
 shm-primitives = { workspace = true }
 libc = { workspace = true }
-facet-json = { workspace = true }
 fastrand = { workspace = true }
 vx-fskit = { path = "../vx-fskit" }
 

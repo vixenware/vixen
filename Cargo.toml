@@ -32,7 +32,6 @@ vx-rs = { path = "crates/vx-rs" }
 vx-vfs = { path = "crates/vx-vfs" }
 vx-vfsd = { path = "crates/vx-vfsd" }
 vx-vfs-types = { path = "crates/vx-vfs-types" }
-parking_lot = "0.12"
 
 # facet ecosystem
 facet = { version = "0.44.1", features = ["jiff02", "camino"] }

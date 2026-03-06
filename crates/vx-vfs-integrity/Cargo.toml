@@ -18,14 +18,8 @@ vx-store-proto = { workspace = true }
 vx-vfsd = { workspace = true }
 vx-io = { workspace = true }
 
-# RPC
-roam = { workspace = true }
-roam-core = { workspace = true }
-roam-stream = { workspace = true }
-
 # Async runtime
 tokio = { workspace = true }
-moire = { workspace = true }
 
 # CLI
 facet = { workspace = true }
@@ -38,7 +32,6 @@ eyre = { workspace = true }
 fastcdc = { workspace = true }
 fastrand = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
 vx-tracing = { workspace = true }
 
