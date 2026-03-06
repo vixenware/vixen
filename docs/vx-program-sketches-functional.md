@@ -94,25 +94,33 @@ Current bias for this branch:
 ```text
 node_id = format::compile_node_id(name, ty)
 nodes! = []
-nodes!.push(node)
+nodes.push!(node)
 ```
 
 With the reading:
 
 - `name = expr` introduces an immutable binding
 - `name! = expr` introduces a mutable binding by shadowing earlier bindings
-- `name!.method(args)` is sugar for rebinding the current mutable `name`
+- `name.method!(args)` is sugar for rebinding the current mutable `name`
 
 So:
 
 ```text
 nodes! = []
-nodes!.push(node)
-nodes!.push(other)
+nodes.push!(node)
+nodes.push!(other)
 ```
 
 behaves like repeated rebinding of the same mutable local, without needing
 `let mut` or `nodes = nodes.push(...)`.
+
+In v0, the receiver for `method!` should probably stay narrow:
+
+- the receiver must be a mutable binding name, not an arbitrary expression
+- `nodes.push!(node)` is fine
+- `graph.crates.push!(node)` should probably be invalid
+
+That keeps the sugar explicit about what is being rebound.
 
 This also means:
 
@@ -305,8 +313,8 @@ Some rules will still want small local accumulators.
 ```text
 fn node_metadata(krate: CrateNode) -> {String: String} {
   metadata! = {}
-  metadata!.insert("crate_name", krate.crate_name)
-  metadata!.insert("crate_type", "bin")
+  metadata.insert!("crate_name", krate.crate_name)
+  metadata.insert!("crate_type", "bin")
   metadata
 }
 ```
@@ -371,7 +379,7 @@ shape of the work.
 - default propagation from within closures becomes part of the language
   contract
 - `throws`-style function signatures need a real surface design
-- method-like rebinding sugar for `name!.push(x)` needs explicit rules
+- method-like rebinding sugar for `name.push!(x)` needs explicit rules
 
 Those are real costs. They are not free.
 
@@ -393,14 +401,14 @@ My strongest current take is:
 - expression closures belong earlier than block closures
 - removing `?` is probably correct if propagation becomes the default
 - `fail` is better than overloading `return Err(...)`
-- `name!.push(x)`-style sugar is better than `:=`
+- `name.push!(x)`-style sugar is better than `:=`
 - `emit::node { ... }` and `Node { ... }` feel right as one named-payload
   family
 
 The next good questions for this branch are:
 
 1. Should `if` remain at all, or should boolean branching collapse into `match`?
-2. Does `name!.push(x)` feel right, or is a different mutable-binding sugar
+2. Does `name.push!(x)` feel right, or is a different mutable-binding sugar
    cleaner?
 3. Should constructors and named-payload calls be unified explicitly in the
    language model?

@@ -195,7 +195,7 @@ fn binary_crates(graph: CrateGraph) -> [CrateNode] do
 
   for(krate <- graph.crates) do
     if(krate.crate_type == @bin) do
-      out!.push(krate)
+      out.push!(krate)
     end
   end
 
@@ -222,7 +222,7 @@ end
 What this shows:
 
 - `out! = []` introduces a mutable local without another keyword
-- `out!.push(krate)` reads like mutation of that local binding
+- `out.push!(krate)` reads like mutation of that local binding
 - immutable bindings stay quiet while mutable writes stand out
 - method calls can exist without defining the whole language around them
 
@@ -329,7 +329,7 @@ This is not "S-expressions but not really", but it is moving toward:
 
 ## What Still Feels Open
 
-- whether `name!.push(x)` should be the canonical mutation sugar, or whether
+- whether `name.push!(x)` should be the canonical mutation sugar, or whether
   mutation should stay as explicit rebinding
 - whether `if(condition)` wants mandatory parens
 - whether `match` arms want `=>` or another shape
@@ -352,5 +352,5 @@ The strongest moves are:
 If this branch is worth continuing, the next comparison should probably be:
 
 1. `if(cond) do` vs `if cond do`
-2. `name!.push(x)` vs explicit rebinding
+2. `name.push!(x)` vs explicit rebinding
 3. `emit::node{...}` vs `emit::node(Node{...})`
