@@ -81,6 +81,18 @@ node.label = "compile";
 items[i] = value;
 ```
 
+### Collections
+
+- list literals use `[ ... ]`
+- map literals use `{ key: value, ... }`
+- `[]` is reserved for list indexing
+- maps should use methods such as `get`, `insert`, and `remove`
+
+Current bias:
+
+- avoid ambiguous missing-key behavior for maps in v0
+- defer set literal syntax until there is a real need
+
 ### Functions
 
 - functions use `fn`
@@ -123,6 +135,8 @@ Current assumption:
   operations
 - `.` on values is primarily field access
 - if method syntax exists, it should desugar cleanly
+- user-defined method definitions are still deferred
+- receiver syntax is still open
 
 Example:
 
@@ -139,12 +153,13 @@ This does **not** imply traits or full Rust-style method resolution in v0.
 - `Result`
 - `match`
 - `return`
+- `?` is acceptable in v0 if it is only exact-type early-return sugar
 
 Current bias:
 
 - support straightforward typed error handling
 - avoid Rust trait-heavy conversion machinery
-- `?` is still open
+- no exception model in v0 unless a compelling reason appears
 
 ## Explicit v0 Restrictions
 
@@ -197,16 +212,16 @@ But the exact capability model should be documented separately from syntax.
 
 ## Open Questions
 
-1. Is method syntax pure sugar in v0, or do we want limited inherent `impl`
-   blocks without traits?
-2. Do we want `?` in v0, or only `match`/`return`?
+1. What should future receiver syntax look like if/when method definitions are
+   added?
+2. Do we eventually want limited inherent `impl` blocks without traits, or keep
+   methods as sugar over builtins/domain ops for longer?
 3. What is the smallest acceptable module system once multi-file becomes
    necessary?
 4. What collection APIs exist in v0 if closures are absent?
 5. What operators are actually needed for real rule code, beyond arithmetic,
    comparison, and boolean logic?
-6. How should maps and indexing behave on missing keys?
-7. What syntax should construct sets, if/when sets become necessary?
+6. What syntax should construct sets, if/when sets become necessary?
 
 ## Next Safe Work
 
