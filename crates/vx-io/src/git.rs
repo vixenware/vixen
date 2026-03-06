@@ -10,7 +10,7 @@ pub async fn find_git_root(start_path: &Utf8Path) -> Option<Utf8PathBuf> {
 
     loop {
         let git_dir = current.join(".git");
-        if tokio::fs::try_exists(&git_dir).await.unwrap_or(false) {
+        if moire::fs::try_exists(&git_dir).await.unwrap_or(false) {
             return Some(current.to_path_buf());
         }
 
@@ -26,7 +26,7 @@ pub async fn find_git_root(start_path: &Utf8Path) -> Option<Utf8PathBuf> {
 /// - `/.vx/` (directory-only)
 /// - `.vx/` (directory everywhere)
 async fn gitignore_contains_vx(gitignore_path: &Utf8Path) -> bool {
-    let Ok(content) = tokio::fs::read_to_string(gitignore_path).await else {
+    let Ok(content) = moire::fs::read_to_string(gitignore_path).await else {
         return false;
     };
 
@@ -63,7 +63,7 @@ pub async fn ensure_vx_gitignored(workspace_root: &Utf8Path) -> Result<bool, std
     let gitignore_path = git_root.join(".gitignore");
 
     // Check if already ignored
-    if tokio::fs::try_exists(&gitignore_path)
+    if moire::fs::try_exists(&gitignore_path)
         .await
         .unwrap_or(false)
         && gitignore_contains_vx(&gitignore_path).await
@@ -74,21 +74,21 @@ pub async fn ensure_vx_gitignored(workspace_root: &Utf8Path) -> Result<bool, std
     // Append entry to .gitignore
     let entry = "\n# vx build system cache (auto-added by vx)\n/.vx\n";
 
-    if tokio::fs::try_exists(&gitignore_path)
+    if moire::fs::try_exists(&gitignore_path)
         .await
         .unwrap_or(false)
     {
         // File exists, append
-        let mut content = tokio::fs::read_to_string(&gitignore_path).await?;
+        let mut content = moire::fs::read_to_string(&gitignore_path).await?;
         // Ensure there's a trailing newline before our entry
         if !content.ends_with('\n') {
             content.push('\n');
         }
         content.push_str(entry);
-        tokio::fs::write(&gitignore_path, content).await?;
+        moire::fs::write(&gitignore_path, content).await?;
     } else {
         // File doesn't exist, create it
-        tokio::fs::write(&gitignore_path, entry.trim_start()).await?;
+        moire::fs::write(&gitignore_path, entry.trim_start()).await?;
     }
 
     Ok(true)

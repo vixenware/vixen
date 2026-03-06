@@ -21,17 +21,60 @@ use camino::Utf8PathBuf;
 use eyre::Result;
 use facet::Facet;
 use figue as args;
-use roam_stream::{HandshakeConfig, NoDispatcher, accept};
+use moire::task::FutureExt;
+use roam_core::acceptor;
+use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
+use roam_stream::StreamLink;
+use roam_types::{ConnectionSettings, Metadata};
 use std::collections::HashMap;
 use std::sync::Arc;
+use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
+use vx_io::spawn::ServiceHandle;
 use vx_runner_proto::RunnerDispatcher;
 use vx_store_proto::{Blake3Hash, StoreClient};
 
 use crate::vfsd_client::VfsdClient as VfsClient;
 
-pub type CasCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
-pub type VfsdCaller = roam_stream::Client<vx_io::net::EndpointConnector, NoDispatcher>;
+pub type CasCaller = roam_core::DriverCaller;
+pub type VfsdCaller = roam_core::DriverCaller;
+
+#[derive(Clone)]
+struct RunnerVirtualAcceptor {
+    boot_service: vx_io::boot::BootService<RunnerService>,
+}
+
+impl ConnectionAcceptor for RunnerVirtualAcceptor {
+    fn accept(
+        &self,
+        _conn_id: roam_types::ConnectionId,
+        peer_settings: &ConnectionSettings,
+        _metadata: &[roam_types::MetadataEntry],
+    ) -> std::result::Result<AcceptedConnection, Metadata<'static>> {
+        let Some(exec) = self.boot_service.gate().service().cloned() else {
+            return Err(vec![]);
+        };
+
+        let parity = peer_settings.parity.other();
+        Ok(AcceptedConnection {
+            settings: ConnectionSettings {
+                parity,
+                max_concurrent_requests: peer_settings.max_concurrent_requests,
+            },
+            metadata: vec![],
+            setup: Box::new(move |handle| {
+                let dispatcher = RunnerDispatcher::new(exec);
+                moire::task::spawn(
+                    async move {
+                        let mut driver = Driver::new(handle, dispatcher);
+                        driver.run().await;
+                    }
+                    .named("runner_virtual_driver"),
+                );
+            }),
+        })
+    }
+}
 
 pub(crate) fn runner_mount_base() -> Utf8PathBuf {
     // Option 1: VX_HOME-based path (works with FSKit, but has system policy restrictions on unsigned binaries)
@@ -40,20 +83,7 @@ pub(crate) fn runner_mount_base() -> Utf8PathBuf {
             .expect("VX_HOME not set — vx-runner must be launched by `vx` or with VX_HOME set"),
     );
 
-    vx_home.join("vixen").join("runner")
-
-    // Option 2: /Volumes path (avoids system policy restrictions, but FSKit mount fails)
-    // let base = if cfg!(target_os = "macos") {
-    //     "/Volumes"
-    // } else {
-    //     "/tmp"
-    // };
-    // let suffix = if std::env::var("VX_TEST").is_ok() {
-    //     "vixenfs-test"
-    // } else {
-    //     "vixenfs"
-    // };
-    // Utf8PathBuf::from(format!("{}/{}", base, suffix))
+    vx_home.join("vfs")
 }
 
 /// vx-runner - Worker daemon
@@ -81,26 +111,20 @@ struct Args {
 }
 
 fn main() -> Result<()> {
+    // On Windows, detect MSVC toolchain and inject env vars (LIB, INCLUDE, etc.)
+    // so that rustc can find link.exe even when not launched from a Developer Command Prompt.
+    // Must happen before tokio runtime starts (set_var requires single-threaded context).
+    #[cfg(windows)]
+    detect_msvc_environment();
+
     // Create a new process group for vx-runner and all its children.
     // The reaper watches our PID and kills this entire group if we die.
     #[cfg(target_os = "macos")]
     spawn_reaper();
 
-    peeps::threads::install_sigprof_handler();
-    peeps::threads::register_thread("main");
-    peeps::tasks::init_task_tracking();
-
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
-        .on_thread_start(|| {
-            peeps::threads::register_thread(
-                std::thread::current().name().unwrap_or("tokio-worker"),
-            );
-        })
-        .on_thread_stop(|| {
-            peeps::threads::deregister_thread();
-        })
         .build()?;
     rt.block_on(async_main())
 }
@@ -111,11 +135,6 @@ async fn async_main() -> Result<()> {
 
     // Initialize tracing
     vx_tracing::init_service("vx_runner=info");
-
-    // Initialize peeps instrumentation
-    peeps::init();
-    #[cfg(unix)]
-    peeps::install_sigusr1("vx-runner");
 
     tracing::info!("hello from vixen-runner");
 
@@ -131,105 +150,74 @@ async fn async_main() -> Result<()> {
     .run()
     .unwrap();
 
-    let store_endpoint = Endpoint::parse(&args.store)?;
     let bind_endpoint = Endpoint::parse(&args.listen)?;
-    let vfsd_endpoint = Endpoint::parse(&args.vfsd)?;
 
-    // Bind listener, connect to store, and spawn+connect to vx-vfsd — all in parallel
-    use vx_io::spawn::ServiceBuilder;
-
-    let mount_path = runner_mount_base();
-
-    let store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone(), NoDispatcher)
-        .caller_name("vx-runner")
-        .connect_only();
-
-    let vfsd_builder = ServiceBuilder::new("vx-vfsd", vfsd_endpoint.clone(), NoDispatcher)
-        .caller_name("vx-runner")
-        .args(&[
-            "--mount",
-            mount_path.as_str(),
-            "--store",
-            &store_endpoint.display(),
-        ])
-        .env("VX_HOME", args.vx_home.as_str());
-
-    let (runner_listener, store_handle, mut vfsd_handle) = tokio::try_join!(
-        async { Listener::bind(&bind_endpoint).await },
-        store_builder.connect(),
-        vfsd_builder.connect(),
-    )?;
+    // Bind listener BEFORE booting — so parent can connect immediately.
+    let mut runner_listener = Listener::bind(&bind_endpoint).await?;
     tracing::info!("Runner RPC bound on {}", bind_endpoint);
 
-    // Watch for vx-vfsd dying — if it does, we're useless.
-    if let Some(mut vfsd_child) = vfsd_handle.child.take() {
-        peeps::tasks::spawn_tracked("vfsd_death_watcher", async move {
-            let status = vfsd_child.wait().await;
-            tracing::error!(?status, "vx-vfsd exited unexpectedly");
-            std::process::exit(1);
-        });
+    // Set up boot gate — root connections get Boot service only.
+    let (gate, boot_tx) = BootGate::<RunnerService>::new();
+
+    // Boot in background: connect to store, spawn vfsd, create runner service.
+    {
+        let gate = Arc::clone(&gate);
+        let store_addr = args.store.clone();
+        let vfsd_addr = args.vfsd.clone();
+        let vx_home = args.vx_home.clone();
+        moire::task::spawn(
+            async move {
+                tracing::info!("Booting vx-runner");
+                match boot_runner(&store_addr, &vfsd_addr, &vx_home).await {
+                    Ok(service) => {
+                        tracing::info!("vx-runner boot succeeded");
+                        gate.set_service(service);
+                        boot_tx.ready();
+                    }
+                    Err(e) => {
+                        tracing::error!("vx-runner boot failed: {e:#}");
+                        boot_tx.failed(format!("{e:#}"));
+                    }
+                }
+            }
+            .named("runner_boot"),
+        );
     }
 
-    let store = Arc::new(StoreClient::new(store_handle.caller));
-    let vfsd_protocol = vx_vfsd::protocol::VfsdClient::new(vfsd_handle.caller);
-    let vfs = VfsClient::new(vfsd_protocol, store.clone());
+    let boot_service = gate.boot_service();
 
-    // Create Runner service
-    let exec = RunnerService::new(store.clone(), Arc::new(vfs));
-
-    // VFS is now mounted by vx-vfsd, not by vx-runner
-    tracing::info!("VFS provided by vx-vfsd at {}", runner_mount_base());
-
-    // SIGUSR1: dump diagnostics
-    #[cfg(unix)]
-    peeps::tasks::spawn_tracked("sigusr1_handler", async {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut sigusr1 =
-            signal(SignalKind::user_defined1()).expect("failed to register SIGUSR1 handler");
-        loop {
-            sigusr1.recv().await;
-            tracing::info!("SIGUSR1 received, dumping diagnostics");
-            eprintln!("[vx-runner] SIGUSR1 received");
-            eprint!("{}", roam_session::diagnostic::dump_all_diagnostics());
-
-            let dump = peeps::collect_dump("vx-runner", Default::default());
-            peeps::write_dump(&dump);
-        }
-    });
-
-    // Start accepting Runner RPC connections
-    tracing::info!("Starting Runner RPC server");
     loop {
         match runner_listener.accept().await {
             Ok((stream, peer_addr)) => {
-                let exec = exec.clone();
-                peeps::tasks::spawn_tracked(
-                    format!("runner_connection_{}", peer_addr),
+                let boot_service = boot_service.clone();
+                moire::task::spawn(
                     async move {
                         tracing::debug!("Runner connection from {}", peer_addr);
-                        let dispatcher = RunnerDispatcher::new(exec);
-                        let (_handle, _incoming, driver) = match accept(
-                            stream,
-                            HandshakeConfig {
-                                max_payload_size: 256 * 1024 * 1024, // 256 MiB
-                                name: Some("vx-runner".into()),
-                                ..Default::default()
-                            },
-                            dispatcher,
-                        )
-                        .await
+
+                        // Root connection gets Boot service only.
+                        let (reader, writer) = tokio::io::split(stream);
+                        let conduit = BareConduit::<roam_types::MessageFamily, _>::new(
+                            StreamLink::new(reader, writer),
+                        );
+                        let boot_dispatcher = BootDispatcher::new(boot_service.clone());
+                        let (caller, session_handle) = match acceptor(conduit)
+                            .on_connection(RunnerVirtualAcceptor {
+                                boot_service: boot_service.clone(),
+                            })
+                            .establish::<roam_core::NoopCaller>(boot_dispatcher)
+                            .await
                         {
-                            Ok(v) => v,
+                            Ok(parts) => parts,
                             Err(e) => {
                                 tracing::debug!("Runner handshake error from {}: {e}", peer_addr);
                                 return;
                             }
                         };
-                        if let Err(e) = driver.run().await {
-                            tracing::debug!("Runner connection error from {}: {}", peer_addr, e);
-                        }
-                        tracing::debug!("Runner connection from {} closed", peer_addr);
-                    },
+
+                        tracing::debug!("Runner connection from {} established", peer_addr);
+                        vx_io::net::park_session(caller, session_handle).await;
+                    }
+                    .named("runner_connection"),
                 );
             }
             Err(e) => {
@@ -239,21 +227,84 @@ async fn async_main() -> Result<()> {
     }
 }
 
+/// Full boot sequence: connect to store, spawn vfsd, create runner service.
+async fn boot_runner(
+    store_addr: &str,
+    vfsd_addr: &str,
+    vx_home: &Utf8PathBuf,
+) -> Result<RunnerService> {
+    use vx_io::spawn::ServiceBuilder;
+
+    let store_endpoint = Endpoint::parse(store_addr)?;
+    let vfsd_endpoint = Endpoint::parse(vfsd_addr)?;
+    let mount_path = runner_mount_base();
+
+    let store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone())
+        .caller_name("vx-runner")
+        .connect_only();
+
+    let vfsd_builder = ServiceBuilder::new("vx-vfsd", vfsd_endpoint.clone())
+        .caller_name("vx-runner")
+        .args(&[
+            "--mount",
+            mount_path.as_str(),
+            "--store",
+            &store_endpoint.display(),
+        ])
+        .env("VX_HOME", vx_home.as_str());
+
+    // Connect to store and spawn vfsd in parallel.
+    let (store_handle, mut vfsd_handle) =
+        tokio::try_join!(store_builder.connect(), vfsd_builder.connect(),)?;
+
+    // Watch for vx-vfsd dying — if it does, we're useless.
+    if let Some(mut vfsd_child) = vfsd_handle.child.take() {
+        moire::task::spawn(
+            async move {
+                let status = vfsd_child.wait().await;
+                tracing::error!(?status, "vx-vfsd exited unexpectedly");
+                std::process::exit(1);
+            }
+            .named("vfsd_death_watcher"),
+        );
+    }
+
+    // Run boot protocol on both services.
+    let (store_virtual, vfsd_virtual) = tokio::try_join!(
+        store_handle.boot_and_connect(),
+        vfsd_handle.boot_and_connect(),
+    )?;
+
+    let store = Arc::new(StoreClient::new(store_virtual));
+    let vfsd_protocol = vx_vfsd::protocol::VfsdClient::new(vfsd_virtual);
+    let vfs = VfsClient::new(vfsd_protocol, Arc::clone(&store));
+
+    let exec = RunnerService::new(store, Arc::new(vfs), store_handle, vfsd_handle);
+
+    tracing::info!("VFS provided by vx-vfsd at {}", runner_mount_base());
+
+    Ok(exec)
+}
+
 /// Inner Exec service implementation
 pub struct RunnerServiceInner {
     /// CAS client for storing outputs and fetching toolchains
-    pub(crate) cas: Arc<StoreClient<crate::CasCaller>>,
+    pub(crate) cas: Arc<StoreClient>,
 
     /// VFS client for hermetic action execution (via vx-vfsd RPC)
     pub(crate) vfs: Arc<VfsClient>,
+
+    /// Retain the upstream root handles for the lifetime of the runner service.
+    _store_handle: ServiceHandle,
+    _vfsd_handle: ServiceHandle,
 
     /// Single-flight deduplication for toolchain prefix creation.
     /// Concurrent requests for the same toolchain coalesce into one operation.
     /// Stores Ok(prefix_id) or Err(message) — errors are cached too, since a missing
     /// toolchain manifest won't fix itself without a new runner session.
     #[allow(clippy::type_complexity)]
-    toolchain_flights: peeps::locks::DiagnosticAsyncMutex<
-        HashMap<Blake3Hash, Arc<tokio::sync::OnceCell<Result<String, String>>>>,
+    toolchain_flights: moire::sync::SyncMutex<
+        HashMap<Blake3Hash, Arc<moire::sync::OnceCell<Result<String, String>>>>,
     >,
 
     /// Track created prefix IDs to avoid collisions
@@ -266,6 +317,10 @@ pub struct RunnerService {
     inner: Arc<RunnerServiceInner>,
 }
 
+impl vx_io::boot::GracefulShutdown for RunnerService {
+    async fn graceful_shutdown(&self) {}
+}
+
 impl std::ops::Deref for RunnerService {
     type Target = RunnerServiceInner;
 
@@ -275,12 +330,19 @@ impl std::ops::Deref for RunnerService {
 }
 
 impl RunnerService {
-    pub fn new(cas: Arc<StoreClient<crate::CasCaller>>, vfs: Arc<VfsClient>) -> Self {
+    pub fn new(
+        cas: Arc<StoreClient>,
+        vfs: Arc<VfsClient>,
+        store_handle: ServiceHandle,
+        vfsd_handle: ServiceHandle,
+    ) -> Self {
         Self {
             inner: Arc::new(RunnerServiceInner {
                 cas,
                 vfs,
-                toolchain_flights: peeps::locks::DiagnosticAsyncMutex::new(
+                _store_handle: store_handle,
+                _vfsd_handle: vfsd_handle,
+                toolchain_flights: moire::sync::SyncMutex::new(
                     "runner/toolchain_flights",
                     HashMap::new(),
                 ),
@@ -350,17 +412,17 @@ impl RunnerService {
     ) -> RunnerResult<String> {
         // Single-flight: concurrent callers for the same toolchain coalesce into one.
         let cell = {
-            let mut flights = self.toolchain_flights.lock().await;
+            let mut flights = self.toolchain_flights.lock();
             flights
                 .entry(toolchain_manifest_hash)
-                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
+                .or_insert_with(|| Arc::new(moire::sync::OnceCell::new("toolchain_prefix_flight")))
                 .clone()
         };
         let result = cell
             .get_or_init(|| async {
                 self.populate_toolchain_prefix(toolchain_manifest_hash)
                     .await
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| format!("{e:?}"))
             })
             .await;
         match result {
@@ -444,7 +506,8 @@ impl RunnerService {
             .iter()
             .any(|c| c.name == "rustc");
         if has_rustc {
-            let rustc_vfs_path = runner_mount_base().join(&prefix_id).join("bin/rustc");
+            let rustc_bin = format!("bin/rustc{}", std::env::consts::EXE_SUFFIX);
+            let rustc_vfs_path = runner_mount_base().join(&prefix_id).join(&rustc_bin);
             if !rustc_vfs_path.as_std_path().exists() {
                 let mount_base = runner_mount_base();
                 let mount_exists = mount_base.as_std_path().exists();
@@ -575,15 +638,6 @@ impl RunnerService {
     pub(crate) async fn remove_action_prefix(&self, prefix_id: &str) {
         self.vfs.remove_prefix(prefix_id).await;
     }
-
-    /// Get the VFS mount path for an action prefix
-    ///
-    /// This is the path that should be passed to sandboxed processes.
-    /// Format: <mount-base>/<prefix_id>/ where mount-base is /Volumes/vixenfs (macOS) or /tmp/vixenfs (Linux).
-    #[allow(dead_code)] // Will be used for sandbox integration
-    pub(crate) fn get_prefix_mount_path(&self, prefix_id: &str) -> Utf8PathBuf {
-        runner_mount_base().join(prefix_id)
-    }
 }
 
 /// Global handle to the reaper's stdin pipe.
@@ -655,6 +709,49 @@ fn spawn_reaper() {
         }
         Err(_) => {
             // Not a hard error — just means orphan protection is disabled
+        }
+    }
+}
+
+/// Detect MSVC toolchain and set LIB/INCLUDE/LIBPATH/PATH in the process environment.
+///
+/// When vx-runner is launched from VS Code or a plain terminal (not a Developer Command Prompt),
+/// the MSVC environment variables aren't set, so rustc can't find link.exe or system libraries.
+/// We use `find-msvc-tools` (same detection logic as the `cc` crate) to locate the MSVC
+/// installation and inject the required env vars.
+#[cfg(windows)]
+fn detect_msvc_environment() {
+    // If LIB is already set, assume we're in a Developer Command Prompt.
+    if std::env::var_os("LIB").is_some() {
+        return;
+    }
+
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else if cfg!(target_arch = "x86") {
+        "i686"
+    } else {
+        eprintln!("vx-runner: unknown host architecture, skipping MSVC detection");
+        return;
+    };
+
+    match find_msvc_tools::find_tool(arch, "link.exe") {
+        Some(tool) => {
+            for (key, value) in tool.env() {
+                // SAFETY: called from main() before any threads are spawned.
+                unsafe { std::env::set_var(key, value) };
+            }
+            eprintln!(
+                "vx-runner: detected MSVC toolchain at {}",
+                tool.path().display()
+            );
+        }
+        None => {
+            eprintln!(
+                "vx-runner: could not detect MSVC toolchain — link.exe may not be found by rustc"
+            );
         }
     }
 }

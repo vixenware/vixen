@@ -9,12 +9,20 @@ edition.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-peeps = { workspace = true }
+moire = { workspace = true }
 camino = { workspace = true }
 eyre = { workspace = true }
 tokio = { workspace = true }
-tempfile = { workspace = true }
+dirs = { workspace = true }
+async-tempfile = { workspace = true }
 tracing = { workspace = true }
+facet = { workspace = true }
+roam = { workspace = true }
+roam-core = { workspace = true }
+roam-types = { workspace = true }
 roam-local = { workspace = true }
 roam-stream = { workspace = true }
 ur-taking-me-with-you = { workspace = true }
+
+[lints]
+workspace = true

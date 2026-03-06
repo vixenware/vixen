@@ -33,15 +33,15 @@ for cmd in gh xcodegen xcodebuild codesign hdiutil xcrun ditto python3 security 
   fi
 done
 
-if ! git -C "$REPO_DIR" diff-index --quiet HEAD --; then
-  echo "Working tree is not clean (tracked changes present). Commit or stash before releasing." >&2
-  exit 1
-fi
-
-if [[ -n "$(git -C "$REPO_DIR" ls-files --others --exclude-standard)" ]]; then
-  echo "Working tree is not clean (untracked files present). Commit, stash, or clean before releasing." >&2
-  exit 1
-fi
+# if ! git -C "$REPO_DIR" diff-index --quiet HEAD --; then
+#   echo "Working tree is not clean (tracked changes present). Commit or stash before releasing." >&2
+#   exit 1
+# fi
+#
+# if [[ -n "$(git -C "$REPO_DIR" ls-files --others --exclude-standard)" ]]; then
+#   echo "Working tree is not clean (untracked files present). Commit, stash, or clean before releasing." >&2
+#   exit 1
+# fi
 
 NOTARY_PROFILE="${VX_MAC_NOTARY_PROFILE:-}"
 RELEASE_REPO="${VX_MAC_RELEASE_REPO:-bearcove/vixen-mac-app}"

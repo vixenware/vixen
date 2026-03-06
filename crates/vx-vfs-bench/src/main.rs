@@ -8,7 +8,6 @@ fn main() {
 mod macos_bench {
     use camino::Utf8PathBuf;
     use std::collections::HashMap;
-    use std::fs::File;
     use std::os::unix::fs::{FileExt, PermissionsExt};
     use std::path::Path;
     use std::process::Command;
@@ -17,8 +16,8 @@ mod macos_bench {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use vixenfs_proto::{
         CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType,
-        LookupResult, ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult,
-        errno, mode,
+        LookupResult, ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsDiskNotify,
+        VfsResult, WriteResult, errno, mode,
     };
     use vx_vfs::{VfsConfig, VfsStart};
 
@@ -525,12 +524,7 @@ mod macos_bench {
     }
 
     impl Vfs for SyntheticVfs {
-        async fn lookup(
-            &self,
-            _cx: &roam::Context,
-            parent_id: ItemId,
-            name: String,
-        ) -> LookupResult {
+        async fn lookup(&self, parent_id: ItemId, name: String) -> LookupResult {
             match self.child_lookup.get(&(parent_id, name)).copied() {
                 Some(id) => {
                     let node = self.nodes.get(&id);
@@ -560,11 +554,7 @@ mod macos_bench {
             }
         }
 
-        async fn get_attributes(
-            &self,
-            _cx: &roam::Context,
-            item_id: ItemId,
-        ) -> GetAttributesResult {
+        async fn get_attributes(&self, item_id: ItemId) -> GetAttributesResult {
             match self.nodes.get(&item_id) {
                 Some(node) => GetAttributesResult {
                     attrs: ItemAttributes {
@@ -591,16 +581,12 @@ mod macos_bench {
             }
         }
 
-        async fn read_dir(
-            &self,
-            _cx: &roam::Context,
-            item_id: ItemId,
-            cursor: u64,
-        ) -> ReadDirResult {
+        async fn read_dir(&self, item_id: ItemId, cookie: u64, verifier: u64) -> ReadDirResult {
             let Some(node) = self.nodes.get(&item_id) else {
                 return ReadDirResult {
                     entries: Vec::new(),
-                    next_cursor: 0,
+                    next_cookie: 0,
+                    verifier: 0,
                     error: errno::ENOENT,
                 };
             };
@@ -608,7 +594,8 @@ mod macos_bench {
             if node.item_type != ItemType::Directory {
                 return ReadDirResult {
                     entries: Vec::new(),
-                    next_cursor: 0,
+                    next_cookie: 0,
+                    verifier: 0,
                     error: errno::ENOTDIR,
                 };
             }
@@ -621,11 +608,12 @@ mod macos_bench {
                     .unwrap_or_default()
             });
 
-            let start = cursor as usize;
+            let start = cookie as usize;
             if start >= children.len() {
                 return ReadDirResult {
                     entries: Vec::new(),
-                    next_cursor: 0,
+                    next_cookie: 0,
+                    verifier: verifier.max(1),
                     error: errno::OK,
                 };
             }
@@ -647,18 +635,13 @@ mod macos_bench {
 
             ReadDirResult {
                 entries,
-                next_cursor: 0,
+                next_cookie: 0,
+                verifier: verifier.max(1),
                 error: errno::OK,
             }
         }
 
-        async fn read(
-            &self,
-            _cx: &roam::Context,
-            item_id: ItemId,
-            offset: u64,
-            len: u64,
-        ) -> ReadResult {
+        async fn read(&self, item_id: ItemId, offset: u64, len: u64) -> ReadResult {
             let start = Instant::now();
 
             let result = match self.nodes.get(&item_id) {
@@ -696,13 +679,7 @@ mod macos_bench {
             result
         }
 
-        async fn write(
-            &self,
-            _cx: &roam::Context,
-            _item_id: ItemId,
-            _offset: u64,
-            _data: Vec<u8>,
-        ) -> WriteResult {
+        async fn write(&self, _item_id: ItemId, _offset: u64, _data: Vec<u8>) -> WriteResult {
             WriteResult {
                 bytes_written: 0,
                 error: errno::EACCES,
@@ -711,7 +688,6 @@ mod macos_bench {
 
         async fn create(
             &self,
-            _cx: &roam::Context,
             _parent_id: ItemId,
             _name: String,
             _item_type: ItemType,
@@ -722,7 +698,7 @@ mod macos_bench {
             }
         }
 
-        async fn delete(&self, _cx: &roam::Context, _item_id: ItemId) -> VfsResult {
+        async fn delete(&self, _item_id: ItemId) -> VfsResult {
             VfsResult {
                 error: errno::EACCES,
             }
@@ -730,7 +706,6 @@ mod macos_bench {
 
         async fn rename(
             &self,
-            _cx: &roam::Context,
             _item_id: ItemId,
             _new_parent_id: ItemId,
             _new_name: String,
@@ -742,7 +717,6 @@ mod macos_bench {
 
         async fn set_attributes(
             &self,
-            _cx: &roam::Context,
             _item_id: ItemId,
             _params: SetAttributesParams,
         ) -> VfsResult {
@@ -751,10 +725,12 @@ mod macos_bench {
             }
         }
 
-        async fn ping(&self, _cx: &roam::Context) -> String {
+        async fn ping(&self) -> String {
             "pong from vx-vfs-bench".to_string()
         }
     }
+
+    impl VfsDiskNotify for SyntheticVfs {}
 
     #[derive(Default)]
     struct ReadStatsInner {
@@ -1057,7 +1033,7 @@ mod macos_bench {
         for mb in &config.files_mb {
             let name = format!("file-{}mb.bin", mb);
             let path = mount_path.join(&name);
-            let file = wait_for_file_open(&path, Duration::from_secs(5))?;
+            let file = wait_for_file_open(&path, Duration::from_secs(5)).await?;
             // Get reference data from the VFS backend for integrity verification
             let item_id = vfs
                 .child_lookup
@@ -1267,7 +1243,7 @@ mod macos_bench {
         let total_start = Instant::now();
 
         let preload_start = Instant::now();
-        let host_bytes = std::fs::read(config.exec_host_file.as_std_path())?;
+        let host_bytes = tokio::fs::read(config.exec_host_file.as_std_path()).await?;
         let preload_elapsed = preload_start.elapsed();
 
         let vfs = SyntheticVfs::from_file_specs(vec![FileSpec {
@@ -1282,7 +1258,7 @@ mod macos_bench {
         let mount_elapsed = mount_start.elapsed();
 
         let mounted_exec_path = mount_path.join(&config.exec_mounted_name);
-        let _opened = wait_for_file_open(&mounted_exec_path, Duration::from_secs(5))?;
+        let _opened = wait_for_file_open(&mounted_exec_path, Duration::from_secs(5)).await?;
 
         let mut runs = Vec::new();
         let exec_total_start = Instant::now();
@@ -1348,70 +1324,55 @@ mod macos_bench {
         })
     }
 
-    fn load_toolchain_file_specs(
+    async fn load_toolchain_file_specs(
         toolchain_root: &Utf8PathBuf,
     ) -> Result<(Vec<FileSpec>, u64, u128), Box<dyn std::error::Error>> {
         let mut files = Vec::new();
         let mut loaded_files: u64 = 0;
         let mut loaded_bytes: u128 = 0;
-        walk_toolchain_dir(
-            toolchain_root.as_std_path(),
-            Path::new(""),
-            &mut files,
-            &mut loaded_files,
-            &mut loaded_bytes,
-        )?;
-        Ok((files, loaded_files, loaded_bytes))
-    }
 
-    fn walk_toolchain_dir(
-        abs_dir: &Path,
-        rel_dir: &Path,
-        out: &mut Vec<FileSpec>,
-        loaded_files: &mut u64,
-        loaded_bytes: &mut u128,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        for entry in std::fs::read_dir(abs_dir)? {
-            let entry = entry?;
-            let file_name = entry.file_name();
-            let rel_path = rel_dir.join(&file_name);
-            let abs_path = entry.path();
-            let file_type = entry.file_type()?;
+        let mut stack: Vec<(std::path::PathBuf, std::path::PathBuf)> = vec![(
+            toolchain_root.as_std_path().to_path_buf(),
+            Path::new("").to_path_buf(),
+        )];
 
-            if file_type.is_dir() {
-                walk_toolchain_dir(&abs_path, &rel_path, out, loaded_files, loaded_bytes)?;
-                continue;
+        while let Some((abs_dir, rel_dir)) = stack.pop() {
+            let mut entries = tokio::fs::read_dir(&abs_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let file_name = entry.file_name();
+                let rel_path = rel_dir.join(&file_name);
+                let abs_path = entry.path();
+                let metadata = tokio::fs::symlink_metadata(&abs_path).await?;
+
+                if metadata.is_dir() {
+                    stack.push((abs_path, rel_path));
+                    continue;
+                }
+                if !metadata.is_file() {
+                    continue;
+                }
+
+                let rel_str = normalize_relative_path(&rel_path)?;
+                let data = tokio::fs::read(&abs_path).await?;
+                let bytes = data.len() as u128;
+                let mode_bits = metadata.permissions().mode() as u32 & 0o777;
+                let entry_mode = if mode_bits & 0o111 != 0 {
+                    mode::FILE_EXECUTABLE
+                } else {
+                    mode::FILE_REGULAR
+                };
+
+                files.push(FileSpec {
+                    path: rel_str,
+                    data: Arc::from(data),
+                    mode: entry_mode,
+                });
+                loaded_files = loaded_files.saturating_add(1);
+                loaded_bytes = loaded_bytes.saturating_add(bytes);
             }
-
-            let metadata = std::fs::metadata(&abs_path)?;
-            if metadata.is_dir() {
-                walk_toolchain_dir(&abs_path, &rel_path, out, loaded_files, loaded_bytes)?;
-                continue;
-            }
-            if !metadata.is_file() {
-                continue;
-            }
-
-            let rel_str = normalize_relative_path(&rel_path)?;
-            let data = std::fs::read(&abs_path)?;
-            let bytes = data.len() as u128;
-            let mode_bits = metadata.permissions().mode() as u32 & 0o777;
-            let entry_mode = if mode_bits & 0o111 != 0 {
-                mode::FILE_EXECUTABLE
-            } else {
-                mode::FILE_REGULAR
-            };
-
-            out.push(FileSpec {
-                path: rel_str,
-                data: Arc::from(data),
-                mode: entry_mode,
-            });
-            *loaded_files = loaded_files.saturating_add(1);
-            *loaded_bytes = loaded_bytes.saturating_add(bytes);
         }
 
-        Ok(())
+        Ok((files, loaded_files, loaded_bytes))
     }
 
     fn normalize_relative_path(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
@@ -1427,20 +1388,22 @@ mod macos_bench {
         Ok(parts.join("/"))
     }
 
-    fn prepare_hello_workspace(path: &Utf8PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-        if path.as_std_path().exists() {
-            std::fs::remove_dir_all(path.as_std_path())?;
+    async fn prepare_hello_workspace(path: &Utf8PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+        if tokio::fs::try_exists(path.as_std_path()).await? {
+            tokio::fs::remove_dir_all(path.as_std_path()).await?;
         }
 
-        std::fs::create_dir_all(path.join("src").as_std_path())?;
-        std::fs::write(
+        tokio::fs::create_dir_all(path.join("src").as_std_path()).await?;
+        tokio::fs::write(
             path.join("Cargo.toml").as_std_path(),
             b"[package]\nname = \"hello_vfs_bench\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-        )?;
-        std::fs::write(
+        )
+        .await?;
+        tokio::fs::write(
             path.join("src/main.rs").as_std_path(),
             b"fn main() { println!(\"hello from mounted toolchain\"); }\n",
-        )?;
+        )
+        .await?;
 
         Ok(())
     }
@@ -1452,7 +1415,7 @@ mod macos_bench {
 
         let preload_start = Instant::now();
         let (file_specs, loaded_files, loaded_bytes) =
-            load_toolchain_file_specs(&config.toolchain_root)?;
+            load_toolchain_file_specs(&config.toolchain_root).await?;
         let preload_elapsed = preload_start.elapsed();
 
         let vfs = SyntheticVfs::from_file_specs(file_specs)
@@ -1462,12 +1425,12 @@ mod macos_bench {
         let mount_path = mount_with_vfs(&config.mount_path, vfs.clone()).await?;
         let mount_elapsed = mount_start.elapsed();
 
-        let mounted_cargo = mount_path.join("bin/cargo");
-        let mounted_rustc = mount_path.join("bin/rustc");
-        let _cargo_open = wait_for_file_open(&mounted_cargo, Duration::from_secs(5))?;
-        let _rustc_open = wait_for_file_open(&mounted_rustc, Duration::from_secs(5))?;
+        let mounted_cargo = mount_path.join(format!("bin/cargo{}", std::env::consts::EXE_SUFFIX));
+        let mounted_rustc = mount_path.join(format!("bin/rustc{}", std::env::consts::EXE_SUFFIX));
+        let _cargo_open = wait_for_file_open(&mounted_cargo, Duration::from_secs(5)).await?;
+        let _rustc_open = wait_for_file_open(&mounted_rustc, Duration::from_secs(5)).await?;
 
-        prepare_hello_workspace(&config.build_workspace)?;
+        prepare_hello_workspace(&config.build_workspace).await?;
 
         let target_dir = config.build_workspace.join("target");
 
@@ -1475,9 +1438,11 @@ mod macos_bench {
         let mut previous = vfs.backend_stats();
         let build_total_start = Instant::now();
         for run_index in 1..=config.build_repeat {
-            if run_index > 1 && config.build_clean_between_runs && target_dir.as_std_path().exists()
+            if run_index > 1
+                && config.build_clean_between_runs
+                && tokio::fs::try_exists(target_dir.as_std_path()).await?
             {
-                std::fs::remove_dir_all(target_dir.as_std_path())?;
+                tokio::fs::remove_dir_all(target_dir.as_std_path()).await?;
             }
 
             let run_start = Instant::now();
@@ -1569,7 +1534,7 @@ mod macos_bench {
     async fn run_mount_and_wait_benchmark(
         config: &BenchConfig,
     ) -> Result<BenchSummary, Box<dyn std::error::Error>> {
-        let host_bytes = std::fs::read(config.exec_host_file.as_std_path())?;
+        let host_bytes = tokio::fs::read(config.exec_host_file.as_std_path()).await?;
 
         let vfs = SyntheticVfs::from_file_specs(vec![FileSpec {
             path: config.exec_mounted_name.clone(),
@@ -1614,19 +1579,19 @@ mod macos_bench {
         }
     }
 
-    fn wait_for_file_open(
+    async fn wait_for_file_open(
         path: &Utf8PathBuf,
         timeout: Duration,
-    ) -> Result<File, Box<dyn std::error::Error>> {
+    ) -> Result<std::fs::File, Box<dyn std::error::Error>> {
         let start = Instant::now();
         loop {
-            match File::open(path.as_std_path()) {
-                Ok(file) => return Ok(file),
+            match tokio::fs::File::open(path.as_std_path()).await {
+                Ok(file) => return Ok(file.into_std().await),
                 Err(err) => {
                     if start.elapsed() >= timeout {
                         return Err(format!("failed to open {}: {}", path, err).into());
                     }
-                    std::thread::sleep(Duration::from_millis(50));
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             }
         }
@@ -1787,7 +1752,7 @@ mod macos_bench {
 
         if let Some(path) = &config.json_out {
             let json = render_json_report(&config, &summary);
-            std::fs::write(path.as_std_path(), json.as_bytes())?;
+            tokio::fs::write(path.as_std_path(), json.as_bytes()).await?;
             println!("json report written to {}", path);
         }
 

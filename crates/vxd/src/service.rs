@@ -11,14 +11,16 @@ use crate::db::Database;
 use crate::error::{Result, VxdError};
 use crate::executor::Executor;
 use crate::inputs::*;
+use ::moire::sync::SyncMutex;
 use camino::Utf8PathBuf;
 use facet::trace;
-use peeps::locks::{DiagnosticAsyncMutex, DiagnosticAsyncRwLock};
+use moire::task::FutureExt;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+use vx_io::spawn::ServiceHandle;
 use vx_report::{
     BuildReport, GraphTopology, ReportStore, RuleId, RulePlan, RulePlanEdge, RulePlanEdgeKind,
     RulePlanFact, RulePlanFactId, RulePlanNode, RulePlanNodeId, RulePlanNodeKind,
@@ -32,7 +34,7 @@ use vx_store_proto::{
 };
 use vxd_proto::{
     ActionType, BuildRequest, BuildResult, ProgressListenerClient, UnpublishResult,
-    VXD_PROTOCOL_VERSION, Vxd,
+    VXD_PROTOCOL_VERSION, Vxd as VxdRpc,
 };
 
 /// Toolchain information (manifest-only, no materialization)
@@ -48,23 +50,19 @@ pub struct ToolchainInfo {
 }
 
 /// Acquired toolchains (manifest references only)
-#[allow(dead_code)]
 pub struct AcquiredToolchains {
     /// Rust toolchain (if acquired)
     pub rust: Option<ToolchainInfo>,
-
-    /// Zig toolchain (if acquired)
-    pub zig: Option<ToolchainInfo>,
 }
 
 /// The daemon service implementation
+// TODO: group some of those locks together?
 #[derive(Clone)]
 pub struct VxdService {
-    /// CAS client for content-addressed storage
-    cas: Arc<StoreClient<crate::UpstreamCaller>>,
-
-    /// Exec client for compilation
-    exec: Arc<RunnerClient<crate::UpstreamCaller>>,
+    store: Arc<StoreClient>,
+    exec: Arc<RunnerClient>,
+    _store_handle: Arc<ServiceHandle>,
+    _runner_handle: Arc<ServiceHandle>,
 
     /// The host triple of the execd machine (used for toolchain selection + cache keys).
     exec_host_triple: String,
@@ -82,27 +80,24 @@ pub struct VxdService {
     picante_wal: Utf8PathBuf,
 
     /// WAL writer for incremental persistence (kept open across builds)
-    wal_writer: Arc<DiagnosticAsyncMutex<Option<WalWriter>>>,
+    wal_writer: Arc<SyncMutex<Option<WalWriter>>>,
 
     /// Acquired toolchains (manifest references only)
-    toolchains: Arc<DiagnosticAsyncMutex<AcquiredToolchains>>,
+    toolchains: Arc<SyncMutex<AcquiredToolchains>>,
 
     /// Spawn tracker for child services
-    spawn_tracker: Arc<DiagnosticAsyncMutex<SpawnTracker>>,
+    spawn_tracker: Arc<SyncMutex<SpawnTracker>>,
 
     /// Progress listener client (for reporting progress to vx CLI)
-    /// Uses RwLock for interior mutability so it can be updated per-connection
-    progress_listener: Arc<
-        DiagnosticAsyncRwLock<Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>>,
-    >,
+    progress_listener: Arc<SyncMutex<Option<Arc<ProgressListenerClient>>>>,
 
     /// Session ID for cache key namespacing. Empty = session zero (shared).
     /// Per-connection state — each connection handler gets its own instance.
-    session_id: Arc<DiagnosticAsyncRwLock<String>>,
+    session_id: Arc<SyncMutex<String>>,
 
     /// Cancellation token for the build active on this session (if any).
     /// Per-connection: when the CLI disconnects, only this session's build is cancelled.
-    active_build_cancel: Arc<DiagnosticAsyncMutex<Option<CancellationToken>>>,
+    active_build_cancel: Arc<SyncMutex<Option<CancellationToken>>>,
 }
 
 fn rule_plan_bridge_enabled() -> bool {
@@ -321,7 +316,7 @@ pub(crate) fn compare_rule_plan_edge_parity(
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn selected_crates_from_rule_plan(
     plan: &RulePlan,
     graph: &CrateGraph,
@@ -383,7 +378,7 @@ pub(crate) fn selected_crates_from_rule_plan(
     Ok(selected)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn transitive_closure_crates(
     graph: &CrateGraph,
     selected: &std::collections::HashSet<vx_rs::crate_graph::CrateId>,
@@ -622,8 +617,8 @@ fn build_rule_plan_from_crate_graph(graph: &CrateGraph) -> RulePlan {
 impl VxdService {
     /// Report progress to CLI if connected
     async fn report_start_action(&self, action_type: ActionType) -> Option<u64> {
-        let listener_guard = self.progress_listener.read().await;
-        if let Some(ref listener) = *listener_guard {
+        let listener = self.progress_listener.lock().clone();
+        if let Some(ref listener) = listener {
             listener.start_action(action_type).await.ok()
         } else {
             None
@@ -631,26 +626,33 @@ impl VxdService {
     }
 
     async fn report_complete_action(&self, action_id: Option<u64>) {
-        let listener_guard = self.progress_listener.read().await;
-        if let (Some(listener), Some(id)) = (listener_guard.as_ref(), action_id) {
+        let listener = self.progress_listener.lock().clone();
+        if let (Some(listener), Some(id)) = (listener.as_ref(), action_id) {
             let _ = listener.complete_action(id).await;
         }
     }
 
     async fn report_set_total(&self, total: u64) {
-        let listener_guard = self.progress_listener.read().await;
-        if let Some(ref listener) = *listener_guard {
+        let listener = self.progress_listener.lock().clone();
+        if let Some(ref listener) = listener {
             let _ = listener.set_total(total).await;
         }
     }
 
+    /// Get the VX_HOME directory.
+    pub fn vx_home(&self) -> &Utf8PathBuf {
+        &self.vx_home
+    }
+
     /// Create a new daemon service
     pub async fn new(
-        cas: Arc<StoreClient<crate::UpstreamCaller>>,
-        exec: Arc<RunnerClient<crate::UpstreamCaller>>,
         vx_home: Utf8PathBuf,
         exec_host_triple: String,
-        spawn_tracker: Arc<DiagnosticAsyncMutex<SpawnTracker>>,
+        spawn_tracker: Arc<SyncMutex<SpawnTracker>>,
+        store: Arc<StoreClient>,
+        exec: Arc<RunnerClient>,
+        store_handle: Arc<ServiceHandle>,
+        runner_handle: Arc<ServiceHandle>,
     ) -> Self {
         let db = Database::new();
         let cache_path = vx_home.join("picante.cache");
@@ -702,40 +704,37 @@ impl VxdService {
         };
 
         Self {
-            cas,
+            store,
             exec,
+            _store_handle: store_handle,
+            _runner_handle: runner_handle,
             exec_host_triple,
             vx_home,
             db: Arc::new(db),
             picante_cache: cache_path,
             picante_wal: wal_path,
-            wal_writer: Arc::new(DiagnosticAsyncMutex::new("vxd/wal_writer", wal_writer)),
-            toolchains: Arc::new(DiagnosticAsyncMutex::new(
+            wal_writer: Arc::new(SyncMutex::new("vxd/wal_writer", wal_writer)),
+            toolchains: Arc::new(SyncMutex::new(
                 "vxd/toolchains",
-                AcquiredToolchains {
-                    rust: None,
-                    zig: None,
-                },
+                AcquiredToolchains { rust: None },
             )),
             spawn_tracker,
-            progress_listener: Arc::new(DiagnosticAsyncRwLock::new("vxd/progress_listener", None)),
-            session_id: Arc::new(DiagnosticAsyncRwLock::new("vxd/session_id", String::new())),
-            active_build_cancel: Arc::new(DiagnosticAsyncMutex::new(
-                "vxd/active_build_cancel",
-                None,
-            )),
+            progress_listener: Arc::new(SyncMutex::new("vxd/progress_listener", None)),
+            session_id: Arc::new(SyncMutex::new("vxd/session_id", String::new())),
+            active_build_cancel: Arc::new(SyncMutex::new("vxd/active_build_cancel", None)),
         }
     }
 
     /// Create a per-connection session with fresh ephemeral state.
-    /// Shared state (CAS, exec, DB, toolchains, WAL) is still shared via Arc.
+    /// Shared state (booted, DB, toolchains, WAL) is still shared via Arc.
     pub fn new_session(&self) -> Self {
         Self {
-            cas: self.cas.clone(),
+            store: self.store.clone(),
             exec: self.exec.clone(),
+            _store_handle: self._store_handle.clone(),
+            _runner_handle: self._runner_handle.clone(),
             exec_host_triple: self.exec_host_triple.clone(),
             vx_home: self.vx_home.clone(),
-            // db: self.db.clone(),
             db: Arc::new(Database::new()),
             picante_cache: self.picante_cache.clone(),
             picante_wal: self.picante_wal.clone(),
@@ -743,31 +742,25 @@ impl VxdService {
             toolchains: self.toolchains.clone(),
             spawn_tracker: self.spawn_tracker.clone(),
             // Per-connection state: fresh for each session
-            progress_listener: Arc::new(DiagnosticAsyncRwLock::new("vxd/progress_listener", None)),
-            session_id: Arc::new(DiagnosticAsyncRwLock::new("vxd/session_id", String::new())),
-            active_build_cancel: Arc::new(DiagnosticAsyncMutex::new(
-                "vxd/active_build_cancel",
-                None,
-            )),
+            progress_listener: Arc::new(SyncMutex::new("vxd/progress_listener", None)),
+            session_id: Arc::new(SyncMutex::new("vxd/session_id", String::new())),
+            active_build_cancel: Arc::new(SyncMutex::new("vxd/active_build_cancel", None)),
         }
     }
 
     /// Get the current session ID for this connection.
     pub async fn session_id(&self) -> String {
-        self.session_id.read().await.clone()
+        self.session_id.lock().clone()
     }
 
     /// Update the progress listener for the current connection
-    pub async fn set_progress_listener(
-        &self,
-        listener: Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>,
-    ) {
-        *self.progress_listener.write().await = listener;
+    pub async fn set_progress_listener(&self, listener: Option<Arc<ProgressListenerClient>>) {
+        *self.progress_listener.lock() = listener;
     }
 
     /// Cancel any active build. Called by the signal handler on SIGINT/SIGTERM.
     pub async fn cancel_active_build(&self) {
-        if let Some(token) = self.active_build_cancel.lock().await.as_ref() {
+        if let Some(token) = self.active_build_cancel.lock().as_ref() {
             info!("cancelling active build");
             token.cancel();
         }
@@ -777,7 +770,7 @@ impl VxdService {
     pub async fn ensure_rust_toolchain(&self, channel: RustChannel) -> Result<ToolchainInfo> {
         // Check if already acquired
         {
-            let toolchains = self.toolchains.lock().await;
+            let toolchains = self.toolchains.lock();
             if let Some(ref rust) = toolchains.rust {
                 return Ok(ToolchainInfo {
                     manifest_hash: rust.manifest_hash,
@@ -803,18 +796,21 @@ impl VxdService {
         let (progress_tx, mut progress_rx) = roam::channel::<vx_store_proto::StoreProgress>();
 
         // Forward store progress to the CLI's ProgressListener
-        let forward_listener = self.progress_listener.read().await.clone();
+        let forward_listener = self.progress_listener.lock().clone();
         let forward_action_id = action_id;
-        let forward_handle = peeps::tasks::spawn_tracked(
-            format!("toolchain_progress_fwd_{:?}", action_id),
+        let forward_handle = moire::task::spawn(
             async move {
-                while let Ok(Some(sp)) = progress_rx.recv().await {
+                while let Ok(Some(sp)) = progress_rx
+                    .recv()
+                    .named("vxd.toolchain.progress.recv")
+                    .await
+                {
                     if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
                         let _ = listener
                             .update_progress(
                                 id,
                                 vxd_proto::ActionProgress {
-                                    message: sp.message,
+                                    message: sp.message.clone(),
                                     current: sp.current,
                                     total: sp.total,
                                 },
@@ -822,21 +818,22 @@ impl VxdService {
                             .await;
                     }
                 }
-            },
+            }
+            .named("toolchain_progress_fwd"),
         );
 
         let result = self
-            .cas
+            .store
             .ensure_rust_toolchain(spec, progress_tx)
             .await
             .map_err(|e| {
                 // Complete action on error
                 let this = self.clone();
-                peeps::tasks::spawn_tracked(
-                    format!("complete_action_{:?}", action_id),
-                    async move { this.report_complete_action(action_id).await },
+                moire::task::spawn(
+                    async move { this.report_complete_action(action_id).await }
+                        .named("complete_action"),
                 );
-                VxdError::CasRpc(e.to_string())
+                VxdError::CasRpc(format!("{e:?}"))
             })?;
 
         // Wait for progress forwarding to drain
@@ -851,30 +848,31 @@ impl VxdService {
 
         let manifest_hash = result.manifest_hash.ok_or_else(|| {
             let this = self.clone();
-            peeps::tasks::spawn_tracked(format!("complete_action_{:?}", action_id), async move {
-                this.report_complete_action(action_id).await
-            });
+            moire::task::spawn(
+                async move { this.report_complete_action(action_id).await }
+                    .named("complete_action"),
+            );
             VxdError::NoManifestHash
         })?;
 
         // Get manifest for version info (and toolchain_id on cache hit)
         let manifest = self
-            .cas
+            .store
             .get_toolchain_manifest(manifest_hash)
             .await
             .map_err(|e| {
                 let this = self.clone();
-                peeps::tasks::spawn_tracked(
-                    format!("complete_action_{:?}", action_id),
-                    async move { this.report_complete_action(action_id).await },
+                moire::task::spawn(
+                    async move { this.report_complete_action(action_id).await }
+                        .named("complete_action"),
                 );
-                VxdError::CasRpc(e.to_string())
+                VxdError::CasRpc(format!("{e:?}"))
             })?
             .ok_or_else(|| {
                 let this = self.clone();
-                peeps::tasks::spawn_tracked(
-                    format!("complete_action_{:?}", action_id),
-                    async move { this.report_complete_action(action_id).await },
+                moire::task::spawn(
+                    async move { this.report_complete_action(action_id).await }
+                        .named("complete_action"),
                 );
                 VxdError::ToolchainManifestNotFound(manifest_hash)
             })?;
@@ -891,7 +889,7 @@ impl VxdService {
 
         // Cache it
         {
-            let mut toolchains = self.toolchains.lock().await;
+            let mut toolchains = self.toolchains.lock();
             toolchains.rust = Some(ToolchainInfo {
                 manifest_hash,
                 toolchain_id,
@@ -908,7 +906,7 @@ impl VxdService {
 
     /// Kill all spawned child services (casd, execd)
     pub async fn kill_spawned_services(&self) {
-        self.spawn_tracker.lock().await.kill_all();
+        self.spawn_tracker.lock().kill_all();
     }
 
     /// Build from vx.styx manifest (C, Rust, or mixed projects)
@@ -961,7 +959,7 @@ impl VxdService {
                 for bin in &manifest.bins {
                     let source_path = project_dir.join(&bin.sources);
                     if source_path.exists() {
-                        let contents = tokio::fs::read(&source_path).await.map_err(|e| {
+                        let contents = ::moire::fs::read(&source_path).await.map_err(|e| {
                             VxdError::FileRead {
                                 path: source_path.clone(),
                                 message: e.to_string(),
@@ -973,10 +971,11 @@ impl VxdService {
                         let chunk_hash = ChunkHash(content_hash.0);
 
                         // Store as chunk
-                        self.cas
+                        self.store
                             .put_chunk(chunk_hash, contents)
                             .await
-                            .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                            .map(|_| ())
+                            .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
                         tree_files.push(crate::cas_tree::TreeFile {
                             path: bin.sources.clone(),
@@ -991,7 +990,7 @@ impl VxdService {
 
                 // Build recursive Merkle directory tree
                 let (node_hash, _total_size) =
-                    crate::cas_tree::build_merkle_tree(&self.cas, tree_files)
+                    crate::cas_tree::build_merkle_tree(&self.store, tree_files)
                         .await
                         .map_err(VxdError::CasRpc)?;
 
@@ -1143,13 +1142,13 @@ impl VxdService {
                     .map(|n| n.get() * 2)
                     .unwrap_or(16);
 
-                let progress_listener = self.progress_listener.read().await.clone();
+                let progress_listener = self.progress_listener.lock().clone();
                 let session_id = self.session_id().await;
 
                 let mut executor = crate::executor::Executor::new(
                     graph,
                     progress_listener,
-                    self.cas.clone(),
+                    self.store.clone(),
                     self.exec.clone(),
                     self.db.clone(),
                     project_dir.to_path_buf(),
@@ -1160,14 +1159,14 @@ impl VxdService {
                 );
 
                 // Register the executor's cancel token so signal handlers can cancel this build
-                *self.active_build_cancel.lock().await = Some(executor.cancel_token());
+                *self.active_build_cancel.lock() = Some(executor.cancel_token());
 
                 let build_start = std::time::Instant::now();
                 let exec_result = executor.execute().await;
                 let duration = build_start.elapsed();
 
                 // Clear the cancel token now that the build is done
-                *self.active_build_cancel.lock().await = None;
+                *self.active_build_cancel.lock() = None;
                 exec_result?;
 
                 // Get execution statistics
@@ -1251,12 +1250,12 @@ impl VxdService {
                     .unwrap_or_else(|| rules_path.clone());
 
                 info!(rules = %source_rel, "loading .vx rules file for RulePlan bridge");
-                let contents = tokio::fs::read_to_string(&rules_path).await.map_err(|e| {
-                    VxdError::FileRead {
+                let contents = ::moire::fs::read_to_string(&rules_path)
+                    .await
+                    .map_err(|e| VxdError::FileRead {
                         path: rules_path.clone(),
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
 
                 let source_id =
                     vx_plan::RulePlanSourceId::from(format!("vx:{}", source_rel.as_str()));
@@ -1603,13 +1602,13 @@ impl VxdService {
         tracing::debug!("creating executor with max_concurrency={}", max_concurrency);
 
         // Get current progress listener (clones the Option<Arc<...>> inside the RwLock)
-        let progress_listener = self.progress_listener.read().await.clone();
+        let progress_listener = self.progress_listener.lock().clone();
         let session_id = self.session_id().await;
 
         let mut executor = Executor::new(
             action_graph,
             progress_listener,
-            self.cas.clone(),
+            self.store.clone(),
             self.exec.clone(),
             self.db.clone(),
             graph.workspace_root.clone(),
@@ -1620,22 +1619,23 @@ impl VxdService {
         );
 
         // Register the executor's cancel token so signal handlers can cancel this build
-        *self.active_build_cancel.lock().await = Some(executor.cancel_token());
+        *self.active_build_cancel.lock() = Some(executor.cancel_token());
 
         tracing::debug!("calling executor.execute()");
         let exec_result = executor.execute().await;
         tracing::debug!("executor.execute() completed");
 
         // Clear the cancel token now that the build is done
-        *self.active_build_cancel.lock().await = None;
+        *self.active_build_cancel.lock() = None;
         exec_result?;
 
         // Append changes to WAL after build (incremental persistence)
-        if let Some(ref mut wal) = *self.wal_writer.lock().await {
-            match self.db.append_to_wal(wal).await {
+        // Take the writer out of the mutex so we don't hold the guard across await
+        let wal_writer = self.wal_writer.lock().take();
+        if let Some(mut wal) = wal_writer {
+            match self.db.append_to_wal(&mut wal).await {
                 Ok(count) if count > 0 => {
                     info!(path = %self.picante_wal, entries = count, "appended changes to WAL");
-                    // Explicit flush to ensure durability (WAL auto-flushes after threshold, but we flush after each build)
                     if let Err(e) = wal.flush() {
                         warn!(path = %self.picante_wal, error = %e, "failed to flush WAL");
                     }
@@ -1647,6 +1647,8 @@ impl VxdService {
                     warn!(path = %self.picante_wal, error = %e, "failed to append to WAL");
                 }
             }
+            // Put it back
+            *self.wal_writer.lock() = Some(wal);
         }
 
         // Get execution statistics
@@ -1676,7 +1678,7 @@ impl VxdService {
 
         // Save the report to the project's .vx/runs/ directory
         let report_store = ReportStore::new(&graph.workspace_root);
-        if let Err(e) = report_store.save(&report) {
+        if let Err(e) = report_store.save(&report).await {
             warn!(error = %e, "failed to save build report");
         } else {
             debug!(run_id = %report.run_id, "saved build report");
@@ -1700,8 +1702,30 @@ impl VxdService {
     }
 }
 
-impl Vxd for VxdService {
-    async fn build(&self, _cx: &roam::Context, request: BuildRequest) -> BuildResult {
+impl vx_io::boot::GracefulShutdown for VxdService {
+    async fn graceful_shutdown(&self) {
+        // Compact WAL before shutdown to create a clean snapshot
+        match self
+            .db
+            .compact_wal(&self.picante_cache, &self.picante_wal, false)
+            .await
+        {
+            Ok(_revision) => {
+                trace!(
+                    cache = %self.picante_cache,
+                    revision = _revision,
+                    "compacted WAL to snapshot"
+                );
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to compact WAL on shutdown");
+            }
+        }
+    }
+}
+
+impl VxdRpc for VxdService {
+    async fn build(&self, request: BuildRequest) -> BuildResult {
         match self.do_build(request).await {
             Ok(result) => result,
             Err(e) => BuildResult {
@@ -1720,21 +1744,20 @@ impl Vxd for VxdService {
         }
     }
 
-    async fn set_session(&self, _cx: &roam::Context, session_id: String) {
+    async fn set_session(&self, session_id: String) {
         info!(session_id = %session_id, "session ID set");
-        *self.session_id.write().await = session_id;
+        *self.session_id.lock() = session_id;
     }
 
     async fn unpublish_cache_keys(
         &self,
-        _cx: &roam::Context,
         cache_keys: Vec<vx_store_proto::CacheKey>,
     ) -> UnpublishResult {
         let mut removed = 0u32;
         let mut not_found = 0u32;
 
         for key in cache_keys {
-            if self.cas.unpublish(key).await.unwrap_or(false) {
+            if self.store.unpublish(key).await.unwrap_or(false) {
                 removed += 1;
             } else {
                 not_found += 1;
@@ -1744,32 +1767,7 @@ impl Vxd for VxdService {
         UnpublishResult { removed, not_found }
     }
 
-    async fn shutdown(&self, _cx: &roam::Context) {
-        tracing::info!("Shutdown requested");
-
-        // Compact WAL before shutdown to create a clean snapshot
-        match self
-            .db
-            .compact_wal(&self.picante_cache, &self.picante_wal, false)
-            .await
-        {
-            Ok(_revision) => {
-                trace!(
-                    cache = %self.picante_cache,
-                    revision = _revision,
-                    "compacted WAL to snapshot"
-                );
-            }
-            Err(e) => {
-                warn!(error = %e, "failed to compact WAL on shutdown");
-            }
-        }
-
-        tracing::info!("Spawned services killed, exiting daemon");
-        std::process::exit(0);
-    }
-
-    async fn version(&self, _cx: &roam::Context) -> ServiceVersion {
+    async fn version(&self) -> ServiceVersion {
         ServiceVersion {
             service: "vxd".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),

@@ -326,11 +326,8 @@ pub enum fuse_opcode {
     FUSE_READDIR = 28,
     FUSE_RELEASEDIR = 29,
     FUSE_FSYNCDIR = 30,
-    #[cfg(feature = "file-lock")]
     FUSE_GETLK = 31,
-    #[cfg(feature = "file-lock")]
     FUSE_SETLK = 32,
-    #[cfg(feature = "file-lock")]
     FUSE_SETLKW = 33,
     FUSE_ACCESS = 34,
     FUSE_CREATE = 35,
@@ -396,11 +393,8 @@ impl TryFrom<u32> for fuse_opcode {
             28 => Ok(fuse_opcode::FUSE_READDIR),
             29 => Ok(fuse_opcode::FUSE_RELEASEDIR),
             30 => Ok(fuse_opcode::FUSE_FSYNCDIR),
-            #[cfg(feature = "file-lock")]
             31 => Ok(fuse_opcode::FUSE_GETLK),
-            #[cfg(feature = "file-lock")]
             32 => Ok(fuse_opcode::FUSE_SETLK),
-            #[cfg(feature = "file-lock")]
             33 => Ok(fuse_opcode::FUSE_SETLKW),
             34 => Ok(fuse_opcode::FUSE_ACCESS),
             35 => Ok(fuse_opcode::FUSE_CREATE),
@@ -779,27 +773,6 @@ pub const FUSE_GETXATTR_OUT_SIZE: usize = mem::size_of::<fuse_getxattr_out>();
 pub struct fuse_getxattr_out {
     pub size: u32,
     pub(crate) _padding: u32,
-}
-
-#[cfg(feature = "file-lock")]
-#[derive(Debug, Decode)]
-#[allow(non_camel_case_types)]
-pub struct fuse_lk_in {
-    pub fh: u64,
-    pub owner: u64,
-    pub lk: fuse_file_lock,
-    pub(crate) _lk_flags: u32,
-    _padding: u32,
-}
-
-#[cfg(feature = "file-lock")]
-pub const FUSE_LK_OUT_SIZE: usize = mem::size_of::<fuse_lk_out>();
-
-#[cfg(feature = "file-lock")]
-#[derive(Debug, Encode)]
-#[allow(non_camel_case_types)]
-pub struct fuse_lk_out {
-    pub lk: fuse_file_lock,
 }
 
 #[derive(Debug, Decode)]

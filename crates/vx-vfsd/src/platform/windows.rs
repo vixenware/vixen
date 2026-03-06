@@ -1,9 +1,6 @@
-use std::sync::Arc;
-
 use camino::Utf8PathBuf;
 
 use crate::Result;
-use crate::vfs::CasVfs;
 
 /// No stuck mount cleanup on Windows (yet).
 pub async fn cleanup_stuck_mount(_mount_path: &Utf8PathBuf) -> Result<()> {
@@ -16,21 +13,14 @@ pub async fn run_sentinel(_mount_path: &Utf8PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// No platform signal handler on Windows.
-pub fn setup_diagnostics_signal(_vfs: Arc<CasVfs>) {}
-
-/// No platform-specific diagnostics on Windows.
-#[allow(dead_code)]
-pub fn dump_platform_diagnostics() {}
-
 /// Always create the mount directory on Windows.
 pub fn should_create_mount_dir(_mount_path: &Utf8PathBuf) -> bool {
     true
 }
 
-/// Collect diagnostics when the VFS smoke test fails.
+/// Collect comprehensive VFS diagnostics when any mount operation fails.
 /// Returns all diagnostics as a single string so the caller can print it atomically.
-pub async fn collect_smoke_test_diagnostics(mount_path: &Utf8PathBuf) -> String {
+pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
     use owo_colors::OwoColorize;
     use std::fmt::Write;
 

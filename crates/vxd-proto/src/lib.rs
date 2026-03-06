@@ -127,9 +127,6 @@ pub trait Vxd {
     /// Remove cache key mappings from the store. Used by `vx clean --cache`
     /// to invalidate specific cache entries without deleting blobs or manifests.
     async fn unpublish_cache_keys(&self, cache_keys: Vec<CacheKey>) -> UnpublishResult;
-
-    /// Shutdown the daemon gracefully
-    async fn shutdown(&self);
 }
 
 /// Progress update for a running action.

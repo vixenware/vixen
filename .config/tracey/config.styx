@@ -1,9 +1,10 @@
+@schema {id crate:tracey-config@1, cli tracey}
+
 // Tracey configuration for vixen
 
 specs (
     {
         name vixen
-        prefix r
         include (docs/content/spec.md)
         impls (
             {

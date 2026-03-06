@@ -82,13 +82,6 @@ impl TestEnv {
         path
     }
 
-    /// Path to the vxd binary (built by cargo)
-    fn vxd_path() -> PathBuf {
-        let path = Self::bindir().join(format!("vxd{}", std::env::consts::EXE_SUFFIX));
-        assert!(path.exists(), "vxd binary does not exist at {:?}", path);
-        path
-    }
-
     /// Run `vx build` in this environment
     pub fn build(&self) -> BuildBuilder {
         BuildBuilder::new(self)
@@ -123,12 +116,6 @@ impl TestEnv {
             std::fs::create_dir_all(parent).expect("failed to create parent dirs");
         }
         std::fs::write(&path, contents).expect("failed to write file");
-    }
-
-    /// Read a file from the project directory
-    pub fn read_file(&self, relative_path: &str) -> String {
-        let path = self.project.path().join(relative_path);
-        std::fs::read_to_string(&path).expect("failed to read file")
     }
 
     /// Check if a file exists in the project directory
@@ -166,6 +153,9 @@ impl VxOutput {
     /// Assert the command succeeded, panicking with full output on failure
     #[track_caller]
     pub fn assert_success(&self) {
+        tracing::trace!("{}", self.stdout);
+        tracing::trace!("{}", self.stderr);
+
         assert!(
             self.success,
             "command failed (exit code {:?}):\n--- stdout ---\n{}\n--- stderr ---\n{}",
@@ -180,6 +170,28 @@ impl VxOutput {
         assert!(
             self.was_cached(),
             "expected cache hit but was not cached:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            self.stdout,
+            self.stderr
+        );
+    }
+
+    /// Assert the command failed
+    #[track_caller]
+    pub fn assert_failure(&self) {
+        assert!(
+            !self.success,
+            "expected command to fail but it succeeded (exit code {:?}):\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            self.exit_code, self.stdout, self.stderr
+        );
+    }
+
+    /// Assert the command failed and output contains the given string
+    #[track_caller]
+    pub fn assert_failure_contains(&self, needle: &str) {
+        self.assert_failure();
+        assert!(
+            self.contains(needle),
+            "expected output to contain {needle:?}:\n--- stdout ---\n{}\n--- stderr ---\n{}",
             self.stdout,
             self.stderr
         );
@@ -207,24 +219,6 @@ impl From<Output> for VxOutput {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         }
     }
-}
-
-/// Persistent cache directory for HTTP responses across test runs.
-///
-/// All test daemons share this directory so toolchain downloads are fetched
-/// once and reused. The directory survives across test runs.
-fn http_cache_dir() -> PathBuf {
-    let dir = dirs_next().join("vx-test-http-cache");
-    std::fs::create_dir_all(&dir).expect("failed to create HTTP cache dir");
-    dir
-}
-
-/// Platform-appropriate cache base directory.
-fn dirs_next() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
-        return PathBuf::from(xdg);
-    }
-    dirs::cache_dir().expect("could not determine cache directory")
 }
 
 /// Builder for `vx build` commands
@@ -261,11 +255,6 @@ impl BuildBuilder {
 
     pub fn in_subdir(mut self, subdir: &str) -> Self {
         self.subdir = Some(subdir.to_owned());
-        self
-    }
-
-    pub fn env(mut self, key: &str, value: &str) -> Self {
-        self.extra_env.push((key.to_owned(), value.to_owned()));
         self
     }
 

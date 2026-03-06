@@ -5,6 +5,7 @@
 
 use camino::Utf8PathBuf;
 use jiff::Zoned;
+use moire::task::FutureExt;
 use std::time::Instant;
 use tracing::{debug, info};
 use vx_runner_proto::{
@@ -44,17 +45,21 @@ impl ActionContext {
     ///
     /// Sets PATH (linker discovery), HOME, and temp dirs. On Windows the temp
     /// vars are critical — without them `GetTempPathW` falls back to `C:\WINDOWS`.
-    pub fn hermetic_env(&self, cmd: &mut tokio::process::Command) {
+    pub fn hermetic_env(&self, cmd: &mut moire::process::Command) {
         cmd.env_clear();
         // Passthrough vars needed by compilers/linkers on the host.
         // On Windows, LIB/INCLUDE are required for MSVC link.exe to find
         // kernel32.lib and friends.
         const PASSTHROUGH: &[&str] = &[
-            "PATH", "HOME",
+            "PATH",
+            "HOME",
             // MSVC toolchain
-            "LIB", "INCLUDE", "LIBPATH",
+            "LIB",
+            "INCLUDE",
+            "LIBPATH",
             // Windows SDK
-            "WindowsSdkDir", "WindowsSDKVersion",
+            "WindowsSdkDir",
+            "WindowsSDKVersion",
         ];
         for var in PASSTHROUGH {
             if let Ok(val) = std::env::var(var) {
@@ -99,7 +104,10 @@ impl RunnerService {
         );
 
         // 1. Create action context
-        let action = self.create_action_context().await;
+        let action = self
+            .create_action_context()
+            .named("runner.run_vfs.create_action_context")
+            .await;
         debug!(action.prefix_id = %action.prefix_id, action.prefix_path = %action.prefix_path, "created action prefix");
 
         // Helper to return an error result (cleanup is done before calling this)
@@ -122,6 +130,7 @@ impl RunnerService {
         let before = Instant::now();
         let toolchain_prefix_id = match self
             .ensure_toolchain_prefix(request.toolchain_manifest)
+            .named("runner.run_vfs.ensure_toolchain_prefix")
             .await
         {
             Ok(id) => id,
@@ -173,7 +182,7 @@ impl RunnerService {
         self.create_output_dir_in_prefix(&action.prefix_id).await;
 
         // 6. Build rustc command
-        let rustc_path = toolchain_path.join("bin/rustc");
+        let rustc_path = toolchain_path.join(format!("bin/rustc{}", std::env::consts::EXE_SUFFIX));
         let sysroot_path = toolchain_path.join("sysroot");
         let src_path = action.sources_path();
         let deps_path = action.deps_path();
@@ -461,7 +470,10 @@ impl RunnerService {
         );
 
         // 1. Create action context
-        let action = self.create_action_context().await;
+        let action = self
+            .create_action_context()
+            .named("runner.run_vfs.create_action_context")
+            .await;
 
         // 2. Ensure Zig toolchain prefix exists
         let toolchain_prefix_id = match self
@@ -735,7 +747,10 @@ impl RunnerService {
     ) -> CcLinkResult {
         let start = Instant::now();
 
-        let action = self.create_action_context().await;
+        let action = self
+            .create_action_context()
+            .named("runner.run_vfs.create_action_context")
+            .await;
 
         let _toolchain_prefix_id = match self
             .ensure_toolchain_prefix(request.toolchain_manifest)
@@ -885,7 +900,7 @@ impl RunnerService {
                 duration_ms: start.elapsed().as_millis() as u64,
                 output_manifest: None,
                 error: Some(format!(
-                    "failed to store object files directory node to CAS: {}",
+                    "failed to store object files directory node to CAS: {:?}",
                     e
                 )),
             };
@@ -913,7 +928,10 @@ impl RunnerService {
                 stderr: String::new(),
                 duration_ms: start.elapsed().as_millis() as u64,
                 output_manifest: None,
-                error: Some(format!("failed to store root directory node to CAS: {}", e)),
+                error: Some(format!(
+                    "failed to store root directory node to CAS: {:?}",
+                    e
+                )),
             };
         }
 
@@ -1104,7 +1122,10 @@ impl RunnerService {
     ) -> RunResult {
         let start = Instant::now();
 
-        let action = self.create_action_context().await;
+        let action = self
+            .create_action_context()
+            .named("runner.run_vfs.create_action_context")
+            .await;
 
         let toolchain_prefix_id = match self
             .ensure_toolchain_prefix(request.toolchain_manifest)
@@ -1164,6 +1185,7 @@ impl RunnerService {
             if let Err(e) = self
                 .vfs
                 .mount_tree(&action.prefix_id, &mount.mount, mount.manifest)
+                .named("runner.run_vfs.mount_tree")
                 .await
             {
                 self.remove_action_prefix(&action.prefix_id).await;
@@ -1276,6 +1298,7 @@ impl RunnerService {
                         blob_size,
                         entry.executable,
                     )
+                    .named("runner.run_vfs.add_file_to_prefix")
                     .await
                 {
                     self.remove_action_prefix(&action.prefix_id).await;
@@ -1296,7 +1319,9 @@ impl RunnerService {
         }
 
         // Ensure out/ exists.
-        self.create_output_dir_in_prefix(&action.prefix_id).await;
+        self.create_output_dir_in_prefix(&action.prefix_id)
+            .named("runner.run_vfs.create_output_dir")
+            .await;
 
         // Validate outputs are under out/.
         for out in &request.outputs {
@@ -1317,7 +1342,7 @@ impl RunnerService {
             }
         }
 
-        let program_path = toolchain_path.join(&request.program_rel);
+        let program_path = toolchain_path.join(format!("{}{}", request.program_rel, std::env::consts::EXE_SUFFIX));
         let mut cmd = crate::sandbox::sandboxed_command(program_path.as_str(), &action);
         for arg in &request.args {
             cmd.arg(expand(arg));
@@ -1331,15 +1356,7 @@ impl RunnerService {
         cmd.current_dir(cwd.as_str());
 
         if request.clear_env {
-            cmd.env_clear();
-        }
-
-        // Preserve a couple host env vars (useful for sandbox wrappers).
-        if let Ok(path) = std::env::var("PATH") {
-            cmd.env("PATH", path);
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            cmd.env("HOME", home);
+            action.hermetic_env(&mut cmd);
         }
 
         for (k, v) in &request.env {
@@ -1370,6 +1387,7 @@ impl RunnerService {
             progress,
             None,
         )
+        .named("runner.run_vfs.run_sandboxed_command")
         .await
         {
             Ok(o) => o,
@@ -1439,7 +1457,10 @@ impl RunnerService {
             };
         }
 
-        let flushed = self.flush_prefix_outputs(&action.prefix_id).await;
+        let flushed = self
+            .flush_prefix_outputs(&action.prefix_id)
+            .named("runner.run_vfs.flush_prefix_outputs")
+            .await;
 
         let mut outputs = Vec::new();
         for out in &request.outputs {

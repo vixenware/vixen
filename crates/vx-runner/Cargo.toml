@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 default = []
-diagnostics = ["peeps/diagnostics", "roam-session/diagnostics"]
+diagnostics = ["moire/diagnostics", "vx-vfsd/diagnostics"]
 
 [package.metadata]
 
@@ -19,6 +19,8 @@ facet = { workspace = true }
 figue = { workspace = true }
 thiserror = { workspace = true }
 roam = { workspace = true }
+roam-core = { workspace = true }
+roam-types = { workspace = true }
 roam-stream = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -35,5 +37,10 @@ vx-runner-proto = { workspace = true }
 vx-vfsd = { path = "../vx-vfsd" }
 vx-io = { workspace = true }
 libc = { workspace = true }
-roam-session = { workspace = true }
-peeps = { workspace = true }
+moire = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+find-msvc-tools = "0.1"
+
+[lints]
+workspace = true

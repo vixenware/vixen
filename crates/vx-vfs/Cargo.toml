@@ -9,7 +9,7 @@ edition.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-peeps = { workspace = true }
+moire = { workspace = true }
 camino = { workspace = true }
 facet = { workspace = true }
 facet-error = { workspace = true }
@@ -18,11 +18,16 @@ vixenfs-proto = { workspace = true }
 cfg-if = "1"
 tracing = { workspace = true }
 vx-vfs-types = { workspace = true }
+roam-shm = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 roam-shm = { workspace = true }
-facet-json = { workspace = true }
+roam-core = { workspace = true }
+roam-types = { workspace = true }
+shm-primitives = { workspace = true }
+libc = { workspace = true }
 fastrand = { workspace = true }
+vx-fskit = { path = "../vx-fskit" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-projfs = { workspace = true }
@@ -38,3 +43,10 @@ async-stream = { workspace = true }
 
 [package.metadata.cargo-shear]
 ignored = ["facet-error"]
+
+[features]
+default = []
+diagnostics = ["moire/diagnostics", "dep:roam-shm"]
+
+[lints]
+workspace = true

@@ -14,7 +14,9 @@ facet = { workspace = true }
 figue = { workspace = true }
 picante = { workspace = true }
 roam = { workspace = true }
-peeps = { workspace = true }
+roam-core = { workspace = true }
+roam-types = { workspace = true }
+moire = { workspace = true }
 roam-stream = { workspace = true }
 tokio = { workspace = true }
 blake3 = { workspace = true }
@@ -22,7 +24,6 @@ camino = { workspace = true }
 eyre = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-ur-taking-me-with-you = { workspace = true }
 libc = { workspace = true }
 petgraph = { workspace = true }
 tokio-util = { workspace = true }
@@ -43,4 +44,7 @@ vx-tarball = { workspace = true }
 
 [features]
 default = []
-diagnostics = ["peeps/diagnostics", "roam-stream/diagnostics"]
+diagnostics = ["moire/diagnostics"]
+
+[lints]
+workspace = true

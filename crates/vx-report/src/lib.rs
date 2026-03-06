@@ -516,13 +516,13 @@ impl ReportStore {
     }
 
     /// Initialize the runs directory.
-    pub fn init(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.runs_dir)
+    pub async fn init(&self) -> std::io::Result<()> {
+        tokio::fs::create_dir_all(&self.runs_dir).await
     }
 
     /// Save a build report.
-    pub fn save(&self, report: &BuildReport) -> std::io::Result<()> {
-        self.init()?;
+    pub async fn save(&self, report: &BuildReport) -> std::io::Result<()> {
+        self.init().await?;
 
         let json = facet_json::to_string(report)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
@@ -530,64 +530,64 @@ impl ReportStore {
 
         // Atomic write via temp file
         let tmp_path = self.runs_dir.join(format!("{}.json.tmp", report.run_id));
-        std::fs::write(&tmp_path, &json)?;
-        std::fs::rename(&tmp_path, &path)?;
+        tokio::fs::write(&tmp_path, &json).await?;
+        tokio::fs::rename(&tmp_path, &path).await?;
 
         // Update "latest" symlink
         let latest_path = self.runs_dir.join("latest");
-        if let Err(e) = std::fs::remove_file(&latest_path) {
+        if let Err(e) = tokio::fs::remove_file(&latest_path).await {
             // NotFound is expected if this is the first run
             if e.kind() != std::io::ErrorKind::NotFound {
                 eprintln!("Warning: failed to remove old 'latest' file: {e}");
             }
         }
-        std::fs::write(&latest_path, &report.run_id.0)?;
+        tokio::fs::write(&latest_path, &report.run_id.0).await?;
 
         Ok(())
     }
 
     /// Load a build report by run ID.
-    pub fn load(&self, run_id: &RunId) -> std::io::Result<Option<BuildReport>> {
+    pub async fn load(&self, run_id: &RunId) -> std::io::Result<Option<BuildReport>> {
         let path = self.runs_dir.join(format!("{}.json", run_id));
-        if !path.exists() {
+        if !tokio::fs::try_exists(&path).await? {
             return Ok(None);
         }
 
-        let json = std::fs::read_to_string(&path)?;
+        let json = tokio::fs::read_to_string(&path).await?;
         let report: BuildReport = facet_json::from_str(&json)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         Ok(Some(report))
     }
 
     /// Get the run ID of the latest build.
-    pub fn latest_run_id(&self) -> std::io::Result<Option<RunId>> {
+    pub async fn latest_run_id(&self) -> std::io::Result<Option<RunId>> {
         let latest_path = self.runs_dir.join("latest");
-        if !latest_path.exists() {
+        if !tokio::fs::try_exists(&latest_path).await? {
             return Ok(None);
         }
 
-        let id_str = std::fs::read_to_string(&latest_path)?;
+        let id_str = tokio::fs::read_to_string(&latest_path).await?;
         Ok(id_str.trim().parse().ok())
     }
 
     /// Load the latest build report.
-    pub fn load_latest(&self) -> std::io::Result<Option<BuildReport>> {
-        if let Some(run_id) = self.latest_run_id()? {
-            self.load(&run_id)
+    pub async fn load_latest(&self) -> std::io::Result<Option<BuildReport>> {
+        if let Some(run_id) = self.latest_run_id().await? {
+            self.load(&run_id).await
         } else {
             Ok(None)
         }
     }
 
     /// List all run IDs in chronological order (oldest first).
-    pub fn list_runs(&self) -> std::io::Result<Vec<RunId>> {
-        if !self.runs_dir.exists() {
+    pub async fn list_runs(&self) -> std::io::Result<Vec<RunId>> {
+        if !tokio::fs::try_exists(&self.runs_dir).await? {
             return Ok(Vec::new());
         }
 
         let mut runs = Vec::new();
-        for entry in std::fs::read_dir(&self.runs_dir)? {
-            let entry = entry?;
+        let mut entries = tokio::fs::read_dir(&self.runs_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             if let Some(ext) = path.extension()
                 && ext == "json"
@@ -604,8 +604,8 @@ impl ReportStore {
     }
 
     /// Get the previous run (second most recent).
-    pub fn previous_run_id(&self) -> std::io::Result<Option<RunId>> {
-        let runs = self.list_runs()?;
+    pub async fn previous_run_id(&self) -> std::io::Result<Option<RunId>> {
+        let runs = self.list_runs().await?;
         if runs.len() >= 2 {
             Ok(Some(runs[runs.len() - 2].clone()))
         } else {
@@ -614,9 +614,9 @@ impl ReportStore {
     }
 
     /// Load the previous build report.
-    pub fn load_previous(&self) -> std::io::Result<Option<BuildReport>> {
-        if let Some(run_id) = self.previous_run_id()? {
-            self.load(&run_id)
+    pub async fn load_previous(&self) -> std::io::Result<Option<BuildReport>> {
+        if let Some(run_id) = self.previous_run_id().await? {
+            self.load(&run_id).await
         } else {
             Ok(None)
         }

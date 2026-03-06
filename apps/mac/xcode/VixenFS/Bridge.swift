@@ -11,6 +11,109 @@ enum VixenFSConstants {
     static let shmBootstrapRetryDelayNs: UInt64 = 0
 }
 
+func vixenPOSIXCode(for error: Error) -> Int32 {
+    if let posix = error as? POSIXError {
+        return posix.code.rawValue
+    }
+
+    let nsError = error as NSError
+    if nsError.domain == NSPOSIXErrorDomain {
+        return Int32(nsError.code)
+    }
+
+    if error is CancellationError {
+        return POSIXError.ECANCELED.rawValue
+    }
+
+    if let err = error as? ConnectionError {
+        switch err {
+        case .connectionClosed:
+            return POSIXError.ENOTCONN.rawValue
+        case .timeout:
+            return POSIXError.ETIMEDOUT.rawValue
+        case .transportError:
+            return POSIXError.EIO.rawValue
+        case .goodbye:
+            return POSIXError.ECONNRESET.rawValue
+        case .protocolViolation, .handshakeFailed:
+            return POSIXError.EPROTO.rawValue
+        }
+    }
+
+    if let err = error as? TransportError {
+        switch err {
+        case .connectionClosed:
+            return POSIXError.ENOTCONN.rawValue
+        case .wouldBlock:
+            return POSIXError.EAGAIN.rawValue
+        case .frameDecoding, .frameEncoding, .protocolViolation:
+            return POSIXError.EPROTO.rawValue
+        case .transportIO:
+            return POSIXError.EIO.rawValue
+        }
+    }
+
+    if let err = error as? RoamError {
+        switch err {
+        case .unknownMethod, .notImplemented:
+            return POSIXError.ENOSYS.rawValue
+        case .decodeError, .encodeError:
+            return POSIXError.EPROTO.rawValue
+        case .connectionClosed:
+            return POSIXError.ENOTCONN.rawValue
+        case .timeout:
+            return POSIXError.ETIMEDOUT.rawValue
+        case .cancelled:
+            return POSIXError.ECANCELED.rawValue
+        }
+    }
+
+    if let err = error as? ShmBootstrapError {
+        switch err {
+        case .invalidSid, .invalidSocketPath, .invalidRequestEncoding:
+            return POSIXError.EINVAL.rawValue
+        case .unsupportedPlatform:
+            return POSIXError.ENOTSUP.rawValue
+        case .socketCreateFailed(let errno), .connectFailed(let errno), .writeFailed(let errno),
+            .readFailed(let errno):
+            return errno
+        case .eof:
+            return POSIXError.EPIPE.rawValue
+        case .invalidResponseMagic, .protocolError, .missingFileDescriptor:
+            return POSIXError.EPROTO.rawValue
+        }
+    }
+
+    if let err = error as? ShmRegionError {
+        switch err {
+        case .invalidSize, .invalidOffset, .resizeShrinkUnsupported:
+            return POSIXError.EINVAL.rawValue
+        case .createFailed(let errno), .openFailed(let errno), .statFailed(let errno),
+            .mmapFailed(let errno), .munmapFailed(let errno), .ftruncateFailed(let errno),
+            .fchmodFailed(let errno):
+            return errno
+        case .emptyFile:
+            return POSIXError.ENOENT.rawValue
+        }
+    }
+
+    return POSIXError.EIO.rawValue
+}
+
+func vixenMappedFSError(_ error: Error, operation: StaticString, logger: Logger) -> any Error {
+    let code = vixenPOSIXCode(for: error)
+    if code == POSIXError.ETIMEDOUT.rawValue {
+        logger.error(
+            "\(operation): timeout mapped to errno=\(code) (\(String(describing: error), privacy: .public))"
+        )
+        NSLog("VixenFS: timeout in \(operation)")
+    }
+    logger.error(
+        "\(operation): mapped \(String(describing: error), privacy: .public) to errno=\(code)"
+    )
+    return fs_errorForPOSIXError(code)
+}
+
 extension VfsClient: @unchecked Sendable {}
 
 actor LifecycleTrace {
@@ -80,6 +183,70 @@ final class NoopDispatcher: ServiceDispatcher, @unchecked Sendable {
     }
 }
 
+actor ConnectionHealth {
+    static let shared = ConnectionHealth()
+
+    private var everConnected = false
+    private var currentlyConnected = false
+    private var connectedAt: Date?
+    private var disconnectedAt: Date?
+    private var disconnectReason: String?
+
+    func recordConnected() {
+        everConnected = true
+        currentlyConnected = true
+        connectedAt = Date()
+        disconnectedAt = nil
+        disconnectReason = nil
+    }
+
+    func recordDisconnected(reason: String) {
+        currentlyConnected = false
+        disconnectedAt = Date()
+        disconnectReason = reason
+    }
+
+    func toJSON() -> Data {
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        var json = "{\n"
+        json += "  \"connected\": \(currentlyConnected),\n"
+        json += "  \"ever_connected\": \(everConnected),\n"
+
+        if let t = connectedAt {
+            json += "  \"connected_at\": \"\(iso.string(from: t))\",\n"
+        } else {
+            json += "  \"connected_at\": null,\n"
+        }
+
+        if let t = disconnectedAt {
+            json += "  \"disconnected_at\": \"\(iso.string(from: t))\",\n"
+        } else {
+            json += "  \"disconnected_at\": null,\n"
+        }
+
+        if currentlyConnected, let start = connectedAt {
+            let seconds = Date().timeIntervalSince(start)
+            json += "  \"uptime_seconds\": \(String(format: "%.3f", seconds)),\n"
+        } else if let start = connectedAt, let end = disconnectedAt {
+            let seconds = end.timeIntervalSince(start)
+            json += "  \"uptime_seconds\": \(String(format: "%.3f", seconds)),\n"
+        } else {
+            json += "  \"uptime_seconds\": null,\n"
+        }
+
+        if let reason = disconnectReason {
+            json += "  \"disconnect_reason\": \"\(reason)\"\n"
+        } else {
+            json += "  \"disconnect_reason\": null\n"
+        }
+
+        json += "}\n"
+        return Data(json.utf8)
+    }
+}
+
 /// Global VFS client shared across the extension
 actor VfsConnection {
     static let shared = VfsConnection()
@@ -88,6 +255,7 @@ actor VfsConnection {
     private var driverTask: Task<Void, Never>?
     private var disconnectRequested = false
     private var debugEnabled = false
+    private var terminalConnectionError: NSError?
     private let log = Logger(subsystem: VixenFSConstants.subsystem, category: "VfsConnection")
 
     func connect(url: URL) async throws {
@@ -99,12 +267,14 @@ actor VfsConnection {
             log, event: "vfs.connect.begin", details: "url=\(url.absoluteString)")
 
         guard let mountOptions = parseMountOptions(from: url) else {
-            throw NSError(
-                domain: "VFS", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Missing or invalid sid in URL: \(url)"])
+            throw POSIXError(.EINVAL)
         }
         let sid = mountOptions.sid
         debugEnabled = mountOptions.debug
+        await SwiftmoireClient.shared.configure(
+            dashboardAddr: mountOptions.moireDashboard,
+            debugFrames: mountOptions.debug
+        )
         if debugEnabled {
             log.notice("mount debug enabled for sid=\(sid, privacy: .public)")
         }
@@ -128,23 +298,30 @@ actor VfsConnection {
             throw error
         }
 
-        let (handle, driver) = establishShmGuest(
+        let (handle, driver) = try await establishShmGuest(
             transport: transport,
             dispatcher: NoopDispatcher()
         )
 
         disconnectRequested = false
+        terminalConnectionError = nil
         let logger = log
         driverTask = Task { [weak self] in
             do {
                 try await driver.run()
                 logger.error("Roam driver exited cleanly — server is gone")
+                NSLog("VixenFS: Roam SHM driver exited cleanly (server gone)")
+                await self?.handleDriverExit(reason: "driver_exit_clean")
             } catch {
-                logger.error("Roam driver exited with error: \(error.localizedDescription)")
+                logger.error(
+                    "Roam driver exited with error: \(String(describing: error), privacy: .public)")
+                NSLog("VixenFS: Roam SHM driver exited with error: \(String(describing: error))")
+                await self?.handleDriverExit(
+                    reason: "driver_exit_error:\(String(describing: error))")
             }
-            await self?.handleDriverExit()
         }
-        client = VfsClient(connection: handle, timeout: 5.0)
+        client = VfsClient(connection: handle, timeout: 28.0)
+        await ConnectionHealth.shared.recordConnected()
         log.info("Connected to \(url.absoluteString)")
         await LifecycleTrace.shared.mark(
             log, event: "vfs.connect.ready", details: "url=\(url.absoluteString)")
@@ -152,8 +329,11 @@ actor VfsConnection {
 
     func disconnect() async {
         await LifecycleTrace.shared.mark(log, event: "vfs.disconnect")
+        await ConnectionHealth.shared.recordDisconnected(reason: "requested")
         disconnectRequested = true
+        terminalConnectionError = nil
         debugEnabled = false
+        await SwiftmoireClient.shared.configure(dashboardAddr: nil, debugFrames: false)
         driverTask?.cancel()
         driverTask = nil
         client = nil
@@ -161,18 +341,28 @@ actor VfsConnection {
 
     func getClient() throws -> VfsClient {
         guard let client = client else {
-            throw NSError(
-                domain: "VFS", code: -1, userInfo: [NSLocalizedDescriptionKey: "Not connected"])
+            if let terminalConnectionError {
+                throw terminalConnectionError
+            }
+            throw POSIXError(.ENOTCONN)
         }
         return client
     }
 
-    private func handleDriverExit() async {
+    private func handleDriverExit(reason: String) async {
         if disconnectRequested {
             log.info("VFS connection closed during normal unload")
+            NSLog("VixenFS: SHM connection closed during unload")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.normal")
         } else {
+            terminalConnectionError = NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(POSIXError.ECONNRESET.rawValue),
+                userInfo: [NSLocalizedDescriptionKey: reason]
+            )
+            await ConnectionHealth.shared.recordDisconnected(reason: reason)
             log.error("Connection to VFS server lost; waiting for FSKit to unload/deactivate")
+            NSLog("VixenFS: SHM connection dropped unexpectedly (driver_exit)")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.unexpected")
         }
         client = nil
@@ -274,6 +464,7 @@ actor VfsConnection {
     private struct MountOptions {
         let sid: String
         let debug: Bool
+        let moireDashboard: String?
     }
 
     private func parseMountOptions(from url: URL) -> MountOptions? {
@@ -287,7 +478,8 @@ actor VfsConnection {
         }
         let debugValue = items.first(where: { $0.name == "debug" })?.value?.lowercased()
         let debug = debugValue == "1" || debugValue == "true" || debugValue == "yes"
-        return MountOptions(sid: sid, debug: debug)
+        let moireDashboard = items.first(where: { $0.name == "moire_dashboard" })?.value
+        return MountOptions(sid: sid, debug: debug, moireDashboard: moireDashboard)
     }
 
     private func isValidSid(_ sid: String) -> Bool {
@@ -409,7 +601,10 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
                 await LifecycleTrace.shared.mark(
                     self.log, event: "bridge.probeResource.failure",
                     details: "error=\(String(describing: error))")
-                sendable.handler(nil, error)
+                sendable.handler(
+                    nil,
+                    vixenMappedFSError(error, operation: #function, logger: self.log)
+                )
             }
         }
     }
@@ -449,7 +644,10 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
                 await LifecycleTrace.shared.mark(
                     self.log, event: "bridge.loadResource.failure",
                     details: "error=\(String(describing: error))")
-                sendable.handler(nil, fs_errorForPOSIXError(POSIXError.EIO.rawValue))
+                sendable.handler(
+                    nil,
+                    vixenMappedFSError(error, operation: #function, logger: self.log)
+                )
             }
         }
     }

@@ -891,8 +891,8 @@ impl ZigToolchainSpec {
 
 // Toolchain Manifest (What Was Acquired)
 
-/// Schema version 4: components stored as DirectoryNode trees, manifests stored as CasNode
-pub const TOOLCHAIN_MANIFEST_SCHEMA_VERSION: u32 = 4;
+/// Schema version 5: removed created_at from content-addressed manifest payload.
+pub const TOOLCHAIN_MANIFEST_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Facet)]
 pub struct ToolchainManifest {
@@ -904,9 +904,6 @@ pub struct ToolchainManifest {
     pub spec_key: ToolchainSpecKey,
     /// Content-derived toolchain identity
     pub toolchain_id: ToolchainId,
-    /// When acquired (ISO 8601 string)
-    pub created_at: String,
-
     // === Rust-specific fields ===
     /// Resolved manifest date (for stable/beta this captures the actual version)
     pub rust_manifest_date: Option<String>,
@@ -1036,7 +1033,7 @@ pub const CRATES_IO_REGISTRY: &str = "registry+https://github.com/rust-lang/crat
 
 /// Current schema version for registry crate manifests.
 /// Bump this when the manifest format changes.
-pub const REGISTRY_MANIFEST_SCHEMA_VERSION: u32 = 2;
+pub const REGISTRY_MANIFEST_SCHEMA_VERSION: u32 = 3;
 
 // Registry Spec (What is Requested)
 
@@ -1132,9 +1129,6 @@ pub struct RegistryCrateManifest {
 
     /// Reference to the .crate tarball bytes in CAS
     pub crate_tarball: BlobRef,
-
-    /// When acquired (ISO 8601 string)
-    pub created_at: String,
 }
 
 // Registry RPC Types

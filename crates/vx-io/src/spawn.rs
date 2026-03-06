@@ -1,29 +1,42 @@
 use camino::Utf8PathBuf;
 use eyre::Result;
+use moire::process::Child;
 use std::time::Duration;
-use tokio::process::Child;
 
-use crate::net::{Endpoint, EndpointConnector};
+use crate::net::Endpoint;
 
 /// Result of a successful [`ServiceBuilder::connect`].
-pub struct ServiceHandle<D> {
+pub struct ServiceHandle {
     /// The spawned child process, if any (None in connect-only mode).
     pub child: Option<Child>,
-    /// A connected roam client.
-    pub caller: roam_stream::Client<EndpointConnector, D>,
+    /// Caller for making RPC calls on the root connection.
+    pub caller: roam_core::DriverCaller,
+    /// Session handle for opening virtual connections.
+    pub session_handle: roam_core::SessionHandle,
+}
+
+impl ServiceHandle {
+    /// Run the boot protocol and open a virtual connection.
+    ///
+    /// 1. Calls `boot()` — waits for the daemon to initialize
+    /// 2. Opens a virtual connection for the real service
+    ///
+    /// Returns a caller for the virtual connection.
+    pub async fn boot_and_connect(&self) -> Result<roam_core::DriverCaller> {
+        crate::boot::boot_and_connect(&self.caller, &self.session_handle).await
+    }
 }
 
 /// Builder for spawning a vixen service and connecting to it via roam.
 ///
 /// The typical flow is:
-/// 1. Create a builder with `ServiceBuilder::new("vx-store", endpoint, dispatcher)`
+/// 1. Create a builder with `ServiceBuilder::new("vx-store", endpoint)`
 /// 2. Configure with `.caller_name()`, `.args()`, `.log_path()`, `.timeout()`
 /// 3. Optionally call `.connect_only()` to skip spawning
 /// 4. Call `.connect()` to spawn (if needed) and wait for the roam handshake
-pub struct ServiceBuilder<D> {
+pub struct ServiceBuilder {
     binary_name: String,
     endpoint: Endpoint,
-    dispatcher: D,
     caller_name: Option<String>,
     cli_args: Vec<String>,
     env_vars: Vec<(String, String)>,
@@ -32,21 +45,16 @@ pub struct ServiceBuilder<D> {
     spawn: bool,
 }
 
-impl<D> ServiceBuilder<D>
-where
-    D: roam_stream::ServiceDispatcher + Clone + 'static,
-{
+impl ServiceBuilder {
     /// Start building a service connection.
     ///
     /// - `binary_name`: the binary to spawn (e.g. "vx-store"), resolved as a sibling of the
     ///   current executable, falling back to PATH.
     /// - `endpoint`: where to connect. When spawning, `--listen <endpoint>` is prepended to args.
-    /// - `dispatcher`: roam dispatcher for incoming RPCs on this connection.
-    pub fn new(binary_name: impl Into<String>, endpoint: Endpoint, dispatcher: D) -> Self {
+    pub fn new(binary_name: impl Into<String>, endpoint: Endpoint) -> Self {
         Self {
             binary_name: binary_name.into(),
             endpoint,
-            dispatcher,
             caller_name: None,
             cli_args: Vec::new(),
             env_vars: Vec::new(),
@@ -103,11 +111,10 @@ where
     /// we fail immediately instead of retrying until timeout.
     ///
     /// When connect-only, retries with backoff until timeout.
-    pub async fn connect(self) -> Result<ServiceHandle<D>> {
+    pub async fn connect(self) -> Result<ServiceHandle> {
         let Self {
             binary_name,
             endpoint,
-            dispatcher,
             caller_name,
             cli_args,
             env_vars,
@@ -118,27 +125,29 @@ where
 
         let mut child = if spawn {
             tracing::info!("Spawning {binary_name}");
-            Some(spawn_binary(
-                &binary_name,
-                &endpoint,
-                &cli_args,
-                &env_vars,
-                log_path.as_deref(),
-            )?)
+            Some(
+                spawn_binary(
+                    &binary_name,
+                    &endpoint,
+                    &cli_args,
+                    &env_vars,
+                    log_path.as_deref(),
+                )
+                .await?,
+            )
         } else {
             tracing::info!("Connecting to {binary_name} at {endpoint}");
             None
         };
 
-        let connect_fut =
-            connect_with_backoff(&binary_name, &endpoint, &dispatcher, &caller_name, timeout);
+        let connect_fut = connect_with_backoff(&binary_name, &endpoint, &caller_name, timeout);
 
         if let Some(ref mut child_proc) = child {
             // Race: connect loop vs child dying.
             tokio::select! {
                 result = connect_fut => {
-                    let caller = result?;
-                    Ok(ServiceHandle { child, caller })
+                    let (caller, session_handle) = result?;
+                    Ok(ServiceHandle { child, caller, session_handle })
                 }
                 exit_status = child_proc.wait() => {
                     match exit_status {
@@ -146,8 +155,8 @@ where
                             // Child exited with status 0 — probably found lock held.
                             // Another instance is likely running, so try to connect.
                             tracing::debug!("{binary_name} exited cleanly (lock held?), trying to connect to existing instance");
-                            let caller = connect_with_backoff(&binary_name, &endpoint, &dispatcher, &caller_name, timeout).await?;
-                            Ok(ServiceHandle { child: None, caller })
+                            let (caller, session_handle) = connect_with_backoff(&binary_name, &endpoint, &caller_name, timeout).await?;
+                            Ok(ServiceHandle { child: None, caller, session_handle })
                         }
                         Ok(status) => eyre::bail!(
                             "{binary_name} exited with {status} before becoming ready at {endpoint}",
@@ -159,55 +168,49 @@ where
                 }
             }
         } else {
-            let caller = connect_fut.await?;
-            Ok(ServiceHandle { child, caller })
+            let (caller, session_handle) = connect_fut.await?;
+            Ok(ServiceHandle {
+                child,
+                caller,
+                session_handle,
+            })
         }
     }
 }
 
 /// Retry connection with exponential backoff until timeout.
-async fn connect_with_backoff<D>(
+async fn connect_with_backoff(
     binary_name: &str,
     endpoint: &Endpoint,
-    dispatcher: &D,
-    caller_name: &Option<String>,
+    _caller_name: &Option<String>,
     timeout: Duration,
-) -> Result<roam_stream::Client<EndpointConnector, D>>
-where
-    D: roam_stream::ServiceDispatcher + Clone + 'static,
-{
+) -> Result<(roam_core::DriverCaller, roam_core::SessionHandle)> {
     let deadline = tokio::time::Instant::now() + timeout;
     let backoff_ms = [10, 25, 50, 100, 250, 500, 1000];
     let mut last_err = None;
 
     for delay in backoff_ms.iter().copied().chain(std::iter::repeat(1000)) {
-        let attempt_caller = crate::net::reconnecting_client_named(
-            endpoint.clone(),
-            dispatcher.clone(),
-            caller_name.clone(),
-        );
-
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             break;
         }
 
         match tokio::time::timeout(
-            remaining.min(Duration::from_secs(2)),
-            attempt_caller.handle(),
+            remaining.min(Duration::from_secs(1)),
+            crate::net::connect_session(endpoint),
         )
         .await
         {
-            Ok(Ok(_)) => {
-                tracing::info!("{binary_name} is ready at {endpoint}");
-                return Ok(attempt_caller);
+            Ok(Ok((caller, session_handle))) => {
+                tracing::debug!("{binary_name} is ready at {endpoint}");
+                return Ok((caller, session_handle));
             }
             Ok(Err(e)) => {
-                tracing::debug!("{binary_name} not ready yet at {endpoint}: {e}");
+                tracing::trace!("{binary_name} not ready yet at {endpoint}: {e}");
                 last_err = Some(e.to_string());
             }
             Err(_) => {
-                tracing::debug!("{binary_name} connect attempt timed out at {endpoint}");
+                tracing::trace!("{binary_name} connect attempt timed out at {endpoint}");
                 last_err = Some("connection timed out".into());
             }
         }
@@ -227,7 +230,7 @@ where
 /// - In test mode (`VX_TEST` set): stdout/stderr inherited.
 /// - Otherwise: stdout/stderr redirected to `log_path` (or null if not set).
 /// - The child dies when the parent dies (via `ur_taking_me_with_you`).
-fn spawn_binary(
+async fn spawn_binary(
     binary_name: &str,
     endpoint: &Endpoint,
     extra_args: &[String],
@@ -253,7 +256,7 @@ fn spawn_binary(
         binary_path.display()
     );
 
-    let mut cmd = tokio::process::Command::new(&binary_path);
+    let mut cmd = moire::process::Command::new(&binary_path);
     cmd.arg("--listen").arg(&endpoint_display);
     cmd.args(extra_args);
     for (key, value) in env_vars {
@@ -261,26 +264,30 @@ fn spawn_binary(
     }
 
     if vx_test {
-        cmd.stdout(Stdio::inherit());
+        // We do not inherit standard output because it can corrupt `--json` output
+        cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::inherit());
     } else if let Some(log_path) = log_path {
-        use std::fs::OpenOptions;
-
         if let Some(parent) = log_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            moire::fs::create_dir_all(parent).await?;
         }
 
-        let log_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)?;
+        let mut opts = moire::fs::OpenOptions::new();
+        opts.create(true).append(true);
+        let log_file = opts.open(log_path).await?;
+        let log_file_clone = log_file.try_clone().await?;
 
-        cmd.stdout(Stdio::from(log_file.try_clone()?));
-        cmd.stderr(Stdio::from(log_file));
+        let stdout_file = log_file_clone.into_std().await;
+        let stderr_file = log_file.into_std().await;
+        cmd.stdout(Stdio::from(stdout_file));
+        cmd.stderr(Stdio::from(stderr_file));
     } else {
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
     }
 
-    ur_taking_me_with_you::spawn_dying_with_parent_async(cmd).map_err(Into::into)
+    let (inner, diag) = cmd.into_inner_with_diagnostics();
+    ur_taking_me_with_you::spawn_dying_with_parent_async(inner)
+        .map(|child| Child::from_tokio_with_diagnostics(child, diag))
+        .map_err(Into::into)
 }

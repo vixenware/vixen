@@ -11,4 +11,14 @@ repository.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
+jiff = { workspace = true }
 libc = { workspace = true }
+tokio = { workspace = true }
+moire = { workspace = true }
+camino = { workspace = true }
+facet = { workspace = true }
+figue = { workspace = true }
+vx-fskit = { path = "../vx-fskit" }
+
+[lints]
+workspace = true

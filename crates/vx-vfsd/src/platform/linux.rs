@@ -5,7 +5,7 @@ use crate::Result;
 /// Clean up stuck FUSE mount if needed.
 pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
     // Check if mount exists in /proc/mounts
-    let mounts = match std::fs::read_to_string("/proc/mounts") {
+    let mounts = match moire::fs::read_to_string("/proc/mounts").await {
         Ok(content) => content,
         Err(_) => return Ok(()), // Can't read mounts, skip cleanup
     };
@@ -16,7 +16,7 @@ pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
     }
 
     // Try to stat the mount point to see if it's stuck
-    match std::fs::metadata(mount_path.as_std_path()) {
+    match moire::fs::metadata(mount_path.as_std_path()).await {
         Ok(_) => {
             // stat succeeded, mount is healthy
             return Ok(());
@@ -65,11 +65,11 @@ pub async fn cleanup_stuck_mount(mount_path: &Utf8PathBuf) -> Result<()> {
     tracing::error!("lazy unmount failed, attempting nuclear cleanup");
 
     // Abort all FUSE connections
-    if let Ok(entries) = std::fs::read_dir("/sys/fs/fuse/connections") {
-        for entry in entries.flatten() {
+    if let Ok(mut entries) = tokio::fs::read_dir("/sys/fs/fuse/connections").await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
             let abort_path = entry.path().join("abort");
-            if abort_path.exists() {
-                let _ = std::fs::write(&abort_path, b"1");
+            if moire::fs::try_exists(&abort_path).await.unwrap_or(false) {
+                let _ = moire::fs::write(&abort_path, b"1").await;
             }
         }
     }
@@ -106,43 +106,14 @@ pub fn unmount(mount_path: &Utf8PathBuf) {
     }
 }
 
-/// Dump kernel FUSE state and thread stacks to stderr.
-pub fn dump_platform_diagnostics() {
-    eprintln!("\n--- Kernel FUSE state ---");
-
-    if let Ok(entries) = std::fs::read_dir("/sys/fs/fuse/connections") {
-        for entry in entries.flatten() {
-            let waiting_path = entry.path().join("waiting");
-            if let Ok(val) = std::fs::read_to_string(&waiting_path) {
-                eprintln!("  {}: waiting={}", entry.path().display(), val.trim());
-            }
-        }
-    }
-
-    eprintln!("\n--- Thread stacks ---");
-    if let Ok(tasks) = std::fs::read_dir("/proc/self/task") {
-        for task in tasks.flatten() {
-            let tid = task.file_name();
-            let comm = std::fs::read_to_string(task.path().join("comm")).unwrap_or_default();
-            let stack = std::fs::read_to_string(task.path().join("stack")).unwrap_or_default();
-            if !stack.trim().is_empty() {
-                eprintln!("  Thread {} ({}):", tid.to_string_lossy(), comm.trim());
-                for line in stack.lines() {
-                    eprintln!("    {line}");
-                }
-            }
-        }
-    }
-}
-
 /// Whether we should create the mount directory.
 pub fn should_create_mount_dir(_mount_path: &Utf8PathBuf) -> bool {
     true
 }
 
-/// Collect diagnostics when the VFS smoke test fails.
+/// Collect comprehensive VFS diagnostics when any mount operation fails.
 /// Returns all diagnostics as a single string so the caller can print it atomically.
-pub async fn collect_smoke_test_diagnostics(mount_path: &Utf8PathBuf) -> String {
+pub async fn collect_vfs_diagnostics(mount_path: &Utf8PathBuf) -> String {
     use owo_colors::OwoColorize;
     use std::fmt::Write;
 
@@ -157,7 +128,7 @@ pub async fn collect_smoke_test_diagnostics(mount_path: &Utf8PathBuf) -> String 
 
     // Check /proc/mounts for FUSE entries
     writeln!(out, "{}", "--- FUSE mounts ---".yellow().bold()).unwrap();
-    match std::fs::read_to_string("/proc/mounts") {
+    match moire::fs::read_to_string("/proc/mounts").await {
         Ok(mounts) => {
             let fuse_lines: Vec<&str> = mounts
                 .lines()
@@ -176,10 +147,10 @@ pub async fn collect_smoke_test_diagnostics(mount_path: &Utf8PathBuf) -> String 
 
     // FUSE connection state
     writeln!(out, "\n{}", "--- FUSE connections ---".yellow().bold()).unwrap();
-    if let Ok(entries) = std::fs::read_dir("/sys/fs/fuse/connections") {
-        for entry in entries.flatten() {
+    if let Ok(mut entries) = tokio::fs::read_dir("/sys/fs/fuse/connections").await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
             let waiting_path = entry.path().join("waiting");
-            if let Ok(val) = std::fs::read_to_string(&waiting_path) {
+            if let Ok(val) = moire::fs::read_to_string(&waiting_path).await {
                 writeln!(out, "  {}: waiting={}", entry.path().display(), val.trim()).unwrap();
             }
         }
@@ -187,7 +158,7 @@ pub async fn collect_smoke_test_diagnostics(mount_path: &Utf8PathBuf) -> String 
 
     // Process inventory
     writeln!(out, "\n{}", "--- Vixen processes ---".yellow().bold()).unwrap();
-    match tokio::process::Command::new("pgrep")
+    match moire::process::Command::new("pgrep")
         .args(["-la", "(vx-|vixen)"])
         .output()
         .await
@@ -208,7 +179,7 @@ pub async fn collect_smoke_test_diagnostics(mount_path: &Utf8PathBuf) -> String 
     // Mount point stat
     writeln!(out, "\n{}", "--- Mount point ---".yellow().bold()).unwrap();
     writeln!(out, "  Expected: {mount_path}").unwrap();
-    match std::fs::symlink_metadata(mount_path.as_std_path()) {
+    match tokio::fs::symlink_metadata(mount_path.as_std_path()).await {
         Ok(meta) => writeln!(out, "  stat: exists, is_dir={}", meta.is_dir()).unwrap(),
         Err(e) => writeln!(out, "  stat: {e}").unwrap(),
     }

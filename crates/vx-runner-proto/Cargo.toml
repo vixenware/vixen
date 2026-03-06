@@ -13,3 +13,6 @@ facet = { workspace = true }
 roam = { workspace = true }
 
 vx-store-proto = { workspace = true }
+
+[lints]
+workspace = true

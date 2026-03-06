@@ -28,15 +28,18 @@
 //! - ID 1: Root directory (`/`)
 //! - ID 2+: Dynamically allocated for prefixes and their contents
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use camino::Utf8PathBuf;
-use peeps::locks::DiagnosticRwLock;
+use moire::sync::SyncMutex;
 use vixenfs_proto::{
     CreateResult, DirEntry, GetAttributesResult, ItemAttributes, ItemId, ItemType, LookupResult,
-    ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsResult, WriteResult, errno, mode,
+    ReadDirResult, ReadResult, SetAttributesParams, Vfs, VfsDiskNotify, VfsResult, WriteResult,
+    errno, mode,
 };
 use vx_store_proto::{Blake3Hash, BlobNode, CasNode, ChunkHash, NodeHash, StoreClient};
 
@@ -56,16 +59,11 @@ pub struct VfsItem {
     pub blob_node: Option<NodeHash>,
     /// For files: size in bytes
     pub size: u64,
-    /// For files being written: buffered data
-    pub write_buffer: Option<Vec<u8>>,
 }
 
 /// An action prefix - represents a build directory like `/build-01JFX.../`
 #[derive(Debug)]
-#[allow(dead_code)] // Fields used for debugging and future prefix management
 pub struct ActionPrefix {
-    /// Unique ID for this prefix (e.g., ULID)
-    pub id: String,
     /// The ItemId of this prefix's root directory
     pub root_item_id: ItemId,
     /// Mapping of paths within prefix to CAS hashes
@@ -97,8 +95,13 @@ const ROOT_ITEM_ID: ItemId = 1;
 pub(crate) struct VfsItems {
     /// All items keyed by ItemId.
     items: HashMap<ItemId, VfsItem>,
-    /// parent_id → { child_name → child_id }
-    children: HashMap<ItemId, HashMap<String, ItemId>>,
+    /// parent_id → { child_name → child_id } (BTreeMap for deterministic iteration order)
+    children: HashMap<ItemId, BTreeMap<String, ItemId>>,
+    /// Directory verifier generations keyed by directory ItemId.
+    dir_verifiers: HashMap<ItemId, u64>,
+    /// In-memory write buffers for files being written (FUSE only).
+    /// Stored separately from VfsItem so items can be cloned cheaply for snapshots.
+    write_buffers: HashMap<ItemId, Vec<u8>>,
 }
 
 impl VfsItems {
@@ -106,7 +109,23 @@ impl VfsItems {
         Self {
             items: HashMap::new(),
             children: HashMap::new(),
+            dir_verifiers: HashMap::new(),
+            write_buffers: HashMap::new(),
         }
+    }
+
+    fn bump_dir_verifier(&mut self, dir_id: ItemId) {
+        let next = self
+            .dir_verifiers
+            .get(&dir_id)
+            .copied()
+            .unwrap_or(1)
+            .wrapping_add(1);
+        self.dir_verifiers.insert(dir_id, next.max(1));
+    }
+
+    fn dir_verifier(&self, dir_id: ItemId) -> u64 {
+        self.dir_verifiers.get(&dir_id).copied().unwrap_or(1)
     }
 
     /// Insert an item, updating the children index.
@@ -114,15 +133,21 @@ impl VfsItems {
         let id = item.id;
         let parent_id = item.parent_id;
         let name = item.name.clone();
+        let is_dir = item.item_type == ItemType::Directory;
         self.items.insert(id, item);
+        if is_dir {
+            self.dir_verifiers.entry(id).or_insert(1);
+        }
         if parent_id != 0 {
             self.children.entry(parent_id).or_default().insert(name, id);
+            self.bump_dir_verifier(parent_id);
         }
     }
 
     /// Remove an item by id, updating the children index.
     pub(crate) fn remove(&mut self, id: ItemId) -> Option<VfsItem> {
         let item = self.items.remove(&id)?;
+        self.write_buffers.remove(&id);
         // Remove from parent's children map
         if item.parent_id != 0
             && let Some(siblings) = self.children.get_mut(&item.parent_id)
@@ -131,10 +156,12 @@ impl VfsItems {
             if siblings.is_empty() {
                 self.children.remove(&item.parent_id);
             }
+            self.bump_dir_verifier(item.parent_id);
         }
         // Remove this item's children entry (even if non-empty — caller is
         // responsible for removing descendants first)
         self.children.remove(&id);
+        self.dir_verifiers.remove(&id);
         Some(item)
     }
 
@@ -179,7 +206,9 @@ impl VfsItems {
 
     /// Rename an item: update the children index for old and new parent.
     fn rename(&mut self, item_id: ItemId, new_parent_id: ItemId, new_name: String) {
+        let mut old_parent = None;
         if let Some(item) = self.items.get(&item_id) {
+            old_parent = Some(item.parent_id);
             let old_parent = item.parent_id;
             let old_name = item.name.clone();
             // Remove from old parent
@@ -197,6 +226,12 @@ impl VfsItems {
             .entry(new_parent_id)
             .or_default()
             .insert(new_name, item_id);
+        if let Some(old_parent_id) = old_parent {
+            self.bump_dir_verifier(old_parent_id);
+            if old_parent_id != new_parent_id {
+                self.bump_dir_verifier(new_parent_id);
+            }
+        }
     }
 
     /// Total number of items.
@@ -209,72 +244,100 @@ impl VfsItems {
         self.items.contains_key(id)
     }
 
-    /// Build a minimal snapshot for flush: no write_buffers, includes children index.
-    /// Single pass over items, O(N) where N = total items.
-    pub(crate) fn snapshot_for_flush(&self) -> FlushSnapshot {
-        let mut mini_items = HashMap::with_capacity(self.items.len());
-        let mut children: HashMap<ItemId, Vec<(String, ItemId)>> = HashMap::new();
+    /// Clone items and children index without write buffers (cheap snapshot for flush).
+    pub(crate) fn clone_without_buffers(&self) -> Self {
+        Self {
+            items: self.items.clone(),
+            children: self.children.clone(),
+            dir_verifiers: self.dir_verifiers.clone(),
+            write_buffers: HashMap::new(),
+        }
+    }
 
-        for (id, item) in &self.items {
-            mini_items.insert(
-                *id,
-                MiniItem {
-                    id: item.id,
-                    name: item.name.clone(),
-                    item_type: item.item_type,
-                    mode: item.mode,
-                    cas_hash: item.cas_hash,
-                    blob_node: item.blob_node,
-                    size: item.size,
-                },
-            );
-            if item.parent_id != 0 {
-                children
-                    .entry(item.parent_id)
-                    .or_default()
-                    .push((item.name.clone(), *id));
+    /// Iterate over children of a parent, sorted by name.
+    /// BTreeMap guarantees lexicographic order, which matches the byte ordering
+    /// required for deterministic DirectoryNode hashing.
+    pub(crate) fn sorted_children_of(&self, parent_id: ItemId) -> Vec<(&str, &VfsItem)> {
+        let Some(kids) = self.children.get(&parent_id) else {
+            return Vec::new();
+        };
+        kids.iter()
+            .filter_map(|(name, id)| Some((name.as_str(), self.items.get(id)?)))
+            .collect()
+    }
+}
+
+/// CAS-backed VFS implementation
+pub(crate) struct VfsState {
+    pub(crate) items: VfsItems,
+    pub(crate) prefixes: HashMap<String, ActionPrefix>,
+}
+
+struct ChunkL1Cache {
+    entries: HashMap<Blake3Hash, Arc<[u8]>>,
+    recency: VecDeque<Blake3Hash>,
+    current_bytes: usize,
+    max_bytes: usize,
+}
+
+impl ChunkL1Cache {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            recency: VecDeque::new(),
+            current_bytes: 0,
+            max_bytes,
+        }
+    }
+
+    fn get(&mut self, hash: &Blake3Hash) -> Option<Arc<[u8]>> {
+        let data = self.entries.get(hash).cloned()?;
+        self.touch(hash);
+        Some(data)
+    }
+
+    fn insert(&mut self, hash: Blake3Hash, data: Arc<[u8]>) {
+        let data_len = data.len();
+        if data_len > self.max_bytes {
+            return;
+        }
+
+        if let Some(prev) = self.entries.remove(&hash) {
+            self.current_bytes = self.current_bytes.saturating_sub(prev.len());
+            self.remove_from_recency(&hash);
+        }
+
+        while self.current_bytes + data_len > self.max_bytes {
+            let Some(oldest) = self.recency.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = self.entries.remove(&oldest) {
+                self.current_bytes = self.current_bytes.saturating_sub(evicted.len());
             }
         }
 
-        // Sort children by name for deterministic DirectoryNode hashing
-        for kids in children.values_mut() {
-            kids.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-        }
+        self.current_bytes += data_len;
+        self.recency.push_back(hash);
+        self.entries.insert(hash, data);
+    }
 
-        FlushSnapshot {
-            items: mini_items,
-            children,
+    fn touch(&mut self, hash: &Blake3Hash) {
+        self.remove_from_recency(hash);
+        self.recency.push_back(*hash);
+    }
+
+    fn remove_from_recency(&mut self, hash: &Blake3Hash) {
+        if let Some(pos) = self.recency.iter().position(|h| h == hash) {
+            self.recency.remove(pos);
         }
     }
 }
 
-/// Minimal item for flush snapshots — no write_buffer, no heap-heavy fields.
-pub(crate) struct MiniItem {
-    pub id: ItemId,
-    pub name: String,
-    pub item_type: ItemType,
-    pub mode: u32,
-    pub cas_hash: Option<Blake3Hash>,
-    pub blob_node: Option<NodeHash>,
-    pub size: u64,
-}
-
-/// Snapshot of VFS state for tree-building during flush.
-/// Built in a single O(N) pass, no write_buffers included.
-pub(crate) struct FlushSnapshot {
-    pub items: HashMap<ItemId, MiniItem>,
-    /// parent_id → sorted Vec of (child_name, child_id)
-    pub children: HashMap<ItemId, Vec<(String, ItemId)>>,
-}
-
-/// CAS-backed VFS implementation
 pub struct CasVfs {
     /// CAS client for fetching blobs
-    pub(crate) cas: Arc<StoreClient<crate::CasCaller>>,
-    /// All items in the VFS with adjacency index
-    pub(crate) items: DiagnosticRwLock<VfsItems>,
-    /// Active action prefixes (keyed by prefix ID like "build-01JFX...")
-    pub(crate) prefixes: DiagnosticRwLock<HashMap<String, ActionPrefix>>,
+    pub(crate) cas: Arc<StoreClient>,
+    /// Unified VFS state lock: items + prefixes
+    pub(crate) state: SyncMutex<VfsState>,
     /// Next available ItemId
     next_id: AtomicU64,
     /// L2 chunk cache (disk): persistent across vx-vfsd restarts.
@@ -284,9 +347,20 @@ pub struct CasVfs {
     /// BlobNode metadata cache: NodeHash → parsed BlobNode.
     /// BlobNodes are immutable (content-addressed) so caching is unconditionally safe.
     /// Small: each entry is ~100 bytes × MAX_CHUNKS_PER_BLOB chunk entries.
-    blobnode_cache: DiagnosticRwLock<HashMap<NodeHash, Arc<BlobNode>>>,
+    blobnode_cache: SyncMutex<HashMap<NodeHash, Arc<BlobNode>>>,
+    /// L1 chunk cache (memory): ChunkHash → bytes, bounded by total bytes.
+    chunk_l1_cache: SyncMutex<ChunkL1Cache>,
+    /// Diagnostic tracker for CAS-backed file identity stability.
+    observed_identities: SyncMutex<HashMap<ItemId, ObservedIdentity>>,
     /// Mount path for reading back files written directly to disk (ProjFS on Windows).
     mount_path: Utf8PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ObservedIdentity {
+    cas_hash: Blake3Hash,
+    blob_node: Option<NodeHash>,
+    size: u64,
 }
 
 impl CasVfs {
@@ -295,7 +369,7 @@ impl CasVfs {
     /// `disk_cache_dir` enables persistent L2 blob cache across restarts.
     /// Pass `None` to disable (L1 memory-only).
     pub fn new(
-        cas: Arc<StoreClient<crate::CasCaller>>,
+        cas: Arc<StoreClient>,
         disk_cache_dir: Option<Utf8PathBuf>,
         mount_path: Utf8PathBuf,
     ) -> Self {
@@ -311,16 +385,25 @@ impl CasVfs {
             cas_hash: None,
             blob_node: None,
             size: 0,
-            write_buffer: None,
         });
 
         Self {
             cas,
-            items: DiagnosticRwLock::new("CasVfs::items", items),
-            prefixes: DiagnosticRwLock::new("CasVfs::prefixes", HashMap::new()),
+            state: SyncMutex::new(
+                "CasVfs::state",
+                VfsState {
+                    items,
+                    prefixes: HashMap::new(),
+                },
+            ),
             next_id: AtomicU64::new(2), // 1=root
             disk_cache_dir,
-            blobnode_cache: DiagnosticRwLock::new("CasVfs::blobnode_cache", HashMap::new()),
+            blobnode_cache: SyncMutex::new("CasVfs::blobnode_cache", HashMap::new()),
+            chunk_l1_cache: SyncMutex::new(
+                "CasVfs::chunk_l1_cache",
+                ChunkL1Cache::new(Self::chunk_l1_cache_max_bytes()),
+            ),
+            observed_identities: SyncMutex::new("CasVfs::observed_identities", HashMap::new()),
             mount_path,
         }
     }
@@ -328,6 +411,17 @@ impl CasVfs {
     /// Allocate a new ItemId
     fn alloc_id(&self) -> ItemId {
         self.next_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn chunk_l1_cache_max_bytes() -> usize {
+        static MAX_BYTES: OnceLock<usize> = OnceLock::new();
+        *MAX_BYTES.get_or_init(|| {
+            std::env::var("VX_VFSD_L1_CHUNK_CACHE_BYTES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(256 * 1024 * 1024)
+        })
     }
 
     /// Compute the disk cache path for a chunk.
@@ -338,37 +432,85 @@ impl CasVfs {
         Some(dir.join(&hex[..2]).join(hex))
     }
 
-    /// Fetch a chunk with L2 disk cache. On miss, fetches from CAS and writes through.
-    async fn read_chunk_cached(&self, chunk_hash: ChunkHash) -> Result<Vec<u8>, String> {
+    /// Fetch a chunk with L1 memory + L2 disk cache. On miss, fetches from CAS and writes through.
+    async fn read_chunk_cached(&self, chunk_hash: ChunkHash) -> Result<Arc<[u8]>, String> {
+        async fn fetch_from_cas(
+            cas: &StoreClient,
+            chunk_hash: ChunkHash,
+        ) -> Result<Arc<[u8]>, String> {
+            let data = cas
+                .get_chunk(chunk_hash)
+                .await
+                .map_err(|e| format!("CAS chunk read error: {:?}", e))?
+                .ok_or_else(|| format!("chunk {} not found", chunk_hash.to_hex()))?;
+
+            let actual_hash = Blake3Hash::from_bytes(&data);
+            if actual_hash != chunk_hash.0 {
+                return Err(format!(
+                    "CAS returned wrong chunk bytes for {} (got {})",
+                    chunk_hash.to_hex(),
+                    actual_hash.to_hex()
+                ));
+            }
+
+            Ok(data.into())
+        }
+
+        // Try L1 memory cache first
+        if let Some(data) = self.chunk_l1_cache.lock().get(&chunk_hash.0) {
+            return Ok(data);
+        }
+
         // Try L2 disk cache first
         if let Some(path) = self.chunk_cache_path(&chunk_hash.0) {
-            match tokio::fs::read(path.as_std_path()).await {
-                Ok(data) => return Ok(data),
+            match moire::fs::read(path.as_std_path()).await {
+                Ok(data) => {
+                    let actual_hash = Blake3Hash::from_bytes(&data);
+                    if actual_hash == chunk_hash.0 {
+                        let data: Arc<[u8]> = data.into();
+                        self.chunk_l1_cache
+                            .lock()
+                            .insert(chunk_hash.0, Arc::clone(&data));
+                        return Ok(data);
+                    }
+
+                    tracing::error!(
+                        expected = %chunk_hash.to_hex(),
+                        actual = %actual_hash.to_hex(),
+                        bytes = data.len(),
+                        path = %path,
+                        "L2 cache hash mismatch on hit, evicting corrupted entry"
+                    );
+                    if let Err(e) = moire::fs::remove_file(path.as_std_path()).await
+                        && e.kind() != std::io::ErrorKind::NotFound
+                    {
+                        tracing::warn!(path = %path, error = ?e, "failed to remove bad L2 cache file");
+                    }
+                    // Fall through to CAS refetch.
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     // Cache miss — fall through to RPC
                 }
                 Err(e) => {
-                    tracing::warn!(hash = %chunk_hash.0, error = %e, "L2 cache read error");
+                    tracing::warn!(hash = %chunk_hash.0, error = ?e, "L2 cache read error");
                     // Fall through to RPC
                 }
             }
         }
 
         // Fetch from CAS
-        let data = self
-            .cas
-            .get_chunk(chunk_hash)
-            .await
-            .map_err(|e| format!("CAS chunk read error: {e}"))?
-            .ok_or_else(|| format!("chunk {} not found", chunk_hash.to_hex()))?;
+        let data = fetch_from_cas(&self.cas, chunk_hash).await?;
 
         // Write-through to L2
         if let Some(path) = self.chunk_cache_path(&chunk_hash.0)
-            && let Err(e) = vx_io::atomic_write(&path, &data).await
+            && let Err(e) = vx_io::atomic_write(&path, &data[..], false).await
         {
-            tracing::warn!(hash = %chunk_hash.0, error = %e, "L2 cache write-through failed");
+            tracing::warn!(hash = %chunk_hash.0, error = ?e, "L2 cache write-through failed");
         }
 
+        self.chunk_l1_cache
+            .lock()
+            .insert(chunk_hash.0, Arc::clone(&data));
         Ok(data)
     }
 
@@ -376,7 +518,7 @@ impl CasVfs {
     async fn get_blobnode_cached(&self, blob_node_hash: NodeHash) -> Result<Arc<BlobNode>, String> {
         // Check cache
         {
-            let cache = self.blobnode_cache.read();
+            let cache = self.blobnode_cache.lock();
             if let Some(blob) = cache.get(&blob_node_hash) {
                 return Ok(Arc::clone(blob));
             }
@@ -387,11 +529,11 @@ impl CasVfs {
             .cas
             .get_node(blob_node_hash)
             .await
-            .map_err(|e| format!("failed to read BlobNode: {e}"))?
+            .map_err(|e| format!("failed to read BlobNode: {:?}", e))?
             .ok_or_else(|| format!("BlobNode {} not found", blob_node_hash.to_hex()))?;
 
         let node = CasNode::from_bytes(&node_data)
-            .map_err(|e| format!("failed to deserialize BlobNode: {e}"))?;
+            .map_err(|e| format!("failed to deserialize BlobNode: {:?}", e))?;
 
         let blob = match node {
             CasNode::Blob(b) => b,
@@ -407,7 +549,7 @@ impl CasVfs {
 
         // Insert into cache
         {
-            let mut cache = self.blobnode_cache.write();
+            let mut cache = self.blobnode_cache.lock();
             cache.insert(blob_node_hash, Arc::clone(&blob));
         }
 
@@ -489,7 +631,7 @@ impl CasVfs {
                     })
                     .collect();
 
-                let mut results: Vec<Option<(Vec<u8>, u64)>> = vec![None; needed_chunks.len()];
+                let mut results: Vec<Option<(Arc<[u8]>, u64)>> = vec![None; needed_chunks.len()];
 
                 // buffer_unordered(8): up to 8 concurrent chunk fetches
                 let mut stream = stream::iter(fetches).buffer_unordered(8);
@@ -531,9 +673,97 @@ impl CasVfs {
             }
         }
     }
+
+    fn size_checks_enabled() -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("VX_VFSD_VERIFY_SIZE")
+                .ok()
+                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        })
+    }
+
+    fn observe_identity(&self, item_id: ItemId, identity: ObservedIdentity, context: &'static str) {
+        let mut observed = self.observed_identities.lock();
+        if let Some(prev) = observed.get(&item_id).copied()
+            && prev != identity
+        {
+            tracing::error!(
+                item_id,
+                context,
+                prev_hash = %prev.cas_hash,
+                prev_blob_node = ?prev.blob_node,
+                prev_size = prev.size,
+                new_hash = %identity.cas_hash,
+                new_blob_node = ?identity.blob_node,
+                new_size = identity.size,
+                "CAS-backed file identity changed for existing item_id"
+            );
+        }
+        observed.insert(item_id, identity);
+    }
+
+    fn clear_observed_identity(&self, item_id: ItemId) {
+        self.observed_identities.lock().remove(&item_id);
+    }
+
+    async fn cas_truth_size(
+        &self,
+        cas_hash: Blake3Hash,
+        blob_node: Option<NodeHash>,
+    ) -> Result<u64, String> {
+        match blob_node {
+            None => {
+                let data = self.read_chunk_cached(ChunkHash(cas_hash)).await?;
+                Ok(data.len() as u64)
+            }
+            Some(blob_node_hash) => {
+                let blob = self.get_blobnode_cached(blob_node_hash).await?;
+                Ok(blob.total_size)
+            }
+        }
+    }
+
+    async fn verify_size_consistency(
+        &self,
+        item_id: ItemId,
+        identity: ObservedIdentity,
+        context: &'static str,
+    ) {
+        if !Self::size_checks_enabled() {
+            return;
+        }
+        match self
+            .cas_truth_size(identity.cas_hash, identity.blob_node)
+            .await
+        {
+            Ok(actual) if actual == identity.size => {}
+            Ok(actual) => {
+                tracing::error!(
+                    item_id,
+                    context,
+                    hash = %identity.cas_hash,
+                    blob_node = ?identity.blob_node,
+                    expected_size = identity.size,
+                    actual_size = actual,
+                    "item.size differs from CAS truth size"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    item_id,
+                    context,
+                    hash = %identity.cas_hash,
+                    blob_node = ?identity.blob_node,
+                    error = ?e,
+                    "failed to compute CAS truth size for consistency check"
+                );
+            }
+        }
+    }
     /// Check if a prefix already exists
     pub async fn has_prefix(&self, prefix_id: &str) -> bool {
-        self.prefixes.read().contains_key(prefix_id)
+        self.state.lock().prefixes.contains_key(prefix_id)
     }
 
     /// Create a new action prefix
@@ -542,10 +772,11 @@ impl CasVfs {
     pub async fn create_prefix(&self, prefix_id: String) -> (String, ItemId) {
         let prefix_root_id = self.alloc_id();
 
-        // Create the prefix directory under root
         {
-            let mut items = self.items.write();
-            items.insert(VfsItem {
+            let mut state = self.state.lock();
+
+            // Create the prefix directory under root
+            state.items.insert(VfsItem {
                 id: prefix_root_id,
                 parent_id: 1, // under root
                 name: prefix_id.clone(),
@@ -554,17 +785,12 @@ impl CasVfs {
                 cas_hash: None,
                 blob_node: None,
                 size: 0,
-                write_buffer: None,
             });
-        }
 
-        // Register the prefix
-        {
-            let mut prefixes = self.prefixes.write();
-            prefixes.insert(
+            // Register the prefix
+            state.prefixes.insert(
                 prefix_id.clone(),
                 ActionPrefix {
-                    id: prefix_id.clone(),
                     root_item_id: prefix_root_id,
                     path_mappings: HashMap::new(),
                 },
@@ -652,27 +878,22 @@ impl CasVfs {
         path: &str,
         entry: PrefixEntry,
     ) -> Option<ItemId> {
-        // Get the prefix root
-        let prefix_root_id = {
-            let prefixes = self.prefixes.read();
-            prefixes.get(prefix_id)?.root_item_id
-        };
-
         // Split path into components and create intermediate directories
         let components: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
         if components.is_empty() {
             return None;
         }
 
-        // Single write lock for the entire check+create sequence
-        let mut items = self.items.write();
+        let mut state = self.state.lock();
+        let prefix_root_id = state.prefixes.get(prefix_id)?.root_item_id;
+
         let mut current_parent = prefix_root_id;
 
         for (i, component) in components.iter().enumerate() {
             let is_last = i == components.len() - 1;
 
             // Check if this component already exists (O(1) via children index)
-            if let Some(existing) = items.lookup_child(current_parent, component) {
+            if let Some(existing) = state.items.lookup_child(current_parent, component) {
                 let existing_id = existing.id;
                 let existing_type = existing.item_type;
                 if is_last {
@@ -700,7 +921,7 @@ impl CasVfs {
                 (ItemType::Directory, mode::DIRECTORY, None, None, 0)
             };
 
-            items.insert(VfsItem {
+            state.items.insert(VfsItem {
                 id: new_id,
                 parent_id: current_parent,
                 name: component.to_string(),
@@ -709,14 +930,10 @@ impl CasVfs {
                 cas_hash,
                 blob_node,
                 size,
-                write_buffer: None,
             });
 
             if is_last {
-                drop(items);
-                // Update prefix mappings
-                let mut prefixes = self.prefixes.write();
-                if let Some(prefix) = prefixes.get_mut(prefix_id) {
+                if let Some(prefix) = state.prefixes.get_mut(prefix_id) {
                     prefix.path_mappings.insert(path.to_string(), entry);
                 }
                 return Some(new_id);
@@ -730,28 +947,22 @@ impl CasVfs {
 
     /// Remove an action prefix and all its contents
     pub async fn remove_prefix(&self, prefix_id: &str) {
-        let prefix_root_id = {
-            let prefixes = self.prefixes.read();
-            let Some(prefix) = prefixes.get(prefix_id) else {
-                return;
-            };
-            prefix.root_item_id
+        let mut state = self.state.lock();
+        let Some(prefix) = state.prefixes.get(prefix_id) else {
+            return;
         };
+        let prefix_root_id = prefix.root_item_id;
 
-        // Collect then remove under one write lock
-        {
-            let mut items = self.items.write();
-            let to_remove = Self::collect_descendants_from(&items, prefix_root_id);
-            // Remove in reverse (leaves first) to keep children index clean
-            for &id in to_remove.iter().rev() {
-                items.remove(id);
-            }
+        let to_remove = Self::collect_descendants_from(&state.items, prefix_root_id);
+        // Remove in reverse (leaves first) to keep children index clean
+        for &id in to_remove.iter().rev() {
+            state.items.remove(id);
         }
 
-        // Remove prefix registration
-        {
-            let mut prefixes = self.prefixes.write();
-            prefixes.remove(prefix_id);
+        state.prefixes.remove(prefix_id);
+        drop(state);
+        for id in to_remove {
+            self.clear_observed_identity(id);
         }
 
         tracing::debug!(prefix_id = %prefix_id, "removed action prefix");
@@ -776,12 +987,12 @@ impl CasVfs {
     }
 }
 
-impl Vfs for CasVfs {
-    async fn lookup(&self, _cx: &roam::Context, parent_id: ItemId, name: String) -> LookupResult {
+impl CasVfs {
+    pub(crate) async fn lookup(&self, parent_id: ItemId, name: String) -> LookupResult {
         tracing::trace!(parent_id, name = %name, "VFS lookup");
 
-        let items = self.items.read();
-        if let Some(item) = items.lookup_child(parent_id, &name) {
+        let state = self.state.lock();
+        if let Some(item) = state.items.lookup_child(parent_id, &name) {
             tracing::trace!(parent_id, name = %name, item_id = item.id, item_type = ?item.item_type, "VFS lookup -> found");
             return LookupResult {
                 attrs: ItemAttributes {
@@ -810,99 +1021,184 @@ impl Vfs for CasVfs {
         }
     }
 
-    async fn get_attributes(&self, _cx: &roam::Context, item_id: ItemId) -> GetAttributesResult {
+    pub(crate) async fn get_attributes(&self, item_id: ItemId) -> GetAttributesResult {
         tracing::trace!(item_id, "VFS get_attributes");
 
-        let items = self.items.read();
-        match items.get(&item_id) {
-            Some(item) => GetAttributesResult {
-                attrs: ItemAttributes {
-                    item_id: item.id,
-                    item_type: item.item_type,
-                    size: item.size,
-                    modified_time: 0,
-                    created_time: 0,
-                    mode: item.mode,
-                },
-                error: errno::OK,
-            },
-            None => GetAttributesResult {
-                attrs: ItemAttributes {
-                    item_id: 0,
-                    item_type: ItemType::File,
-                    size: 0,
-                    modified_time: 0,
-                    created_time: 0,
-                    mode: 0,
-                },
-                error: errno::ENOENT,
-            },
-        }
-    }
-
-    async fn read_dir(&self, _cx: &roam::Context, item_id: ItemId, cursor: u64) -> ReadDirResult {
-        tracing::trace!(item_id, cursor, "VFS read_dir");
-
-        let items = self.items.read();
-        match items.get(&item_id) {
-            Some(item) if item.item_type == ItemType::Directory => {
-                let children: Vec<_> = items.children_of(item_id).collect();
-
-                let entries: Vec<DirEntry> = children
-                    .iter()
-                    .skip(cursor as usize)
-                    .take(100)
-                    .map(|child| DirEntry {
-                        name: child.name.clone(),
-                        item_id: child.id,
-                        item_type: child.item_type,
-                        size: child.size,
-                        modified_time: 0,
-                        created_time: 0,
-                        mode: child.mode,
-                    })
-                    .collect();
-
-                let has_more = children.len() > (cursor as usize + entries.len());
-                let next_cursor = if has_more {
-                    cursor + entries.len() as u64
-                } else {
-                    0
-                };
-
-                ReadDirResult {
-                    entries,
-                    next_cursor,
-                    error: errno::OK,
+        let (attrs, identity_to_check) = {
+            let state = self.state.lock();
+            match state.items.get(&item_id) {
+                Some(item) => {
+                    let identity_to_check = if item.item_type == ItemType::File
+                        && let Some(cas_hash) = item.cas_hash
+                        && !state.items.write_buffers.contains_key(&item_id)
+                    {
+                        Some(ObservedIdentity {
+                            cas_hash,
+                            blob_node: item.blob_node,
+                            size: item.size,
+                        })
+                    } else {
+                        None
+                    };
+                    (
+                        ItemAttributes {
+                            item_id: item.id,
+                            item_type: item.item_type,
+                            size: item.size,
+                            modified_time: 0,
+                            created_time: 0,
+                            mode: item.mode,
+                        },
+                        identity_to_check,
+                    )
+                }
+                None => {
+                    return GetAttributesResult {
+                        attrs: ItemAttributes {
+                            item_id: 0,
+                            item_type: ItemType::File,
+                            size: 0,
+                            modified_time: 0,
+                            created_time: 0,
+                            mode: 0,
+                        },
+                        error: errno::ENOENT,
+                    };
                 }
             }
-            Some(_) => ReadDirResult {
-                entries: Vec::new(),
-                next_cursor: 0,
-                error: errno::ENOTDIR,
-            },
-            None => ReadDirResult {
-                entries: Vec::new(),
-                next_cursor: 0,
-                error: errno::ENOENT,
-            },
+        };
+
+        if let Some(identity) = identity_to_check {
+            self.observe_identity(item_id, identity, "get_attributes");
+            self.verify_size_consistency(item_id, identity, "get_attributes")
+                .await;
+        }
+
+        GetAttributesResult {
+            attrs,
+            error: errno::OK,
         }
     }
 
-    async fn read(
+    pub(crate) async fn read_dir(
         &self,
-        _cx: &roam::Context,
         item_id: ItemId,
-        offset: u64,
-        len: u64,
-    ) -> ReadResult {
+        cookie: u64,
+        verifier: u64,
+    ) -> ReadDirResult {
+        let started = Instant::now();
+        tracing::trace!(item_id, cookie, verifier, "VFS read_dir.start");
+
+        let state = self.state.lock();
+        let (result, child_count) = match state.items.get(&item_id) {
+            Some(item) if item.item_type == ItemType::Directory => {
+                let current_verifier = state.items.dir_verifier(item_id);
+                if cookie != 0 && verifier != current_verifier {
+                    (
+                        ReadDirResult {
+                            entries: Vec::new(),
+                            next_cookie: 0,
+                            verifier: current_verifier,
+                            error: errno::ESTALE,
+                        },
+                        Some(0),
+                    )
+                } else {
+                    let children: Vec<_> = state.items.children_of(item_id).collect();
+
+                    let entries: Vec<DirEntry> = children
+                        .iter()
+                        .skip(cookie as usize)
+                        .take(100)
+                        .map(|child| DirEntry {
+                            name: child.name.clone(),
+                            item_id: child.id,
+                            item_type: child.item_type,
+                            size: child.size,
+                            modified_time: 0,
+                            created_time: 0,
+                            mode: child.mode,
+                        })
+                        .collect();
+
+                    let has_more = children.len() > (cookie as usize + entries.len());
+                    let next_cookie = if has_more {
+                        cookie + entries.len() as u64
+                    } else {
+                        0
+                    };
+
+                    (
+                        ReadDirResult {
+                            entries,
+                            next_cookie,
+                            verifier: current_verifier,
+                            error: errno::OK,
+                        },
+                        Some(children.len()),
+                    )
+                }
+            }
+            Some(_) => (
+                ReadDirResult {
+                    entries: Vec::new(),
+                    next_cookie: 0,
+                    verifier: 0,
+                    error: errno::ENOTDIR,
+                },
+                None,
+            ),
+            None => (
+                ReadDirResult {
+                    entries: Vec::new(),
+                    next_cookie: 0,
+                    verifier: 0,
+                    error: errno::ENOENT,
+                },
+                None,
+            ),
+        };
+        drop(state);
+
+        let elapsed = started.elapsed();
+        tracing::trace!(
+            item_id,
+            cookie,
+            verifier,
+            child_count = ?child_count,
+            entries = result.entries.len(),
+            next_cookie = result.next_cookie,
+            result_verifier = result.verifier,
+            error = result.error,
+            elapsed_us = elapsed.as_micros(),
+            "VFS read_dir.done"
+        );
+        if elapsed >= Duration::from_millis(500) {
+            tracing::warn!(
+                item_id,
+                cookie,
+                verifier,
+                child_count = ?child_count,
+                entries = result.entries.len(),
+                next_cookie = result.next_cookie,
+                result_verifier = result.verifier,
+                error = result.error,
+                elapsed_ms = elapsed.as_millis(),
+                "VFS read_dir.slow"
+            );
+        }
+
+        result
+    }
+
+    pub(crate) async fn read(&self, item_id: ItemId, offset: u64, len: u64) -> ReadResult {
         tracing::trace!(item_id, offset, len, "VFS read");
 
         // Extract what we need while holding the read lock — slice the write buffer
         // in-place instead of cloning the entire Vec<u8>.
-        let (cas_hash, blob_node) = {
-            let items = self.items.read();
-            let Some(item) = items.get(&item_id) else {
+        let (cas_hash, blob_node, size) = {
+            let state = self.state.lock();
+            let Some(item) = state.items.get(&item_id) else {
                 return ReadResult {
                     data: Vec::new(),
                     error: errno::ENOENT,
@@ -917,7 +1213,7 @@ impl Vfs for CasVfs {
             }
 
             // If there's buffered write data, serve from that (it's newer than CAS)
-            if let Some(ref data) = item.write_buffer {
+            if let Some(data) = state.items.write_buffers.get(&item_id) {
                 let start = (offset as usize).min(data.len());
                 let end = ((offset + len) as usize).min(data.len());
                 return ReadResult {
@@ -926,7 +1222,7 @@ impl Vfs for CasVfs {
                 };
             }
 
-            (item.cas_hash, item.blob_node)
+            (item.cas_hash, item.blob_node, item.size)
         };
 
         // Fetch from CAS if we have a hash
@@ -938,14 +1234,46 @@ impl Vfs for CasVfs {
             };
         };
 
+        let identity = ObservedIdentity {
+            cas_hash: hash,
+            blob_node,
+            size,
+        };
+        self.observe_identity(item_id, identity, "read");
+        self.verify_size_consistency(item_id, identity, "read")
+            .await;
+
         // Fetch via chunk-based CAS reads (SmallFile → single chunk, LargeFile → BlobNode)
         match self.read_cas_range(hash, blob_node, offset, len).await {
-            Ok(data) => ReadResult {
-                data,
-                error: errno::OK,
-            },
+            Ok(data) => {
+                let expected_len = if offset >= size {
+                    0
+                } else {
+                    (size - offset).min(len) as usize
+                };
+                if data.len() != expected_len {
+                    tracing::error!(
+                        item_id,
+                        hash = %hash,
+                        file_size = size,
+                        offset,
+                        requested = len,
+                        expected = expected_len,
+                        actual = data.len(),
+                        "short read before EOF detected in CAS-backed read path"
+                    );
+                    return ReadResult {
+                        data: Vec::new(),
+                        error: errno::EIO,
+                    };
+                }
+                ReadResult {
+                    data,
+                    error: errno::OK,
+                }
+            }
             Err(e) => {
-                tracing::error!(hash = %hash, error = %e, "failed to read blob range");
+                tracing::error!(hash = %hash, error = ?e, "failed to read blob range");
                 ReadResult {
                     data: Vec::new(),
                     error: errno::EIO,
@@ -954,32 +1282,29 @@ impl Vfs for CasVfs {
         }
     }
 
-    async fn write(
-        &self,
-        _cx: &roam::Context,
-        item_id: ItemId,
-        offset: u64,
-        data: Vec<u8>,
-    ) -> WriteResult {
+    pub(crate) async fn write(&self, item_id: ItemId, offset: u64, data: Vec<u8>) -> WriteResult {
         tracing::trace!(item_id, offset, len = data.len(), "write");
 
-        let mut items = self.items.write();
-        let Some(item) = items.get_mut(&item_id) else {
-            return WriteResult {
-                bytes_written: 0,
-                error: errno::ENOENT,
-            };
-        };
+        let mut state = self.state.lock();
 
-        if item.item_type != ItemType::File {
-            return WriteResult {
-                bytes_written: 0,
-                error: errno::EISDIR,
-            };
+        match state.items.get(&item_id).map(|i| i.item_type) {
+            None => {
+                return WriteResult {
+                    bytes_written: 0,
+                    error: errno::ENOENT,
+                };
+            }
+            Some(t) if t != ItemType::File => {
+                return WriteResult {
+                    bytes_written: 0,
+                    error: errno::EISDIR,
+                };
+            }
+            _ => {}
         }
 
         // Initialize or extend write buffer
-        let buffer = item.write_buffer.get_or_insert_with(Vec::new);
+        let buffer = state.items.write_buffers.entry(item_id).or_default();
         let end = offset as usize + data.len();
 
         // Extend buffer if needed
@@ -989,7 +1314,12 @@ impl Vfs for CasVfs {
 
         // Copy data into buffer
         buffer[offset as usize..end].copy_from_slice(&data);
-        item.size = buffer.len() as u64;
+        let new_size = buffer.len() as u64;
+
+        // Update size on the item
+        state.items.get_mut(&item_id).unwrap().size = new_size;
+        drop(state);
+        self.clear_observed_identity(item_id);
 
         WriteResult {
             bytes_written: data.len() as u64,
@@ -997,9 +1327,8 @@ impl Vfs for CasVfs {
         }
     }
 
-    async fn create(
+    pub(crate) async fn create(
         &self,
-        _cx: &roam::Context,
         parent_id: ItemId,
         name: String,
         item_type: ItemType,
@@ -1014,10 +1343,10 @@ impl Vfs for CasVfs {
             ItemType::Symlink => mode::FILE_REGULAR,
         };
 
-        let mut items = self.items.write();
+        let mut state = self.state.lock();
 
         // Verify parent exists and is a directory
-        match items.get(&parent_id) {
+        match state.items.get(&parent_id) {
             Some(item) if item.item_type == ItemType::Directory => {}
             Some(_) => {
                 return CreateResult {
@@ -1034,14 +1363,14 @@ impl Vfs for CasVfs {
         }
 
         // Check if name already exists (O(1) via index)
-        if items.child_exists(parent_id, &name) {
+        if state.items.child_exists(parent_id, &name) {
             return CreateResult {
                 item_id: 0,
                 error: errno::EEXIST,
             };
         }
 
-        items.insert(VfsItem {
+        state.items.insert(VfsItem {
             id: new_id,
             parent_id,
             name,
@@ -1050,7 +1379,6 @@ impl Vfs for CasVfs {
             cas_hash: None,
             blob_node: None,
             size: 0,
-            write_buffer: None,
         });
 
         CreateResult {
@@ -1059,7 +1387,7 @@ impl Vfs for CasVfs {
         }
     }
 
-    async fn delete(&self, _cx: &roam::Context, item_id: ItemId) -> VfsResult {
+    pub(crate) async fn delete(&self, item_id: ItemId) -> VfsResult {
         tracing::trace!(item_id, "delete");
 
         if item_id == ROOT_ITEM_ID {
@@ -1068,28 +1396,29 @@ impl Vfs for CasVfs {
             };
         }
 
-        let mut items = self.items.write();
+        let mut state = self.state.lock();
 
-        let Some(item) = items.get(&item_id) else {
+        let Some(item) = state.items.get(&item_id) else {
             return VfsResult {
                 error: errno::ENOENT,
             };
         };
 
         // If directory, check if empty (O(1) via index)
-        if item.item_type == ItemType::Directory && items.has_children(item_id) {
+        if item.item_type == ItemType::Directory && state.items.has_children(item_id) {
             return VfsResult {
                 error: errno::ENOTEMPTY,
             };
         }
 
-        items.remove(item_id);
+        state.items.remove(item_id);
+        drop(state);
+        self.clear_observed_identity(item_id);
         VfsResult { error: errno::OK }
     }
 
-    async fn rename(
+    pub(crate) async fn rename(
         &self,
-        _cx: &roam::Context,
         item_id: ItemId,
         new_parent_id: ItemId,
         new_name: String,
@@ -1102,16 +1431,16 @@ impl Vfs for CasVfs {
             };
         }
 
-        let mut items = self.items.write();
+        let mut state = self.state.lock();
 
-        if !items.contains_key(&item_id) {
+        if !state.items.contains_key(&item_id) {
             return VfsResult {
                 error: errno::ENOENT,
             };
         }
 
         // Check new parent exists and is directory
-        match items.get(&new_parent_id) {
+        match state.items.get(&new_parent_id) {
             Some(p) if p.item_type == ItemType::Directory => {}
             Some(_) => {
                 return VfsResult {
@@ -1126,9 +1455,9 @@ impl Vfs for CasVfs {
         }
 
         // Check name doesn't exist in new parent (O(1) via index)
-        if items.child_exists(new_parent_id, &new_name) {
+        if state.items.child_exists(new_parent_id, &new_name) {
             // Could be ourselves moving to same parent with same name — check
-            if let Some(existing) = items.lookup_child(new_parent_id, &new_name)
+            if let Some(existing) = state.items.lookup_child(new_parent_id, &new_name)
                 && existing.id != item_id
             {
                 return VfsResult {
@@ -1137,13 +1466,12 @@ impl Vfs for CasVfs {
             }
         }
 
-        items.rename(item_id, new_parent_id, new_name);
+        state.items.rename(item_id, new_parent_id, new_name);
         VfsResult { error: errno::OK }
     }
 
-    async fn set_attributes(
+    pub(crate) async fn set_attributes(
         &self,
-        _cx: &roam::Context,
         item_id: ItemId,
         params: SetAttributesParams,
     ) -> VfsResult {
@@ -1153,22 +1481,25 @@ impl Vfs for CasVfs {
             return VfsResult { error: errno::OK };
         }
 
-        let mut items = self.items.write();
+        let mut state = self.state.lock();
 
-        let Some(item) = items.get_mut(&item_id) else {
+        if !state.items.contains_key(&item_id) {
             return VfsResult {
                 error: errno::ENOENT,
             };
-        };
+        }
 
         if let Some(mode) = params.mode {
-            item.mode = mode;
+            state.items.get_mut(&item_id).unwrap().mode = mode;
         }
 
         if let Some(new_size) = params.size {
-            let buffer = item.write_buffer.get_or_insert_with(Vec::new);
+            let buffer = state.items.write_buffers.entry(item_id).or_default();
             buffer.resize(new_size as usize, 0);
-            item.size = new_size;
+            state.items.get_mut(&item_id).unwrap().size = new_size;
+            drop(state);
+            self.clear_observed_identity(item_id);
+            return VfsResult { error: errno::OK };
         }
 
         // modified_time is ignored for now (we don't track times)
@@ -1176,8 +1507,183 @@ impl Vfs for CasVfs {
         VfsResult { error: errno::OK }
     }
 
-    async fn ping(&self, _cx: &roam::Context) -> String {
+    pub(crate) async fn ping(&self) -> String {
         "pong from vx-runner CAS VFS".to_string()
+    }
+}
+
+impl Vfs for CasVfs {
+    async fn lookup(&self, parent_id: ItemId, name: String) -> LookupResult {
+        CasVfs::lookup(self, parent_id, name).await
+    }
+
+    async fn get_attributes(&self, item_id: ItemId) -> GetAttributesResult {
+        CasVfs::get_attributes(self, item_id).await
+    }
+
+    async fn read_dir(&self, item_id: ItemId, cookie: u64, verifier: u64) -> ReadDirResult {
+        CasVfs::read_dir(self, item_id, cookie, verifier).await
+    }
+
+    async fn read(&self, item_id: ItemId, offset: u64, len: u64) -> ReadResult {
+        CasVfs::read(self, item_id, offset, len).await
+    }
+
+    async fn write(&self, item_id: ItemId, offset: u64, data: Vec<u8>) -> WriteResult {
+        CasVfs::write(self, item_id, offset, data).await
+    }
+
+    async fn create(&self, parent_id: ItemId, name: String, item_type: ItemType) -> CreateResult {
+        CasVfs::create(self, parent_id, name, item_type).await
+    }
+
+    async fn delete(&self, item_id: ItemId) -> VfsResult {
+        CasVfs::delete(self, item_id).await
+    }
+
+    async fn rename(&self, item_id: ItemId, new_parent_id: ItemId, new_name: String) -> VfsResult {
+        CasVfs::rename(self, item_id, new_parent_id, new_name).await
+    }
+
+    async fn set_attributes(&self, item_id: ItemId, params: SetAttributesParams) -> VfsResult {
+        CasVfs::set_attributes(self, item_id, params).await
+    }
+
+    async fn ping(&self) -> String {
+        CasVfs::ping(self).await
+    }
+}
+
+impl VfsDiskNotify for CasVfs {
+    fn on_disk_file_created(&self, path: &str, is_directory: bool) {
+        // Path is relative to mount root, e.g. "prefix-id/out/main.o" or
+        // "prefix-id\\out\\main.o" on Windows. Normalize separators.
+        let path = path.replace('\\', "/");
+        let mut components = path.split('/');
+        let Some(prefix_id) = components.next() else {
+            return;
+        };
+
+        let mut state = self.state.lock();
+        let parent_id = match state.prefixes.get(prefix_id) {
+            Some(p) => p.root_item_id,
+            None => {
+                tracing::debug!(%prefix_id, "on_disk_file_created: unknown prefix, ignoring");
+                return;
+            }
+        };
+
+        let remaining: Vec<&str> = components.collect();
+        if remaining.is_empty() {
+            return; // notification for the prefix root itself
+        }
+
+        // Walk/create intermediate directories, then create the leaf.
+        let (dir_parts, leaf) = remaining.split_at(remaining.len() - 1);
+        let mut current_parent = parent_id;
+
+        for &dir_name in dir_parts {
+            if let Some(child) = state.items.lookup_child(current_parent, dir_name) {
+                current_parent = child.id;
+            } else {
+                let dir_id = self.alloc_id();
+                state.items.insert(VfsItem {
+                    id: dir_id,
+                    parent_id: current_parent,
+                    name: dir_name.to_string(),
+                    item_type: ItemType::Directory,
+                    mode: 0o755,
+                    cas_hash: None,
+                    blob_node: None,
+                    size: 0,
+                });
+                tracing::debug!(
+                    %prefix_id,
+                    dir_name,
+                    dir_id,
+                    "on_disk_file_created: registered directory"
+                );
+                current_parent = dir_id;
+            }
+        }
+
+        let leaf_name = leaf[0];
+        if state.items.lookup_child(current_parent, leaf_name).is_some() {
+            // Item already tracked (e.g. modified, not new). Nothing to do —
+            // flush_prefix_from_disk will re-read the content from disk.
+            return;
+        }
+
+        let item_type = if is_directory {
+            ItemType::Directory
+        } else {
+            ItemType::File
+        };
+        let item_id = self.alloc_id();
+        state.items.insert(VfsItem {
+            id: item_id,
+            parent_id: current_parent,
+            name: leaf_name.to_string(),
+            item_type,
+            mode: if is_directory { 0o755 } else { 0o644 },
+            cas_hash: None,
+            blob_node: None,
+            size: 0,
+        });
+        tracing::debug!(
+            %prefix_id,
+            path = %path,
+            item_id,
+            ?item_type,
+            "on_disk_file_created: registered disk file"
+        );
+    }
+
+    fn on_disk_file_deleted(&self, path: &str) {
+        let path = path.replace('\\', "/");
+        let mut components = path.split('/');
+        let Some(prefix_id) = components.next() else {
+            return;
+        };
+
+        let mut state = self.state.lock();
+        let parent_id = match state.prefixes.get(prefix_id) {
+            Some(p) => p.root_item_id,
+            None => return,
+        };
+
+        // Walk to the item.
+        let mut current_parent = parent_id;
+        let remaining: Vec<&str> = components.collect();
+        if remaining.is_empty() {
+            return;
+        }
+
+        let (dir_parts, leaf) = remaining.split_at(remaining.len() - 1);
+        for &dir_name in dir_parts {
+            match state.items.lookup_child(current_parent, dir_name) {
+                Some(child) => current_parent = child.id,
+                None => return, // parent doesn't exist, nothing to delete
+            }
+        }
+
+        if let Some(child) = state.items.lookup_child(current_parent, leaf[0]) {
+            let child_id = child.id;
+            state.items.remove(child_id);
+            tracing::debug!(
+                %prefix_id,
+                path = %path,
+                child_id,
+                "on_disk_file_deleted: removed item"
+            );
+        }
+    }
+
+    fn on_disk_file_renamed(&self, source: &str, destination: &str) {
+        // For simplicity: delete source, create destination.
+        // This avoids complex reparenting logic for a rare operation.
+        self.on_disk_file_deleted(source);
+        self.on_disk_file_created(destination, false);
     }
 }
 
@@ -1185,9 +1691,9 @@ impl Vfs for CasVfs {
 impl CasVfs {
     pub async fn flush_to_cas(&self, item_id: ItemId) -> Option<(Blake3Hash, u64)> {
         let data = {
-            let mut items = self.items.write();
-            let item = items.get_mut(&item_id)?;
-            item.write_buffer.take()?
+            let mut state = self.state.lock();
+            state.items.get(&item_id)?; // check item exists
+            state.items.write_buffers.remove(&item_id)?
         };
 
         if data.is_empty() {
@@ -1198,23 +1704,25 @@ impl CasVfs {
         let content_hash = Blake3Hash::from_bytes(&data);
         let chunk_hash = ChunkHash(content_hash);
         match self.cas.put_chunk(chunk_hash, data.clone()).await {
-            Ok(()) => {
-                let mut items = self.items.write();
-                if let Some(item) = items.get_mut(&item_id) {
+            Ok(_) => {
+                let mut state = self.state.lock();
+                if let Some(item) = state.items.get_mut(&item_id) {
                     item.cas_hash = Some(content_hash);
                     item.blob_node = None; // single chunk
                     item.size = size;
                 }
+                drop(state);
+                self.clear_observed_identity(item_id);
                 Some((content_hash, size))
             }
             Err(e) => {
-                tracing::error!(item_id, error = %e, "failed to flush to CAS, restoring write buffer");
+                tracing::error!(item_id, error = ?e, "failed to flush to CAS, restoring write buffer");
                 // Restore the write buffer so data isn't lost
-                let mut items = self.items.write();
-                if let Some(item) = items.get_mut(&item_id) {
+                let mut state = self.state.lock();
+                if let Some(item) = state.items.get_mut(&item_id) {
                     item.size = data.len() as u64;
-                    item.write_buffer = Some(data);
                 }
+                state.items.write_buffers.insert(item_id, data);
                 None
             }
         }
@@ -1235,27 +1743,30 @@ impl CasVfs {
     }
 
     /// FUSE path: flush in-memory write buffers to CAS.
-    async fn flush_prefix_from_buffers(&self, prefix_id: &str) -> HashMap<String, (Blake3Hash, u64)> {
+    async fn flush_prefix_from_buffers(
+        &self,
+        prefix_id: &str,
+    ) -> HashMap<String, (Blake3Hash, u64)> {
         let mut results = HashMap::new();
 
         let prefix_root_id = {
-            let prefixes = self.prefixes.read();
-            match prefixes.get(prefix_id) {
+            let state = self.state.lock();
+            match state.prefixes.get(prefix_id) {
                 Some(p) => p.root_item_id,
                 None => return results,
             }
         };
 
         let items_to_flush: Vec<(ItemId, String)> = {
-            let items = self.items.read();
-            let descendants = Self::collect_descendants_from(&items, prefix_root_id);
+            let state = self.state.lock();
+            let descendants = Self::collect_descendants_from(&state.items, prefix_root_id);
 
             descendants
                 .into_iter()
                 .filter_map(|id| {
-                    let item = items.get(&id)?;
-                    if item.write_buffer.is_some() {
-                        let path = self.build_path(&items, id, prefix_root_id);
+                    state.items.get(&id)?; // check item exists
+                    if state.items.write_buffers.contains_key(&id) {
+                        let path = self.build_path(&state.items, id, prefix_root_id);
                         Some((id, path))
                     } else {
                         None
@@ -1278,57 +1789,154 @@ impl CasVfs {
         let mut results = HashMap::new();
         let prefix_dir = self.mount_path.join(prefix_id);
 
-        let walker = match std::fs::read_dir(prefix_dir.as_std_path()) {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::error!(%prefix_dir, error = %e, "failed to read prefix dir from disk");
-                return results;
-            }
-        };
+        let files = {
+            let mut files = Vec::new();
+            let mut stack: Vec<(std::path::PathBuf, String)> = Vec::new();
 
-        // Recursively walk and collect all files
-        let mut stack: Vec<(std::path::PathBuf, String)> = vec![];
-        for entry in walker.flatten() {
-            stack.push((entry.path(), String::new()));
-        }
-
-        while let Some((path, rel_parent)) = stack.pop() {
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            let rel_path = if rel_parent.is_empty() {
-                name.to_string()
-            } else {
-                format!("{}/{}", rel_parent, name)
+            let mut root_entries = match tokio::fs::read_dir(prefix_dir.as_std_path()).await {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::error!(%prefix_dir, error = ?e, "failed to read prefix dir from disk");
+                    return results;
+                }
             };
 
-            if path.is_dir() {
-                if let Ok(entries) = std::fs::read_dir(&path) {
-                    for entry in entries.flatten() {
-                        stack.push((entry.path(), rel_path.clone()));
+            loop {
+                match root_entries.next_entry().await {
+                    Ok(Some(entry)) => stack.push((entry.path(), String::new())),
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::error!(%prefix_dir, error = ?e, "failed to iterate prefix dir");
+                        break;
                     }
                 }
-            } else if path.is_file() {
-                match tokio::fs::read(&path).await {
-                    Ok(data) => {
-                        let size = data.len() as u64;
-                        let content_hash = Blake3Hash::from_bytes(&data);
-                        let chunk_hash = ChunkHash(content_hash);
-                        match self.cas.put_chunk(chunk_hash, data).await {
-                            Ok(()) => {
-                                tracing::debug!(
-                                    path = %rel_path,
-                                    size,
-                                    hash = %content_hash,
-                                    "flushed file from disk to CAS"
-                                );
-                                results.insert(rel_path, (content_hash, size));
+            }
+
+            while let Some((path, rel_parent)) = stack.pop() {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                let rel_path = if rel_parent.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{}/{}", rel_parent, name)
+                };
+
+                match tokio::fs::symlink_metadata(&path).await {
+                    Ok(metadata) if metadata.is_dir() => match tokio::fs::read_dir(&path).await {
+                        Ok(mut entries) => loop {
+                            match entries.next_entry().await {
+                                Ok(Some(entry)) => stack.push((entry.path(), rel_path.clone())),
+                                Ok(None) => break,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        path = %path.display(),
+                                        error = ?e,
+                                        "failed to iterate directory while flushing prefix"
+                                    );
+                                    break;
+                                }
                             }
-                            Err(e) => {
-                                tracing::error!(path = %rel_path, error = %e, "failed to put chunk");
-                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                error = ?e,
+                                "failed to read directory while flushing prefix"
+                            );
+                        }
+                    },
+                    Ok(metadata) if metadata.is_file() => files.push((path, rel_path)),
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = ?e,
+                            "failed to stat path while flushing prefix"
+                        );
+                    }
+                }
+            }
+
+            files
+        };
+
+        for (path, rel_path) in files {
+            match moire::fs::read(&path).await {
+                Ok(data) => {
+                    let size = data.len() as u64;
+                    let content_hash = Blake3Hash::from_bytes(&data);
+                    let chunk_hash = ChunkHash(content_hash);
+                    match self.cas.put_chunk(chunk_hash, data).await {
+                        Ok(_) => {
+                            tracing::debug!(
+                                path = %rel_path,
+                                size,
+                                hash = %content_hash,
+                                "flushed file from disk to CAS"
+                            );
+                            results.insert(rel_path, (content_hash, size));
+                        }
+                        Err(e) => {
+                            tracing::error!(path = %rel_path, error = ?e, "failed to put chunk");
                         }
                     }
-                    Err(e) => {
-                        tracing::error!(path = %rel_path, error = %e, "failed to read file from disk");
+                }
+                Err(e) => {
+                    tracing::error!(path = %rel_path, error = ?e, "failed to read file from disk");
+                }
+            }
+        }
+
+        // Update CAS hash and size on items already tracked via ProjFS
+        // notifications (VfsDiskNotify). Items should already exist in
+        // state.items — notifications register them when the compiler
+        // creates/modifies files on disk.
+        if !results.is_empty() {
+            let mut state = self.state.lock();
+            let prefix_root_id = match state.prefixes.get(prefix_id) {
+                Some(p) => p.root_item_id,
+                None => return results,
+            };
+
+            for (rel_path, &(content_hash, size)) in &results {
+                let components: Vec<&str> = rel_path.split('/').collect();
+                let (dir_components, file_name) = components.split_at(components.len() - 1);
+
+                let mut parent_id = prefix_root_id;
+                let mut found = true;
+                for &dir_name in dir_components {
+                    match state.items.lookup_child(parent_id, dir_name) {
+                        Some(child) => parent_id = child.id,
+                        None => {
+                            tracing::warn!(
+                                %prefix_id,
+                                path = %rel_path,
+                                missing_dir = dir_name,
+                                "flush: directory not tracked by notifications"
+                            );
+                            found = false;
+                            break;
+                        }
+                    }
+                }
+
+                if !found {
+                    continue;
+                }
+
+                let file_name = file_name[0];
+                match state.items.lookup_child(parent_id, file_name).map(|i| i.id) {
+                    Some(id) => {
+                        if let Some(item) = state.items.get_mut(&id) {
+                            item.cas_hash = Some(content_hash);
+                            item.size = size;
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            %prefix_id,
+                            path = %rel_path,
+                            "flush: file not tracked by notifications"
+                        );
                     }
                 }
             }
@@ -1337,69 +1945,48 @@ impl CasVfs {
         results
     }
 
-    /// Dump VFS state for debugging
-    #[cfg(unix)]
-    pub fn dump_all_state(&self) {
-        let items = self.items.read();
-        let prefixes = self.prefixes.read();
-
-        eprintln!("\n=== VFS STATE DUMP ===");
-        eprintln!("Total items: {}", items.len());
-        eprintln!("Total prefixes: {}", prefixes.len());
-
-        for (prefix_id, prefix) in prefixes.iter() {
-            eprintln!(
-                "\nPrefix '{}' root_item_id={}",
-                prefix_id, prefix.root_item_id
-            );
-
-            let children: Vec<_> = items
-                .children_of(prefix.root_item_id)
-                .map(|i| format!("{} (type={:?})", i.name, i.item_type))
-                .collect();
-            eprintln!("  Children: {:?}", children);
-        }
-    }
-
     pub async fn dump_state(&self, prefix_id: &str) {
-        let items = self.items.read();
-        let prefixes = self.prefixes.read();
+        let state = self.state.lock();
 
         tracing::debug!("=== VFS STATE DUMP ===");
-        tracing::debug!("Total items: {}", items.len());
-        tracing::debug!("Total prefixes: {}", prefixes.len());
+        tracing::debug!("Total items: {}", state.items.len());
+        tracing::debug!("Total prefixes: {}", state.prefixes.len());
 
         // Show root children
-        let root_children: Vec<_> = items
+        let root_children: Vec<_> = state
+            .items
             .children_of(ROOT_ITEM_ID)
             .map(|i| format!("{} (id={})", i.name, i.id))
             .collect();
         tracing::debug!("Root children: {:?}", root_children);
 
         // Show prefix info
-        if let Some(prefix) = prefixes.get(prefix_id) {
+        if let Some(prefix) = state.prefixes.get(prefix_id) {
             tracing::debug!(
                 "Prefix '{}' root_item_id={}",
                 prefix_id,
                 prefix.root_item_id
             );
 
-            let prefix_children: Vec<_> = items
+            let prefix_children: Vec<_> = state
+                .items
                 .children_of(prefix.root_item_id)
                 .map(|i| format!("{} (id={}, type={:?})", i.name, i.id, i.item_type))
                 .collect();
             tracing::debug!("Prefix children: {:?}", prefix_children);
 
-            if let Some(toolchain) = items.lookup_child(prefix.root_item_id, "toolchain") {
+            if let Some(toolchain) = state.items.lookup_child(prefix.root_item_id, "toolchain") {
                 let tc_id = toolchain.id;
-                let tc_children: Vec<_> = items
+                let tc_children: Vec<_> = state
+                    .items
                     .children_of(tc_id)
                     .map(|i| format!("{} (id={})", i.name, i.id))
                     .collect();
                 tracing::debug!("toolchain/ children: {:?}", tc_children);
 
-                if let Some(bin) = items.lookup_child(tc_id, "bin") {
-                    let bin_children: Vec<_> = items
+                if let Some(bin) = state.items.lookup_child(tc_id, "bin") {
+                    let bin_children: Vec<_> = state
+                        .items
                         .children_of(bin.id)
                         .map(|i| format!("{} (id={})", i.name, i.id))
                         .collect();

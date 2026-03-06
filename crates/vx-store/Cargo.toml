@@ -11,7 +11,6 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 blake3 = { workspace = true }
 camino = { workspace = true }
-jiff = { workspace = true }
 eyre = { workspace = true }
 facet = { workspace = true }
 figue = { workspace = true }
@@ -21,8 +20,9 @@ hex = { workspace = true }
 http-body-util = "0.1"
 pin-project-lite = { workspace = true }
 roam = { workspace = true }
-roam-session = { workspace = true }
-peeps = { workspace = true }
+roam-core = { workspace = true }
+roam-types = { workspace = true }
+moire = { workspace = true }
 roam-stream = { workspace = true }
 sha2 = "0.10"
 tar = { workspace = true }
@@ -39,8 +39,17 @@ vx-tarball = { workspace = true }
 vx-toolchain = { workspace = true }
 
 [dev-dependencies]
+blake3 = { workspace = true }
+roam-stream = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
+vx-io = { path = "../vx-io" }
+vx-store-proto = { path = "../vx-store-proto" }
 
 [features]
 default = []
-diagnostics = ["peeps/diagnostics", "roam-session/diagnostics"]
+diagnostics = ["moire/diagnostics"]
+
+[lints]
+workspace = true

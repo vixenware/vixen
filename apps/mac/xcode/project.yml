@@ -16,7 +16,7 @@ settings:
 packages:
   roam:
     url: https://github.com/bearcove/roam.git
-    revision: bda700bd2126e7cd3c4b0cfb2c10e43d3b3edd94
+    revision: 5cabc262c48dfd16ca799157e19ff705ae02c71d
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle.git
     from: 2.8.1
@@ -107,6 +107,9 @@ targets:
         INFOPLIST_FILE: VixenFS/Info.plist
         GENERATE_INFOPLIST_FILE: false
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        MARKETING_VERSION: 0.0.0
+        CURRENT_PROJECT_VERSION: 0.0.0
+        CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION: YES
     dependencies:
       - package: roam
         product: RoamRuntime

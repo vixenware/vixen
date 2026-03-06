@@ -7,14 +7,15 @@ fn main() {
 
     match args.first().map(|s| s.as_str()) {
         Some("install") => install(),
+        Some("bump-roam") => bump_roam(args.get(1).map(|s| s.as_str())),
         Some(cmd) => {
             eprintln!("Unknown command: {}", cmd);
-            eprintln!("Available commands: install");
+            eprintln!("Available commands: install, bump-roam");
             std::process::exit(1);
         }
         None => {
             eprintln!("Usage: cargo xtask <command>");
-            eprintln!("Available commands: install");
+            eprintln!("Available commands: install, bump-roam");
             std::process::exit(1);
         }
     }
@@ -105,6 +106,70 @@ fn install() {
         } else {
             println!("Installed {}", binary_name);
         }
+    }
+}
+
+fn bump_roam(rev: Option<&str>) {
+    let workspace_root = find_workspace_root().expect("Could not find workspace root");
+    let mac_dir = workspace_root.join("apps/mac");
+
+    let new_rev = match rev {
+        Some(r) => r.to_string(),
+        None => {
+            let output = Command::new("git")
+                .args(["ls-remote", "https://github.com/bearcove/roam.git", "HEAD"])
+                .output()
+                .expect("Failed to run git ls-remote");
+            if !output.status.success() {
+                eprintln!("Failed to fetch latest roam revision");
+                std::process::exit(1);
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout
+                .split_whitespace()
+                .next()
+                .expect("Empty output from git ls-remote")
+                .to_string()
+        }
+    };
+
+    println!("Bumping roam to revision: {}", new_rev);
+
+    let project_yml_path = mac_dir.join("xcode/project.yml");
+    let package_swift_path = mac_dir.join("Package.swift");
+
+    for path in [&project_yml_path, &package_swift_path] {
+        if !path.exists() {
+            eprintln!("Warning: {} does not exist, skipping", path.display());
+            continue;
+        }
+
+        let content = fs::read_to_string(path).expect("Failed to read file");
+        let mut new_content = String::new();
+        for line in content.lines() {
+            if line.contains("revision:") {
+                let prefix = line.split("revision:").next().unwrap();
+                if path.ends_with("project.yml") {
+                    new_content.push_str(prefix);
+                    new_content.push_str(&format!("revision: {}", new_rev));
+                } else {
+                    new_content.push_str(prefix);
+                    let suffix = if line.trim_end().ends_with(',') {
+                        "\","
+                    } else {
+                        "\""
+                    };
+                    new_content.push_str(&format!("revision: \"{}{}", new_rev, suffix));
+                }
+                new_content.push('\n');
+            } else {
+                new_content.push_str(line);
+                new_content.push('\n');
+            }
+        }
+
+        fs::write(path, new_content).expect("Failed to write file");
+        println!("Updated {}", path.display());
     }
 }
 

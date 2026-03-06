@@ -13,7 +13,7 @@ use fuse3::raw::prelude::*;
 use fuse3::telemetry::TelemetryState;
 use fuse3::{Errno, Inode, MountOptions, SetAttr, Timestamp};
 use futures_util::Stream;
-use vixenfs_proto::{ItemAttributes, ItemType, Vfs};
+use vixenfs_proto::{ItemAttributes, ItemType, Vfs, VfsDiskNotify};
 
 use crate::types::{VfsConfig, VfsError, VfsStart};
 
@@ -30,16 +30,6 @@ impl<T> FuseBridge<T> {
     fn new(vfs: T, uid: u32, gid: u32) -> Self {
         Self { vfs, uid, gid }
     }
-}
-
-fn dummy_context() -> roam::Context {
-    roam::Context::new(
-        roam::wire::ConnectionId(0),
-        roam::wire::RequestId(0),
-        roam::wire::MethodId(0),
-        Default::default(),
-        vec![],
-    )
 }
 
 fn item_type_to_file_type(t: ItemType) -> FileType {
@@ -93,8 +83,7 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         name: &OsStr,
     ) -> fuse3::Result<ReplyEntry> {
         let name_str = name.to_str().ok_or_else(Errno::new_not_exist)?;
-        let cx = dummy_context();
-        let result = self.vfs.lookup(&cx, parent, name_str.to_owned()).await;
+        let result = self.vfs.lookup(parent, name_str.to_owned()).await;
         if result.error != 0 {
             return Err(errno_from_vfs(result.error));
         }
@@ -113,8 +102,7 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         _fh: Option<u64>,
         _flags: u32,
     ) -> fuse3::Result<ReplyAttr> {
-        let cx = dummy_context();
-        let result = self.vfs.get_attributes(&cx, inode).await;
+        let result = self.vfs.get_attributes(inode).await;
         if result.error != 0 {
             return Err(errno_from_vfs(result.error));
         }
@@ -137,8 +125,7 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         offset: u64,
         size: u32,
     ) -> fuse3::Result<ReplyData> {
-        let cx = dummy_context();
-        let result = self.vfs.read(&cx, inode, offset, size as u64).await;
+        let result = self.vfs.read(inode, offset, size as u64).await;
         if result.error != 0 {
             return Err(errno_from_vfs(result.error));
         }
@@ -158,9 +145,8 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         _write_flags: u32,
         _flags: u32,
     ) -> fuse3::Result<ReplyWrite> {
-        let cx = dummy_context();
         let len = data.len();
-        let result = self.vfs.write(&cx, inode, offset, data.to_vec()).await;
+        let result = self.vfs.write(inode, offset, data.to_vec()).await;
         if result.error != 0 {
             return Err(errno_from_vfs(result.error));
         }
@@ -176,19 +162,18 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         _fh: Option<u64>,
         set_attr: SetAttr,
     ) -> fuse3::Result<ReplyAttr> {
-        let cx = dummy_context();
         let params = vixenfs_proto::SetAttributesParams {
             mode: set_attr.mode,
             modified_time: None,
             size: set_attr.size,
         };
-        let result = self.vfs.set_attributes(&cx, inode, params).await;
+        let result = self.vfs.set_attributes(inode, params).await;
         if result.error != 0 {
             return Err(errno_from_vfs(result.error));
         }
 
         // Return updated attributes
-        let attr_result = self.vfs.get_attributes(&cx, inode).await;
+        let attr_result = self.vfs.get_attributes(inode).await;
         if attr_result.error != 0 {
             return Err(errno_from_vfs(attr_result.error));
         }
@@ -207,16 +192,15 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         _umask: u32,
     ) -> fuse3::Result<ReplyEntry> {
         let name_str = name.to_str().ok_or_else(Errno::new_not_exist)?;
-        let cx = dummy_context();
         let result = self
             .vfs
-            .create(&cx, parent, name_str.to_owned(), ItemType::Directory)
+            .create(parent, name_str.to_owned(), ItemType::Directory)
             .await;
         if result.error != 0 {
             return Err(errno_from_vfs(result.error));
         }
 
-        let attr_result = self.vfs.get_attributes(&cx, result.item_id).await;
+        let attr_result = self.vfs.get_attributes(result.item_id).await;
         if attr_result.error != 0 {
             return Err(errno_from_vfs(attr_result.error));
         }
@@ -236,16 +220,15 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         _flags: u32,
     ) -> fuse3::Result<ReplyCreated> {
         let name_str = name.to_str().ok_or_else(Errno::new_not_exist)?;
-        let cx = dummy_context();
         let result = self
             .vfs
-            .create(&cx, parent, name_str.to_owned(), ItemType::File)
+            .create(parent, name_str.to_owned(), ItemType::File)
             .await;
         if result.error != 0 {
             return Err(errno_from_vfs(result.error));
         }
 
-        let attr_result = self.vfs.get_attributes(&cx, result.item_id).await;
+        let attr_result = self.vfs.get_attributes(result.item_id).await;
         if attr_result.error != 0 {
             return Err(errno_from_vfs(attr_result.error));
         }
@@ -261,12 +244,11 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
 
     async fn unlink(&self, _req: Request, parent: Inode, name: &OsStr) -> fuse3::Result<()> {
         let name_str = name.to_str().ok_or_else(Errno::new_not_exist)?;
-        let cx = dummy_context();
-        let lookup = self.vfs.lookup(&cx, parent, name_str.to_owned()).await;
+        let lookup = self.vfs.lookup(parent, name_str.to_owned()).await;
         if lookup.error != 0 {
             return Err(errno_from_vfs(lookup.error));
         }
-        let result = self.vfs.delete(&cx, lookup.attrs.item_id).await;
+        let result = self.vfs.delete(lookup.attrs.item_id).await;
         if result.error != 0 {
             return Err(errno_from_vfs(result.error));
         }
@@ -275,12 +257,11 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
 
     async fn rmdir(&self, _req: Request, parent: Inode, name: &OsStr) -> fuse3::Result<()> {
         let name_str = name.to_str().ok_or_else(Errno::new_not_exist)?;
-        let cx = dummy_context();
-        let lookup = self.vfs.lookup(&cx, parent, name_str.to_owned()).await;
+        let lookup = self.vfs.lookup(parent, name_str.to_owned()).await;
         if lookup.error != 0 {
             return Err(errno_from_vfs(lookup.error));
         }
-        let result = self.vfs.delete(&cx, lookup.attrs.item_id).await;
+        let result = self.vfs.delete(lookup.attrs.item_id).await;
         if result.error != 0 {
             return Err(errno_from_vfs(result.error));
         }
@@ -297,19 +278,13 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
     ) -> fuse3::Result<()> {
         let name_str = name.to_str().ok_or_else(Errno::new_not_exist)?;
         let new_name_str = new_name.to_str().ok_or_else(Errno::new_not_exist)?;
-        let cx = dummy_context();
-        let lookup = self.vfs.lookup(&cx, parent, name_str.to_owned()).await;
+        let lookup = self.vfs.lookup(parent, name_str.to_owned()).await;
         if lookup.error != 0 {
             return Err(errno_from_vfs(lookup.error));
         }
         let result = self
             .vfs
-            .rename(
-                &cx,
-                lookup.attrs.item_id,
-                new_parent,
-                new_name_str.to_owned(),
-            )
+            .rename(lookup.attrs.item_id, new_parent, new_name_str.to_owned())
             .await;
         if result.error != 0 {
             return Err(errno_from_vfs(result.error));
@@ -329,16 +304,17 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
         offset: i64,
     ) -> fuse3::Result<ReplyDirectory<impl Stream<Item = fuse3::Result<DirectoryEntry>> + Send + '_>>
     {
-        let cx = dummy_context();
         Ok(ReplyDirectory {
             entries: try_stream! {
-                let mut cursor: u64 = 0;
+                let mut cookie: u64 = 0;
+                let mut verifier: u64 = 0;
                 let mut entry_offset: i64 = 1;
                 loop {
-                    let result = self.vfs.read_dir(&cx, parent, cursor).await;
+                    let result = self.vfs.read_dir(parent, cookie, verifier).await;
                     if result.error != 0 {
                         Err(errno_from_vfs(result.error))?;
                     }
+                    verifier = result.verifier;
                     for entry in result.entries {
                         if entry_offset > offset {
                             yield DirectoryEntry {
@@ -350,10 +326,10 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
                         }
                         entry_offset += 1;
                     }
-                    if result.next_cursor == 0 {
+                    if result.next_cookie == 0 {
                         break;
                     }
-                    cursor = result.next_cursor;
+                    cookie = result.next_cookie;
                 }
             },
         })
@@ -369,19 +345,20 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
     ) -> fuse3::Result<
         ReplyDirectoryPlus<impl Stream<Item = fuse3::Result<DirectoryEntryPlus>> + Send + '_>,
     > {
-        let cx = dummy_context();
         Ok(ReplyDirectoryPlus {
             entries: try_stream! {
-                let mut cursor: u64 = 0;
+                let mut cookie: u64 = 0;
+                let mut verifier: u64 = 0;
                 let mut entry_offset: i64 = 1;
                 loop {
-                    let result = self.vfs.read_dir(&cx, parent, cursor).await;
+                    let result = self.vfs.read_dir(parent, cookie, verifier).await;
                     if result.error != 0 {
                         Err(errno_from_vfs(result.error))?;
                     }
+                    verifier = result.verifier;
                     for entry in result.entries {
                         if entry_offset > offset as i64 {
-                            let attr_result = self.vfs.get_attributes(&cx, entry.item_id).await;
+                            let attr_result = self.vfs.get_attributes(entry.item_id).await;
                             let attr = if attr_result.error == 0 {
                                 attrs_to_file_attr(&attr_result.attrs, self.uid, self.gid)
                             } else {
@@ -415,10 +392,10 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
                         }
                         entry_offset += 1;
                     }
-                    if result.next_cursor == 0 {
+                    if result.next_cookie == 0 {
                         break;
                     }
-                    cursor = result.next_cursor;
+                    cookie = result.next_cookie;
                 }
             },
         })
@@ -444,11 +421,11 @@ impl<T: Vfs + Send + Sync + 'static> Filesystem for FuseBridge<T> {
 
 pub(super) async fn mount<T>(config: VfsConfig, vfs: T) -> Result<VfsStart, VfsError>
 where
-    T: Vfs + Clone + Send + Sync + 'static,
+    T: Vfs + VfsDiskNotify + Clone + Send + Sync + 'static,
 {
     // Skip creating mount directory for system-managed mount points
     if !config.mount_path.starts_with("/media/") {
-        tokio::fs::create_dir_all(config.mount_path.as_std_path())
+        moire::fs::create_dir_all(config.mount_path.as_std_path())
             .await
             .map_err(|error| VfsError::CommandFailed {
                 program: "mount",
@@ -461,7 +438,7 @@ where
     }
 
     // Clean up ghost mounts from previous runs that didn't unmount cleanly.
-    lazy_unmount_if_mounted(&config.mount_path);
+    lazy_unmount_if_mounted(&config.mount_path).await;
 
     let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<VfsStart, VfsError>>();
 
@@ -507,7 +484,7 @@ where
                     }
                 };
 
-                let (vfs_dead_tx, vfs_dead_rx) = tokio::sync::watch::channel(false);
+                let (vfs_dead_tx, vfs_dead_rx) = moire::sync::watch::channel("vfs_dead", false);
 
                 let _ = result_tx.send(Ok(VfsStart::Mounted {
                     mount_path,
@@ -535,8 +512,8 @@ where
 
 /// If `mount_path` is already a mountpoint (ghost mount from a previous run),
 /// perform a lazy unmount (`fusermount3 -uz`) so we can re-mount cleanly.
-fn lazy_unmount_if_mounted(mount_path: &camino::Utf8Path) {
-    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+async fn lazy_unmount_if_mounted(mount_path: &camino::Utf8Path) {
+    let Ok(mounts) = moire::fs::read_to_string("/proc/mounts").await else {
         return;
     };
     let is_mounted = mounts.lines().any(|line| {

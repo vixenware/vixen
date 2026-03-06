@@ -7,173 +7,155 @@
 //! - `vx-vfs`, which serves VFS connections over SHM.
 
 use crate::types::{VfsConfig, VfsError, VfsStart};
-use peeps::locks::DiagnosticAsyncMutex;
-use roam_shm::bootstrap::{SessionId, SessionPaths, unix as shm_bootstrap};
-use roam_shm::driver::MultiPeerHostDriver;
-use roam_shm::{AddPeerOptions, SegmentConfig, ShmHost};
-use std::collections::VecDeque;
+use moire::process::Command;
+use moire::sync::mpsc;
+use moire::sync::watch;
+use moire::task::FutureExt;
+use roam_core::BareConduit;
+use roam_core::acceptor;
+use roam_shm::bootstrap::{self, decode_request};
+use roam_shm::{HostHub, Segment, SegmentConfig, SizeClassConfig};
+use shm_primitives::FileCleanup;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, watch};
-use vixenfs_proto::{Vfs, VfsDispatcher};
-use vx_vfs_types::{
-    VIXEN_APP_PATH, VIXEN_DOWNLOAD_URL, VIXEN_EXTENSION_IDENTIFIER, VIXEN_MOUNT_HELPER_PATH,
-    VfsAction, VfsDiagnostic, VfsHealth, VfsIssueCode,
-};
-const LOG_STREAM_TIMEOUT: Duration = Duration::from_secs(2);
+use vixenfs_proto::{Vfs, VfsDiskNotify, VfsDispatcher};
+use vx_vfs_types::{VIXEN_MOUNT_HELPER_PATH, VfsAction, VfsDiagnostic, VfsIssueCode};
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_GC_AGE: Duration = Duration::from_secs(6 * 60 * 60);
+const SHM_MAX_PAYLOAD_SIZE: u32 = 2_u32 * 1024 * 1024 * 1024;
+
+#[derive(Clone, Debug)]
+struct SessionPaths {
+    sid: String,
+    session_dir: PathBuf,
+    shm_path: PathBuf,
+}
+
+impl SessionPaths {
+    fn new(root: &Path, sid: impl Into<String>) -> Result<Self, String> {
+        let sid = sid.into();
+        if !is_valid_sid(&sid) {
+            return Err("sid must be 32 hex chars or UUID format".to_string());
+        }
+        let sessions_root = root.join("sessions");
+        let session_dir = sessions_root.join(&sid);
+        let shm_path = session_dir.join("hub.shm");
+        Ok(Self {
+            sid,
+            session_dir,
+            shm_path,
+        })
+    }
+
+    fn sid(&self) -> &str {
+        &self.sid
+    }
+
+    fn session_dir(&self) -> PathBuf {
+        self.session_dir.clone()
+    }
+
+    fn shm_path(&self) -> PathBuf {
+        self.shm_path.clone()
+    }
+
+    fn validate_containment(&self) -> Result<(), String> {
+        if self
+            .session_dir
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err("session path escapes root".to_string());
+        }
+        Ok(())
+    }
+
+    fn ensure_dirs(&self) -> std::io::Result<()> {
+        if let Some(parent) = self.session_dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::create_dir_all(&self.session_dir)?;
+        Ok(())
+    }
+}
 
 pub(super) async fn mount<T>(config: VfsConfig, vfs: T) -> Result<VfsStart, VfsError>
 where
-    T: Vfs + Clone + Send + Sync + 'static,
+    T: Vfs + VfsDiskNotify + Clone + Send + Sync + 'static,
 {
     tracing::debug!(mount_path = %config.mount_path, "entering macos vfs startup");
 
-    // Skip creating mount directory for /Volumes - FSKit/diskarbitrationd creates it
-    if !config.mount_path.starts_with("/Volumes/") {
-        tokio::fs::create_dir_all(config.mount_path.as_std_path())
-            .await
-            .map_err(|error| VfsError::CommandFailed {
-                program: "mount",
-                message: format!(
-                    "failed to create mount directory {}: {}",
-                    config.mount_path, error
-                ),
-                _diagnostics: vec![],
-            })?;
-        tracing::debug!(mount_path = %config.mount_path, "ensured mount directory exists");
-    } else {
-        tracing::debug!(mount_path = %config.mount_path, "skipping mount directory creation for /Volumes (system creates it)");
-    }
-
-    let (mount_ready_tx, mut mount_ready_rx) = mpsc::channel::<()>(2);
-    let (vfs_dead_tx, vfs_dead_rx) = watch::channel(false);
+    let (mount_ready_tx, mut mount_ready_rx) = moire::sync::mpsc::channel("mount_ready", 2);
+    let (vfs_dead_tx, vfs_dead_rx) = moire::sync::watch::channel("vfs_dead", false);
     let sid = spawn_shm_loop(vfs, mount_ready_tx, vfs_dead_tx)?;
 
-    tracing::debug!(%sid, mount_path = %config.mount_path, "starting vixenfs-mount helper");
+    let debug_mode = std::env::var("VIXENFS_DEBUG").as_deref() == Ok("1");
 
-    let helper_output = Arc::new(DiagnosticAsyncMutex::new(
-        "vfs/helper_output",
-        VecDeque::new(),
-    ));
+    tracing::debug!(%sid, mount_path = %config.mount_path, debug_mode, "calling vx_fskit::setup");
 
-    // Log file lives next to the mount point (under VX_HOME, not the App Group container)
-    let log_file_path = config
-        .mount_path
-        .as_std_path()
-        .parent()
-        .unwrap()
-        .join("vixenfs-mount.log");
+    // vx_fskit::setup handles: prerequisites, stale mount cleanup, mkdir,
+    // /sbin/mount -F -t vixenfs, and health.json verification.
+    let fskit_result = vx_fskit::setup(&sid, &config.mount_path, debug_mode).await;
 
-    let mut helper_command = Command::new(VIXEN_MOUNT_HELPER_PATH);
-    helper_command
-        .arg("--sid")
-        .arg(&sid)
-        .arg("--mount-point")
-        .arg(config.mount_path.as_str())
-        .arg("--parent-pid")
-        .arg(std::process::id().to_string())
-        .arg("--log-file")
-        .arg(&log_file_path);
-
-    if std::env::var("VIXENFS_PRELOAD").as_deref() == Ok("1") {
-        helper_command.arg("--preload");
+    if let Some(ref error) = fskit_result.error {
+        cleanup_session_dir(&sid).await;
+        let log_detail = fskit_result
+            .log
+            .iter()
+            .map(|entry| {
+                let prefix = match entry.level {
+                    vx_fskit::LogLevel::Ok => "\u{2713}", // ✓
+                    vx_fskit::LogLevel::Info => "",
+                    vx_fskit::LogLevel::Fail => "\u{2717}", // ✗
+                };
+                format!("{prefix} {}", entry.message)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(VfsError::MountFailed {
+            message: error.summary.clone(),
+            _diagnostics: vec![VfsDiagnostic {
+                code: VfsIssueCode::MountFailed,
+                summary: error.summary.clone(),
+                detail: Some(log_detail),
+                actions: error
+                    .remediation
+                    .iter()
+                    .map(|r| VfsAction::RunCommand(r.clone()))
+                    .collect(),
+            }],
+        });
     }
-    if std::env::var("VIXENFS_DEBUG").as_deref() == Ok("1") {
-        helper_command.arg("--debug");
-    }
 
-    helper_command
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(false)
-        .process_group(0);
+    // Mount syscall succeeded and health.json confirms the extension is up.
+    // Now wait for the SHM connection (extension connecting to our SHM segment).
+    tracing::debug!("fskit mount ok, waiting for SHM readiness");
 
-    let mut helper = match helper_command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            cleanup_session_dir(&sid).await;
-            let diagnostics = collect_mount_failure_diagnostics().await;
-            return Err(VfsError::CommandFailed {
-                program: "vixenfs-mount",
-                message: format!("failed to spawn {}: {}", VIXEN_MOUNT_HELPER_PATH, error),
-                _diagnostics: with_mount_context_diagnostic(
-                    diagnostics,
-                    "mount helper failed to start",
-                    format!("failed to spawn {}: {}", VIXEN_MOUNT_HELPER_PATH, error),
-                ),
-            });
-        }
-    };
-
-    // Tail the helper's log file, forwarding lines to tracing and capturing for error reporting
-    let log_tail_task = {
-        let output_clone = helper_output.clone();
-        let log_path = log_file_path.clone();
-        peeps::tasks::spawn_tracked("fskit_helper_log_tail", async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-
-            // Wait for the log file to appear (helper creates it on startup)
-            let file = loop {
-                match tokio::fs::File::open(&log_path).await {
-                    Ok(f) => break f,
-                    Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
-                }
-            };
-            let mut lines = BufReader::new(file).lines();
-            loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) => {
-                        tracing::debug!(target: "vixenfs-mount", "{}", line);
-                        output_clone.lock().await.push_back(line);
-                    }
-                    Ok(None) => {
-                        // EOF — file may still be written to, poll again
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                    Err(_) => break,
-                }
-            }
-        })
-    };
-
-    match wait_for_mount_ready(&mut helper, &mut mount_ready_rx, MOUNT_TIMEOUT).await {
-        Ok(()) => {
-            tracing::info!(mount_path = %config.mount_path, "vixenfs-mount became ready");
+    match tokio::time::timeout(MOUNT_TIMEOUT, mount_ready_rx.recv()).await {
+        Ok(Some(())) => {
+            tracing::info!(mount_path = %config.mount_path, "VFS mounted and SHM connected");
             Ok(VfsStart::Mounted {
                 mount_path: config.mount_path,
                 vfs_dead: vfs_dead_rx,
             })
         }
-        Err(readiness_error) => {
+        Ok(None) => {
             cleanup_session_dir(&sid).await;
-            let diagnostics = collect_mount_failure_diagnostics().await;
-            let _ = helper.kill().await;
-            let _ = helper.wait().await;
-
-            // Wait for the log tail task to finish draining
-            log_tail_task.abort();
-            let _ = log_tail_task.await;
-
-            let helper_output = snapshot_lines(&helper_output).await;
-
-            let mount_detail = if helper_output.is_empty() {
-                readiness_error.clone()
-            } else {
-                format!("{}\nhelper output:\n{}", readiness_error, helper_output)
-            };
             Err(VfsError::CommandFailed {
-                program: "vixenfs-mount",
-                message: readiness_error,
-                _diagnostics: with_mount_context_diagnostic(
-                    diagnostics,
-                    "mount helper did not become ready",
-                    mount_detail,
+                program: "vx-vfs",
+                message: "SHM readiness channel closed before extension connected".to_string(),
+                _diagnostics: vec![],
+            })
+        }
+        Err(_) => {
+            cleanup_session_dir(&sid).await;
+            Err(VfsError::CommandFailed {
+                program: "vx-vfs",
+                message: format!(
+                    "FSKit extension did not connect via SHM within {MOUNT_TIMEOUT:?}"
                 ),
+                _diagnostics: vec![],
             })
         }
     }
@@ -192,19 +174,11 @@ where
     std::thread::Builder::new()
         .name("vfs-runtime".into())
         .spawn(move || {
-            peeps::threads::register_thread("vfs-runtime");
+            let vfs_dead_tx_for_shutdown = vfs_dead_tx.clone();
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(4)
                 .thread_name("vfs-worker")
                 .enable_all()
-                .on_thread_start(|| {
-                    peeps::threads::register_thread(
-                        std::thread::current().name().unwrap_or("vfs-worker"),
-                    );
-                })
-                .on_thread_stop(|| {
-                    peeps::threads::deregister_thread();
-                })
                 .build()
                 .expect("failed to create VFS tokio runtime");
             rt.block_on(async move {
@@ -217,14 +191,7 @@ where
                 };
 
                 let sid = random_sid_hex();
-                let session_id = match SessionId::parse(&sid) {
-                    Ok(session_id) => session_id,
-                    Err(error) => {
-                        let _ = sid_tx.send(Err(format!("generated invalid sid {sid}: {error}")));
-                        return;
-                    }
-                };
-                let session_paths = match SessionPaths::new(&app_group_root, session_id.clone()) {
+                let session_paths = match SessionPaths::new(&app_group_root, sid.clone()) {
                     Ok(paths) => paths,
                     Err(error) => {
                         let _ = sid_tx.send(Err(format!("failed to build session paths: {error}")));
@@ -232,7 +199,9 @@ where
                     }
                 };
 
-                if let Err(error) = gc_stale_sessions(&app_group_root, session_id.as_str(), SESSION_GC_AGE) {
+                if let Err(error) =
+                    gc_stale_sessions(&app_group_root, session_paths.sid(), SESSION_GC_AGE).await
+                {
                     tracing::warn!(error = %error, "failed to garbage-collect stale SHM sessions");
                 }
 
@@ -247,8 +216,8 @@ where
                 }
 
                 let shm_path = session_paths.shm_path();
-                if shm_path.exists()
-                    && let Err(error) = std::fs::remove_file(&shm_path)
+                if moire::fs::try_exists(&shm_path).await.unwrap_or(false)
+                    && let Err(error) = moire::fs::remove_file(&shm_path).await
                 {
                     let _ = sid_tx.send(Err(format!(
                         "failed to remove stale shm file {}: {error}",
@@ -257,8 +226,23 @@ where
                     return;
                 }
 
-                let host = match ShmHost::create(&shm_path, SegmentConfig::default()) {
-                    Ok(host) => host,
+                let classes = [SizeClassConfig {
+                    slot_size: 4096,
+                    slot_count: 64,
+                }];
+                let segment = match Segment::create(
+                    &shm_path,
+                    SegmentConfig {
+                        max_guests: 16,
+                        bipbuf_capacity: 64 * 1024,
+                        max_payload_size: SHM_MAX_PAYLOAD_SIZE,
+                        inline_threshold: 256,
+                        heartbeat_interval: 0,
+                        size_classes: &classes,
+                    },
+                    FileCleanup::Manual,
+                ) {
+                    Ok(segment) => std::sync::Arc::new(segment),
                     Err(error) => {
                         let _ = sid_tx.send(Err(format!(
                             "failed to create SHM hub {}: {error}",
@@ -268,13 +252,13 @@ where
                     }
                 };
 
-                let (driver, _handles, _incoming, driver_handle) =
-                    MultiPeerHostDriver::builder(host).build();
+                let host = HostHub::new(segment.clone());
 
-                let control_sock_path =
-                    control_socket_path_for_sid(&app_group_root, session_paths.sid().as_str());
-                if control_sock_path.exists()
-                    && let Err(error) = std::fs::remove_file(&control_sock_path)
+                let control_sock_path = control_socket_path_for_sid(&app_group_root, session_paths.sid());
+                if moire::fs::try_exists(&control_sock_path)
+                    .await
+                    .unwrap_or(false)
+                    && let Err(error) = moire::fs::remove_file(&control_sock_path).await
                 {
                     let _ = sid_tx.send(Err(format!(
                         "failed to remove stale SHM control socket {}: {error}",
@@ -296,62 +280,101 @@ where
 
                 let _ = sid_tx.send(Ok(sid.clone()));
 
-                let vfs_dead_tx_for_driver = vfs_dead_tx.clone();
-                peeps::tasks::spawn_tracked("shm_host_driver", async move {
-                    if let Err(error) = driver.run().await {
-                        tracing::debug!(%error, "SHM host driver exited with error");
-                    } else {
-                        tracing::debug!("SHM host driver exited cleanly");
-                    }
-                    let _ = vfs_dead_tx_for_driver.send(true);
-                });
-
                 loop {
-                    let ticket = match driver_handle.create_peer(AddPeerOptions::default()).await {
-                        Ok(ticket) => ticket,
+                    let (mut control_stream, _peer) = match control_listener.accept().await {
+                        Ok(parts) => parts,
                         Err(error) => {
-                            tracing::warn!(%error, "failed to reserve SHM peer ticket");
+                            tracing::warn!(%error, "failed to accept SHM control connection");
                             continue;
                         }
                     };
 
-                    let peer_id = ticket.peer_id;
-                    let hub_path = ticket.hub_path.clone();
-                    let doorbell_fd = ticket.doorbell_handle().as_raw_fd();
-
-                    if let Err(error) = driver_handle
-                        .add_peer(peer_id, VfsDispatcher::new(vfs.clone()))
-                        .await
-                    {
-                        tracing::warn!(%error, peer = %peer_id.get(), "failed to add SHM peer to driver");
-                        if let Err(release_error) = driver_handle.release_peer(peer_id).await {
-                            tracing::warn!(%release_error, peer = %peer_id.get(), "failed to release SHM peer after add-peer failure");
+                    let request_sid = match recv_bootstrap_request(&mut control_stream).await {
+                        Ok(sid) => sid,
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to read SHM bootstrap request");
+                            continue;
                         }
+                    };
+                    if request_sid != session_paths.sid() {
+                        let _ = send_bootstrap_error(&control_stream, "sid mismatch");
+                        tracing::warn!(
+                            expected = %session_paths.sid(),
+                            got = %request_sid,
+                            "SHM bootstrap sid mismatch"
+                        );
                         continue;
                     }
 
-                    match shm_bootstrap::accept_and_send_ticket(
-                        &control_listener,
-                        session_paths.sid(),
-                        peer_id,
-                        &hub_path,
-                        doorbell_fd,
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            let _ = mount_ready_tx.try_send(());
-                            tracing::debug!(sid = %session_paths.sid(), peer = %peer_id.get(), "issued SHM bootstrap ticket");
-                        }
+                    let hub_path = shm_path.to_string_lossy().to_string();
+                    let prepared = match host.prepare_bootstrap_success(hub_path.as_bytes()) {
+                        Ok(prepared) => prepared,
                         Err(error) => {
-                            tracing::warn!(%error, peer = %peer_id.get(), "failed SHM bootstrap ticket exchange");
-                            if let Err(release_error) = driver_handle.release_peer(peer_id).await {
-                                tracing::warn!(%release_error, peer = %peer_id.get(), "failed to release SHM peer after bootstrap failure");
-                            }
+                            let _ = send_bootstrap_error(
+                                &control_stream,
+                                format!("failed to reserve peer: {error}"),
+                            );
+                            tracing::warn!(%error, "failed to reserve SHM peer ticket");
+                            continue;
                         }
+                    };
+                    let peer_id = prepared.host_peer.peer_id();
+                    if let Err(error) =
+                        prepared.send_success_unix(control_stream.as_raw_fd(), &segment)
+                    {
+                        tracing::warn!(%error, peer = %peer_id.get(), "failed SHM bootstrap ticket exchange");
+                        prepared.host_peer.release_reservation();
+                        continue;
                     }
+                    let host_peer = prepared.host_peer;
+
+                    tracing::debug!(
+                        sid = %session_paths.sid(),
+                        peer = %peer_id.get(),
+                        "issued SHM bootstrap ticket"
+                    );
+                    let _ = mount_ready_tx.try_send(());
+
+                    let vfs_dispatcher = VfsDispatcher::new(vfs.clone());
+                    moire::task::spawn(
+                        async move {
+                            let link = match host_peer.into_link() {
+                                Ok(link) => link,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        peer = %peer_id.get(),
+                                        "failed to build host link for peer"
+                                    );
+                                    return;
+                                }
+                            };
+                            let conduit: BareConduit<roam_types::MessageFamily, roam_shm::ShmLink> =
+                                BareConduit::new(link);
+                            let (caller, session_handle) = match acceptor(conduit)
+                                .establish::<roam_core::NoopCaller>(vfs_dispatcher)
+                                .await
+                            {
+                                Ok(parts) => parts,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        peer = %peer_id.get(),
+                                        "failed SHM session establish"
+                                    );
+                                    return;
+                                }
+                            };
+                            tracing::debug!(peer = %peer_id.get(), "SHM peer driver established");
+                            let _caller = caller;
+                            let _session_handle = session_handle;
+                            std::future::pending::<()>().await;
+                        }
+                        .named("shm_host_driver"),
+                    );
                 }
             });
+            let _ = vfs_dead_tx_for_shutdown.send(true);
         })
         .expect("failed to spawn VFS runtime thread");
 
@@ -378,17 +401,80 @@ fn random_sid_hex() -> String {
     sid
 }
 
-fn gc_stale_sessions(root: &Path, keep_sid: &str, max_age: Duration) -> Result<(), String> {
+fn is_valid_sid(sid: &str) -> bool {
+    if sid.len() == 32 {
+        return sid.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    if sid.len() == 36 {
+        for (i, c) in sid.chars().enumerate() {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                if c != '-' {
+                    return false;
+                }
+            } else if !c.is_ascii_hexdigit() {
+                return false;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+async fn recv_bootstrap_request(stream: &mut tokio::net::UnixStream) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut header = [0u8; bootstrap::BOOTSTRAP_REQUEST_HEADER_LEN];
+    stream
+        .read_exact(&mut header)
+        .await
+        .map_err(|e| format!("read bootstrap request header: {e}"))?;
+
+    let sid_len = u16::from_le_bytes([header[4], header[5]]) as usize;
+    let mut sid_bytes = vec![0u8; sid_len];
+    stream
+        .read_exact(&mut sid_bytes)
+        .await
+        .map_err(|e| format!("read sid payload: {e}"))?;
+    let mut frame = Vec::with_capacity(bootstrap::BOOTSTRAP_REQUEST_HEADER_LEN + sid_len);
+    frame.extend_from_slice(&header);
+    frame.extend_from_slice(&sid_bytes);
+    let request = decode_request(&frame).map_err(|e| format!("invalid bootstrap request: {e}"))?;
+    let sid = String::from_utf8(request.sid.to_vec()).map_err(|e| format!("sid not utf-8: {e}"))?;
+    if !is_valid_sid(&sid) {
+        return Err("invalid sid encoding".to_string());
+    }
+    Ok(sid)
+}
+
+fn send_bootstrap_error(
+    stream: &tokio::net::UnixStream,
+    message: impl AsRef<str>,
+) -> std::io::Result<()> {
+    shm_primitives::bootstrap::send_response_unix(
+        stream.as_raw_fd(),
+        shm_primitives::bootstrap::BootstrapStatus::Error,
+        0,
+        message.as_ref().as_bytes(),
+        None,
+    )
+    .map_err(|e| std::io::Error::other(format!("bootstrap error response send failed: {e}")))
+}
+
+async fn gc_stale_sessions(root: &Path, keep_sid: &str, max_age: Duration) -> Result<(), String> {
     let sessions_root = root.join("sessions");
-    if !sessions_root.exists() {
+    if !moire::fs::try_exists(&sessions_root).await.unwrap_or(false) {
         return Ok(());
     }
-    let entries = std::fs::read_dir(&sessions_root)
+    let mut entries = tokio::fs::read_dir(&sessions_root)
+        .await
         .map_err(|error| format!("failed to list {}: {error}", sessions_root.display()))?;
     let now = std::time::SystemTime::now();
 
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("failed to read sessions entry: {error}"))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| format!("failed to read sessions entry: {error}"))?
+    {
         let path = entry.path();
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
@@ -397,7 +483,7 @@ fn gc_stale_sessions(root: &Path, keep_sid: &str, max_age: Duration) -> Result<(
         if name == keep_sid {
             continue;
         }
-        let metadata = match std::fs::symlink_metadata(&path) {
+        let metadata = match tokio::fs::symlink_metadata(&path).await {
             Ok(metadata) => metadata,
             Err(_) => continue,
         };
@@ -414,7 +500,7 @@ fn gc_stale_sessions(root: &Path, keep_sid: &str, max_age: Duration) -> Result<(
         if age < max_age {
             continue;
         }
-        if let Err(error) = std::fs::remove_dir_all(&path) {
+        if let Err(error) = moire::fs::remove_dir_all(&path).await {
             tracing::warn!(path = %path.display(), %error, "failed to remove stale SHM session");
         }
     }
@@ -434,7 +520,7 @@ async fn cleanup_session_dir(sid: &str) {
         }
     };
     let control_sock_path = control_socket_path_for_sid(&app_group_root, sid);
-    match tokio::fs::remove_file(&control_sock_path).await {
+    match moire::fs::remove_file(&control_sock_path).await {
         Ok(()) => tracing::debug!(
             %sid,
             path = %control_sock_path.display(),
@@ -449,14 +535,11 @@ async fn cleanup_session_dir(sid: &str) {
         ),
     }
 
-    let session_id = match SessionId::parse(sid) {
-        Ok(session_id) => session_id,
-        Err(error) => {
-            tracing::warn!(%sid, %error, "invalid sid during SHM cleanup");
-            return;
-        }
-    };
-    let session_paths = match SessionPaths::new(&app_group_root, session_id) {
+    if !is_valid_sid(sid) {
+        tracing::warn!(%sid, "invalid sid during SHM cleanup");
+        return;
+    }
+    let session_paths = match SessionPaths::new(&app_group_root, sid.to_string()) {
         Ok(paths) => paths,
         Err(error) => {
             tracing::warn!(%sid, %error, "failed to construct SHM cleanup paths");
@@ -468,7 +551,7 @@ async fn cleanup_session_dir(sid: &str) {
         return;
     }
     let session_dir = session_paths.session_dir();
-    match tokio::fs::remove_dir_all(&session_dir).await {
+    match moire::fs::remove_dir_all(&session_dir).await {
         Ok(()) => {
             tracing::debug!(%sid, path = %session_dir.display(), "removed SHM session directory");
         }
@@ -484,150 +567,12 @@ async fn cleanup_session_dir(sid: &str) {
     }
 }
 
-async fn wait_for_mount_ready(
-    helper: &mut Child,
-    mount_ready_rx: &mut mpsc::Receiver<()>,
-    timeout: Duration,
-) -> Result<(), String> {
-    tokio::select! {
-        wait_result = helper.wait() => {
-            let status = wait_result
-                .map_err(|e| format!("failed to wait for vixenfs-mount process: {e}"))?;
-            if status.success() {
-                // Helper mounted successfully and exited — wait for
-                // the SHM bootstrap (FSKit extension connecting) with
-                // the remaining timeout.
-                tokio::select! {
-                    ready = mount_ready_rx.recv() => {
-                        match ready {
-                            Some(()) => Ok(()),
-                            None => Err("mount readiness channel closed before mount became ready".to_string()),
-                        }
-                    }
-                    _ = tokio::time::sleep(timeout) => {
-                        Err(format!(
-                            "mount helper exited successfully but FSKit extension did not connect within {:?}",
-                            timeout
-                        ))
-                    }
-                }
-            } else {
-                Err(format!(
-                    "failed to mount (status={:?})",
-                    status.code()
-                ))
-            }
-        }
-        ready = mount_ready_rx.recv() => {
-            match ready {
-                Some(()) => Ok(()),
-                None => Err("mount readiness channel closed before mount became ready".to_string()),
-            }
-        }
-        _ = tokio::time::sleep(timeout) => {
-            Err(format!(
-                "timed out waiting for mount readiness after {:?}",
-                timeout
-            ))
-        }
-    }
-}
-
-async fn collect_mount_failure_diagnostics() -> Vec<VfsDiagnostic> {
-    let app_installed = is_app_installed().await;
-    let health = check_extension_health().await;
-
-    let mut diagnostics = Vec::new();
-    if !app_installed {
-        diagnostics.push(VfsDiagnostic {
-            code: VfsIssueCode::AppMissing,
-            summary: format!("{} is missing", VIXEN_APP_PATH),
-            detail: None,
-            actions: vec![
-                VfsAction::OpenDownloadUrl(VIXEN_DOWNLOAD_URL.to_string()),
-                VfsAction::RetryBuild,
-            ],
-        });
-    }
-
-    if app_installed {
-        match health {
-            Some(health) if !health.extension_installed => {
-                diagnostics.push(VfsDiagnostic {
-                    code: VfsIssueCode::ExtensionNotInstalled,
-                    summary: format!("plugin {} is not registered", VIXEN_EXTENSION_IDENTIFIER),
-                    detail: None,
-                    actions: vec![VfsAction::RunVxApp, VfsAction::RetryBuild],
-                });
-            }
-            Some(health) if !health.extension_enabled => {
-                diagnostics.push(VfsDiagnostic {
-                    code: VfsIssueCode::ExtensionDisabled,
-                    summary: format!(
-                        "plugin {} is installed but disabled",
-                        VIXEN_EXTENSION_IDENTIFIER
-                    ),
-                    detail: None,
-                    actions: vec![VfsAction::RunVxApp, VfsAction::RetryBuild],
-                });
-            }
-            Some(_) => {}
-            None => {
-                diagnostics.push(VfsDiagnostic {
-                    code: VfsIssueCode::HealthCheckFailed,
-                    summary: "failed to read extension health from vixenfs-mount --health --json"
-                        .to_string(),
-                    detail: None,
-                    actions: vec![VfsAction::RetryBuild],
-                });
-            }
-        }
-    }
-
-    if diagnostics.is_empty() {
-        diagnostics.push(VfsDiagnostic {
-            code: VfsIssueCode::MountFailed,
-            summary: r#"App here, extension enabled, but mounting failed. You can try the following:
-
- $ log stream --info --debug --predicate 'subsystem == "com.apple.FSKit" OR message CONTAINS "vixenfs"'
-
- And sometimes, killing fskit fixes it
-
- $ sudo killall fskitd fskit_agent
-
- Yeah, FSKit is wonky. File an issue against http://github.com/bearcove/vixen if necessary.
-                "#.to_string(),
-            detail: None,
-            actions: vec![VfsAction::RetryBuild],
-        });
-    }
-    diagnostics
-}
-
-pub(super) async fn is_app_installed() -> bool {
-    tokio::fs::metadata(VIXEN_APP_PATH).await.is_ok()
-}
-
-pub(super) async fn check_extension_health() -> Option<VfsHealth> {
-    let mut command = Command::new(VIXEN_MOUNT_HELPER_PATH);
-    command.arg("--health").arg("--json");
-
-    let output = match tokio::time::timeout(LOG_STREAM_TIMEOUT, command.output()).await {
-        Ok(Ok(output)) => output,
-        _ => return None,
-    };
-
-    let stdout = std::str::from_utf8(&output.stdout).ok()?.trim();
-    facet_json::from_str(stdout).ok()
-}
-
 /// Resolve the App Group container path via the `vixenfs-mount` helper.
 ///
 /// The helper is codesigned with the App Group entitlement, so it can call
 /// `FileManager.containerURL(forSecurityApplicationGroupIdentifier:)` and
 /// return the resolved path. This lets VXRunner (a plain Rust binary) discover
 /// the shared container without needing its own App Group entitlement.
-#[allow(dead_code)]
 pub async fn resolve_app_group_path() -> Result<PathBuf, String> {
     let output = Command::new(VIXEN_MOUNT_HELPER_PATH)
         .arg("--app-group-path")
@@ -652,41 +597,4 @@ pub async fn resolve_app_group_path() -> Result<PathBuf, String> {
     }
 
     Ok(PathBuf::from(path))
-}
-
-async fn snapshot_lines(lines: &Arc<DiagnosticAsyncMutex<VecDeque<String>>>) -> String {
-    lines
-        .lock()
-        .await
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn with_mount_context_diagnostic(
-    mut diagnostics: Vec<VfsDiagnostic>,
-    summary: &str,
-    detail: String,
-) -> Vec<VfsDiagnostic> {
-    if let Some(existing) = diagnostics
-        .iter_mut()
-        .find(|diagnostic| diagnostic.code == VfsIssueCode::MountFailed)
-    {
-        existing.detail = Some(match existing.detail.take() {
-            Some(existing_detail) if !existing_detail.is_empty() => {
-                format!("{}\n\n{}", existing_detail, detail)
-            }
-            _ => detail,
-        });
-        return diagnostics;
-    }
-
-    diagnostics.push(VfsDiagnostic {
-        code: VfsIssueCode::MountFailed,
-        summary: summary.to_string(),
-        detail: Some(detail),
-        actions: vec![VfsAction::RetryBuild],
-    });
-    diagnostics
 }

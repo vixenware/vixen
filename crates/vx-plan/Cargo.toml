@@ -13,3 +13,6 @@ camino = { workspace = true }
 facet = { workspace = true }
 facet-json = { workspace = true }
 strid = { workspace = true }
+
+[lints]
+workspace = true

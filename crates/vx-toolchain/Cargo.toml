@@ -15,12 +15,16 @@ blake3 = { workspace = true }
 camino = { workspace = true }
 facet = { workspace = true }
 facet-toml = { workspace = true }
-lzma-rs = "0.3"
 tar = { workspace = true }
 thiserror = { workspace = true }
 vx-store-proto = { workspace = true }
-walkdir = "2.5"
 vx-http = { workspace = true }
-uuid = { version = "1.19.0", features = ["v4"] }
+vx-tarball = { workspace = true }
+uuid = { version = "1.21.0", features = ["v4"] }
+tokio = { workspace = true }
+tokio-tar = "0.3"
 
 [dev-dependencies]
+
+[lints]
+workspace = true

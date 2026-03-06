@@ -7,9 +7,9 @@ use std::io::{self, Cursor, Read};
 use std::ops::ControlFlow;
 use std::path::Path;
 
-use vixenfs_proto::{ItemType, Vfs};
+use vixenfs_proto::{ItemType, Vfs, VfsDiskNotify};
 use windows_projfs::{
-    DirectoryEntry, DirectoryInfo, FileInfo, Notification, ProjectedFileSystem,
+    DirectoryEntry, DirectoryInfo, FileCloseAction, FileInfo, Notification, ProjectedFileSystem,
     ProjectedFileSystemSource,
 };
 
@@ -27,16 +27,6 @@ fn unix_to_filetime(unix_seconds: u64) -> u64 {
     (unix_seconds + UNIX_TO_FILETIME_EPOCH_OFFSET) * FILETIME_TICKS_PER_SECOND
 }
 
-fn dummy_context() -> roam::Context {
-    roam::Context::new(
-        roam::wire::ConnectionId(0),
-        roam::wire::RequestId(0),
-        roam::wire::MethodId(0),
-        Default::default(),
-        vec![],
-    )
-}
-
 struct ProjFsBridge<T> {
     vfs: T,
     handle: tokio::runtime::Handle,
@@ -48,16 +38,17 @@ impl<T> ProjFsBridge<T> {
     }
 }
 
-impl<T: Vfs + Send + Sync + 'static> ProjFsBridge<T> {
+impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjFsBridge<T> {
     /// Resolve a relative path (from ProjFS) to a VFS ItemId by walking
     /// from the root (ItemId 1) through each path component via `lookup()`.
     fn resolve_path(&self, path: &Path) -> Option<u64> {
-        let cx = dummy_context();
         let mut current_id: u64 = 1; // root
 
         for component in path.components() {
             let name = component.as_os_str().to_string_lossy().to_string();
-            let result = self.handle.block_on(self.vfs.lookup(&cx, current_id, name.clone()));
+            let result = self
+                .handle
+                .block_on(self.vfs.lookup(current_id, name.clone()));
             if result.error != 0 {
                 tracing::debug!(?path, %name, current_id, error = result.error, "resolve_path: lookup failed");
                 return None;
@@ -69,7 +60,7 @@ impl<T: Vfs + Send + Sync + 'static> ProjFsBridge<T> {
     }
 }
 
-impl<T: Vfs + Send + Sync + 'static> ProjectedFileSystemSource for ProjFsBridge<T> {
+impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjectedFileSystemSource for ProjFsBridge<T> {
     fn list_directory(&self, path: &Path) -> Vec<DirectoryEntry> {
         tracing::debug!(?path, "ProjFS list_directory");
         let Some(dir_id) = self.resolve_path(path) else {
@@ -77,16 +68,19 @@ impl<T: Vfs + Send + Sync + 'static> ProjectedFileSystemSource for ProjFsBridge<
             return vec![];
         };
 
-        let cx = dummy_context();
         let mut entries = Vec::new();
-        let mut cursor: u64 = 0;
+        let mut cookie: u64 = 0;
+        let mut verifier: u64 = 0;
 
         loop {
-            let result = self.handle.block_on(self.vfs.read_dir(&cx, dir_id, cursor));
+            let result = self
+                .handle
+                .block_on(self.vfs.read_dir(dir_id, cookie, verifier));
             if result.error != 0 {
                 tracing::warn!(error = result.error, ?path, "read_dir failed");
                 return vec![];
             }
+            verifier = result.verifier;
 
             for entry in &result.entries {
                 let ft_created = unix_to_filetime(entry.created_time);
@@ -115,10 +109,10 @@ impl<T: Vfs + Send + Sync + 'static> ProjectedFileSystemSource for ProjFsBridge<
                 }
             }
 
-            if result.next_cursor == 0 {
+            if result.next_cookie == 0 {
                 break;
             }
-            cursor = result.next_cursor;
+            cookie = result.next_cookie;
         }
 
         // ProjFS requires entries sorted by name
@@ -134,14 +128,17 @@ impl<T: Vfs + Send + Sync + 'static> ProjectedFileSystemSource for ProjFsBridge<
         let parent_id = match self.resolve_path(parent) {
             Some(id) => id,
             None => {
-                tracing::warn!(?path, ?parent, "ProjFS get_directory_entry: parent resolve failed");
+                tracing::warn!(
+                    ?path,
+                    ?parent,
+                    "ProjFS get_directory_entry: parent resolve failed"
+                );
                 return None;
             }
         };
-        let cx = dummy_context();
         let result = self
             .handle
-            .block_on(self.vfs.lookup(&cx, parent_id, file_name.clone()));
+            .block_on(self.vfs.lookup(parent_id, file_name.clone()));
         if result.error != 0 {
             return None;
         }
@@ -184,12 +181,15 @@ impl<T: Vfs + Send + Sync + 'static> ProjectedFileSystemSource for ProjFsBridge<
             return Ok(Box::new(Cursor::new(vec![0u8; length])));
         };
 
-        let cx = dummy_context();
         let result = self
             .handle
-            .block_on(self.vfs.read(&cx, file_id, byte_offset as u64, length as u64));
+            .block_on(self.vfs.read(file_id, byte_offset as u64, length as u64));
         if result.error != 0 {
-            tracing::error!(error = result.error, ?path, "stream_file_content: read failed");
+            tracing::error!(
+                error = result.error,
+                ?path,
+                "stream_file_content: read failed"
+            );
             return Ok(Box::new(Cursor::new(vec![0u8; length])));
         }
 
@@ -197,20 +197,50 @@ impl<T: Vfs + Send + Sync + 'static> ProjectedFileSystemSource for ProjFsBridge<
     }
 
     fn handle_notification(&self, notification: &Notification) -> ControlFlow<()> {
-        tracing::debug!(?notification, "ProjFS notification");
+        match notification {
+            Notification::FileCreated(file) | Notification::FileOverwritten(file) => {
+                let path = file.path.to_string_lossy();
+                tracing::debug!(%path, is_directory = file.is_directory, "ProjFS: file created");
+                self.vfs.on_disk_file_created(&path, file.is_directory);
+            }
+            Notification::FileClosed(file, action) => match action {
+                FileCloseAction::Modified => {
+                    let path = file.path.to_string_lossy();
+                    tracing::debug!(%path, "ProjFS: file modified and closed");
+                    self.vfs.on_disk_file_created(&path, file.is_directory);
+                }
+                FileCloseAction::Deleted => {
+                    let path = file.path.to_string_lossy();
+                    tracing::debug!(%path, "ProjFS: file deleted");
+                    self.vfs.on_disk_file_deleted(&path);
+                }
+                FileCloseAction::NoModification => {}
+            },
+            Notification::FileRenamed(info) => {
+                if let (Some(src), Some(dst)) = (&info.source, &info.destination) {
+                    let src = src.to_string_lossy();
+                    let dst = dst.to_string_lossy();
+                    tracing::debug!(%src, %dst, "ProjFS: file renamed");
+                    self.vfs.on_disk_file_renamed(&src, &dst);
+                }
+            }
+            other => {
+                tracing::trace!(?other, "ProjFS notification (ignored)");
+            }
+        }
         ControlFlow::Continue(())
     }
 }
 
 pub(super) async fn mount<T>(config: VfsConfig, vfs: T) -> Result<VfsStart, VfsError>
 where
-    T: Vfs + Clone + Send + Sync + 'static,
+    T: Vfs + VfsDiskNotify + Clone + Send + Sync + 'static,
 {
     // Clean up stale ProjFS reparse points from a previous (unclean) shutdown.
     cleanup_stale_projfs(&config.mount_path);
 
     // Ensure the mount directory exists
-    tokio::fs::create_dir_all(config.mount_path.as_std_path())
+    moire::fs::create_dir_all(config.mount_path.as_std_path())
         .await
         .map_err(|error| VfsError::CommandFailed {
             program: "mount",
@@ -251,7 +281,7 @@ where
                 }
             };
 
-            let (vfs_dead_tx, vfs_dead_rx) = tokio::sync::watch::channel(false);
+            let (vfs_dead_tx, vfs_dead_rx) = moire::sync::watch::channel("vfs_dead", false);
 
             let _ = result_tx.send(Ok(VfsStart::Mounted {
                 mount_path,

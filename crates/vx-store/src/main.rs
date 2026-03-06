@@ -18,8 +18,13 @@ use camino::Utf8PathBuf;
 use eyre::Result;
 use facet::Facet;
 use figue as args;
-use roam_stream::{HandshakeConfig, accept};
+use moire::task::FutureExt;
+use roam_core::acceptor;
+use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
+use roam_stream::StreamLink;
+use roam_types::{ConnectionSettings, Metadata};
 use std::sync::Arc;
+use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
 use vx_store_proto::StoreDispatcher;
 
@@ -30,10 +35,6 @@ struct Args {
     #[facet(args::named)]
     root: Utf8PathBuf,
 
-    /// VX home directory
-    #[facet(args::named)]
-    vx_home: Utf8PathBuf,
-
     /// Listen endpoint (host:port or unix:/path/to/socket)
     #[facet(args::named)]
     listen: String,
@@ -43,22 +44,47 @@ struct Args {
     builtins: args::FigueBuiltins,
 }
 
-fn main() -> Result<()> {
-    peeps::threads::install_sigprof_handler();
-    peeps::threads::register_thread("main");
-    peeps::tasks::init_task_tracking();
+#[derive(Clone)]
+struct StoreVirtualAcceptor {
+    boot_service: vx_io::boot::BootService<StoreService>,
+}
 
+impl ConnectionAcceptor for StoreVirtualAcceptor {
+    fn accept(
+        &self,
+        _conn_id: roam_types::ConnectionId,
+        peer_settings: &ConnectionSettings,
+        _metadata: &[roam_types::MetadataEntry],
+    ) -> std::result::Result<AcceptedConnection, Metadata<'static>> {
+        let Some(store) = self.boot_service.gate().service().cloned() else {
+            return Err(vec![]);
+        };
+
+        let parity = peer_settings.parity.other();
+        Ok(AcceptedConnection {
+            settings: ConnectionSettings {
+                parity,
+                max_concurrent_requests: peer_settings.max_concurrent_requests,
+            },
+            metadata: vec![],
+            setup: Box::new(move |handle| {
+                let dispatcher = StoreDispatcher::new(store);
+                moire::task::spawn(
+                    async move {
+                        let mut driver = Driver::new(handle, dispatcher);
+                        driver.run().await;
+                    }
+                    .named("store_virtual_driver"),
+                );
+            }),
+        })
+    }
+}
+
+fn main() -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
-        .on_thread_start(|| {
-            peeps::threads::register_thread(
-                std::thread::current().name().unwrap_or("tokio-worker"),
-            );
-        })
-        .on_thread_stop(|| {
-            peeps::threads::deregister_thread();
-        })
         .build()?;
     rt.block_on(async_main())
 }
@@ -69,15 +95,9 @@ async fn async_main() -> Result<()> {
 
     // Initialize tracing
     vx_tracing::init_service("vx_store=info");
-    tracing::debug!("tracing initialized");
 
-    // Initialize peeps instrumentation
-    peeps::init();
-    #[cfg(unix)]
-    peeps::install_sigusr1("vx-store");
-
+    // Initialize moire instrumentation
     tracing::info!("hello from vixen-store");
-    tracing::debug!("parsing args");
 
     let args: Args = args::Driver::new(
         args::builder::<Args>()?
@@ -91,100 +111,97 @@ async fn async_main() -> Result<()> {
     .run()
     .unwrap();
 
-    tracing::debug!("args parsed, listen={}", args.listen);
     let bind = Endpoint::parse(&args.listen)?;
 
-    // Build storage backend
-    let storage = CasStore::new(FsStorage::new(args.root.clone()));
+    // Bind listener BEFORE booting — so parent can connect immediately.
+    let mut listener = Listener::bind(&bind).await?;
+    tracing::info!("store listening on {}", bind);
 
-    // Initialize storage directories
-    tracing::debug!("initializing storage at {}", args.root);
-    storage.init().await?;
-    tracing::debug!("storage initialized");
+    // Set up boot gate — root connections get Boot service only.
+    let (gate, boot_tx) = BootGate::<StoreService>::new();
 
-    // Initialize store service
-    let store = StoreService::new(storage, args.vx_home);
-
-    // SIGUSR1: dump diagnostics
-    #[cfg(unix)]
+    // Boot in background: initialize storage, create service.
     {
-        let store = store.clone();
-        peeps::tasks::spawn_tracked("sigusr1_handler", async move {
-            use tokio::signal::unix::{SignalKind, signal};
-            let mut sigusr1 =
-                signal(SignalKind::user_defined1()).expect("failed to register SIGUSR1 handler");
-            loop {
-                sigusr1.recv().await;
-                tracing::info!("SIGUSR1 received, dumping diagnostics");
-                let sem = &store.download_semaphore;
-                tracing::debug!("SIGUSR1 received");
-                tracing::debug!("download_semaphore: available={}", sem.available_permits(),);
-                eprint!("{}", roam_session::diagnostic::dump_all_diagnostics());
-
-                let mut custom = std::collections::HashMap::new();
-                custom.insert(
-                    "download_semaphore_available".into(),
-                    sem.available_permits().to_string(),
-                );
-                let dump = peeps::collect_dump("vx-store", custom);
-                peeps::write_dump(&dump);
+        let gate = Arc::clone(&gate);
+        let root = args.root.clone();
+        moire::task::spawn(
+            async move {
+                tracing::info!("Booting vx-store");
+                match async {
+                    let storage = CasStore::new(FsStorage::new(root));
+                    storage.init().await?;
+                    let store = StoreService::new(storage);
+                    Ok::<_, eyre::Report>(store)
+                }
+                .await
+                {
+                    Ok(store) => {
+                        tracing::info!("vx-store boot succeeded");
+                        gate.set_service(store);
+                        boot_tx.ready();
+                    }
+                    Err(e) => {
+                        tracing::error!("vx-store boot failed: {e:#}");
+                        boot_tx.failed(format!("{e:#}"));
+                    }
+                }
             }
-        });
+            .named("store_boot"),
+        );
     }
 
-    // Start server (TCP or Unix socket)
-    let listener = Listener::bind(&bind).await?;
-    tracing::info!("store listening on {}", bind);
+    let boot_service = gate.boot_service();
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
-        tracing::info!("accepted connection");
-        let store = store.clone();
+        tracing::info!("accepted connection from {peer_addr}");
+        let boot_service = boot_service.clone();
 
-        peeps::tasks::spawn_tracked(format!("store_connection_{}", peer_addr), async move {
-            tracing::debug!("New connection from {}", peer_addr);
+        moire::task::spawn(
+            async move {
+                tracing::debug!("New connection from {}", peer_addr);
 
-            let dispatcher = StoreDispatcher::new(store);
-            let (_handle, _incoming, driver) = match accept(
-                stream,
-                HandshakeConfig {
-                    max_payload_size: 256 * 1024 * 1024, // 256 MiB
-                    name: Some("vx-store".into()),
-                    ..Default::default()
-                },
-                dispatcher,
-            )
-            .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::debug!("Handshake failed for {}: {e}", peer_addr);
-                    return;
-                }
-            };
-            if let Err(e) = driver.run().await {
-                tracing::warn!("Connection error from {}: {}", peer_addr, e);
+                // Root connection gets Boot service only.
+                let (reader, writer) = tokio::io::split(stream);
+                let conduit = BareConduit::<roam_types::MessageFamily, _>::new(StreamLink::new(
+                    reader, writer,
+                ));
+                let boot_dispatcher = BootDispatcher::new(boot_service.clone());
+                let (caller, session_handle) = match acceptor(conduit)
+                    .on_connection(StoreVirtualAcceptor {
+                        boot_service: boot_service.clone(),
+                    })
+                    .establish::<roam_core::NoopCaller>(boot_dispatcher)
+                    .await
+                {
+                    Ok(parts) => parts,
+                    Err(e) => {
+                        tracing::debug!("Handshake failed for {}: {e}", peer_addr);
+                        return;
+                    }
+                };
+
+                tracing::debug!("Connection from {} established", peer_addr);
+                vx_io::net::park_session(caller, session_handle).await;
             }
-
-            tracing::debug!("Connection from {} closed", peer_addr);
-        });
+            .named("store_connection"),
+        );
     }
 }
 
 impl StoreService {
-    fn new(storage: CasStore, vx_home: Utf8PathBuf) -> Self {
+    fn new(storage: CasStore) -> Self {
         Self {
             inner: Arc::new(StoreServiceInner {
                 storage,
-                vx_home,
                 toolchain_manager: ToolchainManager::new(),
                 registry_manager: RegistryManager::new(),
                 download_semaphore: Arc::new(tokio::sync::Semaphore::new(32)),
-                rust_component_tarballs: peeps::locks::DiagnosticAsyncMutex::new(
+                rust_component_tarballs: moire::sync::SyncMutex::new(
                     "store/rust_component_tarballs",
                     std::collections::HashMap::new(),
                 ),
-                rust_component_trees: peeps::locks::DiagnosticAsyncMutex::new(
+                rust_component_trees: moire::sync::SyncMutex::new(
                     "store/rust_component_trees",
                     std::collections::HashMap::new(),
                 ),

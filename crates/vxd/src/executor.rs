@@ -3,13 +3,14 @@
 //! This module implements the execution engine that schedules and runs actions
 //! from the action graph with optimal parallelism while respecting dependencies.
 
+use ::moire::sync::SyncMutex;
+use moire::task::FutureExt;
 use petgraph::Direction::Incoming;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{RwLock, Semaphore};
-use tokio::task::JoinSet;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
@@ -25,9 +26,7 @@ use vxd_proto::{ActionProgress, ProgressListenerClient};
 
 /// State of an individual action
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ActionState {
-    Pending,
     Running,
     Completed,
     Failed,
@@ -146,7 +145,7 @@ enum ExecutorMessage {
 /// fires. This guard ensures the executor always receives a completion message.
 struct CompletionGuard {
     node_idx: NodeIndex,
-    tx: Option<tokio::sync::mpsc::UnboundedSender<ExecutorMessage>>,
+    tx: Option<moire::sync::mpsc::UnboundedSender<ExecutorMessage>>,
 }
 
 impl CompletionGuard {
@@ -157,7 +156,7 @@ impl CompletionGuard {
 }
 
 async fn load_manifest(
-    cas: &Arc<StoreClient<crate::UpstreamCaller>>,
+    cas: &Arc<StoreClient>,
     manifest_hash: NodeHash,
     crate_name: &str,
 ) -> Result<vx_store_proto::NodeManifest, VxdError> {
@@ -166,7 +165,7 @@ async fn load_manifest(
         .await
         .map_err(|e| VxdError::Compilation {
             crate_name: crate_name.to_string(),
-            message: format!("Failed to fetch manifest from CAS: {e}"),
+            message: format!("Failed to fetch manifest from CAS: {e:?}"),
         })?
         .ok_or(VxdError::OutputManifestNotFound(manifest_hash))?;
     match CasNode::from_bytes(&node_bytes) {
@@ -187,7 +186,7 @@ async fn load_manifest(
 }
 
 async fn fetch_blob_from_ref(
-    cas: &Arc<StoreClient<crate::UpstreamCaller>>,
+    cas: &Arc<StoreClient>,
     blob_ref: &BlobRef,
 ) -> Result<Vec<u8>, VxdError> {
     match blob_ref {
@@ -195,7 +194,7 @@ async fn fetch_blob_from_ref(
             let data = cas
                 .get_chunk(*chunk)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
                 .ok_or_else(|| VxdError::BlobNotFound(format!("chunk {}", chunk.to_hex())))?;
             Ok(data)
         }
@@ -207,7 +206,7 @@ async fn fetch_blob_from_ref(
             let node_bytes = cas
                 .get_node(*blob_node)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
                 .ok_or_else(|| VxdError::BlobNotFound(format!("blob node {}", blob_node)))?;
             let blob_node_data = match CasNode::from_bytes(&node_bytes) {
                 Ok(CasNode::Blob(b)) => b,
@@ -217,7 +216,7 @@ async fn fetch_blob_from_ref(
                         blob_node.to_hex()
                     )));
                 }
-                Err(e) => return Err(VxdError::CasRpc(e.to_string())),
+                Err(e) => return Err(VxdError::CasRpc(format!("{e:?}"))),
             };
 
             let mut result = Vec::with_capacity(blob_node_data.total_size as usize);
@@ -225,7 +224,7 @@ async fn fetch_blob_from_ref(
                 let chunk_data = cas
                     .get_chunk(chunk_entry.hash)
                     .await
-                    .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                    .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
                     .ok_or_else(|| {
                         VxdError::BlobNotFound(format!("chunk {}", chunk_entry.hash.to_hex()))
                     })?;
@@ -237,7 +236,7 @@ async fn fetch_blob_from_ref(
 }
 
 async fn fetch_output_blob_data(
-    cas: &Arc<StoreClient<crate::UpstreamCaller>>,
+    cas: &Arc<StoreClient>,
     blob_ref: &OutputBlobRef,
 ) -> Result<Vec<u8>, VxdError> {
     match blob_ref {
@@ -245,7 +244,7 @@ async fn fetch_output_blob_data(
             let data = cas
                 .get_chunk(*chunk)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
                 .ok_or_else(|| VxdError::BlobNotFound(format!("chunk {}", chunk)))?;
             Ok(data)
         }
@@ -257,7 +256,7 @@ async fn fetch_output_blob_data(
             let node_bytes = cas
                 .get_node(*blob_node)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
                 .ok_or_else(|| VxdError::BlobNotFound(format!("blob node {}", blob_node)))?;
             let blob_node_data = match CasNode::from_bytes(&node_bytes) {
                 Ok(CasNode::Blob(b)) => b,
@@ -280,7 +279,7 @@ async fn fetch_output_blob_data(
                 let chunk_data = cas
                     .get_chunk(chunk_entry.hash)
                     .await
-                    .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                    .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
                     .ok_or_else(|| VxdError::BlobNotFound(format!("chunk {}", chunk_entry.hash)))?;
                 result.extend_from_slice(&chunk_data);
             }
@@ -296,6 +295,21 @@ fn namespaced_run_cache_key(base: Blake3Hash, session_id: &str) -> Blake3Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"vx-run-session-v1\n");
     hasher.update(b"session:");
+    hasher.update(session_id.as_bytes());
+    hasher.update(b"\nbase:");
+    hasher.update(&base.0);
+    Blake3Hash(*hasher.finalize().as_bytes())
+}
+
+fn namespaced_action_cache_key(base: Blake3Hash, session_id: &str, domain: &str) -> Blake3Hash {
+    if session_id.is_empty() {
+        return base;
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"vx-action-session-v1\n");
+    hasher.update(b"domain:");
+    hasher.update(domain.as_bytes());
+    hasher.update(b"\nsession:");
     hasher.update(session_id.as_bytes());
     hasher.update(b"\nbase:");
     hasher.update(&base.0);
@@ -325,7 +339,7 @@ pub struct Executor {
     states: HashMap<NodeIndex, ActionState>,
 
     /// Results from completed actions (shared read-only with spawned tasks)
-    results: Arc<RwLock<HashMap<NodeIndex, ActionResult>>>,
+    results: Arc<SyncMutex<HashMap<NodeIndex, ActionResult>>>,
 
     /// Remaining dependency count for each action (owned by executor)
     remaining_deps: HashMap<NodeIndex, usize>,
@@ -337,23 +351,23 @@ pub struct Executor {
     concurrency_limit: Arc<Semaphore>,
 
     /// Channel for messages from spawned tasks
-    message_tx: tokio::sync::mpsc::UnboundedSender<ExecutorMessage>,
-    message_rx: tokio::sync::mpsc::UnboundedReceiver<ExecutorMessage>,
+    message_tx: moire::sync::mpsc::UnboundedSender<ExecutorMessage>,
+    message_rx: moire::sync::mpsc::UnboundedReceiver<ExecutorMessage>,
 
     /// In-flight action tasks (for waiting on cancellation)
-    in_flight: JoinSet<()>,
+    in_flight: moire::task::JoinSet<()>,
 
     /// Cancellation token — cancel all in-flight actions
     cancel_token: CancellationToken,
 
     /// Progress listener client (for reporting progress to vx CLI)
-    progress_listener: Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>,
+    progress_listener: Option<Arc<ProgressListenerClient>>,
 
     /// CAS client (CAS)
-    cas: Arc<StoreClient<crate::UpstreamCaller>>,
+    cas: Arc<StoreClient>,
 
     /// Runner client for execution
-    exec: Arc<RunnerClient<crate::UpstreamCaller>>,
+    exec: Arc<RunnerClient>,
 
     /// Picante database (Arc-shareable with internal synchronization)
     db: Arc<crate::db::Database>,
@@ -365,7 +379,7 @@ pub struct Executor {
     build_start: std::time::Instant,
 
     /// Free-list of concurrency lane IDs (0..max_concurrency)
-    free_lanes: Arc<tokio::sync::Mutex<Vec<u32>>>,
+    free_lanes: Arc<SyncMutex<Vec<u32>>>,
 
     /// Execution statistics (owned by executor)
     stats: ExecutionStats,
@@ -394,9 +408,9 @@ impl Executor {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         graph: ActionGraph,
-        progress_listener: Option<Arc<ProgressListenerClient<roam_stream::ConnectionHandle>>>,
-        cas: Arc<StoreClient<crate::UpstreamCaller>>,
-        exec: Arc<RunnerClient<crate::UpstreamCaller>>,
+        progress_listener: Option<Arc<ProgressListenerClient>>,
+        cas: Arc<StoreClient>,
+        exec: Arc<RunnerClient>,
         db: Arc<crate::db::Database>,
         workspace_root: camino::Utf8PathBuf,
         target_triple: String,
@@ -443,7 +457,7 @@ impl Executor {
             debug!("ready[{}] = {:?} {}", i, node_idx, action.display_name());
         }
 
-        let (message_tx, message_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (message_tx, message_rx) = moire::sync::mpsc::unbounded_channel("executor_messages");
 
         // Detect CommandLineTools version on macOS
         #[cfg(target_os = "macos")]
@@ -471,13 +485,13 @@ impl Executor {
         Self {
             graph,
             states: HashMap::new(),
-            results: Arc::new(RwLock::new(HashMap::new())),
+            results: Arc::new(SyncMutex::new("vxd/executor_results", HashMap::new())),
             remaining_deps,
             ready_queue,
             concurrency_limit: Arc::new(Semaphore::new(max_concurrency)),
             message_tx,
             message_rx,
-            in_flight: JoinSet::new(),
+            in_flight: moire::task::JoinSet::named("vxd/executor_in_flight"),
             cancel_token: CancellationToken::new(),
             progress_listener,
             cas,
@@ -485,7 +499,8 @@ impl Executor {
             db,
             node_timings: HashMap::new(),
             build_start: std::time::Instant::now(),
-            free_lanes: Arc::new(tokio::sync::Mutex::new(
+            free_lanes: Arc::new(SyncMutex::new(
+                "vxd/executor_free_lanes",
                 (0..max_concurrency as u32).collect(),
             )),
             stats: ExecutionStats::default(),
@@ -594,6 +609,7 @@ impl Executor {
                     .concurrency_limit
                     .clone()
                     .acquire_owned()
+                    .named("executor.concurrency.acquire_owned")
                     .await
                     .unwrap();
                 self.spawn_action(node_idx, permit);
@@ -629,7 +645,7 @@ impl Executor {
                                 node_idx
                             );
                             self.states.insert(node_idx, ActionState::Completed);
-                            self.results.write().await.insert(node_idx, action_result);
+                            self.results.lock().insert(node_idx, action_result);
 
                             // Decrement dependency counts and add newly ready actions to queue
                             for dependent_idx in
@@ -663,7 +679,7 @@ impl Executor {
         }
 
         // Compute stats from results
-        let results_lock = self.results.read().await;
+        let results_lock = self.results.lock();
         let mut cache_hits = 0;
         let mut rebuilt = 0;
         let mut bin_output = None;
@@ -1166,25 +1182,32 @@ impl Executor {
             // Spawn a task to forward StoreProgress → ActionProgress
             let forward_listener = progress_listener.clone();
             let forward_action_id = action_id;
-            let forward_handle = tokio::spawn(async move {
-                while let Ok(Some(sp)) = store_progress_rx.recv().await {
-                    if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
-                        let _ = listener
-                            .update_progress(
-                                id,
-                                ActionProgress {
-                                    message: sp.message,
-                                    current: sp.current,
-                                    total: sp.total,
-                                },
-                            )
-                            .await;
+            let forward_handle = moire::task::spawn(
+                async move {
+                    while let Ok(Some(sp)) = store_progress_rx
+                        .recv()
+                        .named("executor.store_progress.recv")
+                        .await
+                    {
+                        if let (Some(listener), Some(id)) = (&forward_listener, forward_action_id) {
+                            let _ = listener
+                                .update_progress(
+                                    id,
+                                    ActionProgress {
+                                        message: sp.message.clone(),
+                                        current: sp.current,
+                                        total: sp.total,
+                                    },
+                                )
+                                .await;
+                        }
                     }
                 }
-            });
+                .named("store_progress_forward"),
+            );
 
             // Acquire a lane ID for timeline tracking
-            let lane = free_lanes.lock().await.pop().unwrap_or(0);
+            let lane = free_lanes.lock().pop().unwrap_or(0);
 
             debug!("calling execute_action for {:?} on lane {}", node_idx, lane);
 
@@ -1231,7 +1254,7 @@ impl Executor {
             let execute_ms = execute_start.elapsed().as_millis() as u64;
 
             // Release the lane back to the pool
-            free_lanes.lock().await.push(lane);
+            free_lanes.lock().push(lane);
 
             debug!("sending completion message for {:?}", node_idx);
             // Send result back to executor — disarm the drop guard since we're sending explicitly
@@ -1255,10 +1278,10 @@ impl Executor {
 async fn execute_action(
     action: Action,
     deps: Vec<NodeIndex>,
-    cas: &Arc<StoreClient<crate::UpstreamCaller>>,
-    exec: &Arc<RunnerClient<crate::UpstreamCaller>>,
+    cas: &Arc<StoreClient>,
+    exec: &Arc<RunnerClient>,
     db: &Arc<crate::db::Database>,
-    results: &Arc<RwLock<HashMap<NodeIndex, ActionResult>>>,
+    results: &Arc<SyncMutex<HashMap<NodeIndex, ActionResult>>>,
     workspace_root: &camino::Utf8PathBuf,
     _target_triple: &str,
     _profile: &str,
@@ -1291,7 +1314,7 @@ async fn execute_action(
             let result = cas
                 .download_rust_toolchain_component(spec, component.clone(), progress)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
             if result.status == EnsureStatus::Failed {
                 return Err(VxdError::ToolchainAcquisition(
@@ -1326,7 +1349,7 @@ async fn execute_action(
 
             // Locate corresponding download result for this component.
             let tarball = {
-                let results_lock = results.read().await;
+                let results_lock = results.lock();
                 results_lock.values().find_map(|r| match r {
                     ActionResult::RustToolchainComponentDownloaded {
                         component: downloaded_component,
@@ -1352,7 +1375,7 @@ async fn execute_action(
             let result = cas
                 .extract_rust_toolchain_component(spec, component.clone(), tarball, progress)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
             if result.status == EnsureStatus::Failed {
                 return Err(VxdError::ToolchainAcquisition(
@@ -1386,7 +1409,7 @@ async fn execute_action(
             let result = cas
                 .ensure_registry_crate(spec, progress)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
             match result.status {
                 EnsureStatus::Hit | EnsureStatus::Downloaded => {
@@ -1431,7 +1454,7 @@ async fn execute_action(
             let finalize_result = cas
                 .finalize_rust_toolchain(spec)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
             if finalize_result.status == EnsureStatus::Failed {
                 return Err(VxdError::ToolchainAcquisition(
                     finalize_result
@@ -1447,7 +1470,7 @@ async fn execute_action(
             let manifest = cas
                 .get_toolchain_manifest(toolchain_manifest)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
                 .ok_or(VxdError::ToolchainManifestNotFound(toolchain_manifest))?;
             let toolchain_id = finalize_result
                 .toolchain_id
@@ -1516,13 +1539,14 @@ async fn execute_action(
                 let mut h = blake3::Hasher::new();
                 h.update(b"vx-ingest-rust-src-v1\n");
                 h.update(&closure_hash.0);
-                Blake3Hash(*h.finalize().as_bytes())
+                let base = Blake3Hash(*h.finalize().as_bytes());
+                namespaced_action_cache_key(base, session_id, "ingest-rust-source")
             };
 
             let (source_manifest, was_cached) = if let Some(cached) = cas
                 .lookup(cache_key)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
             {
                 (cached.0, true)
             } else {
@@ -1530,7 +1554,7 @@ async fn execute_action(
                 for rel_path in &paths {
                     let abs_path = workspace_root_path.join(rel_path);
                     let contents =
-                        tokio::fs::read(&abs_path)
+                        ::moire::fs::read(&abs_path)
                             .await
                             .map_err(|e| VxdError::FileRead {
                                 path: abs_path.clone(),
@@ -1541,7 +1565,8 @@ async fn execute_action(
                     let chunk_hash = ChunkHash(content_hash.0);
                     cas.put_chunk(chunk_hash, contents)
                         .await
-                        .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                        .map(|_| ())
+                        .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
                     tree_files.push(crate::cas_tree::TreeFile {
                         path: rel_path.to_string(),
@@ -1561,7 +1586,8 @@ async fn execute_action(
 
                 cas.publish(cache_key, source_node_hash)
                     .await
-                    .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                    .map(|_| ())
+                    .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
                 (source_manifest, false)
             };
@@ -1586,7 +1612,7 @@ async fn execute_action(
             use vx_tarball::{Compression, extract_to_tree};
 
             let registry_manifest = {
-                let results_lock = results.read().await;
+                let results_lock = results.lock();
                 deps.iter()
                     .find_map(|idx| match results_lock.get(idx) {
                         Some(ActionResult::RegistryCrateAcquired {
@@ -1607,20 +1633,21 @@ async fn execute_action(
                 let mut h = blake3::Hasher::new();
                 h.update(b"vx-extract-registry-v1\n");
                 h.update(&registry_manifest.0);
-                Blake3Hash(*h.finalize().as_bytes())
+                let base = Blake3Hash(*h.finalize().as_bytes());
+                namespaced_action_cache_key(base, session_id, "extract-registry-tree")
             };
 
             let (source_manifest, was_cached) = if let Some(cached) = cas
                 .lookup(cache_key)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
             {
                 (cached.0, true)
             } else {
                 let manifest = cas
                     .get_registry_manifest(NodeHash(registry_manifest))
                     .await
-                    .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                    .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
                     .ok_or_else(|| VxdError::RegistryCrateNoManifest {
                         name: name.clone(),
                         version: version.clone(),
@@ -1638,7 +1665,8 @@ async fn execute_action(
                         cas_for_blobs
                             .put_chunk(ChunkHash(hash), data)
                             .await
-                            .map_err(|e| e.to_string())?;
+                            .map(|_| ())
+                            .map_err(|e| format!("{e:?}"))?;
                         Ok(hash)
                     },
                 )
@@ -1678,7 +1706,8 @@ async fn execute_action(
 
                 cas.publish(cache_key, source_node_hash)
                     .await
-                    .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                    .map(|_| ())
+                    .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
                 (source_manifest, false)
             };
@@ -1719,7 +1748,7 @@ async fn execute_action(
             let result = cas
                 .ensure_zig_toolchain(spec, progress)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
             if result.status == EnsureStatus::Failed {
                 return Err(VxdError::ToolchainAcquisition(
@@ -1743,7 +1772,7 @@ async fn execute_action(
                     .await
                     .map_err(|e| VxdError::Compilation {
                         crate_name: format!("zig-{}", version),
-                        message: format!("Failed to fetch toolchain manifest: {}", e),
+                        message: format!("Failed to fetch toolchain manifest: {e:?}"),
                     })?
                     .ok_or(VxdError::ToolchainManifestNotFound(manifest_hash))?;
                 manifest.toolchain_id
@@ -1781,7 +1810,7 @@ async fn execute_action(
         } => {
             let toolchain_manifest = match toolchain {
                 crate::action_graph::RunToolchain::Zig => {
-                    let results_lock = results.read().await;
+                    let results_lock = results.lock();
                     deps.iter()
                         .find_map(|idx| match results_lock.get(idx) {
                             Some(ActionResult::ZigToolchainAcquired { manifest_hash, .. }) => {
@@ -1795,7 +1824,7 @@ async fn execute_action(
                         })?
                 }
                 crate::action_graph::RunToolchain::Rust => {
-                    let results_lock = results.read().await;
+                    let results_lock = results.lock();
                     deps.iter()
                         .find_map(|idx| match results_lock.get(idx) {
                             Some(ActionResult::RustToolchainFinalized {
@@ -1812,7 +1841,7 @@ async fn execute_action(
 
             let mut resolved_tree_mounts = tree_mounts.clone();
             if !dep_tree_mounts.is_empty() {
-                let results_lock = results.read().await;
+                let results_lock = results.lock();
                 for spec in &dep_tree_mounts {
                     let source_manifest = deps
                         .iter()
@@ -1840,7 +1869,7 @@ async fn execute_action(
 
             let mut resolved_file_mounts = file_mounts.clone();
             if !dep_file_mounts.is_empty() {
-                let results_lock = results.read().await;
+                let results_lock = results.lock();
                 for spec in &dep_file_mounts {
                     let manifest_hash = deps
                         .iter()
@@ -1867,21 +1896,23 @@ async fn execute_action(
                 }
             }
             if !collect_file_mounts.is_empty() {
-                let results_lock = results.read().await;
-                for spec in &collect_file_mounts {
-                    let dep_manifests: Vec<Blake3Hash> = deps
-                        .iter()
+                // Collect all dep manifests under the lock, then release it
+                let dep_manifests: Vec<Blake3Hash> = {
+                    let results_lock = results.lock();
+                    deps.iter()
                         .filter_map(|idx| match results_lock.get(idx) {
                             Some(ActionResult::RunCompleted {
                                 output_manifest, ..
                             }) => Some(*output_manifest),
                             _ => None,
                         })
-                        .collect();
+                        .collect()
+                };
 
+                for spec in &collect_file_mounts {
                     let mut i = 0usize;
-                    for mh in dep_manifests {
-                        let manifest = load_manifest(cas, NodeHash(mh), &label).await?;
+                    for mh in &dep_manifests {
+                        let manifest = load_manifest(cas, NodeHash(*mh), &label).await?;
 
                         if manifest.outputs.iter().any(|o| o.logical == spec.logical) {
                             let path = format!(
@@ -1892,7 +1923,7 @@ async fn execute_action(
                                 width = spec.pad_width
                             );
                             resolved_file_mounts.push(RunFileMount {
-                                manifest: mh,
+                                manifest: *mh,
                                 logical: spec.logical.clone(),
                                 path,
                             });
@@ -1919,14 +1950,14 @@ async fn execute_action(
             let (output_manifest, was_cached) = if let Some(cached) = cas
                 .lookup(cache_key)
                 .await
-                .map_err(|e| VxdError::CasRpc(e.to_string()))?
+                .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?
             {
                 (cached.0, true)
             } else {
                 let result = exec
                     .run(request, progress)
                     .await
-                    .map_err(|e| VxdError::ExecRpc(e.to_string()))?;
+                    .map_err(|e| VxdError::ExecRpc(format!("{e:?}")))?;
                 if !result.success {
                     return Err(VxdError::Compilation {
                         crate_name: label.clone(),
@@ -1942,7 +1973,8 @@ async fn execute_action(
 
                 cas.publish(cache_key, NodeHash(output_manifest))
                     .await
-                    .map_err(|e| VxdError::CasRpc(e.to_string()))?;
+                    .map(|_| ())
+                    .map_err(|e| VxdError::CasRpc(format!("{e:?}")))?;
 
                 (output_manifest, false)
             };
@@ -1969,12 +2001,12 @@ async fn execute_action(
                         crate_name: label.clone(),
                         message: format!("Invalid output path: {out_path}"),
                     })?;
-                    tokio::fs::create_dir_all(parent)
-                        .await
-                        .map_err(|e| VxdError::Compilation {
+                    ::moire::fs::create_dir_all(parent).await.map_err(|e| {
+                        VxdError::Compilation {
                             crate_name: label.clone(),
                             message: format!("Failed to create output directory: {e}"),
-                        })?;
+                        }
+                    })?;
 
                     if !ensured_vx_gitignore && out_path.starts_with(&vx_root) {
                         match vx_io::git::ensure_vx_gitignored(workspace_root).await {
@@ -1992,7 +2024,7 @@ async fn execute_action(
                             message: format!("Failed to fetch output blob from CAS: {e}"),
                         })?;
 
-                    tokio::fs::write(&out_path, &data).await.map_err(|e| {
+                    ::moire::fs::write(&out_path, &data).await.map_err(|e| {
                         VxdError::Compilation {
                             crate_name: label.clone(),
                             message: format!("Failed to write output to {out_path}: {e}"),
@@ -2003,7 +2035,7 @@ async fn execute_action(
                         #[cfg(unix)]
                         {
                             use std::os::unix::fs::PermissionsExt;
-                            let mut perms = tokio::fs::metadata(&out_path)
+                            let mut perms = ::moire::fs::metadata(&out_path)
                                 .await
                                 .map_err(|e| VxdError::Compilation {
                                     crate_name: label.clone(),
@@ -2011,7 +2043,7 @@ async fn execute_action(
                                 })?
                                 .permissions();
                             perms.set_mode(0o755);
-                            tokio::fs::set_permissions(&out_path, perms)
+                            ::moire::fs::set_permissions(&out_path, perms)
                                 .await
                                 .map_err(|e| VxdError::Compilation {
                                     crate_name: label.clone(),

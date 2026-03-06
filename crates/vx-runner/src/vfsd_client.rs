@@ -6,17 +6,17 @@ use vx_store_proto::{
     Blake3Hash, CasNode, ContentHash, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient,
 };
 
-type RpcClient = vx_vfsd::protocol::VfsdClient<crate::VfsdCaller>;
+type RpcClient = vx_vfsd::protocol::VfsdClient;
 
 /// Client wrapper for vx-vfsd RPC operations
 #[derive(Clone)]
 pub struct VfsdClient {
     client: Arc<RpcClient>,
-    cas: Arc<StoreClient<crate::CasCaller>>,
+    cas: Arc<StoreClient>,
 }
 
 impl VfsdClient {
-    pub fn new(client: RpcClient, cas: Arc<StoreClient<crate::CasCaller>>) -> Self {
+    pub fn new(client: RpcClient, cas: Arc<StoreClient>) -> Self {
         Self {
             client: Arc::new(client),
             cas,
@@ -82,7 +82,7 @@ impl VfsdClient {
         self.cas
             .put_node(leaf_hash, leaf_bytes)
             .await
-            .map_err(|e| format!("failed to store DirectoryNode for {}: {}", path, e))?;
+            .map_err(|e| format!("failed to store DirectoryNode for {}: {:?}", path, e))?;
 
         // Build parent directories from inside out (skip the filename)
         let mut current_hash = leaf_hash;
@@ -99,10 +99,9 @@ impl VfsdClient {
                 total_size: current_size,
             });
             let (dir_bytes, dir_hash) = dir_node.to_bytes_and_hash();
-            self.cas
-                .put_node(dir_hash, dir_bytes)
-                .await
-                .map_err(|e| format!("failed to store parent DirectoryNode for {}: {}", path, e))?;
+            self.cas.put_node(dir_hash, dir_bytes).await.map_err(|e| {
+                format!("failed to store parent DirectoryNode for {}: {:?}", path, e)
+            })?;
             current_hash = dir_hash;
         }
 
@@ -129,7 +128,8 @@ impl VfsdClient {
         self.client
             .mount(path, tree_hash)
             .await
-            .map_err(|e| e.to_string())
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"))
     }
 
     /// Flush all written files in a prefix to CAS
@@ -224,7 +224,7 @@ impl VfsdClient {
         } else {
             format!("/{}/{}", prefix_id, subpath)
         };
-        self.client.flush(path).await.map_err(|e| e.to_string())
+        self.client.flush(path).await.map_err(|e| format!("{e:?}"))
     }
 
     /// Remove an action prefix

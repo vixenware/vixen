@@ -1,90 +1,60 @@
 //! Common I/O utilities for vixen crates
 
+use async_tempfile::TempFile;
 use camino::{Utf8Path, Utf8PathBuf};
 
+pub mod boot;
 pub mod git;
 pub mod net;
 pub mod spawn;
 
+/// Resolve the VX_HOME directory: `$VX_HOME` if set, otherwise `~/.vx`.
+pub fn vx_home() -> Utf8PathBuf {
+    match std::env::var("VX_HOME") {
+        Ok(v) => Utf8PathBuf::from(v),
+        Err(_) => {
+            let home = dirs::home_dir().expect("could not determine home directory");
+            Utf8PathBuf::from(home.join(".vx").to_string_lossy().into_owned())
+        }
+    }
+}
+
 /// Atomically write contents to a file.
 ///
 /// Creates a temporary file in the same directory, writes contents,
-/// then atomically renames to the final path. This ensures the file
-/// is never partially written.
-pub async fn atomic_write(path: &Utf8Path, contents: &[u8]) -> Result<(), std::io::Error> {
-    let parent_dir = path.parent().unwrap_or_else(|| Utf8Path::new("."));
-
-    // Create parent directory if it doesn't exist
-    tokio::fs::create_dir_all(parent_dir).await?;
-
-    // Create a temporary file in the same directory to ensure it's on the same filesystem
-    let temp_file = tempfile::Builder::new()
-        .prefix(".tmp-")
-        .tempfile_in(parent_dir)
-        .map_err(std::io::Error::other)?;
-
-    // Get the temporary path and write contents to it
-    let temp_path = temp_file.into_temp_path();
-    tokio::fs::write(&temp_path, contents).await?;
-
-    // Atomically persist the temporary file to the final location.
-    // If rename fails (e.g. cross-filesystem or Windows access denied),
-    // fall back to copy + delete.
-    if let Err(e) = temp_path.persist(path) {
-        let temp = e.path;
-        std::fs::copy(&temp, path.as_std_path())
-            .map_err(|ce| std::io::Error::other(format!(
-                "rename failed ({}), copy fallback also failed: {}",
-                e.error, ce
-            )))?;
-        // temp is dropped here, which deletes the temp file
-    }
-
-    Ok(())
-}
-
-/// Atomically write contents to a file, optionally making it executable.
-///
-/// Like [`atomic_write`], but also sets the executable bit on Unix if requested.
-pub async fn atomic_write_executable(
+/// then atomically renames to the final path without clobbering an
+/// existing file. `AlreadyExists` is treated as success.
+pub async fn atomic_write(
     path: &Utf8Path,
     contents: &[u8],
-    _executable: bool,
+    executable: bool,
 ) -> Result<(), std::io::Error> {
     let parent_dir = path.parent().unwrap_or_else(|| Utf8Path::new("."));
 
     // Create parent directory if it doesn't exist
-    tokio::fs::create_dir_all(parent_dir).await?;
+    moire::fs::create_dir_all(parent_dir).await?;
 
-    // Create a temporary file in the same directory
-    let temp_file = tempfile::Builder::new()
-        .prefix(".tmp-")
-        .tempfile_in(parent_dir)
+    // Create a temporary file in the same directory to ensure it's on the same filesystem
+    let temp_file = TempFile::new_in(parent_dir.as_std_path())
+        .await
         .map_err(std::io::Error::other)?;
 
-    let temp_path = temp_file.into_temp_path();
-    tokio::fs::write(&temp_path, contents).await?;
+    // Get the temporary path and write contents to it
+    let temp_path = temp_file.file_path();
+    moire::fs::write(&temp_path, contents).await?;
 
-    // Set executable bit if requested
+    // Set executable bit if requested.
     #[cfg(unix)]
-    if _executable {
+    if executable {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = tokio::fs::metadata(&temp_path).await?.permissions();
+        let mut perms = moire::fs::metadata(&temp_path).await?.permissions();
         perms.set_mode(perms.mode() | 0o111);
-        tokio::fs::set_permissions(&temp_path, perms).await?;
+        moire::fs::set_permissions(&temp_path, perms).await?;
     }
 
-    // Atomically persist (with copy+delete fallback)
-    if let Err(e) = temp_path.persist(path) {
-        let temp = e.path;
-        std::fs::copy(&temp, path.as_std_path())
-            .map_err(|ce| std::io::Error::other(format!(
-                "rename failed ({}), copy fallback also failed: {}",
-                e.error, ce
-            )))?;
-    }
-
-    Ok(())
+    // Atomically move temp file to final path. rename() on the same filesystem is
+    // atomic and overwrites any existing target, which is fine for our use case.
+    moire::fs::rename(temp_path.to_path_buf(), path.as_std_path()).await
 }
 
 /// Create a unique scratch directory under the given base path.
@@ -98,7 +68,7 @@ pub async fn create_scratch_dir(base: &Utf8Path) -> Result<Utf8PathBuf, std::io:
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let scratch_base = base.join("scratch");
-    tokio::fs::create_dir_all(&scratch_base).await?;
+    moire::fs::create_dir_all(&scratch_base).await?;
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -109,79 +79,7 @@ pub async fn create_scratch_dir(base: &Utf8Path) -> Result<Utf8PathBuf, std::io:
     let id = format!("{:x}-{}-{}", timestamp, pid, count);
     let dir = scratch_base.join(&id);
 
-    tokio::fs::create_dir_all(&dir).await?;
+    moire::fs::create_dir_all(&dir).await?;
 
     Ok(dir)
-}
-
-/// Synchronous version of atomic write for use in blocking contexts.
-pub mod sync {
-    use camino::Utf8Path;
-    use std::io::Write;
-
-    /// Atomically write contents to a file.
-    pub fn atomic_write(path: &Utf8Path, contents: &[u8]) -> Result<(), std::io::Error> {
-        let parent_dir = path.parent().unwrap_or_else(|| Utf8Path::new("."));
-        std::fs::create_dir_all(parent_dir)?;
-
-        let temp_file = tempfile::Builder::new()
-            .prefix(".tmp-")
-            .tempfile_in(parent_dir)
-            .map_err(std::io::Error::other)?;
-
-        let (mut file, temp_path) = temp_file.into_parts();
-        file.write_all(contents)?;
-        file.sync_all()?;
-        drop(file);
-
-        if let Err(e) = temp_path.persist(path) {
-            let temp = e.path;
-            std::fs::copy(&temp, path.as_std_path())
-                .map_err(|ce| std::io::Error::other(format!(
-                    "rename failed ({}), copy fallback also failed: {}",
-                    e.error, ce
-                )))?;
-        }
-
-        Ok(())
-    }
-
-    /// Atomically write contents to a file, optionally making it executable.
-    pub fn atomic_write_executable(
-        path: &Utf8Path,
-        contents: &[u8],
-        _executable: bool,
-    ) -> Result<(), std::io::Error> {
-        let parent_dir = path.parent().unwrap_or_else(|| Utf8Path::new("."));
-        std::fs::create_dir_all(parent_dir)?;
-
-        let temp_file = tempfile::Builder::new()
-            .prefix(".tmp-")
-            .tempfile_in(parent_dir)
-            .map_err(std::io::Error::other)?;
-
-        let (mut file, temp_path) = temp_file.into_parts();
-        file.write_all(contents)?;
-        file.sync_all()?;
-        drop(file);
-
-        #[cfg(unix)]
-        if _executable {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&temp_path)?.permissions();
-            perms.set_mode(perms.mode() | 0o111);
-            std::fs::set_permissions(&temp_path, perms)?;
-        }
-
-        if let Err(e) = temp_path.persist(path) {
-            let temp = e.path;
-            std::fs::copy(&temp, path.as_std_path())
-                .map_err(|ce| std::io::Error::other(format!(
-                    "rename failed ({}), copy fallback also failed: {}",
-                    e.error, ce
-                )))?;
-        }
-
-        Ok(())
-    }
 }

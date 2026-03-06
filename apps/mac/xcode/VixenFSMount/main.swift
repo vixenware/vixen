@@ -5,6 +5,17 @@ import os
 
 private let log = Logger(subsystem: "eu.bearcove.vixenfs.mount", category: "Main")
 
+/// Log with PID and ISO-8601 timestamp prefix to stderr + unified logging.
+private func emit(_ message: String) {
+    let fmt = ISO8601DateFormatter()
+    fmt.formatOptions = [.withInternetDateTime]
+    let prefix =
+        "\(ProcessInfo.processInfo.processIdentifier) \(fmt.string(from: Date()))"
+    fputs("\(prefix) \(message)\n", stderr)
+    fflush(stderr)
+    log.notice("\(message, privacy: .public)")
+}
+
 enum Command {
     case mount(Config)
     case health(json: Bool)
@@ -19,7 +30,6 @@ struct Config {
     let sid: String
     let scheme: String
     let fsType: String
-    let parentPID: pid_t  // explicitly passed via --parent-pid
     let preload: Bool
     let debug: Bool
     let logFile: String?  // if set, redirect stdout/stderr to this file
@@ -47,7 +57,6 @@ struct Config {
         var sid: String?
         var scheme = "vixen"
         let fsType = "vixenfs"
-        var parentPID: pid_t?
         var preload = false
         var debug = false
         var logFile: String?
@@ -79,14 +88,6 @@ struct Config {
             case "--preload":
                 mountArgumentsProvided = true
                 preload = true
-            case "--parent-pid":
-                mountArgumentsProvided = true
-                index += 1
-                let value = try valueArg(args, index: index, name: "--parent-pid")
-                guard let pid = pid_t(value), pid > 0 else {
-                    throw MountError.invalidArgument("--parent-pid must be a positive integer")
-                }
-                parentPID = pid
             case "--debug":
                 mountArgumentsProvided = true
                 debug = true
@@ -134,9 +135,6 @@ struct Config {
         guard let sid else {
             throw MountError.invalidArgument("Missing required --sid argument")
         }
-        guard let parentPID else {
-            throw MountError.invalidArgument("Missing required --parent-pid argument")
-        }
 
         return .mount(
             Config(
@@ -144,7 +142,6 @@ struct Config {
                 sid: sid,
                 scheme: scheme,
                 fsType: fsType,
-                parentPID: parentPID,
                 preload: preload,
                 debug: debug,
                 logFile: logFile
@@ -204,41 +201,13 @@ enum MountError: Error, CustomStringConvertible {
                 Usage:
                   vixenfs-mount --health [--json]
                   vixenfs-mount --app-group-path
-                  vixenfs-mount --sid <sid> --mount-point <path> --parent-pid <pid> [--scheme <scheme>] [--debug] [--log-file <path>]
+                  vixenfs-mount --sid <sid> --mount-point <path> [--scheme <scheme>] [--debug] [--log-file <path>]
                 """
         }
     }
 }
 
-/// Watches a parent process and calls a handler when it exits.
-final class ParentExitWatcher {
-    private let pid: pid_t
-    private let queue: DispatchQueue
-    private let handler: () -> Void
-    private var source: DispatchSourceProcess?
-
-    init(pid: pid_t, queue: DispatchQueue, handler: @escaping () -> Void) {
-        self.pid = pid
-        self.queue = queue
-        self.handler = handler
-    }
-
-    func start() {
-        let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: queue)
-        source.setEventHandler { [weak self] in
-            self?.handler()
-        }
-        source.resume()
-        self.source = source
-    }
-
-    func stop() {
-        source?.cancel()
-        source = nil
-    }
-}
-
-/// Mounts the FSKit filesystem and exits.
+/// Mounts the FSKit filesystem and exits with 0.
 ///
 /// The mount registers with FSKit which spawns the VixenFS appex as a
 /// separate process. Once the mount syscall succeeds, vixenfs-mount's
@@ -246,31 +215,20 @@ final class ParentExitWatcher {
 /// Lifecycle management (unmounting) is handled by vx-reaper.
 final class MountLifecycle {
     private let config: Config
-    private let queue = DispatchQueue(label: "eu.bearcove.vixenfs.mount.lifecycle")
-    private var signalSources: [DispatchSourceSignal] = []
-    private var parentWatcher: ParentExitWatcher?
-    private var cleanupStarted = false
 
     init(config: Config) {
         self.config = config
     }
 
     /// Log to both stderr (which may be redirected to a log file) and unified logging.
-    func emit(_ message: String) {
-        fputs("vixenfs-mount: \(message)\n", stderr)
-        fflush(stderr)
-        log.notice("\(message, privacy: .public)")
+    func log(_ message: String) {
+        emit(message)
     }
 
     func run() throws {
         try ensureMountPointExists()
         try mount()
-        let mountedPath = self.config.mountPoint
-        let mountedSource = self.config.source
-        emit("mounted \(mountedPath) from \(mountedSource)")
-        installSignalHandlers()
-        installParentWatcher()
-        dispatchMain()
+        emit("mounted \(config.mountPoint) from \(config.source)")
     }
 
     private func ensureMountPointExists() throws {
@@ -323,94 +281,6 @@ final class MountLifecycle {
                 exitCode: process.terminationStatus, stdout: stdout, stderr: stderr)
         }
     }
-
-    private func installSignalHandlers() {
-        for signalNumber in [SIGINT, SIGTERM, SIGHUP] {
-            signal(signalNumber, SIG_IGN)
-            let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: queue)
-            source.setEventHandler { [weak self] in
-                self?.emit("received signal \(signalNumber), unmounting")
-                self?.performCleanupAndExit(status: 0)
-            }
-            source.resume()
-            signalSources.append(source)
-        }
-    }
-
-    private func installParentWatcher() {
-        let parentPID = self.config.parentPID
-        let queue = self.queue
-        let lifecycle = self
-
-        // If we've already been reparented (parent died between spawn and now),
-        // clean up immediately.
-        let currentParent = getppid()
-        if currentParent != parentPID {
-            emit(
-                "parent already gone (expected \(parentPID), getppid()=\(currentParent)), unmounting"
-            )
-            performCleanupAndExit(status: 0)
-            return
-        }
-
-        let watcher = ParentExitWatcher(pid: parentPID, queue: queue) {
-            lifecycle.emit("parent pid \(parentPID) exited, unmounting")
-            lifecycle.performCleanupAndExit(status: 0)
-        }
-        watcher.start()
-        parentWatcher = watcher
-    }
-
-    private func performCleanupAndExit(status: Int32) {
-        guard !cleanupStarted else { return }
-        cleanupStarted = true
-        parentWatcher?.stop()
-        unmount()
-        exit(status)
-    }
-
-    private func unmount() {
-        let mountPoint = config.mountPoint
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
-        process.arguments = ["unmount", "force", mountPoint]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-        } catch {
-            emit("failed to spawn diskutil: \(error)")
-            return
-        }
-
-        let timeoutSeconds: Double = 5
-        let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            process.waitUntilExit()
-            done.signal()
-        }
-        if done.wait(timeout: .now() + timeoutSeconds) == .timedOut {
-            emit("diskutil unmount force timed out after \(timeoutSeconds)s, killing diskutil")
-            process.terminate()
-            // Last resort: kill the FSKit extension process so the kernel can clean up
-            emit("killing VixenFS extension process as last resort")
-            let pkill = Process()
-            pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            pkill.arguments = ["-x", "VixenFS"]
-            pkill.standardOutput = FileHandle.nullDevice
-            pkill.standardError = FileHandle.nullDevice
-            try? pkill.run()
-            pkill.waitUntilExit()
-            return
-        }
-
-        if process.terminationStatus == 0 {
-            emit("unmounted \(mountPoint)")
-        } else {
-            emit("diskutil unmount force failed (status \(process.terminationStatus))")
-        }
-    }
 }
 
 private func emitHealthJSON(installed: Bool, enabled: Bool) {
@@ -426,8 +296,7 @@ private func runHealthCheck(json: Bool) -> Never {
             if json {
                 emitHealthJSON(installed: false, enabled: false)
             }
-            fputs(
-                "vixenfs-mount: FSKit health check failed: \(error.localizedDescription)\n", stderr)
+            emit("FSKit health check failed: \(error.localizedDescription)")
             exit(2)
         }
 
@@ -435,7 +304,7 @@ private func runHealthCheck(json: Bool) -> Never {
             if json {
                 emitHealthJSON(installed: false, enabled: false)
             }
-            fputs("vixenfs-mount: FSKit health check failed: no module list returned\n", stderr)
+            emit("FSKit health check failed: no module list returned")
             exit(2)
         }
 
@@ -451,20 +320,14 @@ private func runHealthCheck(json: Bool) -> Never {
 
         guard installed else {
             if !json {
-                fputs(
-                    "vixenfs-mount: FSKit module \(Config.extensionBundleIdentifier) is not installed\n",
-                    stderr
-                )
+                emit("FSKit module \(Config.extensionBundleIdentifier) is not installed")
             }
             exit(2)
         }
 
         guard enabled else {
             if !json {
-                fputs(
-                    "vixenfs-mount: FSKit module \(Config.extensionBundleIdentifier) is installed but disabled\n",
-                    stderr
-                )
+                emit("FSKit module \(Config.extensionBundleIdentifier) is installed but disabled")
             }
             exit(2)
         }
@@ -487,9 +350,7 @@ do {
             let url = FileManager.default.containerURL(
                 forSecurityApplicationGroupIdentifier: Config.appGroupIdentifier)
         else {
-            fputs(
-                "vixenfs-mount: failed to resolve App Group container for \(Config.appGroupIdentifier)\n",
-                stderr)
+            emit("failed to resolve App Group container for \(Config.appGroupIdentifier)")
             exit(2)
         }
         fputs(url.path, stdout)
@@ -498,7 +359,7 @@ do {
         if let logFile = config.logFile {
             let fd = open(logFile, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
             guard fd >= 0 else {
-                fputs("vixenfs-mount: failed to open log file \(logFile): errno \(errno)\n", stderr)
+                emit("failed to open log file \(logFile): errno \(errno)")
                 exit(2)
             }
             dup2(fd, STDOUT_FILENO)
@@ -509,20 +370,16 @@ do {
             setvbuf(stdout, nil, _IOLBF, 0)
         }
         let lifecycle = MountLifecycle(config: config)
-        lifecycle.emit(
-            "starting (pid=\(ProcessInfo.processInfo.processIdentifier), parent-pid=\(config.parentPID), mount-point=\(config.mountPoint))"
-        )
+        lifecycle.log("starting (mount-point=\(config.mountPoint))")
         try lifecycle.run()
     }
 } catch let error as MountError {
-    fputs("vixenfs-mount: \(error.description)\n", stderr)
-    fflush(stderr)
+    emit("\(error.description)")
     if case .usage = error {
         exit(0)
     }
     exit(2)
 } catch {
-    fputs("vixenfs-mount: unexpected error: \(error)\n", stderr)
-    fflush(stderr)
+    emit("unexpected error: \(error)")
     exit(3)
 }

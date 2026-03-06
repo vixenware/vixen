@@ -9,7 +9,7 @@ edition.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-peeps = { workspace = true }
+moire = { workspace = true }
 facet = { workspace = true }
 figue = { workspace = true }
 facet-json = { workspace = true }
@@ -21,17 +21,25 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 vx-tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-roam = { workspace = true }
+roam-core = { workspace = true }
+roam-types = { workspace = true }
 roam-stream = { workspace = true }
 indicatif = { workspace = true }
-dirs = { workspace = true }
-
 vxd-proto = { workspace = true }
 vx-store-proto = { workspace = true }
 vx-io = { workspace = true }
 vx-report = { workspace = true }
 vx-vfs = { workspace = true }
+strip-ansi-escapes = { workspace = true }
+unicode-width = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 ulid = { workspace = true }
+
+[features]
+default = []
+diagnostics = ["moire/diagnostics", "roam-stream/diagnostics", "vx-vfs/diagnostics"]
+
+[lints]
+workspace = true

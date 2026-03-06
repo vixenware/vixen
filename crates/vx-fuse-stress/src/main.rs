@@ -18,6 +18,8 @@ struct Args {
     timeout_secs: u64,
     rounds: usize,
     forever: bool,
+    skip_warmup: bool,
+    cold_cache_each_round: bool,
 }
 
 impl Default for Args {
@@ -28,6 +30,8 @@ impl Default for Args {
             timeout_secs: 10,
             rounds: 20,
             forever: false,
+            skip_warmup: false,
+            cold_cache_each_round: false,
         }
     }
 }
@@ -68,6 +72,12 @@ fn parse_args() -> Args {
             "--forever" => {
                 args.forever = true;
             }
+            "--skip-warmup" => {
+                args.skip_warmup = true;
+            }
+            "--cold-cache-each-round" => {
+                args.cold_cache_each_round = true;
+            }
             other => {
                 eprintln!("Unknown argument: {other}");
                 eprintln!("Usage: vx-fuse-stress [OPTIONS]");
@@ -76,6 +86,10 @@ fn parse_args() -> Args {
                 eprintln!("  --timeout-secs <N>  Hang detection timeout (default: 10)");
                 eprintln!("  --rounds <N>        Number of stress rounds (default: 20)");
                 eprintln!("  --forever           Run indefinitely until failure");
+                eprintln!("  --skip-warmup       Skip initial warmup build");
+                eprintln!(
+                    "  --cold-cache-each-round  Clear VX_HOME/cache/blobs/blake3 before each round"
+                );
                 std::process::exit(1);
             }
         }
@@ -129,7 +143,7 @@ fn write_project_source(dir: &Path, index: usize, round: usize) -> Result<()> {
 fn dump_hang_diagnostics(vx_home: &Path) {
     eprintln!("\n=== HANG DIAGNOSTICS ===\n");
 
-    // Trigger peeps dumps via SIGUSR1 to all vixen processes
+    // Trigger moire dumps via SIGUSR1 to all vixen processes
     #[cfg(unix)]
     let pids = find_vixen_pids();
     #[cfg(not(unix))]
@@ -146,10 +160,10 @@ fn dump_hang_diagnostics(vx_home: &Path) {
         std::thread::sleep(Duration::from_millis(500));
     }
 
-    // Read peeps dumps
-    let dump_dir = Path::new("/tmp/peeps-dumps");
+    // Read moire dumps
+    let dump_dir = Path::new("/tmp/moire-dumps");
     if dump_dir.exists() {
-        eprintln!("\n--- peeps dumps ---");
+        eprintln!("\n--- moire dumps ---");
         if let Ok(entries) = std::fs::read_dir(dump_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -318,11 +332,13 @@ fn cleanup_mount(vx_home: &Path) {
 async fn stress_loop(
     args: &Args,
     vx_bin: &Path,
-    vx_home: &str,
+    vx_home: &Path,
     project_dirs: &[PathBuf],
 ) -> Result<()> {
     let timeout = Duration::from_secs(args.timeout_secs);
     let mut round = 0usize;
+    let l2_cache_dir = vx_home.join("cache").join("blobs").join("blake3");
+    let vx_home_str = vx_home.to_string_lossy().to_string();
 
     loop {
         if !args.forever && round >= args.rounds {
@@ -330,6 +346,19 @@ async fn stress_loop(
         }
 
         info!(round, "starting round");
+
+        if args.cold_cache_each_round {
+            if let Err(e) = tokio::fs::remove_dir_all(&l2_cache_dir).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                warn!(round, cache_dir = %l2_cache_dir.display(), error = %e, "failed to clear L2 cache directory");
+            }
+            if let Err(e) = tokio::fs::create_dir_all(&l2_cache_dir).await {
+                warn!(round, cache_dir = %l2_cache_dir.display(), error = %e, "failed to recreate L2 cache directory");
+            } else {
+                info!(round, cache_dir = %l2_cache_dir.display(), "cleared L2 cache directory");
+            }
+        }
 
         // Mutate each project's source to prevent cache hits
         for (i, project_dir) in project_dirs.iter().enumerate() {
@@ -344,7 +373,7 @@ async fn stress_loop(
 
             let child = tokio::process::Command::new(vx_bin)
                 .args(["build", "--no-spawn", "--no-tui"])
-                .env("VX_HOME", vx_home)
+                .env("VX_HOME", &vx_home_str)
                 .env("VX_TEST", "1")
                 .current_dir(project_dir)
                 .stdout(std::process::Stdio::null())
@@ -434,6 +463,8 @@ fn main() -> Result<()> {
         timeout_secs = args.timeout_secs,
         rounds = args.rounds,
         forever = args.forever,
+        skip_warmup = args.skip_warmup,
+        cold_cache_each_round = args.cold_cache_each_round,
         "starting VFS stress test"
     );
 
@@ -444,8 +475,7 @@ fn main() -> Result<()> {
     let tmp_dir = tempfile::tempdir()?;
     let vx_home = tmp_dir.path().join("vx-home");
     std::fs::create_dir_all(&vx_home)?;
-    let vx_home_str = vx_home.to_str().unwrap().to_string();
-    info!(vx_home = %vx_home_str, "created isolated VX_HOME");
+    info!(vx_home = %vx_home.display(), "created isolated VX_HOME");
 
     let projects_dir = tmp_dir.path().join("projects");
     std::fs::create_dir_all(&projects_dir)?;
@@ -459,7 +489,7 @@ fn main() -> Result<()> {
 
     info!("starting vxd...");
     let mut vxd_child = std::process::Command::new(&vxd_bin)
-        .env("VX_HOME", &vx_home_str)
+        .env("VX_HOME", &vx_home)
         .env("VX_TEST", "1")
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
@@ -471,9 +501,13 @@ fn main() -> Result<()> {
     loop {
         let ready = {
             #[cfg(unix)]
-            { vxd_sock.exists() && std::os::unix::net::UnixStream::connect(&vxd_sock).is_ok() }
+            {
+                vxd_sock.exists() && std::os::unix::net::UnixStream::connect(&vxd_sock).is_ok()
+            }
             #[cfg(not(unix))]
-            { vxd_sock.exists() }
+            {
+                vxd_sock.exists()
+            }
         };
         if ready {
             break;
@@ -486,28 +520,32 @@ fn main() -> Result<()> {
     }
     info!("vxd is ready");
 
-    info!("running warmup build...");
-    let warmup_status = std::process::Command::new(&vx_bin)
-        .args(["build", "--no-spawn", "--no-tui"])
-        .env("VX_HOME", &vx_home_str)
-        .env("VX_TEST", "1")
-        .current_dir(&project_dirs[0])
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .wrap_err("failed to run warmup build")?;
+    if !args.skip_warmup {
+        info!("running warmup build...");
+        let warmup_status = std::process::Command::new(&vx_bin)
+            .args(["build", "--no-spawn", "--no-tui"])
+            .env("VX_HOME", &vx_home)
+            .env("VX_TEST", "1")
+            .current_dir(&project_dirs[0])
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .wrap_err("failed to run warmup build")?;
 
-    if !warmup_status.success() {
-        let _ = vxd_child.kill();
-        bail!("warmup build failed with status {warmup_status}");
+        if !warmup_status.success() {
+            let _ = vxd_child.kill();
+            bail!("warmup build failed with status {warmup_status}");
+        }
+        info!("warmup build completed");
+    } else {
+        info!("skipping warmup build");
     }
-    info!("warmup build completed");
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
-    let result = rt.block_on(stress_loop(&args, &vx_bin, &vx_home_str, &project_dirs));
+    let result = rt.block_on(stress_loop(&args, &vx_bin, &vx_home, &project_dirs));
 
     info!("shutting down vxd...");
     let _ = vxd_child.kill();

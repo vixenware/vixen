@@ -5,9 +5,10 @@ use vx_runner_proto::{
 use vx_store_proto::{ServiceVersion, StoreProgress};
 
 use crate::RunnerService;
+use moire::task::FutureExt;
 
-impl Runner for RunnerService {
-    async fn version(&self, _cx: &roam::Context) -> ServiceVersion {
+impl RunnerService {
+    async fn version(&self) -> ServiceVersion {
         ServiceVersion {
             service: "vx-runner".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -17,7 +18,6 @@ impl Runner for RunnerService {
 
     async fn compile_rust(
         &self,
-        _cx: &roam::Context,
         request: RustCompileRequest,
         progress: roam::Tx<StoreProgress>,
     ) -> RustCompileResult {
@@ -26,7 +26,6 @@ impl Runner for RunnerService {
 
     async fn compile_cc(
         &self,
-        _cx: &roam::Context,
         request: CcCompileRequest,
         progress: roam::Tx<StoreProgress>,
     ) -> CcCompileResult {
@@ -35,19 +34,49 @@ impl Runner for RunnerService {
 
     async fn link_cc(
         &self,
-        _cx: &roam::Context,
         request: CcLinkRequest,
         progress: roam::Tx<StoreProgress>,
     ) -> CcLinkResult {
         self.link_cc_vfs(request, progress).await
     }
 
-    async fn run(
+    async fn run(&self, request: RunRequest, progress: roam::Tx<StoreProgress>) -> RunResult {
+        self.run_vfs(request, progress)
+            .named("runner.run_vfs")
+            .await
+    }
+}
+
+impl Runner for RunnerService {
+    async fn version(&self) -> ServiceVersion {
+        RunnerService::version(self).await
+    }
+
+    async fn compile_rust(
         &self,
-        _cx: &roam::Context,
-        request: RunRequest,
+        request: RustCompileRequest,
         progress: roam::Tx<StoreProgress>,
-    ) -> RunResult {
-        self.run_vfs(request, progress).await
+    ) -> RustCompileResult {
+        RunnerService::compile_rust(self, request, progress).await
+    }
+
+    async fn compile_cc(
+        &self,
+        request: CcCompileRequest,
+        progress: roam::Tx<StoreProgress>,
+    ) -> CcCompileResult {
+        RunnerService::compile_cc(self, request, progress).await
+    }
+
+    async fn link_cc(
+        &self,
+        request: CcLinkRequest,
+        progress: roam::Tx<StoreProgress>,
+    ) -> CcLinkResult {
+        RunnerService::link_cc(self, request, progress).await
+    }
+
+    async fn run(&self, request: RunRequest, progress: roam::Tx<StoreProgress>) -> RunResult {
+        RunnerService::run(self, request, progress).await
     }
 }

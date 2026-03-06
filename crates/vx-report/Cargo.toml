@@ -14,3 +14,7 @@ facet-json = { workspace = true }
 camino = { workspace = true }
 vx-plan = { workspace = true }
 ulid = "1.2"
+tokio = { workspace = true }
+
+[lints]
+workspace = true

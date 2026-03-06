@@ -19,11 +19,12 @@ Add to your `Cargo.toml`:
 [dependencies]
 vixenfs-proto = { path = "../vixenfs-proto" }
 roam = { workspace = true }
-roam-stream = { workspace = true }
+roam-core = { workspace = true }
+roam-types = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 ```
 
-Then implement `Vfs` and serve it over a `roam_stream` transport.
+Then implement `VfsServer` and serve it over a Roam v7 session (`roam_core::acceptor` + `roam_core::Driver`).
 
 ## Notes
 

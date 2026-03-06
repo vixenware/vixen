@@ -35,6 +35,7 @@ pub enum VfsAction {
     RetryBuild,
     RunVxApp,
     OpenDownloadUrl(String),
+    RunCommand(String),
 }
 
 #[derive(Debug, Clone, Facet)]

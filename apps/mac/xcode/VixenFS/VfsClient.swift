@@ -4,19 +4,23 @@
 import Foundation
 import RoamRuntime
 
+private func roamHexPrefix(_ data: Data, count: Int = 24) -> String {
+    data.prefix(count).map { String(format: "%02x", $0) }.joined(separator: " ")
+}
+
 // MARK: - Vfs Method IDs
 
 public enum VfsMethodId {
     public static let lookup: UInt64 = 0x70460df96a9e3ebf
     public static let getAttributes: UInt64 = 0xc968b68989c3f020
-    public static let readDir: UInt64 = 0xd717690e60df5af3
+    public static let readDir: UInt64 = 0x2007dfb650199d2c
     public static let read: UInt64 = 0x9c80fd555999d0e1
     public static let write: UInt64 = 0x5d398e81123c3597
     public static let create: UInt64 = 0x2caaf8adf5eda0e1
     public static let delete: UInt64 = 0xfa37cb27061e7e2a
     public static let rename: UInt64 = 0x4d68b4b3208a8c07
     public static let setAttributes: UInt64 = 0x320f6529a5a0e5ce
-    public static let ping: UInt64 = 0xe35cdfdca59ce5ab
+    public static let ping: UInt64 = 0xbf89334f8d104575
 }
 
 // MARK: - Vfs Types
@@ -87,12 +91,14 @@ public struct DirEntry: Codable, Sendable {
 
 public struct ReadDirResult: Codable, Sendable {
     public var entries: [DirEntry]
-    public var nextCursor: UInt64
+    public var nextCookie: UInt64
+    public var verifier: UInt64
     public var error: Int32
 
-    public init(entries: [DirEntry], nextCursor: UInt64, error: Int32) {
+    public init(entries: [DirEntry], nextCookie: UInt64, verifier: UInt64, error: Int32) {
         self.entries = entries
-        self.nextCursor = nextCursor
+        self.nextCookie = nextCookie
+        self.verifier = verifier
         self.error = error
     }
 }
@@ -156,8 +162,9 @@ public protocol VfsCaller {
     ///  Get attributes for an item.
     func getAttributes(itemId: UInt64) async throws -> GetAttributesResult
     ///  Read directory contents.
-    ///  Use cursor=0 for first page, then use returned next_cursor for subsequent pages.
-    func readDir(itemId: UInt64, cursor: UInt64) async throws -> ReadDirResult
+    ///  Use cookie=0/verifier=0 for first page, then pass returned
+    ///  next_cookie/verifier for subsequent pages.
+    func readDir(itemId: UInt64, cookie: UInt64, verifier: UInt64) async throws -> ReadDirResult
     ///  Read file contents.
     func read(itemId: UInt64, offset: UInt64, len: UInt64) async throws -> ReadResult
     ///  Write file contents.
@@ -190,28 +197,57 @@ public final class VfsClient: VfsCaller {
         let payload = Data(payloadBytes)
         let response = try await connection.call(methodId: 0x70460df96a9e3ebf, payload: payload, timeout: timeout)
         var cursor = 0
-        try decodeRpcResult(from: response, offset: &cursor)
-        let __result_attrs_itemId = try decodeVarint(from: response, offset: &cursor)
-        let ___result_attrs_itemType_disc = try decodeU8(from: response, offset: &cursor)
-        let __result_attrs_itemType: ItemType
-        switch ___result_attrs_itemType_disc {
+        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        switch _cursor_resultDisc {
         case 0:
-            __result_attrs_itemType = .file
+            let __result_attrs_itemId = try decodeVarint(from: response, offset: &cursor)
+            let ___result_attrs_itemType_disc = try decodeVarint(from: response, offset: &cursor)
+            let __result_attrs_itemType: ItemType
+            switch ___result_attrs_itemType_disc {
+            case 0:
+                __result_attrs_itemType = .file
+            case 1:
+                __result_attrs_itemType = .directory
+            case 2:
+                __result_attrs_itemType = .symlink
+            default:
+                throw RoamError.decodeError("unknown enum variant")
+            }
+            let __result_attrs_size = try decodeVarint(from: response, offset: &cursor)
+            let __result_attrs_modifiedTime = try decodeVarint(from: response, offset: &cursor)
+            let __result_attrs_createdTime = try decodeVarint(from: response, offset: &cursor)
+            let __result_attrs_mode = try decodeU32(from: response, offset: &cursor)
+            let _result_attrs = ItemAttributes(itemId: __result_attrs_itemId, itemType: __result_attrs_itemType, size: __result_attrs_size, modifiedTime: __result_attrs_modifiedTime, createdTime: __result_attrs_createdTime, mode: __result_attrs_mode)
+            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let result = LookupResult(attrs: _result_attrs, error: _result_error)
+            return result
         case 1:
-            __result_attrs_itemType = .directory
-        case 2:
-            __result_attrs_itemType = .symlink
+            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            switch _cursor_errorCode {
+            case 0:
+                throw RoamError.decodeError("unexpected user error for infallible method")
+            case 1:
+                throw RoamError.unknownMethod
+            case 2:
+                throw RoamError.decodeError("invalid payload")
+            case 3:
+                throw RoamError.cancelled
+            default:
+                throw RoamError.decodeError("invalid RoamError discriminant: \(_cursor_errorCode)")
+            }
         default:
-            throw RoamError.decodeError("unknown enum variant")
+            let prefix = roamHexPrefix(response)
+            let decodedAsMessage: String
+            if let msg = try? MessageV7.decode(from: response) {
+                decodedAsMessage = "yes(connId=\(msg.connectionId), payload=\(String(describing: msg.payload)))"
+            } else {
+                decodedAsMessage = "no"
+            }
+            NSLog(
+                "VfsClient.read invalid result discriminant=\(_cursor_resultDisc) response_len=\(response.count) prefix=[\(prefix)] decode_as_message=\(decodedAsMessage)"
+            )
+            throw RoamError.decodeError("invalid Result discriminant: \(_cursor_resultDisc)")
         }
-        let __result_attrs_size = try decodeVarint(from: response, offset: &cursor)
-        let __result_attrs_modifiedTime = try decodeVarint(from: response, offset: &cursor)
-        let __result_attrs_createdTime = try decodeVarint(from: response, offset: &cursor)
-        let __result_attrs_mode = try decodeU32(from: response, offset: &cursor)
-        let _result_attrs = ItemAttributes(itemId: __result_attrs_itemId, itemType: __result_attrs_itemType, size: __result_attrs_size, modifiedTime: __result_attrs_modifiedTime, createdTime: __result_attrs_createdTime, mode: __result_attrs_mode)
-        let _result_error = try decodeI32(from: response, offset: &cursor)
-        let result = LookupResult(attrs: _result_attrs, error: _result_error)
-        return result
     }
 
     public func getAttributes(itemId: UInt64) async throws -> GetAttributesResult {
@@ -220,66 +256,106 @@ public final class VfsClient: VfsCaller {
         let payload = Data(payloadBytes)
         let response = try await connection.call(methodId: 0xc968b68989c3f020, payload: payload, timeout: timeout)
         var cursor = 0
-        try decodeRpcResult(from: response, offset: &cursor)
-        let __result_attrs_itemId = try decodeVarint(from: response, offset: &cursor)
-        let ___result_attrs_itemType_disc = try decodeU8(from: response, offset: &cursor)
-        let __result_attrs_itemType: ItemType
-        switch ___result_attrs_itemType_disc {
+        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        switch _cursor_resultDisc {
         case 0:
-            __result_attrs_itemType = .file
-        case 1:
-            __result_attrs_itemType = .directory
-        case 2:
-            __result_attrs_itemType = .symlink
-        default:
-            throw RoamError.decodeError("unknown enum variant")
-        }
-        let __result_attrs_size = try decodeVarint(from: response, offset: &cursor)
-        let __result_attrs_modifiedTime = try decodeVarint(from: response, offset: &cursor)
-        let __result_attrs_createdTime = try decodeVarint(from: response, offset: &cursor)
-        let __result_attrs_mode = try decodeU32(from: response, offset: &cursor)
-        let _result_attrs = ItemAttributes(itemId: __result_attrs_itemId, itemType: __result_attrs_itemType, size: __result_attrs_size, modifiedTime: __result_attrs_modifiedTime, createdTime: __result_attrs_createdTime, mode: __result_attrs_mode)
-        let _result_error = try decodeI32(from: response, offset: &cursor)
-        let result = GetAttributesResult(attrs: _result_attrs, error: _result_error)
-        return result
-    }
-
-    public func readDir(itemId: UInt64, cursor: UInt64) async throws -> ReadDirResult {
-        var payloadBytes: [UInt8] = []
-        payloadBytes += encodeVarint(itemId)
-        payloadBytes += encodeVarint(cursor)
-        let payload = Data(payloadBytes)
-        let response = try await connection.call(methodId: 0xd717690e60df5af3, payload: payload, timeout: timeout)
-        var cursor_ = 0
-        try decodeRpcResult(from: response, offset: &cursor_)
-        let _result_entries = try decodeVec(from: response, offset: &cursor_, decoder: { data, off in
-            let _name = try decodeString(from: data, offset: &off)
-            let _itemId = try decodeVarint(from: data, offset: &off)
-            let _itemType = try ({ data, off in
-            let disc = try decodeU8(from: data, offset: &off)
-            let result: ItemType
-            switch disc {
+            let __result_attrs_itemId = try decodeVarint(from: response, offset: &cursor)
+            let ___result_attrs_itemType_disc = try decodeVarint(from: response, offset: &cursor)
+            let __result_attrs_itemType: ItemType
+            switch ___result_attrs_itemType_disc {
             case 0:
-                result = .file
+                __result_attrs_itemType = .file
             case 1:
-                result = .directory
+                __result_attrs_itemType = .directory
             case 2:
-                result = .symlink
+                __result_attrs_itemType = .symlink
             default:
                 throw RoamError.decodeError("unknown enum variant")
             }
+            let __result_attrs_size = try decodeVarint(from: response, offset: &cursor)
+            let __result_attrs_modifiedTime = try decodeVarint(from: response, offset: &cursor)
+            let __result_attrs_createdTime = try decodeVarint(from: response, offset: &cursor)
+            let __result_attrs_mode = try decodeU32(from: response, offset: &cursor)
+            let _result_attrs = ItemAttributes(itemId: __result_attrs_itemId, itemType: __result_attrs_itemType, size: __result_attrs_size, modifiedTime: __result_attrs_modifiedTime, createdTime: __result_attrs_createdTime, mode: __result_attrs_mode)
+            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let result = GetAttributesResult(attrs: _result_attrs, error: _result_error)
             return result
-        })(data, &off)
-            let _size = try decodeVarint(from: data, offset: &off)
-            let _modifiedTime = try decodeVarint(from: data, offset: &off)
-            let _createdTime = try decodeVarint(from: data, offset: &off)
-            let _mode = try decodeU32(from: data, offset: &off)
-            return DirEntry(name: _name, itemId: _itemId, itemType: _itemType, size: _size, modifiedTime: _modifiedTime, createdTime: _createdTime, mode: _mode)
-        })
-        let _result_nextCursor = try decodeVarint(from: response, offset: &cursor_)
-        let _result_error = try decodeI32(from: response, offset: &cursor_)
-        let result = ReadDirResult(entries: _result_entries, nextCursor: _result_nextCursor, error: _result_error)
-        return result
+        case 1:
+            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            switch _cursor_errorCode {
+            case 0:
+                throw RoamError.decodeError("unexpected user error for infallible method")
+            case 1:
+                throw RoamError.unknownMethod
+            case 2:
+                throw RoamError.decodeError("invalid payload")
+            case 3:
+                throw RoamError.cancelled
+            default:
+                throw RoamError.decodeError("invalid RoamError discriminant: \(_cursor_errorCode)")
+            }
+        default:
+            throw RoamError.decodeError("invalid Result discriminant: \(_cursor_resultDisc)")
+        }
+    }
+
+    public func readDir(itemId: UInt64, cookie: UInt64, verifier: UInt64) async throws -> ReadDirResult {
+        var payloadBytes: [UInt8] = []
+        payloadBytes += encodeVarint(itemId)
+        payloadBytes += encodeVarint(cookie)
+        payloadBytes += encodeVarint(verifier)
+        let payload = Data(payloadBytes)
+        let response = try await connection.call(methodId: 0x2007dfb650199d2c, payload: payload, timeout: timeout)
+        var cursor = 0
+        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        switch _cursor_resultDisc {
+        case 0:
+            let _result_entries = try decodeVec(from: response, offset: &cursor, decoder: { data, off in
+                let _name = try decodeString(from: data, offset: &off)
+                let _itemId = try decodeVarint(from: data, offset: &off)
+                let _itemType = try ({ data, off in
+                let disc = try decodeVarint(from: data, offset: &off)
+                let result: ItemType
+                switch disc {
+                case 0:
+                    result = .file
+                case 1:
+                    result = .directory
+                case 2:
+                    result = .symlink
+                default:
+                    throw RoamError.decodeError("unknown enum variant")
+                }
+                return result
+            })(data, &off)
+                let _size = try decodeVarint(from: data, offset: &off)
+                let _modifiedTime = try decodeVarint(from: data, offset: &off)
+                let _createdTime = try decodeVarint(from: data, offset: &off)
+                let _mode = try decodeU32(from: data, offset: &off)
+                return DirEntry(name: _name, itemId: _itemId, itemType: _itemType, size: _size, modifiedTime: _modifiedTime, createdTime: _createdTime, mode: _mode)
+            })
+            let _result_nextCookie = try decodeVarint(from: response, offset: &cursor)
+            let _result_verifier = try decodeVarint(from: response, offset: &cursor)
+            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let result = ReadDirResult(entries: _result_entries, nextCookie: _result_nextCookie, verifier: _result_verifier, error: _result_error)
+            return result
+        case 1:
+            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            switch _cursor_errorCode {
+            case 0:
+                throw RoamError.decodeError("unexpected user error for infallible method")
+            case 1:
+                throw RoamError.unknownMethod
+            case 2:
+                throw RoamError.decodeError("invalid payload")
+            case 3:
+                throw RoamError.cancelled
+            default:
+                throw RoamError.decodeError("invalid RoamError discriminant: \(_cursor_errorCode)")
+            }
+        default:
+            throw RoamError.decodeError("invalid Result discriminant: \(_cursor_resultDisc)")
+        }
     }
 
     public func read(itemId: UInt64, offset: UInt64, len: UInt64) async throws -> ReadResult {
@@ -290,11 +366,30 @@ public final class VfsClient: VfsCaller {
         let payload = Data(payloadBytes)
         let response = try await connection.call(methodId: 0x9c80fd555999d0e1, payload: payload, timeout: timeout)
         var cursor = 0
-        try decodeRpcResult(from: response, offset: &cursor)
-        let _result_data = try decodeBytes(from: response, offset: &cursor)
-        let _result_error = try decodeI32(from: response, offset: &cursor)
-        let result = ReadResult(data: _result_data, error: _result_error)
-        return result
+        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        switch _cursor_resultDisc {
+        case 0:
+            let _result_data = try decodeBytes(from: response, offset: &cursor)
+            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let result = ReadResult(data: _result_data, error: _result_error)
+            return result
+        case 1:
+            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            switch _cursor_errorCode {
+            case 0:
+                throw RoamError.decodeError("unexpected user error for infallible method")
+            case 1:
+                throw RoamError.unknownMethod
+            case 2:
+                throw RoamError.decodeError("invalid payload")
+            case 3:
+                throw RoamError.cancelled
+            default:
+                throw RoamError.decodeError("invalid RoamError discriminant: \(_cursor_errorCode)")
+            }
+        default:
+            throw RoamError.decodeError("invalid Result discriminant: \(_cursor_resultDisc)")
+        }
     }
 
     public func write(itemId: UInt64, offset: UInt64, data: Data) async throws -> WriteResult {
@@ -305,11 +400,30 @@ public final class VfsClient: VfsCaller {
         let payload = Data(payloadBytes)
         let response = try await connection.call(methodId: 0x5d398e81123c3597, payload: payload, timeout: timeout)
         var cursor = 0
-        try decodeRpcResult(from: response, offset: &cursor)
-        let _result_bytesWritten = try decodeVarint(from: response, offset: &cursor)
-        let _result_error = try decodeI32(from: response, offset: &cursor)
-        let result = WriteResult(bytesWritten: _result_bytesWritten, error: _result_error)
-        return result
+        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        switch _cursor_resultDisc {
+        case 0:
+            let _result_bytesWritten = try decodeVarint(from: response, offset: &cursor)
+            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let result = WriteResult(bytesWritten: _result_bytesWritten, error: _result_error)
+            return result
+        case 1:
+            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            switch _cursor_errorCode {
+            case 0:
+                throw RoamError.decodeError("unexpected user error for infallible method")
+            case 1:
+                throw RoamError.unknownMethod
+            case 2:
+                throw RoamError.decodeError("invalid payload")
+            case 3:
+                throw RoamError.cancelled
+            default:
+                throw RoamError.decodeError("invalid RoamError discriminant: \(_cursor_errorCode)")
+            }
+        default:
+            throw RoamError.decodeError("invalid Result discriminant: \(_cursor_resultDisc)")
+        }
     }
 
     public func create(parentId: UInt64, name: String, itemType: ItemType) async throws -> CreateResult {
@@ -319,21 +433,40 @@ public final class VfsClient: VfsCaller {
         payloadBytes += { v in
     switch v {
     case .file:
-        return [UInt8(0)]
+        return encodeVarint(UInt64(0))
     case .directory:
-        return [UInt8(1)]
+        return encodeVarint(UInt64(1))
     case .symlink:
-        return [UInt8(2)]
+        return encodeVarint(UInt64(2))
     }
 }(itemType)
         let payload = Data(payloadBytes)
         let response = try await connection.call(methodId: 0x2caaf8adf5eda0e1, payload: payload, timeout: timeout)
         var cursor = 0
-        try decodeRpcResult(from: response, offset: &cursor)
-        let _result_itemId = try decodeVarint(from: response, offset: &cursor)
-        let _result_error = try decodeI32(from: response, offset: &cursor)
-        let result = CreateResult(itemId: _result_itemId, error: _result_error)
-        return result
+        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        switch _cursor_resultDisc {
+        case 0:
+            let _result_itemId = try decodeVarint(from: response, offset: &cursor)
+            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let result = CreateResult(itemId: _result_itemId, error: _result_error)
+            return result
+        case 1:
+            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            switch _cursor_errorCode {
+            case 0:
+                throw RoamError.decodeError("unexpected user error for infallible method")
+            case 1:
+                throw RoamError.unknownMethod
+            case 2:
+                throw RoamError.decodeError("invalid payload")
+            case 3:
+                throw RoamError.cancelled
+            default:
+                throw RoamError.decodeError("invalid RoamError discriminant: \(_cursor_errorCode)")
+            }
+        default:
+            throw RoamError.decodeError("invalid Result discriminant: \(_cursor_resultDisc)")
+        }
     }
 
     public func delete(itemId: UInt64) async throws -> VfsResult {
@@ -342,10 +475,29 @@ public final class VfsClient: VfsCaller {
         let payload = Data(payloadBytes)
         let response = try await connection.call(methodId: 0xfa37cb27061e7e2a, payload: payload, timeout: timeout)
         var cursor = 0
-        try decodeRpcResult(from: response, offset: &cursor)
-        let _result_error = try decodeI32(from: response, offset: &cursor)
-        let result = VfsResult(error: _result_error)
-        return result
+        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        switch _cursor_resultDisc {
+        case 0:
+            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let result = VfsResult(error: _result_error)
+            return result
+        case 1:
+            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            switch _cursor_errorCode {
+            case 0:
+                throw RoamError.decodeError("unexpected user error for infallible method")
+            case 1:
+                throw RoamError.unknownMethod
+            case 2:
+                throw RoamError.decodeError("invalid payload")
+            case 3:
+                throw RoamError.cancelled
+            default:
+                throw RoamError.decodeError("invalid RoamError discriminant: \(_cursor_errorCode)")
+            }
+        default:
+            throw RoamError.decodeError("invalid Result discriminant: \(_cursor_resultDisc)")
+        }
     }
 
     public func rename(itemId: UInt64, newParentId: UInt64, newName: String) async throws -> VfsResult {
@@ -356,10 +508,29 @@ public final class VfsClient: VfsCaller {
         let payload = Data(payloadBytes)
         let response = try await connection.call(methodId: 0x4d68b4b3208a8c07, payload: payload, timeout: timeout)
         var cursor = 0
-        try decodeRpcResult(from: response, offset: &cursor)
-        let _result_error = try decodeI32(from: response, offset: &cursor)
-        let result = VfsResult(error: _result_error)
-        return result
+        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        switch _cursor_resultDisc {
+        case 0:
+            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let result = VfsResult(error: _result_error)
+            return result
+        case 1:
+            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            switch _cursor_errorCode {
+            case 0:
+                throw RoamError.decodeError("unexpected user error for infallible method")
+            case 1:
+                throw RoamError.unknownMethod
+            case 2:
+                throw RoamError.decodeError("invalid payload")
+            case 3:
+                throw RoamError.cancelled
+            default:
+                throw RoamError.decodeError("invalid RoamError discriminant: \(_cursor_errorCode)")
+            }
+        default:
+            throw RoamError.decodeError("invalid Result discriminant: \(_cursor_resultDisc)")
+        }
     }
 
     public func setAttributes(itemId: UInt64, params: SetAttributesParams) async throws -> VfsResult {
@@ -369,19 +540,57 @@ public final class VfsClient: VfsCaller {
         let payload = Data(payloadBytes)
         let response = try await connection.call(methodId: 0x320f6529a5a0e5ce, payload: payload, timeout: timeout)
         var cursor = 0
-        try decodeRpcResult(from: response, offset: &cursor)
-        let _result_error = try decodeI32(from: response, offset: &cursor)
-        let result = VfsResult(error: _result_error)
-        return result
+        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        switch _cursor_resultDisc {
+        case 0:
+            let _result_error = try decodeI32(from: response, offset: &cursor)
+            let result = VfsResult(error: _result_error)
+            return result
+        case 1:
+            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            switch _cursor_errorCode {
+            case 0:
+                throw RoamError.decodeError("unexpected user error for infallible method")
+            case 1:
+                throw RoamError.unknownMethod
+            case 2:
+                throw RoamError.decodeError("invalid payload")
+            case 3:
+                throw RoamError.cancelled
+            default:
+                throw RoamError.decodeError("invalid RoamError discriminant: \(_cursor_errorCode)")
+            }
+        default:
+            throw RoamError.decodeError("invalid Result discriminant: \(_cursor_resultDisc)")
+        }
     }
 
     public func ping() async throws -> String {
         let payload = Data()
-        let response = try await connection.call(methodId: 0xe35cdfdca59ce5ab, payload: payload, timeout: timeout)
+        let response = try await connection.call(methodId: 0xbf89334f8d104575, payload: payload, timeout: timeout)
         var cursor = 0
-        try decodeRpcResult(from: response, offset: &cursor)
-        let result = try decodeString(from: response, offset: &cursor)
-        return result
+        let _cursor_resultDisc = try decodeVarint(from: response, offset: &cursor)
+        switch _cursor_resultDisc {
+        case 0:
+            let result = try decodeString(from: response, offset: &cursor)
+            return result
+        case 1:
+            let _cursor_errorCode = try decodeU8(from: response, offset: &cursor)
+            switch _cursor_errorCode {
+            case 0:
+                throw RoamError.decodeError("unexpected user error for infallible method")
+            case 1:
+                throw RoamError.unknownMethod
+            case 2:
+                throw RoamError.decodeError("invalid payload")
+            case 3:
+                throw RoamError.cancelled
+            default:
+                throw RoamError.decodeError("invalid RoamError discriminant: \(_cursor_errorCode)")
+            }
+        default:
+            throw RoamError.decodeError("invalid Result discriminant: \(_cursor_resultDisc)")
+        }
     }
 }
 
@@ -390,7 +599,7 @@ public final class VfsClient: VfsCaller {
 public let vfs_schemas: [String: MethodSchema] = [
     "lookup": MethodSchema(args: [.u64, .string]),
     "getAttributes": MethodSchema(args: [.u64]),
-    "readDir": MethodSchema(args: [.u64, .u64]),
+    "readDir": MethodSchema(args: [.u64, .u64, .u64]),
     "read": MethodSchema(args: [.u64, .u64, .u64]),
     "write": MethodSchema(args: [.u64, .u64, .bytes]),
     "create": MethodSchema(args: [.u64, .string, .enum(variants: [("File", []), ("Directory", []), ("Symlink", [])])]),
@@ -441,4 +650,3 @@ public struct VfsSerializers: BindingSerializers {
         }
     }
 }
-

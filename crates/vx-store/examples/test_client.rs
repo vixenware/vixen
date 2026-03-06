@@ -1,7 +1,6 @@
 //! Simple test client to verify vx-store TCP connectivity
 
 use eyre::Result;
-use roam_stream::NoDispatcher;
 use vx_store_proto::{ChunkHash, StoreClient};
 
 fn main() -> Result<()> {
@@ -20,11 +19,8 @@ async fn async_main() -> Result<()> {
     tracing::info!("Connecting to CAS at {}...", addr);
 
     let endpoint = vx_io::net::Endpoint::parse(addr)?;
-    let caller = vx_io::net::reconnecting_client(endpoint.clone(), NoDispatcher);
-    caller
-        .handle()
-        .await
-        .map_err(|e| eyre::eyre!("failed to connect to {}: {}", endpoint, e))?;
+    let (root_caller, session_handle) = vx_io::net::connect_session(&endpoint).await?;
+    let caller = vx_io::boot::boot_and_connect(&root_caller, &session_handle).await?;
     tracing::info!("Connected!");
 
     // Create CAS client
@@ -37,12 +33,15 @@ async fn async_main() -> Result<()> {
     client
         .put_chunk(chunk_hash, test_data.to_vec())
         .await
-        .map_err(|e| eyre::eyre!("put_chunk failed: {e}"))?;
+        .map_err(|e| eyre::eyre!("put_chunk failed: {e:?}"))?;
     tracing::info!("Put chunk: {}", chunk_hash.to_hex());
 
     // Test: get the chunk back
     tracing::info!("Testing get_chunk...");
-    let retrieved = client.get_chunk(chunk_hash).await?;
+    let retrieved = client
+        .get_chunk(chunk_hash)
+        .await
+        .map_err(|e| eyre::eyre!("get_chunk failed: {e:?}"))?;
     match retrieved {
         Some(data) => {
             assert_eq!(data.as_slice(), test_data);
@@ -56,7 +55,10 @@ async fn async_main() -> Result<()> {
 
     // Test: has_chunk
     tracing::info!("Testing has_chunk...");
-    let exists = client.has_chunk(chunk_hash).await?;
+    let exists = client
+        .has_chunk(chunk_hash)
+        .await
+        .map_err(|e| eyre::eyre!("has_chunk failed: {e:?}"))?;
     tracing::info!("Chunk exists: {}", exists);
 
     // Close connection by dropping the caller

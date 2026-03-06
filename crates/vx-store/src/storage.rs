@@ -12,9 +12,10 @@
 use std::io;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use tokio::io::AsyncWriteExt;
 use vx_io::atomic_write;
 use vx_store_proto::{
-    Blake3Hash, CacheKey, ChunkHash, ManifestHash, NodeHash, RegistrySpecKey, ToolchainSpecKey,
+    Blake3Hash, CacheKey, ChunkHash, NodeHash, RegistrySpecKey, ToolchainSpecKey,
 };
 
 // =============================================================================
@@ -60,7 +61,7 @@ impl FsStorage {
 
     pub(crate) async fn get_chunk(&self, hash: &ChunkHash) -> io::Result<Option<Vec<u8>>> {
         let path = self.chunk_path_for(hash);
-        match tokio::fs::read(&path).await {
+        match moire::fs::read(&path).await {
             Ok(data) => Ok(Some(data)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
@@ -68,12 +69,12 @@ impl FsStorage {
     }
 
     pub(crate) async fn put_chunk(&self, hash: &ChunkHash, data: &[u8]) -> io::Result<()> {
-        atomic_write(&self.chunk_path_for(hash), data).await
+        atomic_write(&self.chunk_path_for(hash), data, false).await
     }
 
     pub(crate) async fn has_chunk(&self, hash: &ChunkHash) -> io::Result<bool> {
         let path = self.chunk_path_for(hash);
-        match tokio::fs::try_exists(&path).await {
+        match moire::fs::try_exists(&path).await {
             Ok(exists) => Ok(exists),
             Err(e) => Err(e),
         }
@@ -83,7 +84,7 @@ impl FsStorage {
 
     pub(crate) async fn get_node(&self, hash: &NodeHash) -> io::Result<Option<Vec<u8>>> {
         let path = self.node_path_for(hash);
-        match tokio::fs::read(&path).await {
+        match moire::fs::read(&path).await {
             Ok(data) => Ok(Some(data)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
@@ -91,12 +92,12 @@ impl FsStorage {
     }
 
     pub(crate) async fn put_node(&self, hash: &NodeHash, data: &[u8]) -> io::Result<()> {
-        atomic_write(&self.node_path_for(hash), data).await
+        atomic_write(&self.node_path_for(hash), data, false).await
     }
 
     pub(crate) async fn has_node(&self, hash: &NodeHash) -> io::Result<bool> {
         let path = self.node_path_for(hash);
-        match tokio::fs::try_exists(&path).await {
+        match moire::fs::try_exists(&path).await {
             Ok(exists) => Ok(exists),
             Err(e) => Err(e),
         }
@@ -121,18 +122,13 @@ impl CasStore {
     /// Create all required subdirectories.
     pub(crate) async fn init(&self) -> io::Result<()> {
         let root = self.primary.root();
-        tokio::fs::create_dir_all(root.join("chunks/blake3")).await?;
-        tokio::fs::create_dir_all(root.join("nodes/blake3")).await?;
-        tokio::fs::create_dir_all(root.join("cache/blake3")).await?;
-        tokio::fs::create_dir_all(root.join("tmp")).await?;
-        tokio::fs::create_dir_all(root.join("toolchains")).await?;
-        tokio::fs::create_dir_all(root.join("registry/spec")).await?;
+        moire::fs::create_dir_all(root.join("chunks/blake3")).await?;
+        moire::fs::create_dir_all(root.join("nodes/blake3")).await?;
+        moire::fs::create_dir_all(root.join("cache/blake3")).await?;
+        moire::fs::create_dir_all(root.join("tmp")).await?;
+        moire::fs::create_dir_all(root.join("toolchains")).await?;
+        moire::fs::create_dir_all(root.join("registry/spec")).await?;
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn tmp_dir(&self) -> Utf8PathBuf {
-        self.primary.root().join("tmp")
     }
 
     // -- Chunk operations --
@@ -163,66 +159,6 @@ impl CasStore {
         self.primary.has_node(hash).await
     }
 
-    // -- Manifests (JSON, stored in manifests/blake3/) --
-
-    fn manifest_path(root: &Utf8Path, hash: &ManifestHash) -> Utf8PathBuf {
-        let hex = hash.to_hex();
-        root.join("manifests/blake3")
-            .join(&hex[..2])
-            .join(format!("{}.json", hex))
-    }
-
-    pub(crate) async fn get_manifest(&self, hash: &ManifestHash) -> io::Result<Option<String>> {
-        let path = Self::manifest_path(self.primary.root(), hash);
-        match tokio::fs::read_to_string(&path).await {
-            Ok(json) => Ok(Some(json)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    pub(crate) async fn put_manifest(&self, hash: &ManifestHash, json: &[u8]) -> io::Result<()> {
-        let path = Self::manifest_path(self.primary.root(), hash);
-        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return Ok(());
-        }
-        atomic_write(&path, json).await
-    }
-
-    // -- Tree manifests (stored in trees/blake3/) --
-
-    fn tree_manifest_path(root: &Utf8Path, hash: &ManifestHash) -> Utf8PathBuf {
-        let hex = hash.to_hex();
-        root.join("trees/blake3")
-            .join(&hex[..2])
-            .join(format!("{}.json", hex))
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn get_tree_manifest(
-        &self,
-        hash: &ManifestHash,
-    ) -> io::Result<Option<String>> {
-        let path = Self::tree_manifest_path(self.primary.root(), hash);
-        match tokio::fs::read_to_string(&path).await {
-            Ok(json) => Ok(Some(json)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    pub(crate) async fn put_tree_manifest(
-        &self,
-        hash: &ManifestHash,
-        json: &[u8],
-    ) -> io::Result<()> {
-        let path = Self::tree_manifest_path(self.primary.root(), hash);
-        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return Ok(());
-        }
-        atomic_write(&path, json).await
-    }
-
     // -- Toolchain specs (spec_key → manifest_hash mapping) --
 
     fn toolchain_spec_path(root: &Utf8Path, key: &ToolchainSpecKey) -> Utf8PathBuf {
@@ -244,11 +180,27 @@ impl CasStore {
         manifest_hash: &Blake3Hash,
     ) -> io::Result<bool> {
         let path = Self::toolchain_spec_path(self.primary.root(), key);
-        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return Ok(false);
-        }
-        match atomic_write(&path, manifest_hash.to_hex().as_bytes()).await {
-            Ok(()) => Ok(true),
+        let parent = path
+            .parent()
+            .expect("toolchain spec path has parent")
+            .to_path_buf();
+        let manifest_hex = manifest_hash.to_hex();
+
+        moire::fs::create_dir_all(&parent).await?;
+
+        let mut opts = moire::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        match opts.open(&path).await {
+            Ok(mut file) => {
+                file.write_all(manifest_hex.as_bytes()).await?;
+                file.sync_all().await?;
+                if let Ok(dir) = moire::fs::File::open(&parent).await
+                    && let Err(e) = dir.sync_all().await
+                {
+                    tracing::warn!("failed to sync directory {}: {}", parent, e);
+                }
+                Ok(true)
+            }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
             Err(e) => Err(e),
         }
@@ -281,29 +233,24 @@ impl CasStore {
             .to_path_buf();
         let manifest_hex = manifest_hash.to_hex();
 
-        tokio::task::spawn_blocking(move || {
-            use std::fs::{File, OpenOptions};
-            use std::io::Write;
+        moire::fs::create_dir_all(&parent).await?;
 
-            std::fs::create_dir_all(&parent)?;
-
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut file) => {
-                    file.write_all(manifest_hex.as_bytes())?;
-                    file.sync_all()?;
-                    if let Ok(dir) = File::open(&parent)
-                        && let Err(e) = dir.sync_all()
-                    {
-                        tracing::warn!("failed to sync directory {}: {}", parent, e);
-                    }
-                    Ok(true)
+        let mut opts = moire::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        match opts.open(&path).await {
+            Ok(mut file) => {
+                file.write_all(manifest_hex.as_bytes()).await?;
+                file.sync_all().await?;
+                if let Ok(dir) = moire::fs::File::open(&parent).await
+                    && let Err(e) = dir.sync_all().await
+                {
+                    tracing::warn!("failed to sync directory {}: {}", parent, e);
                 }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
-                Err(e) => Err(e),
+                Ok(true)
             }
-        })
-        .await
-        .expect("spawn_blocking join failed")
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     // -- Cache (cache_key → node_hash mapping) --
@@ -324,12 +271,12 @@ impl CasStore {
         manifest_hash: &Blake3Hash,
     ) -> io::Result<()> {
         let dest = Self::cache_path(self.primary.root(), key);
-        atomic_write(&dest, manifest_hash.to_hex().as_bytes()).await
+        atomic_write(&dest, manifest_hash.to_hex().as_bytes(), false).await
     }
 
     pub(crate) async fn delete_cache(&self, key: &CacheKey) -> io::Result<bool> {
         let path = Self::cache_path(self.primary.root(), key);
-        match tokio::fs::remove_file(path).await {
+        match moire::fs::remove_file(path).await {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e),
@@ -342,7 +289,7 @@ impl CasStore {
 // =============================================================================
 
 async fn read_hash_mapping(path: &Utf8Path) -> io::Result<Option<Blake3Hash>> {
-    match tokio::fs::read_to_string(path).await {
+    match moire::fs::read_to_string(path).await {
         Ok(content) => Ok(Blake3Hash::from_hex(content.trim())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),

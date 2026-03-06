@@ -24,7 +24,6 @@ pub struct ActionDep {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum PlannerSyntheticKind {
     Group,
     Action,
@@ -97,7 +96,6 @@ pub struct RunDepFileMount {
 
 /// A single unit of work in the build process
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 #[allow(clippy::large_enum_variant)]
 pub enum Action {
     /// Download a Rust toolchain component from static.rust-lang.org
@@ -375,27 +373,16 @@ pub struct ActionNode {
 }
 
 /// The action dependency graph
-#[allow(dead_code)]
 pub struct ActionGraph {
     /// Directed graph: edges point from dependent → dependency
     /// (i.e., if A depends on B, there's an edge A → B)
     pub graph: DiGraph<ActionNode, String>,
 
-    /// Map from CrateId to its action node (for resolving dependencies)
-    pub crate_to_node: HashMap<CrateId, NodeIndex>,
-
-    /// Rust toolchain extract nodes by component.
-    pub rust_toolchain_extract_nodes: HashMap<RustComponent, NodeIndex>,
-
     /// Rust toolchain spec used for finalization during compile.
     pub rust_toolchain_spec: Option<RustToolchainSpec>,
-
-    /// Map from (name, version) to registry crate acquisition node
-    pub registry_nodes: HashMap<(String, String), NodeIndex>,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct RulePlanLoweringError {
     pub message: String,
     pub rule_id: String,
@@ -421,10 +408,7 @@ impl ActionGraph {
     pub fn new() -> Self {
         Self {
             graph: DiGraph::new(),
-            crate_to_node: HashMap::new(),
-            rust_toolchain_extract_nodes: HashMap::new(),
             rust_toolchain_spec: None,
-            registry_nodes: HashMap::new(),
         }
     }
 
@@ -738,314 +722,7 @@ impl ActionGraph {
 
         Ok(Self {
             graph,
-            crate_to_node,
-            rust_toolchain_extract_nodes: HashMap::from([
-                (RustComponent::Rustc, extract_rustc_node),
-                (RustComponent::RustStd, extract_rust_std_node),
-            ]),
             rust_toolchain_spec: Some(toolchain_spec),
-            registry_nodes,
-        })
-    }
-
-    #[allow(dead_code)]
-    pub fn from_crate_graph_subset(
-        crate_graph: &CrateGraph,
-        included_crates: &std::collections::HashSet<CrateId>,
-        rust_channel: RustChannel,
-        target_triple: String,
-        toolchain: RustToolchain,
-        config: BuildConfig,
-        db: &crate::db::Database,
-    ) -> Result<Self, crate::error::VxdError> {
-        use tracing::debug;
-
-        debug!(
-            included = included_crates.len(),
-            "Building action graph from crate graph subset"
-        );
-        let mut graph = DiGraph::new();
-        let mut crate_to_node = HashMap::new();
-        let mut registry_nodes = HashMap::new();
-
-        // 1. Create per-component toolchain actions.
-        let download_rustc_node = graph.add_node(ActionNode {
-            action: Action::DownloadRustToolchainComponent {
-                channel: rust_channel.clone(),
-                target_triple: target_triple.clone(),
-                component: RustComponent::Rustc,
-            },
-        });
-        let download_rust_std_node = graph.add_node(ActionNode {
-            action: Action::DownloadRustToolchainComponent {
-                channel: rust_channel.clone(),
-                target_triple: target_triple.clone(),
-                component: RustComponent::RustStd,
-            },
-        });
-        let extract_rustc_node = graph.add_node(ActionNode {
-            action: Action::ExtractRustToolchainComponent {
-                channel: rust_channel.clone(),
-                target_triple: target_triple.clone(),
-                component: RustComponent::Rustc,
-            },
-        });
-        let extract_rust_std_node = graph.add_node(ActionNode {
-            action: Action::ExtractRustToolchainComponent {
-                channel: rust_channel.clone(),
-                target_triple: target_triple.clone(),
-                component: RustComponent::RustStd,
-            },
-        });
-
-        graph.add_edge(
-            extract_rustc_node,
-            download_rustc_node,
-            "always".to_string(),
-        );
-        graph.add_edge(
-            extract_rust_std_node,
-            download_rust_std_node,
-            "always".to_string(),
-        );
-
-        // Finalize Rust toolchain once after components are extracted.
-        let toolchain_spec = RustToolchainSpec {
-            channel: rust_channel.clone(),
-            host: target_triple.clone(),
-            target: target_triple.clone(),
-            components: vec![RustComponent::Rustc, RustComponent::RustStd],
-        };
-        let finalize_node = graph.add_node(ActionNode {
-            action: Action::FinalizeRustToolchain {
-                spec: toolchain_spec.clone(),
-            },
-        });
-        graph.add_edge(finalize_node, extract_rustc_node, "always".to_string());
-        graph.add_edge(finalize_node, extract_rust_std_node, "always".to_string());
-
-        // 2. Create registry crate acquisition actions for needed registry crates.
-        let mut needed_registry = std::collections::BTreeMap::<(String, String, String), ()>::new();
-        for crate_id in included_crates {
-            let node = &crate_graph.nodes[crate_id];
-            if let CrateSource::Registry {
-                name,
-                version,
-                checksum,
-            } = &node.source
-            {
-                needed_registry.insert((name.clone(), version.clone(), checksum.clone()), ());
-            }
-        }
-
-        debug!(
-            registry_count = needed_registry.len(),
-            "Creating registry acquisition actions"
-        );
-        for ((name, version, checksum), _) in needed_registry {
-            let registry_action = graph.add_node(ActionNode {
-                action: Action::AcquireRegistryCrate {
-                    name: name.clone(),
-                    version: version.clone(),
-                    checksum,
-                },
-            });
-            registry_nodes.insert((name, version), registry_action);
-        }
-
-        // 3. Create compilation actions for included crates (topo order for determinism).
-        for crate_id in &crate_graph.topo_order {
-            if !included_crates.contains(crate_id) {
-                continue;
-            }
-            let crate_node = &crate_graph.nodes[crate_id];
-
-            let action_deps: Vec<ActionDep> = crate_node
-                .deps
-                .iter()
-                .map(|dep| ActionDep {
-                    extern_name: dep.extern_name.clone(),
-                    crate_id: dep.crate_id,
-                })
-                .collect();
-
-            let target_triple_str = toolchain
-                .target(db)
-                .map_err(|e| crate::error::VxdError::Picante(e.to_string()))?;
-            let profile_str = config
-                .profile(db)
-                .map_err(|e| crate::error::VxdError::Picante(e.to_string()))?;
-
-            let workspace_root_str = crate_graph.workspace_root.to_string();
-
-            let source_node = match &crate_node.source {
-                CrateSource::Path { .. } => graph.add_node(ActionNode {
-                    action: Action::IngestRustSourceTree {
-                        crate_id: crate_node.id,
-                        crate_name: crate_node.crate_name.clone(),
-                        edition: crate_node.edition.as_str().to_string(),
-                        crate_type: crate_node.crate_type,
-                        workspace_root: workspace_root_str.clone(),
-                        crate_root_rel: crate_node.crate_root_rel.to_string(),
-                    },
-                }),
-                CrateSource::Registry { name, version, .. } => {
-                    let node_idx = graph.add_node(ActionNode {
-                        action: Action::ExtractRegistryCrateTree {
-                            crate_id: crate_node.id,
-                            name: name.clone(),
-                            version: version.clone(),
-                            crate_name: crate_node.crate_name.clone(),
-                            edition: crate_node.edition.as_str().to_string(),
-                            crate_type: crate_node.crate_type,
-                            crate_root_rel: crate_node.crate_root_rel.to_string(),
-                        },
-                    });
-                    if let Some(&registry_idx) =
-                        registry_nodes.get(&(name.clone(), version.clone()))
-                    {
-                        graph.add_edge(node_idx, registry_idx, "always".to_string());
-                    }
-                    node_idx
-                }
-            };
-
-            let output_filename = if crate_node.crate_type.as_str() == "lib" {
-                format!("lib{}.rlib", crate_node.crate_name)
-            } else {
-                crate_node.crate_name.clone()
-            };
-            let output_rel = format!("out/{output_filename}");
-
-            let mut args = vec![
-                "--sysroot".to_string(),
-                "${VX_TOOLCHAIN}/sysroot".to_string(),
-                "--crate-name".to_string(),
-                crate_node.crate_name.clone(),
-                "--crate-type".to_string(),
-                crate_node.crate_type.as_str().to_string(),
-                "--edition".to_string(),
-                crate_node.edition.as_str().to_string(),
-                "--target".to_string(),
-                target_triple_str.clone(),
-                "-o".to_string(),
-                output_rel.clone(),
-            ];
-
-            if profile_str == "release" {
-                args.push("-C".to_string());
-                args.push("opt-level=3".to_string());
-            } else {
-                args.push("-C".to_string());
-                args.push("opt-level=0".to_string());
-                args.push("-g".to_string());
-            }
-
-            for dep in &action_deps {
-                args.push("--extern".to_string());
-                args.push(format!(
-                    "{}=deps/lib{}.rlib",
-                    dep.extern_name, dep.extern_name
-                ));
-            }
-
-            args.push(format!("src/{}", crate_node.crate_root_rel));
-
-            let outputs = vec![RunOutput {
-                logical: if crate_node.crate_type.as_str() == "lib" {
-                    "rlib".to_string()
-                } else {
-                    "bin".to_string()
-                },
-                path: output_rel,
-                executable: crate_node.crate_type.as_str() == "bin",
-            }];
-
-            let action = Action::Run {
-                label: format!("rustc {}", crate_node.crate_name),
-                kind: RunKind::RustCompile {
-                    crate_id: crate_node.id,
-                    crate_name: crate_node.crate_name.clone(),
-                    crate_type: crate_node.crate_type,
-                },
-                toolchain: RunToolchain::Rust,
-                program_rel: "bin/rustc".to_string(),
-                args,
-                env: vec![],
-                cwd: None,
-                clear_env: true,
-                tree_mounts: vec![],
-                dep_tree_mounts: vec![RunDepTreeMount {
-                    crate_id: crate_node.id,
-                    mount: "src".to_string(),
-                }],
-                file_mounts: vec![],
-                dep_file_mounts: action_deps
-                    .iter()
-                    .map(|dep| RunDepFileMount {
-                        crate_id: dep.crate_id,
-                        logical: "rlib".to_string(),
-                        path: format!("deps/lib{}.rlib", dep.extern_name),
-                    })
-                    .collect(),
-                collect_file_mounts: vec![],
-                outputs,
-                materialize: if crate_node.crate_type.as_str() == "bin" {
-                    vec![RunMaterialize {
-                        logical: "bin".to_string(),
-                        workspace_rel_path: format!(
-                            ".vx/build/{}/{}/{}",
-                            target_triple_str, profile_str, crate_node.crate_name
-                        ),
-                    }]
-                } else {
-                    vec![]
-                },
-            };
-
-            let node_idx = graph.add_node(ActionNode { action });
-            crate_to_node.insert(crate_node.id, node_idx);
-
-            graph.add_edge(node_idx, finalize_node, "always".to_string());
-            graph.add_edge(node_idx, source_node, "always".to_string());
-        }
-
-        // 4. Add dependency edges.
-        for crate_id in &crate_graph.topo_order {
-            if !included_crates.contains(crate_id) {
-                continue;
-            }
-            let crate_node = &crate_graph.nodes[crate_id];
-            let Some(&compile_idx) = crate_to_node.get(&crate_node.id) else {
-                continue;
-            };
-
-            for dep in &crate_node.deps {
-                let dep_compile_idx = crate_to_node.get(&dep.crate_id).copied().ok_or_else(|| {
-                    crate::error::VxdError::InvalidManifest(format!(
-                        "selected crate '{}' depends on crate '{}' which is not included in the execution subset",
-                        crate_node.crate_name,
-                        crate_graph.nodes[&dep.crate_id].crate_name
-                    ))
-                })?;
-                graph.add_edge(compile_idx, dep_compile_idx, "always".to_string());
-            }
-        }
-
-        Ok(Self {
-            graph,
-            crate_to_node,
-            rust_toolchain_extract_nodes: HashMap::from([
-                (RustComponent::Rustc, extract_rustc_node),
-                (RustComponent::RustStd, extract_rust_std_node),
-            ]),
-            rust_toolchain_spec: Some(RustToolchainSpec {
-                channel: rust_channel,
-                host: target_triple.clone(),
-                target: target_triple,
-                components: vec![RustComponent::Rustc, RustComponent::RustStd],
-            }),
-            registry_nodes,
         })
     }
 
@@ -1053,7 +730,6 @@ impl ActionGraph {
     ///
     /// This bridge intentionally starts small: it materializes `group`/`action`/`artifact`/`fact`
     /// nodes as synthetic planner actions and preserves edge kinds in topology metadata.
-    #[allow(dead_code)]
     pub fn from_rule_plan(plan: &RulePlan) -> Result<Self, RulePlanLoweringError> {
         if let Err(err) = plan.validate() {
             return Err(RulePlanLoweringError {
@@ -1502,18 +1178,12 @@ impl ActionGraph {
 
         Ok(Self {
             graph,
-            crate_to_node,
-            rust_toolchain_extract_nodes: HashMap::from([
-                (RustComponent::Rustc, extract_rustc_node),
-                (RustComponent::RustStd, extract_rust_std_node),
-            ]),
             rust_toolchain_spec: Some(RustToolchainSpec {
                 channel: rust_channel,
                 host: target_triple.clone(),
                 target: target_triple,
                 components: vec![RustComponent::Rustc, RustComponent::RustStd],
             }),
-            registry_nodes,
         })
     }
 
@@ -1621,7 +1291,6 @@ impl ActionGraph {
     }
 }
 
-#[allow(dead_code)]
 fn planner_kind_for_node(node: &RulePlanNode) -> PlannerSyntheticKind {
     match node.kind {
         RulePlanNodeKind::Group => PlannerSyntheticKind::Group,
@@ -1631,7 +1300,6 @@ fn planner_kind_for_node(node: &RulePlanNode) -> PlannerSyntheticKind {
     }
 }
 
-#[allow(dead_code)]
 fn action_from_rule_plan_node(node: &RulePlanNode) -> Result<Action, RulePlanLoweringError> {
     if let Some(action) = try_lower_compile_node(node)? {
         return Ok(action);
@@ -1649,7 +1317,6 @@ fn action_from_rule_plan_node(node: &RulePlanNode) -> Result<Action, RulePlanLow
     })
 }
 
-#[allow(dead_code)]
 fn try_lower_compile_node(node: &RulePlanNode) -> Result<Option<Action>, RulePlanLoweringError> {
     if !wants_compile_lowering(node) {
         return Ok(None);
@@ -1697,7 +1364,6 @@ fn try_lower_compile_node(node: &RulePlanNode) -> Result<Option<Action>, RulePla
     }))
 }
 
-#[allow(dead_code)]
 fn try_lower_registry_node(node: &RulePlanNode) -> Result<Option<Action>, RulePlanLoweringError> {
     if !wants_registry_lowering(node) {
         return Ok(None);
@@ -1735,7 +1401,6 @@ fn try_lower_registry_node(node: &RulePlanNode) -> Result<Option<Action>, RulePl
     }))
 }
 
-#[allow(dead_code)]
 fn planner_edge_kind(edge: &RulePlanEdge) -> Result<&'static str, RulePlanLoweringError> {
     match edge.kind {
         RulePlanEdgeKind::Always => Ok("always"),
@@ -1752,7 +1417,6 @@ fn planner_edge_kind(edge: &RulePlanEdge) -> Result<&'static str, RulePlanLoweri
     }
 }
 
-#[allow(dead_code)]
 fn lowering_error_for_edge(edge: &RulePlanEdge, message: String) -> RulePlanLoweringError {
     RulePlanLoweringError {
         message,
@@ -1763,7 +1427,6 @@ fn lowering_error_for_edge(edge: &RulePlanEdge, message: String) -> RulePlanLowe
     }
 }
 
-#[allow(dead_code)]
 fn lowering_error_for_node(node: &RulePlanNode, message: String) -> RulePlanLoweringError {
     RulePlanLoweringError {
         message,
@@ -1774,7 +1437,6 @@ fn lowering_error_for_node(node: &RulePlanNode, message: String) -> RulePlanLowe
     }
 }
 
-#[allow(dead_code)]
 fn wants_compile_lowering(node: &RulePlanNode) -> bool {
     if node.kind != RulePlanNodeKind::Action {
         return false;
@@ -1784,7 +1446,6 @@ fn wants_compile_lowering(node: &RulePlanNode) -> bool {
         || node.provenance.metadata.contains_key("crate_type")
 }
 
-#[allow(dead_code)]
 fn wants_registry_lowering(node: &RulePlanNode) -> bool {
     if node.kind != RulePlanNodeKind::Artifact {
         return false;

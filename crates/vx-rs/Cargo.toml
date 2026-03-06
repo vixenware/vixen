@@ -18,9 +18,12 @@ facet = { workspace = true }
 facet-cargo-toml = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
-ra-ap-rustc_lexer = "0.150.0"
+ra-ap-rustc_lexer = "0.153.0"
 vx-store-proto = { workspace = true }
 vx-manifest = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

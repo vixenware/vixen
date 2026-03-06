@@ -13,8 +13,16 @@ camino = { workspace = true }
 futures-util = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+moire = { workspace = true }
 tracing = { workspace = true }
 vx-store-proto = { workspace = true }
 
-async-compression = { version = "0.4.36", default-features = false, features = ["tokio", "gzip", "xz"] }
+async-compression = { version = "0.4.41", default-features = false, features = [
+  "tokio",
+  "gzip",
+  "xz",
+] }
 tokio-tar = "0.3"
+
+[lints]
+workspace = true

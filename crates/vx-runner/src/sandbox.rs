@@ -14,12 +14,11 @@
 //!
 //! Also provides timeout enforcement and streamed output for all platforms.
 
-#[cfg(target_os = "macos")]
-use std::os::unix::fs::PermissionsExt;
+use moire::process::Command;
+use moire::task::FutureExt;
 use std::process::ExitStatus;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use vx_store_proto::StoreProgress;
 
 use crate::service_vfs::ActionContext;
@@ -129,16 +128,16 @@ pub async fn run_sandboxed_command(
     }
 
     // Take ownership of stdout/stderr handles
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let stderr = child.stderr.take().expect("stderr was piped");
+    let stdout = child.take_stdout().expect("stdout was piped");
+    let stderr = child.take_stderr().expect("stderr was piped");
 
     // Merge stdout and stderr into a single combined output buffer.
     // Also track the latest line for progress reporting.
-    let combined_output = std::sync::Arc::new(peeps::locks::DiagnosticAsyncMutex::new(
+    let combined_output = std::sync::Arc::new(moire::sync::SyncMutex::new(
         "runner/combined_output",
         String::new(),
     ));
-    let latest_line = std::sync::Arc::new(peeps::locks::DiagnosticAsyncMutex::new(
+    let latest_line = std::sync::Arc::new(moire::sync::SyncMutex::new(
         "runner/latest_line",
         String::new(),
     ));
@@ -146,8 +145,8 @@ pub async fn run_sandboxed_command(
     // Spawn readers for both streams
     let combined_for_stdout = combined_output.clone();
     let latest_for_stdout = latest_line.clone();
-    let stdout_task =
-        peeps::tasks::spawn_tracked(format!("sandbox_stdout_{}", action_desc), async move {
+    let stdout_task = moire::task::spawn(
+        async move {
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
             loop {
@@ -156,20 +155,22 @@ pub async fn run_sandboxed_command(
                     Ok(0) => break,
                     Ok(_) => {
                         let trimmed = line.trim_end().to_string();
-                        combined_for_stdout.lock().await.push_str(&line);
+                        combined_for_stdout.lock().push_str(&line);
                         if !trimmed.is_empty() {
-                            *latest_for_stdout.lock().await = trimmed;
+                            *latest_for_stdout.lock() = trimmed;
                         }
                     }
                     Err(_) => break,
                 }
             }
-        });
+        }
+        .named("sandbox_stdout"),
+    );
 
     let combined_for_stderr = combined_output.clone();
     let latest_for_stderr = latest_line.clone();
-    let stderr_task =
-        peeps::tasks::spawn_tracked(format!("sandbox_stderr_{}", action_desc), async move {
+    let stderr_task = moire::task::spawn(
+        async move {
             let mut reader = BufReader::new(stderr);
             let mut line = String::new();
             loop {
@@ -178,29 +179,31 @@ pub async fn run_sandboxed_command(
                     Ok(0) => break,
                     Ok(_) => {
                         let trimmed = line.trim_end().to_string();
-                        combined_for_stderr.lock().await.push_str(&line);
+                        combined_for_stderr.lock().push_str(&line);
                         if !trimmed.is_empty() {
-                            *latest_for_stderr.lock().await = trimmed;
+                            *latest_for_stderr.lock() = trimmed;
                         }
                     }
                     Err(_) => break,
                 }
             }
-        });
+        }
+        .named("sandbox_stderr"),
+    );
 
     // Progress tick task: every 250ms, send the latest line if it changed
     let latest_for_tick = latest_line.clone();
     let action_desc_owned = action_desc.to_string();
-    let tick_task =
-        peeps::tasks::spawn_tracked(format!("sandbox_tick_{}", action_desc), async move {
+    let tick_task = moire::task::spawn(
+        async move {
             let mut last_sent = String::new();
             let mut interval = tokio::time::interval(PROGRESS_TICK_INTERVAL);
             loop {
                 interval.tick().await;
-                let current = latest_for_tick.lock().await.clone();
+                let current = latest_for_tick.lock().clone();
                 if current != last_sent && !current.is_empty() {
                     let _ = progress
-                        .send(&StoreProgress {
+                        .send(StoreProgress {
                             message: format!("{action_desc_owned}: {current}"),
                             current: None,
                             total: None,
@@ -209,7 +212,9 @@ pub async fn run_sandboxed_command(
                     last_sent = current;
                 }
             }
-        });
+        }
+        .named("sandbox_tick"),
+    );
 
     // Grab the PID before wait (child.id() returns None after exit)
     let pid = child.id();
@@ -251,7 +256,7 @@ pub async fn run_sandboxed_command(
             }
             let _ = stdout_task.await;
             let _ = stderr_task.await;
-            let output = combined_output.lock().await.clone();
+            let output = combined_output.lock().clone();
             Ok(CommandOutput {
                 exit_status,
                 combined_output: output,
@@ -277,11 +282,11 @@ pub async fn run_sandboxed_command(
             if let Some(pid) = pid {
                 terminate_process_group(pid).await;
             }
-            let _ = child.kill().await;
+            let _ = child.kill();
 
             let _ = stdout_task.await;
             let _ = stderr_task.await;
-            let partial = combined_output.lock().await.clone();
+            let partial = combined_output.lock().clone();
 
             Err(CommandError::TimedOut {
                 action_desc: action_desc.to_string(),
@@ -300,11 +305,11 @@ pub async fn run_sandboxed_command(
             if let Some(pid) = pid {
                 terminate_process_group(pid).await;
             }
-            let _ = child.kill().await;
+            let _ = child.kill();
 
             let _ = stdout_task.await;
             let _ = stderr_task.await;
-            let partial = combined_output.lock().await.clone();
+            let partial = combined_output.lock().clone();
 
             Err(CommandError::Cancelled {
                 action_desc: action_desc.to_string(),
@@ -413,38 +418,6 @@ pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
         "sandboxed_command: wrapping with sandbox-exec"
     );
     tracing::trace!(profile = %SEATBELT_PROFILE, "seatbelt profile");
-
-    // Check if the program binary exists on disk before we try to run it.
-    // This helps distinguish "sandbox-exec not found" from "program not found".
-    let program_exists = std::path::Path::new(program).exists();
-    let program_is_file = std::path::Path::new(program)
-        .metadata()
-        .map(|m| m.is_file())
-        .unwrap_or(false);
-    let program_permissions = std::fs::metadata(program)
-        .map(|m| format!("{:o}", m.permissions().mode()))
-        .unwrap_or_else(|e| format!("error: {e}"));
-
-    tracing::trace!(
-        program,
-        program_exists,
-        program_is_file,
-        program_permissions,
-        "sandboxed_command: program binary check"
-    );
-
-    let sandbox_exec_exists = std::path::Path::new("/usr/bin/sandbox-exec").exists();
-    tracing::trace!(
-        sandbox_exec_exists,
-        "sandboxed_command: sandbox-exec binary check"
-    );
-
-    let write_dir_exists = action.out_path.as_std_path().exists();
-    tracing::trace!(
-        write_dir = %action.out_path,
-        write_dir_exists,
-        "sandboxed_command: write_dir check"
-    );
 
     let mut cmd = Command::new("/usr/bin/sandbox-exec");
     cmd.arg("-p").arg(SEATBELT_PROFILE);

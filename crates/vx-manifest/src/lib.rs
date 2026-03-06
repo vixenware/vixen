@@ -277,6 +277,16 @@ impl Manifest {
         let cargo = facet_cargo_toml::CargoToml::parse(contents)
             .map_err(|e| ManifestError::ParseError(e.to_string()))?;
 
+        // Check for workspace before requiring [package] — a workspace-only
+        // manifest has no [package] section and we want to report "unsupported:
+        // workspace" not "missing required section: [package]".
+        if cargo.workspace.is_some() {
+            return Err(ManifestError::Unsupported {
+                feature: "[workspace]",
+                details: "workspaces are not supported yet".into(),
+            });
+        }
+
         // Extract package
         let package = cargo
             .package
@@ -298,12 +308,6 @@ impl Manifest {
             return Err(ManifestError::Unsupported {
                 feature: "[build-dependencies]",
                 details: "build-dependencies are not supported yet".into(),
-            });
-        }
-        if cargo.workspace.is_some() {
-            return Err(ManifestError::Unsupported {
-                feature: "[workspace]",
-                details: "workspaces are not supported yet".into(),
             });
         }
         if let Some(ref features) = cargo.features

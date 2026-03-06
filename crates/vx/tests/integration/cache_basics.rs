@@ -6,15 +6,11 @@
 //! - Source/profile/edition changes cause cache miss
 //! - Changes to any module in the closure cause cache miss
 
-#[allow(dead_code)]
-mod harness;
-use harness::{TestEnv, create_hello_world};
-
-use crate::harness::create_hello_world_at;
+use crate::harness::{TestEnv, create_hello_world, create_hello_world_at, init_test_tracing};
 
 #[test]
 fn fresh_build_succeeds() {
-    harness::init_test_tracing();
+    init_test_tracing();
     let env = TestEnv::new();
     create_hello_world(&env);
 

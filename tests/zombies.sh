@@ -8,7 +8,7 @@ pgrep -la '(vxd|vx-|Vixen|vixen)' || echo "no one"
 echo
 
 echo "== Stuck on test mount"
-pre="/private/tmp/.vx-test/nextest/"
+pre="/private/tmp/.vx-test/runner"
 lsof -n -P -u "$USER" -Fpcn 2>/dev/null |
 awk -v pre="$pre" '
   $0 ~ /^p/ {pid=substr($0,2); next}

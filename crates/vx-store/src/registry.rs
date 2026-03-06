@@ -43,22 +43,19 @@ pub(crate) enum DownloadError {
 // Registry Manager (Inflight Deduplication)
 // =============================================================================
 
-type InflightFuture = Arc<tokio::sync::OnceCell<EnsureRegistryCrateResult>>;
+type InflightFuture = Arc<moire::sync::OnceCell<EnsureRegistryCrateResult>>;
 
 /// Manages in-flight registry crate acquisitions with deduplication.
 ///
 /// Same design as ToolchainManager: inflight entries are never removed.
 pub struct RegistryManager {
-    inflight: peeps::locks::DiagnosticAsyncMutex<HashMap<RegistrySpecKey, InflightFuture>>,
+    inflight: moire::sync::SyncMutex<HashMap<RegistrySpecKey, InflightFuture>>,
 }
 
 impl RegistryManager {
     pub fn new() -> Self {
         Self {
-            inflight: peeps::locks::DiagnosticAsyncMutex::new(
-                "store/registry_inflight",
-                HashMap::new(),
-            ),
+            inflight: moire::sync::SyncMutex::new("store/registry_inflight", HashMap::new()),
         }
     }
 
@@ -81,15 +78,24 @@ impl RegistryManager {
 
         // Get or create inflight entry
         let cell = {
-            let mut inflight = self.inflight.lock().await;
+            let mut inflight = self.inflight.lock();
             inflight
                 .entry(spec_key)
-                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
+                .or_insert_with(|| Arc::new(moire::sync::OnceCell::new("registry_inflight")))
                 .clone()
         };
 
         // Initialize if we're first, otherwise wait
-        cell.get_or_init(|| acquire_fn()).await.clone()
+        let result = cell.get_or_init(|| acquire_fn()).await.clone();
+
+        let mut inflight = self.inflight.lock();
+        if let Some(existing) = inflight.get(&spec_key)
+            && Arc::ptr_eq(existing, &cell)
+        {
+            inflight.remove(&spec_key);
+        }
+
+        result
     }
 }
 

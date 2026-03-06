@@ -28,7 +28,7 @@ impl Endpoint {
     /// Accepts:
     /// - `host:port` or `tcp://host:port` -> TCP
     /// - `unix:/path/to/socket` -> local IPC endpoint
-    /// - Absolute path starting with `/` -> local IPC endpoint (convenience on Unix)
+    /// - Absolute path starting with `/` (Unix) or `C:\` (Windows) -> local IPC endpoint
     pub fn parse(endpoint: &str) -> Result<Self> {
         let endpoint = endpoint.trim();
 
@@ -36,9 +36,22 @@ impl Endpoint {
             return Ok(Endpoint::Local(camino::Utf8PathBuf::from(path)));
         }
 
+        // Detect bare absolute paths as local IPC endpoints.
         #[cfg(unix)]
         {
             if endpoint.starts_with('/') {
+                return Ok(Endpoint::Local(camino::Utf8PathBuf::from(endpoint)));
+            }
+        }
+        #[cfg(windows)]
+        {
+            // Match drive-letter paths like `C:\...` or `C:/...`
+            let bytes = endpoint.as_bytes();
+            if bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && (bytes[2] == b'\\' || bytes[2] == b'/')
+            {
                 return Ok(Endpoint::Local(camino::Utf8PathBuf::from(endpoint)));
             }
         }
@@ -151,10 +164,13 @@ impl AsyncWrite for Stream {
 }
 
 async fn connect_io(endpoint: &Endpoint) -> io::Result<Stream> {
+    let ep_display = endpoint.display();
     match endpoint {
         Endpoint::Tcp { host, port } => {
             let addr = format!("{host}:{port}");
-            let stream = tokio::net::TcpStream::connect(addr).await?;
+            let stream =
+                moire::net::connect(tokio::net::TcpStream::connect(addr), &ep_display, "tcp")
+                    .await?;
             Ok(Stream::Tcp(stream))
         }
         Endpoint::Local(path) => {
@@ -163,7 +179,9 @@ async fn connect_io(endpoint: &Endpoint) -> io::Result<Stream> {
             #[cfg(windows)]
             let local_target = roam_local::path_to_pipe_name(path.as_std_path());
 
-            let stream = roam_local::connect(local_target).await?;
+            let stream =
+                moire::net::connect(roam_local::connect(local_target), &ep_display, "local")
+                    .await?;
             Ok(Stream::Local(stream))
         }
     }
@@ -194,7 +212,7 @@ pub async fn try_connect(endpoint: &Endpoint) -> Result<Option<Stream>> {
 pub enum Listener {
     Tcp(tokio::net::TcpListener),
     Local {
-        listener: peeps::locks::DiagnosticAsyncMutex<roam_local::LocalListener>,
+        listener: roam_local::LocalListener,
         endpoint: camino::Utf8PathBuf,
     },
 }
@@ -217,7 +235,7 @@ impl Listener {
                 }
 
                 if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
+                    moire::fs::create_dir_all(parent).await?;
                 }
 
                 #[cfg(unix)]
@@ -227,7 +245,7 @@ impl Listener {
 
                 let listener = roam_local::LocalListener::bind(bind_target)?;
                 Ok(Listener::Local {
-                    listener: peeps::locks::DiagnosticAsyncMutex::new("io/local_listener", listener),
+                    listener,
                     endpoint: path.clone(),
                 })
             }
@@ -235,15 +253,20 @@ impl Listener {
     }
 
     /// Accept a connection, returning the stream and peer address string.
-    pub async fn accept(&self) -> Result<(Stream, String)> {
+    pub async fn accept(&mut self) -> Result<(Stream, String)> {
         match self {
             Listener::Tcp(listener) => {
-                let (stream, addr) = listener.accept().await?;
+                let local_addr = listener
+                    .local_addr()
+                    .map(|a| a.to_string())
+                    .unwrap_or_default();
+                let (stream, addr) =
+                    moire::net::accept(listener.accept(), &local_addr, "tcp").await?;
                 Ok((Stream::Tcp(stream), addr.to_string()))
             }
-            Listener::Local { listener, .. } => {
-                let mut guard = listener.lock().await;
-                let stream = guard.accept().await?;
+            Listener::Local { listener, endpoint } => {
+                let ep_display = format!("unix:{endpoint}");
+                let stream = moire::net::accept(listener.accept(), &ep_display, "local").await?;
                 #[cfg(unix)]
                 return Ok((Stream::Local(stream), "local".to_string()));
                 #[cfg(windows)]
@@ -274,46 +297,52 @@ impl EndpointConnector {
     pub fn new(endpoint: Endpoint) -> Self {
         Self { endpoint }
     }
-}
 
-impl roam_stream::Connector for EndpointConnector {
-    type Transport = Stream;
-
-    async fn connect(&self) -> io::Result<Self::Transport> {
-        connect_io(&self.endpoint).await
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
     }
 }
 
-/// Create a reconnecting roam-stream client for an endpoint.
-pub fn reconnecting_client<D>(
-    endpoint: Endpoint,
-    dispatcher: D,
-) -> roam_stream::Client<EndpointConnector, D>
-where
-    D: roam_stream::ServiceDispatcher + Clone,
-{
-    reconnecting_client_named(endpoint, dispatcher, None)
+/// Connect to an endpoint and establish a roam session, returning a caller and session handle.
+pub async fn connect_session(
+    endpoint: &Endpoint,
+) -> Result<(roam_core::DriverCaller, roam_core::SessionHandle)> {
+    use roam_core::{BareConduit, initiator};
+    use roam_stream::StreamLink;
+    use roam_types::MessageFamily;
+
+    let stream = connect_io(endpoint).await?;
+    let (r, w) = tokio::io::split(stream);
+    let link = StreamLink::new(r, w);
+    let conduit = BareConduit::<MessageFamily, _>::new(link);
+
+    let (caller, session_handle) = initiator(conduit)
+        .establish(())
+        .await
+        .map_err(|e| eyre::eyre!("session establishment failed: {e}"))?;
+
+    Ok((caller, session_handle))
 }
 
-/// Create a reconnecting roam-stream client for an endpoint with a diagnostic name.
-pub fn reconnecting_client_named<D>(
-    endpoint: Endpoint,
-    dispatcher: D,
-    name: Option<String>,
-) -> roam_stream::Client<EndpointConnector, D>
-where
-    D: roam_stream::ServiceDispatcher + Clone,
-{
-    roam_stream::connect_with_policy(
-        EndpointConnector::new(endpoint),
-        roam_stream::HandshakeConfig {
-            max_payload_size: 256 * 1024 * 1024, // 256 MiB
-            name,
-            ..Default::default()
-        },
-        dispatcher,
-        roam_stream::RetryPolicy::default(),
-    )
+struct ParkSession<C> {
+    _caller: C,
+    _session_handle: roam_core::SessionHandle,
+}
+
+impl<C> std::future::Future for ParkSession<C> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+        Poll::Pending
+    }
+}
+
+pub async fn park_session<C>(caller: C, session_handle: roam_core::SessionHandle) {
+    ParkSession {
+        _caller: caller,
+        _session_handle: session_handle,
+    }
+    .await;
 }
 
 /// Create a default local IPC endpoint for a service within VX_HOME.
