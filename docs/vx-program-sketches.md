@@ -44,7 +44,7 @@ fn plan_crates(graph: CrateGraph) -> Unit {
             emit::node(Node {
                 id: NodeId { value: node_id },
                 kind: NodeKind::Action,
-                label: format::concat(["compile ", krate.crate_name]),
+                label: `compile ${krate.crate_name}`,
                 metadata: metadata,
             });
         }
@@ -170,7 +170,7 @@ fn make_compile_node(krate: CrateNode) -> Node {
             value: format::compile_node_id(krate.crate_name, krate.crate_type),
         },
         kind: NodeKind::Action,
-        label: format::concat(["compile ", krate.crate_name]),
+        label: `compile ${krate.crate_name}`,
         metadata: metadata,
     }
 }

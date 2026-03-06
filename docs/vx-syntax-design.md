@@ -93,6 +93,26 @@ Current bias:
 - avoid ambiguous missing-key behavior for maps in v0
 - defer set literal syntax until there is a real need
 
+### Strings
+
+- ordinary string literals use double quotes
+- template strings use backticks
+- interpolation uses TypeScript-style `${expr}`
+
+Examples:
+
+```rust
+"compile"
+`compile ${krate.crate_name}`
+```
+
+Current bias:
+
+- template strings should be the preferred ergonomic way to build labels and
+  similar user-facing strings
+- `format::concat(...)`-style construction should not be the default surface
+  style
+
 ### Functions
 
 - functions use `fn`
