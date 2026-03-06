@@ -16,6 +16,9 @@ Related experiments:
 - [vx-program-sketches-minimal-forms.md](/Users/amos/bearcove/vixen/docs/vx-program-sketches-minimal-forms.md)
   explores a more holistic minimal grammar with `do/end`, `:=`, and
   payload-shaped calls and headers.
+- [vx-program-sketches-functional.md](/Users/amos/bearcove/vixen/docs/vx-program-sketches-functional.md)
+  explores a more expression-oriented direction with closures, collection
+  combinators, and pipelines.
 
 Neither note is the current baseline.
 
