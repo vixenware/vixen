@@ -10,7 +10,7 @@ repository = "https://github.com/bearcove/vx"
 
 [workspace.dependencies]
 # instrumentation
-moire = { git = "https://github.com/bearcove/moire", branch = "main", features = ["diagnostics"] }
+moire = { version = "1.0.0", features = ["diagnostics"] }
 
 
 # internal crates
@@ -61,7 +61,7 @@ ur-taking-me-with-you = { version = "7.1.0", features = [
 ] }
 
 # config files
-facet-styx = { git = "https://github.com/bearcove/styx", branch = "main" }
+facet-styx = { version = "2.0.0" }
 
 # process management
 
@@ -171,27 +171,16 @@ strip = "none"
 # picante = { path = "../picante/crates/picante" }
 # picante-macros = { path = "../picante/crates/picante-macros" }
 
-[patch."https://github.com/bearcove/moire"]
-moire = { path = "/Users/amos/bearcove/moire/crates/moire" }
-moire-types = { path = "/Users/amos/bearcove/moire/crates/moire-types" }
-
 [patch.crates-io]
-roam = { path = "/Users/amos/bearcove/roam/rust/roam" }
-roam-core = { path = "/Users/amos/bearcove/roam/rust/roam-core" }
-roam-types = { path = "/Users/amos/bearcove/roam/rust/roam-types" }
-roam-stream = { path = "/Users/amos/bearcove/roam/rust/roam-stream" }
-roam-shm = { path = "/Users/amos/bearcove/roam/rust/roam-shm" }
-shm-primitives = { path = "/Users/amos/bearcove/roam/rust/shm-primitives" }
-roam-local = { path = "/Users/amos/bearcove/roam/rust/roam-local" }
-roam-codegen = { path = "/Users/amos/bearcove/roam/rust/roam-codegen" }
-ur-taking-me-with-you = { path = "/Users/amos/bearcove/roam/rust/ur-taking-me-with-you" }
-
-[patch."https://github.com/bearcove/styx"]
-facet-styx = { path = "/Users/amos/bearcove/styx/crates/facet-styx" }
-styx-cst = { path = "/Users/amos/bearcove/styx/crates/styx-cst" }
-styx-parse = { path = "/Users/amos/bearcove/styx/crates/styx-parse" }
-styx-tokenizer = { path = "/Users/amos/bearcove/styx/crates/styx-tokenizer" }
-styx-tree = { path = "/Users/amos/bearcove/styx/crates/styx-tree" }
+# roam = { path = "/Users/amos/bearcove/roam/rust/roam" }
+# roam-core = { path = "/Users/amos/bearcove/roam/rust/roam-core" }
+# roam-types = { path = "/Users/amos/bearcove/roam/rust/roam-types" }
+# roam-stream = { path = "/Users/amos/bearcove/roam/rust/roam-stream" }
+# roam-shm = { path = "/Users/amos/bearcove/roam/rust/roam-shm" }
+# shm-primitives = { path = "/Users/amos/bearcove/roam/rust/shm-primitives" }
+# roam-local = { path = "/Users/amos/bearcove/roam/rust/roam-local" }
+# roam-codegen = { path = "/Users/amos/bearcove/roam/rust/roam-codegen" }
+# ur-taking-me-with-you = { path = "/Users/amos/bearcove/roam/rust/ur-taking-me-with-you" }
 
 [profile.samply]
 inherits = "release"

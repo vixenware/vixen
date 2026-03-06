@@ -761,6 +761,8 @@ dependencies = [
 [[package]]
 name = "facet-styx"
 version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94c9458d6d474e5578d3e4aa178c2a61c9d2676bba59dd5686dcd708fe424ab2"
 dependencies = [
  "ariadne",
  "facet",
@@ -934,7 +936,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "libc",
- "moire 1.0.0",
+ "moire",
  "nix",
  "tokio",
  "tracing",
@@ -1552,27 +1554,20 @@ dependencies = [
 [[package]]
 name = "moire"
 version = "1.0.0"
-dependencies = [
- "moire-macros",
- "moire-macros-noop 1.0.0",
- "moire-tokio 1.0.0",
- "moire-wasm 1.0.0",
-]
-
-[[package]]
-name = "moire"
-version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac52dcc0ff5b4710a66626370b1bf85ba3d924fd8019e8cfa100e8dafffda4ad"
 dependencies = [
- "moire-macros-noop 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "moire-tokio 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "moire-wasm 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moire-macros",
+ "moire-macros-noop",
+ "moire-tokio",
+ "moire-wasm",
 ]
 
 [[package]]
 name = "moire-macros"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c494331faed7953b795b7769a84e9272e6f59e34ddceebadba4715b245957bc2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1582,27 +1577,8 @@ dependencies = [
 [[package]]
 name = "moire-macros-noop"
 version = "1.0.0"
-
-[[package]]
-name = "moire-macros-noop"
-version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92ccdc0bf403f5ecf29c09e8e9f178caed89a914ea032e0c2d99d3824b78892d"
-
-[[package]]
-name = "moire-runtime"
-version = "1.0.0"
-dependencies = [
- "ctor",
- "facet",
- "facet-json",
- "facet-value",
- "moire-trace-capture 1.0.0",
- "moire-trace-types 1.0.0",
- "moire-types 1.0.0",
- "moire-wire 1.0.0",
- "tokio",
-]
 
 [[package]]
 name = "moire-runtime"
@@ -1614,21 +1590,10 @@ dependencies = [
  "facet",
  "facet-json",
  "facet-value",
- "moire-trace-capture 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "moire-trace-types 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "moire-types 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "moire-wire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "tokio",
-]
-
-[[package]]
-name = "moire-tokio"
-version = "1.0.0"
-dependencies = [
- "ctor",
- "moire-runtime 1.0.0",
- "moire-types 1.0.0",
- "parking_lot",
+ "moire-trace-capture",
+ "moire-trace-types",
+ "moire-types",
+ "moire-wire",
  "tokio",
 ]
 
@@ -1639,18 +1604,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fdb30c43038ce71c727da5a4ff01d09dd4c823486cc17b3b08661420d0ceda43"
 dependencies = [
  "ctor",
- "moire-runtime 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "moire-types 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moire-runtime",
+ "moire-types",
  "parking_lot",
  "tokio",
-]
-
-[[package]]
-name = "moire-trace-capture"
-version = "1.0.0"
-dependencies = [
- "libc",
- "moire-trace-types 1.0.0",
 ]
 
 [[package]]
@@ -1660,14 +1617,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6685ebbdee1253529c9074c41d8288504b640ffe8c21176ce464fef5c5c00c38"
 dependencies = [
  "libc",
- "moire-trace-types 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "moire-trace-types"
-version = "1.0.0"
-dependencies = [
- "facet",
+ "moire-trace-types",
 ]
 
 [[package]]
@@ -1682,35 +1632,12 @@ dependencies = [
 [[package]]
 name = "moire-types"
 version = "1.0.0"
-dependencies = [
- "facet",
- "facet-value",
- "moire-trace-types 1.0.0",
-]
-
-[[package]]
-name = "moire-types"
-version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "667b2fc41e30d3b0f7d0d29e978d3f473afaf0e0be355202eead317e35ace200"
 dependencies = [
  "facet",
  "facet-value",
- "moire-trace-types 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "moire-wasm"
-version = "1.0.0"
-dependencies = [
- "async-channel",
- "async-lock",
- "event-listener",
- "futures-channel",
- "futures-util",
- "gloo-timers",
- "moire-types 1.0.0",
- "wasm-bindgen-futures",
+ "moire-trace-types",
 ]
 
 [[package]]
@@ -1725,18 +1652,8 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "gloo-timers",
- "moire-types 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moire-types",
  "wasm-bindgen-futures",
-]
-
-[[package]]
-name = "moire-wire"
-version = "1.0.0"
-dependencies = [
- "facet",
- "facet-json",
- "moire-trace-types 1.0.0",
- "moire-types 1.0.0",
 ]
 
 [[package]]
@@ -1747,8 +1664,8 @@ checksum = "bf0ec84eeb2e23a83339cf5edc9d5a3a9ec5849416bd4051951fba416ea3e0f7"
 dependencies = [
  "facet",
  "facet-json",
- "moire-trace-types 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "moire-types 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moire-trace-types",
+ "moire-types",
 ]
 
 [[package]]
@@ -2109,6 +2026,8 @@ dependencies = [
 [[package]]
 name = "roam"
 version = "7.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29d0bf0d93a7b037760849a0bff8a2eddb88e38b6a589d40f0d6015d5aa2416d"
 dependencies = [
  "facet",
  "facet-postcard",
@@ -2121,6 +2040,8 @@ dependencies = [
 [[package]]
 name = "roam-codegen"
 version = "7.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "286556da765b53498b295b179434360f089cad3233fc00681c4a693bded4c8b5"
 dependencies = [
  "facet-core",
  "heck",
@@ -2131,6 +2052,8 @@ dependencies = [
 [[package]]
 name = "roam-core"
 version = "7.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9134ff4bf4461862fc35af171833b21b99712e2ea353f4a91a138082bac5c482"
 dependencies = [
  "facet",
  "facet-core",
@@ -2139,7 +2062,7 @@ dependencies = [
  "facet-postcard",
  "facet-reflect",
  "getrandom 0.3.4",
- "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moire",
  "roam-types",
  "smallvec 1.15.1",
  "tokio",
@@ -2151,6 +2074,8 @@ dependencies = [
 [[package]]
 name = "roam-hash"
 version = "7.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab15eb35adf79b8c8c513d7e36ce791d87e20b017cd6f22044ad177de92a3a63"
 dependencies = [
  "blake3",
  "facet-core",
@@ -2161,14 +2086,18 @@ dependencies = [
 [[package]]
 name = "roam-local"
 version = "7.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c92f5153007a40b5cef997bf453d9dd9684b8a28cadbf20b7306d34c40852710"
 dependencies = [
- "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moire",
  "tokio",
 ]
 
 [[package]]
 name = "roam-macros-core"
 version = "7.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ba56909284f96e46a5b82e5a2d3199f47edcaf3fd8b112cc71b2cbd2b652852"
 dependencies = [
  "facet-cargo-toml",
  "heck",
@@ -2180,6 +2109,8 @@ dependencies = [
 [[package]]
 name = "roam-macros-parse"
 version = "7.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "702e52659c87a8852e66ef0ad7930d0e3c6de38ee842b733058b86fed0fd8ab8"
 dependencies = [
  "proc-macro2",
  "unsynn",
@@ -2188,6 +2119,8 @@ dependencies = [
 [[package]]
 name = "roam-service-macros"
 version = "7.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce49cce6f5366c3aa7096f43db7bd32f4b8bd02ef6096be997f15ec25dd55b5"
 dependencies = [
  "proc-macro2",
  "roam-macros-core",
@@ -2196,6 +2129,8 @@ dependencies = [
 [[package]]
 name = "roam-shm"
 version = "7.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49b883584d48f365d242a0b07458221ef1e51c435b4b5b1198ff2ab43b25ef85"
 dependencies = [
  "facet-postcard",
  "libc",
@@ -2211,8 +2146,10 @@ dependencies = [
 [[package]]
 name = "roam-stream"
 version = "7.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6788d43b5fcdb55962227dec3ae8aa6ff47b96b5481c0d675d29702930e3ee8"
 dependencies = [
- "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moire",
  "roam-types",
  "tokio",
 ]
@@ -2220,6 +2157,8 @@ dependencies = [
 [[package]]
 name = "roam-types"
 version = "7.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b901f47ce5aa1821ae29c5efd6df8cd131420e9dea61e4cc3b0c28a0357fcfd6"
 dependencies = [
  "bitflags 2.11.0",
  "facet",
@@ -2449,6 +2388,8 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 [[package]]
 name = "shm-primitives"
 version = "7.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b919cc18b54d63ba2d0d2a3be2df9a7e3d812eb30b169e4b03cea828ce405d8"
 dependencies = [
  "libc",
  "loom",
@@ -2458,6 +2399,8 @@ dependencies = [
 [[package]]
 name = "shm-primitives-async"
 version = "7.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a22d0d143bc547fb0f3ee02bce67f948fc839747aff1bd893af51407985ecc22"
 dependencies = [
  "libc",
  "tokio",
@@ -2569,6 +2512,8 @@ dependencies = [
 [[package]]
 name = "styx-cst"
 version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ecab1fb549ab2a0cc52b969b489cd0dd5e6968fa1e16bf965409e4103e921ce"
 dependencies = [
  "rowan",
  "styx-tokenizer",
@@ -2577,6 +2522,8 @@ dependencies = [
 [[package]]
 name = "styx-format"
 version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ed35156a5b5ecb552495b225a57e7790142a0fce9bc8b3274b599d709c6da58"
 dependencies = [
  "styx-cst",
  "styx-parse",
@@ -2586,6 +2533,8 @@ dependencies = [
 [[package]]
 name = "styx-parse"
 version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c738428c4d09db9fc578cfb22357b0ddb19cb614ed2a0811856c9c8ed4be0d7"
 dependencies = [
  "styx-tokenizer",
  "tracing",
@@ -2594,6 +2543,8 @@ dependencies = [
 [[package]]
 name = "styx-tokenizer"
 version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "751728b08f449d291f80c8f084c4f4c6268c543d41f7e8d85c70b092bcea9388"
 dependencies = [
  "tracing",
 ]
@@ -2601,6 +2552,8 @@ dependencies = [
 [[package]]
 name = "styx-tree"
 version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b75454a260a6dd281de9c387179f746026358b465e0604db7b35aadc38404f01"
 dependencies = [
  "ariadne",
  "facet-testhelpers",
@@ -2983,6 +2936,8 @@ checksum = "9fa66022bbd1ab992fad72bdedcfd07a0023b6f5ecc83d50121e39e3a3caed41"
 [[package]]
 name = "ur-taking-me-with-you"
 version = "7.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bb92a9a86a46a20b6d288adcc2a71394996b7e46727e37a1ee69771c25fe1fe"
 dependencies = [
  "libc",
  "tokio",
@@ -3064,7 +3019,7 @@ dependencies = [
  "figue",
  "indicatif",
  "libc",
- "moire 1.0.0",
+ "moire",
  "owo-colors",
  "roam-core",
  "roam-stream",
@@ -3112,7 +3067,7 @@ dependencies = [
  "facet-json",
  "jiff",
  "libc",
- "moire 1.0.0",
+ "moire",
  "tokio",
  "tracing",
 ]
@@ -3139,7 +3094,7 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
- "moire 1.0.0",
+ "moire",
  "thiserror 2.0.18",
  "tracing",
  "vx-io",
@@ -3154,7 +3109,7 @@ dependencies = [
  "dirs",
  "eyre",
  "facet",
- "moire 1.0.0",
+ "moire",
  "roam",
  "roam-core",
  "roam-local",
@@ -3205,7 +3160,7 @@ dependencies = [
  "figue",
  "jiff",
  "libc",
- "moire 1.0.0",
+ "moire",
  "tokio",
  "vx-fskit",
 ]
@@ -3250,7 +3205,7 @@ dependencies = [
  "figue",
  "jiff",
  "libc",
- "moire 1.0.0",
+ "moire",
  "roam",
  "roam-core",
  "roam-stream",
@@ -3290,7 +3245,7 @@ dependencies = [
  "futures-util",
  "hex",
  "http-body-util",
- "moire 1.0.0",
+ "moire",
  "pin-project-lite",
  "roam",
  "roam-core",
@@ -3331,7 +3286,7 @@ dependencies = [
  "async-compression",
  "camino",
  "futures-util",
- "moire 1.0.0",
+ "moire",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tar",
@@ -3378,7 +3333,7 @@ dependencies = [
  "fuse3",
  "futures-util",
  "libc",
- "moire 1.0.0",
+ "moire",
  "roam",
  "roam-core",
  "roam-shm",
@@ -3441,7 +3396,7 @@ dependencies = [
  "figue",
  "futures-util",
  "libc",
- "moire 1.0.0",
+ "moire",
  "owo-colors",
  "roam",
  "roam-core",
@@ -3471,7 +3426,7 @@ dependencies = [
  "facet",
  "figue",
  "libc",
- "moire 1.0.0",
+ "moire",
  "petgraph",
  "picante",
  "roam",
