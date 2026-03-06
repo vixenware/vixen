@@ -28,7 +28,7 @@ This variant assumes:
 - list literals use `[...]`
 - record literals use `{...}`
 - immutable local binding uses `name = expr`
-- mutable local write uses `name! = expr`
+- mutable local introduction or shadowing uses `name! = expr`
 - loop headers use a binding arrow instead of `in`
 
 This is trying to minimize grammar by making more constructs share the same
@@ -104,7 +104,7 @@ What feels good:
 
 What feels risky:
 
-- `name! = expr` needs a very clear write/read rule
+- `name!` needs a very clear "this binding is mutable" rule
 - `emit::node{...}` blurs the line between call and literal in a way that needs
   careful parsing rules
 
@@ -195,7 +195,7 @@ fn binary_crates(graph: CrateGraph) -> [CrateNode] do
 
   for(krate <- graph.crates) do
     if(krate.crate_type == @bin) do
-      out! = out.push(krate)
+      out!.push(krate)
     end
   end
 
@@ -221,7 +221,8 @@ end
 
 What this shows:
 
-- `out! = []` is compact and visually loud in the right way
+- `out! = []` introduces a mutable local without another keyword
+- `out!.push(krate)` reads like mutation of that local binding
 - immutable bindings stay quiet while mutable writes stand out
 - method calls can exist without defining the whole language around them
 
@@ -308,7 +309,7 @@ So my read is:
 - `do/end` for all blocks
 - payload-oriented headers and calls
 - `=` for immutable binding
-- `name! = expr` for mutable local write
+- `name! = expr` for mutable local introduction/shadowing
 - `for(pattern <- iterable)` instead of `for pattern in iterable`
 - `(...)` and `{...}` as the only two real payload shapes
 - tags for compact domain variants
@@ -328,8 +329,8 @@ This is not "S-expressions but not really", but it is moving toward:
 
 ## What Still Feels Open
 
-- whether `name! = expr` should declare-and-update, or only update after an
-  earlier introduction
+- whether `name!.push(x)` should be the canonical mutation sugar, or whether
+  mutation should stay as explicit rebinding
 - whether `if(condition)` wants mandatory parens
 - whether `match` arms want `=>` or another shape
 - whether method mutation is okay as surface syntax
@@ -351,5 +352,5 @@ The strongest moves are:
 If this branch is worth continuing, the next comparison should probably be:
 
 1. `if(cond) do` vs `if cond do`
-2. `name! = expr` as declare-and-update vs some other mutable-binding rule
+2. `name!.push(x)` vs explicit rebinding
 3. `emit::node{...}` vs `emit::node(Node{...})`

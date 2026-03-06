@@ -21,6 +21,17 @@ Current intent:
 - do **not** treat `vx-plan`'s current `vx_lang` prototype as the new source of
   truth
 
+Recent active exploration has moved in a few non-baseline directions:
+
+- away from `do/end`
+- away from `:=`
+- toward expression closures for collection transforms
+- toward allowing `?` inside closures with propagation to the enclosing rule
+- toward treating `Type{...}` and `callee{...}` as one named-payload shape
+- toward `name! = expr` as mutable-binding introduction/shadowing syntax
+
+Those ideas are still exploratory, but they are the live frontier now.
+
 ## Overall Direction
 
 The language should feel Rust-like, but with sharp limits similar in spirit to

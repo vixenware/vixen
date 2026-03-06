@@ -1,40 +1,72 @@
 # Vixen Program Sketches: Functional Variant
 
-This note explores a different turn from the earlier grammar sketches.
+This note explores a more functional direction for Vixen.
 
-The question here is not:
+The point is not "replace all control flow with combinators". The point is:
 
-- how do we make `for` cleaner?
+- make collection transforms first-class
+- let rule code read more like graph/data derivation
+- avoid encoding obvious transforms as manual accumulation loops
 
-It is:
+This branch has moved away from the earlier assumptions:
 
-- what if Vixen wants collection transforms, closures, and expression-oriented
-  rule code badly enough that imperative loops stop being the center of the
-  language?
-
-This is closer to:
-
-- a typed rule DSL
-- with functional collection programming
-- still constrained and deterministic
-- but less statement-driven
+- no `do/end`
+- no `:=`
+- no block closures in v0
 
 ## Working Assumptions
 
 This variant assumes:
 
-- blocks still use `do ... end`
-- closures exist
-- the main closure forms are:
-  - expression closure: `|x| expr`
-  - block closure: `|x| do ... end`
+- ordinary blocks still use `{ ... }`
+- closures exist in v0
+- v0 closures are expression closures only: `|x| expr`
 - collection APIs like `map`, `filter`, `flat_map`, `fold`, and `each` are
   first-class
 - recursion is still out
-- higher-order collection operations are still bounded by the input collection
+- higher-order collection operations are still bounded by input collections
+- `?` is allowed inside closures
 
-This is trying to keep the language non-Turing-complete while letting it feel
-much more like "transform data into a plan".
+The important non-Rust rule is:
+
+- `?` inside a closure propagates out of the enclosing fallible rule, not out
+  of the closure itself
+
+That is possible because Vixen does not need Rust's "closures are just ordinary
+functions" rule.
+
+## Binding and Mutation Surface
+
+Current bias for this branch:
+
+```text
+node_id = format::compile_node_id(name, ty)
+nodes! = []
+nodes!.push(node)
+```
+
+With the reading:
+
+- `name = expr` introduces an immutable binding
+- `name! = expr` introduces a mutable binding, possibly by shadowing
+- `name!.method(args)` is sugar for rebinding the current mutable `name`
+
+So:
+
+```text
+nodes! = []
+nodes!.push(node)
+nodes!.push(other)
+```
+
+behaves like repeated rebinding of the same mutable local, without needing
+`let mut` or `nodes = nodes.push(...)`.
+
+This keeps:
+
+- immutable bindings quiet
+- mutation explicit
+- `!` attached to the mutable binding, not to method names
 
 ## Closure Surface
 
@@ -42,328 +74,244 @@ The smallest plausible closure surface is probably:
 
 ```text
 |krate| krate.crate_type == @bin
-|krate| Node{ ... }
-|left, right| left.merge(right)
+|krate| make_compile_node(krate)
+|plan, node| plan.add_node(node)
 ```
 
-And when a body wants multiple steps:
+This branch deliberately avoids multi-statement closure bodies in v0.
+
+If a transform needs multiple steps, the current bias is:
+
+- extract a named helper function
+- or fall back to imperative control flow
+
+That keeps closures simple while still unlocking the highest-value cases.
+
+## Sketch 1: Filter directly
 
 ```text
-|krate| do
-  node_id = format::compile_node_id(
-    krate.crate_name,
-    krate.crate_type,
-  )
-
-  Node{
-    id: node_id,
-    kind: @action,
-    label: `compile ${krate.crate_name}`,
-  }
-end
+fn binary_crates(graph: CrateGraph) -> [CrateNode] {
+  graph.crates.filter(|krate| krate.crate_type == @bin)
+}
 ```
 
-This is the first place where `do/end` really helps. It gives closures a block
-form without reusing braces.
+This is still the clearest argument for the whole branch.
 
-## Sketch 1: Plan compile nodes by mapping first, emitting second
+Compared to the imperative form, this is simply closer to what the program
+means.
+
+## Sketch 2: Map nodes, then emit them
 
 ```text
-fn plan_crates(graph: CrateGraph) -> Unit do
+fn plan_crates(graph: CrateGraph) -> Unit {
   graph.crates
     .filter(|krate| krate.crate_type == @bin)
-    .map(|krate| do
-      node_id = format::compile_node_id(
-        krate.crate_name,
-        krate.crate_type,
-      )
+    .map(|krate| make_compile_node(krate))
+    .each(|node| emit::node{node})
+}
 
-      Node{
-        id: node_id,
-        kind: @action,
-        label: `compile ${krate.crate_name}`,
-        metadata: {
-          crate_name: krate.crate_name,
-          crate_type: "bin",
-        },
-      }
-    end)
-    .each(|node| emit::node{ node: node })
-end
+fn make_compile_node(krate: CrateNode) -> Node {
+  Node{
+    id: format::compile_node_id(krate.crate_name, krate.crate_type),
+    kind: @action,
+    label: `compile ${krate.crate_name}`,
+    metadata: {
+      crate_name: krate.crate_name,
+      crate_type: "bin",
+    },
+  }
+}
 ```
 
 What this shows:
 
-- the rule reads as a transformation pipeline, not an instruction list
-- `filter` and `map` match the problem better than nested `if` inside `for`
-- `emit::node{...}` still works as the side-effect boundary
+- the rule reads as selection, derivation, emission
+- constructor calls and named-payload calls coexist naturally
+- expression closures are enough if helper extraction is cheap
 
-What feels good:
-
-- this is much closer to "what the program means"
-- the sequence of operations is easier to scan than the imperative version
-
-What feels risky:
-
-- the surface now depends heavily on closures being pleasant
-- long chains may want a pipeline operator later
-
-## Sketch 2: Plan edges with `flat_map`
+## Sketch 3: `?` inside closures, but not Rust-style
 
 ```text
-fn plan_edges(graph: CrateGraph) -> Unit do
+fn plan_edges(graph: CrateGraph) -> Result<Unit, InputError> {
   graph.crates
-    .flat_map(|krate| do
-      compile_id = format::compile_node_id(
-        krate.crate_name,
-        krate.crate_type,
-      )
+    .flat_map(|krate| edges_for_crate(graph, krate)?)
+    .each(|edge| emit::edge{edge})
 
-      krate.deps.map(|dep| do
-        dep_krate = graph.lookup_crate(dep.crate_id)?
-        dep_id = format::compile_node_id(
-          dep_krate.crate_name,
-          dep_krate.crate_type,
-        )
+  Ok(())
+}
 
-        Edge{
-          from: dep_id,
-          to: compile_id,
-          kind: @always,
-          metadata: {},
-        }
-      end)
-    end)
-    .each(|edge| emit::edge{ edge: edge })
-end
+fn edges_for_crate(graph: CrateGraph, krate: CrateNode) -> Result<[Edge], InputError> {
+  compile_id = format::compile_node_id(krate.crate_name, krate.crate_type)
+
+  krate.deps.map(|dep| edge_for_dep(graph, compile_id, dep)?)
+}
+
+fn edge_for_dep(graph: CrateGraph, compile_id: NodeId, dep: DepEdge) -> Result<Edge, InputError> {
+  dep_krate = graph.lookup_crate(dep.crate_id)?
+  dep_id = format::compile_node_id(dep_krate.crate_name, dep_krate.crate_type)
+
+  Ok(Edge{
+    from: dep_id,
+    to: compile_id,
+    kind: @always,
+    metadata: {},
+  })
+}
 ```
 
 What this shows:
 
-- nested graph expansion is a real use case for `flat_map`
-- closure blocks make local helper bindings okay
-- the program looks more like graph derivation than step-by-step mutation
+- expression closures can still be useful in fallible pipelines
+- `?` inside `flat_map` and `map` closures can mean what users actually want
+- helper extraction keeps closure syntax small without losing the functional
+  shape
 
-What feels risky:
+This is the main place where Vixen can improve on Rust instead of copying it.
 
-- this may be too abstract for some rules
-- if `?` is allowed inside closures, return behavior needs to be very clear
+## Sketch 4: Validation stays control-flow-shaped
 
-## Sketch 3: Validate manifest-derived input as a diagnostic pipeline
+Not everything should be a pipeline.
 
 ```text
-fn validate_registry_dependencies(graph: CrateGraph) -> Result<Unit, InputError> do
-  graph.crates
-    .map(|krate| match(krate.source) do
-      @registry{name, version, checksum} => do
+fn validate_registry_dependencies(graph: CrateGraph) -> Result<Unit, InputError> {
+  for krate in graph.crates {
+    match krate.source {
+      @registry{name, version, checksum} => {
         exists = cargo::registry_package_exists(name, version)?
-        if(!exists) do
-          Err{
+        if !exists {
+          return Err{
             kind: @missing_registry_crate,
             name: name,
             version: version,
           }
-        end else do
-          valid = cargo::registry_checksum_matches(name, version, checksum)?
-          if(!valid) do
-            Err{
-              kind: @checksum_mismatch,
-              name: name,
-              version: version,
-            }
-          end else do
-            Ok(())
-          end
-        end
-      end
+        }
 
-      @path{} => Ok(())
-    end)
-    .collect_results()?
+        valid = cargo::registry_checksum_matches(name, version, checksum)?
+        if !valid {
+          return Err{
+            kind: @checksum_mismatch,
+            name: name,
+            version: version,
+          }
+        }
+      }
+      @path{} => {}
+    }
+  }
 
   Ok(())
-end
+}
 ```
 
-What this shows:
+This is the important hybrid point:
 
-- validation logic can still be expression-oriented
-- a helper like `collect_results()` starts to matter
-- `match` as an expression becomes more important than `match` as a statement
+- transforms should look functional when they are transforms
+- validation/error-heavy logic can stay imperative
 
-What feels good:
+The language does not need to be ideologically pure.
 
-- this makes "validate every crate" read like validation, not control flow
+## Sketch 5: Mutable locals with bang-binding sugar
 
-What feels risky:
-
-- this may be pushing too hard toward combinator-heavy code
-- `if ... else do ... end` needs a clean expression form if this branch is real
-
-## Sketch 4: Build a filtered list directly
+Some rules will still want small local accumulators.
 
 ```text
-fn binary_crates(graph: CrateGraph) -> [CrateNode] do
-  graph.crates.filter(|krate| krate.crate_type == @bin)
-end
+fn node_metadata(krate: CrateNode) -> {String: String} {
+  metadata! = {}
+  metadata!.insert("crate_name", krate.crate_name)
+  metadata!.insert("crate_type", "bin")
+  metadata
+}
 ```
 
-This is the clearest argument for the whole branch.
-
-Compared to the earlier imperative sketches, this is simply the right shape for
-the problem.
-
-## Sketch 5: Build a plan fragment with `fold`
+This is much nicer than:
 
 ```text
-fn plan_fragment(graph: CrateGraph) -> RulePlan do
-  graph.crates
-    .filter(|krate| krate.crate_type == @bin)
-    .map(|krate| Node{
-      id: format::compile_node_id(
-        krate.crate_name,
-        krate.crate_type,
-      ),
-      kind: @action,
-      label: `compile ${krate.crate_name}`,
-      metadata: {
-        crate_name: krate.crate_name,
-        crate_type: "bin",
-      },
-    })
-    .fold(RulePlan::new(), |plan, node| plan.add_node(node))
-end
+metadata = {}
+metadata = metadata.insert(...)
+metadata = metadata.insert(...)
 ```
 
-What this shows:
+and does not require making mutation the default.
 
-- if Vixen ever wants plan fragments as values, `fold` is the natural tool
-- value semantics and functional transforms fit each other well
+## Sketch 6: Optional pipeline operator
 
-What feels risky:
-
-- `fold` is powerful, but it can also become a dumping ground for logic that
-  should have stayed clearer
-
-## Sketch 6: Functional emission with a pipeline operator
-
-If the language leans this way, it may want a pipeline operator badly.
+If this branch becomes central, a pipeline operator may earn its keep:
 
 ```text
-fn plan_crates(graph: CrateGraph) -> Unit do
+fn plan_crates(graph: CrateGraph) -> Unit {
   graph.crates
     |> filter(|krate| krate.crate_type == @bin)
-    |> map(|krate| Node{
-         id: format::compile_node_id(
-           krate.crate_name,
-           krate.crate_type,
-         ),
-         kind: @action,
-         label: `compile ${krate.crate_name}`,
-       })
-    |> each(|node| emit::node{ node: node })
-end
+    |> map(|krate| make_compile_node(krate))
+    |> each(|node| emit::node{node})
+}
 ```
 
-This is not necessary, but it may become the cleanest surface if the language
-is genuinely pipeline-oriented.
+This is not necessary for v0, but it is the first extra operator that feels
+plausibly justified by the domain.
 
-## What This Variant Seems To Want
+## Why This Branch Fits Vixen Well
 
-- closures as real surface syntax
-- `match` and `if` usable as expressions, not just statements
-- collection combinators as core language affordances
-- side effects isolated at the edge (`emit`, diagnostics, host queries)
-- maybe a pipeline operator
-- maybe fewer explicit local bindings overall
-
-This is a more ambitious language than the earlier minimal-form sketch.
-
-It is less "small control-flow DSL" and more "typed transformational language".
-
-## Why This May Actually Fit Vixen Better
-
-Vixen rules are often about:
+Vixen rule logic is often about:
 
 - selecting subsets
-- rewriting graph-shaped data
-- deriving nodes and edges
-- validating collections of related inputs
+- deriving nodes from inputs
+- expanding dependency edges
+- transforming graph data
 
 That is naturally expressed as:
 
-- filter
-- map
-- flat_map
-- fold
-- partition
-- collect_results
+- `filter`
+- `map`
+- `flat_map`
+- `fold`
+- `each`
 
-not just as:
+not only as:
 
 - `for`
 - `if`
 - mutable locals
 
-So if the language is meant to describe rule logic rather than systems code,
-this branch may be closer to the true center.
+So the functional branch is not aesthetic for its own sake. It matches the
+shape of the work.
 
-## The Main New Costs
+## The Main Costs
 
-- closures must exist
-- capture semantics must be designed
-- `?` inside closures must be specified carefully
-- the language may become more abstract than some users want
-- good names for combinators matter a lot
+- closures are now in v0
+- closure typing needs a real design
+- capture semantics need a design
+- `?` propagation through closures becomes part of the language contract
+- method-like rebinding sugar for `name!.push(x)` needs explicit rules
 
-And most importantly:
-
-- this branch reopens the decision to ban closures in v0
-
-## Binding Surface in This Branch
-
-If this branch is real, I do **not** think it wants `:=`.
-
-The quieter rule is probably:
-
-```text
-node_id = format::compile_node_id(name, ty)
-nodes! = []
-nodes! = nodes.push(node)
-```
-
-That gives:
-
-- plain `=` for immutable binding
-- `name! = expr` for mutable local write
-- no `let`
-- no `let mut`
-- no separate binding operator
-
-That feels more in tune with the functional bias of this branch:
-
-- immutable locals disappear into the background
-- mutation is rare and visually loud
+Those are real costs. They are not free.
 
 ## Current Read
 
-This feels more like a real candidate than I expected.
+This still feels stronger than the purely imperative branches.
 
-Not because imperative code is bad, but because the actual Vixen problems are
-heavily collection-transform and graph-derivation shaped.
+But the good version is not:
+
+- everything becomes a pipeline
+
+It is:
+
+- use functional transforms where the problem is a transform
+- use ordinary control flow where the problem is control flow
 
 My strongest current take is:
 
-- if Vixen goes functional, closures become more justified than methods
-- if Vixen goes functional, plain `=` is probably a better immutable binding
-  surface than `:=`
+- expression closures belong earlier than block closures
+- `?` inside closures is worth designing properly
+- `name!.push(x)`-style sugar is better than `:=`
+- `emit::node{...}` remains one of the strongest surface ideas across all
+  branches
 
-The next questions for this branch are probably:
+The next good questions for this branch are:
 
-1. What is the smallest closure syntax that still feels good?
-2. Is `if` an expression, a statement, or both?
-3. Does the language want a pipeline operator?
-4. Does `emit` stay side-effectful, or do we prefer returning fragments and
-   combining them?
-5. Should `name! = expr` declare-and-update, or should mutable bindings have a
-   stricter introduction rule?
+1. Should `if` remain at all, or should boolean branching collapse into `match`?
+2. Does `name!.push(x)` feel right, or is a different mutable-binding sugar
+   cleaner?
+3. Should constructors and named-payload calls be unified explicitly in the
+   language model?
+4. Does the language want a pipeline operator in v0, or is method chaining
+   enough?
