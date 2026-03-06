@@ -50,7 +50,7 @@ And when a body wants multiple steps:
 
 ```text
 |krate| do
-  node_id := format::compile_node_id(
+  node_id = format::compile_node_id(
     krate.crate_name,
     krate.crate_type,
   )
@@ -73,7 +73,7 @@ fn plan_crates(graph: CrateGraph) -> Unit do
   graph.crates
     .filter(|krate| krate.crate_type == @bin)
     .map(|krate| do
-      node_id := format::compile_node_id(
+      node_id = format::compile_node_id(
         krate.crate_name,
         krate.crate_type,
       )
@@ -114,14 +114,14 @@ What feels risky:
 fn plan_edges(graph: CrateGraph) -> Unit do
   graph.crates
     .flat_map(|krate| do
-      compile_id := format::compile_node_id(
+      compile_id = format::compile_node_id(
         krate.crate_name,
         krate.crate_type,
       )
 
       krate.deps.map(|dep| do
-        dep_krate := graph.lookup_crate(dep.crate_id)?
-        dep_id := format::compile_node_id(
+        dep_krate = graph.lookup_crate(dep.crate_id)?
+        dep_id = format::compile_node_id(
           dep_krate.crate_name,
           dep_krate.crate_type,
         )
@@ -156,7 +156,7 @@ fn validate_registry_dependencies(graph: CrateGraph) -> Result<Unit, InputError>
   graph.crates
     .map(|krate| match(krate.source) do
       @registry{name, version, checksum} => do
-        exists := cargo::registry_package_exists(name, version)?
+        exists = cargo::registry_package_exists(name, version)?
         if(!exists) do
           Err{
             kind: @missing_registry_crate,
@@ -164,7 +164,7 @@ fn validate_registry_dependencies(graph: CrateGraph) -> Result<Unit, InputError>
             version: version,
           }
         end else do
-          valid := cargo::registry_checksum_matches(name, version, checksum)?
+          valid = cargo::registry_checksum_matches(name, version, checksum)?
           if(!valid) do
             Err{
               kind: @checksum_mismatch,
@@ -320,6 +320,31 @@ And most importantly:
 
 - this branch reopens the decision to ban closures in v0
 
+## Binding Surface in This Branch
+
+If this branch is real, I do **not** think it wants `:=`.
+
+The quieter rule is probably:
+
+```text
+node_id = format::compile_node_id(name, ty)
+nodes! = []
+nodes! = nodes.push(node)
+```
+
+That gives:
+
+- plain `=` for immutable binding
+- `name! = expr` for mutable local write
+- no `let`
+- no `let mut`
+- no separate binding operator
+
+That feels more in tune with the functional bias of this branch:
+
+- immutable locals disappear into the background
+- mutation is rare and visually loud
+
 ## Current Read
 
 This feels more like a real candidate than I expected.
@@ -330,6 +355,8 @@ heavily collection-transform and graph-derivation shaped.
 My strongest current take is:
 
 - if Vixen goes functional, closures become more justified than methods
+- if Vixen goes functional, plain `=` is probably a better immutable binding
+  surface than `:=`
 
 The next questions for this branch are probably:
 
@@ -338,3 +365,5 @@ The next questions for this branch are probably:
 3. Does the language want a pipeline operator?
 4. Does `emit` stay side-effectful, or do we prefer returning fragments and
    combining them?
+5. Should `name! = expr` declare-and-update, or should mutable bindings have a
+   stricter introduction rule?

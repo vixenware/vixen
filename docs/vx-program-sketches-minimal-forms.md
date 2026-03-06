@@ -27,8 +27,8 @@ This variant assumes:
 - grouping uses `(...)`
 - list literals use `[...]`
 - record literals use `{...}`
-- local binding uses `:=`
-- mutable local binding uses `mut name := expr`
+- immutable local binding uses `name = expr`
+- mutable local write uses `name! = expr`
 - loop headers use a binding arrow instead of `in`
 
 This is trying to minimize grammar by making more constructs share the same
@@ -40,7 +40,7 @@ The language starts to look like this:
 
 ```text
 fn name(params) -> Return do
-  binding := expr
+  binding = expr
 
   if(condition) do
     ...
@@ -63,7 +63,7 @@ What is nice about this:
 
 - `fn`, `if`, `for`, and `match` all take one header payload and one block
 - `for` no longer has its own special English grammar
-- `let` becomes optional as a surface keyword
+- `let` disappears as a surface keyword
 - calls and control forms both become "keyword/operator + payload + block"
 
 ## Sketch 1: Plan compile nodes
@@ -72,7 +72,7 @@ What is nice about this:
 fn plan_crates(graph: CrateGraph) -> Unit do
   for(krate <- graph.crates) do
     if(krate.crate_type == @bin) do
-      node_id := format::compile_node_id(
+      node_id = format::compile_node_id(
         krate.crate_name,
         krate.crate_type,
       )
@@ -95,7 +95,7 @@ What this shows:
 
 - `for(krate <- graph.crates)` is much more compact than `for krate in ...`
 - `emit::node{...}` makes named-argument calls feel first-class
-- `:=` carries binding without needing `let`
+- plain `=` carries immutable binding without needing `let`
 
 What feels good:
 
@@ -104,7 +104,7 @@ What feels good:
 
 What feels risky:
 
-- `:=` is a real departure from Rust
+- `name! = expr` needs a very clear write/read rule
 - `emit::node{...}` blurs the line between call and literal in a way that needs
   careful parsing rules
 
@@ -113,14 +113,14 @@ What feels risky:
 ```text
 fn plan_edges(graph: CrateGraph) -> Unit do
   for(krate <- graph.crates) do
-    compile_id := format::compile_node_id(
+    compile_id = format::compile_node_id(
       krate.crate_name,
       krate.crate_type,
     )
 
     for(dep <- krate.deps) do
-      dep_krate := graph.lookup_crate(dep.crate_id)?
-      dep_id := format::compile_node_id(
+      dep_krate = graph.lookup_crate(dep.crate_id)?
+      dep_id = format::compile_node_id(
         dep_krate.crate_name,
         dep_krate.crate_type,
       )
@@ -149,7 +149,7 @@ fn validate_registry_dependencies(graph: CrateGraph) -> Result<Unit, InputError>
   for(krate <- graph.crates) do
     match(krate.source) do
       @registry{name, version, checksum} => do
-        exists := cargo::registry_package_exists(name, version)?
+        exists = cargo::registry_package_exists(name, version)?
         if(!exists) do
           return Err{
             kind: @missing_registry_crate,
@@ -158,7 +158,7 @@ fn validate_registry_dependencies(graph: CrateGraph) -> Result<Unit, InputError>
           }
         end
 
-        valid := cargo::registry_checksum_matches(name, version, checksum)?
+        valid = cargo::registry_checksum_matches(name, version, checksum)?
         if(!valid) do
           return Err{
             kind: @checksum_mismatch,
@@ -191,11 +191,11 @@ What feels risky:
 
 ```text
 fn binary_crates(graph: CrateGraph) -> [CrateNode] do
-  mut out := []
+  out! = []
 
   for(krate <- graph.crates) do
     if(krate.crate_type == @bin) do
-      out.push(krate)
+      out! = out.push(krate)
     end
   end
 
@@ -207,7 +207,7 @@ Alternative if collection mutation should not rely on method syntax:
 
 ```text
 fn binary_crates(graph: CrateGraph) -> [CrateNode] do
-  mut out := []
+  out! = []
 
   for(krate <- graph.crates) do
     if(krate.crate_type == @bin) do
@@ -221,8 +221,8 @@ end
 
 What this shows:
 
-- `mut out := []` is compact and clear
-- the binding/operator story is more uniform than `let mut`
+- `out! = []` is compact and visually loud in the right way
+- immutable bindings stay quiet while mutable writes stand out
 - method calls can exist without defining the whole language around them
 
 ## Sketch 5: Construct a compile node
@@ -272,7 +272,7 @@ This is much cleaner than:
 - parens for others
 - special statement grammar for a third category
 
-## Why `let` Feels Weak Here
+## Why `let` and `:=` Feel Weak Here
 
 If the language goes in this direction, `let` is one of the least justified
 pieces of Rust carryover.
@@ -287,26 +287,28 @@ let mut out = []
 vs:
 
 ```text
-node_id := ...
-mut out := []
+node_id = ...
+out! = []
 ```
 
 The second version:
 
 - is shorter
-- makes binding look like one uniform form
+- makes immutability the quiet default
+- makes mutability explicit at the write site
 - does not require a separate declaration keyword
 
 So my read is:
 
 - `fn`, `if`, `for`, `match`, `return` still earn their keep
-- `let` probably does not
+- `let` and `:=` probably do not
 
 ## What This Variant Seems To Want
 
 - `do/end` for all blocks
 - payload-oriented headers and calls
-- `:=` for binding
+- `=` for immutable binding
+- `name! = expr` for mutable local write
 - `for(pattern <- iterable)` instead of `for pattern in iterable`
 - `(...)` and `{...}` as the only two real payload shapes
 - tags for compact domain variants
@@ -322,11 +324,12 @@ This is not "S-expressions but not really", but it is moving toward:
 - the forms feel more coherent as a language
 - `for(... <- ...)` is much easier to justify than `for ... in ... do`
 - `emit::node{...}` is probably the cleanest emission surface so far
-- dropping `let` may actually simplify the language meaningfully
+- dropping `let` and `:=` may actually simplify the language meaningfully
 
 ## What Still Feels Open
 
-- whether `:=` is the right binding operator
+- whether `name! = expr` should declare-and-update, or only update after an
+  earlier introduction
 - whether `if(condition)` wants mandatory parens
 - whether `match` arms want `=>` or another shape
 - whether method mutation is okay as surface syntax
@@ -341,11 +344,12 @@ not just a styling preference.
 The strongest moves are:
 
 - `do/end`
-- `:=`
+- plain `=` for immutable bindings
+- `name! = expr` for mutable writes
 - one payload rule for calls and headers
 
 If this branch is worth continuing, the next comparison should probably be:
 
 1. `if(cond) do` vs `if cond do`
-2. `node_id := ...` vs `name = ...` with declaration inferred from scope
+2. `name! = expr` as declare-and-update vs some other mutable-binding rule
 3. `emit::node{...}` vs `emit::node(Node{...})`
