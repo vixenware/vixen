@@ -170,41 +170,54 @@ struct Fact {
 }
 
 // Rust domain types (provided by the rust rule pack)
-struct CrateId { value: String }
+//
+// These are simplified projections of the host model, not 1:1 mirrors.
+// The host types (vx_rs::CrateNode, vx_rs::CrateGraph, etc.) carry
+// implementation details (blake3 CrateId hashes, absolute paths, build
+// script output slots) that rule programs do not need. The rule-language
+// types expose the planning-relevant subset.
 
-enum CrateType {
+struct CrateId { value: String }     // host: CrateId(Blake3Hash), projected as hex string
+
+enum CrateType {                     // host: vx_rs::CrateType (currently Lib | Bin)
     Lib,
     Bin,
-    ProcMacro,
-    CDylib,
-    StaticLib,
 }
 
-struct Crate {
+enum CrateSource {                   // host: vx_rs::CrateSource
+    Path { workspace_rel: String },
+    Registry { name: String, version: String, checksum: String },
+}
+
+struct CrateNode {                   // host: vx_rs::CrateNode (subset)
     id: CrateId,
-    name: String,
-    version: String,
+    package_name: String,
+    crate_name: String,
+    source: CrateSource,
     edition: String,
     crate_type: CrateType,
-    deps: List<CrateDep>,
+    deps: List<DepEdge>,
 }
 
-struct CrateDep {
-    crate_id: CrateId,
+struct DepEdge {                     // host: vx_rs::DepEdge
     extern_name: String,
+    crate_id: CrateId,
 }
 
-struct CrateGraph {
-    root: CrateId,
-    crates: List<Crate>,
-    topo: List<CrateId>,
+struct CrateGraph {                  // host: vx_rs::CrateGraph (subset)
+    root_crate: CrateId,
+    crates: List<CrateNode>,
+    topo_order: List<CrateId>,
 }
 ```
 
-These types are **the same shape as the Rust structs** they model. A `Crate` in
-the rule language mirrors `vx_rs::CrateGraph::Crate`. This is deliberate — the
-type system is a projection of the host's domain model, not an independent
-invention.
+These types are **simplified projections** of the host model, not 1:1 mirrors.
+The host carries implementation details (blake3 hashes as `CrateId`, absolute
+`Utf8PathBuf` paths, mutable `build_script_output` slots) that rule programs
+should not see. The rule-language types expose only the planning-relevant fields
+— enough to iterate crates, inspect their types and dependencies, and emit the
+right graph nodes. When new host fields become planning-relevant (e.g.
+`build_script_rel` for build-script rules), the projection grows.
 
 ### Expressions
 
@@ -219,47 +232,46 @@ NodeKind::Action
 
 // Let bindings (type inferred from RHS)
 let graph: CrateGraph = rust.crate_graph()
-let root: Crate = rust.root(graph)
+let root: CrateNode = rust.root(graph)
 
 // Control flow
-if crate.crate_type == CrateType::Bin {
+if krate.crate_type == CrateType::Bin {
     emit.node(Node {
-        id: NodeId { value: str.cat("compile-bin:", crate.name) },
+        id: NodeId { value: str.cat("compile-bin:", krate.crate_name) },
         kind: NodeKind::Action,
-        label: str.cat("compile ", crate.name),
-        metadata: {"crate_name": crate.name, "crate_type": "bin"},
+        label: str.cat("compile ", krate.crate_name),
+        metadata: {"crate_name": krate.crate_name, "crate_type": "bin"},
     })
 }
 
 // Iteration
-for crate in closure {
+for krate in closure {
     emit.node(Node {
-        id: NodeId { value: str.cat("compile-rlib:", crate.name) },
+        id: NodeId { value: str.cat("compile-rlib:", krate.crate_name) },
         kind: NodeKind::Action,
-        label: str.cat("compile ", crate.name),
-        metadata: {"crate_name": crate.name, "crate_type": "lib"},
+        label: str.cat("compile ", krate.crate_name),
+        metadata: {"crate_name": krate.crate_name, "crate_type": "lib"},
     })
 }
 
 // Match (enum destructuring)
-match crate.crate_type {
-    CrateType::Bin => plan_bin(crate),
-    CrateType::Lib => plan_lib(crate),
-    _ => {},
+match krate.crate_type {
+    CrateType::Bin => plan_bin(krate),
+    CrateType::Lib => plan_lib(krate),
 }
 
-// Field access
-crate.name
-crate.deps.len()
+// Field access (struct fields only, no method calls)
+krate.crate_name
+list.len(krate.deps)
 
-// Function definitions
-fn plan_compile(crate: Crate, profile: String) -> Unit {
-    let node_id: NodeId = NodeId { value: str.cat("compile:", crate.name) }
+// Function definitions (return type required)
+fn plan_compile(krate: CrateNode, profile: String) -> Unit {
+    let node_id: NodeId = NodeId { value: str.cat("compile:", krate.crate_name) }
     emit.node(Node {
         id: node_id,
         kind: NodeKind::Action,
-        label: str.cat("compile ", crate.name),
-        metadata: {"crate_name": crate.name, "crate_type": crate.crate_type.as_str()},
+        label: str.cat("compile ", krate.crate_name),
+        metadata: {"crate_name": krate.crate_name, "crate_type": "lib"},
     })
 }
 ```
@@ -276,9 +288,9 @@ emit.fact(fact: Fact)
 
 // Rust domain queries — return typed domain structs
 rust.crate_graph() -> CrateGraph
-rust.root(graph: CrateGraph) -> Crate
-rust.select(graph: CrateGraph, name: String, crate_type: CrateType) -> List<Crate>
-rust.transitive_closure(graph: CrateGraph, roots: List<Crate>) -> List<Crate>
+rust.root(graph: CrateGraph) -> CrateNode
+rust.select(graph: CrateGraph, name: String, crate_type: CrateType) -> List<CrateNode>
+rust.transitive_closure(graph: CrateGraph, roots: List<CrateNode>) -> List<CrateNode>
 
 // Environment (capability-gated)
 env.profile() -> String
