@@ -272,6 +272,7 @@ impl NonBlockFuseConnection {
     }
 
     fn set_fd_non_blocking(fd: RawFd) -> io::Result<()> {
+        let fd = unsafe { BorrowedFd::borrow_raw(fd) };
         let flags = nix::fcntl::fcntl(fd, FcntlArg::F_GETFL).map_err(io::Error::from)?;
         let flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
         nix::fcntl::fcntl(fd, FcntlArg::F_SETFL(flags)).map_err(io::Error::from)?;
@@ -279,6 +280,7 @@ impl NonBlockFuseConnection {
     }
 
     fn set_fd_cloexec(fd: RawFd) -> io::Result<()> {
+        let fd = unsafe { BorrowedFd::borrow_raw(fd) };
         let flags = nix::fcntl::fcntl(fd, FcntlArg::F_GETFD).map_err(io::Error::from)?;
         let flags = FdFlag::from_bits_truncate(flags) | FdFlag::FD_CLOEXEC;
         nix::fcntl::fcntl(fd, FcntlArg::F_SETFD(flags)).map_err(io::Error::from)?;
