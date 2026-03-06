@@ -160,6 +160,15 @@ too little punctuation can become muddy very quickly.
 So the lesson is "strip redundant punctuation", not "strip punctuation
 everywhere".
 
+There is a specific version of this problem that matters a lot for Vixen:
+
+- if `{}` is used for both blocks and object/record literals
+- and commas/colons/semicolons are all weakened
+
+then the language either needs meaningful whitespace, or another strong visual
+disambiguator. Parser context alone is not enough; the surface has to stay easy
+for humans to scan.
+
 ### 3. Styx's exact value model
 
 Styx has tags, payloads, implicit unit, and schema-driven interpretation.

@@ -321,6 +321,51 @@ That is no longer "Rust but smaller". It is more like:
   language design
 - if expressions get any richer, this style could become muddy quickly
 
+## The Main Structural Problem
+
+The biggest objection to this whole direction is not tags or newline-separated
+statements. It is brace ambiguity.
+
+If Vixen keeps:
+
+- `{ ... }` for control-flow/function scopes
+- `{ ... }` for object/record literals
+
+and also removes enough commas/semicolons/colons, then the surface gets muddy
+fast.
+
+For example, this is not visually stable enough:
+
+```text
+if krate.crate_type == @bin {
+    emit::node @Node{
+        id node_id
+        kind @action
+    }
+}
+```
+
+The parser may be able to distinguish those forms from context. That is not the
+real issue. The real issue is that humans have to parse it too.
+
+So if Vixen wanted to go strongly in this direction, it would probably need one
+of these:
+
+1. Significant whitespace.
+   The language would need indentation and line structure to carry real
+   syntactic meaning, not just formatting preference.
+
+2. Different delimiters.
+   Keep `{}` for blocks, but use another form for typed records/object literals.
+
+3. More punctuation than this sketch currently allows.
+   For example, keep `:` and/or `,` inside object literals even if statements
+   outside them become newline-driven.
+
+My read is that this objection is serious. It probably means the fully
+Styx-heavy direction only works if Vixen is willing to become indentation-aware,
+or if it stops using exactly the same visual container for blocks and records.
+
 ## Current Read
 
 I do not think Vixen should blindly become this language.
@@ -333,6 +378,8 @@ But I do think this pressure test reveals three things:
    typed construction.
 3. The ugliness in the current sketches is less about control flow and more
    about constructor punctuation and collection-update ceremony.
+4. If `{}` continues to mean both block and record, whitespace significance or
+   another disambiguator probably becomes necessary before this style can work.
 
 That means the best next comparison is probably not:
 
