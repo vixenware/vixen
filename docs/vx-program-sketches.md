@@ -6,6 +6,10 @@ programs Vixen actually needs to express.
 The point is not to defend a specific syntax feature in isolation. The point is
 to sketch realistic rule logic and see what feels natural, awkward, or missing.
 
+A deliberately much more aggressive alternative lives in
+[vx-program-sketches-styx.md](/Users/amos/bearcove/vixen/docs/vx-program-sketches-styx.md).
+That note is useful as a pressure test, but it is not the current baseline.
+
 Current constraints for these sketches:
 
 - no Kajit-backed semantics yet
