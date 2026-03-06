@@ -31,11 +31,9 @@ vx-fskit = { path = "../vx-fskit" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-projfs = { workspace = true }
-roam = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuse3 = { workspace = true }
-roam = { workspace = true }
 libc = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
