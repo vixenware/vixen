@@ -20,6 +20,7 @@ use picante::wal::WalWriter;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+use vx_io::spawn::ServiceHandle;
 use vx_report::{
     BuildReport, GraphTopology, ReportStore, RuleId, RulePlan, RulePlanEdge, RulePlanEdgeKind,
     RulePlanFact, RulePlanFactId, RulePlanNode, RulePlanNodeId, RulePlanNodeKind,
@@ -60,6 +61,8 @@ pub struct AcquiredToolchains {
 pub struct VxdService {
     store: Arc<StoreClient>,
     exec: Arc<RunnerClient>,
+    _store_handle: Arc<ServiceHandle>,
+    _runner_handle: Arc<ServiceHandle>,
 
     /// The host triple of the execd machine (used for toolchain selection + cache keys).
     exec_host_triple: String,
@@ -648,6 +651,8 @@ impl VxdService {
         spawn_tracker: Arc<SyncMutex<SpawnTracker>>,
         store: Arc<StoreClient>,
         exec: Arc<RunnerClient>,
+        store_handle: Arc<ServiceHandle>,
+        runner_handle: Arc<ServiceHandle>,
     ) -> Self {
         let db = Database::new();
         let cache_path = vx_home.join("picante.cache");
@@ -701,6 +706,8 @@ impl VxdService {
         Self {
             store,
             exec,
+            _store_handle: store_handle,
+            _runner_handle: runner_handle,
             exec_host_triple,
             vx_home,
             db: Arc::new(db),
@@ -724,6 +731,8 @@ impl VxdService {
         Self {
             store: self.store.clone(),
             exec: self.exec.clone(),
+            _store_handle: self._store_handle.clone(),
+            _runner_handle: self._runner_handle.clone(),
             exec_host_triple: self.exec_host_triple.clone(),
             vx_home: self.vx_home.clone(),
             db: Arc::new(Database::new()),
@@ -745,10 +754,7 @@ impl VxdService {
     }
 
     /// Update the progress listener for the current connection
-    pub async fn set_progress_listener(
-        &self,
-        listener: Option<Arc<ProgressListenerClient>>,
-    ) {
+    pub async fn set_progress_listener(&self, listener: Option<Arc<ProgressListenerClient>>) {
         *self.progress_listener.lock() = listener;
     }
 

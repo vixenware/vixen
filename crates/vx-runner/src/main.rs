@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
+use vx_io::spawn::ServiceHandle;
 use vx_runner_proto::RunnerDispatcher;
 use vx_store_proto::{Blake3Hash, StoreClient};
 
@@ -193,11 +194,11 @@ async fn async_main() -> Result<()> {
                             StreamLink::new(reader, writer),
                         );
                         let boot_dispatcher = BootDispatcher::new(boot_service.clone());
-                        let (_client, _session_handle) = match acceptor(conduit)
+                        let (caller, session_handle) = match acceptor(conduit)
                             .on_connection(RunnerVirtualAcceptor {
                                 boot_service: boot_service.clone(),
                             })
-                            .establish::<()>(boot_dispatcher)
+                            .establish::<roam_core::NoopCaller>(boot_dispatcher)
                             .await
                         {
                             Ok(parts) => parts,
@@ -208,6 +209,7 @@ async fn async_main() -> Result<()> {
                         };
 
                         tracing::debug!("Runner connection from {} established", peer_addr);
+                        vx_io::net::park_session(caller, session_handle).await;
                     }
                     .named("runner_connection"),
                 );
@@ -271,7 +273,7 @@ async fn boot_runner(
     let vfsd_protocol = vx_vfsd::protocol::VfsdClient::new(vfsd_virtual);
     let vfs = VfsClient::new(vfsd_protocol, Arc::clone(&store));
 
-    let exec = RunnerService::new(store, Arc::new(vfs));
+    let exec = RunnerService::new(store, Arc::new(vfs), store_handle, vfsd_handle);
 
     tracing::info!("VFS provided by vx-vfsd at {}", runner_mount_base());
 
@@ -285,6 +287,10 @@ pub struct RunnerServiceInner {
 
     /// VFS client for hermetic action execution (via vx-vfsd RPC)
     pub(crate) vfs: Arc<VfsClient>,
+
+    /// Retain the upstream root handles for the lifetime of the runner service.
+    _store_handle: ServiceHandle,
+    _vfsd_handle: ServiceHandle,
 
     /// Single-flight deduplication for toolchain prefix creation.
     /// Concurrent requests for the same toolchain coalesce into one operation.
@@ -318,11 +324,18 @@ impl std::ops::Deref for RunnerService {
 }
 
 impl RunnerService {
-    pub fn new(cas: Arc<StoreClient>, vfs: Arc<VfsClient>) -> Self {
+    pub fn new(
+        cas: Arc<StoreClient>,
+        vfs: Arc<VfsClient>,
+        store_handle: ServiceHandle,
+        vfsd_handle: ServiceHandle,
+    ) -> Self {
         Self {
             inner: Arc::new(RunnerServiceInner {
                 cas,
                 vfs,
+                _store_handle: store_handle,
+                _vfsd_handle: vfsd_handle,
                 toolchain_flights: moire::sync::SyncMutex::new(
                     "runner/toolchain_flights",
                     HashMap::new(),

@@ -29,9 +29,9 @@ echo "HTTP cache dir is at ${VX_HTTP_CACHE_DIR}"
 
 # VX_HOME goes in /tmp — sockets and VFS mounts must NOT be in ~/Library/Caches
 # or any location that macOS services scan (Finder, Spotlight, etc.), because
-# stale mounts cause system-wide hangs.
-export VX_HOME="/tmp/.vx-test3"
-mkdir -p "${VX_HOME}"
+# stale mounts cause system-wide hangs. Use a fresh directory per nextest run so
+# dead mounts or stale sockets from an earlier crash cannot poison the current run.
+export VX_HOME="$(mktemp -d /tmp/.vx-test.XXXXXX)"
 echo "Test VX_HOME will be ${VX_HOME}"
 
 # VX_TEST=1 enables test mode: 2s idle timeout, inherit stderr

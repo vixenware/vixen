@@ -2108,7 +2108,7 @@ dependencies = [
 
 [[package]]
 name = "roam"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "facet",
  "facet-postcard",
@@ -2120,7 +2120,7 @@ dependencies = [
 
 [[package]]
 name = "roam-codegen"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "facet-core",
  "heck",
@@ -2130,7 +2130,7 @@ dependencies = [
 
 [[package]]
 name = "roam-core"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "facet",
  "facet-core",
@@ -2150,7 +2150,7 @@ dependencies = [
 
 [[package]]
 name = "roam-hash"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "blake3",
  "facet-core",
@@ -2160,7 +2160,7 @@ dependencies = [
 
 [[package]]
 name = "roam-local"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
@@ -2168,7 +2168,7 @@ dependencies = [
 
 [[package]]
 name = "roam-macros-core"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "facet-cargo-toml",
  "heck",
@@ -2179,7 +2179,7 @@ dependencies = [
 
 [[package]]
 name = "roam-macros-parse"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "proc-macro2",
  "unsynn",
@@ -2187,7 +2187,7 @@ dependencies = [
 
 [[package]]
 name = "roam-service-macros"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "proc-macro2",
  "roam-macros-core",
@@ -2195,7 +2195,7 @@ dependencies = [
 
 [[package]]
 name = "roam-shm"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "facet-postcard",
  "libc",
@@ -2210,7 +2210,7 @@ dependencies = [
 
 [[package]]
 name = "roam-stream"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "moire 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "roam-types",
@@ -2219,7 +2219,7 @@ dependencies = [
 
 [[package]]
 name = "roam-types"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "bitflags 2.11.0",
  "facet",
@@ -2448,7 +2448,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shm-primitives"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "libc",
  "loom",
@@ -2457,7 +2457,7 @@ dependencies = [
 
 [[package]]
 name = "shm-primitives-async"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "libc",
  "tokio",
@@ -2982,7 +2982,7 @@ checksum = "9fa66022bbd1ab992fad72bdedcfd07a0023b6f5ecc83d50121e39e3a3caed41"
 
 [[package]]
 name = "ur-taking-me-with-you"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "libc",
  "tokio",

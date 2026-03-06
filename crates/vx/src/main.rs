@@ -15,7 +15,7 @@ use owo_colors::OwoColorize;
 use roam_core::Driver;
 use roam_types::{ConnectionSettings, Parity};
 use tui::emit_osc_progress;
-use vx_io::spawn::ServiceBuilder;
+use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_report::ReportStore;
 use vx_store_proto::Blake3Hash;
 use vx_tracing::init_cli_stderr;
@@ -194,6 +194,19 @@ fn soft_wrap(text: &str, max_width: usize) -> String {
     out
 }
 
+struct ConnectedVxd {
+    handle: ServiceHandle,
+    client: VxdClient,
+}
+
+impl std::ops::Deref for ConnectedVxd {
+    type Target = VxdClient;
+
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
+}
+
 /// Extract the leading "indent" from a line that may contain ANSI escapes.
 ///
 /// Returns `(prefix, visible_width)` where `prefix` is the byte slice
@@ -307,7 +320,7 @@ impl CliContext {
     ///
     /// The progress dispatcher is created here because it's tightly coupled
     /// to the vx CLI's display logic.
-    async fn ensure_vxd(&self) -> Result<VxdClient> {
+    async fn ensure_vxd(&self) -> Result<ConnectedVxd> {
         let vx_home = vx_io::vx_home();
 
         // Connect to daemon — root connection only has the Boot service.
@@ -354,7 +367,10 @@ impl CliContext {
         let caller = driver.caller();
         tokio::spawn(async move { driver.run().await });
 
-        Ok(VxdClient::new(caller))
+        Ok(ConnectedVxd {
+            handle,
+            client: VxdClient::new(caller),
+        })
     }
 
     // ─── Commands ───────────────────────────────────────────────────────
@@ -511,7 +527,7 @@ impl CliContext {
     }
 
     async fn cmd_start(&mut self, _args: StartArgs) -> Result<()> {
-        let daemon = self.ensure_vxd().await?;
+        let mut daemon = self.ensure_vxd().await?;
 
         tracing::info!("✓ daemon is running");
 
@@ -523,6 +539,16 @@ impl CliContext {
 
         tracing::info!("✓ connected to vxd");
         tracing::info!("   {}", version);
+
+        if let Some(mut child) = daemon.handle.child.take() {
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| eyre!("vxd wait failed: {e}"))?;
+            if !status.success() {
+                bail!("vxd exited with {status}");
+            }
+        }
 
         Ok(())
     }

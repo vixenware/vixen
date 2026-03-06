@@ -12,6 +12,12 @@ use vx_store_proto::{
 #[derive(Clone)]
 pub struct VfsdService {
     vfs: Arc<CasVfs>,
+    _retained_store_connection: Option<Arc<StoreConnection>>,
+}
+
+struct StoreConnection {
+    _root_caller: roam_core::DriverCaller,
+    _session_handle: roam_core::SessionHandle,
 }
 
 impl vx_io::boot::GracefulShutdown for VfsdService {
@@ -19,8 +25,26 @@ impl vx_io::boot::GracefulShutdown for VfsdService {
 }
 
 impl VfsdService {
+    #[allow(dead_code)]
     pub fn new(vfs: Arc<CasVfs>) -> Self {
-        Self { vfs }
+        Self {
+            vfs,
+            _retained_store_connection: None,
+        }
+    }
+
+    pub fn new_with_store_connection(
+        vfs: Arc<CasVfs>,
+        root_caller: Arc<roam_core::DriverCaller>,
+        session_handle: Arc<roam_core::SessionHandle>,
+    ) -> Self {
+        Self {
+            vfs,
+            _retained_store_connection: Some(Arc::new(StoreConnection {
+                _root_caller: Arc::unwrap_or_clone(root_caller),
+                _session_handle: Arc::unwrap_or_clone(session_handle),
+            })),
+        }
     }
 
     /// Parse an absolute VFS path into (prefix_id, relative_path)

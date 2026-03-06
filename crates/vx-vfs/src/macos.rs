@@ -11,8 +11,8 @@ use moire::process::Command;
 use moire::sync::mpsc;
 use moire::sync::watch;
 use moire::task::FutureExt;
-use roam_core::acceptor;
 use roam_core::BareConduit;
+use roam_core::acceptor;
 use roam_shm::bootstrap::{self, decode_request};
 use roam_shm::{HostHub, Segment, SegmentConfig, SizeClassConfig};
 use shm_primitives::FileCleanup;
@@ -351,8 +351,8 @@ where
                             };
                             let conduit: BareConduit<roam_types::MessageFamily, roam_shm::ShmLink> =
                                 BareConduit::new(link);
-                            let (_client, _session_handle) = match acceptor(conduit)
-                                .establish::<()>(vfs_dispatcher)
+                            let (caller, session_handle) = match acceptor(conduit)
+                                .establish::<roam_core::NoopCaller>(vfs_dispatcher)
                                 .await
                             {
                                 Ok(parts) => parts,
@@ -366,6 +366,9 @@ where
                                 }
                             };
                             tracing::debug!(peer = %peer_id.get(), "SHM peer driver established");
+                            let _caller = caller;
+                            let _session_handle = session_handle;
+                            std::future::pending::<()>().await;
                         }
                         .named("shm_host_driver"),
                     );

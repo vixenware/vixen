@@ -311,6 +311,27 @@ pub async fn connect_session(
     Ok((caller, session_handle))
 }
 
+struct ParkSession<C> {
+    _caller: C,
+    _session_handle: roam_core::SessionHandle,
+}
+
+impl<C> std::future::Future for ParkSession<C> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+        Poll::Pending
+    }
+}
+
+pub async fn park_session<C>(caller: C, session_handle: roam_core::SessionHandle) {
+    ParkSession {
+        _caller: caller,
+        _session_handle: session_handle,
+    }
+    .await;
+}
+
 /// Create a default local IPC endpoint for a service within VX_HOME.
 ///
 /// On Unix this resolves to a Unix domain socket; on Windows the path is

@@ -37,6 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
+use vx_io::spawn::ServiceHandle;
 use vx_runner_proto::RunnerClient;
 use vx_store_proto::StoreClient;
 use vxd_proto::VxdDispatcher;
@@ -159,6 +160,8 @@ impl SpawnTracker {
 struct ServiceClients {
     store: Arc<StoreClient>,
     exec: Arc<RunnerClient>,
+    store_handle: Arc<ServiceHandle>,
+    runner_handle: Arc<ServiceHandle>,
 }
 
 #[derive(Clone)]
@@ -266,6 +269,8 @@ async fn ensure_services(
     Ok(ServiceClients {
         store: Arc::new(StoreClient::new(store_virtual)),
         exec: Arc::new(RunnerClient::new(runner_virtual)),
+        store_handle: Arc::new(store_handle),
+        runner_handle: Arc::new(runner_handle),
     })
 }
 
@@ -443,6 +448,8 @@ async fn async_main() -> Result<()> {
                                 spawn_tracker,
                                 clients.store,
                                 clients.exec,
+                                clients.store_handle,
+                                clients.runner_handle,
                             )
                             .await,
                         );
@@ -562,11 +569,11 @@ async fn async_main() -> Result<()> {
                     reader, writer,
                 ));
                 let boot_dispatcher = BootDispatcher::new(boot_service.clone());
-                let (_client, _session_handle) = match acceptor(conduit)
+                let (caller, session_handle) = match acceptor(conduit)
                     .on_connection(VxdVirtualAcceptor {
                         boot_service: boot_service.clone(),
                     })
-                    .establish::<()>(boot_dispatcher)
+                    .establish::<roam_core::NoopCaller>(boot_dispatcher)
                     .await
                 {
                     Ok(parts) => parts,
@@ -585,14 +592,12 @@ async fn async_main() -> Result<()> {
                     }
                 };
 
-                let count =
-                    active_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) - 1;
                 tracing::debug!(
                     %peer_addr,
-                    active_connections = count,
+                    active_connections = active_connections.load(std::sync::atomic::Ordering::Relaxed),
                     "connection established"
                 );
-                *last_disconnect.lock() = Some(tokio::time::Instant::now());
+                vx_io::net::park_session(caller, session_handle).await;
             }
             .named(conn_name),
         );

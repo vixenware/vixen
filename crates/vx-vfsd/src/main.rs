@@ -367,11 +367,11 @@ async fn async_main() -> Result<()> {
                             StreamLink::new(reader, writer),
                         );
                         let boot_dispatcher = BootDispatcher::new(boot_service.clone());
-                        let (_client, _session_handle) = match acceptor(conduit)
+                        let (caller, session_handle) = match acceptor(conduit)
                             .on_connection(VfsdVirtualAcceptor {
                                 boot_service: boot_service.clone(),
                             })
-                            .establish::<()>(boot_dispatcher)
+                            .establish::<roam_core::NoopCaller>(boot_dispatcher)
                             .await
                         {
                             Ok(parts) => parts,
@@ -385,6 +385,7 @@ async fn async_main() -> Result<()> {
                         };
 
                         tracing::debug!("vx-vfsd session established with {}", peer_addr);
+                        vx_io::net::park_session(caller, session_handle).await;
                     }
                     .named("vfsd_connection"),
                 );
@@ -397,7 +398,13 @@ async fn async_main() -> Result<()> {
 }
 
 /// Connect to vx-store using the boot protocol.
-async fn connect_to_store(endpoint_str: &str) -> Result<StoreClient> {
+async fn connect_to_store(
+    endpoint_str: &str,
+) -> Result<(
+    StoreClient,
+    roam_core::DriverCaller,
+    roam_core::SessionHandle,
+)> {
     let endpoint = Endpoint::parse(endpoint_str)?;
     let (root_caller, session_handle) = vx_io::net::connect_session(&endpoint)
         .await
@@ -406,14 +413,18 @@ async fn connect_to_store(endpoint_str: &str) -> Result<StoreClient> {
         .await
         .map_err(|e| format!("vx-store boot failed: {e:#}"))?;
 
-    Ok(StoreClient::new(virtual_caller))
+    Ok((
+        StoreClient::new(virtual_caller),
+        root_caller,
+        session_handle,
+    ))
 }
 
 /// Full boot sequence: connect to store, create VFS, mount, smoke test.
 async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService> {
     // 1. Connect to vx-store (with boot protocol)
     tracing::debug!("Connecting to vx-store at {store_addr}");
-    let cas = connect_to_store(store_addr).await?;
+    let (cas, store_root_caller, store_session_handle) = connect_to_store(store_addr).await?;
     tracing::debug!("Connected to vx-store");
     let cas = Arc::new(cas);
 
@@ -573,5 +584,9 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
         return Err(error);
     }
 
-    Ok(VfsdService::new(vfs))
+    Ok(VfsdService::new_with_store_connection(
+        vfs,
+        Arc::new(store_root_caller),
+        Arc::new(store_session_handle),
+    ))
 }

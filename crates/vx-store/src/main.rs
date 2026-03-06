@@ -167,11 +167,11 @@ async fn async_main() -> Result<()> {
                     reader, writer,
                 ));
                 let boot_dispatcher = BootDispatcher::new(boot_service.clone());
-                let (_client, _session_handle) = match acceptor(conduit)
+                let (caller, session_handle) = match acceptor(conduit)
                     .on_connection(StoreVirtualAcceptor {
                         boot_service: boot_service.clone(),
                     })
-                    .establish::<()>(boot_dispatcher)
+                    .establish::<roam_core::NoopCaller>(boot_dispatcher)
                     .await
                 {
                     Ok(parts) => parts,
@@ -182,6 +182,7 @@ async fn async_main() -> Result<()> {
                 };
 
                 tracing::debug!("Connection from {} established", peer_addr);
+                vx_io::net::park_session(caller, session_handle).await;
             }
             .named("store_connection"),
         );
