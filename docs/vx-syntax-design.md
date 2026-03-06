@@ -163,6 +163,24 @@ fn rewrite(self) -> Self {
 This does **not** imply traits, references, or full Rust-style method
 resolution in v0.
 
+### Namespaces
+
+- namespace-qualified items use Rust-style `::`
+- `.` is reserved for field access and method calls on values
+
+Examples:
+
+```rust
+format::compile_node_id(name, crate_type)
+emit::node(node)
+env::profile()
+```
+
+This keeps call syntax unambiguous:
+
+- `foo.bar` means field or method
+- `foo::bar(...)` means namespaced item
+
 ### Error handling
 
 - `Option`

@@ -36,15 +36,15 @@ This is the baseline planning shape.
 fn plan_crates(graph: CrateGraph) -> Unit {
     for krate in graph.crates {
         if krate.crate_type == CrateType::Bin {
-            let node_id = format.compile_node_id(krate.crate_name, krate.crate_type);
+            let node_id = format::compile_node_id(krate.crate_name, krate.crate_type);
             let metadata = {}
                 .insert("crate_name", krate.crate_name)
                 .insert("crate_type", "bin");
 
-            emit.node(Node {
+            emit::node(Node {
                 id: NodeId { value: node_id },
                 kind: NodeKind::Action,
-                label: format.concat(["compile ", krate.crate_name]),
+                label: format::concat(["compile ", krate.crate_name]),
                 metadata: metadata,
             });
         }
@@ -66,13 +66,13 @@ This tests multi-step graph logic.
 ```rust
 fn plan_edges(graph: CrateGraph) -> Unit {
     for krate in graph.crates {
-        let compile_id = format.compile_node_id(krate.crate_name, krate.crate_type);
+        let compile_id = format::compile_node_id(krate.crate_name, krate.crate_type);
 
         for dep in krate.deps {
             let dep_krate = graph.lookup_crate(dep.crate_id)?;
-            let dep_id = format.compile_node_id(dep_krate.crate_name, dep_krate.crate_type);
+            let dep_id = format::compile_node_id(dep_krate.crate_name, dep_krate.crate_type);
 
-            emit.edge(Edge {
+            emit::edge(Edge {
                 from: NodeId { value: dep_id },
                 to: NodeId { value: compile_id },
                 kind: EdgeKind::Always,
@@ -99,7 +99,7 @@ fn validate_registry_dependencies(graph: CrateGraph) -> Result<Unit, InputError>
     for krate in graph.crates {
         match krate.source {
             CrateSource::Registry { name, version, checksum } => {
-                let exists = cargo.registry_package_exists(name, version)?;
+                let exists = cargo::registry_package_exists(name, version)?;
                 if !exists {
                     return Err(InputError::MissingRegistryCrate {
                         name: name,
@@ -107,7 +107,7 @@ fn validate_registry_dependencies(graph: CrateGraph) -> Result<Unit, InputError>
                     });
                 }
 
-                let valid = cargo.registry_checksum_matches(name, version, checksum)?;
+                let valid = cargo::registry_checksum_matches(name, version, checksum)?;
                 if !valid {
                     return Err(InputError::ChecksumMismatch {
                         name: name,
@@ -167,10 +167,10 @@ fn make_compile_node(krate: CrateNode) -> Node {
 
     Node {
         id: NodeId {
-            value: format.compile_node_id(krate.crate_name, krate.crate_type),
+            value: format::compile_node_id(krate.crate_name, krate.crate_type),
         },
         kind: NodeKind::Action,
-        label: format.concat(["compile ", krate.crate_name]),
+        label: format::concat(["compile ", krate.crate_name]),
         metadata: metadata,
     }
 }
@@ -187,7 +187,7 @@ What this suggests:
 
 1. Should local collection mutation be direct syntax, or purely reassignment via
    value-returning functions?
-2. Is ambient `emit.*` the right model for output, or should planning functions
+2. Is ambient `emit::*` the right model for output, or should planning functions
    explicitly return plan fragments?
 3. Are chained value-receiver methods enough for maps and lists, or do we still
    want additional syntax for local updates?
