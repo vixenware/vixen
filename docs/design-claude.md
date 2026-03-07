@@ -14,8 +14,8 @@ A typed, demand-driven build language with a distributed memoizing runtime.
 | **Demand root** | The top-level value the user asks for. Everything else is realized only as a transitive dependency. |
 | **Tracked computation** | A computation whose inputs and outputs are recorded by the runtime for memoization and invalidation. |
 | **Host builtin** | A primitive operation that crosses the pure/effect boundary: `exec`, `acquire_tree` (Stage 0) / `acquire` (Stage 1), `download`, `read`, `glob`, `write_file`, format parsing, hashing. |
-| **Blob** | Immutable, pathless, content-addressed bytes in the store. Identity is BLAKE3 hash. |
-| **Artifact** | A typed reference to stored content plus semantic metadata. Wraps a blob or tree with type information (e.g., "this blob is an `.rlib`"). |
+| **Blob** | Immutable, pathless, content-addressed bytes in the store. Identity is BLAKE3 hash. The store's atom of content. |
+| **Artifact** | A language-level concept: a named, typed reference to a blob or tree in the store. The store holds raw blobs and trees; the artifact's type and meaning live in the result record that references it. For example, `result.rlib` is an artifact — a field named `rlib` whose value is a blob hash. The store does not know it is an `.rlib`; the result record does. |
 | **Tree** | A first-class structural value: a content-addressed manifest of named entries (blobs and subtrees). Not `Map<Path, Blob>` — it carries membership, subtree identity, and merge semantics. |
 | **Stream\<T\>** | An unordered, reusable, progressively-produced collection of typed elements. Elements arrive as the producer yields them. Multiple consumers observe the same cached elements. |
 | **List\<T\>** | A concrete, ordered, finite collection. Spine is known immediately. Elements may be unrealized computation nodes. |
@@ -26,7 +26,8 @@ A typed, demand-driven build language with a distributed memoizing runtime.
 | **VFS** | Virtual filesystem that projects store content into executor sandboxes. FSKit on macOS, FUSE on Linux, ProjFS on Windows. Currently `vx-vfsd`. |
 | **Lease** | A temporary hold on in-flight CAS objects during execution. Prevents GC from reclaiming blobs that have been uploaded but not yet published. Expires on execution failure or abandonment. |
 | **Root** | A durable reference from a memo table entry or demand result to published CAS objects. Roots are what keep committed values alive across GC. |
-| **Early cutoff** | If a computation reruns and produces a value identical to its previous result, downstream dependents are not invalidated. |
+| **Early cutoff** | If a computation reruns and produces a value identical to its previous result, downstream dependents are not invalidated. The computation's dependency trace is still updated to reflect the dependencies actually observed during this re-evaluation. |
+| **Dependency trace** | The set of (dependency identity, observed value identity) pairs recorded during a computation's evaluation. Used to determine whether a memo entry is still valid without re-execution. |
 | **Monotonic producer** | A producer whose yielded elements are individually final — later elements cannot invalidate earlier ones. Archive extraction is monotonic; generic process execution is not. |
 | **Computation identity** | The cache key for a memoized computation: function identity + argument identities + resolved late-bound values + runtime version. |
 | **Execution identity** | The cache key for a concrete `exec`: argv + env + input identities + output schema + sandbox policy + toolchain identity + platform contract. |
@@ -234,7 +235,8 @@ The language draws a hard line between semantic values (things computations prod
 | Semantic value | Runtime telemetry |
 |----------------|-------------------|
 | `exec` declared output files/trees | stderr output |
-| `acquire` stream elements | Download progress |
+| `acquire_tree` result (Stage 0) | Download progress |
+| `acquire` stream elements (Stage 1, after verification) | Speculative work before verification |
 | Captured stdout (when declared) | Execution timings |
 | Parsed TOML/JSON values | CAS upload events |
 | Typed computation results | Lease acquisition/release |
@@ -359,6 +361,8 @@ Concretely:
 - Runtime/language semantics version
 - Host primitive contract version (for builtins)
 
+Note: computation identity is the *lookup key* for the memo table. A memo entry stores additional data beyond the key: the **dependency trace** (all sub-computations observed during evaluation, with their value identities at the time) and the **output value identity**. The dependency trace is not part of the cache key — it is a verifying trace used to check whether the cached result is still valid without re-execution. See §4.8.
+
 **Execution identity.** The cache key for a concrete `exec`. Composed of:
 - argv
 - env
@@ -394,7 +398,7 @@ This is the hardest identity problem. The design must answer:
 - **Defer closure identity rules.** Closures are a hard problem — captured variables need to participate in identity, and closures created in loops need distinct identities. Solving this correctly requires experience with real build rules. In v0, closures are not separately memoized; they are evaluated inline as part of their enclosing top-level function.
 - **No higher-order memo boundaries.** Users cannot define custom memo points. There is no `@memoize` annotation or equivalent. The only memo boundaries are top-level named functions and host primitives. Stream combinators (when streams arrive in Stage 1) are not independently memoized.
 
-**Transitive invalidation** is handled by the dependency graph, not by transitive function hashing. If function `f` calls function `g`, and `g`'s code changes, `g` may produce different results. If it does (detected by value comparison), `f` is re-evaluated. If `g` produces the same results despite the code change (early cutoff), `f`'s cached result remains valid. This means function identity does not need to transitively include callee identities — it only needs its own body hash plus its argument values.
+**Transitive invalidation** is handled by the dependency graph, not by transitive function hashing. If function `f` calls function `g`, and `g`'s code changes, `g` may produce different results. If it does (detected by value comparison), `f` is re-evaluated. If `g` produces the same results despite the code change (early cutoff), `f`'s cached result remains valid — but `g`'s memo entry is updated with its new dependency trace (§4.7, §7.3). This means function identity does not need to transitively include callee identities — it only needs its own body hash plus its argument values. The dependency trace handles the rest.
 
 ### 4.5 Late-bound input resolution
 
@@ -440,9 +444,10 @@ lib = compile(deps, ...)
 // deps is unchanged → step 4 does NOT rerun
 ```
 
-Early cutoff at step 2 prevents the formatting change from propagating. This is only possible because:
-1. Parsing and compilation are separate tracked computation boundaries with separate cache entries.
+Early cutoff at step 2 prevents the formatting change from propagating. This is possible because:
+1. Parsing and compilation are separate tracked computation boundaries with separate memo entries.
 2. The parsed TOML value has well-defined structural equality — this is what makes the cutoff check meaningful.
+3. The memo entry for step 2 is updated with the new dependency trace (it now depends on the reformatted `raw_bytes` hash, not the old one), even though the output value is unchanged. This ensures future invalidation checks are correct.
 
 ### 4.7 Invariants for sound memoization
 
@@ -450,7 +455,50 @@ Early cutoff at step 2 prevents the formatting change from propagating. This is 
 2. **Completeness**: the cache key must include everything that can affect the output. Undeclared inputs break this; sandboxing prevents undeclared inputs.
 3. **Value identity**: two values are "the same" if their content-addressed identity matches. For blobs: BLAKE3 hash. For trees: Merkle root. For typed compound values: structural hash.
 4. **Equality requirement**: every type that serves as a semantic cache boundary must have well-defined structural equality. Types without stable equality are not valid memo boundaries.
-5. **Early cutoff correctness**: if a computation reruns and produces a value with the same identity, its dependents must not be invalidated. This means the runtime must compare output identity before and after re-evaluation.
+5. **Early cutoff correctness**: if a computation reruns and produces a value with the same identity, its dependents must not be invalidated. This means the runtime must compare output identity before and after re-evaluation. **However**, same output value does not mean the memo entry is unchanged — the dependency trace must still be updated (see invariant 6).
+6. **Dependency trace correctness**: every memo entry must record the dependency trace (the set of sub-computations observed during evaluation, with their value identities). When a computation is re-evaluated — even if early cutoff fires — the memo entry's dependency trace must be updated to reflect the dependencies actually observed during this re-evaluation. A computation that produces the same output but observed different dependencies has different invalidation behavior going forward. Failure to update the trace makes future cache validity checks unsound.
+
+### 4.8 Memo entry structure and value storage
+
+A memo entry is the unit of cached computation. It records everything needed for cache validity checking and result reconstruction.
+
+**Memo entry contents:**
+
+| Field | Contents |
+|-------|----------|
+| **Computation identity** (key) | Function identity + argument value identities + runtime version |
+| **Dependency trace** | Set of (sub-computation identity, observed value identity) pairs |
+| **Output value identity** | Content-addressed identity of the result |
+| **Output value** | The result itself, or a reference to it in the store |
+
+**Two classes of values, two storage models:**
+
+Values in Vixen fall into two classes with different storage characteristics:
+
+**Store-resident values** — blobs and trees. These live in the content-addressed store (CAS). Their identity is their store hash (BLAKE3 for blobs, Merkle root for trees). A memo entry that produces a store-resident value records the store reference (hash). The value can be reconstructed from the store by any participant with store access. These values are inherently shareable across machines.
+
+**Structured values** — parsed records, toolchain specs, resolved configurations, typed result records from `exec`, and any other compound value that is not a raw blob or tree. These are values that exist in the evaluator, not in the CAS. Their identity is a **canonical structural hash**: a deterministic hash computed over the value's type tag and field values, recursively. Two structured values with the same canonical hash are semantically equal.
+
+Canonical structural hashing rules:
+- Primitive fields (strings, integers, booleans): hash of their canonical byte representation
+- Blob/tree references: hash of their store identity (BLAKE3 / Merkle root)
+- Record fields: sorted by field name, each field hashed as (name, value_hash)
+- Lists: ordered sequence of element hashes
+- The type tag participates in the hash — a `ToolchainSpec` and a `RustPackage` with identical field values have different hashes
+
+**Stage 0 storage model**: structured values are orchestrator-local. They live in the evaluator's memo table, serialized using a canonical encoding. The memo table is a local database. This is sufficient for single-machine builds.
+
+**Stage 3+ storage model**: for shared caching, structured values must be serializable to a canonical byte representation that can be stored in (or alongside) the CAS. The canonical encoding used for hashing serves double duty as the serialization format. A structured value's canonical hash becomes its store key, and its canonical encoding becomes its store content.
+
+**Concrete examples:**
+
+| Value type | Identity | Storage (Stage 0) | Storage (Stage 3+) |
+|-----------|----------|-------------------|-------------------|
+| Blob (`libfoo.rlib` bytes) | BLAKE3 hash | CAS | CAS |
+| Tree (toolchain directory) | Merkle root | CAS | CAS |
+| Parsed TOML manifest | Canonical structural hash | Orchestrator memo table | CAS (canonical encoding) |
+| `ToolchainSpec` record | Canonical structural hash | Orchestrator memo table | CAS (canonical encoding) |
+| `exec` result record | Canonical structural hash (over field names + referenced blob/tree hashes) | Orchestrator memo table | CAS (canonical encoding) |
 
 ---
 
@@ -458,14 +506,19 @@ Early cutoff at step 2 prevents the formatting change from propagating. This is 
 
 ### 5.1 Core runtime objects
 
-The runtime distinguishes the following object types. These are not interchangeable and should not be collapsed into "everything is a blob" or "everything is a file."
+The runtime has two layers: **store objects** (what the CAS holds) and **language values** (what the evaluator works with). These are related but distinct.
 
-- **Blob**: immutable byte content in the store, identified by BLAKE3 digest. The atom of storage. Large blobs are split via content-defined chunking; the store deduplicates shared chunks.
-- **Artifact**: a typed reference to stored content plus semantic metadata. An artifact wraps a blob or tree with type information: "this blob is an `.rlib`", "this tree is a Rust toolchain distribution." Artifacts are what typed outputs from `exec` return — not raw blobs, but blobs with meaning.
-- **Tree**: a canonical hierarchical collection of named entries (blobs and subtrees), identified by Merkle root.
-- **TreeEntry**: one path-bearing entry discovered within a tree-producing operation. Carries `path`, `content`, and `kind`.
-- **Stream\<T\>**: a progressive, reusable, unordered collection of typed elements.
-- **TypedOutputs**: the committed typed result record from an `exec` — a named record of artifacts and trees matching the declared output schema.
+**Store objects** (live in the CAS):
+
+- **Blob**: immutable byte content, identified by BLAKE3 digest. The atom of storage. Large blobs are split via content-defined chunking; the store deduplicates shared chunks. The store does not know or care what a blob "means" — it is raw bytes.
+- **Tree**: a canonical hierarchical collection of named entries (blobs and subtrees), identified by Merkle root hash. The store's unit of structured content.
+
+**Language values** (live in the evaluator, reference store objects):
+
+- **Artifact**: a named, typed reference to a blob or tree in the store. The type information and semantic meaning (e.g., "this is an `.rlib`") live in the result record that references the blob, not in the store itself. When the spec says "`exec` returns artifacts," it means `exec` returns a typed result record whose fields are blob/tree references with meaningful names.
+- **TreeEntry**: one path-bearing entry discovered within a tree-producing operation. Carries `path`, `content` (blob hash), and `kind` (file or directory).
+- **Stream\<T\>**: a progressive, reusable, unordered collection of typed elements. (Stage 1.)
+- **Structured values**: parsed records, toolchain specs, typed result records, and other compound values. These are not store objects — they live in the evaluator's memo table (§4.8). Their identity is canonical structural hash.
 
 ### 5.2 Trees
 
@@ -496,7 +549,7 @@ Operations that do not exist on streams in v0: `zip` (requires ordering), `fold`
 
 ### 5.4 Typed outputs from `exec`
 
-`exec` returns a typed record derived from its output declarations:
+`exec` returns a typed result record derived from its output declarations. Each field in the result record is an artifact — a named reference to a blob or tree in the store.
 
 ```
 result = exec(
@@ -508,10 +561,12 @@ result = exec(
     metadata: file("libfoo.rmeta"),
   },
 )
-// result.rlib: Blob
-// result.depinfo: Blob
-// result.metadata: Blob
+// result.rlib: Blob reference (BLAKE3 hash of libfoo.rlib bytes)
+// result.depinfo: Blob reference (BLAKE3 hash of libfoo.d bytes)
+// result.metadata: Blob reference (BLAKE3 hash of libfoo.rmeta bytes)
 ```
+
+The store holds the raw bytes of each output file as blobs. The result record holds the typed references: `rlib`, `depinfo`, `metadata` are field names that carry semantic meaning. The store does not know that `result.rlib` is a Rust library — the result record does.
 
 For tree outputs (when the exact set of output files is not known statically):
 
@@ -523,10 +578,12 @@ result = exec(
     generated: tree("gen/"),
   },
 )
-// result.generated: Tree
+// result.generated: Tree reference (Merkle root hash)
 ```
 
 The runtime captures the full tree under `gen/` after successful execution. The tree is content-addressed as a Merkle manifest. The declared output shape (`file` vs `tree`) tells the runtime what to capture.
+
+The result record itself is a structured value (§4.8). Its identity is a canonical structural hash over the field names and the blob/tree hashes they reference. This identity participates in early cutoff: if a re-execution produces blobs with the same BLAKE3 hashes, the result record has the same structural hash, and downstream dependents are not re-evaluated.
 
 ### 5.5 Why generic `exec` is not a semantic stream
 
@@ -551,18 +608,35 @@ Contrast with `acquire` (archive extraction):
 acquire(url: "https://...", sha256: "...")
 ```
 
-As the archive is extracted, each entry is individually final. Entry `bin/rustc` does not get overwritten by a later entry. The stream is **monotonic**: later elements do not invalidate earlier ones. This is why `acquire` can yield a semantic `Stream<TreeEntry>` while `exec` cannot.
+As the archive is extracted, each entry is individually final in the sense that later entries do not overwrite earlier ones. The stream is **monotonic with respect to content**: later elements do not invalidate earlier ones. This is why `acquire` can yield a `Stream<TreeEntry>` while `exec` cannot.
 
-The monotonicity criterion is the bright line: **a primitive may yield semantic stream elements only if each element is individually final and cannot be invalidated by subsequent execution.**
+However, monotonicity alone is not sufficient for soundness. There is a second requirement: **verification boundary**.
 
-The test for any candidate stream-producing primitive is:
+#### Verification boundaries and publication gating
 
-1. Can a later yield invalidate, overwrite, or delete an earlier yield?
-2. Can the producer fail partway through in a way that makes earlier yields incorrect?
+The `sha256` parameter in `acquire` specifies a hash over the entire archive. This hash is computed incrementally as bytes are downloaded, but the final verification check can only happen after all bytes have been received. This creates a gap: archive entries may be extracted and yielded to stream consumers before the archive hash is fully verified.
 
-If the answer to either is yes, the primitive is not monotonic and must not produce semantic streams. It should publish only committed results after successful completion.
+**In Stage 0**, this problem does not arise. `acquire_tree` is a fused primitive that verifies the complete archive hash and only then produces a `Tree` value. No semantic value is visible to the language until verification is complete.
 
-`acquire` passes this test: archive entries are individually immutable and independently valid. `exec` fails it: filesystem mutations during process execution are provisional and non-monotonic.
+**In Stage 1**, when `acquire` yields a `Stream<TreeEntry>`, the following rule applies:
+
+> **Publication gating rule**: no memo entry may be written for a computation that consumed a stream element until the stream's verification boundary is satisfied.
+
+This means downstream work (e.g., `map(compile)` applied to stream elements) may execute speculatively — the runtime may start compilations before the archive hash is fully verified. But these speculative results are held under the stream's lease and are not published (memo'd) until the archive hash verification succeeds. If verification fails, all speculative work is discarded along with the stream, and no memo entries are written. The system is in the same state as if the operation never started.
+
+This is not optimistic execution with rollback — there is nothing to roll back, because nothing was committed.
+
+#### The full soundness test
+
+The test for any candidate stream-producing primitive has three parts:
+
+1. **Content monotonicity**: Can a later yield invalidate, overwrite, or delete an earlier yield? (If yes, not a valid stream producer.)
+2. **Verification boundary**: Does the primitive have a verification step that gates the finality of all yielded elements? (If yes, publication of downstream results must be gated on this verification.)
+3. **Failure atomicity**: If the producer fails partway through, can the runtime discard all yielded elements and downstream speculative work without leaving invalid state? (Must be yes.)
+
+`exec` fails test 1: filesystem mutations during process execution are provisional and non-monotonic.
+
+`acquire` passes test 1 (entries are individually immutable). It has a verification boundary (archive hash), so downstream publication is gated. It passes test 3 (lease-based cleanup on failure).
 
 ---
 
@@ -674,15 +748,29 @@ File watch events are **hints, not authoritative**. When the daemon receives a f
 
 This means correctness never depends on file watching. If file watching is unavailable (remote build, CI, no daemon), the system falls back to hashing all inputs on demand. File watching only improves latency.
 
-### 7.3 Early cutoff in detail
+### 7.3 Early cutoff, dependency traces, and cache validity
 
-Early cutoff is checked at every tracked computation boundary:
+The runtime uses a two-phase cache validity check, following the verifying-trace model:
 
-1. A computation's inputs have changed (transitively, some upstream dependency produced a different value).
-2. The runtime re-evaluates the computation.
-3. The runtime compares the new output's content-addressed identity to the previous output's identity.
-4. If identical: dependents are NOT re-evaluated. The change stops propagating.
-5. If different: dependents are marked for re-evaluation. The process continues.
+**Phase 1: Trace verification (can we skip re-evaluation entirely?)**
+
+1. A computation's memo entry exists from a previous run. The entry contains: output value identity + dependency trace (the set of sub-computations observed, with their value identities at the time).
+2. The runtime checks each dependency in the trace: does it still have the same value identity?
+3. If ALL dependencies match: the cached output is still valid. No re-evaluation. No downstream propagation.
+4. If ANY dependency has changed: proceed to Phase 2.
+
+**Phase 2: Re-evaluation with early cutoff (can we stop propagation?)**
+
+5. The runtime re-evaluates the computation. During re-evaluation, it records the new dependency trace — which may differ from the previous trace, because dynamic dependencies can change.
+6. The runtime compares the new output's value identity to the previous output's value identity.
+7. If identical (early cutoff): dependents are NOT re-evaluated. The change stops propagating. **But the memo entry's dependency trace is updated** to reflect the dependencies actually observed during this re-evaluation.
+8. If different: the memo entry is updated with the new output and new dependency trace. Dependents are marked for re-evaluation. The process continues.
+
+**Why the dependency trace update in step 7 matters:**
+
+A computation may produce the same output value but observe different dependencies. For example: a function reads a config file to decide which of two equivalent code paths to take. If the config file changes but the output is the same, early cutoff fires. But the memo entry must now record the dependency on the new config file content, not the old content. Otherwise, the next time the config file changes, the runtime would check the old dependency trace, find a match (wrong!), and skip re-evaluation when it shouldn't.
+
+Same output value ≠ same invalidation behavior. Early cutoff stops downstream propagation. It does not freeze the dependency trace.
 
 This is the mechanism that prevents a Cargo.toml reformatting from triggering a full rebuild. It is also the mechanism that allows a toolchain update to avoid rebuilding crates whose compilation output happens to be identical (uncommon but possible with no-op updates).
 
@@ -751,7 +839,7 @@ If the user interrupts a build:
 1. **The memo table never contains invalid entries.** An entry is written only after successful execution and output capture. Atomic writes prevent partial entries.
 2. **The store never contains corrupt objects.** Every blob is verified by BLAKE3 on write and on read. A bit flip is detected, not silently served.
 3. **An interrupted build cannot leave the system in a state where the next build produces wrong results.** Leases and atomic memo writes ensure this.
-4. **Transient failures (network, OOM) do not produce cached failure entries for `download`/`acquire`.** Only deterministic failures may be cached, and only for primitives where the failure is determined by the inputs.
+4. **Transient failures (network, OOM) do not produce cached failure entries for `download`/`acquire_tree`/`acquire`.** Only deterministic failures may be cached, and only for primitives where the failure is determined by the inputs.
 
 ---
 
@@ -870,13 +958,13 @@ These must hold for the system to be correct. Violations are bugs.
 
 4. **Content-addressed integrity**: every object in the store is verified by BLAKE3 on write and on read. Bit flips are detected, not silently served.
 
-5. **Early cutoff correctness**: if a computation re-evaluates and produces a result with the same content-addressed identity, its dependents are not re-evaluated.
+5. **Early cutoff correctness**: if a computation re-evaluates and produces a result with the same content-addressed identity, its dependents are not re-evaluated. The computation's dependency trace is still updated to reflect the dependencies actually observed during re-evaluation (§4.7 invariant 6).
 
 6. **Lease safety**: in-flight blobs are held by leases. GC never reclaims a leased object. Leases expire only on successful commit, explicit cancellation, or timeout.
 
 7. **No semantic dependence on runtime telemetry**: stderr, timings, progress events, CAS upload notifications, and scheduler decisions never affect computation results or cache keys.
 
-8. **Monotonic stream safety**: a primitive may yield semantic stream elements only if each element is individually final and later elements cannot invalidate earlier ones.
+8. **Monotonic stream safety**: a primitive may yield semantic stream elements only if each element is individually final and later elements cannot invalidate earlier ones. If the primitive has a deferred verification boundary (e.g., archive hash), no downstream memo entry may be published until verification succeeds (§5.5).
 
 9. **Demand purity**: the language has no construct that triggers evaluation. All demand originates from outside the language boundary.
 
@@ -896,7 +984,7 @@ These must be answered before the first evaluator can be implemented.
 
 1. **Function identity normalization.** What normalization is applied for function identity hashing? Surface AST or lowered IR? Are local variable names significant? (§4.4 defines the v0 compromise; this is the remaining implementation detail.)
 
-2. **Structural hashing for compound values.** What is the concrete representation of a typed compound value's content-addressed identity? Structural hash of all fields? Merkle-style? §4.2 establishes that types without stable equality cannot be memo boundaries — but the specific hashing scheme for compound types needs implementation design before the evaluator can implement early cutoff.
+2. **Structural hashing for compound values.** §4.8 defines the canonical structural hashing rules (type tag + sorted fields + recursive hashing). The remaining blocker is implementation: choosing the concrete canonical encoding format, verifying that it is deterministic across platforms, and deciding whether the hashing and encoding should be the same byte stream (simplest) or separate concerns.
 
 3. **Path collision in tree collection.** What happens when two entries in a tree-producing operation have the same path? Last-write-wins? Error? This must be deterministic. Applies to `acquire_tree` in Stage 0 and to `collect_tree()` when streams arrive in Stage 1.
 
@@ -904,19 +992,23 @@ These must be answered before the first evaluator can be implemented.
 
 5. **Error model for `exec`.** What is the error value? Just "failed with exit code N and stderr"? Or richer structure? The evaluator must know how to represent and propagate exec failures before it can wire to `vx-runner`.
 
+6. **Dependency trace representation.** §4.8 and §7.3 establish that memo entries must record dependency traces for verifying-trace cache validity checks. The concrete representation must be defined: how are sub-computation observations recorded during evaluation? How are they serialized in the memo table? What is the cost of trace verification vs. re-evaluation, and when should the runtime prefer one over the other?
+
 ### Later open questions
 
 These are real design questions but do not block Stage 0 implementation.
 
-6. **Eviction/GC policy for memo entries.** LRU? Reference counting? Manual pinning? Time-based expiry? (Stage 0 has no GC — store grows unbounded.)
+7. **Eviction/GC policy for memo entries.** LRU? Reference counting? Manual pinning? Time-based expiry? (Stage 0 has no GC — store grows unbounded.)
 
-7. **Late-bound input refresh policy.** §4.5 defines the resolution model, but the TTL/staleness policy for resolved values (e.g., how often to re-resolve "current Rust stable") needs a concrete answer. Not blocking because Stage 0 uses explicit toolchain specs.
+8. **Late-bound input refresh policy.** §4.5 defines the resolution model, but the TTL/staleness policy for resolved values (e.g., how often to re-resolve "current Rust stable") needs a concrete answer. Not blocking because Stage 0 uses explicit toolchain specs.
 
-8. **Stream backpressure / early-termination.** What happens when consumers don't need all elements? (Deferred with streams to Stage 1.)
+9. **Stream backpressure / early-termination.** What happens when consumers don't need all elements? (Deferred with streams to Stage 1.)
 
-9. **User-defined types.** Should the language support user-defined types, or are all types built-in / provided by the standard library? Stage 0 is dynamically typed; this is a Stage 4 question.
+10. **Stream publication gating implementation.** §5.5 defines the publication gating rule for streams with deferred verification boundaries. The concrete implementation (lease scoping, speculative result tracking, verification-triggered commit) needs design before Stage 1.
 
-10. **Non-deterministic tools.** How does the system handle compilers that embed timestamps or tools that use randomized algorithms? Is this purely a documentation/policy concern, or does the runtime attempt to detect it? Sandboxing mitigates but does not fully resolve this.
+11. **User-defined types.** Should the language support user-defined types, or are all types built-in / provided by the standard library? Stage 0 is dynamically typed; this is a Stage 4 question.
+
+12. **Non-deterministic tools.** How does the system handle compilers that embed timestamps or tools that use randomized algorithms? Is this purely a documentation/policy concern, or does the runtime attempt to detect it? Sandboxing mitigates but does not fully resolve this.
 
 ---
 
