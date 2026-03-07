@@ -221,9 +221,10 @@ What this shows:
 ```text
 fn validate_registry_entry(name: String, version: String) -> Unit throws InputError {
   match catch cargo::registry_package_exists(name, version) {
-    Ok(exists) => match {
-      exists => ()
-      _ => fail MissingRegistryCrate { name, version }
+    Ok(exists) => {
+      if !exists {
+        fail MissingRegistryCrate { name, version }
+      }
     }
     Err(err) => fail err
   }
@@ -273,12 +274,27 @@ This is a good middle ground:
 
 ```text
 fn source_label(krate: CrateNode) -> String {
+  match krate.source {
+    Registry { name, version, checksum } => `registry ${name}@${version}`
+    Path { path } => `path ${path}`
+    _ => "unknown"
+  }
+}
+
+fn preferred_label(krate: CrateNode) -> String {
   @choose {
-    match krate.source {
-      Registry { name, version, checksum } => break choose `registry ${name}@${version}`
-      Path { path } => break choose `path ${path}`
-      _ => "unknown"
+    registry = krate.source as CrateSource::Registry
+
+    match registry {
+      Some(source) => break choose `registry ${source.name}@${source.version}`
+      None => ()
     }
+
+    if krate.crate_type == Bin {
+      break choose `bin ${krate.crate_name}`
+    }
+
+    `crate ${krate.crate_name}`
   }
 }
 
@@ -296,7 +312,9 @@ fn first_binary(graph: CrateGraph) -> Option<CrateNode> {
 
 What this shows:
 
-- `break` is the local escape hatch for blocks and closures
+- plain `match` already works well as an expression when no early exit is needed
+- `break` is the local escape hatch for blocks and closures when early exit is
+  actually useful
 - `return` remains the nonlocal function escape hatch
 - closures can participate in structured control flow without becoming tiny
   Rust functions

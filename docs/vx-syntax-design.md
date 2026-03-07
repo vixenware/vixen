@@ -225,6 +225,8 @@ Current bias:
 - `$` is only shorthand for unary expression closures
 - block-bodied closures still spell their parameters explicitly
 - multi-parameter closures still spell their parameters explicitly
+- template-heavy code may still prefer explicit parameter names for readability,
+  since `${$}` is lexically valid but visually rough
 
 Both single-expression and block-bodied closures are allowed:
 
