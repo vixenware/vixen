@@ -13,60 +13,65 @@ fn build_root(root_src: Tree, ctx: BuildCtx) -> BuiltCrate =
 
 // Build a resolved package.
 //
-// The memo key includes the package id, role, enabled features, and
-// host/target triples. The same crate built for host (build-dep) vs
-// target (normal dep) is a different computation.
-fn build_pkg(pkg: ResolvedPkg, ctx: BuildCtx) -> BuiltCrate =
-  memo(pkg.id, pkg.role, pkg.enabled_features, ctx.host, ctx.target) {
-    // Build host-side dependencies first (build-dependencies).
-    // These are needed for build scripts and proc macros.
-    let host_deps =
-      pkg.deps
-        .filter($.role == Host)
-        .map(|edge| edge.extern_name => build_pkg(edge.pkg, ctx))
-        .into_map()
+// This is a plain function. Repeated calls with identical (pkg, ctx)
+// arguments are automatically shared by the runtime — no explicit
+// memoization needed. If two crates depend on the same resolved package,
+// build_pkg is called twice but executes once.
+//
+// The same applies to host vs target builds: pkg.role is part of the
+// argument identity, so build_pkg(dep, ctx) with role=Host and
+// build_pkg(dep, ctx) with role=Target are different computations with
+// different cached results.
+fn build_pkg(pkg: ResolvedPkg, ctx: BuildCtx) -> BuiltCrate = {
+  // Build host-side dependencies first (build-dependencies).
+  // These are needed for build scripts and proc macros.
+  let host_deps =
+    pkg.deps
+      .filter($.role == Host)
+      .map(|edge| edge.extern_name => build_pkg(edge.pkg, ctx))
+      .into_map()
 
-    // Run the build script, if any. It may produce:
-    // - OUT_DIR with generated code
-    // - cargo:rustc-env=KEY=VALUE
-    // - cargo:rustc-cfg=FEATURE
-    // - cargo:rustc-link-search=PATH
-    // - cargo:rustc-link-lib=LIB
-    let build_out =
-      run_build_script_if_any(pkg, host_deps, ctx)
+  // Run the build script, if any. It may produce:
+  // - OUT_DIR with generated code
+  // - cargo:rustc-env=KEY=VALUE
+  // - cargo:rustc-cfg=FEATURE
+  // - cargo:rustc-link-search=PATH
+  // - cargo:rustc-link-lib=LIB
+  let build_out =
+    run_build_script_if_any(pkg, host_deps, ctx)
 
-    // Build target-side dependencies (normal dependencies).
-    // Only their rmeta is needed for pipelining.
-    let target_deps =
-      pkg.deps
-        .filter($.role == Target)
-        .map(|edge| edge.extern_name => build_pkg(edge.pkg, ctx))
-        .into_map()
+  // Build target-side dependencies (normal dependencies).
+  // Only their rmeta is needed for pipelining.
+  let target_deps =
+    pkg.deps
+      .filter($.role == Target)
+      .map(|edge| edge.extern_name => build_pkg(edge.pkg, ctx))
+      .into_map()
 
-    // The extern tree: each dependency's rmeta, named for --extern.
-    // dep.rmeta is lazy — blocks until that dep's rustc emits metadata.
-    let externs = tree {
-      for (name, dep) in target_deps {
-        "lib${name}.rmeta" = dep.rmeta
-      }
-    }
-
-    let events =
-      rustc_events(
-        pkg       = pkg,
-        externs   = externs,
-        build_out = build_out,
-        ctx       = ctx,
-      )
-
-    // The returned struct's fields are lazy projections over the shared
-    // event stream. Nothing computes until demanded.
-    {
-      rmeta       = events.find($ as RMeta).0,
-      rlib        = events.find($ as RLib).0,
-      diagnostics = events.filter($ as Diagnostic).map($.0),
+  // The extern tree: each dependency's rmeta, named for --extern.
+  // dep.rmeta is lazy — blocks until that dep's rustc emits metadata.
+  let externs = tree {
+    for (name, dep) in target_deps {
+      "lib${name}.rmeta" = dep.rmeta
     }
   }
+
+  let events =
+    rustc_events(
+      pkg       = pkg,
+      externs   = externs,
+      build_out = build_out,
+      ctx       = ctx,
+    )
+
+  // The returned struct's fields are lazy projections over the shared
+  // event stream. Nothing computes until demanded.
+  {
+    rmeta       = events.find($ as RMeta).0,
+    rlib        = events.find($ as RLib).0,
+    diagnostics = events.filter($ as Diagnostic).map($.0),
+  }
+}
 
 // Run rustc and return its event stream.
 fn rustc_events(

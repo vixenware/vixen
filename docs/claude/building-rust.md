@@ -14,29 +14,32 @@ Here is what building a Rust crate looks like in Vixen. This is the design
 target — not all syntax is final, but the shape is right.
 
 ```
-fn build_pkg(pkg: ResolvedPkg, ctx: BuildCtx) -> BuiltCrate =
-  memo(pkg.id, pkg.role, pkg.enabled_features, ctx.host, ctx.target) {
-    let target_deps =
-      pkg.deps
-        .filter($.role == Target)
-        .map(|edge| edge.extern_name => build_pkg(edge.pkg, ctx))
-        .into_map()
+fn build_pkg(pkg: ResolvedPkg, ctx: BuildCtx) -> BuiltCrate = {
+  let target_deps =
+    pkg.deps
+      .filter($.role == Target)
+      .map(|edge| edge.extern_name => build_pkg(edge.pkg, ctx))
+      .into_map()
 
-    let externs = tree {
-      for (name, dep) in target_deps {
-        "lib${name}.rmeta" = dep.rmeta
-      }
-    }
-
-    let events = rustc_events(pkg, externs, build_out, ctx)
-
-    {
-      rmeta       = events.find($ as RMeta).0,
-      rlib        = events.find($ as RLib).0,
-      diagnostics = events.filter($ as Diagnostic).map($.0),
+  let externs = tree {
+    for (name, dep) in target_deps {
+      "lib${name}.rmeta" = dep.rmeta
     }
   }
+
+  let events = rustc_events(pkg, externs, build_out, ctx)
+
+  {
+    rmeta       = events.find($ as RMeta).0,
+    rlib        = events.find($ as RLib).0,
+    diagnostics = events.filter($ as Diagnostic).map($.0),
+  }
+}
 ```
+
+`build_pkg` is a plain function. Repeated calls with identical arguments are
+automatically shared — no annotation needed. If two crates depend on the same
+resolved package, `build_pkg` executes once.
 
 This reads like ordinary code. Parse the manifest, resolve dependencies,
 recursively build them, prepare inputs, run rustc, project the outputs.

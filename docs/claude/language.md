@@ -276,26 +276,28 @@ stream.find($ as Metadata) // |x| x as Metadata
 
 For multi-argument closures or complex bodies, use the full form: `|a, b| ...`
 
-### Explicit memoization with `memo`
+### Implicit memoization
 
-By default, top-level named functions are memoized by their full argument
-identity. When you need a custom memo key (e.g. because the same function
-should produce different results for different roles or feature sets), use
-an explicit `memo` block:
+There is no `memo` keyword or explicit cache annotation. Function calls are
+automatically cached by computation identity.
 
 ```
-fn build_pkg(pkg: ResolvedPkg, ctx: BuildCtx) -> BuiltCrate =
-  memo(pkg.id, pkg.role, pkg.enabled_features, ctx.host, ctx.target) {
-    ...
-  }
+// Two callers requesting the same dep get the same cached build.
+// The runtime deduplicates automatically.
+fn build_pkg(pkg: ResolvedPkg, ctx: BuildCtx) -> BuiltCrate = {
+  ...
+}
 ```
 
-The memo key is the tuple of values in the parentheses. If the key matches a
-previous invocation, the cached result is returned. The body is only evaluated
-on cache miss.
+The computation identity of a call is derived from the structural identity of
+its arguments. Two calls are the same computation if and only if they receive
+structurally identical values. The runtime caches results by computation
+identity and reuses them across callers.
 
-This is necessary for dependency resolution where the same package may be
-built differently depending on role (host vs target) and enabled features.
+This means:
+- Recursive calls with the same arguments execute once, not N times
+- The dependency graph is a DAG, not a tree — shared dependencies are shared
+- No explicit deduplication or memoization annotation in user code
 
 ## Modules
 

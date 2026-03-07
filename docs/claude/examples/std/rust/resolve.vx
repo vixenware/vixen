@@ -12,66 +12,73 @@ use std.rust.manifest { parse_manifest }
 
 // Resolve a package from a request.
 //
-// The memo key includes role and features because the same crate at the
-// same version can be built differently depending on who requests it.
-// Cargo features are additive — repeated requests for the same package
-// union features rather than pick one caller's set.
+// This is a plain recursive function. The runtime automatically caches
+// calls by argument identity. Two callers requesting the same (req, host,
+// target) get the same result.
+//
+// Role and features are part of req, so a Target request and a Host
+// request for the same crate are distinct computations with distinct
+// cached results — which is correct, since they compile to different
+// artifacts.
+//
+// Feature coalescing (unioning features from multiple callers of the same
+// package) happens via coalesce_same_package_by_unioning_features(), which
+// groups edges by package id and unions their feature sets before recursing.
 fn resolve_pkg(
   req: ResolveReq,
   root_src: Tree,
   ctx: BuildCtx,
-) -> ResolvedPkg =
-  memo(req, ctx.host, ctx.target) {
-    let concrete = choose_concrete_source(req.source, ctx.lock, ctx.registry)
-    let src = materialize_source(concrete, root_src)
-    let manifest = parse_manifest(src)
+) -> ResolvedPkg = {
+  let concrete = choose_concrete_source(req.source, ctx.lock, ctx.registry)
+  let src = materialize_source(concrete, root_src)
+  let manifest = parse_manifest(src)
 
-    let enabled =
-      activate_features(
-        manifest,
-        requested = req.requested_features,
-        default_features = req.default_features,
-      )
+  let enabled =
+    activate_features(
+      manifest,
+      requested = req.requested_features,
+      default_features = req.default_features,
+    )
 
-    let dep_reqs =
-      collect_dep_reqs(
-        manifest = manifest,
-        enabled_features = enabled,
-        ctx = ctx,
-      )
-
-    let deps =
-      dep_reqs
-        .map(|edge| {
-          {
-            extern_name = edge.extern_name,
-            kind        = edge.kind,
-            role        = edge.role,
-
-            pkg = resolve_pkg(
-              req = {
-                source             = edge.source,
-                role               = edge.role,
-                default_features   = edge.default_features,
-                requested_features = edge.requested_features,
-              },
-              root_src = root_src,
-              ctx      = ctx,
-            ),
-          }
-        })
-        .coalesce_same_package_by_unioning_features()
-
-    {
-      id               = package_id(manifest, concrete),
-      source           = concrete,
-      src              = src,
-      manifest         = manifest,
-      role             = req.role,
+  let dep_reqs =
+    collect_dep_reqs(
+      manifest = manifest,
       enabled_features = enabled,
-      deps             = deps,
-    }
+      ctx = ctx,
+    )
+
+  let deps =
+    dep_reqs
+      .coalesce_same_package_by_unioning_features()
+      .map(|edge| {
+        {
+          extern_name = edge.extern_name,
+          kind        = edge.kind,
+          role        = edge.role,
+
+          pkg = resolve_pkg(
+            req = {
+              source             = edge.source,
+              role               = edge.role,
+              default_features   = edge.default_features,
+              requested_features = edge.requested_features,
+            },
+            root_src = root_src,
+            ctx      = ctx,
+          ),
+        }
+      })
+
+  {
+    id               = package_id(manifest, concrete),
+    source           = concrete,
+    src              = src,
+    manifest         = manifest,
+    role             = req.role,
+    enabled_features = enabled,
+    deps             = deps,
   }
+}
 
 fn resolve_root(root_src: Tree, ctx: BuildCtx) -> ResolvedPkg =
   resolve_pkg(
