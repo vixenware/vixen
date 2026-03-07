@@ -4,6 +4,8 @@ A typed, demand-driven build language with a distributed memoizing runtime.
 
 ---
 
+<!-- split: 02-semantic-core.md (glossary) -->
+
 ## Glossary
 
 | Term | Definition |
@@ -36,7 +38,9 @@ A typed, demand-driven build language with a distributed memoizing runtime.
 
 ---
 
-## 0. Non-goals
+<!-- split: 07-non-goals.md -->
+
+## Non-goals
 
 These are explicitly out of scope. They are not deferred features; they are things this system does not attempt.
 
@@ -50,7 +54,9 @@ These are explicitly out of scope. They are not deferred features; they are thin
 
 ---
 
-## 0.1 What this phase is trying to validate
+<!-- split: 00-objective.md -->
+
+## Objective: what this phase is trying to validate
 
 This document describes a complete system. The current phase of work is not trying to build that complete system. It is trying to answer specific questions that must be answered before deeper implementation is justified.
 
@@ -72,6 +78,8 @@ This document describes a complete system. The current phase of work is not tryi
 The goal is to pressure-test the semantic model against real build examples before committing to the full implementation. If the model breaks under real use, it is cheaper to discover that now.
 
 ---
+
+<!-- split: 02-semantic-core.md (motivation) -->
 
 ## 1. Motivation and framing
 
@@ -136,6 +144,8 @@ The paper models build systems as `Task c k v` — a function from a key `k` to 
 The paper remains the best available framework for classifying the core scheduling and rebuilding strategy. But Vixen's design extends into territory the paper intentionally leaves abstract: typed values, structured storage, sandboxed execution, streaming, and store lifecycle.
 
 ---
+
+<!-- split: 02-semantic-core.md (normative) -->
 
 ## 2. Core semantic model
 
@@ -246,6 +256,8 @@ Telemetry may be surfaced in debugging tools, the graph inspector, or logging. I
 
 ---
 
+<!-- split: 03-operational-core.md -->
+
 ## 3. Operational model
 
 ### 3.1 Architecture
@@ -329,6 +341,8 @@ The language does not see this. From the language's perspective, independent com
 This is where "Model A semantically, Model B operationally" is load-bearing. The scheduler exists; it just doesn't leak into the language.
 
 ---
+
+<!-- split: 02-semantic-core.md (identity model) -->
 
 ## 4. Cache and identity model
 
@@ -417,6 +431,8 @@ Late-bound inputs must resolve against an **explicit execution context**, not am
 
 The key rule: **resolution is orchestrator-owned, but parameterized by execution platform and executor class.** The resolved value, plus the relevant platform/capability fingerprint, participates in identity. If a local executor can see state that a remote executor cannot (e.g., a system-installed SDK), that state must either be explicitly fingerprinted or the build is not portable — and the system should know which case it's in.
 
+<!-- split: 04-example-corpus/early-cutoff-toml.md -->
+
 ### 4.6 Value-based caching, concretely
 
 "Value-based caching" means the cache key includes the identity of values, not the identity of how those values were produced.
@@ -502,6 +518,8 @@ Canonical structural hashing rules:
 
 ---
 
+<!-- split: 02-semantic-core.md (output model) -->
+
 ## 5. Output and artifact model
 
 ### 5.1 Core runtime objects
@@ -585,6 +603,8 @@ The runtime captures the full tree under `gen/` after successful execution. The 
 
 The result record itself is a structured value (§4.8). Its identity is a canonical structural hash over the field names and the blob/tree hashes they reference. This identity participates in early cutoff: if a re-execution produces blobs with the same BLAKE3 hashes, the result record has the same structural hash, and downstream dependents are not re-evaluated.
 
+<!-- split: 04-example-corpus/exec-vs-stream.md -->
+
 ### 5.5 Why generic `exec` is not a semantic stream
 
 Consider a C compiler invocation:
@@ -640,6 +660,8 @@ The test for any candidate stream-producing primitive has three parts:
 
 ---
 
+<!-- split: 03-operational-core.md (store lifecycle) -->
+
 ## 6. Store / GC / liveness model
 
 ### 6.1 Three states of a produced object
@@ -673,6 +695,8 @@ A **root** is a durable reference to a content-addressed object. Roots come from
 - Pinned objects: explicitly pinned by the user or tooling (e.g., "keep this toolchain available").
 
 GC walks reachability from all roots. Anything reachable (transitively, through Merkle manifests) survives. Everything else is eligible for collection.
+
+<!-- split: 04-example-corpus/acquire-toolchain.md -->
 
 ### 6.4 Worked example: downloading and extracting a Rust toolchain
 
@@ -722,6 +746,8 @@ If the download fails at step 3 (network error): the lease expires, partially-up
 If the hash doesn't match at step 3: this is a permanent failure. The runtime reports it. Whether to cache this failure is a policy question — the URL may have been compromised, or the spec may be wrong. Conservatively: do not cache hash-mismatch failures.
 
 ---
+
+<!-- split: 02-semantic-core.md (incrementality) -->
 
 ## 7. Incrementality and invalidation
 
@@ -774,6 +800,8 @@ Same output value ≠ same invalidation behavior. Early cutoff stops downstream 
 
 This is the mechanism that prevents a Cargo.toml reformatting from triggering a full rebuild. It is also the mechanism that allows a toolchain update to avoid rebuilding crates whose compilation output happens to be identical (uncommon but possible with no-op updates).
 
+<!-- split: 04-example-corpus/dynamic-test-discovery.md -->
+
 ### 7.4 Concrete example: Rust crate with dynamically discovered tests
 
 ```
@@ -800,6 +828,8 @@ fn build_and_test(pkg: RustPackage, tc: RustToolchain) -> TestResult {
 Dynamic test discovery is natural: the test binary itself determines which tests exist. This is not a dependency graph trick; it is ordinary tracked evaluation. If the source changes, the test binary changes, which changes the test results. If the source changes in a way that does not affect the test binary (early cutoff), the tests are not re-run.
 
 ---
+
+<!-- split: 03-operational-core.md (failure recovery) -->
 
 ## 8. Failure, cancellation, and crash recovery
 
@@ -842,6 +872,8 @@ If the user interrupts a build:
 4. **Transient failures (network, OOM) do not produce cached failure entries for `download`/`acquire_tree`/`acquire`.** Only deterministic failures may be cached, and only for primitives where the failure is determined by the inputs.
 
 ---
+
+<!-- split: 06-decisions.md (staged plan) -->
 
 ## 9. Implementation plan
 
@@ -908,6 +940,8 @@ The irreducible foundation. Without these, nothing else makes sense.
 
 ---
 
+<!-- split: 06-decisions.md (open questions, risks) -->
+
 ## 10. Open questions and risks
 
 ### 10.1 Design questions (not blocking Stage 0)
@@ -946,6 +980,8 @@ The Stage 0 blockers are listed separately in the "Unresolved questions" section
 
 ---
 
+<!-- split: 01-invariants.md -->
+
 ## Architectural invariants
 
 These must hold for the system to be correct. Violations are bugs.
@@ -975,6 +1011,8 @@ These must hold for the system to be correct. Violations are bugs.
 12. **Equality requirement**: every type used as a semantic cache boundary must have well-defined structural equality. Types without stable equality cannot participate in early cutoff.
 
 ---
+
+<!-- split: 05-stage0-blockers.md (blockers) + 06-decisions.md (later questions) -->
 
 ## Unresolved questions
 
@@ -1011,6 +1049,8 @@ These are real design questions but do not block Stage 0 implementation.
 12. **Non-deterministic tools.** How does the system handle compilers that embed timestamps or tools that use randomized algorithms? Is this purely a documentation/policy concern, or does the runtime attempt to detect it? Sandboxing mitigates but does not fully resolve this.
 
 ---
+
+<!-- split: 05-stage0-blockers.md (MVP scope) + 06-decisions.md (MVP decisions) -->
 
 ## Proposed MVP cut
 
@@ -1070,7 +1110,9 @@ The MVP proves: **the evaluator can drive real compilation through `exec`, memoi
 
 ---
 
-## Appendix A: Current implementation assets
+<!-- split: not included in normative split — implementation context only -->
+
+## Appendix A: Current implementation assets (non-normative)
 
 This section is implementation context, not normative architecture. It documents what already exists and can be reused. The spec above defines the target; this appendix describes the starting point.
 
