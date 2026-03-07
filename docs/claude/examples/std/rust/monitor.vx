@@ -1,0 +1,56 @@
+// std/rust/monitor.vx — Rustc JSON output parser
+//
+// This is the parse function passed to exec. It runs on the executor,
+// parsing rustc's JSON stdout and yielding typed events as artifacts
+// and diagnostics appear.
+
+use std.rust.types { RustcEvent, RMeta, RLib, Diagnostic, Finished,
+                     RustDiagnostic, DiagnosticSpan }
+
+// Parse rustc's --json output line by line, yielding events.
+// This function is a generator — it yields RustcEvent values.
+fn rustc_json(process: Process) -> Stream<RustcEvent> = {
+  for line in process.stdout_lines() {
+    let msg = json_parse(line)
+
+    match msg["reason"] {
+      "compiler-artifact" => {
+        let filenames = msg["filenames"]
+
+        // rustc emits metadata before the final library.
+        // The "emit" field tells us which artifact this is.
+        for filename in filenames {
+          if filename.ends_with(".rmeta") {
+            yield RMeta { file = store.commit(filename) }
+          }
+          if filename.ends_with(".rlib") {
+            yield RLib { file = store.commit(filename) }
+          }
+        }
+      }
+
+      "compiler-message" => {
+        let inner = msg["message"]
+        yield Diagnostic {
+          diag = RustDiagnostic {
+            level    = inner["level"],
+            message  = inner["message"],
+            rendered = inner["rendered"],
+            spans    = inner["spans"].map(|s| DiagnosticSpan {
+              file_name    = s["file_name"],
+              line_start   = s["line_start"],
+              line_end     = s["line_end"],
+              column_start = s["column_start"],
+              column_end   = s["column_end"],
+              text         = s["text"].map($.text).join("\n"),
+            }),
+          }
+        }
+      }
+
+      "build-finished" => {
+        yield Finished { status = msg["success"] }
+      }
+    }
+  }
+}

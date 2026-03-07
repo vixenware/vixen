@@ -1,0 +1,66 @@
+// std/rust/toolchain.vx — Hermetic Rust toolchain acquisition
+
+use std.rust.types { Toolchain, LockFile, LockedPackage }
+
+enum Channel {
+  Stable
+  Beta
+  Nightly { date: String }
+}
+
+struct ChannelManifest {
+  version: String
+  url: String
+  sha256: String
+}
+
+// Resolve a channel to a concrete version. This is one of the few
+// network-touching operations — it checks what "stable" means today.
+// The result is memoized: once resolved, it stays resolved for the
+// duration of the build.
+fn resolve_channel(channel: Channel, target: String) -> ChannelManifest = {
+  let channel_name = match channel {
+    Stable        => "stable"
+    Beta          => "beta"
+    Nightly { d } => "nightly-${d}"
+  }
+
+  let manifest_url =
+    "https://static.rust-lang.org/dist/channel-rust-${channel_name}.toml"
+
+  // download + parse the channel manifest to find the actual version
+  let manifest =
+    download(url = manifest_url)
+      .read_utf8()
+      .toml()
+      .decode<RustChannelToml>()
+
+  let pkg = manifest.pkg.rust
+
+  {
+    version = pkg.version,
+    url     = pkg.target[target].url,
+    sha256  = pkg.target[target].hash,
+  }
+}
+
+// Acquire a Rust toolchain. Downloads the archive, verifies the hash,
+// extracts into the store, and returns a Toolchain value.
+fn acquire_toolchain(channel: Channel, target: String) -> Toolchain = {
+  let resolved = resolve_channel(channel, target)
+
+  let entries = acquire(url = resolved.url, sha256 = resolved.sha256)
+  let tc_tree = entries.filter($ as TreeEntry).collect_tree()
+
+  // The archive has a top-level directory like "rust-1.80.0-x86_64-unknown-linux-gnu/"
+  // Navigate into it.
+  let prefix = "rust-${resolved.version}-${target}"
+  let root = tc_tree.subtree(prefix)
+
+  Toolchain {
+    rustc   = root["bin/rustc"],
+    std     = root.subtree("lib"),
+    version = resolved.version,
+    target  = target,
+  }
+}

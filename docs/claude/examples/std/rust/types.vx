@@ -1,0 +1,78 @@
+// std/rust/types.vx — Type definitions for Rust builds
+
+struct BuiltCrate {
+  name: String
+  rmeta: Blob
+  rlib: Blob
+  diagnostics: Stream<RustDiagnostic>
+}
+
+struct RustDiagnostic {
+  level: String
+  message: String
+  rendered: String
+  spans: List<DiagnosticSpan>
+}
+
+struct DiagnosticSpan {
+  file_name: String
+  line_start: Int
+  line_end: Int
+  column_start: Int
+  column_end: Int
+  text: String
+}
+
+enum RustcEvent {
+  RMeta      { file: Blob }
+  RLib       { file: Blob }
+  Diagnostic { diag: RustDiagnostic }
+  Finished   { status: ExitStatus }
+}
+
+struct CargoManifest {
+  package: PackageInfo
+  dependencies: Map<String, DepSpec>
+}
+
+struct PackageInfo {
+  name: String
+  version: String
+  edition: String
+}
+
+enum DepSpec {
+  Simple  { version: String }
+  Complex { version: String, features: List<String>, optional: Bool }
+}
+
+struct ResolvedCrate {
+  name: String
+  version: String
+  source: CrateSource
+  deps: List<ResolvedCrate>
+}
+
+enum CrateSource {
+  Registry { url: String, sha256: String }
+  Path     { tree: Tree }
+  Git      { url: String, rev: String, sha256: String }
+}
+
+struct Toolchain {
+  rustc: Blob
+  std: Tree
+  version: String
+  target: String
+}
+
+struct LockFile {
+  packages: List<LockedPackage>
+}
+
+struct LockedPackage {
+  name: String
+  version: String
+  source: String
+  checksum: String
+}

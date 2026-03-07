@@ -1,0 +1,47 @@
+// std/rust/manifest.vx — Cargo manifest parsing and dependency resolution
+
+use std.rust.types { CargoManifest, ResolvedCrate, CrateSource, LockFile }
+
+// Parse a Cargo.toml from a source tree.
+fn parse_manifest(src: Tree) -> CargoManifest =
+  src["Cargo.toml"]
+    .read_utf8()
+    .toml()
+    .decode<CargoManifest>()
+
+// Parse a Cargo.lock file.
+fn parse_lock(blob: Blob) -> LockFile =
+  blob
+    .read_utf8()
+    .toml()
+    .decode<LockFile>()
+
+// Resolve dependencies for a crate. Uses the lockfile if present,
+// otherwise resolves from the registry.
+//
+// This is a memoized computation. The same (name, version, deps, lock)
+// tuple always resolves the same way.
+fn resolve_deps(src: Tree, cargo: CargoManifest) -> List<ResolvedCrate> =
+  crates_io.resolve(
+    name    = cargo.package.name,
+    version = cargo.package.version,
+    deps    = cargo.dependencies,
+    lock    = src.get("Cargo.lock").map(parse_lock),
+  )
+
+// Download and verify a crate's source from the registry.
+fn fetch_source(dep: ResolvedCrate) -> Tree =
+  match dep.source {
+    Registry { url, sha256 } =>
+      acquire(url = url, sha256 = sha256)
+        .filter($ as TreeEntry)
+        .collect_tree()
+
+    Path { tree } =>
+      tree
+
+    Git { url, rev, sha256 } =>
+      acquire(url = "${url}/archive/${rev}.tar.gz", sha256 = sha256)
+        .filter($ as TreeEntry)
+        .collect_tree()
+  }

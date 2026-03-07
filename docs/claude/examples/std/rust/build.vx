@@ -1,0 +1,86 @@
+// std/rust/build.vx — Core Rust build logic
+
+use std.rust.types    { BuiltCrate, RustcEvent, RMeta, RLib, Diagnostic,
+                        Toolchain, CargoManifest, ResolvedCrate }
+use std.rust.manifest { parse_manifest, resolve_deps, fetch_source }
+use std.rust.monitor  { rustc_json }
+
+// Compile a Rust crate, producing metadata, library, and diagnostics.
+//
+// This is the central function. It:
+// 1. Parses the manifest
+// 2. Resolves and recursively builds dependencies
+// 3. Prepares the extern tree (rmeta files from deps)
+// 4. Runs rustc with a JSON monitor for pipelining
+// 5. Returns a BuiltCrate whose fields are lazy stream projections
+fn build_crate(src: Tree, tc: Toolchain) -> BuiltCrate = {
+  let cargo = parse_manifest(src)
+  let deps  = resolve_deps(src, cargo)
+
+  let built_deps =
+    deps
+      .map(|dep| dep.name => build_dep(dep, tc))
+      .into_map()
+
+  // Construct the extern tree. Each dependency contributes its rmeta.
+  // dep.rmeta is lazy — it blocks until that dep's rustc emits metadata.
+  // This is the pipelining mechanism: we don't wait for dep.rlib.
+  let externs = tree {
+    for (name, dep) in built_deps {
+      "lib${name}.rmeta" = dep.rmeta
+    }
+  }
+
+  let events = rustc_events(tc, src, externs, cargo)
+
+  // Return a BuiltCrate. The fields are lazy projections over the shared
+  // event stream. No field is computed until someone demands it.
+  {
+    name        = cargo.package.name,
+    rmeta       = events.find($ as RMeta).file,
+    rlib        = events.find($ as RLib).file,
+    diagnostics = events.filter($ as Diagnostic).map($.diag),
+  }
+}
+
+// Build a dependency: fetch its source, then build it.
+// Memoization makes this a no-op if the same (dep, tc) was already built.
+fn build_dep(dep: ResolvedCrate, tc: Toolchain) -> BuiltCrate =
+  build_crate(fetch_source(dep), tc)
+
+// Build the root crate (the user's project).
+fn build_root(src: Tree, tc: Toolchain) -> BuiltCrate =
+  build_crate(src, tc)
+
+// Run rustc and return its event stream.
+fn rustc_events(
+  tc: Toolchain,
+  src: Tree,
+  externs: Tree,
+  cargo: CargoManifest,
+) -> Stream<RustcEvent> =
+  exec(
+    cmd = [
+      tc.rustc,
+      "--crate-name", cargo.package.name,
+      "--edition", cargo.package.edition,
+      "--crate-type", "lib",
+      "--emit", "metadata,link",
+      "--json", "artifacts,diagnostic-rendered-ansi",
+      "--out-dir", "/out",
+      "-L", "dependency=/deps",
+
+      for entry in externs.entries() {
+        "--extern", "${entry.stem}=${entry.path}"
+      },
+
+      "/src/src/lib.rs",
+    ],
+
+    mount = {
+      "/src":  src,
+      "/deps": externs,
+    },
+
+    parse = rustc_json,
+  )

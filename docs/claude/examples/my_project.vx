@@ -1,0 +1,23 @@
+// my_project.vx — Example user project build file
+//
+// This is what a user would write for their project.
+// The standard library does the heavy lifting.
+
+use std.rust.build     { build_root }
+use std.rust.toolchain { acquire_toolchain, Channel }
+
+let target = "x86_64-unknown-linux-gnu"
+
+let tc = acquire_toolchain(
+  channel = Channel.Stable,
+  target  = target,
+)
+
+let src = source_tree()
+
+let my_crate = build_root(src, tc)
+
+// Demand any of these from the CLI:
+//   vixen build my_crate.rlib
+//   vixen build my_crate.rmeta
+//   vixen show my_crate.diagnostics
