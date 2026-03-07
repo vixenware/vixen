@@ -4,8 +4,9 @@ This document introduces Vixen's language and execution model through a
 concrete example: compiling Rust code. It starts simple and builds up, letting
 you discover the semantics as they become necessary.
 
-For aspirational Vixen source files that encode a full cargo build, see
-[examples/std/rust/](examples/std/rust/).
+For aspirational Vixen source files that encode a full cargo build — including
+dependency resolution, feature activation, build scripts, host/target roles,
+and lockfile support — see [examples/std/rust/](examples/std/rust/).
 
 ## The shape of a Rust build
 
@@ -13,30 +14,28 @@ Here is what building a Rust crate looks like in Vixen. This is the design
 target — not all syntax is final, but the shape is right.
 
 ```
-fn build_crate(src: Tree, tc: Toolchain) -> BuiltCrate = {
-  let cargo = parse_manifest(src)
-  let deps  = resolve_deps(src, cargo)
+fn build_pkg(pkg: ResolvedPkg, ctx: BuildCtx) -> BuiltCrate =
+  memo(pkg.id, pkg.role, pkg.enabled_features, ctx.host, ctx.target) {
+    let target_deps =
+      pkg.deps
+        .filter($.role == Target)
+        .map(|edge| edge.extern_name => build_pkg(edge.pkg, ctx))
+        .into_map()
 
-  let built_deps =
-    deps
-      .map(|dep| dep.name => build_dep(dep, tc))
-      .into_map()
+    let externs = tree {
+      for (name, dep) in target_deps {
+        "lib${name}.rmeta" = dep.rmeta
+      }
+    }
 
-  let externs = tree {
-    for (name, dep) in built_deps {
-      "lib${name}.rmeta" = dep.rmeta
+    let events = rustc_events(pkg, externs, build_out, ctx)
+
+    {
+      rmeta       = events.find($ as RMeta).0,
+      rlib        = events.find($ as RLib).0,
+      diagnostics = events.filter($ as Diagnostic).map($.0),
     }
   }
-
-  let events = rustc_events(tc, src, externs, cargo)
-
-  {
-    name        = cargo.package.name,
-    rmeta       = events.find($ as RMeta).file,
-    rlib        = events.find($ as RLib).file,
-    diagnostics = events.filter($ as Diagnostic).map($.diag),
-  }
-}
 ```
 
 This reads like ordinary code. Parse the manifest, resolve dependencies,
@@ -70,17 +69,16 @@ No mutation, no half-filled struct, no promise type.
 
 ```
 struct BuiltCrate {
-  name: String
   rmeta: Blob
   rlib: Blob
   diagnostics: Stream<RustDiagnostic>
 }
 
 enum RustcEvent {
-  RMeta      { file: Blob }
-  RLib       { file: Blob }
-  Diagnostic { diag: RustDiagnostic }
-  Finished   { status: ExitStatus }
+  RMeta(Blob)
+  RLib(Blob)
+  Diagnostic(RustDiagnostic)
+  Finished(ExitStatus)
 }
 ```
 
@@ -88,10 +86,9 @@ enum RustcEvent {
 won't be computed until someone accesses them. But there is nothing special
 about the type itself.
 
-`RustcEvent` is an enum whose variants are proper types. `RMeta` is both a
-variant of `RustcEvent` and a standalone type. This is what makes
-`events.find($ as RMeta)` work — the `as` operator narrows from `RustcEvent`
-to `RMeta`.
+`RustcEvent` is an enum with tuple-style variants. `RMeta` is both a variant
+of `RustcEvent` and a standalone type. `events.find($ as RMeta)` narrows the
+stream to `RMeta` values; `.0` extracts the inner `Blob`.
 
 ### Parsing the manifest
 
@@ -214,7 +211,7 @@ graph emerges from function calls.
 The line that makes pipelining work:
 
 ```
-rmeta = events.find($ as RMeta).file,
+rmeta = events.find($ as RMeta).0,
 ```
 
 `events` is the stream from `rustc_events()`. `.find($ as RMeta)` blocks
@@ -228,7 +225,7 @@ rlib. So the dependent starts compiling as soon as metadata is ready.
 ### Diagnostics
 
 ```
-diagnostics = events.filter($ as Diagnostic).map($.diag),
+diagnostics = events.filter($ as Diagnostic).map($.0),
 ```
 
 Diagnostics are stream events. They're stored with the cached computation. On

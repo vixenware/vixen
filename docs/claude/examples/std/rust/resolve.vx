@@ -1,0 +1,217 @@
+// std/rust/resolve.vx — Dependency resolution
+//
+// This is the heart of what cargo does: turn a dependency request into a
+// concrete, feature-activated, recursively-resolved package graph.
+
+use std.rust.types {
+  BuildCtx, ResolveReq, ResolvedPkg, ResolvedEdge, PackageId,
+  SourceReq, SourceRef, DepSpec, DepKind, Role,
+  CargoManifest, FeatureItem, CfgExpr,
+}
+use std.rust.manifest { parse_manifest }
+
+// Resolve a package from a request.
+//
+// The memo key includes role and features because the same crate at the
+// same version can be built differently depending on who requests it.
+// Cargo features are additive — repeated requests for the same package
+// union features rather than pick one caller's set.
+fn resolve_pkg(
+  req: ResolveReq,
+  root_src: Tree,
+  ctx: BuildCtx,
+) -> ResolvedPkg =
+  memo(req, ctx.host, ctx.target) {
+    let concrete = choose_concrete_source(req.source, ctx.lock, ctx.registry)
+    let src = materialize_source(concrete, root_src)
+    let manifest = parse_manifest(src)
+
+    let enabled =
+      activate_features(
+        manifest,
+        requested = req.requested_features,
+        default_features = req.default_features,
+      )
+
+    let dep_reqs =
+      collect_dep_reqs(
+        manifest = manifest,
+        enabled_features = enabled,
+        ctx = ctx,
+      )
+
+    let deps =
+      dep_reqs
+        .map(|edge| {
+          {
+            extern_name = edge.extern_name,
+            kind        = edge.kind,
+            role        = edge.role,
+
+            pkg = resolve_pkg(
+              req = {
+                source             = edge.source,
+                role               = edge.role,
+                default_features   = edge.default_features,
+                requested_features = edge.requested_features,
+              },
+              root_src = root_src,
+              ctx      = ctx,
+            ),
+          }
+        })
+        .coalesce_same_package_by_unioning_features()
+
+    {
+      id               = package_id(manifest, concrete),
+      source           = concrete,
+      src              = src,
+      manifest         = manifest,
+      role             = req.role,
+      enabled_features = enabled,
+      deps             = deps,
+    }
+  }
+
+fn resolve_root(root_src: Tree, ctx: BuildCtx) -> ResolvedPkg =
+  resolve_pkg(
+    req = {
+      source             = Path { path = "." },
+      role               = Target,
+      default_features   = true,
+      requested_features = ctx.root_features,
+    },
+    root_src = root_src,
+    ctx      = ctx,
+  )
+
+// --- Feature activation ---
+
+// Compute the transitive closure of enabled features.
+// Cargo features are additive: "default" includes whatever "default"
+// maps to, features can enable other features, and dep:x enables
+// optional dependency x.
+fn activate_features(
+  manifest: CargoManifest,
+  requested: Set<String>,
+  default_features: Bool,
+) -> Set<String> =
+  feature_closure(
+    manifest.features,
+    requested ++ if default_features then set { "default" } else set {},
+  )
+
+// Walk the feature graph to a fixed point.
+fn feature_closure(
+  feature_map: Map<String, List<FeatureItem>>,
+  seeds: Set<String>,
+) -> Set<String> = {
+  let result = seeds
+  let worklist = seeds.to_list()
+
+  for feat in worklist {
+    match feature_map.get(feat) {
+      Some(items) =>
+        for item in items {
+          match item {
+            Feature(name) =>
+              if !result.contains(name) {
+                result = result.insert(name)
+                worklist = worklist ++ [name]
+              }
+
+            Dep(name) =>
+              result = result.insert("dep:${name}")
+
+            DepFeature { dep, feature } =>
+              result = result.insert("dep:${dep}")
+              if !result.contains(feature) {
+                result = result.insert(feature)
+                worklist = worklist ++ [feature]
+              }
+          }
+        }
+      None => {}
+    }
+  }
+
+  result
+}
+
+// --- Dependency collection ---
+
+// Collect dependency requests from the manifest, filtered by:
+// - Not dev dependencies (those are only for the root crate's tests)
+// - Target-specific deps are filtered by cfg expression
+// - Optional deps are only included if their feature is enabled
+fn collect_dep_reqs(
+  manifest: CargoManifest,
+  enabled_features: Set<String>,
+  ctx: BuildCtx,
+) -> List<DepSpec> =
+  manifest.dependencies
+    .filter($.kind != Dev)
+    .filter($.target_when.none? || eval_cfg($.target_when?, ctx.target))
+    .filter(!$.optional || enabled_features.contains($.extern_name))
+    .map(|dep| {
+      dep with {
+        role =
+          if dep.kind == Build
+            then Host
+            else Target,
+
+        requested_features =
+          dep.features ++ inherited_dep_features(enabled_features, dep),
+      }
+    })
+
+// Features like "dep-name/feature-name" in the parent's enabled set
+// contribute "feature-name" to the dependency's requested features.
+fn inherited_dep_features(
+  enabled: Set<String>,
+  dep: DepSpec,
+) -> Set<String> =
+  enabled
+    .filter($.starts_with("${dep.extern_name}/"))
+    .map($.strip_prefix("${dep.extern_name}/"))
+
+// --- Source materialization ---
+
+// Turn a SourceReq into a concrete SourceRef using the lockfile or registry.
+fn choose_concrete_source(
+  source: SourceReq,
+  lock: Option<CargoLock>,
+  registry: Registry,
+) -> SourceRef =
+  match source {
+    Path { path } =>
+      SourceRef.Path { path = path }
+
+    Registry { crate, req, registry = reg } =>
+      lock.find_registry(crate, req, reg)
+        ?? registry.select(crate, req, reg)
+
+    Git { url, rev, subdir } =>
+      lock.find_git(url, rev, subdir)
+        ?? registry.select_git(url, rev, subdir)
+  }
+
+// Download/extract/checkout the source tree for a resolved source.
+fn materialize_source(source: SourceRef, root_src: Tree) -> Tree =
+  match source {
+    Path { path } =>
+      root_src.subtree(path)
+
+    Registry { download_url, checksum } =>
+      download(download_url, checksum).extract_tree()
+
+    Git { url, rev, subdir } =>
+      git_checkout(url, rev).subtree(subdir)
+  }
+
+fn package_id(manifest: CargoManifest, source: SourceRef) -> PackageId =
+  {
+    name    = manifest.package.name,
+    version = manifest.package.version,
+    source  = source,
+  }

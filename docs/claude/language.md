@@ -54,20 +54,47 @@ If a program needs those, it should collect first, then operate on the list.
 
 ### Enums
 
+Variants can have named fields or positional fields (tuple-style):
+
 ```
+// Named fields
 enum Shape {
   Circle { radius: Float }
   Rect { w: Float, h: Float }
+}
+
+// Tuple-style (positional)
+enum RustcEvent {
+  RMeta(Blob)
+  RLib(Blob)
+  Diagnostic(RustDiagnostic)
+  Finished(ExitStatus)
 }
 ```
 
 Enum variants are proper types. `Shape::Circle` is both a variant of `Shape`
 and a standalone type `Circle`. A value of type `Circle` is a value of type
-`Shape`.
+`Shape`. Similarly, `RMeta` is a standalone type.
+
+Tuple-style variants expose their fields positionally: `rmeta_event.0` gives
+the `Blob` inside an `RMeta(blob)`. Named-field variants use field names:
+`circle.radius`.
 
 This is unlike Rust, where `Option::Some(5)` is type `Option<i32>`, not a
 type `Some`. In Vixen, enum declaration simultaneously defines the variant
 types as real, usable types.
+
+Variant fields can have default values:
+
+```
+enum SourceReq {
+  Registry {
+    crate: String
+    req: VersionReq
+    registry: String = "crates-io"
+  }
+}
+```
 
 ### The `as` operator
 
@@ -78,15 +105,38 @@ This is the primary mechanism for working with enums:
 
 ```
 let event: RustcEvent = ...
-let meta = event as Metadata  // Metadata or nothing
+let meta = event as RMeta  // RMeta or nothing
 ```
 
 Combined with `$` closures, this gives concise stream filtering:
 
 ```
-let rmeta = events.find($ as Metadata)
-let diagnostics = events.filter($ as Diagnostic)
+let rmeta = events.find($ as RMeta).0
+let diagnostics = events.filter($ as Diagnostic).map($.0)
 ```
+
+### Sets
+
+`Set<T>` — an unordered collection of unique values.
+
+```
+let features = set { "default", "serde", "std" }
+features.contains("serde")  // true
+features.insert("alloc")    // new set with "alloc" added
+```
+
+### Options
+
+`Option<T>` — a value that may or may not be present.
+
+- `some(value)` — wraps a value
+- `none` — absent
+- `opt.some?` — true if present
+- `opt.none?` — true if absent
+- `opt.map(f)` — applies f if present
+- `opt.or(default)` — unwraps, or returns default
+- `opt ?? fallback` — same as `.or(fallback)` but also works for non-Option
+  expressions that might fail
 
 ## Bindings and values
 
@@ -112,10 +162,33 @@ Streams have reference semantics: multiple bindings to the same stream share
 the underlying producer. This is not shared mutable state — stream elements
 are produced once and cached. No consumer can modify the stream.
 
+### Record update with `with`
+
+`expr with { field = new_value }` creates a new record with one or more
+fields replaced:
+
+```
+let updated = dep with {
+  role = Host,
+  requested_features = dep.features ++ extra_features,
+}
+```
+
+This is not mutation — it produces a new value. The original is unchanged.
+
+### Concatenation with `++`
+
+`++` concatenates lists and unions sets:
+
+```
+let all_deps = normal_deps ++ build_deps ++ target_deps
+let all_features = requested ++ set { "default" }
+```
+
 ### Local mutation as syntax sugar
 
-Amos wants locals to be ergonomically mutable without introducing shared
-mutable state. The model:
+Locals can be ergonomically rebindable without introducing shared mutable
+state. The model:
 
 ```
 let items = []
@@ -202,6 +275,27 @@ stream.find($ as Metadata) // |x| x as Metadata
 ```
 
 For multi-argument closures or complex bodies, use the full form: `|a, b| ...`
+
+### Explicit memoization with `memo`
+
+By default, top-level named functions are memoized by their full argument
+identity. When you need a custom memo key (e.g. because the same function
+should produce different results for different roles or feature sets), use
+an explicit `memo` block:
+
+```
+fn build_pkg(pkg: ResolvedPkg, ctx: BuildCtx) -> BuiltCrate =
+  memo(pkg.id, pkg.role, pkg.enabled_features, ctx.host, ctx.target) {
+    ...
+  }
+```
+
+The memo key is the tuple of values in the parentheses. If the key matches a
+previous invocation, the cached result is returned. The body is only evaluated
+on cache miss.
+
+This is necessary for dependency resolution where the same package may be
+built differently depending on role (host vs target) and enabled features.
 
 ## Modules
 

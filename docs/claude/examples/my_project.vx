@@ -1,23 +1,24 @@
 // my_project.vx — Example user project build file
-//
-// This is what a user would write for their project.
-// The standard library does the heavy lifting.
 
 use std.rust.build     { build_root }
 use std.rust.toolchain { acquire_toolchain, Channel }
+use std.rust.types     { BuildCtx, Triple }
 
-let target = "x86_64-unknown-linux-gnu"
+let host   = Triple { arch = "aarch64", vendor = "apple", os = "darwin", env = "" }
+let target = host
 
-let tc = acquire_toolchain(
-  channel = Channel.Stable,
-  target  = target,
-)
+let ctx = BuildCtx {
+  host          = host,
+  target        = target,
+  toolchain     = acquire_toolchain(channel = Channel.Stable, target = target),
+  registry      = crates_io_registry(),
+  lock          = source_tree().get("Cargo.lock").map(parse_lock),
+  root_features = set { "default" },
+}
 
-let src = source_tree()
+let my_crate = build_root(source_tree(), ctx)
 
-let my_crate = build_root(src, tc)
-
-// Demand any of these from the CLI:
+// Demand from the CLI:
 //   vixen build my_crate.rlib
 //   vixen build my_crate.rmeta
 //   vixen show my_crate.diagnostics

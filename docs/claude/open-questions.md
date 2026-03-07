@@ -8,16 +8,16 @@ Design decisions that are not yet settled.
 regular struct whose fields are lazy projections over that stream.
 
 ```
-fn build_crate(src: Tree, tc: Toolchain) -> BuiltCrate = {
-  let events = rustc_events(tc, src, externs, cargo)
+fn build_pkg(pkg: ResolvedPkg, ctx: BuildCtx) -> BuiltCrate =
+  memo(pkg.id, pkg.role, pkg.enabled_features, ctx.host, ctx.target) {
+    let events = rustc_events(pkg, externs, build_out, ctx)
 
-  {
-    name        = cargo.package.name,
-    rmeta       = events.find($ as RMeta).file,
-    rlib        = events.find($ as RLib).file,
-    diagnostics = events.filter($ as Diagnostic).map($.diag),
+    {
+      rmeta       = events.find($ as RMeta).0,
+      rlib        = events.find($ as RLib).0,
+      diagnostics = events.filter($ as Diagnostic).map($.0),
+    }
   }
-}
 ```
 
 The struct is ordinary. Its fields are demand-driven computations. No promises,
