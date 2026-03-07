@@ -30,7 +30,10 @@ The current design direction is:
 - no separate mutable-binding sigil
 - method chaining instead of a pipeline operator, for now
 - default error propagation with explicit `catch` / `fail`
-- `match` as the branching surface
+- `if` for simple boolean guards
+- `match` for pattern matching and multi-way guard branching
+- `for` for bounded imperative iteration
+- no bare `loop`
 - short unqualified variant/constructor forms inferred from type context
 
 ## Parsing Architecture
@@ -236,6 +239,12 @@ Both single-expression and block-bodied closures are allowed:
 
 The last expression in a block-bodied closure is its value by default.
 
+Closures are non-escaping in v0:
+
+- they are intended for immediate inline use in combinators and similar calls
+- they are not stored, returned, or invoked later
+- this keeps nonlocal `return` well-defined
+
 Methods are surface sugar over ordinary functions. There is no distinct method
 declaration form in v0.
 
@@ -261,8 +270,18 @@ Current working assumptions:
 
 ### Control flow
 
-The current direction is `match`-centric and intentionally experiments with no
-`if`.
+The current direction keeps both `if` and `match`, because they serve different
+shapes of logic.
+
+Use `if` for ordinary single-condition branching:
+
+```text
+if !exists {
+  fail MissingRegistryCrate { name, version }
+}
+```
+
+Use `match` for pattern matching and multi-way branching:
 
 There are two distinct `match` forms.
 
@@ -288,6 +307,8 @@ match {
 
 Rules:
 
+- `if` remains available in v0
+- `for` remains available for bounded iteration over finite collections
 - scrutinee match and guard-only match are separate forms
 - scrutinee-match arms do **not** have extra guards in v0
 - guard-only match is checked top-to-bottom; the first matching arm wins
@@ -308,10 +329,11 @@ Err(err)
 Exhaustiveness is intentionally conservative for now. The current bias is:
 
 - require `_` unless coverage is locally obvious enough to prove cheaply
+- require bounded iteration sources for `for`
 
 ### Breakable scopes, `return`, and `continue`
 
-Blocks, closures, and loops are breakable.
+Blocks, closures, and bounded `for` loops are breakable.
 
 ```text
 @choose {
@@ -322,10 +344,6 @@ Blocks, closures, and loops are breakable.
 Labels use an `@name` marker on the target and a plain name in the `break`:
 
 ```text
-loop @outer {
-  break outer
-}
-
 @choose {
   break choose 42
 }
@@ -335,7 +353,7 @@ Current intent:
 
 - plain `break value` exits the nearest breakable thing
 - closures are breakable too
-- `continue` is loop-only
+- `continue` is `for`-loop-only
 - `return value` exits the enclosing function, even from inside a closure
 
 That gives a useful split:
@@ -357,6 +375,13 @@ Inside a throwing function:
 - errors propagate automatically by default
 - `fail err` exits the current `throws` boundary with an error
 - `catch expr` suppresses propagation and yields an ordinary `Result`
+
+For closures:
+
+- a closure body inherits the enclosing `throws` context
+- combinators are typed over whether their closure body may fail
+- a combinator using a fallible closure becomes fallible itself
+- that fallibility then participates in the ordinary default-propagation model
 
 Example:
 
@@ -437,6 +462,7 @@ These restrictions are intentional, not temporary accidents.
 
 - no recursion
 - no `while`
+- no bare `loop`
 - no references (`&`, `&mut`) in v0
 - no traits / impl blocks / dynamic dispatch in v0
 - no pipeline operator in v0

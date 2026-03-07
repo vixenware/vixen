@@ -27,6 +27,8 @@ Current constraints for these sketches:
 - functional transforms now look closer to the actual shape of Vixen rule code
 - method chaining is preferred over a pipeline operator, for now
 - error handling is being rethought away from Rust's `?`/`Result` surface
+- bounded `for` remains in the language for imperative multi-step code
+- `if` remains in the language for simple guards
 - the real pressure point is now less about methods and more about where we
   still want explicit writeback, output emission, and typed diagnostics
 

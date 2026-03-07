@@ -19,10 +19,13 @@ This variant now assumes:
 - no separate mutable-binding sigil
 - no pipeline operator in v0
 - closures exist in v0
+- closures are non-escaping in v0
 - closures use `(x) => ...` syntax
 - unary expression closures may use `$` shorthand
 - block-bodied closures are allowed
-- `match` is the branching surface
+- `if` is back for simple guards
+- `match` handles patterns and multi-way branching
+- `for` remains available for bounded imperative iteration
 - short constructor/variant forms are inferred from type context
 - methods are sugar over ordinary visible functions
 - `place.method!(...)` is writeback sugar on places
@@ -179,37 +182,38 @@ What this shows:
 - block closures are useful without dragging in a full Rust closure model
 - no `?` is needed
 - errors still propagate out of the enclosing `throws` boundary automatically
+- this only works cleanly because v0 closures are non-escaping and inherit the
+  enclosing `throws` context
 
-## Sketch 4: Match-only validation
+## Sketch 4: Validation with `for`, `match`, and `if`
 
 ```text
 fn validate_registry_dependencies(graph: CrateGraph) -> Unit throws InputError {
-  graph.crates.each((krate) => {
+  for krate in graph.crates {
     match krate.source {
       Registry { name, version, checksum } => {
         exists = cargo::registry_package_exists(name, version)
-        match {
-          !exists => fail MissingRegistryCrate { name, version }
-          _ => ()
+        if !exists {
+          fail MissingRegistryCrate { name, version }
         }
 
         valid = cargo::registry_checksum_matches(name, version, checksum)
-        match {
-          !valid => fail ChecksumMismatch { name, version }
-          _ => ()
+        if !valid {
+          fail ChecksumMismatch { name, version }
         }
       }
       Path { path } => ()
       _ => ()
     }
-  })
+  }
 }
 ```
 
 What this shows:
 
-- `match` can cover both scrutinee matching and boolean branching
-- the language can stay readable without `if`
+- `for` still earns its keep for imperative multi-step validation
+- `if` is better than guard-only `match` for single-condition checks
+- `match` stays the right tool for structural branching
 - `fail` reads better than `return Err(...)`
 
 ## Sketch 5: Local error interception stays explicit
@@ -296,6 +300,7 @@ What this shows:
 - `return` remains the nonlocal function escape hatch
 - closures can participate in structured control flow without becoming tiny
   Rust functions
+- nonlocal `return` is only coherent because closures do not escape in v0
 
 ## Why This Branch Fits Vixen Well
 
@@ -313,14 +318,10 @@ That is naturally expressed as:
 - `map`
 - `flat_map`
 - `each`
-- `match`
-- `fail`
-
-not only as:
-
 - `for`
 - `if`
-- manual accumulation locals
+- `match`
+- `fail`
 
 So the functional branch is not aesthetic for its own sake. It matches the
 shape of the work.
@@ -336,7 +337,7 @@ The good version is not:
 It is:
 
 - use functional transforms where the problem is a transform
-- use `match` and blocks where the problem is control flow
+- use `for`, `if`, `match`, and blocks where the problem is control flow
 - make propagation the quiet path
 - keep local rewrites explicit with `!`
 
