@@ -119,10 +119,7 @@ fn walk_toolchain(root: &std::path::Path) -> Result<Vec<StoredFile>> {
     Ok(files)
 }
 
-async fn store_file_data(
-    store: &StoreClient,
-    data: &[u8],
-) -> Result<DirEntryKind> {
+async fn store_file_data(store: &StoreClient, data: &[u8]) -> Result<DirEntryKind> {
     let content_hash = ContentHash(Blake3Hash(blake3::hash(data).into()));
 
     if data.len() <= CDC_MAX_CHUNK as usize {

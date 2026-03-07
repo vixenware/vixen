@@ -1608,7 +1608,11 @@ impl VfsDiskNotify for CasVfs {
         }
 
         let leaf_name = leaf[0];
-        if state.items.lookup_child(current_parent, leaf_name).is_some() {
+        if state
+            .items
+            .lookup_child(current_parent, leaf_name)
+            .is_some()
+        {
             // Item already tracked (e.g. modified, not new). Nothing to do —
             // flush_prefix_from_disk will re-read the content from disk.
             return;

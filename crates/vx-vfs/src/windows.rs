@@ -181,9 +181,9 @@ impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjectedFileSystemSource f
             return Ok(Box::new(Cursor::new(vec![0u8; length])));
         };
 
-        let result = self
-            .handle
-            .block_on(self.vfs.read(file_id, byte_offset as u64, length as u64));
+        let result =
+            self.handle
+                .block_on(self.vfs.read(file_id, byte_offset as u64, length as u64));
         if result.error != 0 {
             tracing::error!(
                 error = result.error,

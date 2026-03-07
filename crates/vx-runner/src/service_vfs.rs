@@ -1342,7 +1342,11 @@ impl RunnerService {
             }
         }
 
-        let program_path = toolchain_path.join(format!("{}{}", request.program_rel, std::env::consts::EXE_SUFFIX));
+        let program_path = toolchain_path.join(format!(
+            "{}{}",
+            request.program_rel,
+            std::env::consts::EXE_SUFFIX
+        ));
         let mut cmd = crate::sandbox::sandboxed_command(program_path.as_str(), &action);
         for arg in &request.args {
             cmd.arg(expand(arg));
