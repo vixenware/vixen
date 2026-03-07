@@ -3089,13 +3089,19 @@ name = "vx-http"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "bytes",
  "camino",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-rustls",
  "hyper-util",
  "moire",
+ "pin-project-lite",
+ "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
  "tracing",
  "vx-io",
 ]

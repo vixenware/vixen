@@ -2,6 +2,8 @@
 
 use futures_util::{StreamExt, future::join};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
 use vx_store_proto::{
@@ -37,6 +39,37 @@ const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_millis(25);
 
 async fn send_progress_best_effort(progress: &roam::Tx<StoreProgress>, update: StoreProgress) {
     let _ = tokio::time::timeout(PROGRESS_SEND_TIMEOUT, progress.send(update)).await;
+}
+
+async fn run_singleflight<K, V, Fut>(
+    inflight: &moire::sync::SyncMutex<HashMap<K, Arc<moire::sync::OnceCell<V>>>>,
+    key: K,
+    cell_name: &'static str,
+    op: impl FnOnce() -> Fut,
+) -> V
+where
+    K: Eq + Hash + Clone,
+    V: Clone,
+    Fut: Future<Output = V>,
+{
+    let cell = {
+        let mut inflight = inflight.lock();
+        inflight
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(moire::sync::OnceCell::new(cell_name)))
+            .clone()
+    };
+
+    let result = cell.get_or_init(op).await.clone();
+
+    let mut inflight = inflight.lock();
+    if let Some(existing) = inflight.get(&key)
+        && Arc::ptr_eq(existing, &cell)
+    {
+        inflight.remove(&key);
+    }
+
+    result
 }
 
 // =============================================================================
@@ -363,6 +396,102 @@ impl ToolchainManager {
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{download_component, run_singleflight};
+    use sha2::Digest;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::time::{Duration, sleep};
+
+    #[tokio::test]
+    async fn download_component_reuses_http_disk_cache() {
+        let cache_dir = TempDir::new().expect("cache dir");
+        // Safe here because this test runs in its own process under nextest.
+        unsafe {
+            std::env::set_var("VX_HTTP_CACHE_DIR", cache_dir.path());
+        }
+
+        let body = b"cached toolchain bytes".to_vec();
+        let expected_hash = hex::encode(sha2::Sha256::digest(&body));
+        let hit_count = Arc::new(AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let hits = hit_count.clone();
+        let body_for_server = body.clone();
+
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                hits.fetch_add(1, Ordering::SeqCst);
+
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await.expect("read request");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body_for_server.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write headers");
+                socket
+                    .write_all(&body_for_server)
+                    .await
+                    .expect("write body");
+            }
+        });
+
+        let (progress_tx, _progress_rx) = roam::channel();
+        let url = format!("http://{addr}/toolchain.tar.xz");
+
+        let first = download_component(&url, &expected_hash, "rustc", &progress_tx)
+            .await
+            .expect("first download");
+        let second = download_component(&url, &expected_hash, "rustc", &progress_tx)
+            .await
+            .expect("second download");
+
+        assert_eq!(first, body);
+        assert_eq!(second, body);
+        assert_eq!(hit_count.load(Ordering::SeqCst), 1);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn run_singleflight_deduplicates_concurrent_callers() {
+        let inflight = Arc::new(moire::sync::SyncMutex::new(
+            "test_singleflight",
+            HashMap::<u64, Arc<moire::sync::OnceCell<u64>>>::new(),
+        ));
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let inflight = inflight.clone();
+            let calls = calls.clone();
+            tasks.push(tokio::spawn(async move {
+                run_singleflight(&inflight, 7_u64, "test_cell", async move || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    sleep(Duration::from_millis(25)).await;
+                    99_u64
+                })
+                .await
+            }));
+        }
+
+        for task in tasks {
+            assert_eq!(task.await.expect("task join"), 99);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
 
@@ -1251,93 +1380,106 @@ impl StoreService {
             };
         }
 
-        let channel = match &spec.channel {
-            RustChannel::Stable => vx_toolchain::Channel::Stable,
-            RustChannel::Beta => vx_toolchain::Channel::Beta,
-            RustChannel::Nightly { date } => vx_toolchain::Channel::Nightly { date: date.clone() },
-        };
-
-        let manifest = match fetch_channel_manifest(&channel).await {
-            Ok(m) => m,
-            Err(e) => {
-                return EnsureRustToolchainComponentResult {
-                    spec_key: Some(spec_key),
-                    component,
-                    tarball: None,
-                    tree_root: None,
-                    status: EnsureStatus::Failed,
-                    error: Some(format!("failed to fetch channel manifest: {}", e)),
+        let this = self.clone();
+        let spec_for_op = spec.clone();
+        let component_for_op = component.clone();
+        run_singleflight(
+            &self.rust_component_downloads_inflight,
+            key.clone(),
+            "rust_component_downloads_inflight",
+            async move || {
+                let channel = match &spec_for_op.channel {
+                    RustChannel::Stable => vx_toolchain::Channel::Stable,
+                    RustChannel::Beta => vx_toolchain::Channel::Beta,
+                    RustChannel::Nightly { date } => {
+                        vx_toolchain::Channel::Nightly { date: date.clone() }
+                    }
                 };
-            }
-        };
 
-        let target_manifest = match component {
-            RustComponent::Rustc => manifest.rustc_for_target(&spec.host),
-            RustComponent::RustStd => manifest.rust_std_for_target(&spec.target),
-            RustComponent::Cargo => unreachable!("cargo is filtered above"),
-        };
-
-        let target_manifest = match target_manifest {
-            Ok(t) => t,
-            Err(e) => {
-                return EnsureRustToolchainComponentResult {
-                    spec_key: Some(spec_key),
-                    component,
-                    tarball: None,
-                    tree_root: None,
-                    status: EnsureStatus::Failed,
-                    error: Some(e.to_string()),
+                let manifest = match fetch_channel_manifest(&channel).await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return EnsureRustToolchainComponentResult {
+                            spec_key: Some(spec_key),
+                            component: component_for_op.clone(),
+                            tarball: None,
+                            tree_root: None,
+                            status: EnsureStatus::Failed,
+                            error: Some(format!("failed to fetch channel manifest: {}", e)),
+                        };
+                    }
                 };
-            }
-        };
 
-        let tarball = match download_component(
-            &target_manifest.url,
-            &target_manifest.hash,
-            component_name,
-            &progress,
+                let target_manifest = match component_for_op {
+                    RustComponent::Rustc => manifest.rustc_for_target(&spec_for_op.host),
+                    RustComponent::RustStd => manifest.rust_std_for_target(&spec_for_op.target),
+                    RustComponent::Cargo => unreachable!("cargo is filtered above"),
+                };
+
+                let target_manifest = match target_manifest {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return EnsureRustToolchainComponentResult {
+                            spec_key: Some(spec_key),
+                            component: component_for_op.clone(),
+                            tarball: None,
+                            tree_root: None,
+                            status: EnsureStatus::Failed,
+                            error: Some(e.to_string()),
+                        };
+                    }
+                };
+
+                let tarball = match download_component(
+                    &target_manifest.url,
+                    &target_manifest.hash,
+                    component_name,
+                    &progress,
+                )
+                .await
+                {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        return EnsureRustToolchainComponentResult {
+                            spec_key: Some(spec_key),
+                            component: component_for_op.clone(),
+                            tarball: None,
+                            tree_root: None,
+                            status: EnsureStatus::Failed,
+                            error: Some(format!("failed to download {component_name}: {e}")),
+                        };
+                    }
+                };
+
+                let tarball_ref = match store_blob_chunked(&this, &tarball).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return EnsureRustToolchainComponentResult {
+                            spec_key: Some(spec_key),
+                            component: component_for_op.clone(),
+                            tarball: None,
+                            tree_root: None,
+                            status: EnsureStatus::Failed,
+                            error: Some(format!("failed to store tarball: {e}")),
+                        };
+                    }
+                };
+
+                this.rust_component_tarballs
+                    .lock()
+                    .insert(key, tarball_ref.clone());
+
+                EnsureRustToolchainComponentResult {
+                    spec_key: Some(spec_key),
+                    component: component_for_op,
+                    tarball: Some(tarball_ref),
+                    tree_root: None,
+                    status: EnsureStatus::Downloaded,
+                    error: None,
+                }
+            },
         )
         .await
-        {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                return EnsureRustToolchainComponentResult {
-                    spec_key: Some(spec_key),
-                    component,
-                    tarball: None,
-                    tree_root: None,
-                    status: EnsureStatus::Failed,
-                    error: Some(format!("failed to download {component_name}: {e}")),
-                };
-            }
-        };
-
-        let tarball_ref = match store_blob_chunked(self, &tarball).await {
-            Ok(r) => r,
-            Err(e) => {
-                return EnsureRustToolchainComponentResult {
-                    spec_key: Some(spec_key),
-                    component,
-                    tarball: None,
-                    tree_root: None,
-                    status: EnsureStatus::Failed,
-                    error: Some(format!("failed to store tarball: {e}")),
-                };
-            }
-        };
-
-        self.rust_component_tarballs
-            .lock()
-            .insert((spec_key, component.clone()), tarball_ref.clone());
-
-        EnsureRustToolchainComponentResult {
-            spec_key: Some(spec_key),
-            component,
-            tarball: Some(tarball_ref),
-            tree_root: None,
-            status: EnsureStatus::Downloaded,
-            error: None,
-        }
     }
 
     /// Extract one Rust toolchain component tarball into a DirectoryNode tree.
@@ -1415,138 +1557,150 @@ impl StoreService {
             };
         }
 
-        // Read tarball from CAS
-        let tarball = match read_blob_from_ref(self, &tarball_ref).await {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                return EnsureRustToolchainComponentResult {
-                    spec_key: Some(spec_key),
-                    component,
-                    tarball: Some(tarball_ref),
-                    tree_root: None,
-                    status: EnsureStatus::Failed,
-                    error: Some(format!("failed to read tarball: {e}")),
-                };
-            }
-        };
-
-        send_progress_best_effort(
-            &progress,
-            StoreProgress {
-                message: format!("extracting {component_name}"),
-                current: None,
-                total: None,
-            },
-        )
-        .await;
-
-        let strip_components = match component {
-            RustComponent::Rustc => 2,
-            RustComponent::RustStd => 2,
-            RustComponent::Cargo => unreachable!("cargo is filtered above"),
-        };
-
-        // Track per-file info during extraction
-        let file_info: Arc<moire::sync::SyncMutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
-            Arc::new(moire::sync::SyncMutex::new(
-                "store/file_info",
-                HashMap::new(),
-            ));
-        let file_info_clone = file_info.clone();
         let this = self.clone();
-
-        let tree = match vx_tarball::extract_to_tree(
-            std::io::Cursor::new(tarball),
-            Compression::Xz,
-            strip_components,
-            async move |data: Vec<u8>| {
-                let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
-                let prepared = chunking::prepare_blob(&data);
-                for ci in &prepared.chunks {
-                    let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
-                    this.storage
-                        .put_chunk(&ci.hash, chunk_data)
-                        .await
-                        .map_err(|e| format!("failed to write chunk: {e}"))?;
-                }
-                let blob_node = if let Some(bn) = &prepared.blob_node {
-                    this.storage
-                        .put_node(&bn.node_hash, &bn.serialized_bytes)
-                        .await
-                        .map_err(|e| format!("failed to write BlobNode: {e}"))?;
-                    Some(bn.node_hash)
-                } else {
-                    None
+        let spec_for_op = spec.clone();
+        let component_for_op = component.clone();
+        let tarball_ref_for_op = tarball_ref.clone();
+        run_singleflight(
+            &self.rust_component_extracts_inflight,
+            extracted_key.clone(),
+            "rust_component_extracts_inflight",
+            async move || {
+                let tarball = match read_blob_from_ref(&this, &tarball_ref_for_op).await {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        return EnsureRustToolchainComponentResult {
+                            spec_key: Some(spec_key),
+                            component: component_for_op.clone(),
+                            tarball: Some(tarball_ref_for_op.clone()),
+                            tree_root: None,
+                            status: EnsureStatus::Failed,
+                            error: Some(format!("failed to read tarball: {e}")),
+                        };
+                    }
                 };
-                file_info_clone.lock().insert(
-                    content_hash.0,
-                    ExtractedFileInfo {
-                        content_hash,
-                        blob_node,
-                        size: data.len() as u64,
-                        executable: false,
+
+                send_progress_best_effort(
+                    &progress,
+                    StoreProgress {
+                        message: format!("extracting {component_name}"),
+                        current: None,
+                        total: None,
+                    },
+                )
+                .await;
+
+                let strip_components = match component_for_op {
+                    RustComponent::Rustc => 2,
+                    RustComponent::RustStd => 2,
+                    RustComponent::Cargo => unreachable!("cargo is filtered above"),
+                };
+
+                let file_info: Arc<moire::sync::SyncMutex<HashMap<Blake3Hash, ExtractedFileInfo>>> =
+                    Arc::new(moire::sync::SyncMutex::new(
+                        "store/file_info",
+                        HashMap::new(),
+                    ));
+                let file_info_clone = file_info.clone();
+                let store = this.clone();
+
+                let tree = match vx_tarball::extract_to_tree(
+                    std::io::Cursor::new(tarball),
+                    Compression::Xz,
+                    strip_components,
+                    async move |data: Vec<u8>| {
+                        let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
+                        let prepared = chunking::prepare_blob(&data);
+                        for ci in &prepared.chunks {
+                            let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
+                            store
+                                .storage
+                                .put_chunk(&ci.hash, chunk_data)
+                                .await
+                                .map_err(|e| format!("failed to write chunk: {e}"))?;
+                        }
+                        let blob_node = if let Some(bn) = &prepared.blob_node {
+                            store
+                                .storage
+                                .put_node(&bn.node_hash, &bn.serialized_bytes)
+                                .await
+                                .map_err(|e| format!("failed to write BlobNode: {e}"))?;
+                            Some(bn.node_hash)
+                        } else {
+                            None
+                        };
+                        file_info_clone.lock().insert(
+                            content_hash.0,
+                            ExtractedFileInfo {
+                                content_hash,
+                                blob_node,
+                                size: data.len() as u64,
+                                executable: false,
+                            },
+                        );
+                        Ok(content_hash.0)
+                    },
+                )
+                .await
+                {
+                    Ok(tree) => tree,
+                    Err(e) => {
+                        return EnsureRustToolchainComponentResult {
+                            spec_key: Some(spec_key),
+                            component: component_for_op.clone(),
+                            tarball: Some(tarball_ref_for_op.clone()),
+                            tree_root: None,
+                            status: EnsureStatus::Failed,
+                            error: Some(format!("failed to extract {component_name}: {}", e)),
+                        };
+                    }
+                };
+
+                let (tree_root, total_size) =
+                    match tree_manifest_to_merkle(&this, &tree, &file_info).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return EnsureRustToolchainComponentResult {
+                                spec_key: Some(spec_key),
+                                component: component_for_op.clone(),
+                                tarball: Some(tarball_ref_for_op.clone()),
+                                tree_root: None,
+                                status: EnsureStatus::Failed,
+                                error: Some(format!("failed to build merkle tree: {e}")),
+                            };
+                        }
+                    };
+
+                let target = match component_for_op {
+                    RustComponent::Rustc => spec_for_op.host.clone(),
+                    RustComponent::RustStd => spec_for_op.target.clone(),
+                    RustComponent::Cargo => unreachable!("cargo is filtered above"),
+                };
+
+                let unique_chunks = file_info.lock().len() as u32;
+
+                this.rust_component_trees.lock().insert(
+                    extracted_key,
+                    ExtractedRustComponent {
+                        tree_root,
+                        target,
+                        total_size_bytes: total_size,
+                        file_count: tree.entries.len() as u32,
+                        unique_chunks,
                     },
                 );
-                Ok(content_hash.0)
+
+                EnsureRustToolchainComponentResult {
+                    spec_key: Some(spec_key),
+                    component: component_for_op,
+                    tarball: Some(tarball_ref_for_op),
+                    tree_root: Some(tree_root),
+                    status: EnsureStatus::Downloaded,
+                    error: None,
+                }
             },
         )
         .await
-        {
-            Ok(tree) => tree,
-            Err(e) => {
-                return EnsureRustToolchainComponentResult {
-                    spec_key: Some(spec_key),
-                    component,
-                    tarball: Some(tarball_ref),
-                    tree_root: None,
-                    status: EnsureStatus::Failed,
-                    error: Some(format!("failed to extract {component_name}: {}", e)),
-                };
-            }
-        };
-
-        // Build DirectoryNode tree from the flat TreeManifest
-        let (tree_root, total_size) = match tree_manifest_to_merkle(self, &tree, &file_info).await {
-            Ok(r) => r,
-            Err(e) => {
-                return EnsureRustToolchainComponentResult {
-                    spec_key: Some(spec_key),
-                    component,
-                    tarball: Some(tarball_ref),
-                    tree_root: None,
-                    status: EnsureStatus::Failed,
-                    error: Some(format!("failed to build merkle tree: {e}")),
-                };
-            }
-        };
-
-        let target = match component {
-            RustComponent::Rustc => spec.host.clone(),
-            RustComponent::RustStd => spec.target.clone(),
-            RustComponent::Cargo => unreachable!("cargo is filtered above"),
-        };
-
-        let unique_chunks = file_info.lock().len() as u32;
-
-        self.rust_component_trees.lock().insert(
-            extracted_key,
-            ExtractedRustComponent {
-                tree_root,
-                target,
-                total_size_bytes: total_size,
-                file_count: tree.entries.len() as u32,
-                unique_chunks,
-            },
-        );
-
-        EnsureRustToolchainComponentResult {
-            spec_key: Some(spec_key),
-            component,
-            tarball: Some(tarball_ref),
-            tree_root: Some(tree_root),
-            status: EnsureStatus::Downloaded,
-            error: None,
-        }
     }
 
     /// Build and publish the Rust toolchain manifest from extracted components.
@@ -1584,214 +1738,223 @@ impl StoreService {
             };
         }
 
-        let rustc_component = {
-            let lock = self.rust_component_trees.lock();
-            lock.get(&(spec_key, RustComponent::Rustc)).cloned()
-        };
-        let rust_std_component = {
-            let lock = self.rust_component_trees.lock();
-            lock.get(&(spec_key, RustComponent::RustStd)).cloned()
-        };
-
-        let rustc_component = match rustc_component {
-            Some(c) => c,
-            None => {
-                return EnsureToolchainResult {
-                    spec_key: Some(spec_key),
-                    toolchain_id: None,
-                    manifest_hash: None,
-                    status: ToolchainEnsureStatus::Failed,
-                    error: Some("rustc component has not been extracted".to_string()),
-                };
-            }
-        };
-        let rust_std_component = match rust_std_component {
-            Some(c) => c,
-            None => {
-                return EnsureToolchainResult {
-                    spec_key: Some(spec_key),
-                    toolchain_id: None,
-                    manifest_hash: None,
-                    status: ToolchainEnsureStatus::Failed,
-                    error: Some("rust-std component has not been extracted".to_string()),
-                };
-            }
-        };
-
-        let channel = match &spec.channel {
-            RustChannel::Stable => vx_toolchain::Channel::Stable,
-            RustChannel::Beta => vx_toolchain::Channel::Beta,
-            RustChannel::Nightly { date } => vx_toolchain::Channel::Nightly { date: date.clone() },
-        };
-
-        let manifest = match fetch_channel_manifest(&channel).await {
-            Ok(m) => m,
-            Err(e) => {
-                return EnsureToolchainResult {
-                    spec_key: Some(spec_key),
-                    toolchain_id: None,
-                    manifest_hash: None,
-                    status: ToolchainEnsureStatus::Failed,
-                    error: Some(format!("failed to fetch channel manifest: {}", e)),
-                };
-            }
-        };
-
-        let rustc_target = match manifest.rustc_for_target(&spec.host) {
-            Ok(t) => t,
-            Err(e) => {
-                return EnsureToolchainResult {
-                    spec_key: Some(spec_key),
-                    toolchain_id: None,
-                    manifest_hash: None,
-                    status: ToolchainEnsureStatus::Failed,
-                    error: Some(e.to_string()),
-                };
-            }
-        };
-        let rust_std_target = match manifest.rust_std_for_target(&spec.target) {
-            Ok(t) => t,
-            Err(e) => {
-                return EnsureToolchainResult {
-                    spec_key: Some(spec_key),
-                    toolchain_id: None,
-                    manifest_hash: None,
-                    status: ToolchainEnsureStatus::Failed,
-                    error: Some(e.to_string()),
-                };
-            }
-        };
-
-        let toolchain_id = vx_toolchain::RustToolchainId::from_manifest_sha256s(
-            &spec.host,
-            &spec.target,
-            &rustc_target.hash,
-            &rust_std_target.hash,
-        );
-
-        let toolchain_manifest = ToolchainManifest {
-            schema_version: TOOLCHAIN_MANIFEST_SCHEMA_VERSION,
-            kind: ToolchainKind::Rust,
+        let this = self.clone();
+        let spec_for_op = spec.clone();
+        run_singleflight(
+            &self.rust_toolchain_finalize_inflight,
             spec_key,
-            toolchain_id: toolchain_id.0,
-            rust_manifest_date: Some(manifest.date.clone()),
-            rust_version: Some(manifest.rustc.version.clone()),
-            zig_version: None,
-            components: vec![
-                ToolchainComponentTree {
-                    name: "rustc".to_string(),
-                    target: Some(rustc_component.target),
-                    tree_root: rustc_component.tree_root,
-                    sha256: rustc_target.hash.clone(),
-                    total_size_bytes: rustc_component.total_size_bytes,
-                    file_count: rustc_component.file_count,
-                    unique_chunks: rustc_component.unique_chunks,
-                },
-                ToolchainComponentTree {
-                    name: "rust-std".to_string(),
-                    target: Some(rust_std_component.target),
-                    tree_root: rust_std_component.tree_root,
-                    sha256: rust_std_target.hash.clone(),
-                    total_size_bytes: rust_std_component.total_size_bytes,
-                    file_count: rust_std_component.file_count,
-                    unique_chunks: rust_std_component.unique_chunks,
-                },
-            ],
-        };
+            "rust_toolchain_finalize_inflight",
+            async move || {
+                let rustc_component = {
+                    let lock = this.rust_component_trees.lock();
+                    lock.get(&(spec_key, RustComponent::Rustc)).cloned()
+                };
+                let rust_std_component = {
+                    let lock = this.rust_component_trees.lock();
+                    lock.get(&(spec_key, RustComponent::RustStd)).cloned()
+                };
 
-        let node = CasNode::Toolchain(toolchain_manifest);
-        let (node_bytes, manifest_hash) = node.to_bytes_and_hash();
-        if let Err(e) = self.storage.put_node(&manifest_hash, &node_bytes).await {
-            return EnsureToolchainResult {
-                spec_key: Some(spec_key),
-                toolchain_id: Some(toolchain_id.0),
-                manifest_hash: None,
-                status: ToolchainEnsureStatus::Failed,
-                error: Some(format!("failed to write toolchain manifest: {e}")),
-            };
-        }
+                let rustc_component = match rustc_component {
+                    Some(c) => c,
+                    None => {
+                        return EnsureToolchainResult {
+                            spec_key: Some(spec_key),
+                            toolchain_id: None,
+                            manifest_hash: None,
+                            status: ToolchainEnsureStatus::Failed,
+                            error: Some("rustc component has not been extracted".to_string()),
+                        };
+                    }
+                };
+                let rust_std_component = match rust_std_component {
+                    Some(c) => c,
+                    None => {
+                        return EnsureToolchainResult {
+                            spec_key: Some(spec_key),
+                            toolchain_id: None,
+                            manifest_hash: None,
+                            status: ToolchainEnsureStatus::Failed,
+                            error: Some("rust-std component has not been extracted".to_string()),
+                        };
+                    }
+                };
 
-        if let Err(e) = validate_directory_closure(self, rustc_component.tree_root).await {
-            return EnsureToolchainResult {
-                spec_key: Some(spec_key),
-                toolchain_id: Some(toolchain_id.0),
-                manifest_hash: None,
-                status: ToolchainEnsureStatus::Failed,
-                error: Some(format!("toolchain closure validation failed (rustc): {e}")),
-            };
-        }
-        if let Err(e) = validate_directory_closure(self, rust_std_component.tree_root).await {
-            return EnsureToolchainResult {
-                spec_key: Some(spec_key),
-                toolchain_id: Some(toolchain_id.0),
-                manifest_hash: None,
-                status: ToolchainEnsureStatus::Failed,
-                error: Some(format!(
-                    "toolchain closure validation failed (rust-std): {e}"
-                )),
-            };
-        }
+                let channel = match &spec_for_op.channel {
+                    RustChannel::Stable => vx_toolchain::Channel::Stable,
+                    RustChannel::Beta => vx_toolchain::Channel::Beta,
+                    RustChannel::Nightly { date } => {
+                        vx_toolchain::Channel::Nightly { date: date.clone() }
+                    }
+                };
 
-        match self
-            .storage
-            .put_toolchain_spec(&spec_key, &manifest_hash.0)
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                let winner_hash = match self.storage.get_toolchain_spec(&spec_key).await {
-                    Ok(Some(hash)) => hash,
-                    Ok(None) => {
+                let manifest = match fetch_channel_manifest(&channel).await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return EnsureToolchainResult {
+                            spec_key: Some(spec_key),
+                            toolchain_id: None,
+                            manifest_hash: None,
+                            status: ToolchainEnsureStatus::Failed,
+                            error: Some(format!("failed to fetch channel manifest: {}", e)),
+                        };
+                    }
+                };
+
+                let rustc_target = match manifest.rustc_for_target(&spec_for_op.host) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return EnsureToolchainResult {
+                            spec_key: Some(spec_key),
+                            toolchain_id: None,
+                            manifest_hash: None,
+                            status: ToolchainEnsureStatus::Failed,
+                            error: Some(e.to_string()),
+                        };
+                    }
+                };
+                let rust_std_target = match manifest.rust_std_for_target(&spec_for_op.target) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return EnsureToolchainResult {
+                            spec_key: Some(spec_key),
+                            toolchain_id: None,
+                            manifest_hash: None,
+                            status: ToolchainEnsureStatus::Failed,
+                            error: Some(e.to_string()),
+                        };
+                    }
+                };
+
+                let toolchain_id = vx_toolchain::RustToolchainId::from_manifest_sha256s(
+                    &spec_for_op.host,
+                    &spec_for_op.target,
+                    &rustc_target.hash,
+                    &rust_std_target.hash,
+                );
+
+                let toolchain_manifest = ToolchainManifest {
+                    schema_version: TOOLCHAIN_MANIFEST_SCHEMA_VERSION,
+                    kind: ToolchainKind::Rust,
+                    spec_key,
+                    toolchain_id: toolchain_id.0,
+                    rust_manifest_date: Some(manifest.date.clone()),
+                    rust_version: Some(manifest.rustc.version.clone()),
+                    zig_version: None,
+                    components: vec![
+                        ToolchainComponentTree {
+                            name: "rustc".to_string(),
+                            target: Some(rustc_component.target),
+                            tree_root: rustc_component.tree_root,
+                            sha256: rustc_target.hash.clone(),
+                            total_size_bytes: rustc_component.total_size_bytes,
+                            file_count: rustc_component.file_count,
+                            unique_chunks: rustc_component.unique_chunks,
+                        },
+                        ToolchainComponentTree {
+                            name: "rust-std".to_string(),
+                            target: Some(rust_std_component.target),
+                            tree_root: rust_std_component.tree_root,
+                            sha256: rust_std_target.hash.clone(),
+                            total_size_bytes: rust_std_component.total_size_bytes,
+                            file_count: rust_std_component.file_count,
+                            unique_chunks: rust_std_component.unique_chunks,
+                        },
+                    ],
+                };
+
+                let node = CasNode::Toolchain(toolchain_manifest);
+                let (node_bytes, manifest_hash) = node.to_bytes_and_hash();
+                if let Err(e) = this.storage.put_node(&manifest_hash, &node_bytes).await {
+                    return EnsureToolchainResult {
+                        spec_key: Some(spec_key),
+                        toolchain_id: Some(toolchain_id.0),
+                        manifest_hash: None,
+                        status: ToolchainEnsureStatus::Failed,
+                        error: Some(format!("failed to write toolchain manifest: {e}")),
+                    };
+                }
+
+                if let Err(e) = validate_directory_closure(&this, rustc_component.tree_root).await {
+                    return EnsureToolchainResult {
+                        spec_key: Some(spec_key),
+                        toolchain_id: Some(toolchain_id.0),
+                        manifest_hash: None,
+                        status: ToolchainEnsureStatus::Failed,
+                        error: Some(format!("toolchain closure validation failed (rustc): {e}")),
+                    };
+                }
+                if let Err(e) = validate_directory_closure(&this, rust_std_component.tree_root).await
+                {
+                    return EnsureToolchainResult {
+                        spec_key: Some(spec_key),
+                        toolchain_id: Some(toolchain_id.0),
+                        manifest_hash: None,
+                        status: ToolchainEnsureStatus::Failed,
+                        error: Some(format!(
+                            "toolchain closure validation failed (rust-std): {e}"
+                        )),
+                    };
+                }
+
+                match this.storage.put_toolchain_spec(&spec_key, &manifest_hash.0).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let winner_hash = match this.storage.get_toolchain_spec(&spec_key).await {
+                            Ok(Some(hash)) => hash,
+                            Ok(None) => {
+                                return EnsureToolchainResult {
+                                    spec_key: Some(spec_key),
+                                    toolchain_id: Some(toolchain_id.0),
+                                    manifest_hash: None,
+                                    status: ToolchainEnsureStatus::Failed,
+                                    error: Some(format!(
+                                        "spec mapping for {spec_key} already exists but could not be read"
+                                    )),
+                                };
+                            }
+                            Err(e) => {
+                                return EnsureToolchainResult {
+                                    spec_key: Some(spec_key),
+                                    toolchain_id: Some(toolchain_id.0),
+                                    manifest_hash: None,
+                                    status: ToolchainEnsureStatus::Failed,
+                                    error: Some(format!(
+                                        "failed to read winner mapping for {spec_key}: {e}"
+                                    )),
+                                };
+                            }
+                        };
                         return EnsureToolchainResult {
                             spec_key: Some(spec_key),
                             toolchain_id: Some(toolchain_id.0),
-                            manifest_hash: None,
-                            status: ToolchainEnsureStatus::Failed,
-                            error: Some(format!(
-                                "spec mapping for {spec_key} already exists but could not be read"
-                            )),
+                            manifest_hash: Some(NodeHash(winner_hash)),
+                            status: ToolchainEnsureStatus::Hit,
+                            error: None,
                         };
                     }
                     Err(e) => {
                         return EnsureToolchainResult {
                             spec_key: Some(spec_key),
                             toolchain_id: Some(toolchain_id.0),
-                            manifest_hash: None,
+                            manifest_hash: Some(manifest_hash),
                             status: ToolchainEnsureStatus::Failed,
                             error: Some(format!(
-                                "failed to read winner mapping for {spec_key}: {e}"
+                                "failed to publish spec mapping for {spec_key}: {e}"
                             )),
                         };
                     }
-                };
-                return EnsureToolchainResult {
-                    spec_key: Some(spec_key),
-                    toolchain_id: Some(toolchain_id.0),
-                    manifest_hash: Some(NodeHash(winner_hash)),
-                    status: ToolchainEnsureStatus::Hit,
-                    error: None,
-                };
-            }
-            Err(e) => {
-                return EnsureToolchainResult {
+                }
+
+                EnsureToolchainResult {
                     spec_key: Some(spec_key),
                     toolchain_id: Some(toolchain_id.0),
                     manifest_hash: Some(manifest_hash),
-                    status: ToolchainEnsureStatus::Failed,
-                    error: Some(format!(
-                        "failed to publish spec mapping for {spec_key}: {e}"
-                    )),
-                };
-            }
-        }
-
-        EnsureToolchainResult {
-            spec_key: Some(spec_key),
-            toolchain_id: Some(toolchain_id.0),
-            manifest_hash: Some(manifest_hash),
-            status: ToolchainEnsureStatus::Downloaded,
-            error: None,
-        }
+                    status: ToolchainEnsureStatus::Downloaded,
+                    error: None,
+                }
+            },
+        )
+        .await
     }
 
     /// Ensure a Zig toolchain exists in CAS (internal helper, not an RPC method).

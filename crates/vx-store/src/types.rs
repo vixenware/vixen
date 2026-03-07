@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use moire::sync::SyncMutex;
 use tokio::sync::Semaphore;
-use vx_store_proto::{BlobRef, RustComponent, ToolchainSpecKey};
+use vx_store_proto::{
+    BlobRef, EnsureRustToolchainComponentResult, EnsureToolchainResult, RustComponent,
+    ToolchainSpecKey,
+};
 
 use crate::{
     RegistryManager,
@@ -46,8 +49,32 @@ pub(crate) struct StoreServiceInner {
     pub(crate) rust_component_tarballs:
         SyncMutex<std::collections::HashMap<(ToolchainSpecKey, RustComponent), BlobRef>>,
 
+    /// In-flight Rust toolchain component download operations.
+    pub(crate) rust_component_downloads_inflight: SyncMutex<
+        std::collections::HashMap<
+            (ToolchainSpecKey, RustComponent),
+            std::sync::Arc<moire::sync::OnceCell<EnsureRustToolchainComponentResult>>,
+        >,
+    >,
+
     /// Extracted Rust toolchain components by (spec_key, component)
     pub(crate) rust_component_trees: SyncMutex<
         std::collections::HashMap<(ToolchainSpecKey, RustComponent), ExtractedRustComponent>,
+    >,
+
+    /// In-flight Rust toolchain component extract operations.
+    pub(crate) rust_component_extracts_inflight: SyncMutex<
+        std::collections::HashMap<
+            (ToolchainSpecKey, RustComponent),
+            std::sync::Arc<moire::sync::OnceCell<EnsureRustToolchainComponentResult>>,
+        >,
+    >,
+
+    /// In-flight Rust toolchain finalization operations.
+    pub(crate) rust_toolchain_finalize_inflight: SyncMutex<
+        std::collections::HashMap<
+            ToolchainSpecKey,
+            std::sync::Arc<moire::sync::OnceCell<EnsureToolchainResult>>,
+        >,
     >,
 }

@@ -201,8 +201,20 @@ impl StoreService {
                     "store/rust_component_tarballs",
                     std::collections::HashMap::new(),
                 ),
+                rust_component_downloads_inflight: moire::sync::SyncMutex::new(
+                    "store/rust_component_downloads_inflight",
+                    std::collections::HashMap::new(),
+                ),
                 rust_component_trees: moire::sync::SyncMutex::new(
                     "store/rust_component_trees",
+                    std::collections::HashMap::new(),
+                ),
+                rust_component_extracts_inflight: moire::sync::SyncMutex::new(
+                    "store/rust_component_extracts_inflight",
+                    std::collections::HashMap::new(),
+                ),
+                rust_toolchain_finalize_inflight: moire::sync::SyncMutex::new(
+                    "store/rust_toolchain_finalize_inflight",
                     std::collections::HashMap::new(),
                 ),
             }),

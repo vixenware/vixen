@@ -10,6 +10,8 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
 blake3 = { workspace = true }
+bytes = { workspace = true }
+futures-util = { workspace = true }
 moire = { workspace = true }
 vx-io = { workspace = true }
 camino = { workspace = true }
@@ -23,8 +25,14 @@ hyper-rustls = { version = "0.27", default-features = false, features = [
   "tls12",
 ] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
+pin-project-lite = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true, features = ["io"] }
 tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
