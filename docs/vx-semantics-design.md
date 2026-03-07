@@ -221,6 +221,11 @@ Placement is contextual:
 - a tree entry
 - final materialization for a demanded output
 
+Paths still exist, but only as placement and lookup metadata inside trees.
+
+There is no ambient "read this host filesystem path" model at the language
+level.
+
 Trees are also first-class typed values.
 
 A tree is **not** just `Map<Path, FileBlob>`.
@@ -275,7 +280,11 @@ like `TreeEntry`, carrying at least:
 - `content`
 - `kind`
 
-where `kind` distinguishes file-like and directory-like entries.
+where:
+
+- `path` is the entry's relative placement path inside its tree context
+- `content` is the underlying file/tree payload or handle
+- `kind` distinguishes file-like and directory-like entries
 
 Current direction:
 
@@ -334,32 +343,27 @@ rules force them.
 
 ## File and Tree Observations
 
-Path construction is pure.
+The primary lookup root is a `Tree`, not an ambient filesystem path.
 
-Examples:
-
-- `workspace / "src" / "lib.rs"`
-- `toolchain_root / "bin" / "rustc"`
-
-These expressions build location values only. They do not observe the outside
-world yet.
-
-Tracked observations begin when the program asks the runtime to inspect a tree
-or file.
+Tracked observations begin when the program asks the runtime to inspect a tree,
+an entry, or a file handle.
 
 Current semantic split:
 
-- exact-path observation:
-  - `read_text(path)`
-  - `read_bytes(path)`
-  - `exists(path)`
-  - `stat(path)`
+- entry lookup:
+  - `tree.entry(relpath)`
+  - `exists(tree, relpath)`
+- content observation:
+  - `read_text(file_or_entry)`
+  - `read_bytes(file_or_entry)`
+  - `stat(file_or_entry)`
 - structural observation:
-  - `children(dir)`
-  - `glob(root, pattern)`
+  - `children(tree_or_entry)`
+  - `glob(tree_or_entry, pattern)`
 
 Important consequences:
 
+- lookup depends on the referenced tree plus the requested relative path
 - reading a file depends on that file's observed content or metadata
 - listing a directory depends on membership, not just content of existing files
 - `glob` is a first-class primitive because it must work over abstract trees,
@@ -368,7 +372,7 @@ Important consequences:
 
 In terms of collection shape:
 
-- exact-path observations return ordinary values
+- lookup and content observations return ordinary values
 - structural observations such as `children(...)` and `glob(...)` return
   `Stream<TreeEntry>`
 
