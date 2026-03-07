@@ -15,6 +15,7 @@ A typed, demand-driven build language with a distributed memoizing runtime.
 | **Tracked computation** | A computation whose inputs and outputs are recorded by the runtime for memoization and invalidation. |
 | **Host builtin** | A primitive operation that crosses the pure/effect boundary: `exec`, `acquire`, `download`, `read`, `glob`, `write_file`, format parsing, hashing. |
 | **Blob** | Immutable, pathless, content-addressed bytes in the store. Identity is BLAKE3 hash. |
+| **Artifact** | A typed reference to stored content plus semantic metadata. Wraps a blob or tree with type information (e.g., "this blob is an `.rlib`"). |
 | **Tree** | A first-class structural value: a content-addressed manifest of named entries (blobs and subtrees). Not `Map<Path, Blob>` — it carries membership, subtree identity, and merge semantics. |
 | **Stream\<T\>** | An unordered, reusable, progressively-produced collection of typed elements. Elements arrive as the producer yields them. Multiple consumers observe the same cached elements. |
 | **List\<T\>** | A concrete, ordered, finite collection. Spine is known immediately. Elements may be unrealized computation nodes. |
@@ -27,6 +28,10 @@ A typed, demand-driven build language with a distributed memoizing runtime.
 | **Root** | A durable reference from a memo table entry or demand result to published CAS objects. Roots are what keep committed values alive across GC. |
 | **Early cutoff** | If a computation reruns and produces a value identical to its previous result, downstream dependents are not invalidated. |
 | **Monotonic producer** | A producer whose yielded elements are individually final — later elements cannot invalidate earlier ones. Archive extraction is monotonic; generic process execution is not. |
+| **Computation identity** | The cache key for a memoized computation: function identity + argument identities + resolved late-bound values + runtime version. |
+| **Execution identity** | The cache key for a concrete `exec`: argv + env + input identities + output schema + sandbox policy + toolchain identity + platform contract. |
+| **Function identity** | A stable hash of a function's semantic body. Changes when the function's code changes; stable otherwise. |
+| **Value identity** | Structural equality of typed values. The basis for early cutoff and cache comparison. |
 
 ---
 
@@ -41,6 +46,29 @@ These are explicitly out of scope. They are not deferred features; they are thin
 - **Perfect static termination guarantees.** `exec` can loop forever. The language allows unrestricted recursion. Cycle detection is runtime, not compile-time.
 - **IDE-first language experience in v0.** The language needs a lossless CST and LSP eventually, but the runtime semantics come first.
 - **Make it easy to write non-deterministic builds.** Every design choice biases toward determinism. Non-determinism is a bug, not a feature.
+
+---
+
+## 0.1 What this phase is trying to validate
+
+This document describes a complete system. The current phase of work is not trying to build that complete system. It is trying to answer specific questions that must be answered before deeper implementation is justified.
+
+**The objective of Stage 0 is to validate:**
+
+1. That the demand-driven evaluator can drive real compilation through `exec`, connected to the existing runner/VFS/store stack.
+2. That memoization and early cutoff work correctly across tracked computation boundaries.
+3. That the identity model (function identity, value identity, computation identity, execution identity) is sound and implementable — not just plausible on paper.
+4. That the semantic model (pure computation + host builtins, no effect markers, no exposed evaluation state) holds up against real build rules, not just toy examples.
+5. That the architecture's key interfaces are remote-compatible from day one, even though Stage 0 execution is local-only.
+
+**This phase is explicitly not trying to:**
+
+- Finish the production system.
+- Design every language feature.
+- Reverse-engineer legacy code into the architecture.
+- Prove that streams, remote execution, or the full type system work.
+
+The goal is to pressure-test the semantic model against real build examples before committing to the full implementation. If the model breaks under real use, it is cheaper to discover that now.
 
 ---
 
@@ -272,6 +300,8 @@ Sandboxing is enforced by the VFS (the process literally cannot see undeclared f
 
 ### 3.4 Remote execution
 
+**Local and remote execution must have the same semantics.** If local execution can observe state that remote execution cannot, the model is broken. The differences between local and remote are purely operational (transport, latency, content availability), never semantic.
+
 The architecture is designed so that vx-runner can be remote:
 
 - The orchestrator sends a computation specification over RPC.
@@ -281,6 +311,8 @@ The architecture is designed so that vx-runner can be remote:
 - The orchestrator only needs the output Merkle roots / blob hashes to proceed.
 
 The store is the rendezvous point. Orchestrator and executor never exchange file contents directly. This is why everything is content-addressed and why the VFS reads from the store, not from the orchestrator.
+
+This invariant interacts with late-bound inputs (§4.5): if a build depends on executor capabilities (Xcode, SDKs), those capabilities must be explicitly fingerprinted in execution identity. A local executor that silently provides a system SDK that remote executors lack will produce cache entries that are non-portable. The system must know when this is happening.
 
 ### 3.5 Backpressure and scheduling
 
@@ -298,37 +330,89 @@ This is where "Model A semantically, Model B operationally" is load-bearing. The
 
 ## 4. Cache and identity model
 
-### 4.1 What goes into a cache key
+### 4.1 Why this is the hard part
 
-A computation's cache key must capture everything that can affect its output. For Vixen, this means:
+The system only works if computation identity is stable and sound. If identity is underspecified, the cache lies — it returns results computed under different conditions. If identity is overspecified, reuse collapses — cache hits become rare and the system degenerates to a slow task runner.
 
-| Component | What it captures |
-|-----------|-----------------|
-| **Function identity** | Which function is being called. In practice: a hash of the function's definition in the Vixen source. |
-| **Argument values** | The content-addressed identity of every argument. For blobs: BLAKE3 hash. For trees: Merkle root. For typed values: structural hash of all fields. |
-| **Host builtin identity** | For `exec`: the argv, environment, output declarations. For `acquire`: URL, expected hash. |
-| **Runtime semantics version** | A version stamp for the runtime itself. If the semantics of `exec` sandboxing change, all cached `exec` results must be invalidated. |
+### 4.2 Identity taxonomy
 
-What does NOT go into the cache key:
+The design requires six distinct kinds of identity. They are related but not interchangeable.
 
-- Scheduler decisions (which executor, what order)
+**Blob identity.** Digest of immutable bytes. BLAKE3 hash. The simplest and most stable form of identity. Two blobs with the same hash are the same blob.
+
+**Tree identity.** Digest of the canonicalized tree structure plus child identities. A Merkle root hash. Two trees with the same Merkle root contain the same entries — regardless of how or when they were assembled.
+
+**Value identity.** Structural identity of typed values. For blobs and trees, this reduces to digest identity. For compound types (parsed manifests, typed records), this is fieldwise structural equality. **A type that does not have well-defined structural equality is not a valid semantic cache boundary.** This is the rule that makes early cutoff implementable rather than aspirational.
+
+Concretely:
+- Blobs/trees: digest equality
+- Parsed ASTs: structural equality
+- Typed records: fieldwise structural equality
+- Opaque host handles: must not be semantic values unless their equality is well-defined
+
+**Function identity.** A stable identifier for a function's semantics. When a function's body changes, its identity must change. When its body is unchanged, its identity must be stable across evaluations.
+
+**Computation identity.** The cache key for a memoized computation. Composed of:
+- Function identity
+- Argument value identities
+- Resolved late-bound input values (see §4.5)
+- Runtime/language semantics version
+- Host primitive contract version (for builtins)
+
+**Execution identity.** The cache key for a concrete `exec`. Composed of:
+- argv
+- env
+- Declared input tree/file identities
+- Declared output schema
+- Sandbox policy
+- Toolchain identity (content-addressed — the toolchain tree's Merkle root)
+- Platform/executor contract version
+
+If any component is omitted from the appropriate identity, the cache may return a result computed under meaningfully different conditions.
+
+### 4.3 What does NOT go into identity
+
+- Scheduler decisions (which executor, what order, how many concurrent)
 - Wall-clock time
 - Hostname, PID, or other environmental noise
 - Store location (local vs. remote)
+- Whether the result came from cache or fresh evaluation
 
-### 4.2 Function identity
+### 4.4 Function identity: the likely failure point
 
-This is the hardest part. When a Vixen function's body changes, its cache key must change. But "the function changed" is not simple to define in a language with closures, higher-order functions, and recursion.
+This is the hardest identity problem. The design must answer:
+- What is the stable identity of a user-defined function?
+- How do code changes invalidate previous memo cells?
+- How do standard library changes invalidate previous memo cells?
+- How are closures and captured environments represented?
 
-**Proposed approach**: hash the function's normalized AST (after parsing, before evaluation). Two functions with identical normalized ASTs have identical identity. A change to any expression in the function body changes the hash.
+**v0 compromise (survivable first restriction):**
 
-**Captured variables**: if a function closes over a value, that value's identity is part of the function's identity. This is necessary for correctness: `make_compiler(tc)` with different toolchains must produce different cache keys.
+- Memoize only **top-level named functions** and **host primitives** initially. These have stable names and stable AST bodies.
+- Give each compiled function body a **stable semantic hash** (normalized AST or HIR, after parsing, before evaluation). Two functions with identical normalized bodies have identical identity.
+- Include the **stdlib/runtime semantic version** in the key. A stdlib change invalidates all memo entries that used stdlib functions.
+- **Defer closure identity rules.** Closures are a hard problem — captured variables need to participate in identity, and closures created in loops need distinct identities. Solving this correctly requires experience with real build rules. In v0, closures are not separately memoized; they are evaluated inline as part of their enclosing top-level function.
 
-**Transitive closure**: if function `f` calls function `g`, and `g` changes, then `f`'s results may be invalid. This is handled by the dependency graph: `f`'s cache entry depends on `g`'s results. If `g` produces different results (detected by value comparison), `f` is re-evaluated. If `g` produces the same results (early cutoff), `f`'s cached result remains valid.
+**Transitive invalidation** is handled by the dependency graph, not by transitive function hashing. If function `f` calls function `g`, and `g`'s code changes, `g` may produce different results. If it does (detected by value comparison), `f` is re-evaluated. If `g` produces the same results despite the code change (early cutoff), `f`'s cached result remains valid. This means function identity does not need to transitively include callee identities — it only needs its own body hash plus its argument values.
 
-This means function identity does not need to transitively include callee identities. It only needs its own AST hash plus its argument values. Early cutoff handles the transitive case.
+### 4.5 Late-bound input resolution
 
-### 4.3 Value-based caching, concretely
+Late-bound inputs are values that are not known at module-load time but resolve to concrete values during evaluation. Example: "current Rust stable" resolves to a specific version, which resolves to a specific toolchain distribution.
+
+Late-bound inputs must resolve against an **explicit execution context**, not ambient state. Not all late-bound inputs are equal:
+
+**Portable artifacts.** "Rust stable" resolves to a concrete distribution archive with a known hash. The resolved value (URL + hash, or the resulting tree Merkle root) participates in computation identity. This is fully portable — any executor with store access can use it.
+
+**Executor capabilities.** Some builds require capabilities that are not portable artifacts: Xcode and Apple SDKs on macOS, specific GPU drivers, platform-specific system libraries. These are properties of the executor, not of the build definition. The orchestrator must:
+- Know which executor classes provide which capabilities
+- Include a **capability fingerprint** in execution identity (e.g., Xcode version, SDK version)
+- Route `exec` calls to executors that match the required capabilities
+
+**Local-only ambient inputs.** Some inputs are inherently local and not remotely shareable unless explicitly reified into the store: the host OS version, available RAM, CPU architecture. These should be modeled as executor properties, not as implicit inputs that silently enter cache keys.
+
+The key rule: **resolution is orchestrator-owned, but parameterized by execution platform and executor class.** The resolved value, plus the relevant platform/capability fingerprint, participates in identity. If a local executor can see state that a remote executor cannot (e.g., a system-installed SDK), that state must either be explicitly fingerprinted or the build is not portable — and the system should know which case it's in.
+
+### 4.6 Value-based caching, concretely
 
 "Value-based caching" means the cache key includes the identity of values, not the identity of how those values were produced.
 
@@ -355,24 +439,32 @@ lib = compile(deps, ...)
 // deps is unchanged → step 4 does NOT rerun
 ```
 
-Early cutoff at step 2 prevents the formatting change from propagating. This is only possible because parsing and compilation are separate tracked computation boundaries with separate cache entries.
+Early cutoff at step 2 prevents the formatting change from propagating. This is only possible because:
+1. Parsing and compilation are separate tracked computation boundaries with separate cache entries.
+2. The parsed TOML value has well-defined structural equality — this is what makes the cutoff check meaningful.
 
-### 4.4 Invariants for sound memoization
+### 4.7 Invariants for sound memoization
 
 1. **Determinism**: given the same cache key, a computation must produce the same value. Sandboxing enforces this for `exec`.
 2. **Completeness**: the cache key must include everything that can affect the output. Undeclared inputs break this; sandboxing prevents undeclared inputs.
 3. **Value identity**: two values are "the same" if their content-addressed identity matches. For blobs: BLAKE3 hash. For trees: Merkle root. For typed compound values: structural hash.
-4. **Early cutoff correctness**: if a computation reruns and produces a value with the same identity, its dependents must not be invalidated. This means the runtime must compare output identity before and after re-evaluation.
+4. **Equality requirement**: every type that serves as a semantic cache boundary must have well-defined structural equality. Types without stable equality are not valid memo boundaries.
+5. **Early cutoff correctness**: if a computation reruns and produces a value with the same identity, its dependents must not be invalidated. This means the runtime must compare output identity before and after re-evaluation.
 
 ---
 
 ## 5. Output and artifact model
 
-### 5.1 Blobs
+### 5.1 Core runtime objects
 
-A blob is immutable, pathless, content-addressed bytes. Identity is BLAKE3 hash. Large blobs are split via content-defined chunking; the store deduplicates shared chunks.
+The runtime distinguishes the following object types. These are not interchangeable and should not be collapsed into "everything is a blob" or "everything is a file."
 
-Blobs are the atoms of the store. Everything else — trees, artifacts, typed outputs — is built from blobs.
+- **Blob**: immutable byte content in the store, identified by BLAKE3 digest. The atom of storage. Large blobs are split via content-defined chunking; the store deduplicates shared chunks.
+- **Artifact**: a typed reference to stored content plus semantic metadata. An artifact wraps a blob or tree with type information: "this blob is an `.rlib`", "this tree is a Rust toolchain distribution." Artifacts are what typed outputs from `exec` return — not raw blobs, but blobs with meaning.
+- **Tree**: a canonical hierarchical collection of named entries (blobs and subtrees), identified by Merkle root.
+- **TreeEntry**: one path-bearing entry discovered within a tree-producing operation. Carries `path`, `content`, and `kind`.
+- **Stream\<T\>**: a progressive, reusable, unordered collection of typed elements.
+- **TypedOutputs**: the committed typed result record from an `exec` — a named record of artifacts and trees matching the declared output schema.
 
 ### 5.2 Trees
 
@@ -460,6 +552,15 @@ As the archive is extracted, each entry is individually final. Entry `bin/rustc`
 
 The monotonicity criterion is the bright line: **a primitive may yield semantic stream elements only if each element is individually final and cannot be invalidated by subsequent execution.**
 
+The test for any candidate stream-producing primitive is:
+
+1. Can a later yield invalidate, overwrite, or delete an earlier yield?
+2. Can the producer fail partway through in a way that makes earlier yields incorrect?
+
+If the answer to either is yes, the primitive is not monotonic and must not produce semantic streams. It should publish only committed results after successful completion.
+
+`acquire` passes this test: archive entries are individually immutable and independently valid. `exec` fails it: filesystem mutations during process execution are provisional and non-monotonic.
+
 ---
 
 ## 6. Store / GC / liveness model
@@ -498,6 +599,18 @@ GC walks reachability from all roots. Anything reachable (transitively, through 
 
 ### 6.4 Worked example: downloading and extracting a Rust toolchain
 
+**Stage 0 form** (fused primitive, no semantic streams):
+
+```
+fn rust_toolchain(spec: ToolchainSpec) -> Tree {
+  acquire_tree(url: spec.url, sha256: spec.sha256)
+}
+
+tc_tree = rust_toolchain(RUST_1_80_SPEC)
+```
+
+**Stage 1 form** (decomposed into stream operations):
+
 ```
 fn rust_toolchain(spec: ToolchainSpec) -> Tree {
   acquire(url: spec.url, sha256: spec.sha256)
@@ -507,17 +620,19 @@ fn rust_toolchain(spec: ToolchainSpec) -> Tree {
 tc_tree = rust_toolchain(RUST_1_80_SPEC)
 ```
 
-Execution proceeds as:
+Both forms produce the same result. The Stage 1 form exposes the intermediate stream, enabling `filter` and `map` between `acquire` and `collect_tree`. The Stage 0 form hides the stream inside the fused primitive.
+
+Execution proceeds as (Stage 0 form shown; Stage 1 is identical except step 2-5 expose stream elements to user code):
 
 1. `rust_toolchain(RUST_1_80_SPEC)` is demanded. Orchestrator checks memo table: `memo[rust_toolchain, RUST_1_80_SPEC]`. Cache miss.
 
-2. `acquire(url, sha256)` begins. A lease is acquired.
+2. `acquire_tree(url, sha256)` begins. A lease is acquired.
 
-3. The runtime downloads the archive, verifying the hash as bytes arrive. Extraction begins immediately (streaming).
+3. The runtime downloads the archive, verifying the hash as bytes arrive. Extraction begins immediately (streaming internally, but not exposed as a semantic stream in Stage 0).
 
-4. As each archive entry is extracted, its content is uploaded to CAS under the lease. The stream yields `TreeEntry` elements to the `collect_tree()` operation.
+4. As each archive entry is extracted, its content is uploaded to CAS under the lease.
 
-5. `collect_tree()` assembles entries into a Merkle tree manifest as they arrive. When the archive is exhausted, the final manifest is written to CAS.
+5. Entries are assembled into a Merkle tree manifest. When the archive is exhausted, the final manifest is written to CAS.
 
 6. The memo table entry is written: `memo[rust_toolchain, RUST_1_80_SPEC] -> tree_manifest_hash`.
 
@@ -639,20 +754,7 @@ If the user interrupts a build:
 
 ## 9. Implementation plan
 
-### 9.1 What already exists
-
-The following infrastructure is already implemented:
-
-- Content-addressed store (`vx-store`) with BLAKE3, CDC chunking, Merkle manifests
-- Executor with sandboxed VFS (`vx-runner`, `vx-vfsd`)
-- VFS backends: FSKit (macOS), FUSE (Linux), ProjFS (Windows)
-- Orchestrator daemon (`vxd`) with RPC via roam
-- Daemon lifecycle, multiplexing, and bootstrap (`vx`)
-- Rust compilation pipeline (hardcoded, not yet driven by the language) (`vx-rs`)
-- Tarball acquisition (`vx-tarball`)
-- Toolchain management (`vx-toolchain`)
-
-### 9.2 Staged plan
+### 9.1 Staged plan
 
 #### Stage 0: Language kernel (must have for correctness)
 
@@ -664,11 +766,11 @@ The irreducible foundation. Without these, nothing else makes sense.
 
 3. **`exec` integration.** Wire the evaluator to the existing `vx-runner`. Structured inputs (trees + placed files), structured outputs (declared files + trees), sandboxed execution, output capture to store.
 
-4. **`acquire` as a stream.** Wire to the existing `vx-tarball`. Produce `Stream<TreeEntry>`. Support `filter`, `map`, `collect_tree()`.
+4. **`acquire_tree` as a fused primitive.** Wire to the existing `vx-tarball`. `acquire_tree(url, sha256) -> Tree` downloads, verifies, extracts, and returns a complete Tree. No semantic streams in Stage 0 — the stream decomposition (`acquire` → `filter` → `map` → `collect_tree`) is deferred to Stage 1.
 
 5. **Workspace root as a Tree.** The runtime provides the workspace root as a Tree handle. `entry()`, `children()`, `glob()` work over it. `read_bytes()` / `read_text()` on entries. All tracked.
 
-6. **One end-to-end example.** Compile a single Rust crate using Vixen source that calls `exec` with `rustc`. Inputs from workspace tree. Toolchain from `acquire`. Output captured to store. Demonstrate memoization and early cutoff.
+6. **One end-to-end example.** Compile a single Rust crate using Vixen source that calls `exec` with `rustc`. Inputs from workspace tree. Toolchain from `acquire_tree`. Output captured to store. Demonstrate memoization and early cutoff.
 
 **This stage replaces the hardcoded `vx-rs` pipeline with one driven by Vixen source.**
 
@@ -678,7 +780,7 @@ The irreducible foundation. Without these, nothing else makes sense.
 
 8. **Multi-crate workspace.** Recursive dependency resolution. Demonstrate memoization across crates.
 
-9. **Toolchain acquisition in Vixen.** `acquire` + `collect_tree` + `toolchain_from_distribution`. Replace hardcoded `vx-toolchain` logic.
+9. **Toolchain acquisition in Vixen.** Decompose `acquire_tree` into `acquire` (producing `Stream<TreeEntry>`) + stream combinators (`filter`, `map`) + `collect_tree`. Replace hardcoded `vx-toolchain` logic. This is where semantic streams enter the evaluator.
 
 10. **Proc macro support.** Proc macros are host-target executables compiled during the build. This is a natural test of dynamic dependencies.
 
@@ -702,6 +804,7 @@ The irreducible foundation. Without these, nothing else makes sense.
 
 #### Stage 4: Language maturity (can come later)
 
+
 18. **Type checking.** Static type system. Type errors before evaluation. Typed function signatures.
 
 19. **LSP and editor support.** Completions, diagnostics, go-to-definition. Built on the lossless CST.
@@ -718,13 +821,13 @@ The irreducible foundation. Without these, nothing else makes sense.
 
 ### 10.1 Unresolved design questions
 
-**Function identity under code changes.** Hashing the normalized AST is the proposed approach, but the details matter. How are closures handled? If a function captures a value and the captured value's identity is part of the function's identity, do we hash the value or a reference to the computation that produced it? This needs a concrete specification before Stage 0 can ship.
+**Function identity under code changes.** The v0 approach is to memoize only top-level named functions with stable semantic hashes of their bodies (§4.4). But the details of the hash still matter: what normalization is applied? Are comments and whitespace stripped? Are local variable names significant? Is the hash over the surface AST or a lowered IR? These must be answered before Stage 0 ships. Closure identity is deferred but will eventually need a design.
 
 **Stream backpressure.** Streams are reusable and cached. But if a stream produces 100,000 elements and only one consumer needs 10, does the runtime eagerly cache all 100,000? Or can it stop the producer? Reusability implies "the producer runs to completion" since another consumer might need all elements. But that could be wasteful. Possible resolution: reference counting on stream consumers, with the producer stopping when all consumers have detached.
 
 **Tree mutability during collection.** `collect_tree()` assembles a tree from a stream. But what if two stream elements have the same path? Last-write-wins? Error? This needs a deterministic resolution policy.
 
-**Late-bound inputs.** "Current Rust stable toolchain" resolves to a concrete version. But when does that resolution happen? At demand time? At module load time? If the resolution is cached, when does the cache expire? This is a policy question that interacts with cache invalidation in non-obvious ways.
+**Late-bound input refresh policy.** §4.5 defines the resolution model (portable artifacts vs. executor capabilities vs. local ambient inputs), but the TTL/staleness question remains: how often should "current Rust stable" be re-resolved? On every build? Once per day? Only when explicitly requested? This is a UX policy question with cache invalidation consequences.
 
 **Error aggregation.** We said fail-fast with deterministic tie-breaking. But the UX question remains: should `vixen test` behave differently from `vixen build`? If so, is that a language-level distinction or a CLI-level presentation choice? Current answer: CLI-level. But that means the runtime needs to support both "stop after first failure" and "continue and aggregate" modes.
 
@@ -732,7 +835,7 @@ The irreducible foundation. Without these, nothing else makes sense.
 
 ### 10.2 Risks
 
-**Complexity of the evaluator.** A demand-driven, memoizing evaluator with dynamic dependencies, stream support, early cutoff, and cycle detection is not trivial to build correctly. The interaction between streams, memoization, and early cutoff is particularly subtle. **Mitigation**: Stage 0 can defer streams and handle only concrete values and `exec`. Streams can be added in Stage 1.
+**Complexity of the evaluator.** A demand-driven, memoizing evaluator with dynamic dependencies, stream support, early cutoff, and cycle detection is not trivial to build correctly. The interaction between streams, memoization, and early cutoff is particularly subtle. **Mitigation**: Stage 0 defers semantic streams entirely (§9.1). All values are concrete. `acquire_tree` is a fused primitive. Streams are introduced in Stage 1 once the evaluator is stable and the concrete model is validated.
 
 **Cache explosion.** If every intermediate computation is memoized, the store can grow very large. Especially with Merkle manifests for trees, where small changes produce new manifests. **Mitigation**: GC with reachability from roots. Eviction policies (LRU on memo entries). CDC chunking for deduplication. But the eviction policy needs design work.
 
@@ -744,13 +847,13 @@ The irreducible foundation. Without these, nothing else makes sense.
 
 ### 10.3 Where the design might collapse under its own ambition
 
-**Streams + memoization + early cutoff.** The interaction between these three features is the most complex part of the design. A stream is a progressively-produced value. Memoization caches it. Early cutoff compares it to the previous run. But what does it mean to compare two streams for equality? If the stream is unordered, do you compare element sets? What if the stream is very large? This triple interaction needs a formal specification, not just handwaving about "the runtime handles it."
+**Streams + memoization + early cutoff.** The interaction between these three features is the most complex part of the design. A stream is a progressively-produced value. Memoization caches it. Early cutoff compares it to the previous run. But what does it mean to compare two streams for equality? If the stream is unordered, do you compare element sets? What if the stream is very large? This triple interaction needs a formal specification before Stage 1 introduces semantic streams.
 
-**Narrower version that preserves the essence**: defer streams to Stage 1. In Stage 0, `acquire` returns a `Tree` (blocking), not a `Stream<TreeEntry>`. All values are concrete. Memoization and early cutoff work on concrete values, which is well-understood. Add streams once the evaluator is stable and the concrete model is validated.
+**Decision**: streams are deferred to Stage 1. In Stage 0, `acquire_tree` returns a `Tree` (blocking). All values are concrete. Memoization and early cutoff work on concrete values, which is well-understood. The stream decomposition is introduced once the evaluator is stable and the concrete model is validated.
 
-**Remote execution + streaming.** If `acquire` produces a stream and a remote executor needs the resulting tree, the stream must be collected somewhere before it can be referenced by Merkle root. Where? On the orchestrator? On the store directly? If the acquire is itself remote, the stream elements are already in the remote store — but the orchestrator needs to know the final tree root to dispatch dependent work. This interaction is tractable but needs careful design.
+**Remote execution + streaming.** If `acquire` produces a stream and a remote executor needs the resulting tree, the stream must be collected somewhere before it can be referenced by Merkle root. This interaction is tractable but needs careful design.
 
-**Narrower version**: in Stage 0-2, all execution is local. The store is local. Remote execution is Stage 3. This avoids the distributed-streaming problem entirely until the local model is proven.
+**Decision**: in Stage 0-2, all execution is local. The store is local. Remote execution is Stage 3. This avoids the distributed-streaming problem entirely until the local model is proven.
 
 ---
 
@@ -778,19 +881,23 @@ These must hold for the system to be correct. Violations are bugs.
 
 10. **Store is the rendezvous**: orchestrator and executor never exchange file contents directly. All data flows through the content-addressed store.
 
+11. **Local/remote semantic equivalence**: local and remote execution must produce the same results for the same computation identity. If local execution can observe state that remote execution cannot, the model is broken.
+
+12. **Equality requirement**: every type used as a semantic cache boundary must have well-defined structural equality. Types without stable equality cannot participate in early cutoff.
+
 ---
 
 ## Unresolved questions (pre-implementation)
 
-1. How exactly is function identity computed? What is the normalized AST hash? How are closures and captured values handled?
+1. What normalization is applied for function identity hashing? Surface AST or lowered IR? Are local variable names significant? (§4.4 defines the v0 compromise; this is the remaining detail.)
 
 2. What is the concrete eviction/GC policy for memo entries? LRU? Reference counting? Manual pinning? Time-based expiry?
 
-3. What is the resolution and caching policy for late-bound inputs like "current Rust stable"?
+3. What is the concrete refresh/expiry policy for late-bound input resolution? §4.5 defines the model, but the TTL/staleness policy for resolved values (e.g., how often to re-resolve "current Rust stable") needs a concrete answer.
 
 4. What happens when two stream elements in `collect_tree()` have the same path?
 
-5. What is the concrete representation of a typed compound value's content-addressed identity? Structural hash of all fields? Merkle-style? What about types with no meaningful structural identity (e.g., opaque host handles)?
+5. What is the concrete representation of a typed compound value's content-addressed identity? Structural hash of all fields? Merkle-style? §4.2 establishes that types without stable equality cannot be memo boundaries — but the specific hashing scheme for compound types needs implementation design.
 
 6. How is the runtime semantics version stamp managed? Is it a hash of the evaluator binary? A manually-bumped version? What granularity of change triggers full invalidation?
 
@@ -811,20 +918,50 @@ These must hold for the system to be correct. Violations are bugs.
 Specifically included:
 - Parser for a minimal Vixen subset (bindings, function definitions, function calls, string literals, list literals, record literals, field access)
 - Demand-driven evaluator with memoization and early cutoff
-- `exec` wired to existing `vx-runner`
-- `acquire` returning a `Tree` (not a stream — deferred)
+- `exec` wired to existing `vx-runner` / `vx-vfsd` / `vx-store`
+- `acquire` as the only semantic stream primitive (wired to existing `vx-tarball`)
+- No provisional `exec` event streams in the language
+- No generic stream `zip`/`fold`/`join`/`group_by`
+- Memoization scoped to top-level named functions and host primitives (no closure memoization)
+- Structural equality for core types: blobs (digest), trees (Merkle root), parsed records (fieldwise)
 - `read_bytes`, `parse_toml` for manifest parsing
 - Workspace root as a Tree handle with `entry()` and `glob()`
 - One working example: compile a single Rust crate from Vixen source
 
 Specifically excluded from MVP:
-- Streams (all collections are concrete)
 - Type checking (evaluation is dynamically typed)
 - Remote execution (all local)
 - GC / leases (store grows unbounded in MVP)
 - File watching (manual rebuild trigger)
 - Multi-crate workspaces (single crate only)
+- Closure-aware function identity
 - C/C++ rules
 - LSP / editor support
 
 The MVP proves: **the evaluator can drive real compilation through `exec`, memoization works, early cutoff works, and the architecture holds together end-to-end.** Everything else builds on that foundation.
+
+---
+
+## Appendix A: Current implementation assets
+
+This section is implementation context, not normative architecture. It documents what already exists and can be reused. The spec above defines the target; this appendix describes the starting point.
+
+| Crate | What it provides | Spec relevance |
+|-------|-----------------|----------------|
+| `vx-store` | Content-addressed blob store, BLAKE3, CDC chunking, Merkle manifests | Store (§3.1, §6) |
+| `vx-runner` | Sandboxed process execution | Executor (§3.1, §3.3) |
+| `vx-vfsd` | VFS daemon, separate process from runner | VFS projection (§3.3) |
+| `vx-fskit` | macOS FSKit VFS backend | Platform VFS |
+| `fuse3` | Linux FUSE VFS backend | Platform VFS |
+| `vxd` | Orchestrator daemon, RPC via roam, lifecycle management | Orchestrator (§3.1) |
+| `vx` | CLI, daemon bootstrap, connect/bootstrap modes | External demand entry point |
+| `vx-rs` | Hardcoded Rust compilation pipeline | To be replaced by Vixen source (Stage 0-1) |
+| `vx-tarball` | Archive download and extraction | Backing for `acquire` primitive |
+| `vx-toolchain` | Toolchain acquisition and management | To be replaced by Vixen source (Stage 1) |
+| `vx-manifest` | Cargo manifest parsing | To be replaced by `parse_toml` in Vixen |
+| `vx-plan` | Build planning | To be redesigned around the evaluator |
+| `vxd-proto`, `vx-runner-proto`, `vx-store-proto`, `vixenfs-proto` | RPC protocol definitions (roam) | Stable infrastructure |
+| `landlock-exec` | Linux sandboxing via Landlock | Sandbox enforcement (§3.3) |
+| `vx-vfs-bench`, `vx-vfs-integrity`, `vx-fuse-stress` | VFS testing and benchmarking | Test infrastructure |
+
+The key observation: the store, executor, VFS, and daemon infrastructure are already built and working. Stage 0 is about wiring a new evaluator to this existing stack, not building the runtime from scratch.
