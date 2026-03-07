@@ -3,13 +3,32 @@
 This is a reference for Vixen's language semantics. For a tutorial
 introduction, see [building-rust.md](building-rust.md).
 
+## Syntax basics
+
+Comments use `//`:
+
+```
+// This is a comment
+let x = 5  // inline comment
+```
+
+Double-quoted strings are plain literals. Backtick strings support
+interpolation with `${}`, like JavaScript template literals:
+
+```
+"plain string"
+`rust-${resolved.version}-${target}`
+`feature="${feat}"`
+`CARGO_FEATURE_${feat.to_upper()}`
+```
+
 ## Types
 
 ### Scalars
 
-- `Int` — integer
-- `String` — UTF-8 text
-- `Bool` — true or false
+- `Int` — integer literals: `0`, `42`, `-1`
+- `String` — UTF-8 text: `"hello"` (plain), `` `hello ${name}` `` (interpolated)
+- `Bool` — `true` or `false`
 - `Blob` — immutable, content-addressed bytes in the store. Identity is BLAKE3
   hash. A blob has no path — it is pure content.
 
@@ -20,14 +39,39 @@ introduction, see [building-rust.md](building-rust.md).
 
 #### List operations
 
+- `list[i]` — index access by position
 - `list.map(f)` — transform each element
 - `list.filter(predicate)` — elements matching a predicate
 - `list.flat_map(f)` — map, then flatten one level
 - `list.push(element) -> List<T>` — new list with element appended
 - `list.into_set() -> Set<T>` — collect into a set
 - `list.into_map() -> Map<K, V>` — collect key-value pairs into a map
+- `(A, B, ...)` — tuple. Fixed-size, heterogeneous, positional access.
 - `Tree` — content-addressed directory structure. A manifest of named entries
   (blobs and subtrees). Identity is its merkle root.
+
+#### Tuples
+
+Tuples group values positionally:
+
+```
+let pair = ("hello", 42)
+pair.0  // "hello"
+pair.1  // 42
+```
+
+Used in destructuring:
+
+```
+for (name, dep) in target_deps { ... }
+let (left, right) = text.split_once("/")
+```
+
+And as element types in collections:
+
+```
+map.entries() -> List<(K, V)>
+```
 
 ### Structs
 
@@ -47,23 +91,24 @@ struct Package {
 }
 ```
 
-Struct values are constructed by name or anonymously. Both forms use the same
-field syntax:
+Struct values are constructed by name or anonymously. Fields use `:`
+(same as type annotations and named arguments — `=` is only for `let`
+bindings):
 
 ```
 // Named construction
 Toolchain {
-  rustc   = root["bin/rustc"],
-  std     = root.subtree("lib"),
-  version = resolved.version,
-  target  = target,
+  rustc:   root["bin/rustc"],
+  std:     root.subtree("lib"),
+  version: resolved.version,
+  target:  target,
 }
 
 // Anonymous — inferred from return type or binding
 {
-  name    = manifest.package.name,
-  version = manifest.package.version,
-  source  = source,
+  name:    manifest.package.name,
+  version: manifest.package.version,
+  source:  source,
 }
 ```
 
@@ -187,6 +232,9 @@ let diagnostics = events.filter($ as Diagnostic).map($.0)
 let features = set { "default", "serde", "std" }
 features.contains("serde")  // true
 features.insert("alloc")    // new set with "alloc" added
+features.filter(predicate)  // sub-set matching predicate
+features.map(f)             // transform each element
+features.to_list()          // convert to a list
 ```
 
 ### Options
@@ -199,6 +247,7 @@ features.insert("alloc")    // new set with "alloc" added
 - `opt.none?` — true if absent
 - `opt.map(f)` — applies f if present
 - `opt.or(default)` — unwraps, or returns default
+- `opt.and_then(f)` — applies f if present, where f itself returns an Option
 - `opt ?? fallback` — same as `.or(fallback)` but also works for non-Option
   expressions that might fail
 
@@ -228,13 +277,13 @@ are produced once and cached. No consumer can modify the stream.
 
 ### Record update with `with`
 
-`expr with { field = new_value }` creates a new record with one or more
+`expr with { field: new_value }` creates a new record with one or more
 fields replaced:
 
 ```
 let updated = dep with {
-  role = Host,
-  requested_features = dep.features ++ extra_features,
+  role: Host,
+  requested_features: dep.features ++ extra_features,
 }
 ```
 
@@ -324,8 +373,16 @@ let rustc_env = {}
 
 - `map["key"]` — index access, fails if key is absent
 - `map.get(key) -> Option<V>` — look up a key, returns nothing if absent
-- `map.entries() -> List<(K, V)>` — all key-value pairs (iterable with `for`)
+- `map.entries() -> List<(K, V)>` — all key-value pairs
 - `map.has(key) -> Bool` — test for key presence
+
+Maps are directly iterable with `for`, yielding `(key, value)` pairs:
+
+```
+for (key, value) in build_out.rustc_env {
+  "--env", `${key}=${value}`
+}
+```
 
 ### Tree literals
 
@@ -334,7 +391,7 @@ let rustc_env = {}
 ```
 let externs = tree {
   for (name, dep) in built_deps {
-    "lib${name}.rmeta" = dep.rmeta
+    `lib${name}.rmeta`: dep.rmeta
   }
 }
 ```
@@ -352,9 +409,9 @@ Pattern matching on values. Arms use `=>` and are checked top-to-bottom.
 
 ```
 let channel_name = match channel {
-  Stable        => "stable"
-  Beta          => "beta"
-  Nightly { d } => "nightly-${d}"
+  Stable           => "stable"
+  Beta             => "beta"
+  Nightly { date } => `nightly-${date}`
 }
 ```
 
@@ -362,7 +419,7 @@ Supported patterns:
 
 - **Unit variants**: `Stable =>`, `None =>`
 - **Tuple-style destructuring**: `Some(v) =>`, `String(version_req) =>`
-- **Named-field destructuring**: `Nightly { d } =>`, `Path { path } =>`
+- **Named-field destructuring**: `Nightly { date } =>`, `Path { path } =>`
 - **Named-field with rebinding**: `Registry { crate, req, registry = reg } =>`
   binds the `registry` field to the local name `reg`
 - **String literals**: `"compiler-artifact" =>`, `"build-finished" =>`
@@ -420,7 +477,7 @@ Block form with else:
 
 ```
 if src.get("src/lib.rs").some?
-  then some(LibTarget { path = "src/lib.rs", crate_type = "lib" })
+  then some(LibTarget { path: "src/lib.rs", crate_type: "lib" })
   else none
 ```
 
@@ -428,9 +485,9 @@ Multi-branch:
 
 ```
 if t.has("path") then
-  Path { path = t["path"].as_string() }
+  Path { path: t["path"].as_string() }
 else if t.has("git") then
-  Git { url = t["git"].as_string(), ... }
+  Git { url: t["git"].as_string(), ... }
 else
   Registry { ... }
 ```
@@ -449,7 +506,7 @@ Destructuring in the binding:
 
 ```
 for (name, dep) in target_deps {
-  "lib${name}.rmeta" = dep.rmeta
+  `lib${name}.rmeta`: dep.rmeta
 }
 ```
 
@@ -468,27 +525,27 @@ for (name, dep) in target_deps {
   ```
   tree {
     for (name, dep) in built_deps {
-      "lib${name}.rmeta" = dep.rmeta
+      `lib${name}.rmeta`: dep.rmeta
     }
   }
   ```
 
 - **Inline in cmd lists** — splices generated arguments:
   ```
-  cmd = [
+  cmd: [
     tc.rustc,
     for entry in externs.entries() {
-      "--extern", "${entry.stem}=${entry.path}"
+      "--extern", `${entry.stem}=${entry.path}`
     },
   ]
   ```
 
 - **Inline in env maps** — generates key-value pairs:
   ```
-  env = {
+  env: {
     "OUT_DIR": "/out",
     for feat in pkg.enabled_features {
-      "CARGO_FEATURE_${feat.to_upper()}": "1"
+      `CARGO_FEATURE_${feat.to_upper()}`: "1"
     },
   }
   ```
@@ -532,7 +589,7 @@ RMeta)`) without waiting for the entire stream to complete.
 ## Functions
 
 ```
-fn compile(src: Tree, tc: Toolchain) -> Stream<RustcEvent> {
+fn compile(src: Tree, tc: Toolchain) -> Stream<RustcEvent> = {
   ...
 }
 ```
@@ -546,7 +603,7 @@ which computations are pure and which are effectful.
 
 ### Named arguments
 
-All arguments are named at call sites using `name: value` syntax:
+Arguments can be passed positionally or named using `name: value` syntax:
 
 ```
 exec(
@@ -597,6 +654,13 @@ stream.find($ as Metadata) // |x| x as Metadata
 
 For multi-argument closures or complex bodies, use the full form: `|a, b| ...`
 
+`$` binds to the innermost enclosing closure. Nesting works naturally:
+
+```
+// outer $ is the features Option, inner $ is each string element
+t.get("features").map($.as_list().map($.as_string()).into_set())
+```
+
 ### impl blocks
 
 `impl` adds methods to a named type. No traits — just methods on types.
@@ -610,6 +674,13 @@ impl Blob {
 impl String {
   fn toml() -> TomlValue { ... }
   fn json() -> JsonValue { ... }
+}
+
+impl TomlValue {
+  fn decode<T>() -> T { ... }
+}
+
+impl JsonValue {
   fn decode<T>() -> T { ... }
 }
 ```
@@ -654,11 +725,11 @@ separate rule-definition phase.
 ```
 // std/rust/build.vx — part of the standard library
 
-fn compile_crate(src: Tree, deps: [...], tc: Toolchain) -> Stream<RustcEvent> {
+fn compile_crate(src: Tree, deps: [...], tc: Toolchain) -> Stream<RustcEvent> = {
   ...
 }
 
-fn link_binary(crates: [...], tc: Toolchain) -> Blob {
+fn link_binary(crates: [...], tc: Toolchain) -> Blob = {
   ...
 }
 ```
@@ -734,7 +805,7 @@ cmd: [
   "--crate-name", cargo.package.name,
 
   for entry in externs.entries() {
-    "--extern", "${entry.stem}=${entry.path}"
+    "--extern", `${entry.stem}=${entry.path}`
   },
 
   "/src/src/lib.rs",
@@ -786,7 +857,6 @@ source_tree() -> Tree
 Parsing:
 
 - `string.toml() -> TomlValue` — parse as TOML
-- `string.decode<T>() -> T` — decode a parsed value into a typed struct
 - `json_parse(text) -> JsonValue` — parse JSON (free function)
 
 Testing:
@@ -801,27 +871,65 @@ Manipulation:
 - `string.split(separator) -> List<String>` — split into parts
 - `string.split_once(separator) -> (String, String)` — split at first occurrence
 - `string.to_upper() -> String` — uppercase
-- `string.to_string() -> String` — convert to string (for non-string types like Triple)
+
+General conversion:
+
+- `value.to_string() -> String` — convert any type to its string
+  representation (e.g. `triple.to_string()`, `feat.to_upper()`)
 
 Collection:
 
 - `list.join(separator) -> String` — join a list of strings
 
-### TomlValue (builtin)
+### TomlValue / JsonValue (builtin)
 
-`string.toml()` returns a `TomlValue`. This is a dynamically-typed
-representation of parsed TOML, used for navigating manifest files before
-decoding into typed structs.
+`string.toml()` returns a `TomlValue`. `json_parse(text)` returns a
+`JsonValue`. Both are enums over dynamically-typed parsed data:
+
+```
+enum TomlValue {
+  String(String)
+  Int(Int)
+  Bool(Bool)
+  Table(TomlTable)
+  Array(List<TomlValue>)
+}
+```
+
+`TomlTable` is the table variant — functions can accept it as a parameter
+type to require a table specifically.
+
+Navigation:
 
 - `value["key"]` — index into a table, fails if absent
 - `value.get(key) -> Option<TomlValue>` — look up a key, returns nothing if absent
 - `value.has(key) -> Bool` — test for key presence
-- `value.as_string() -> String` — extract as string
-- `value.as_bool() -> Bool` — extract as bool
-- `value.as_list() -> List<TomlValue>` — extract as list
+
+Extraction:
+
+- `value.as_string() -> String`
+- `value.as_bool() -> Bool`
+- `value.as_list() -> List<TomlValue>`
 - `value.entries() -> List<(String, TomlValue)>` — table entries as key-value pairs
 
-`json_parse()` returns a `JsonValue` with the same API.
+Decoding:
+
+- `value.decode<T>() -> T` — decode into a typed struct
+
+`JsonValue` has the same API.
+
+In typed contexts, `JsonValue` and `TomlValue` coerce implicitly to the
+expected type. This avoids littering code with `.as_string()` calls:
+
+```
+// msg["filenames"] coerces to iterable, elements coerce to String
+for filename in msg["filenames"] {
+  if filename.ends_with(".rmeta") { ... }
+}
+```
+
+Use explicit extraction (`.as_string()`, `.as_list()`, etc.) when the
+context is ambiguous or when passing to a generic function.
 
 ### Other builtins
 
@@ -890,3 +998,14 @@ A `TreeEntry` represents a single entry in a tree:
 - `entry.path` — full path within the tree (e.g. `"lib/libfoo.rmeta"`)
 - `entry.stem` — filename without extension (e.g. `"libfoo"`)
 - `entry.blob` — the content as a `Blob`
+
+## Stdlib types and helpers
+
+The following types are used in examples but defined in the standard library,
+not documented here: `ExitStatus`, `CfgExpr`, `VersionReq`, `Registry`,
+`RustChannelToml`, `Bytes`.
+
+Similarly, these helper functions are called in examples but their
+implementations are part of the standard library: `parse_version_req`,
+`parse_cfg_expr`, `eval_cfg`, `collect_build_script_out`,
+`compile_build_script`, `coalesce_same_package_by_unioning_features`.

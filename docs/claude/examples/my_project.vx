@@ -2,18 +2,19 @@
 
 use std.rust.build     { build_root }
 use std.rust.toolchain { acquire_toolchain, Channel }
+use std.rust.manifest  { parse_lock }
 use std.rust.types     { BuildCtx, Triple }
 
-let host   = Triple { arch = "aarch64", vendor = "apple", os = "darwin", env = "" }
+let host   = Triple { arch: "aarch64", vendor: "apple", os: "darwin", env: "" }
 let target = host
 
 let ctx = BuildCtx {
-  host          = host,
-  target        = target,
-  toolchain     = acquire_toolchain(channel: Channel.Stable, @target),
-  registry      = crates_io_registry(),
-  lock          = source_tree().get("Cargo.lock").map(parse_lock),
-  root_features = set { "default" },
+  host:          host,
+  target:        target,
+  toolchain:     acquire_toolchain(channel: Channel.Stable, @target),
+  registry:      crates_io_registry(),
+  lock:          source_tree().get("Cargo.lock").map(parse_lock),
+  root_features: set { "default" },
 }
 
 let my_crate = build_root(source_tree(), ctx)

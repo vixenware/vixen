@@ -5,7 +5,7 @@
 
 use std.rust.types {
   BuildCtx, ResolveReq, ResolvedPkg, ResolvedEdge, PackageId,
-  SourceReq, SourceRef, DepSpec, DepKind, Role,
+  SourceReq, SourceRef, DepSpec, DepReq, DepKind, Role,
   CargoManifest, FeatureItem, CfgExpr,
 }
 use std.rust.manifest { parse_manifest }
@@ -52,16 +52,16 @@ fn resolve_pkg(
       .coalesce_same_package_by_unioning_features()
       .map(|edge| {
         {
-          extern_name = edge.extern_name,
-          kind        = edge.kind,
-          role        = edge.role,
+          extern_name: edge.extern_name,
+          kind:        edge.kind,
+          role:        edge.role,
 
-          pkg = resolve_pkg(
+          pkg: resolve_pkg(
             req: {
-              source             = edge.source,
-              role               = edge.role,
-              default_features   = edge.default_features,
-              requested_features = edge.requested_features,
+              source:             edge.source,
+              role:               edge.role,
+              default_features:   edge.default_features,
+              requested_features: edge.requested_features,
             },
             @root_src,
             @ctx,
@@ -70,23 +70,23 @@ fn resolve_pkg(
       })
 
   {
-    id               = package_id(manifest, concrete),
-    source           = concrete,
-    src              = src,
-    manifest         = manifest,
-    role             = req.role,
-    enabled_features = enabled,
-    deps             = deps,
+    id:               package_id(manifest, concrete),
+    source:           concrete,
+    src:              src,
+    manifest:         manifest,
+    role:             req.role,
+    enabled_features: enabled,
+    deps:             deps,
   }
 }
 
 fn resolve_root(root_src: Tree, ctx: BuildCtx) -> ResolvedPkg =
   resolve_pkg(
     req: {
-      source             = Path { path = "." },
-      role               = Target,
-      default_features   = true,
-      requested_features = ctx.root_features,
+      source:             Path { path: "." },
+      role:               Target,
+      default_features:   true,
+      requested_features: ctx.root_features,
     },
     @root_src,
     @ctx,
@@ -128,10 +128,10 @@ fn feature_closure(
               }
 
             Dep(name) =>
-              result = result.insert("dep:${name}")
+              result = result.insert(`dep:${name}`)
 
             DepFeature { dep, feature } =>
-              result = result.insert("dep:${dep}")
+              result = result.insert(`dep:${dep}`)
               if !result.contains(feature) {
                 result = result.insert(feature)
                 worklist = worklist ++ [feature]
@@ -155,21 +155,24 @@ fn collect_dep_reqs(
   manifest: CargoManifest,
   enabled_features: Set<String>,
   ctx: BuildCtx,
-) -> List<DepSpec> =
+) -> List<DepReq> =
   manifest.dependencies
     .filter($.kind != Dev)
     .filter($.target_when.none? || eval_cfg($.target_when?, ctx.target))
     .filter(!$.optional || enabled_features.contains($.extern_name))
-    .map(|dep| {
-      dep with {
-        role =
-          if dep.kind == Build
-            then Host
-            else Target,
+    .map(|dep| DepReq {
+      extern_name:      dep.extern_name,
+      kind:             dep.kind,
+      source:           dep.source,
+      default_features: dep.default_features,
 
-        requested_features =
-          dep.features ++ inherited_dep_features(enabled_features, dep),
-      }
+      role:
+        if dep.kind == Build
+          then Host
+          else Target,
+
+      requested_features:
+        dep.features ++ inherited_dep_features(enabled_features, dep),
     })
 
 // Features like "dep-name/feature-name" in the parent's enabled set
@@ -179,8 +182,8 @@ fn inherited_dep_features(
   dep: DepSpec,
 ) -> Set<String> =
   enabled
-    .filter($.starts_with("${dep.extern_name}/"))
-    .map($.strip_prefix("${dep.extern_name}/"))
+    .filter($.starts_with(`${dep.extern_name}/`))
+    .map($.strip_prefix(`${dep.extern_name}/`))
 
 // --- Source materialization ---
 
@@ -192,7 +195,7 @@ fn choose_concrete_source(
 ) -> SourceRef =
   match source {
     Path { path } =>
-      SourceRef.Path { path = path }
+      SourceRef.Path { path: path }
 
     Registry { crate, req, registry = reg } =>
       lock.find_registry(crate, req, reg)
@@ -218,7 +221,7 @@ fn materialize_source(source: SourceRef, root_src: Tree) -> Tree =
 
 fn package_id(manifest: CargoManifest, source: SourceRef) -> PackageId =
   {
-    name    = manifest.package.name,
-    version = manifest.package.version,
-    source  = source,
+    name:    manifest.package.name,
+    version: manifest.package.version,
+    source:  source,
   }

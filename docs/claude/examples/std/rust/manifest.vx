@@ -9,37 +9,37 @@ fn parse_manifest(src: Tree) -> CargoManifest = {
   let toml = src["Cargo.toml"].read_utf8().toml()
 
   {
-    package = parse_package(toml["package"]),
-    lib = parse_or_infer_lib_target(src, toml),
-    build_script = parse_build_script(src, toml),
+    package:      parse_package(toml["package"]),
+    lib:          parse_or_infer_lib_target(src, toml),
+    build_script: parse_build_script(src, toml),
 
-    dependencies =
+    dependencies:
       parse_dep_table(toml.get("dependencies"), kind: Normal)
       ++ parse_dep_table(toml.get("build-dependencies"), kind: Build)
       ++ parse_target_dep_tables(toml.get("target")),
 
-    features = parse_features_table(toml.get("features")),
+    features: parse_features_table(toml.get("features")),
   }
 }
 
 fn parse_package(raw: TomlTable) -> Package =
   {
-    name    = raw["name"].as_string(),
-    version = raw["version"].as_string(),
-    edition = raw.get("edition").map($.as_string()).or("2021"),
+    name:    raw["name"].as_string(),
+    version: raw["version"].as_string(),
+    edition: raw.get("edition").map($.as_string()).or("2021"),
   }
 
 fn parse_or_infer_lib_target(src: Tree, toml: TomlTable) -> Option<LibTarget> =
   match toml.get("lib") {
     Some(lib_table) =>
       some(LibTarget {
-        path       = lib_table.get("path").map($.as_string()).or("src/lib.rs"),
-        crate_type = lib_table.get("crate-type").map($.as_string()).or("lib"),
+        path:       lib_table.get("path").map($.as_string()).or("src/lib.rs"),
+        crate_type: lib_table.get("crate-type").map($.as_string()).or("lib"),
       })
 
     None =>
       if src.get("src/lib.rs").some?
-        then some(LibTarget { path = "src/lib.rs", crate_type = "lib" })
+        then some(LibTarget { path: "src/lib.rs", crate_type: "lib" })
         else none
   }
 
@@ -56,53 +56,53 @@ fn parse_dep_table(raw: Option<TomlTable>, kind: DepKind) -> List<DepSpec> =
     match value {
       String(version_req) =>
         {
-          extern_name      = extern_name,
-          package_name     = extern_name,
-          source           = Registry {
-            crate = extern_name,
-            req   = parse_version_req(version_req),
+          extern_name:      extern_name,
+          package_name:     extern_name,
+          source:           Registry {
+            crate: extern_name,
+            req:   parse_version_req(version_req),
           },
-          default_features = true,
-          features         = set {},
-          optional         = false,
-          kind             = kind,
-          target_when      = none,
+          default_features: true,
+          features:         set {},
+          optional:         false,
+          kind:             kind,
+          target_when:      none,
         }
 
       Table(t) =>
         {
-          extern_name  = extern_name,
-          package_name = t.get("package").map($.as_string()).or(extern_name),
+          extern_name:  extern_name,
+          package_name: t.get("package").map($.as_string()).or(extern_name),
 
-          source =
+          source:
             if t.has("path") then
-              Path { path = t["path"].as_string() }
+              Path { path: t["path"].as_string() }
             else if t.has("git") then
               Git {
-                url    = t["git"].as_string(),
-                rev    = t.get("rev").map($.as_string()),
-                subdir = t.get("subdir").map($.as_string()).or("."),
+                url:    t["git"].as_string(),
+                rev:    t.get("rev").map($.as_string()),
+                subdir: t.get("subdir").map($.as_string()).or("."),
               }
             else
               Registry {
-                crate    = t.get("package").map($.as_string()).or(extern_name),
-                req      = parse_version_req(t["version"].as_string()),
-                registry = t.get("registry").map($.as_string()).or("crates-io"),
+                crate:    t.get("package").map($.as_string()).or(extern_name),
+                req:      parse_version_req(t["version"].as_string()),
+                registry: t.get("registry").map($.as_string()).or("crates-io"),
               },
 
-          default_features =
+          default_features:
             t.get("default-features").map($.as_bool()).or(true),
 
-          features =
+          features:
             t.get("features")
               .map($.as_list().map($.as_string()).into_set())
               .or(set {}),
 
-          optional =
+          optional:
             t.get("optional").map($.as_bool()).or(false),
 
-          kind        = kind,
-          target_when = none,
+          kind:        kind,
+          target_when: none,
         }
     }
   })
@@ -114,10 +114,10 @@ fn parse_target_dep_tables(raw_targets: Option<TomlTable>) -> List<DepSpec> =
     let pred = parse_cfg_expr(cfg_expr)
 
     parse_dep_table(table.get("dependencies"), kind: Normal)
-      .map($ with { target_when = some(pred) })
+      .map($ with { target_when: some(pred) })
 
     ++ parse_dep_table(table.get("build-dependencies"), kind: Build)
-         .map($ with { target_when = some(pred) })
+         .map($ with { target_when: some(pred) })
   })
 
 fn parse_features_table(raw: Option<TomlTable>) -> Map<String, List<FeatureItem>> =
@@ -128,7 +128,7 @@ fn parse_features_table(raw: Option<TomlTable>) -> Map<String, List<FeatureItem>
         Dep(s.strip_prefix("dep:"))
       else if s.contains("/") then
         let parts = s.split("/")
-        DepFeature { dep = parts[0], feature = parts[1] }
+        DepFeature { dep: parts[0], feature: parts[1] }
       else
         Feature(s)
     })

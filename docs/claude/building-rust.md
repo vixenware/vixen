@@ -23,16 +23,16 @@ fn build_pkg(pkg: ResolvedPkg, ctx: BuildCtx) -> BuiltCrate = {
 
   let externs = tree {
     for (name, dep) in target_deps {
-      "lib${name}.rmeta" = dep.rmeta
+      `lib${name}.rmeta`: dep.rmeta
     }
   }
 
   let events = rustc_events(pkg, externs, build_out, ctx)
 
   {
-    rmeta       = events.find($ as RMeta).0,
-    rlib        = events.find($ as RLib).0,
-    diagnostics = events.filter($ as Diagnostic).map($.0),
+    rmeta:       events.find($ as RMeta).0,
+    rlib:        events.find($ as RLib).0,
+    diagnostics: events.filter($ as Diagnostic).map($.0),
   }
 }
 ```
@@ -47,7 +47,7 @@ recursively build them, prepare inputs, run rustc, project the outputs.
 The important line is:
 
 ```
-"lib${name}.rmeta" = dep.rmeta
+`lib${name}.rmeta`: dep.rmeta
 ```
 
 `dep.rmeta` is a lazy projection from the dependency's rustc event stream. The
@@ -116,10 +116,10 @@ Expression-body functions use `=` instead of `{ ... }`.
 ```
 fn resolve_deps(src: Tree, cargo: CargoManifest) -> List<ResolvedCrate> =
   crates_io.resolve(
-    name    = cargo.package.name,
-    version = cargo.package.version,
-    deps    = cargo.dependencies,
-    lock    = src.get("Cargo.lock").map(parse_lock),
+    name:    cargo.package.name,
+    version: cargo.package.version,
+    deps:    cargo.dependencies,
+    lock:    src.get("Cargo.lock").map(parse_lock),
   )
 ```
 
@@ -149,7 +149,7 @@ fn rustc_events(
       "-L", "dependency=/deps",
 
       for entry in externs.entries() {
-        "--extern", "${entry.stem}=${entry.path}"
+        "--extern", `${entry.stem}=${entry.path}`
       },
 
       "/src/src/lib.rs",
@@ -181,7 +181,7 @@ artifacts and diagnostics appear.
 ```
 let externs = tree {
   for (name, dep) in built_deps {
-    "lib${name}.rmeta" = dep.rmeta
+    `lib${name}.rmeta`: dep.rmeta
   }
 }
 ```
@@ -214,12 +214,12 @@ graph emerges from function calls.
 The line that makes pipelining work:
 
 ```
-rmeta = events.find($ as RMeta).0,
+rmeta: events.find($ as RMeta).0,
 ```
 
 `events` is the stream from `rustc_events()`. `.find($ as RMeta)` blocks
 until the monitor yields an `RMeta` event — which happens when rustc emits
-metadata, before it finishes codegen. `.file` extracts the blob.
+metadata, before it finishes codegen. `.0` extracts the inner blob.
 
 A dependent crate's `externs` tree references `dep.rmeta`. Constructing that
 tree blocks on the dependency's rmeta. It does NOT block on the dependency's
@@ -228,7 +228,7 @@ rlib. So the dependent starts compiling as soon as metadata is ready.
 ### Diagnostics
 
 ```
-diagnostics = events.filter($ as Diagnostic).map($.0),
+diagnostics: events.filter($ as Diagnostic).map($.0),
 ```
 
 Diagnostics are stream events. They're stored with the cached computation. On

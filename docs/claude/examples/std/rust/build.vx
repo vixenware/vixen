@@ -52,7 +52,7 @@ fn build_pkg(pkg: ResolvedPkg, ctx: BuildCtx) -> BuiltCrate = {
   // dep.rmeta is lazy — blocks until that dep's rustc emits metadata.
   let externs = tree {
     for (name, dep) in target_deps {
-      "lib${name}.rmeta" = dep.rmeta
+      `lib${name}.rmeta`: dep.rmeta
     }
   }
 
@@ -61,9 +61,9 @@ fn build_pkg(pkg: ResolvedPkg, ctx: BuildCtx) -> BuiltCrate = {
   // The returned struct's fields are lazy projections over the shared
   // event stream. Nothing computes until demanded.
   {
-    rmeta       = events.find($ as RMeta).0,
-    rlib        = events.find($ as RLib).0,
-    diagnostics = events.filter($ as Diagnostic).map($.0),
+    rmeta:       events.find($ as RMeta).0,
+    rlib:        events.find($ as RLib).0,
+    diagnostics: events.filter($ as Diagnostic).map($.0),
   }
 }
 
@@ -93,7 +93,7 @@ fn rustc_argv(
   build_out: BuildScriptOut,
   ctx: BuildCtx,
 ) -> List<String> = {
-  let lib = pkg.manifest.lib ?? LibTarget { path = "src/lib.rs", crate_type = "lib" }
+  let lib = pkg.manifest.lib ?? LibTarget { path: "src/lib.rs", crate_type: "lib" }
 
   [
     ctx.toolchain.rustc,
@@ -107,12 +107,12 @@ fn rustc_argv(
 
     // Extern declarations from dependencies
     for entry in externs.entries() {
-      "--extern", "${entry.stem}=${entry.path}"
+      "--extern", `${entry.stem}=${entry.path}`
     },
 
     // Feature cfgs
     for feat in pkg.enabled_features {
-      "--cfg", "feature=\"${feat}\""
+      "--cfg", `feature="${feat}"`
     },
 
     // Build script cfgs
@@ -122,11 +122,11 @@ fn rustc_argv(
 
     // Build script env
     for (key, value) in build_out.rustc_env {
-      "--env", "${key}=${value}"
+      "--env", `${key}=${value}`
     },
 
     // The source file
-    "/src/${lib.path}",
+    `/src/${lib.path}`,
   ]
 }
 
@@ -166,7 +166,7 @@ fn run_build_script(
       "HOST":               ctx.host.to_string(),
 
       for feat in pkg.enabled_features {
-        "CARGO_FEATURE_${feat.to_upper()}": "1"
+        `CARGO_FEATURE_${feat.to_upper()}`: "1"
       },
     },
 
@@ -183,9 +183,9 @@ fn run_build_script(
 
 fn empty_build_script_out() -> BuildScriptOut =
   {
-    out_dir     = empty_tree(),
-    rustc_env   = {},
-    rustc_cfg   = set {},
-    link_search = [],
-    link_libs   = [],
+    out_dir:     empty_tree(),
+    rustc_env:   {},
+    rustc_cfg:   set {},
+    link_search: [],
+    link_libs:   [],
   }

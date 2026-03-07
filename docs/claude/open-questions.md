@@ -12,9 +12,9 @@ fn build_pkg(pkg: ResolvedPkg, ctx: BuildCtx) -> BuiltCrate = {
   let events = rustc_events(pkg, externs, build_out, ctx)
 
   {
-    rmeta       = events.find($ as RMeta).0,
-    rlib        = events.find($ as RLib).0,
-    diagnostics = events.filter($ as Diagnostic).map($.0),
+    rmeta:       events.find($ as RMeta).0,
+    rlib:        events.find($ as RLib).0,
+    diagnostics: events.filter($ as Diagnostic).map($.0),
   }
 }
 ```

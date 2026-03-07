@@ -102,6 +102,17 @@ enum FeatureItem {
 
 // --- Resolution ---
 
+// Intermediate: a dependency ready for resolution (after feature activation
+// and role assignment). Produced by collect_dep_reqs, consumed by resolve_pkg.
+struct DepReq {
+  extern_name: String
+  kind: DepKind
+  role: Role
+  source: SourceReq
+  default_features: Bool
+  requested_features: Set<String>
+}
+
 struct ResolveReq {
   source: SourceReq
   role: Role
