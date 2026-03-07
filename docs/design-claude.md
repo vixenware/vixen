@@ -13,7 +13,7 @@ A typed, demand-driven build language with a distributed memoizing runtime.
 | **Demand** | An external request to realize a value. All demand originates outside the language (CLI, API). The language has no force/await/realize construct. |
 | **Demand root** | The top-level value the user asks for. Everything else is realized only as a transitive dependency. |
 | **Tracked computation** | A computation whose inputs and outputs are recorded by the runtime for memoization and invalidation. |
-| **Host builtin** | A primitive operation that crosses the pure/effect boundary: `exec`, `acquire`, `download`, `read`, `glob`, `write_file`, format parsing, hashing. |
+| **Host builtin** | A primitive operation that crosses the pure/effect boundary: `exec`, `acquire_tree` (Stage 0) / `acquire` (Stage 1), `download`, `read`, `glob`, `write_file`, format parsing, hashing. |
 | **Blob** | Immutable, pathless, content-addressed bytes in the store. Identity is BLAKE3 hash. |
 | **Artifact** | A typed reference to stored content plus semantic metadata. Wraps a blob or tree with type information (e.g., "this blob is an `.rlib`"). |
 | **Tree** | A first-class structural value: a content-addressed manifest of named entries (blobs and subtrees). Not `Map<Path, Blob>` — it carries membership, subtree identity, and merge semantics. |
@@ -392,6 +392,7 @@ This is the hardest identity problem. The design must answer:
 - Give each compiled function body a **stable semantic hash** (normalized AST or HIR, after parsing, before evaluation). Two functions with identical normalized bodies have identical identity.
 - Include the **stdlib/runtime semantic version** in the key. A stdlib change invalidates all memo entries that used stdlib functions.
 - **Defer closure identity rules.** Closures are a hard problem — captured variables need to participate in identity, and closures created in loops need distinct identities. Solving this correctly requires experience with real build rules. In v0, closures are not separately memoized; they are evaluated inline as part of their enclosing top-level function.
+- **No higher-order memo boundaries.** Users cannot define custom memo points. There is no `@memoize` annotation or equivalent. The only memo boundaries are top-level named functions and host primitives. Stream combinators (when streams arrive in Stage 1) are not independently memoized.
 
 **Transitive invalidation** is handled by the dependency graph, not by transitive function hashing. If function `f` calls function `g`, and `g`'s code changes, `g` may produce different results. If it does (detected by value comparison), `f` is re-evaluated. If `g` produces the same results despite the code change (early cutoff), `f`'s cached result remains valid. This means function identity does not need to transitively include callee identities — it only needs its own body hash plus its argument values.
 
@@ -478,6 +479,8 @@ Trees are first-class values in the language, not just store implementation deta
 - Tree identity is the Merkle root hash.
 
 ### 5.3 Streams
+
+> **Stage note:** Semantic streams are not part of Stage 0. In Stage 0, `acquire_tree` is a fused primitive that returns a `Tree` directly. The stream decomposition described here is introduced in Stage 1.
 
 A `Stream<T>` is an unordered, reusable, progressively-produced collection of typed elements.
 
@@ -819,15 +822,13 @@ The irreducible foundation. Without these, nothing else makes sense.
 
 ## 10. Open questions and risks
 
-### 10.1 Unresolved design questions
+### 10.1 Design questions (not blocking Stage 0)
 
-**Function identity under code changes.** The v0 approach is to memoize only top-level named functions with stable semantic hashes of their bodies (§4.4). But the details of the hash still matter: what normalization is applied? Are comments and whitespace stripped? Are local variable names significant? Is the hash over the surface AST or a lowered IR? These must be answered before Stage 0 ships. Closure identity is deferred but will eventually need a design.
+The Stage 0 blockers are listed separately in the "Unresolved questions" section below. The questions here are real but do not block initial implementation.
 
-**Stream backpressure.** Streams are reusable and cached. But if a stream produces 100,000 elements and only one consumer needs 10, does the runtime eagerly cache all 100,000? Or can it stop the producer? Reusability implies "the producer runs to completion" since another consumer might need all elements. But that could be wasteful. Possible resolution: reference counting on stream consumers, with the producer stopping when all consumers have detached.
+**Stream backpressure.** Streams are reusable and cached. But if a stream produces 100,000 elements and only one consumer needs 10, does the runtime eagerly cache all 100,000? Or can it stop the producer? Reusability implies "the producer runs to completion" since another consumer might need all elements. Possible resolution: reference counting on stream consumers, with the producer stopping when all consumers have detached. (Deferred to Stage 1 with streams.)
 
-**Tree mutability during collection.** `collect_tree()` assembles a tree from a stream. But what if two stream elements have the same path? Last-write-wins? Error? This needs a deterministic resolution policy.
-
-**Late-bound input refresh policy.** §4.5 defines the resolution model (portable artifacts vs. executor capabilities vs. local ambient inputs), but the TTL/staleness question remains: how often should "current Rust stable" be re-resolved? On every build? Once per day? Only when explicitly requested? This is a UX policy question with cache invalidation consequences.
+**Late-bound input refresh policy.** §4.5 defines the resolution model (portable artifacts vs. executor capabilities vs. local ambient inputs), but the TTL/staleness question remains: how often should "current Rust stable" be re-resolved? On every build? Once per day? Only when explicitly requested? This is a UX policy question with cache invalidation consequences. (Stage 0 uses explicit toolchain specs, so this is not blocking.)
 
 **Error aggregation.** We said fail-fast with deterministic tie-breaking. But the UX question remains: should `vixen test` behave differently from `vixen build`? If so, is that a language-level distinction or a CLI-level presentation choice? Current answer: CLI-level. But that means the runtime needs to support both "stop after first failure" and "continue and aggregate" modes.
 
@@ -887,27 +888,35 @@ These must hold for the system to be correct. Violations are bugs.
 
 ---
 
-## Unresolved questions (pre-implementation)
+## Unresolved questions
 
-1. What normalization is applied for function identity hashing? Surface AST or lowered IR? Are local variable names significant? (§4.4 defines the v0 compromise; this is the remaining detail.)
+### Stage 0 blockers
 
-2. What is the concrete eviction/GC policy for memo entries? LRU? Reference counting? Manual pinning? Time-based expiry?
+These must be answered before the first evaluator can be implemented.
 
-3. What is the concrete refresh/expiry policy for late-bound input resolution? §4.5 defines the model, but the TTL/staleness policy for resolved values (e.g., how often to re-resolve "current Rust stable") needs a concrete answer.
+1. **Function identity normalization.** What normalization is applied for function identity hashing? Surface AST or lowered IR? Are local variable names significant? (§4.4 defines the v0 compromise; this is the remaining implementation detail.)
 
-4. What happens when two stream elements in `collect_tree()` have the same path?
+2. **Structural hashing for compound values.** What is the concrete representation of a typed compound value's content-addressed identity? Structural hash of all fields? Merkle-style? §4.2 establishes that types without stable equality cannot be memo boundaries — but the specific hashing scheme for compound types needs implementation design before the evaluator can implement early cutoff.
 
-5. What is the concrete representation of a typed compound value's content-addressed identity? Structural hash of all fields? Merkle-style? §4.2 establishes that types without stable equality cannot be memo boundaries — but the specific hashing scheme for compound types needs implementation design.
+3. **Path collision in tree collection.** What happens when two entries in a tree-producing operation have the same path? Last-write-wins? Error? This must be deterministic. Applies to `acquire_tree` in Stage 0 and to `collect_tree()` when streams arrive in Stage 1.
 
-6. How is the runtime semantics version stamp managed? Is it a hash of the evaluator binary? A manually-bumped version? What granularity of change triggers full invalidation?
+4. **Runtime semantics version stamp.** How is the runtime semantics version managed? Is it a hash of the evaluator binary? A manually-bumped version? What granularity of change triggers full invalidation? This participates in computation identity (§4.2) and must be defined before the memo table can be implemented.
 
-7. What is the backpressure / early-termination model for streams with consumers that don't need all elements?
+5. **Error model for `exec`.** What is the error value? Just "failed with exit code N and stderr"? Or richer structure? The evaluator must know how to represent and propagate exec failures before it can wire to `vx-runner`.
 
-8. Should the language support user-defined types, or are all types built-in / provided by the standard library?
+### Later open questions
 
-9. What is the error model for `exec` in detail? Is the error value just "failed with exit code N and stderr"? Or is there richer structure?
+These are real design questions but do not block Stage 0 implementation.
 
-10. How does the system handle non-deterministic tools (compilers that embed timestamps, tools that use randomized algorithms)? Is this purely a documentation/policy concern, or does the runtime attempt to detect it?
+6. **Eviction/GC policy for memo entries.** LRU? Reference counting? Manual pinning? Time-based expiry? (Stage 0 has no GC — store grows unbounded.)
+
+7. **Late-bound input refresh policy.** §4.5 defines the resolution model, but the TTL/staleness policy for resolved values (e.g., how often to re-resolve "current Rust stable") needs a concrete answer. Not blocking because Stage 0 uses explicit toolchain specs.
+
+8. **Stream backpressure / early-termination.** What happens when consumers don't need all elements? (Deferred with streams to Stage 1.)
+
+9. **User-defined types.** Should the language support user-defined types, or are all types built-in / provided by the standard library? Stage 0 is dynamically typed; this is a Stage 4 question.
+
+10. **Non-deterministic tools.** How does the system handle compilers that embed timestamps or tools that use randomized algorithms? Is this purely a documentation/policy concern, or does the runtime attempt to detect it? Sandboxing mitigates but does not fully resolve this.
 
 ---
 
@@ -915,20 +924,47 @@ These must hold for the system to be correct. Violations are bugs.
 
 **The MVP is Stage 0**: language kernel + evaluator + `exec` integration + workspace tree + one end-to-end Rust crate compilation.
 
-Specifically included:
+### Specifically included
+
 - Parser for a minimal Vixen subset (bindings, function definitions, function calls, string literals, list literals, record literals, field access)
 - Demand-driven evaluator with memoization and early cutoff
 - `exec` wired to existing `vx-runner` / `vx-vfsd` / `vx-store`
-- `acquire` as the only semantic stream primitive (wired to existing `vx-tarball`)
-- No provisional `exec` event streams in the language
-- No generic stream `zip`/`fold`/`join`/`group_by`
-- Memoization scoped to top-level named functions and host primitives (no closure memoization)
-- Structural equality for core types: blobs (digest), trees (Merkle root), parsed records (fieldwise)
+- `acquire_tree` as a fused host primitive (wired to existing `vx-tarball`). Returns `Tree`, not `Stream<TreeEntry>`. No semantic streams in Stage 0.
 - `read_bytes`, `parse_toml` for manifest parsing
 - Workspace root as a Tree handle with `entry()` and `glob()`
+- Structural equality for core types: blobs (digest), trees (Merkle root), parsed records (fieldwise)
 - One working example: compile a single Rust crate from Vixen source
 
-Specifically excluded from MVP:
+### Memoization scope in Stage 0
+
+Memoization is limited to:
+- **Top-level named functions.** These have stable names and stable AST bodies. Identity is (function body hash + argument value identities + runtime version).
+- **Host primitives** (`exec`, `acquire_tree`, `read_bytes`, `parse_toml`, `glob`). Identity is (primitive identity + argument value identities + primitive contract version).
+
+Memoization does NOT apply to:
+- Closures or lambdas (evaluated inline as part of their enclosing function)
+- Higher-order user-defined memo boundaries
+- Stream combinators (streams do not exist in Stage 0)
+- Any implicit expansion of the memo model beyond the two categories above
+
+This scope is a deliberate restriction, not an oversight. The memo model may expand in later stages, but only with explicit design work.
+
+### Remote compatibility
+
+Stage 0 execution is local-only. However, all key interfaces must be designed so that remote execution can be added without semantic changes:
+
+- **`exec` specifications** must be self-contained descriptions (argv, env, input identities, output schema, sandbox policy) that could be sent to a remote executor.
+- **Publication rules** (memo table writes, root creation) must not assume co-located store and executor.
+- **Lease and root semantics** must be defined in terms of the store protocol, not in terms of local process lifetime.
+- **Execution contexts** must explicitly model executor capabilities and platform contracts, even if Stage 0 has only one local executor.
+- **Cache identity rules** must not include machine-specific state (hostname, PID, local paths) — only content-addressed values and explicit platform contracts.
+- **Late-bound input resolution** must resolve against an explicit execution context, not ambient local state.
+
+The test: a Stage 0 memo table entry, if transported to a remote store, must be semantically valid there. If it isn't, the interface is not remote-compatible.
+
+### Specifically excluded from MVP
+
+- Semantic streams (`Stream<TreeEntry>`, stream combinators) — deferred to Stage 1
 - Type checking (evaluation is dynamically typed)
 - Remote execution (all local)
 - GC / leases (store grows unbounded in MVP)
@@ -956,7 +992,7 @@ This section is implementation context, not normative architecture. It documents
 | `vxd` | Orchestrator daemon, RPC via roam, lifecycle management | Orchestrator (§3.1) |
 | `vx` | CLI, daemon bootstrap, connect/bootstrap modes | External demand entry point |
 | `vx-rs` | Hardcoded Rust compilation pipeline | To be replaced by Vixen source (Stage 0-1) |
-| `vx-tarball` | Archive download and extraction | Backing for `acquire` primitive |
+| `vx-tarball` | Archive download and extraction | Backing for `acquire_tree` (Stage 0) / `acquire` (Stage 1) |
 | `vx-toolchain` | Toolchain acquisition and management | To be replaced by Vixen source (Stage 1) |
 | `vx-manifest` | Cargo manifest parsing | To be replaced by `parse_toml` in Vixen |
 | `vx-plan` | Build planning | To be redesigned around the evaluator |
