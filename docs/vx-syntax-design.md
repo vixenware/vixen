@@ -203,6 +203,26 @@ Closures use arrow syntax and infer parameter types from context:
 () => None
 ```
 
+In unary expression-closure positions, `$` may stand for the implicit argument:
+
+```text
+graph.crates.filter($.crate_type == Bin)
+numbers.map(2 * $)
+```
+
+This is shorthand for:
+
+```text
+graph.crates.filter((krate) => krate.crate_type == Bin)
+numbers.map((x) => 2 * x)
+```
+
+Current bias:
+
+- `$` is only shorthand for unary expression closures
+- block-bodied closures still spell their parameters explicitly
+- multi-parameter closures still spell their parameters explicitly
+
 Both single-expression and block-bodied closures are allowed:
 
 ```text

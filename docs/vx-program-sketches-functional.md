@@ -20,6 +20,7 @@ This variant now assumes:
 - no pipeline operator in v0
 - closures exist in v0
 - closures use `(x) => ...` syntax
+- unary expression closures may use `$` shorthand
 - block-bodied closures are allowed
 - `match` is the branching surface
 - short constructor/variant forms are inferred from type context
@@ -110,7 +111,7 @@ Current assumptions:
 
 ```text
 fn binary_crates(graph: CrateGraph) -> [CrateNode] {
-  graph.crates.filter((krate) => krate.crate_type == Bin)
+  graph.crates.filter($.crate_type == Bin)
 }
 ```
 
@@ -123,8 +124,8 @@ Compared to the imperative form, it is simply closer to what the program means.
 ```text
 fn plan_crates(graph: CrateGraph) -> Unit {
   graph.crates
-    .filter((krate) => krate.crate_type == Bin)
-    .map((krate) => make_compile_node(krate))
+    .filter($.crate_type == Bin)
+    .map(make_compile_node($))
     .each((node) => emit::node { node })
 }
 
