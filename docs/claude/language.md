@@ -36,6 +36,9 @@ interpolation with `${}`, like JavaScript template literals:
 
 - `[T]` — list of T. Known length. Ordered.
 - `{ field: T, ... }` — anonymous record. Named fields.
+- `(A, B, ...)` — tuple. Fixed-size, heterogeneous, positional access.
+- `Tree` — content-addressed directory structure. A manifest of named entries
+  (blobs and subtrees). Identity is its merkle root.
 
 #### List operations
 
@@ -46,9 +49,6 @@ interpolation with `${}`, like JavaScript template literals:
 - `list.push(element) -> List<T>` — new list with element appended
 - `list.into_set() -> Set<T>` — collect into a set
 - `list.into_map() -> Map<K, V>` — collect key-value pairs into a map
-- `(A, B, ...)` — tuple. Fixed-size, heterogeneous, positional access.
-- `Tree` — content-addressed directory structure. A manifest of named entries
-  (blobs and subtrees). Identity is its merkle root.
 
 #### Tuples
 
@@ -248,6 +248,9 @@ features.to_list()          // convert to a list
 - `opt.map(f)` — applies f if present
 - `opt.or(default)` — unwraps, or returns default
 - `opt.and_then(f)` — applies f if present, where f itself returns an Option
+- `opt?` — postfix unwrap: extracts the inner value from `some(v)`, producing
+  `v`. Useful in contexts where the Option is known to be present (e.g. after
+  a `.none?` guard).
 - `opt ?? fallback` — same as `.or(fallback)` but also works for non-Option
   expressions that might fail
 
@@ -615,6 +618,15 @@ exec(
 download(url: manifest_url, sha256: checksum)
 ```
 
+Parameters with `Option<T>` type can be omitted entirely — they default to
+`none`:
+
+```
+// sha256 has type Option<String>, omitting it passes none
+download(url: manifest_url)
+// equivalent to: download(url: manifest_url, sha256: none)
+```
+
 When passing a binding whose name matches the parameter, use `@` as shorthand:
 
 ```
@@ -875,7 +887,7 @@ Manipulation:
 General conversion:
 
 - `value.to_string() -> String` — convert any type to its string
-  representation (e.g. `triple.to_string()`, `feat.to_upper()`)
+  representation (e.g. `triple.to_string()`)
 
 Collection:
 
@@ -897,11 +909,13 @@ enum TomlValue {
 ```
 
 `TomlTable` is the table variant — functions can accept it as a parameter
-type to require a table specifically.
+type to require a table specifically. `TomlTable` supports the same
+navigation and extraction operations as `TomlValue`.
 
-Navigation:
+Navigation (on both `TomlValue`/`JsonValue` and their table variants):
 
-- `value["key"]` — index into a table, fails if absent
+- `value["key"]` — index into a table, fails if absent. Equivalent to
+  dot-access: `value.key` is shorthand for `value["key"]`.
 - `value.get(key) -> Option<TomlValue>` — look up a key, returns nothing if absent
 - `value.has(key) -> Bool` — test for key presence
 
