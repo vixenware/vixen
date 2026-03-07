@@ -10,7 +10,7 @@ let target = host
 let ctx = BuildCtx {
   host          = host,
   target        = target,
-  toolchain     = acquire_toolchain(channel = Channel.Stable, target = target),
+  toolchain     = acquire_toolchain(channel: Channel.Stable, @target),
   registry      = crates_io_registry(),
   lock          = source_tree().get("Cargo.lock").map(parse_lock),
   root_features = set { "default" },

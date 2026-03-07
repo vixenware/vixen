@@ -35,16 +35,16 @@ fn resolve_pkg(
 
   let enabled =
     activate_features(
-      manifest,
-      requested = req.requested_features,
-      default_features = req.default_features,
+      @manifest,
+      requested: req.requested_features,
+      default_features: req.default_features,
     )
 
   let dep_reqs =
     collect_dep_reqs(
-      manifest = manifest,
-      enabled_features = enabled,
-      ctx = ctx,
+      @manifest,
+      enabled_features: enabled,
+      @ctx,
     )
 
   let deps =
@@ -57,14 +57,14 @@ fn resolve_pkg(
           role        = edge.role,
 
           pkg = resolve_pkg(
-            req = {
+            req: {
               source             = edge.source,
               role               = edge.role,
               default_features   = edge.default_features,
               requested_features = edge.requested_features,
             },
-            root_src = root_src,
-            ctx      = ctx,
+            @root_src,
+            @ctx,
           ),
         }
       })
@@ -82,14 +82,14 @@ fn resolve_pkg(
 
 fn resolve_root(root_src: Tree, ctx: BuildCtx) -> ResolvedPkg =
   resolve_pkg(
-    req = {
+    req: {
       source             = Path { path = "." },
       role               = Target,
       default_features   = true,
       requested_features = ctx.root_features,
     },
-    root_src = root_src,
-    ctx      = ctx,
+    @root_src,
+    @ctx,
   )
 
 // --- Feature activation ---

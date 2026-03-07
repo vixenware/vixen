@@ -56,13 +56,7 @@ fn build_pkg(pkg: ResolvedPkg, ctx: BuildCtx) -> BuiltCrate = {
     }
   }
 
-  let events =
-    rustc_events(
-      pkg       = pkg,
-      externs   = externs,
-      build_out = build_out,
-      ctx       = ctx,
-    )
+  let events = rustc_events(@pkg, @externs, @build_out, @ctx)
 
   // The returned struct's fields are lazy projections over the shared
   // event stream. Nothing computes until demanded.
@@ -81,15 +75,15 @@ fn rustc_events(
   ctx: BuildCtx,
 ) -> Stream<RustcEvent> =
   exec(
-    cmd = rustc_argv(pkg, externs, build_out, ctx),
+    cmd: rustc_argv(@pkg, @externs, @build_out, @ctx),
 
-    mount = {
+    mount: {
       "/src":  pkg.src,
       "/deps": externs,
       "/out":  empty_tree(),
     },
 
-    parse = rustc_json,
+    parse: rustc_json,
   )
 
 // Build the full rustc command line.
@@ -163,9 +157,9 @@ fn run_build_script(
   // cargo:rustc-link-search=PATH
   // cargo:rustc-link-lib=LIB
   let events = exec(
-    cmd = [script_bin],
+    cmd: [script_bin],
 
-    env = {
+    env: {
       "CARGO_MANIFEST_DIR": "/src",
       "OUT_DIR":            "/out",
       "TARGET":             ctx.target.to_string(),
@@ -176,12 +170,12 @@ fn run_build_script(
       },
     },
 
-    mount = {
+    mount: {
       "/src": pkg.src,
       "/out": empty_tree(),
     },
 
-    parse = parse_build_script_stdout,
+    parse: parse_build_script_stdout,
   )
 
   collect_build_script_out(events)

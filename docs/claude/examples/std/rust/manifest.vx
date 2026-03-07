@@ -14,8 +14,8 @@ fn parse_manifest(src: Tree) -> CargoManifest = {
     build_script = parse_build_script(src, toml),
 
     dependencies =
-      parse_dep_table(toml.get("dependencies"), kind = Normal)
-      ++ parse_dep_table(toml.get("build-dependencies"), kind = Build)
+      parse_dep_table(toml.get("dependencies"), kind: Normal)
+      ++ parse_dep_table(toml.get("build-dependencies"), kind: Build)
       ++ parse_target_dep_tables(toml.get("target")),
 
     features = parse_features_table(toml.get("features")),
@@ -113,10 +113,10 @@ fn parse_target_dep_tables(raw_targets: Option<TomlTable>) -> List<DepSpec> =
   raw_targets.or({}).entries().flat_map(|(cfg_expr, table)| {
     let pred = parse_cfg_expr(cfg_expr)
 
-    parse_dep_table(table.get("dependencies"), kind = Normal)
+    parse_dep_table(table.get("dependencies"), kind: Normal)
       .map($ with { target_when = some(pred) })
 
-    ++ parse_dep_table(table.get("build-dependencies"), kind = Build)
+    ++ parse_dep_table(table.get("build-dependencies"), kind: Build)
          .map($ with { target_when = some(pred) })
   })
 

@@ -139,7 +139,7 @@ fn rustc_events(
   cargo: CargoManifest,
 ) -> Stream<RustcEvent> =
   exec(
-    cmd = [
+    cmd: [
       tc.rustc,
       "--crate-name", cargo.package.name,
       "--edition", cargo.package.edition,
@@ -155,12 +155,12 @@ fn rustc_events(
       "/src/src/lib.rs",
     ],
 
-    mount = {
+    mount: {
       "/src": src,
       "/deps": externs,
     },
 
-    parse = rustc_json,
+    parse: rustc_json,
   )
 ```
 

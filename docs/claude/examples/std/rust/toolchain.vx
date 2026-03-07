@@ -30,7 +30,7 @@ fn resolve_channel(channel: Channel, target: String) -> ChannelManifest = {
 
   // download + parse the channel manifest to find the actual version
   let manifest =
-    download(url = manifest_url)
+    download(url: manifest_url)
       .read_utf8()
       .toml()
       .decode<RustChannelToml>()
@@ -49,7 +49,7 @@ fn resolve_channel(channel: Channel, target: String) -> ChannelManifest = {
 fn acquire_toolchain(channel: Channel, target: String) -> Toolchain = {
   let resolved = resolve_channel(channel, target)
 
-  let entries = acquire(url = resolved.url, sha256 = resolved.sha256)
+  let entries = acquire(url: resolved.url, sha256: resolved.sha256)
   let tc_tree = entries.filter($ as TreeEntry).collect_tree()
 
   // The archive has a top-level directory like "rust-1.80.0-x86_64-unknown-linux-gnu/"

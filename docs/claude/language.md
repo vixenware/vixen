@@ -16,9 +16,58 @@ introduction, see [building-rust.md](building-rust.md).
 ### Composite types
 
 - `[T]` — list of T. Known length. Ordered.
-- `{ field: T, ... }` — record/struct. Named fields.
+- `{ field: T, ... }` — anonymous record. Named fields.
+
+#### List operations
+
+- `list.map(f)` — transform each element
+- `list.filter(predicate)` — elements matching a predicate
+- `list.flat_map(f)` — map, then flatten one level
+- `list.push(element) -> List<T>` — new list with element appended
+- `list.into_set() -> Set<T>` — collect into a set
+- `list.into_map() -> Map<K, V>` — collect key-value pairs into a map
 - `Tree` — content-addressed directory structure. A manifest of named entries
   (blobs and subtrees). Identity is its merkle root.
+
+### Structs
+
+`struct` declares a named record type:
+
+```
+struct BuiltCrate {
+  rmeta: Blob
+  rlib: Blob
+  diagnostics: Stream<RustDiagnostic>
+}
+
+struct Package {
+  name: String
+  version: String
+  edition: String
+}
+```
+
+Struct values are constructed by name or anonymously. Both forms use the same
+field syntax:
+
+```
+// Named construction
+Toolchain {
+  rustc   = root["bin/rustc"],
+  std     = root.subtree("lib"),
+  version = resolved.version,
+  target  = target,
+}
+
+// Anonymous — inferred from return type or binding
+{
+  name    = manifest.package.name,
+  version = manifest.package.version,
+  source  = source,
+}
+```
+
+Fields are accessed with dot syntax: `pkg.manifest.package.name`.
 
 ### Streams
 
@@ -72,9 +121,24 @@ enum RustcEvent {
 }
 ```
 
-Enum variants are proper types. `Shape::Circle` is both a variant of `Shape`
-and a standalone type `Circle`. A value of type `Circle` is a value of type
+Enum variants are proper types. `Circle` is both a variant of `Shape`
+and a standalone type. A value of type `Circle` is a value of type
 `Shape`. Similarly, `RMeta` is a standalone type.
+
+Variants can be referenced with qualified syntax when disambiguation is
+needed:
+
+```
+Channel.Stable
+SourceRef.Path { path: path }
+```
+
+Or unqualified when the variant name is unambiguous (including after `use`):
+
+```
+use std.rust.types { Role, Target, Host }
+let role = Target
+```
 
 Tuple-style variants expose their fields positionally: `rmeta_event.0` gives
 the `Blob` inside an `RMeta(blob)`. Named-field variants use field names:
@@ -176,13 +240,48 @@ let updated = dep with {
 
 This is not mutation — it produces a new value. The original is unchanged.
 
-### Concatenation with `++`
+### Operators
+
+#### Arithmetic
+
+`+`, `-`, `*`, `/` — standard numeric operators.
+
+#### Comparison
+
+- `==`, `!=` — structural equality
+- `<`, `>`, `<=`, `>=` — ordering
+
+```
+deps.filter($.role == Target)
+deps.filter($.kind != Dev)
+```
+
+#### Boolean
+
+- `!` — negation
+- `&&` — short-circuit and
+- `||` — short-circuit or
+
+```
+.filter(!$.optional || enabled_features.contains($.extern_name))
+.filter($.target_when.none? || eval_cfg($.target_when?, ctx.target))
+```
+
+#### Concatenation with `++`
 
 `++` concatenates lists and unions sets:
 
 ```
 let all_deps = normal_deps ++ build_deps ++ target_deps
 let all_features = requested ++ set { "default" }
+```
+
+#### Key-value with `=>`
+
+`key => value` creates a key-value pair. Used with `.into_map()`:
+
+```
+deps.map(|dep| dep.name => build_dep(dep)).into_map()
 ```
 
 ### Local mutation as syntax sugar
@@ -213,7 +312,20 @@ let m = deps.map(|dep| dep.name => build_dep(dep, tc)).into_map()
 ```
 
 The `=>` operator creates a key-value pair. `.into_map()` collects pairs into
-a map. Maps support index access: `m["key"]`.
+a map.
+
+Empty map literal: `{}`
+
+```
+let rustc_env = {}
+```
+
+#### Map operations
+
+- `map["key"]` — index access, fails if key is absent
+- `map.get(key) -> Option<V>` — look up a key, returns nothing if absent
+- `map.entries() -> List<(K, V)>` — all key-value pairs (iterable with `for`)
+- `map.has(key) -> Bool` — test for key presence
 
 ### Tree literals
 
@@ -231,6 +343,192 @@ Inside the block, string keys map to blob values. Supports `for` loops and
 conditionals for generating entries. The tree is content-addressed — its
 identity is its merkle root.
 
+## Control flow
+
+### match
+
+Pattern matching on values. Arms use `=>` and are checked top-to-bottom.
+`match` is an expression — each arm produces a value.
+
+```
+let channel_name = match channel {
+  Stable        => "stable"
+  Beta          => "beta"
+  Nightly { d } => "nightly-${d}"
+}
+```
+
+Supported patterns:
+
+- **Unit variants**: `Stable =>`, `None =>`
+- **Tuple-style destructuring**: `Some(v) =>`, `String(version_req) =>`
+- **Named-field destructuring**: `Nightly { d } =>`, `Path { path } =>`
+- **Named-field with rebinding**: `Registry { crate, req, registry = reg } =>`
+  binds the `registry` field to the local name `reg`
+- **String literals**: `"compiler-artifact" =>`, `"build-finished" =>`
+
+Arms can have block bodies:
+
+```
+match msg["reason"] {
+  "compiler-artifact" => {
+    let filenames = msg["filenames"]
+    ...
+  }
+  "compiler-message" => {
+    ...
+  }
+}
+```
+
+Nested matching works naturally:
+
+```
+match feature_map.get(feat) {
+  Some(items) =>
+    for item in items {
+      match item {
+        Feature(name) => ...
+        Dep(name)     => ...
+        DepFeature { dep, feature } => ...
+      }
+    }
+  None => {}
+}
+```
+
+### if
+
+Two forms, both expressions.
+
+**Expression form** with `then`/`else` — for inline use:
+
+```
+let edition = raw.get("edition").map($.as_string()).or("2021")
+let role = if dep.kind == Build then Host else Target
+```
+
+**Block form** — for statements and side effects:
+
+```
+if filename.ends_with(".rmeta") {
+  yield RMeta(store.commit(filename))
+}
+```
+
+Block form with else:
+
+```
+if src.get("src/lib.rs").some?
+  then some(LibTarget { path = "src/lib.rs", crate_type = "lib" })
+  else none
+```
+
+Multi-branch:
+
+```
+if t.has("path") then
+  Path { path = t["path"].as_string() }
+else if t.has("git") then
+  Git { url = t["git"].as_string(), ... }
+else
+  Registry { ... }
+```
+
+### for
+
+`for` iterates over lists, sets, streams, and map entries.
+
+```
+for line in process.stdout_lines() {
+  ...
+}
+```
+
+Destructuring in the binding:
+
+```
+for (name, dep) in target_deps {
+  "lib${name}.rmeta" = dep.rmeta
+}
+```
+
+`for` works in multiple contexts:
+
+- **Statements** — general iteration with side effects (yield, rebinding):
+  ```
+  for feat in worklist {
+    if !result.contains(feat) {
+      result = result.insert(feat)
+    }
+  }
+  ```
+
+- **Tree literals** — generates entries:
+  ```
+  tree {
+    for (name, dep) in built_deps {
+      "lib${name}.rmeta" = dep.rmeta
+    }
+  }
+  ```
+
+- **Inline in cmd lists** — splices generated arguments:
+  ```
+  cmd = [
+    tc.rustc,
+    for entry in externs.entries() {
+      "--extern", "${entry.stem}=${entry.path}"
+    },
+  ]
+  ```
+
+- **Inline in env maps** — generates key-value pairs:
+  ```
+  env = {
+    "OUT_DIR": "/out",
+    for feat in pkg.enabled_features {
+      "CARGO_FEATURE_${feat.to_upper()}": "1"
+    },
+  }
+  ```
+
+### yield
+
+`yield` produces an element into a stream. A function that uses `yield` is a
+generator — its return type is `Stream<T>` where `T` is the type of yielded
+values.
+
+```
+fn rustc_json(process: Process) -> Stream<RustcEvent> = {
+  for line in process.stdout_lines() {
+    let msg = json_parse(line)
+
+    match msg["reason"] {
+      "compiler-artifact" => {
+        for filename in msg["filenames"] {
+          if filename.ends_with(".rmeta") {
+            yield RMeta(store.commit(filename))
+          }
+        }
+      }
+      "compiler-message" => {
+        yield Diagnostic(...)
+      }
+    }
+  }
+}
+```
+
+`yield` does not suspend or return. The generator continues executing after
+each yield. Yielded elements are cached by the runtime and available to
+consumers via `find`, `filter`, `map`, etc.
+
+This is the mechanism behind pipelining: a monitor function passed to `exec`
+runs on the executor, parsing process output and yielding typed events as
+they appear. Consumers block on specific events (e.g. `events.find($ as
+RMeta)`) without waiting for the entire stream to complete.
+
 ## Functions
 
 ```
@@ -245,6 +543,29 @@ discoverability comes from the shape of top-level definitions.
 Functions may call host primitives (`exec`, `acquire`, etc.) without
 declaration. There is no effect coloring in the type system. The runtime knows
 which computations are pure and which are effectful.
+
+### Named arguments
+
+All arguments are named at call sites using `name: value` syntax:
+
+```
+exec(
+  cmd:   [tc.rustc, "--edition", "2021"],
+  mount: { "/src": src },
+  parse: rustc_json,
+)
+
+download(url: manifest_url, sha256: checksum)
+```
+
+When passing a binding whose name matches the parameter, use `@` as shorthand:
+
+```
+let url = "https://..."
+let sha256 = "abc123..."
+download(@url, @sha256)
+// equivalent to: download(url: url, sha256: sha256)
+```
 
 ### Expression bodies
 
@@ -276,6 +597,32 @@ stream.find($ as Metadata) // |x| x as Metadata
 
 For multi-argument closures or complex bodies, use the full form: `|a, b| ...`
 
+### impl blocks
+
+`impl` adds methods to a named type. No traits — just methods on types.
+
+```
+impl Blob {
+  fn read_utf8() -> String { ... }
+  fn read_bytes() -> Bytes { ... }
+}
+
+impl String {
+  fn toml() -> TomlValue { ... }
+  fn json() -> JsonValue { ... }
+  fn decode<T>() -> T { ... }
+}
+```
+
+Methods enable pipeline-style chaining:
+
+```
+src["Cargo.toml"].read_utf8().toml().decode<CargoManifest>()
+```
+
+Some `impl` blocks are builtins (provided by the runtime). User code can
+also define `impl` blocks for its own types.
+
 ### Implicit memoization
 
 There is no `memo` keyword or explicit cache annotation. Function calls are
@@ -305,7 +652,7 @@ A Vixen file is a module. It exports types, values, and functions. There is no
 separate rule-definition phase.
 
 ```
-// std/rust.vx — part of the standard library
+// std/rust/build.vx — part of the standard library
 
 fn compile_crate(src: Tree, deps: [...], tc: Toolchain) -> Stream<RustcEvent> {
   ...
@@ -314,6 +661,34 @@ fn compile_crate(src: Tree, deps: [...], tc: Toolchain) -> Stream<RustcEvent> {
 fn link_binary(crates: [...], tc: Toolchain) -> Blob {
   ...
 }
+```
+
+### use
+
+`use` imports names from other modules. Module paths are dot-separated,
+matching the file hierarchy (`std.rust.types` → `std/rust/types.vx`).
+
+Selective imports list the names to bring into scope:
+
+```
+use std.rust.types { Toolchain, BuildCtx, Triple }
+use std.rust.build { build_root }
+use std.rust.monitor { rustc_json, parse_build_script_stdout }
+```
+
+Multiple names from the same module go in a single `use`:
+
+```
+use std.rust.types {
+  BuildCtx, BuiltCrate, RustcEvent, RMeta, RLib, Diagnostic,
+  ResolvedPkg, ResolvedEdge, BuildScriptOut, Role,
+}
+```
+
+Enum variants are imported by name (since variants are standalone types):
+
+```
+use std.rust.types { Role, Target, Host }
 ```
 
 ## Host builtins
@@ -326,10 +701,10 @@ Runs a sandboxed process. Generic over the event type yielded by the parser.
 
 ```
 exec(
-  cmd   = [program, args...],
-  env   = { KEY: "value", ... },
-  mount = { "/path": tree_or_blob, ... },
-  parse = parser_function,
+  cmd:   [program, args...],
+  env:   { KEY: "value", ... },
+  mount: { "/path": tree_or_blob, ... },
+  parse: parser_function,
 ) -> Stream<E>
 ```
 
@@ -354,7 +729,7 @@ The process runs in a sandbox:
 #### Inline comprehensions in cmd
 
 ```
-cmd = [
+cmd: [
   tc.rustc,
   "--crate-name", cargo.package.name,
 
@@ -384,8 +759,13 @@ the store. The hash is mandatory.
 Fetches a single file (no archive extraction).
 
 ```
-download(url: String, sha256: String) -> Blob
+download(url: String, sha256: Option<String>) -> Blob
 ```
+
+When `sha256` is provided, the downloaded content is verified against it.
+When omitted, the download is trusted — use this for mutable resources like
+channel manifests where the hash isn't known ahead of time. The result is
+still content-addressed once stored.
 
 ### source_tree
 
@@ -395,14 +775,104 @@ Returns the project source as a content-addressed tree.
 source_tree() -> Tree
 ```
 
-### File operations
+### Blob methods (builtin)
 
-- `read_text(blob) -> String` — decode blob as UTF-8
-- `read_bytes(blob) -> Bytes` — raw bytes
+- `blob.read_utf8() -> String` — decode as UTF-8
+- `blob.read_bytes() -> Bytes` — raw bytes
+- `blob.blake3() -> String` — content hash
+
+### String methods (builtin)
+
+Parsing:
+
+- `string.toml() -> TomlValue` — parse as TOML
+- `string.decode<T>() -> T` — decode a parsed value into a typed struct
+- `json_parse(text) -> JsonValue` — parse JSON (free function)
+
+Testing:
+
+- `string.starts_with(prefix) -> Bool`
+- `string.ends_with(suffix) -> Bool`
+- `string.contains(substring) -> Bool`
+
+Manipulation:
+
+- `string.strip_prefix(prefix) -> String` — remove prefix
+- `string.split(separator) -> List<String>` — split into parts
+- `string.split_once(separator) -> (String, String)` — split at first occurrence
+- `string.to_upper() -> String` — uppercase
+- `string.to_string() -> String` — convert to string (for non-string types like Triple)
+
+Collection:
+
+- `list.join(separator) -> String` — join a list of strings
+
+### TomlValue (builtin)
+
+`string.toml()` returns a `TomlValue`. This is a dynamically-typed
+representation of parsed TOML, used for navigating manifest files before
+decoding into typed structs.
+
+- `value["key"]` — index into a table, fails if absent
+- `value.get(key) -> Option<TomlValue>` — look up a key, returns nothing if absent
+- `value.has(key) -> Bool` — test for key presence
+- `value.as_string() -> String` — extract as string
+- `value.as_bool() -> Bool` — extract as bool
+- `value.as_list() -> List<TomlValue>` — extract as list
+- `value.entries() -> List<(String, TomlValue)>` — table entries as key-value pairs
+
+`json_parse()` returns a `JsonValue` with the same API.
+
+### Other builtins
+
 - `write_file(content) -> Blob` — create a pathless blob in the store
-- `json_parse(text) -> Value` — parse JSON
-- `toml_parse(text) -> Value` — parse TOML
-- `blake3(blob) -> String` — hash
+- `empty_tree() -> Tree` — an empty tree (no entries)
+- `git_checkout(url: String, rev: String) -> Tree` — checkout a git repo at a
+  specific revision
+- `crates_io_registry() -> Registry` — the default crates.io registry
+- `blob.extract_tree() -> Tree` — extract an archive blob into a tree
+
+### Executor-side APIs
+
+These are available inside monitor functions — the `parse` argument to `exec`.
+Monitors run on the executor alongside the sandboxed process.
+
+#### Process
+
+The `Process` value is passed to the monitor function. It provides access to
+the running process's output:
+
+- `process.stdout_lines() -> Stream<String>` — stdout as a stream of lines,
+  delivered progressively as the process runs
+
+#### store
+
+The `store` object is available on the executor. It commits artifacts produced
+by the sandboxed process into the content-addressed store:
+
+- `store.commit(path) -> Blob` — reads a file from the executor filesystem,
+  computes its BLAKE3 hash, and stores it. The file must be complete on disk
+  before calling commit. The monitor relies on structured output (e.g. rustc's
+  JSON) to know when a file is ready — not filesystem events.
+
+Together, these are how monitors parse process output and yield typed events:
+
+```
+fn rustc_json(process: Process) -> Stream<RustcEvent> = {
+  for line in process.stdout_lines() {
+    let msg = json_parse(line)
+    match msg["reason"] {
+      "compiler-artifact" => {
+        for filename in msg["filenames"] {
+          if filename.ends_with(".rmeta") {
+            yield RMeta(store.commit(filename))
+          }
+        }
+      }
+    }
+  }
+}
+```
 
 ### Tree operations
 
@@ -412,3 +882,11 @@ source_tree() -> Tree
 - `tree.subtree(path) -> Tree` — get a subtree rooted at path
 - `tree.entries() -> Stream<TreeEntry>` — all entries
 - `tree.glob(pattern) -> Stream<TreeEntry>` — entries matching a glob
+
+#### TreeEntry
+
+A `TreeEntry` represents a single entry in a tree:
+
+- `entry.path` — full path within the tree (e.g. `"lib/libfoo.rmeta"`)
+- `entry.stem` — filename without extension (e.g. `"libfoo"`)
+- `entry.blob` — the content as a `Blob`
