@@ -48,21 +48,21 @@ suspends until the values it depends on resolve.
 metadata = artifacts.find($.kind == "metadata");
 lib = artifacts.find($.kind == "lib");
 
-// This function call implicitly suspends until both resolve.
-// There is no await keyword. The runtime handles it.
+// compile_dependent takes metadata and lib as arguments — both pending.
+// This doesn't block. It just creates more nodes in the dataflow graph.
 result = compile_dependent(metadata, lib);
 
-// Meanwhile, unrelated work that doesn't depend on metadata or lib
-// can proceed in parallel — the runtime only blocks what actually
-// needs the pending value.
+// unrelated work proceeds concurrently — no dependency on metadata or lib.
 unrelated = process_docs(doc_tree);
 ```
 
-Suspension is invisible in the language. A pending value looks and acts like
-any other value — you can pass it to functions, store it in structs, put it in
-arrays. Evaluation only pauses at the point where the actual resolved value is
-needed (e.g., to read a field, to pass to `exec` as an argument, to compare
-for equality).
+Pending values are invisible in the language. A pending value looks and acts
+like any other value — you can pass it to functions, store it in structs,
+put it in arrays, access its fields. None of these operations wait. Values
+are only forced at two boundaries: when data crosses to a remote executor
+(the `exec` boundary), and when the final output tree is materialized to
+disk. Everything else just builds up the dataflow graph. See `evaluation.md`
+for the full model.
 
 **Universal value properties.** Because Vixen has value semantics and no
 references, every value can be compared for equality, hashed, and
