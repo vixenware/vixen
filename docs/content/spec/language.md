@@ -878,13 +878,25 @@ insert_anchor_links = "heading"
 
 > r[type.coerce.widen]
 >
-> A variant value auto-widens to its parent enum type when the context
-> expects the enum. This chains through alias variants.
-> `Shape.Circle { radius: 5.0 }` widens to `Shape` automatically. Sum
-> type shorthands also widen: a `String` widens to `ExecArg` when
-> `ExecArg = String | Path`.
+> A variant value auto-widens to its parent enum type, but only when the
+> target type is already known — never when the type would be inferred
+> from the value. This chains through alias variants. The reverse is not
+> true — narrowing requires `as` or `match`.
+
+> r[type.coerce.widen.when]
 >
-> The reverse is not true — narrowing requires `as` or `match`.
+> Widening fires in "checking" mode (expected type is known), never in
+> "inference" mode (type flows from the value):
+>
+> - **Yes**: annotated bindings (`x: Shape = circle`), struct fields
+>   (type known from definition), return types (annotated on function),
+>   explicit `as` conversion.
+> - **No**: unannotated bindings (`x = circle` — `x` is `Circle`, not
+>   `Shape`), function call arguments (overload resolution uses the
+>   exact type, no widening).
+>
+> This ensures that adding a function overload or removing a type
+> annotation cannot silently change which coercions occur.
 
 > r[type.coerce.stringify]
 >
@@ -1098,7 +1110,16 @@ insert_anchor_links = "heading"
 >
 > Multiple functions can share the same name if they differ in parameter
 > types. The evaluator selects the matching overload based on the known
-> types of the arguments at the call site.
+> types of the arguments at the call site. An exact type match always
+> wins over a match via widening.
+
+> r[fn.overload.no-sum-dispatch]
+>
+> Overload resolution does not synthesize dispatch over enum variants.
+> If `fn digest(x: Blob)` and `fn digest(x: Tree)` both exist, calling
+> `digest(entry)` where `entry: Entry` (and `Entry = Blob | Tree`) is
+> an error — there is no overload for `Entry`. Write an explicit `match`
+> or add `fn digest(x: Entry)`.
 
 ## Constructors
 
@@ -1182,7 +1203,8 @@ insert_anchor_links = "heading"
 > r[comb.fold]
 >
 > `.fold(init, f)` reduces all elements to a single value using an
-> accumulator.
+> accumulator. Only available on `Array`, not on `Stream` — fold depends
+> on element order, which streams do not have.
 
 > r[comb.any]
 >
@@ -1206,8 +1228,8 @@ insert_anchor_links = "heading"
 > r[comb.reduce]
 >
 > `.reduce(f)` is like `.fold` but uses the first element as the initial
-> accumulator. On streams, element order is nondeterministic — use
-> `.to_array()` first if a deterministic reduction order is needed.
+> accumulator. Only available on `Array`, not on `Stream` — use
+> `.to_array()` first.
 
 > r[comb.group-by]
 >
@@ -1554,6 +1576,15 @@ insert_anchor_links = "heading"
 > inside the orchestrator is lazy dataflow. The runtime resolves the
 > graph as dependencies become available, but no language-level
 > operation ever blocks waiting for a value.
+
+### Control flow demand propagation
+
+> r[eval.control-demand]
+>
+> `if`, `match`, and `is` do not force pending values. They propagate
+> demand to the scrutinee/condition. Demand propagates to a branch only
+> after that branch is selected by the resolved scrutinee. Branches not
+> taken receive no demand — no work is done for dead branches.
 
 ### The evaluator enters functions
 
