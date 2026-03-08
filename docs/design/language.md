@@ -12,7 +12,7 @@ only `Fn` — no `FnOnce`, no `FnMut`. Iterating over an array does not consume 
 
 ```vixen
 fn add_tag(config: Config) -> Config {
-  config.tags = config.tags.append("new");
+  config.tags.append!("new");
   config  // returns a modified copy
 }
 
@@ -28,6 +28,12 @@ This applies to all types: scalars, structs, arrays, maps, closures. There is
 no way to observe mutation from another binding. Reassignment (`x.field = val`)
 is syntactic sugar for creating a new value with that field changed — it shadows
 the previous binding, it does not mutate anything in place.
+
+The `!` suffix on a method call is sugar for rebinding: `x.method!(args)` means
+`x = x.method(args)`. It works through field access too: `config.tags.append!("new")`
+means `config.tags = config.tags.append("new")`, which in turn means
+`config = Config { ..config, tags: config.tags.append("new") }`. It reads like
+mutation but is pure value semantics.
 
 **Demand-driven execution.** There is demand at the top (what the build system
 needs), and evaluation is driven downward from that demand. There is no separate
