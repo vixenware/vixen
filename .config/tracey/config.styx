@@ -14,4 +14,15 @@ specs (
             }
         )
     }
+    {
+        name internals
+        include (docs/content/internals-spec.md)
+        impls (
+            {
+                name rust
+                include (crates/**/*.rs)
+                exclude (target/**)
+            }
+        )
+    }
 )
