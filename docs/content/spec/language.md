@@ -80,15 +80,44 @@ insert_anchor_links = "heading"
 > begin with `/*` and end with `*/`. Block comments nest —
 > `/* /* inner */ outer */` is one comment.
 
+### Attributes
+
+> r[lex.attributes]
+>
+> Attributes use `@` followed by a name and optional arguments:
+> `@rename("name")`, `@ttl("5m")`, `@tag("type")`. Attributes attach
+> to the declaration or field that immediately follows them. Multiple
+> attributes can stack:
+>
+> ```vixen
+> @tag("type")
+> @rename_all("kebab-case")
+> Shape = enum { ... }
+> ```
+>
+> Attributes may appear before:
+>
+> - Type declarations (`struct`, `enum`, `newtype`)
+> - Struct fields
+> - Enum variants
+> - Function declarations
+>
+> `@` in pattern position (`name @ pattern`) is the binding operator,
+> not an attribute. `@` in expression position (`@f(args, ..)`) is
+> partial application, not an attribute. The parser distinguishes these
+> by syntactic context.
+
 ### Semicolons
 
 > r[lex.semicolons]
 >
-> Statements are separated by semicolons. This applies uniformly — at
-> module top level and inside blocks. In blocks, the last expression is
-> what the block evaluates to (this includes function bodies). A source
-> file is a sequence of semicolon-separated statements; there is no
-> trailing expression value at file level.
+> Semicolons separate statements. This applies uniformly — at module
+> top level and inside blocks. A trailing semicolon after the last
+> statement is permitted but not required. In blocks, the last
+> expression (without a trailing semicolon) is the block's value; a
+> trailing semicolon turns it into a statement and the block evaluates
+> to `()`. A source file is a sequence of semicolon-separated
+> statements; there is no trailing expression value at file level.
 
 ### Operators and delimiters
 
@@ -148,22 +177,27 @@ insert_anchor_links = "heading"
 >
 > From lowest to highest precedence:
 >
-> | Precedence | Operators          | Associativity | Description           |
-> |------------|--------------------|---------------|-----------------------|
-> | 1          | `\|\|`             | left          | Logical OR            |
-> | 2          | `&&`               | left          | Logical AND           |
-> | 3          | `==` `!=`          | left          | Equality              |
-> | 4          | `<` `<=` `>` `>=`  | left          | Comparison            |
-> | 5          | `..` `..=`         | none          | Range                 |
-> | 6          | `+` `-`            | left          | Additive              |
-> | 7          | `*` `/` `%`        | left          | Multiplicative        |
-> | 8          | unary `-` `!`      | prefix        | Negation, logical NOT |
-> | 9          | `as` `as?` `is`    | left          | Type cast / test      |
-> | 10         | `?`                | postfix       | Fallible              |
-> | 11         | `.`                | left          | Field access / UFCS   |
-> | 12         | `()` `[]`          | postfix       | Call, index           |
+> | Precedence | Operators              | Associativity | Description                 |
+> |------------|------------------------|---------------|-----------------------------|
+> | 1          | `with`                 | none          | Struct update               |
+> | 2          | `\|\|`                 | left          | Logical OR                  |
+> | 3          | `&&`                   | left          | Logical AND                 |
+> | 4          | `==` `!=`              | left          | Equality                    |
+> | 5          | `<` `<=` `>` `>=`      | left          | Comparison                  |
+> | 6          | `..` `..=`             | none          | Range                       |
+> | 7          | `+` `-`                | left          | Additive                    |
+> | 8          | `*` `/` `%`            | left          | Multiplicative              |
+> | 9          | unary `-` `!`          | prefix        | Negation, logical NOT       |
+> | 10         | `as` `as?` `is` `::`   | left          | Type cast / test / ascription |
+> | 11         | `?`                    | postfix       | Fallible                    |
+> | 12         | `.`                    | left          | Field access / UFCS         |
+> | 13         | `()` `[]`              | postfix       | Call, index                 |
 >
-> Assignment (`=`) is a statement, not an expression.
+> Assignment (`=`) is a statement, not an expression. `@` in
+> `@f(args, ..)` is a prefix modifier on call expressions, not a
+> standalone operator — it binds at the call level. `|` is not an
+> expression operator; it appears in type declarations (sum shorthand)
+> and in patterns (or-patterns).
 
 ## Declaration grammar
 
@@ -697,9 +731,11 @@ insert_anchor_links = "heading"
 
 > r[expr.fallible]
 >
-> Any function or method call can be suffixed with `?` to catch poisoning
-> and return `Option` instead: `f(x)?` returns `None` on failure,
-> `Some(result)` on success.
+> The `?` suffix catches poisoning and returns `Option` instead:
+> `Some(result)` on success, `None` on failure. It applies to any
+> expression that may poison — function calls (`f(x)?`), UFCS calls
+> (`x.f()?`), and index expressions (`array[i]?`). The `as?` operator
+> follows the same pattern (see [type.as-fallible]).
 
 ### Statements
 
@@ -1213,6 +1249,17 @@ insert_anchor_links = "heading"
 > concurrent computation. Results are produced as they become available,
 > not in input order.
 
+> r[comb.model.ordering]
+>
+> Because combinators always produce `Stream`, calling `.map(f)` on an
+> `Array` loses input order. The elements are processed concurrently
+> and the resulting stream is unordered. To recover a deterministic
+> array, call `.to_array()`, which sorts by universal total ordering —
+> not by the original input position. This means
+> `[3, 1, 2].map($ * 2).to_array()` returns `[2, 4, 6]`, not
+> `[6, 2, 4]`. This is a deliberate trade-off: concurrent fan-out and
+> canonical determinism over positional preservation.
+
 > r[comb.map]
 >
 > `.map(f)` applies `f` to each element and returns a `Stream` of results.
@@ -1367,10 +1414,10 @@ insert_anchor_links = "heading"
 
 > r[error.catch]
 >
-> Any function or method call can be suffixed with `?` to catch poisoning
-> and return `Option` instead. `f(x)?` returns `None` on failure,
-> `Some(result)` on success. The `?` suffix always means "the fallible
-> version that returns Option instead of poisoning."
+> The `?` suffix catches poisoning and returns `Option`. It applies to
+> function calls, UFCS calls, and index expressions. `f(x)?` returns
+> `None` on failure, `Some(result)` on success. The `?` suffix always
+> means "the fallible version that returns Option instead of poisoning."
 >
 > This is the same pattern as `as` / `as?`.
 
