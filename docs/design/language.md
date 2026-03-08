@@ -653,7 +653,7 @@ Stream combinators work the same way:
 ```vixen
 artifacts = exec[Artifact](...);
 
-artifacts.map(process($))            // Stream[Output]
+artifacts.map(process)               // Stream[Output] — process is Fn(Artifact) -> Output
 artifacts.filter($.kind == "lib")    // Stream[Artifact]
 artifacts.find($.kind == "metadata") // Artifact (pending)
 ```
