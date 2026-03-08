@@ -995,8 +995,39 @@ There is no recovery from `fail`. If a computation fails, the subgraph
 that depends on it fails. Independent subgraphs are unaffected. The
 runtime reports all failures with full context.
 
+### The `?` suffix
+
+Any function or method call can be suffixed with `?` to catch poisoning
+and return `Option` instead. `f(x)` poisons on failure. `f(x)?` returns
+`None` on failure, `Some(result)` on success.
+
+This is a general mechanism — the evaluator wraps any poison in `Option`
+automatically. You don't need to define two versions of every function.
+
+```vixen
+port = parse_port("abc");   // poisons — "abc" is not a number
+port = parse_port("abc")?;  // None
+port = parse_port("8080")?; // Some(8080)
+```
+
+This is the same pattern as `as` / `as?`:
+
+- `as` — poisons on failure, `as?` — returns Option
+- `f()` — poisons on failure, `f()?` — returns Option
+
+The `?` suffix always means "the fallible version that returns Option
+instead of poisoning."
+
+Combined with `filter_map`, this is how you handle data that might not
+parse:
+
+```vixen
+// parse each stdout chunk as JSON, skip non-JSON lines
+messages = p.stdout.filter_map(Json.parse?[RustcMessage]);
+```
+
 For optional things — "try to find this, use a fallback if it's not
-there" — use `Option`, not error handling:
+there" — use `?` and `Option`, not error handling:
 
 ## Streams
 
