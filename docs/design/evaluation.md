@@ -157,6 +157,22 @@ discovers their dataflow graph, and schedules their internal computations
 the same way it schedules top-level ones. Demand propagates all the way
 down.
 
+## Observers are demand-driven
+
+An `exec` observer might look push-based — it "reacts" to process output.
+It's not. The observer is a function that takes a `Process` and returns
+`Stream[T]`. `process.stdout` is a `Stream[Blob]`. The observer consumes
+one stream and produces another. It's a stream transformation, and demand
+flows backward through it like everything else.
+
+When something downstream demands the next event from the observer's
+output stream, the evaluator enters the observer body, which demands
+the next chunk from `process.stdout`. That chunk is a pending value. It
+resolves when the OS process writes to its pipe. But that's below the
+abstraction — the process running in the real world is what makes pending
+values resolve. From the evaluator's perspective, there is no push. There
+are only pending values that eventually become available.
+
 ## Memoization
 
 When the evaluator demands a function call, it first checks whether that
