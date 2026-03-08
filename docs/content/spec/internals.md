@@ -71,14 +71,14 @@ How Vixen implements value semantics without copying everything.
 > captured values are reference-counted handles, same as struct fields.
 > Cloning a closure is shallow.
 
-## Rebinding performance
+## Persistent data structures
 
-> i[impl.rebind-perf]
+> i[impl.persistent]
 >
-> `items.append!("new")` is O(log n), not O(n). It creates a new path in
-> the persistent array, sharing the unchanged parts. The rebinding
-> replaces the root reference. This makes idiomatic Vixen code (chains of
-> `!` calls) efficient by default.
+> Operations like `append` on arrays and `with` on structs are O(log n),
+> not O(n). They create a new path in the persistent structure, sharing
+> the unchanged parts. This makes idiomatic Vixen code (chains of `with`
+> updates, combinator pipelines) efficient by default.
 
 ## Cycle-free by design
 

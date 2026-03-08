@@ -22,8 +22,11 @@ insert_anchor_links = "heading"
 > r[lang.value-semantics.universal]
 >
 > Because Vixen has value semantics and no references, every value can be
-> compared for equality, hashed, and serialized/deserialized. Closures and
-> their captured values are serializable.
+> compared for equality, hashed, and serialized/deserialized. This
+> includes closures (compared and hashed by their function identity and
+> captured values) and `F64` (which uses total ordering: `NaN == NaN`,
+> `NaN` sorts last, `-0.0 == +0.0`). All types have a universal total
+> ordering, which is what enables deterministic `.to_array()` on streams.
 
 ## Conventions
 
@@ -81,8 +84,11 @@ insert_anchor_links = "heading"
 
 > r[lex.semicolons]
 >
-> Statements are separated by semicolons. In blocks, the last expression
-> is what the block evaluates to (this includes functions).
+> Statements are separated by semicolons. This applies uniformly — at
+> module top level and inside blocks. In blocks, the last expression is
+> what the block evaluates to (this includes function bodies). A source
+> file is a sequence of semicolon-separated statements; there is no
+> trailing expression value at file level.
 
 ### Operators and delimiters
 
@@ -116,8 +122,8 @@ insert_anchor_links = "heading"
 > r[lex.numeric]
 >
 > Integer literals are sequences of digits, optionally separated by
-> underscores for readability: `1_000_000`. They default to `U64`. A type
-> suffix selects a different type: `4_I64`, `3_F64`.
+> underscores for readability: `1_000_000`. They default to `U64`.
+> Use type ascription (`::`) to specify a different type: `4::I64`.
 >
 > Float literals contain a decimal point: `3.14`, `0.5`. They default to
 > `F64`.
@@ -165,8 +171,9 @@ insert_anchor_links = "heading"
 
 > r[decl.binding]
 >
-> A binding associates a name with a value: `name = expr`. The name must
-> be snake_case. There is no `let` keyword — casing distinguishes bindings
+> A binding associates a name with a value: `name = expr`. An optional
+> type annotation can be added: `name: Type = expr`. The name must be
+> snake_case. There is no `let` keyword — casing distinguishes bindings
 > from type declarations.
 
 > r[decl.binding.destructure]
@@ -256,11 +263,26 @@ insert_anchor_links = "heading"
 > }
 > ```
 >
-> Parameter types and return type are always annotated. The last expression
-> in the body is the return value. `return` can be used for early exit.
-> If the return type is omitted, it defaults to `()` (the empty tuple).
-> A function body that ends with a statement (including an empty body)
-> implicitly returns `()`.
+> Parameter types are always annotated. The return type may be omitted,
+> in which case it defaults to `()` (the empty tuple). The last
+> expression in the body is the return value. `return` can be used for
+> early exit. A function body that ends with a statement (including an
+> empty body) implicitly returns `()`.
+
+> r[decl.fn.destructure]
+>
+> Parameters can use destructuring patterns. The type annotation applies
+> to the whole pattern:
+>
+> ```vixen
+> fn distance((x1, y1): (F64, F64), (x2, y2): (F64, F64)) -> F64 {
+>   ((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1)).sqrt()
+> }
+>
+> fn greet({ first, last }: Name) -> String {
+>   `Hello ${first} ${last}`
+> }
+> ```
 
 > r[decl.fn.generic]
 >
@@ -299,8 +321,8 @@ insert_anchor_links = "heading"
 > r[expr.literal.int]
 >
 > Integer literals: a sequence of digits, optionally separated by
-> underscores. Default type is `U64`. A type suffix selects a different
-> type: `42`, `1_000_000`, `4_I64`, `3_F64`.
+> underscores. Default type is `U64`. Use type ascription to specify a
+> different type: `42`, `1_000_000`, `4::I64`.
 
 > r[expr.literal.float]
 >
@@ -567,6 +589,23 @@ insert_anchor_links = "heading"
 > succeed or the node poisons. `expr as? Type` is the fallible version —
 > returns `Option`, `Some` on success, `None` on failure.
 
+### Type ascription expressions
+
+> r[expr.ascribe]
+>
+> `expr :: Type` asserts the type of an expression without conversion.
+> This is a static check — the expression must already be of the given
+> type. Unlike `as`, no conversion occurs. This is useful for
+> disambiguating literal types and documenting intent:
+>
+> ```vixen
+> zero = 0 :: I64    // literal 0 as I64, no conversion
+> pi = 3.14 :: F64   // explicit (though F64 is the default)
+> ```
+>
+> Spaces around `::` are canonical formatting but not required:
+> `0::I64` and `0 :: I64` are equivalent.
+
 ### Type test expressions
 
 > r[expr.is]
@@ -633,8 +672,8 @@ insert_anchor_links = "heading"
 >
 > Integer literals default to `U64`. Float literals default to `F64`.
 > Literal syntax is specified in [lex.numeric], [lex.string], and
-> [lex.string.interpolation]. Explicit type suffixes are supported:
-> `4_U64`.
+> [lex.string.interpolation]. Type ascription selects a different type:
+> `4::I64`.
 
 ## Newtypes
 
@@ -765,8 +804,8 @@ insert_anchor_links = "heading"
 >
 > Vixen uses local type inference. Types flow forward from literals and
 > function return types, and backward from function parameter types.
-> Function signatures are always explicit — parameter types and return
-> types must be annotated. Closure parameter types are inferred from
+> Function parameter types are always annotated. Return types may be
+> omitted (defaults to `()`). Closure parameter types are inferred from
 > context (the expected function signature at the call site). Generic type
 > parameters are inferred from arguments.
 >
@@ -1038,6 +1077,13 @@ insert_anchor_links = "heading"
 > The type is `Map[K, V]`. Keys can be any Vixen type — all types are
 > comparable for equality and hashable.
 
+> r[collect.map.order]
+>
+> Maps are ordered by key using Vixen's universal total ordering.
+> Iterating a map (via combinators or `.keys()` / `.values()`) always
+> produces entries in sorted key order. This makes map iteration
+> deterministic.
+
 ## Ranges
 
 > r[collect.range]
@@ -1067,7 +1113,8 @@ insert_anchor_links = "heading"
 > r[comb.find]
 >
 > `.find(pred)` returns whichever matching element resolves first. The
-> result is `Option[T]`.
+> result is `Option[T]`. Because streams are unordered, `.find()` is
+> nondeterministic — different runs may return different elements.
 
 > r[comb.fold]
 >
@@ -1096,7 +1143,8 @@ insert_anchor_links = "heading"
 > r[comb.reduce]
 >
 > `.reduce(f)` is like `.fold` but uses the first element as the initial
-> accumulator.
+> accumulator. On streams, element order is nondeterministic — use
+> `.to_array()` first if a deterministic reduction order is needed.
 
 > r[comb.group-by]
 >
@@ -1118,8 +1166,11 @@ insert_anchor_links = "heading"
 
 > r[comb.collect]
 >
-> `.to_array()` and `.to_map()` convert a `Stream` back into an `Array`
-> or `Map`. The result is pending until all elements resolve.
+> `.to_array()` converts a `Stream` back into an `Array`. It waits for
+> all elements to resolve, then sorts them using Vixen's universal total
+> ordering to produce a deterministic result. `.to_map()` converts a
+> stream of `(key, value)` pairs into a `Map`. Both are pending until
+> all elements resolve.
 
 > r[comb.map-combinators]
 >
@@ -1199,6 +1250,22 @@ insert_anchor_links = "heading"
 > Stream combinators do not impose ordering. Results are produced as they
 > become available, not in input order. `.map(f)` over a stream is
 > concurrent — each application of `f` is an independent computation.
+
+> r[stream.determinism]
+>
+> Streams are nondeterministic in element arrival order. The transition
+> from unordered stream to ordered array is where determinism is
+> restored: `.to_array()` waits for all elements to resolve, then sorts
+> them using Vixen's universal total ordering (all values are comparable).
+> The result is a stable, deterministic `Array` regardless of which
+> elements resolved first.
+>
+> This means `[3, 2, 1].to_stream().to_array()` returns `[1, 2, 3]`.
+> For build systems, this is the right default — the collection of
+> artifacts is in a stable order before linking, regardless of which
+> compilation finished first. If a specific semantic order is needed
+> (e.g., sorting files by size), call a custom sort on the resulting
+> `Array`.
 
 > r[stream.of]
 >
@@ -1399,14 +1466,31 @@ insert_anchor_links = "heading"
 
 > r[eval.forcing]
 >
-> Almost nothing in the language forces a pending value. Two things force:
+> Inside the orchestrator, **nothing forces a pending value**. No
+> language construct waits. `a + b` where `a` is pending produces a
+> pending result. `if cond { x } else { y }` where `cond` is pending
+> produces a pending value. `match`, `is`, indexing, `as`, overload
+> dispatch — all build nodes in the dataflow graph. None of them block.
+> The language never waits.
+
+> r[eval.forcing.boundary]
 >
-> 1. **Crossing the exec boundary** — to serialize a value and ship it
->    to an executor, the data must be resolved.
-> 2. **Materializing the final output** — at the very end, the runtime
->    writes the output tree to disk.
+> Values are forced only when they cross a **boundary** between
+> environments:
 >
-> Everything else just builds up the dataflow graph.
+> 1. **Orchestrator → Executor** — when calling `exec`, the arguments,
+>    mounts, and serialized observer must be fully resolved before they
+>    can be shipped to the executor process. This is a serialization
+>    boundary.
+> 2. **Orchestrator → External caller** — the external environment (CLI,
+>    API, or other driver) demands the final result. This is where the
+>    output tree must be fully materialized.
+>
+> These are the only two forcing points. They are both environment
+> boundaries — the moment data leaves the orchestrator. Everything
+> inside the orchestrator is lazy dataflow. The runtime resolves the
+> graph as dependencies become available, but no language-level
+> operation ever blocks waiting for a value.
 
 ### The evaluator enters functions
 
