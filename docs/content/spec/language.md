@@ -156,6 +156,139 @@ insert_anchor_links = "heading"
 >
 > Assignment (`=`) is a statement, not an expression.
 
+## Declaration grammar
+
+### Bindings
+
+> r[decl.binding]
+>
+> A binding associates a name with a value: `name = expr`. The name must
+> be snake_case. There is no `let` keyword — casing distinguishes bindings
+> from type declarations.
+
+> r[decl.binding.destructure]
+>
+> Bindings can destructure: `{ first, last } = name`. The type is inferred
+> from the right-hand side. Tuple destructuring: `(a, b) = pair`.
+
+### Type declarations
+
+> r[decl.type]
+>
+> A type declaration uses UpperCamelCase on the left side of `=`:
+> `Name = struct { ... }` or `Name = enum { ... }`. No `type` keyword —
+> casing is sufficient.
+
+### Struct declarations
+
+> r[decl.struct]
+>
+> ```vixen
+> Point = struct {
+>   x: F64,
+>   y: F64,
+> }
+> ```
+>
+> Fields are comma-separated. Trailing commas are allowed.
+
+> r[decl.struct.nested]
+>
+> A field type can be declared inline:
+>
+> ```vixen
+> CargoToml = struct {
+>   package: Package = struct {
+>     name: String,
+>     edition: String,
+>   },
+> }
+> ```
+>
+> The nested type is accessible as `CargoToml.Package`.
+
+### Enum declarations
+
+> r[decl.enum]
+>
+> ```vixen
+> Shape = enum {
+>   Circle { radius: F64 },
+>   Rect { width: F64, height: F64 },
+>   Empty,
+> }
+> ```
+>
+> Variants are comma-separated. Each variant can have no payload, a tuple
+> payload (`Variant(Type)`), or a struct payload (`Variant { field: Type }`).
+
+> r[decl.enum.alias]
+>
+> A variant can alias an existing type: `File: Blob`. The shorthand `:Blob`
+> means `Blob: Blob`.
+
+> r[decl.enum.sum]
+>
+> `Entry = Blob | Tree` is shorthand for an enum where each variant is an
+> alias named after its type.
+
+### Newtype declarations
+
+> r[decl.newtype]
+>
+> ```vixen
+> Blake3 = newtype of String;
+> ```
+>
+> Creates a distinct type backed by an existing type. Requires explicit
+> `as` conversion.
+
+### Function declarations
+
+> r[decl.fn]
+>
+> ```vixen
+> fn add(a: U64, b: U64) -> U64 {
+>   a + b
+> }
+> ```
+>
+> Parameter types and return type are always annotated. The last expression
+> in the body is the return value. `return` can be used for early exit.
+> If the return type is omitted, it defaults to `()` (the empty tuple).
+> A function body that ends with a statement (including an empty body)
+> implicitly returns `()`.
+
+> r[decl.fn.generic]
+>
+> Generic parameters use square brackets after the function name:
+>
+> ```vixen
+> fn first[T](items: Array[T]) -> T {
+>   items[0]
+> }
+> ```
+
+> r[decl.fn.keyword-args]
+>
+> Keyword arguments follow positional arguments in a separate braced group:
+>
+> ```vixen
+> fn greet(name: String, { cheerful: Bool = false }) -> String {
+>   if cheerful { `Hey ${name}!!!` } else { `Hello ${name}` }
+> }
+>
+> greet("Amos", cheerful = true)
+> ```
+
+### Scope
+
+> r[decl.scope]
+>
+> Declarations (bindings, types, functions) can appear anywhere — at
+> module top level or inside any block. Declarations inside a block are
+> scoped to that block.
+
 ## Modules
 
 > r[lang.modules]
@@ -191,19 +324,19 @@ insert_anchor_links = "heading"
 > r[type.scalar.literals]
 >
 > Integer literals default to `U64`. Float literals default to `F64`.
-> String literals use double quotes. String interpolation uses backticks:
-> `` `Hello ${name}` ``. Explicit type suffixes are supported:
+> Literal syntax is specified in [lex.numeric], [lex.string], and
+> [lex.string.interpolation]. Explicit type suffixes are supported:
 > `4_U64`.
 
 ## Newtypes
 
 > r[type.newtype]
 >
-> `newtype` creates a new type backed by an existing scalar type. The new
-> type requires explicit conversion via `as`:
+> A newtype is a distinct type backed by an existing type. The new type
+> requires explicit conversion via `as`:
 >
 > ```vixen
-> newtype Blake3 of String;
+> Blake3 = newtype of String;
 > hash = blake3_hash_of(something); // type Blake3
 > raw = hash as String;             // explicit conversion
 > ```
@@ -384,18 +517,6 @@ insert_anchor_links = "heading"
 
 ## Functions
 
-> r[fn.define]
->
-> Freestanding functions are defined with `fn`. The last expression in the
-> body is the return value. `return` can be used for early exit.
-
-> r[fn.keyword-args]
->
-> Functions can take keyword arguments after positional arguments:
-> `fn greet(name: String, { cheerful: Bool = false })`. Keyword arguments
-> can have defaults. Functions with keyword arguments cannot be passed as
-> values.
-
 > r[fn.recursion]
 >
 > Recursive functions are allowed. Recursive types are not. Most iteration
@@ -405,7 +526,8 @@ insert_anchor_links = "heading"
 > r[fn.type]
 >
 > Function types use `Fn(Args) -> Ret` syntax. Only functions with
-> positional arguments can have their type named.
+> positional arguments can have their type named. Functions with keyword
+> arguments cannot be passed as values.
 
 ## Closures
 
