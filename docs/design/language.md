@@ -118,6 +118,43 @@ name = Name { first: "John", last: "Doe" };
 name = Name { ..name, last; "Wilson" };
 ```
 
+## Control flow
+
+`if`/`else` works like in Rust — no parentheses around the condition, braces
+are required:
+
+```vixen
+if x > 0 {
+  "positive"
+} else if x == 0 {
+  "zero"
+} else {
+  "negative"
+}
+```
+
+`if`/`else` is an expression — it evaluates to a value:
+
+```vixen
+label = if x > 0 { "positive" } else { "negative" };
+```
+
+`for` iterates over anything iterable (arrays, ranges, maps):
+
+```vixen
+for item in [1, 2, 3] {
+  // ...
+}
+
+for i in 0..5 {
+  // i takes values 0, 1, 2, 3, 4
+}
+
+for key, value in some_map {
+  // ...
+}
+```
+
 ## Functions
 
 Freestanding functions can be defined with `fn`:
@@ -132,7 +169,6 @@ Functions can take keyword arguments:
 
 ```vixen
 fn greet(name: String, { cheerful: Bool = false }) -> String {
-  // Well we haven't defined ifs but they work just like in Rust
   if cheerful {
     `A heartily welcome to ${name}!`
   } else {
@@ -143,6 +179,18 @@ fn greet(name: String, { cheerful: Bool = false }) -> String {
 g1 = greet("Winter");
 // note: keyword arguments go _after_ positional arguments, always.
 g2 = greet("Spring", cheerful = true);
+```
+
+The last expression in a function body is its return value. `return` can
+be used for early exit:
+
+```vixen
+fn abs(x: I64) -> I64 {
+  if x < 0 {
+    return -x;
+  }
+  x
+}
 ```
 
 ## Arrays
@@ -211,12 +259,12 @@ Fn(Array[U64]) -> U64
 Vixen has range literals similar to Rust
 
 ```vixen
-a = 0..10;       // exclusive range: 0, 1, 2, ..., 9
-b = 0..=10;      // inclusive range: 0, 1, 2, ..., 10
-c = ..10;         // range up to (exclusive)
-d = ..=10;        // range up to (inclusive)
-e = 0..;          // range from 0, unbounded
-f = ..;           // full range, unbounded on both sides
+a = 0..10;       // Range[U64]
+b = 0..=10;      // RangeInclusive[U64]
+c = ..10;         // RangeTo[U64]
+d = ..=10;        // RangeToInclusive[U64]
+e = 0..;          // RangeFrom[U64]
+f = ..;           // RangeFull
 ```
 
 Ranges can be used in `for` loops:
@@ -245,7 +293,7 @@ fn find(haystack: Array[String], predicate: Fn(String) -> Bool) -> String? {
       return item;
     }
   }
-  nil
+  None
 }
 
 fn starts_with_ch(name: String) -> Bool {
@@ -291,18 +339,45 @@ name.full() // "John Doe"
 
 ## Enums
 
-Vixen has Rust-like enums. The main difference is that struct variants are
-actual types:
+Vixen has Rust-like enums. The main difference is that each variant is
+an actual type:
 
 ```vixen
+enum Color {
+  Red,
+  Green,
+  Blue,
+}
+
+enum Expr {
+  Literal(F64),
+  Add(Expr, Expr),
+}
+
 enum Shape {
   Circle { radius: F64 },
   Rectangle { width: F64, height: F64 },
 }
 ```
 
+Variants can have no payload (`Color.Red`), a tuple payload (`Expr.Literal(3.0)`),
+or a struct payload (`Shape.Circle { radius: 5.0 }`).
+
 Each variant is a type under the enum's namespace. `Shape.Circle` is a type,
-and `Shape` is a type. They are distinct.
+and `Shape` is a type. They are distinct. This applies to all variant kinds:
+
+- `Color.Red` — a zero-sized type
+- `Expr.Add` — a tuple type, fields accessed with `.0`, `.1`
+- `Shape.Circle` — a struct type, fields accessed by name (`.radius`)
+
+```vixen
+node = Expr.Add(Expr(Literal(1.0)), Expr(Literal(2.0)));
+node.0 // the left operand, type: Expr
+node.1 // the right operand, type: Expr
+
+c = Shape.Circle { radius: 5.0 };
+c.radius // 5.0
+```
 
 To build a variant value (narrow type):
 
@@ -348,4 +423,59 @@ type Circle = Shape.Circle;
 
 c = Circle { radius: 5.0 };        // a Circle (aka Shape.Circle)
 s = Shape(Circle { radius: 5.0 }); // a Shape
+```
+
+## The `as` operator
+
+`as` converts between types. The conversion must succeed — if it doesn't,
+it's an error:
+
+```vixen
+// narrowing an enum to a variant
+s = Shape(Circle { radius: 5.0 });
+c = s as Shape.Circle; // ok, c is of type Shape.Circle
+r = s as Shape.Rectangle; // error: s is a Circle, not a Rectangle
+```
+
+This also works for newtypes:
+
+```vixen
+newtype Blake3 of String;
+hash = blake3_hash_of(something);
+raw = hash as String; // ok
+```
+
+## Option
+
+`Option` is a built-in enum:
+
+```vixen
+enum Option[T] {
+  Some(T),
+  None,
+}
+```
+
+`T?` is sugar for `Option[T]`:
+
+```vixen
+fn first_even(items: Array[U64]) -> U64? {
+  for item in items {
+    if item % 2 == 0 {
+      return item;
+    }
+  }
+  None
+}
+```
+
+## The `as?` operator
+
+`as?` is the fallible version of `as`. Instead of erroring, it returns
+an `Option`:
+
+```vixen
+s = Shape(Circle { radius: 5.0 });
+c = s as? Shape.Circle;    // Option(Some(Shape.Circle { radius: 5.0 }))
+r = s as? Shape.Rectangle; // Option(None)
 ```
