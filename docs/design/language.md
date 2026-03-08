@@ -1005,25 +1005,35 @@ that doesn't return `Result` is a compile error.
 ### Calling fallible functions
 
 When a function returns `Result[T, E]` and is called from another function
-that also returns a compatible `Result`, the error auto-propagates. The
-caller sees `T`, not `Result[T, E]`:
+that also returns `Result`, the error auto-propagates via auto-widening.
+The caller sees `T`, not `Result[T, E]`:
 
 ```vixen
-fn deploy(input: String) -> Result[Output, String] {
-  port = parse_port(input);   // port is U64 — Err auto-propagates
-  config = load_config(port); // config is Config — same
+// parse_port returns Result[U64, ParseError]
+// load_config returns Result[Config, IoError]
+// The error type of deploy covers both via auto-widening.
+fn deploy(input: String) -> Result[Output, ParseError | IoError] {
+  port = parse_port(input);   // port is U64 — ParseError auto-widens
+  config = load_config(port); // config is Config — IoError auto-widens
   run(config)                 // auto-widens to Result
 }
 ```
 
-The happy path has zero noise. No `?` on every call, no unwrapping.
+The happy path has zero noise. No `?` on every call, no unwrapping. Error
+type compatibility uses the same auto-widening that enums already have —
+each call site's error type widens into the function's declared error type.
+
+Calling a fallible function from a function that does **not** return
+`Result` is a compile error. You must either handle the error (via `?`
+call syntax + `match`) or propagate it (by declaring your own return type
+as `Result`).
 
 To **opt into** inspecting the Result instead of auto-propagating, use the
 `?` call syntax — `f(x)?` returns the `Result` value:
 
 ```vixen
-fn deploy_lenient(input: String) -> Result[Output, String] {
-  port = parse_port(input)?;  // port is Result[U64, String]
+fn deploy_lenient(input: String) -> Result[Output, ParseError | IoError] {
+  port = parse_port(input)?;  // port is Result[U64, ParseError]
   match port {
     Ok(n) => run_on(n),
     Err(_) => run_on(8080),
