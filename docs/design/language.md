@@ -431,6 +431,64 @@ if x > 0 {
 label = if x > 0 { "positive" } else { "negative" };
 ```
 
+`match` branches on the variant of an enum and binds the payload in one
+step. Inside `match`, variant names are in scope — no need to qualify them
+with the enum name (same rule as enum constructors):
+
+```vixen
+match t {
+  Number(n) => `number: ${n}`,
+  Op(op) => `operator: ${op}`,
+}
+```
+
+`match` is an expression — it evaluates to a value:
+
+```vixen
+label = match t {
+  Number(n) => `number: ${n}`,
+  Op(op) => `operator: ${op}`,
+};
+```
+
+All variant kinds work:
+
+```vixen
+match color {
+  Red => "red",
+  Green => "green",
+  Blue => "blue",
+}
+
+match shape {
+  Circle { radius } => 3.14159 * radius * radius,
+  Rectangle { width, height } => width * height,
+}
+```
+
+`match` must be exhaustive — every variant must be covered. A wildcard `_`
+catches everything else:
+
+```vixen
+match color {
+  Red => "stop",
+  _ => "go",
+}
+```
+
+This is essential for `Result` — right now `fail` produces errors, but
+callers need a way to inspect them:
+
+```vixen
+port = match parse_port(input) {
+  Ok(n) => n,
+  Err(msg) => {
+    log(`bad port: ${msg}`);
+    fail msg;
+  },
+};
+```
+
 `for` iterates over anything iterable (arrays, ranges, maps):
 
 ```vixen
