@@ -35,7 +35,10 @@ worlds.
 ## Conventions
 
 All types are written in UpperCamelCase. Every binding is written in snake_case.
-This is enforced by the Vixen evaluator. 
+This is enforced by the Vixen evaluator. Because of this, there is no `type`
+keyword — `Name = struct { ... }` is a type declaration (UpperCamelCase),
+`name = Name { ... }` is a binding (snake_case). The casing rule makes them
+unambiguous.
 
 Comments are `//` and `/*`. Statements are separated by semicolons. In blocks,
 the last expression is what the block evaluates to (this includes functions).
@@ -100,11 +103,12 @@ Open quesiton what does `()` mean? Empty tuple (awkward) or unit value (which !=
 
 ## Structs
 
-Vixen supports Rust-like structs. Types are always introduced with the `type`
-keyword:
+Vixen supports Rust-like structs. Type declarations use `=` — the
+UpperCamelCase naming convention (enforced by the evaluator) distinguishes
+type declarations from bindings, so no `type` keyword is needed:
 
 ```vixen
-type Name = struct {
+Name = struct {
   first: String,
   last: String,
 };
@@ -124,7 +128,7 @@ name = Name { :first, :last };
 If you already have another value with compatible fields you can spread it into the struct:
 
 ```vixen
-type FirstName = struct {
+FirstName = struct {
   first: String,
 };
 
@@ -151,33 +155,34 @@ name = Name { ..name, last; "Wilson" };
 
 ### Nested type declarations
 
-Types can be declared inline in field position using the same `type X = ...`
+Types can be declared inline in field position using the same `Name = ...`
 syntax. The declared type lives under the parent's namespace and can be
-referenced by name elsewhere:
+referenced by name elsewhere. Use parentheses to disambiguate when a nested
+type declaration appears inside a more complex type expression:
 
 ```vixen
-type CargoToml = struct {
-  package: type Package = struct {
+CargoToml = struct {
+  package: Package = struct {
     name: String,
     version: String,
     edition: String?,
   },
-  dependencies: Map[String, type DependencySpec = String | struct {
+  dependencies: Map[String, DependencySpec = String | struct {
     version: String?,
     path: String?,
     git: String?,
     features: Array[String]?,
   }]?,
   dev_dependencies: Map[String, DependencySpec]?,
-  bin: Array[type BinTarget = struct {
+  bin: Array[BinTarget = struct {
     name: String,
     path: String?,
   }]?,
-  lib: type LibTarget = struct {
+  lib: (LibTarget = struct {
     name: String?,
     path: String?,
-  }?,
-  workspace: type Workspace = struct {
+  })?,
+  workspace: Workspace = struct {
     members: Array[String]?,
   }?,
 };
@@ -452,18 +457,18 @@ an actual type.
 Variants can have no payload, a tuple payload, or a struct payload:
 
 ```vixen
-type Color = enum {
+Color = enum {
   Red,
   Green,
   Blue,
 };
 
-type Expr = enum {
+Expr = enum {
   Literal(F64),
   Add(Expr, Expr),
 };
 
-type Shape = enum {
+Shape = enum {
   Circle { radius: F64 },
   Rectangle { width: F64, height: F64 },
 };
@@ -491,7 +496,7 @@ In addition to the three payload kinds above, a variant can be an alias for
 an existing type, using colon syntax:
 
 ```vixen
-type Entry = enum {
+Entry = enum {
   File: Blob,
   Dir: Tree,
 };
@@ -505,7 +510,7 @@ If you don't need to rename, the `:` shorthand reuses the type name as the
 variant name — `:Blob` means `Blob: Blob`:
 
 ```vixen
-type Entry = enum {
+Entry = enum {
   :Blob,
   :Tree,
 };
@@ -523,7 +528,7 @@ For the common case of "one of these types, no renaming needed," there's
 a one-line form:
 
 ```vixen
-type Entry = Blob | Tree;
+Entry = Blob | Tree;
 ```
 
 This is equivalent to the `:` form above. The variant names are the type
@@ -563,7 +568,7 @@ field, or an alias variant), values of that inner type auto-widen into the
 variant, and from there into the enum. This chains:
 
 ```vixen
-type Entry = Blob | Tree;
+Entry = Blob | Tree;
 
 // Blob auto-widens to Entry.Blob, which auto-widens to Entry:
 fn process(e: Entry) { /* ... */ }
@@ -591,7 +596,7 @@ circumference(Shape(Circle { radius: 5.0 })); // error: expected Shape.Circle, g
 If a variant name is used often, a type alias can bring it to the top level:
 
 ```vixen
-type Circle = Shape.Circle;
+Circle = Shape.Circle;
 
 c = Circle { radius: 5.0 };        // a Circle (aka Shape.Circle)
 s = Shape(Circle { radius: 5.0 }); // a Shape
@@ -622,7 +627,7 @@ raw = hash as String; // ok
 `Option` is a built-in enum:
 
 ```vixen
-type Option[T] = enum {
+Option[T] = enum {
   Some(T),
   None,
 };
@@ -714,7 +719,7 @@ store).
 blobs or other trees — auto-widening handles the conversion:
 
 ```vixen
-type Entry = Blob | Tree;
+Entry = Blob | Tree;
 
 output = Tree.of({
   "README.md": Blob.from_string("# Hello"),
