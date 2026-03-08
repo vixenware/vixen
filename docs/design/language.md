@@ -1069,9 +1069,9 @@ detail of the store, not a language-level concept.
 readme = Blob.from_string("# My Project\n\nHello.");
 ```
 
-Blobs with binary content are not constructed in the language — they come from
-`exec` + `commit` (a tool produces a file, the observer commits it to the
-store).
+Blobs with binary content are not constructed in the language — they come
+from `exec` (a tool produces a file, the yield boundary commits it to the
+store). See `builtins.md`.
 
 ### Tree constructors
 
@@ -1135,178 +1135,10 @@ arg = `--extern=dep=${rmeta}`;
 entry_arg = `${entry}`;
 ```
 
-String interpolation with a `Path` produces a structured value (not a plain
-`String`) that preserves the store dependencies. The exact type of `exec`
-args is an open question, but it must support both plain strings and these
-structured values. The same applies to `env` values — an environment
-variable might define an include path pointing to mounted content.
-
-## Exec
-
-`exec` is the core built-in for running external processes. It runs a command
-on an executor — a sandboxed runner with a virtual filesystem, potentially a
-VM in the cloud.
-
-The executor provides a working directory backed by the VFS. All mount paths
-are relative to this working directory — there are no absolute paths in the
-VFS. The sandbox also provides read-only access to system paths (toolchains
-like Xcode, MSVC, GCC) which are fingerprinted but not controlled by Vixen.
-This design works across Linux, macOS, and Windows without requiring root
-or filesystem namespace control.
-
-```vixen
-// Open question: the exact types for args and env values — they must
-// support both plain strings and structured values carrying store refs.
-exec[T](
-  args: Array[...],
-  env: Map[String, ...],
-  mounts: Map[Path, Mount],
-  observer: Fn(Process) -> Stream[T],
-) -> Stream[T]
-```
-
-`exec` is generic over `T`. The observer closure determines `T`, and `exec`
-returns the same `Stream[T]` to the caller.
-
-### The observer closure
-
-The observer runs **on the executor**, not the orchestrator. It is serialized
-along with its captured values and shipped to the executor. A closure cannot
-be sent until all its captures are resolved — attempting to serialize a
-pending value is just another form of depending on it, so it suspends.
-
-The observer receives a `Process` handle and returns a stream of events:
-
-- `process.stdout` — standard output of the running process
-- `process.stderr` — standard error of the running process
-
-`commit` returns a handle (a `Blob` — a Blake3 hash reference) promising
-to commit a path from the virtual filesystem to the content-addressable
-store. The actual data movement is lazy — it happens when the handle is
-demanded, which in practice means when the observer yields a value
-containing the handle back to the orchestrator. This is the materialization
-boundary: yielded values must be in the store so the executor can be
-released. The store is ambient — both orchestrator and executor have
-access to it. Only lightweight references (Blake3 hashes) flow between
-them.
-
-```vixen
-fn commit(path: Path) -> Blob
-```
-
-### Observer patterns
-
-**Streaming observer** — for tools like `rustc` that emit structured output
-during execution. The observer parses stdout incrementally, commits artifacts
-as they appear, and yields events one at a time. This allows dependents to
-start work early. For example, downstream crates can begin compiling as soon
-as `rustc` emits its metadata file, without waiting for code generation to
-finish.
-
-**Simple observer** — for tools where you only care about the final result.
-The observer waits for the process to exit, commits the output directory,
-and yields a single event.
-
-### Stream errors
-
-When a stream's producer fails (e.g., a process crashes in an `exec`),
-the stream terminates. Any pending value derived from that stream becomes
-poisoned — the same poisoning mechanism as `fail` (see Errors above).
-
-Application-level errors (e.g., `rustc` reporting a compilation error)
-are the observer's responsibility. The observer parses stdout/stderr and
-can call `fail` with a meaningful message. The runtime attaches the full
-context automatically.
-
-### Memoization and caching
-
-Because all values are hashable and comparable, the runtime can memoize
-function calls transparently. A function without revalidation annotations
-(like `@ttl`) is assumed to be deterministic — same arguments, same result,
-cached forever. Functions with `@ttl` are cached provisionally and
-revalidated according to their policy (see Mutable resources below).
-
-`exec` is a special case. Its cache key includes the runner fingerprint
-in addition to the declared inputs: **(args, env, mounts,
-observer + captures, runner fingerprint)**. If all of these match a previous
-execution, the runtime replays the cached stream of events without running the
-process again.
-
-Most `exec` inputs are declared explicitly. But some come from the runner
-itself — toolchain versions like Xcode, MSVC, GCC, etc. These are not mounted
-or installed by Vixen. They are whatever is on the runner. But they are
-fingerprinted and tracked: if the toolchain version changes, the cache key
-changes and the result is invalidated. Runner-contributed inputs are not
-visible in the Vixen language — the runner reports its fingerprint and the
-runtime incorporates it into the cache key automatically.
-
-### Mutable resources and revalidation
-
-Not all inputs to a build are stable. A URL with a SHA-256 hash is immutable —
-it can be cached forever. But "what is the current stable Rust version?" reads
-a mutable resource whose answer changes over time.
-
-The core principle: **access to mutable resources is cacheable with
-revalidation, and unchanged results are contained by early cutoff.**
-
-The problem is that the evaluator cannot assume the result stays valid forever
-from the explicit inputs alone. The solution is a revalidation policy:
-
-- The function runs and produces a result
-- The result is cached provisionally
-- On a subsequent build, the runtime may re-evaluate the function according
-  to its revalidation policy (TTL, force refresh, etc.)
-- If the result is unchanged, early cutoff prevents downstream recomputation
-- If the result changed, downstream nodes that depend on it are recomputed
-
-This is expressed with annotations on the function:
-
-```vixen
-@ttl("24h")
-fn current_rust_stable() -> String {
-  // fetches from network, returns e.g. "1.78.0"
-}
-```
-
-The `@ttl` annotation tells the runtime: this result is valid for 24 hours.
-After that, re-evaluate. If the new result equals the old one, nothing
-downstream needs to change.
-
-Two kinds of resources:
-
-**Fully stable** — URL + hash, content-addressed. Cached forever. Ordinary
-memoized node:
-
-```vixen
-fn fetch_rustc(version: String, target: String) -> Tree {
-  acquire(
-    `https://static.rust-lang.org/dist/rustc-${version}-${target}.tar.xz`,
-    sha256 = "abc123...",
-  )
-}
-```
-
-**Mutable** — the answer can change. Cached provisionally, revalidated by
-policy. Early cutoff contains the blast radius:
-
-```vixen
-@ttl("1h")
-fn rust_stable_version() -> String {
-  // fetch channel manifest, parse, return version string
-}
-```
-
-Operational questions that become policy knobs:
-
-- Default TTL for mutable queries
-- Whether CI can force a refresh (`vx build --refresh`)
-- Whether local dev can use stale values for speed
-- Whether lockfiles bypass TTL entirely (locked = use this exact value,
-  don't revalidate)
-
-These are runtime/UX decisions, not language semantics. The language just
-marks which functions access mutable resources and what their revalidation
-policy is. The runtime handles the rest.
+String interpolation with a `Path` produces an `ExecArg` (not a plain
+`String`) that preserves the store dependencies. See `builtins.md` for the
+full `exec` specification including `ExecArg`, `Mount`, `Process`, and
+observer patterns.
 
 ## Demand model
 
