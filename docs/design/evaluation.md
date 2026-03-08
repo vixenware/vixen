@@ -29,24 +29,25 @@ at **inspection points**:
 
 - Comparing for equality: `a == b`
 - Pattern matching: `match x { ... }`
-- String interpolation of a scalar: `` `${x}` ``
 - Arithmetic: `a + b`
-- Passing to `exec` args (the data must be available to the executor)
 - Materializing the final output tree to disk
 
 Constructing a struct, accessing a field, calling a function, returning a
-value — these are NOT inspection points. They do not force anything.
+value, string interpolation — these are NOT inspection points. They do not
+force anything. (String interpolation produces a structured value that
+preserves provenance, not a plain string — so it doesn't need to resolve
+its parts.)
 
 ## Where pending values come from
 
-The only source of pending values is `exec`. An `exec` returns a
-`Stream[T]`. Operations on that stream (like `find`) produce pending
-values — handles to data the executor hasn't produced yet.
+Pending values come from **streams**. Any function that returns
+`Stream[T]` and uses `yield` produces values over time. Operations on
+a stream (like `find`) return pending values — handles to data that
+hasn't been produced yet.
 
-Everything else in the language produces resolved values immediately
-(assuming its inputs are resolved). `compile_lib(src)` where `src` is
-resolved does not produce a pending value — unless its body contains an
-`exec`, in which case the pending-ness flows out through the return value.
+`exec` is one way to get a stream, but it's not special — it's a built-in
+that happens to return `Stream[T]`. User code can create streams with
+`yield` in any function that returns `Stream[T]`.
 
 ## The dataflow graph
 
@@ -63,8 +64,9 @@ The runtime schedules them based on the dependency graph.
 
 ## Poisoned values
 
-When a process in an `exec` fails unexpectedly, the stream terminates.
-Any pending value that was waiting on that stream becomes **poisoned**.
+When a stream's producer fails (e.g., a process crashes in an `exec`),
+the stream terminates. Any pending value derived from that stream becomes
+**poisoned**.
 A poisoned value propagates its error at inspection points — the same
 places where a pending value would force resolution.
 
