@@ -112,12 +112,13 @@ type Name = struct {
 name = Name { first: "John", last: "Doe" };
 ```
 
-If you already have bindings with the right name, you can use shortcut syntax:
+If you already have bindings with the right name, you can use the `:` shorthand
+— `:x` means `x: x` (the field name matches the binding name):
 
 ```vixen
 first = "John";
 last = "Doe";
-name = Name { @first, @last };
+name = Name { :first, :last };
 ```
 
 If you already have another value with compatible fields you can spread it into the struct:
@@ -500,18 +501,21 @@ type Entry = enum {
 `Entry.Dir` is an alias for `Tree`. This is useful when building enums out
 of types that already exist, giving them new names within the enum.
 
-If you don't need to rename, the `@` shorthand reuses the type name as the
-variant name:
+If you don't need to rename, the `:` shorthand reuses the type name as the
+variant name — `:Blob` means `Blob: Blob`:
 
 ```vixen
 type Entry = enum {
-  @Blob,
-  @Tree,
+  :Blob,
+  :Tree,
 };
 ```
 
 This is equivalent to `Blob: Blob, Tree: Tree` — the variant `Entry.Blob`
 is an alias for `Blob`, and `Entry.Tree` is an alias for `Tree`.
+
+The `:` prefix works the same way in enums and struct construction — it
+always means "the name is the same as what follows."
 
 ### Sum type shorthand
 
@@ -522,7 +526,7 @@ a one-line form:
 type Entry = Blob | Tree;
 ```
 
-This is equivalent to the `@` form above. The variant names are the type
+This is equivalent to the `:` form above. The variant names are the type
 names.
 
 ### Building enum values
