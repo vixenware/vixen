@@ -496,6 +496,147 @@ match shape {
 }
 ```
 
+### Guards
+
+A match arm can have a guard — a boolean condition after `if`:
+
+```vixen
+match port {
+  n if n < 1024 => "privileged",
+  n if n < 49152 => "registered",
+  _ => "dynamic",
+}
+```
+
+The guard is checked after the pattern matches. If the guard is false, the
+next arm is tried. Guards work with all pattern kinds.
+
+### Literal patterns
+
+`match` works on any value, not just enums. String and number literals
+are valid patterns:
+
+```vixen
+match ext {
+  "rs" => "rust source",
+  "toml" => "config",
+  "lock" => "lockfile",
+  _ => "other",
+}
+
+match exit_code {
+  0 => "success",
+  1 => "general error",
+  127 => "command not found",
+  code => fail `unexpected exit code ${code}`,
+}
+```
+
+### Or-patterns
+
+Multiple patterns in one arm, separated by `|`:
+
+```vixen
+match ext {
+  "rs" | "toml" | "lock" => "rust-related",
+  "c" | "h" => "c-related",
+  _ => "other",
+}
+```
+
+Or-patterns can include bindings as long as every alternative binds the
+same names with the same types:
+
+```vixen
+match shape {
+  Circle { radius } | Ellipse { radius, .. } => radius,
+  _ => 0.0,
+}
+```
+
+### Tuple patterns
+
+`match` works on tuples:
+
+```vixen
+match (status, kind) {
+  (0, "lib") => "library built",
+  (0, _) => "built",
+  (code, _) => fail `exit code ${code}`,
+}
+```
+
+### Nested destructuring
+
+Patterns can be nested arbitrarily:
+
+```vixen
+match config {
+  Config { package: Package { edition: "2021", .. }, .. } => "edition 2021",
+  Config { package: Package { edition, .. }, .. } => `edition ${edition}`,
+}
+```
+
+### The `is` operator
+
+`is` tests whether a value matches a pattern, binding variables on success.
+It replaces `if let` from Rust — Vixen has no `let` keyword:
+
+```vixen
+if config.edition is Some(edition) {
+  use_edition(edition)
+} else {
+  use_default()
+}
+
+if shape is Circle { radius } {
+  compute_area(radius)
+} else {
+  0.0
+}
+```
+
+`is` is an expression — it evaluates to `Bool` and can be used anywhere:
+
+```vixen
+has_lib = entries.any($ is Entry.File);
+```
+
+## Struct destructuring
+
+Structs can be destructured in bindings. The type name is not needed —
+it is inferred from the right-hand side:
+
+```vixen
+name = Name { first: "John", last: "Doe" };
+{ first, last } = name;
+```
+
+This is the same rule as module destructuring:
+
+```vixen
+{ rust } = import("std");
+```
+
+For enum variants in `match` or `is`, the variant name is always required —
+the compiler needs to know which variant you're testing for.
+
+## Block expressions
+
+A block `{ ... }` is an expression. The last expression in the block is
+its value. This is how intermediate values are scoped:
+
+```vixen
+area = {
+  width = rect.x2 - rect.x1;
+  height = rect.y2 - rect.y1;
+  width * height
+};
+```
+
+The bindings `width` and `height` are only visible inside the block. Blocks
+replace `let`/`in` or `where` clauses from other languages.
+
 ## Functions
 
 Freestanding functions can be defined with `fn`:
@@ -533,6 +674,21 @@ fn abs(x: I64) -> I64 {
   x
 }
 ```
+
+### Recursion
+
+Recursive functions are allowed:
+
+```vixen
+fn fibonacci(n: U64) -> U64 {
+  if n <= 1 { n } else { fibonacci(n - 1) + fibonacci(n - 2) }
+}
+```
+
+Recursive types are still disallowed (see Enums) — every value must have
+a finite size. But recursive functions are fine. Most iteration should use
+combinators (`map`, `filter`, `fold`, etc.); recursion is available for
+tree-walking and similar algorithms.
 
 ## Arrays
 
@@ -590,6 +746,37 @@ system, no bounds syntax, no where clauses. For a build system language
 where most generics are simple containers and transformations, this is
 sufficient.
 
+## Type inference
+
+Vixen uses local type inference — types flow forward from literals and
+function return types, and backward from function parameter types.
+
+```vixen
+a = [1, 2, 3];         // Array[U64] — inferred from literals
+b = a.map($ * 2);      // Stream[U64] — inferred from map's return type
+name = "hello";         // String — inferred from literal
+```
+
+Function signatures are always explicit — parameter types and return types
+must be annotated:
+
+```vixen
+fn add(a: U64, b: U64) -> U64 { a + b }  // types required
+```
+
+Generic type parameters are inferred from arguments:
+
+```vixen
+fn first[T](items: Array[T]) -> T? { items.find(true) }
+
+first([1, 2, 3])        // T = U64, inferred from argument
+first(["a", "b"])        // T = String, inferred from argument
+```
+
+The inference is local — it does not cross function boundaries. Each
+function is checked independently using its explicit signature. This
+keeps error messages local and predictable.
+
 ## Maps
 
 Vixen has map literals:
@@ -616,6 +803,8 @@ Array, Map, or Stream. Every element is an independent concurrent
 computation. Results are yielded as they become available, not in input
 order. See `evaluation.md` for details.
 
+### Core combinators
+
 ```vixen
 items = [1, 2, 3, 4, 5];
 
@@ -626,6 +815,59 @@ items.fold(0, (acc, x) => acc + x)  // 15
 items.any($ > 3)                    // true
 items.all($ > 3)                    // false
 ```
+
+### flat_map
+
+`flat_map` maps each element to a stream (or array) and flattens the
+results into a single stream. Essential for one-to-many transformations:
+
+```vixen
+// each crate produces multiple artifacts
+artifacts = crates.flat_map(compile($));  // Stream[Artifact]
+
+// equivalent to:
+artifacts = crates.map(compile($)).flatten();
+```
+
+### filter_map
+
+`filter_map` maps and filters in one step — the function returns
+`Option[T]`. `Some` values are yielded, `None` values are skipped:
+
+```vixen
+// parse each line as JSON, skip non-JSON lines
+messages = p.stdout.filter_map(Json.parse?[RustcMessage]);
+```
+
+### reduce
+
+Like `fold`, but uses the first element as the initial accumulator instead
+of taking an explicit initial value:
+
+```vixen
+items.reduce($0 + $1)  // 15 — same as fold(0, $0 + $1) for addition
+```
+
+### group_by, partition
+
+```vixen
+// group by key function — returns Map[K, Array[T]]
+by_kind = artifacts.group_by($.kind);  // Map[String, Array[Artifact]]
+
+// split into two arrays by predicate
+(passing, failing) = results.partition($.exit_code == 0);
+```
+
+### Why no positional combinators?
+
+Streams are unordered — elements arrive as they resolve, not in input
+order. This means positional combinators like `take(n)`, `skip(n)`,
+`enumerate`, `zip`, `chunks`, `windows`, `take_while`, and `skip_while`
+are not available. "Take the first 5" has no meaning when there is no
+first. These operations exist on `Array` (which is ordered), but
+combinators operate on `Stream`.
+
+### Collecting results
 
 To get an array or map back from a stream, use `.to_array()` or `.to_map()`:
 
@@ -639,6 +881,8 @@ boosted = scores.map((k, v) => (k, v * 2)).to_map();  // Map[String, U64]
 `.to_array()` and `.to_map()` are methods on `Stream`. The result is
 pending until all elements resolve.
 
+### Map combinators
+
 Map combinators pass `(key, value)` pairs to the closure:
 
 ```vixen
@@ -647,6 +891,8 @@ scores.find((k, v) => v > 15)              // Some(("bob", 20))
 scores.keys()                               // Array[String]
 scores.values()                             // Array[U64]
 ```
+
+### Stream combinators
 
 Stream combinators work the same way:
 
@@ -708,12 +954,29 @@ found = names.find($.starts_with("ch"));
 // found is Some("charlie")
 ```
 
-The `$` is a shorthand for single-argument closures. These are all equivalent:
+`$` is a shorthand for the first argument of a closure. These are all
+equivalent:
 
 ```vixen
 found = names.find(fn(name) { name.starts_with("ch") });
 found = names.find((name) => name.starts_with("ch"));
 found = names.find($.starts_with("ch"));
+```
+
+`$` is `$0`. For multi-argument closures, use `$0`, `$1`, `$2`, etc.:
+
+```vixen
+items.reduce($0 + $1)                     // (a, b) => a + b
+pairs.sort_by($0.name < $1.name)          // (a, b) => a.name < b.name
+```
+
+`$` works anywhere in an expression, including function arguments. This
+covers partial application:
+
+```vixen
+items.map(add($, 1))                      // (x) => add(x, 1)
+items.filter(has_extension($, "rs"))       // (x) => has_extension(x, "rs")
+items.map(Pair { first: $, second: 0 })   // (x) => Pair { first: x, second: 0 }
 ```
 
 Named functions work too:
@@ -724,6 +987,44 @@ fn starts_with_ch(name: String) -> Bool {
 }
 
 found = names.find(starts_with_ch);
+```
+
+## Pipe operator
+
+The pipe operator `|>` passes the left-hand value as the first argument
+to the right-hand function call:
+
+```vixen
+result = input |> parse |> validate |> compile;
+
+// equivalent to:
+result = compile(validate(parse(input)));
+```
+
+If the right-hand side has arguments, the piped value is inserted as the
+first argument:
+
+```vixen
+result = input |> parse("strict") |> validate(schema);
+
+// equivalent to:
+result = validate(parse(input, "strict"), schema);
+```
+
+Method chaining and pipes serve different purposes. Use pipes for threading
+a value through free functions, dots for methods on a type:
+
+```vixen
+// free functions composed with pipe
+output = src |> find_crates |> compile_all |> link;
+
+// method chaining for collection operations
+libs = artifacts.filter($.kind == "lib").to_array();
+
+// they compose naturally
+libs = (src |> find_crates |> compile_all)
+  .filter($.kind == "lib")
+  .to_array();
 ```
 
 ## Methods
@@ -965,6 +1266,22 @@ c = s as? Shape.Circle;    // Option(Some(Shape.Circle { radius: 5.0 }))
 r = s as? Shape.Rectangle; // Option(None)
 ```
 
+## Option methods
+
+`Option` has combinators for ergonomic handling:
+
+```vixen
+config.edition.unwrap_or("2021")     // "2021" if None
+config.edition.map(parse_edition)    // Option[Edition] — None stays None
+config.edition.and_then(validate)    // Option[T] — flat maps over the option
+config.edition.is_some()             // Bool
+config.edition.is_none()             // Bool
+```
+
+`unwrap_or` provides a default. `map` transforms the inner value.
+`and_then` is like `map` but the function itself returns an `Option`,
+and the result is flattened (no `Option[Option[T]]`).
+
 ## Errors
 
 There is no `Result` type. Vixen has one error model: **poisoning**.
@@ -1026,8 +1343,18 @@ parse:
 messages = p.stdout.filter_map(Json.parse?[RustcMessage]);
 ```
 
-For optional things — "try to find this, use a fallback if it's not
-there" — use `?` and `Option`, not error handling:
+Combined with Option methods, `?` enables "try X, fall back to Y":
+
+```vixen
+// try system library, fall back to vendored
+lib = find_system_lib("openssl")?.unwrap_or(vendor_lib("openssl"));
+
+// try TOML, fall back to JSON
+config = Toml.parse?[Config](data).unwrap_or(Json.parse[Config](data));
+
+// try the fast path, fall back to the slow path
+result = fast_compile(src)?.unwrap_or(slow_compile(src));
+```
 
 ## Streams
 

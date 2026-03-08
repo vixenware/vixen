@@ -130,6 +130,76 @@ Application-level errors (e.g., `rustc` reporting a compilation error)
 are the observer's responsibility — parse stdout/stderr and call `fail`
 with a meaningful message.
 
+## String methods
+
+Strings have built-in methods for common operations:
+
+### Testing
+
+```vixen
+s.starts_with("prefix")     // Bool
+s.ends_with("suffix")       // Bool
+s.contains("needle")        // Bool
+s.is_empty()                // Bool
+```
+
+### Splitting and joining
+
+```vixen
+s.split("/")                 // Array[String]
+s.split_once("/")            // Option[(String, String)] — first occurrence
+parts.join(", ")             // String — join array elements with separator
+s.lines()                    // Array[String] — split by newline
+```
+
+### Transforming
+
+```vixen
+s.trim()                     // strip leading/trailing whitespace
+s.trim_start()               // strip leading whitespace
+s.trim_end()                 // strip trailing whitespace
+s.to_upper()                 // "HELLO"
+s.to_lower()                 // "hello"
+s.replace("old", "new")     // replace all occurrences
+s.replace_once("old", "new") // replace first occurrence
+```
+
+### Slicing
+
+```vixen
+s.len()                      // U64 — byte length
+s.chars()                    // Array[String] — Unicode grapheme clusters
+s.slice(0..5)                // String — substring by byte range
+```
+
+### Parsing
+
+```vixen
+s.parse_u64()                // U64 — poisons if not a valid number
+s.parse_i64()                // I64
+s.parse_f64()                // F64
+s.parse_u64()?               // Option[U64] — None if not a valid number
+```
+
+### Regex
+
+```vixen
+s.matches("\\d+")            // Bool — test against a regex pattern
+s.find_all("\\d+")           // Array[String] — all matches
+s.captures("(\\w+)=(\\w+)")  // Option[Array[String]] — capture groups
+s.replace_regex("\\s+", " ") // replace by regex pattern
+```
+
+### Path-oriented string operations
+
+Build systems work heavily with paths as strings. These complement the
+`Path` type for cases where you're working with raw path strings:
+
+```vixen
+s.strip_prefix("src/")       // Option[String]
+s.strip_suffix(".rs")        // Option[String]
+```
+
 ## `Stream.of`
 
 Creates a single-element stream:
