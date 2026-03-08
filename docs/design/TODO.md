@@ -1,20 +1,9 @@
 # Vixen design TODO
 
-## Demand model
-How does a build start? What drives evaluation? Does the Vixen program receive
-CLI arguments? How does the user select what to build?
-
-## Outputs
-How do you declare what a build produces? Are outputs named? Can they be
-queried/filtered (Bazel-style)?
-
 ## Query / target selection
 How does the user ask for specific outputs? Is there a query language? Pattern
-matching on target names? Labels?
-
-## Cargo-to-Vixen compatibility
-How do existing Cargo builds map to Vixen? Is there a translation layer that
-reads Cargo.toml/Cargo.lock and produces Vixen evaluation?
+matching on target names? Labels? How do CLI args (`Args`) map to what gets
+built inside `std.rust.workspace`?
 
 ## Toolchain acquisition
 How are toolchains (rustc, clang, etc.) downloaded and managed? Are they
@@ -64,3 +53,33 @@ paths), but it will miss cases that require full macro evaluation. For those
 cases, users write a `build.vixen` that explicitly declares additional inputs.
 This is the escape hatch: the default works for most crates, and custom build
 files handle the rest.
+
+## Demand model
+
+Entry point is `fn build(src: Tree, args: Args) -> Tree`. The runtime calls it
+with the working directory (lazy tree) and parsed CLI args. The returned tree is
+the build output, materialized to disk by the runtime.
+
+## Outputs
+
+The build function returns a `Tree` — the output directory to materialize.
+No separate target catalog or enumeration phase.
+
+## Cargo-to-Vixen compatibility
+
+If no `build.vixen` exists, Vixen looks for `Cargo.toml` and evaluates as if
+a thin build file called `std.rust.workspace(src, args)` were present. CLI
+flags match cargo's (`--bin`, `--lib`, `--package`, `--release`, etc.).
+
+## Enum alias variants and auto-widening
+
+Enums support alias variants (`File: Blob`), `@` shorthand (`@Blob`), and
+sum type shorthand (`enum Entry = Blob | Tree`). Auto-widening: if a variant
+wraps exactly one type, values of that type auto-widen into the variant and
+up to the enum.
+
+## Static methods and constructors
+
+`fn Type.method() -> T` without `self` is a static method. Used for
+constructors like `Blob.from_string`, `Tree.of`. Tree operations (subtree,
+glob, merge) are lazy instance methods.

@@ -100,13 +100,14 @@ Open quesiton what does `()` mean? Empty tuple (awkward) or unit value (which !=
 
 ## Structs
 
-Vixen supports Rust-like structs
+Vixen supports Rust-like structs. Types are always introduced with the `type`
+keyword:
 
 ```vixen
-struct Name {
+type Name = struct {
   first: String,
   last: String,
-}
+};
 
 name = Name { first: "John", last: "Doe" };
 ```
@@ -122,9 +123,9 @@ name = Name { @first, @last };
 If you already have another value with compatible fields you can spread it into the struct:
 
 ```vixen
-struct FirstName {
+type FirstName = struct {
   first: String,
-}
+};
 
 fn = FirstName { first: "John" };
 name = Name { ..fn, last: "Doe" };
@@ -361,6 +362,21 @@ name = Name { first: "John", last: "Doe" };
 name.full() // "John Doe"
 ```
 
+### Static methods
+
+Methods that don't take `self` are static — they are called on the type,
+not on a value:
+
+```vixen
+fn Blob.from_string(s: String) -> Blob {
+  // ...
+}
+
+b = Blob.from_string("Hello, world!");
+```
+
+Static methods are how constructors work. The type itself acts as a namespace.
+
 ## Enums
 
 Vixen has Rust-like enums. The main difference is that each variant is
@@ -371,21 +387,21 @@ an actual type.
 Variants can have no payload, a tuple payload, or a struct payload:
 
 ```vixen
-enum Color {
+type Color = enum {
   Red,
   Green,
   Blue,
-}
+};
 
-enum Expr {
+type Expr = enum {
   Literal(F64),
   Add(Expr, Expr),
-}
+};
 
-enum Shape {
+type Shape = enum {
   Circle { radius: F64 },
   Rectangle { width: F64, height: F64 },
-}
+};
 ```
 
 Each variant is a type under the enum's namespace. `Shape.Circle` is a type,
@@ -410,10 +426,10 @@ In addition to the three payload kinds above, a variant can be an alias for
 an existing type, using colon syntax:
 
 ```vixen
-enum Entry {
+type Entry = enum {
   File: Blob,
   Dir: Tree,
-}
+};
 ```
 
 `Entry.File` is an alias for `Blob` — an `Entry.File` value *is* a `Blob`.
@@ -424,10 +440,10 @@ If you don't need to rename, the `@` shorthand reuses the type name as the
 variant name:
 
 ```vixen
-enum Entry {
+type Entry = enum {
   @Blob,
   @Tree,
-}
+};
 ```
 
 This is equivalent to `Blob: Blob, Tree: Tree` — the variant `Entry.Blob`
@@ -439,7 +455,7 @@ For the common case of "one of these types, no renaming needed," there's
 a one-line form:
 
 ```vixen
-enum Entry = Blob | Tree;
+type Entry = Blob | Tree;
 ```
 
 This is equivalent to the `@` form above. The variant names are the type
@@ -479,7 +495,7 @@ field, or an alias variant), values of that inner type auto-widen into the
 variant, and from there into the enum. This chains:
 
 ```vixen
-enum Entry = Blob | Tree;
+type Entry = Blob | Tree;
 
 // Blob auto-widens to Entry.Blob, which auto-widens to Entry:
 fn process(e: Entry) { /* ... */ }
@@ -538,10 +554,10 @@ raw = hash as String; // ok
 `Option` is a built-in enum:
 
 ```vixen
-enum Option[T] {
+type Option[T] = enum {
   Some(T),
   None,
-}
+};
 ```
 
 `T?` is sugar for `Option[T]`:
@@ -611,6 +627,49 @@ are uploaded.
 
 The Vixen language never exposes Blake3 hashes. The hash is an implementation
 detail of the store, not a language-level concept.
+
+### Blob constructors
+
+`Blob.from_string` creates a blob from a text string:
+
+```vixen
+readme = Blob.from_string("# My Project\n\nHello.");
+```
+
+Blobs with binary content are not constructed in the language — they come from
+`exec` + `commit` (a tool produces a file, the observer commits it to the
+store).
+
+### Tree constructors
+
+`Tree.of` creates a tree from a map of names to entries. Entries can be
+blobs or other trees — auto-widening handles the conversion:
+
+```vixen
+type Entry = Blob | Tree;
+
+output = Tree.of({
+  "README.md": Blob.from_string("# Hello"),
+  "src": src_tree,
+});
+```
+
+Trees can also be derived from other trees:
+
+```vixen
+// select a subtree
+lib_src = src.subtree("src/lib");
+
+// filter by glob
+rs_files = src.glob("**/*.rs");
+
+// merge two trees (later entries win on conflict)
+combined = tree_a.merge(tree_b);
+```
+
+These operations are lazy — they describe a new tree without copying or
+hashing anything. The runtime materializes only what's needed at `exec`
+boundaries.
 
 ## Paths
 
