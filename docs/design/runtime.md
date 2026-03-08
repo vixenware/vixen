@@ -134,7 +134,8 @@ comes from two sources:
    machine. Multiple execs can run concurrently.
 
 The user writes sequential-looking code. The runtime extracts parallelism
-from the dependency structure.
+from the dependency structure. See `concurrency.md` for concrete examples
+of when parallelism emerges from sequential-looking code.
 
 ## Exec internals
 
