@@ -5,7 +5,7 @@
 specs (
     {
         name vixen
-        include (docs/content/spec.md)
+        include (docs/content/spec/language.md)
         impls (
             {
                 name rust
@@ -16,7 +16,7 @@ specs (
     }
     {
         name internals
-        include (docs/content/internals-spec.md)
+        include (docs/content/spec/internals.md)
         impls (
             {
                 name rust
