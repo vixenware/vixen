@@ -59,10 +59,10 @@ unrelated = process_docs(doc_tree);
 Pending values are invisible in the language. A pending value looks and acts
 like any other value — you can pass it to functions, store it in structs,
 put it in arrays, access its fields. None of these operations wait. Values
-are only forced at two boundaries: when data crosses to a remote executor
-(the `exec` boundary), and when the final output tree is materialized to
-disk. Everything else just builds up the dataflow graph. See `evaluation.md`
-for the full model.
+are only forced when they must be serialized to cross a node boundary (e.g.,
+shipping data to a remote executor), or when the final output tree is
+materialized to disk. Everything else just builds up the dataflow graph.
+See `evaluation.md` for the full model.
 
 **Universal value properties.** Because Vixen has value semantics and no
 references, every value can be compared for equality, hashed, and

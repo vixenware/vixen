@@ -71,12 +71,12 @@ in the dataflow graph.
 
 Two things force:
 
-1. **Crossing the node boundary.** `exec` sends values to a remote
-   executor. To serialize a value and ship it to another machine, the
-   data must be resolved. This is the primary forcing point — and it's
-   the reason the language was designed around value semantics, universal
-   hashability, and serializability in the first place. Everything about
-   the language exists so that values can cross this boundary.
+1. **Crossing the node boundary.** To serialize a value and ship it to
+   another machine, the data must be resolved. This is the primary
+   forcing point — and it's the reason the language was designed around
+   value semantics, universal hashability, and serializability in the
+   first place. Everything about the language exists so that values can
+   cross this boundary.
 
 2. **Materializing the final output.** At the very end, the runtime
    writes the output tree to disk. The data must be resolved to write
