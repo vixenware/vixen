@@ -236,16 +236,55 @@ slice = arr[1..4]; // [20, 30, 40]
 
 ## Closures
 
-Functions can be passed to other functions:
+Functions can be defined as top-level and passed to other functions:
 
 ```vixen
-fn repeat(amount: U64, f: Fn()) {
-  for i in 0..amount {
-    f();
+fn find(haystack: Array[String], predicate: Fn(String) -> Bool) -> String? {
+  for item in haystack {
+    if predicate(item) {
+      return item;
+    }
   }
+  nil
 }
 
-repeat(3, fn() {
-  print("hello");
-});
+fn starts_with_ch(name: String) -> Bool {
+  name.starts_with("ch")
+}
+
+names = ["alice", "bob", "charlie"];
+found = find(names, starts_with_ch);
+// found is "charlie"
+```
+
+Anonymous functions (closures) work too:
+
+```vixen
+found = find(names, fn(name) { name.starts_with("ch") });
+```
+
+There's a shorter arrow syntax (no pipes like in Rust, parens like in JS):
+
+```vixen
+found = find(names, (name) => name.starts_with("ch"));
+```
+
+And for single-argument closures, `$` refers to the argument:
+
+```vixen
+found = find(names, $.starts_with("ch"));
+```
+
+## Methods
+
+In addition to freestanding functions, one can define methods on a
+given type:
+
+```vixen
+fn Name.full(self) -> String {
+  `${self.first} ${self.last}`
+}
+
+name = Name { first: "John", last: "Doe" };
+name.full() // "John Doe"
 ```
