@@ -2,6 +2,23 @@
 
 Fundamental truths about how Vixen evaluates programs.
 
+## Demand-driven dataflow
+
+Vixen uses demand-driven dataflow evaluation. The computation forms a
+dataflow graph — nodes are computations, edges are data dependencies.
+But the graph is not built upfront and executed eagerly. It is discovered
+lazily as evaluation proceeds.
+
+Evaluation starts from what is demanded — the output `Tree` that the build
+must produce. To evaluate a node, the evaluator looks at its dependencies
+and evaluates those first. If a node has multiple independent dependencies,
+they can be evaluated concurrently. If a node is never needed by anything
+downstream of the demand, it is never evaluated.
+
+A binding that is never read is never evaluated. A function that is never
+called is never entered. Only the subgraph reachable from the demanded
+output is ever computed.
+
 ## Values and pending-ness
 
 Pending is a property of a **value**, not of a binding.
@@ -51,16 +68,13 @@ that happens to return `Stream[T]`. User code can create streams with
 
 ## The dataflow graph
 
-Every binding in a function body is a node. The edges are data
-dependencies — which bindings each node references.
-
-A node can be evaluated when its direct inputs are available. "Available"
-means the binding exists and has been assigned — NOT that every value
-reachable from it is fully resolved. A struct with pending fields is
-available. An array with pending elements is available.
+Nodes are computations — function calls, `exec` invocations, expressions
+that produce values. Edges are data dependencies between them. A node can
+be evaluated when its inputs are available. "Available" does not mean fully
+resolved — a struct with pending fields is available, an array with pending
+elements is available. It just means the value exists.
 
 Nodes with no dependencies between them can be evaluated concurrently.
-The runtime schedules them based on the dependency graph.
 
 ## Poisoned values
 
