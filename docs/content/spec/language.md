@@ -281,7 +281,7 @@ insert_anchor_links = "heading"
 >   if cheerful { `Hey ${name}!!!` } else { `Hello ${name}` }
 > }
 >
-> greet("Amos", cheerful = true)
+> greet("Amos", cheerful: true)
 > ```
 
 ### Scope
@@ -291,6 +291,311 @@ insert_anchor_links = "heading"
 > Declarations (bindings, types, functions) can appear anywhere — at
 > module top level or inside any block. Declarations inside a block are
 > scoped to that block.
+
+## Expression grammar
+
+### Literal expressions
+
+> r[expr.literal.int]
+>
+> Integer literals: a sequence of digits, optionally separated by
+> underscores. Default type is `U64`. A type suffix selects a different
+> type: `42`, `1_000_000`, `4_I64`, `3_F64`.
+
+> r[expr.literal.float]
+>
+> Float literals: digits with a decimal point. Default type is `F64`:
+> `3.14`, `0.5`, `1_000.0`.
+
+> r[expr.literal.bool]
+>
+> Boolean literals: `true`, `false`. Type is `Bool`.
+
+> r[expr.literal.string]
+>
+> String literals are enclosed in double quotes: `"hello world"`. Escape
+> sequences: `\\`, `\"`, `\n`, `\t`, `\r`, `\0`, `\u{...}` (Unicode code
+> point by hex value).
+
+> r[expr.literal.interpolation]
+>
+> Interpolated strings use backticks: `` `Hello ${name}` ``. The `${ }`
+> delimiter contains an arbitrary expression — any expression valid in
+> Vixen can appear inside, including function calls, field access, `if`,
+> `match`, and nested interpolations:
+>
+> ```vixen
+> msg = `found ${results.len()} results in ${elapsed}s`
+> label = `status: ${if ok { "pass" } else { "fail" }}`
+> ```
+>
+> There is no bare-identifier shorthand — `${ }` is the only
+> interpolation syntax.
+
+### Identifier expressions
+
+> r[expr.ident]
+>
+> An identifier in expression position evaluates to the value of the
+> binding or type it refers to. snake_case identifiers refer to bindings,
+> UpperCamelCase identifiers refer to types.
+
+### Tuple expressions
+
+> r[expr.tuple]
+>
+> The empty tuple is `()`. A single-element tuple requires a trailing
+> comma: `(expr,)`. Two or more elements: `(a, b)`. Trailing commas are
+> always allowed. Spread syntax inserts elements from another tuple:
+> `(1, ..two_three, 4)`.
+
+### Parenthesized expressions
+
+> r[expr.paren]
+>
+> `(expr)` groups an expression for precedence. A parenthesized expression
+> without trailing comma is not a tuple — `(1 + 2)` is `3`, not `(3,)`.
+
+### Block expressions
+
+> r[expr.block]
+>
+> A block `{ stmt; stmt; expr }` is an expression. Statements are
+> separated by semicolons. The last expression in the block is its value.
+> A block ending with a statement (or empty) evaluates to `()`.
+> Declarations inside a block are scoped to that block.
+>
+> ```vixen
+> area = {
+>   w = rect.width;
+>   h = rect.height;
+>   w * h
+> }
+> ```
+
+### Array expressions
+
+> r[expr.array]
+>
+> Array literals use square brackets: `[1, 2, 3]`. Elements are
+> comma-separated. Trailing commas are allowed. The type is `Array[T]`
+> where `T` is inferred from the elements.
+
+### Map expressions
+
+> r[expr.map]
+>
+> Map literals use `%{ }` with `=>` separating keys from values:
+>
+> ```vixen
+> coords = %{ "lat" => 53.156, "lng" => 145.23 }
+> port_names = %{ 80 => "http", 443 => "https" }
+> ```
+>
+> Keys and values are arbitrary expressions. Trailing commas are allowed.
+> The type is `Map[K, V]`.
+
+### Function call expressions
+
+> r[expr.call]
+>
+> `f(arg1, arg2)` calls a function with positional arguments. Trailing
+> commas are allowed. Keyword arguments follow positional arguments using
+> `:` syntax:
+>
+> ```vixen
+> greet("Amos", cheerful: true)
+> acquire(url, sha256: hash)
+> ```
+>
+> Keyword arguments can appear in any order but must come after all
+> positional arguments.
+
+> r[expr.call.spread]
+>
+> Spread syntax `..value` in keyword argument position expands a struct's
+> fields into keyword arguments. Only fields whose names match a keyword
+> parameter are used — extra fields are ignored. Order matters: explicit
+> keyword arguments after the spread override spread values.
+>
+> ```vixen
+> fn render(template: String, { width: U64, height: U64, title: String }) { ... }
+>
+> defaults = Config { width: 800, height: 600, title: "untitled", debug: true };
+> render("page.html", ..defaults, title: "Home")
+> // debug is ignored (not a keyword param), title is overridden
+> ```
+
+### Struct literal expressions
+
+> r[expr.struct-literal]
+>
+> `TypeName { field: value, field2: value2 }` constructs a struct. The
+> `:x` shorthand means `x: x` — reuses a binding as the field value.
+> Spread syntax `..other` copies remaining fields from another value.
+> Trailing commas are allowed.
+>
+> ```vixen
+> p = Point { x: 1.0, y: 2.0 }
+> p2 = Point { :x, y: 2.0 }
+> p3 = Point { ..p, y: 3.0 }
+> ```
+
+### Index expressions
+
+> r[expr.index]
+>
+> `array[i]` accesses an element by index. `map[key]` accesses a value by
+> key. Out-of-bounds or missing keys poison the result. The fallible
+> version `array[i]?` returns `Option` instead.
+
+### Field access expressions
+
+> r[expr.field]
+>
+> `value.field` accesses a struct field by name. `tuple._0`, `tuple._1`
+> access tuple elements by position (underscore prefix avoids ambiguity
+> with float literals).
+
+> r[expr.field.variant]
+>
+> `Enum.Variant` accesses a variant as a type under the enum's namespace.
+> `Shape.Circle` is a type — distinct from `Shape`. This is field access
+> on a type, not on a value. Variant types can be used to construct
+> values (`Shape.Circle { radius: 5.0 }`) or in type position.
+
+### UFCS expressions
+
+> r[expr.ufcs]
+>
+> `x.f(args)` where `f` is not a field of `x` desugars to `f(x, args)`.
+> The dot operator tries field access first; if no field matches, it
+> rewrites to a function call with the left-hand side as the first
+> argument:
+>
+> ```vixen
+> items.map($ + 1).filter($ > 3).to_array()
+> // desugars to:
+> to_array(filter(map(items, $ + 1), $ > 3))
+> ```
+
+### Update expressions
+
+> r[expr.with]
+>
+> `value with { field: new_value }` produces a new value with some fields
+> changed. Fields not mentioned are kept from the original. See
+> [type.struct.with] and [type.struct.with-assign].
+
+### Closure expressions
+
+> r[expr.closure]
+>
+> Two syntactic forms:
+>
+> - Block form: `fn(x, y) { body }` — parameters in parentheses, body in
+>   braces.
+> - Arrow form: `(x, y) => expr` — parameters in parentheses, body is a
+>   single expression.
+>
+> Parameter types are inferred from context. Closures capture bindings
+> from their enclosing scope by value.
+
+> r[expr.closure.dollar]
+>
+> `$` is shorthand for the first argument of an implicit closure. Any
+> expression containing `$` that appears in a function argument position
+> is automatically wrapped in a closure:
+>
+> ```vixen
+> items.map($ + 1)          // means: items.map((x) => x + 1)
+> items.map(add($, 1))      // means: items.map((x) => add(x, 1))
+> items.filter($.len() > 3) // means: items.filter((x) => x.len() > 3)
+> ```
+
+> r[expr.closure.dollar-numbered]
+>
+> `$` is `$0`. For multi-argument closures, use `$0`, `$1`, `$2`, etc.
+> The highest numbered `$N` determines the closure's arity:
+>
+> ```vixen
+> items.reduce($0 + $1)   // means: items.reduce((a, b) => a + b)
+> ```
+>
+> `$` and `$N` bind to the nearest enclosing function argument position
+> where a closure is expected.
+
+### Conditional expressions
+
+> r[expr.if]
+>
+> `if condition { then_body } else { else_body }`. No parentheses around
+> the condition, braces required around both branches. `else if` chains
+> are allowed. When used as an expression (its value is used), the `else`
+> branch is required. When used as a statement (value discarded), the
+> `else` branch is optional and the whole thing evaluates to `()`.
+
+### Match expressions
+
+> r[expr.match]
+>
+> ```vixen
+> match value {
+>   pattern => expr,
+>   pattern if guard => expr,
+>   _ => default_expr,
+> }
+> ```
+>
+> Arms are comma-separated. Each arm is `pattern => expr` with an optional
+> `if guard` between the pattern and the arrow. Arms can use block bodies:
+> `pattern => { stmts; expr }`. `match` must be exhaustive — every
+> possible value must be covered. A wildcard `_` catches everything else.
+
+### Import expressions
+
+> r[expr.import]
+>
+> `import("path")` is an expression that evaluates to a module value.
+> The argument is a string literal — not a general expression.
+
+### Type cast expressions
+
+> r[expr.as]
+>
+> `expr as Type` converts a value to another type. The conversion must
+> succeed or the node poisons. `expr as? Type` is the fallible version —
+> returns `Option`, `Some` on success, `None` on failure.
+
+### Type test expressions
+
+> r[expr.is]
+>
+> `expr is pattern` tests whether a value matches a pattern. Evaluates to
+> `Bool`. Variables bound in the pattern are in scope in the enclosing
+> `if` body:
+>
+> ```vixen
+> if config.edition is Some(edition) {
+>   use_edition(edition)
+> }
+> ```
+
+### Fallible expressions
+
+> r[expr.fallible]
+>
+> Any function or method call can be suffixed with `?` to catch poisoning
+> and return `Option` instead: `f(x)?` returns `None` on failure,
+> `Some(result)` on success.
+
+### Statements
+
+> r[expr.statement]
+>
+> Assignment (`name = expr`, `name: Type = expr`) and compound update
+> (`name with= { ... }`) are statements, not expressions. Declarations
+> (`fn`, `struct`, `enum`, `newtype`) are also statements.
 
 ## Modules
 
@@ -437,12 +742,6 @@ insert_anchor_links = "heading"
 > `Entry = Blob | Tree` is shorthand for an enum where each variant is
 > an alias named after its type.
 
-> r[type.enum.auto-widen]
->
-> A variant value auto-widens to the parent enum type when the context
-> expects the enum. This chains through alias variants. The reverse is
-> not true — narrowing requires `as` or `match`.
-
 > r[type.enum.build]
 >
 > To build a variant value (narrow type): `Shape.Circle { radius: 5.0 }`.
@@ -473,6 +772,36 @@ insert_anchor_links = "heading"
 >
 > Inference does not cross function boundaries. Each function is checked
 > independently using its explicit signature.
+
+## Implicit coercions
+
+> r[type.coerce.widen]
+>
+> A variant value auto-widens to its parent enum type when the context
+> expects the enum. This chains through alias variants.
+> `Shape.Circle { radius: 5.0 }` widens to `Shape` automatically. Sum
+> type shorthands also widen: a `String` widens to `ExecArg` when
+> `ExecArg = String | Path`.
+>
+> The reverse is not true — narrowing requires `as` or `match`.
+
+> r[type.coerce.stringify]
+>
+> String interpolation (`` `${expr}` ``) calls `stringify(expr)`. The
+> `stringify` function is overloaded — built-in overloads exist for
+> scalar types (`U64`, `I64`, `F64`, `Bool`, `String`). User-defined
+> types must provide their own `fn stringify(x: MyType) -> String`
+> overload or interpolation is a compile error.
+
+> r[type.coerce.unit]
+>
+> A function body or block that ends with a statement (or is empty)
+> implicitly evaluates to `()`.
+
+> r[type.coerce.none]
+>
+> There are no implicit numeric coercions. Converting between `U64`,
+> `I64`, and `F64` always requires explicit `as`.
 
 ## Control flow
 
@@ -543,6 +872,75 @@ insert_anchor_links = "heading"
 > A block `{ ... }` is an expression. The last expression in the block is
 > its value. Bindings inside a block are scoped to that block. Blocks
 > replace `let`/`in` and `where` clauses from other languages.
+
+## Pattern grammar
+
+> r[pattern.wildcard]
+>
+> `_` matches any value and binds nothing.
+
+> r[pattern.binding]
+>
+> A snake_case identifier in pattern position binds the matched value to
+> that name: `x`, `name`, `remaining`.
+
+> r[pattern.literal]
+>
+> Integer, float, string, and boolean literals are valid patterns. They
+> match by equality: `0`, `"hello"`, `true`.
+
+> r[pattern.tuple]
+>
+> `(a, b, c)` destructures a tuple. Nested patterns are allowed in each
+> position.
+
+> r[pattern.struct]
+>
+> `{ field, field2: pat }` destructures a struct. A bare `field` binds
+> the field to a variable of the same name. `field: pat` matches the
+> field against a nested pattern. `..` ignores remaining fields.
+
+> r[pattern.variant]
+>
+> Enum variant patterns require the variant name:
+> `Circle { radius }`, `Some(value)`, `None`. In `match`, the variant
+> name is always required (unlike struct destructuring in bindings where
+> it's inferred).
+
+> r[pattern.array]
+>
+> Array patterns match by structure. `..` skips any number of elements.
+> `..name` binds the skipped elements as an `Array`:
+>
+> ```vixen
+> match items {
+>   [] => "empty",
+>   [only] => `just ${stringify(only)}`,
+>   [first, ..] => `starts with ${stringify(first)}`,
+>   [first, .., last] => `${stringify(first)} to ${stringify(last)}`,
+>   [_, second, ..rest] => use(second, rest),
+> }
+> ```
+
+> r[pattern.or]
+>
+> `pat1 | pat2` matches if either pattern matches. All alternatives
+> must bind the same names with the same types.
+
+> r[pattern.at]
+>
+> `name @ pattern` binds the whole matched value to `name` while also
+> destructuring it with the inner pattern.
+
+> r[pattern.guard]
+>
+> In `match` arms, `pattern if condition => expr`. The guard is checked
+> after the pattern matches. If the guard is false, the next arm is tried.
+
+> r[pattern.where]
+>
+> Patterns appear in: `match` arms, `is` expressions, binding
+> destructuring, and function parameters (for tuples/structs).
 
 ## Functions
 
@@ -1061,5 +1459,5 @@ insert_anchor_links = "heading"
 
 > r[exec.acquire]
 >
-> `acquire(url, sha256 = hash)` fetches a resource by URL. Cached forever
+> `acquire(url, sha256: hash)` fetches a resource by URL. Cached forever
 > when a hash is provided.
