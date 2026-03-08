@@ -1053,6 +1053,30 @@ resolution."
 Note: `?` is part of the call syntax, not a postfix operator on the return
 value. `f(x)` and `f(x)?` are two different ways to call the same function.
 
+### Mapping errors
+
+To add context to an error, use `?` to get the Result, then `.map_err()`
+to transform it. The transformed Result then auto-propagates normally:
+
+```vixen
+fn deploy(input: String) -> Result[Output, DeployError] {
+  port = parse_port(input)?.map_err((e) => DeployError {
+    message: `failed to parse port from "${input}"`,
+    cause: e,
+  });
+  config = load_config(port)?.map_err((e) => DeployError {
+    message: `failed to load config on port ${port}`,
+    cause: e,
+  });
+  run(config)
+}
+```
+
+The `?` gives you the Result, `.map_err()` wraps the error with context,
+and the resulting Result auto-propagates back into the happy path. It's
+more verbose than a bare call — that's intentional. The common case (just
+propagate) is free; adding context is where you pay the syntax cost.
+
 ## Streams
 
 `Stream[T]` is a built-in generic type that produces values of type `T` over
