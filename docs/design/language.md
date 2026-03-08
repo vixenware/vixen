@@ -10,6 +10,25 @@ value can be used as many times as you want. Nothing is ever consumed or moved.
 Passing a value to a function does not prevent you from using it again. There is
 only `Fn` — no `FnOnce`, no `FnMut`. Iterating over an array does not consume it.
 
+```vixen
+fn add_tag(config: Config) -> Config {
+  config.tags = config.tags.append("new");
+  config  // returns a modified copy
+}
+
+original = Config { name: "foo", tags: ["a", "b"] };
+modified = add_tag(original);
+
+// original is unchanged — add_tag received a copy
+original.tags  // ["a", "b"]
+modified.tags  // ["a", "b", "new"]
+```
+
+This applies to all types: scalars, structs, arrays, maps, closures. There is
+no way to observe mutation from another binding. Reassignment (`x.field = val`)
+is syntactic sugar for creating a new value with that field changed — it shadows
+the previous binding, it does not mutate anything in place.
+
 **Demand-driven execution.** There is demand at the top (what the build system
 needs), and evaluation is driven downward from that demand. There is no separate
 planning phase that builds a dependency graph and then an execution phase that
@@ -17,6 +36,27 @@ runs it — dependencies are discovered dynamically as evaluation proceeds. The
 core side effect is `exec`, which runs commands on remote executors (see below).
 Values produced by `exec` may not be immediately available; evaluation implicitly
 suspends until the values it depends on resolve.
+
+```vixen
+// metadata and lib are both pending — they come from an exec stream
+metadata = artifacts.find($.kind == "metadata");
+lib = artifacts.find($.kind == "lib");
+
+// This function call implicitly suspends until both resolve.
+// There is no await keyword. The runtime handles it.
+result = compile_dependent(metadata, lib);
+
+// Meanwhile, unrelated work that doesn't depend on metadata or lib
+// can proceed in parallel — the runtime only blocks what actually
+// needs the pending value.
+unrelated = process_docs(doc_tree);
+```
+
+Suspension is invisible in the language. A pending value looks and acts like
+any other value — you can pass it to functions, store it in structs, put it in
+arrays. Evaluation only pauses at the point where the actual resolved value is
+needed (e.g., to read a field, to pass to `exec` as an argument, to compare
+for equality).
 
 **Universal value properties.** Because Vixen has value semantics and no
 references, every value can be compared for equality, hashed, and
