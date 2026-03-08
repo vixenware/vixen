@@ -148,6 +148,70 @@ name = Name { first: "John", last: "Doe" };
 name = Name { ..name, last; "Wilson" };
 ```
 
+### Nested type declarations
+
+Types can be declared inline in field position using the same `type X = ...`
+syntax. The declared type lives under the parent's namespace and can be
+referenced by name elsewhere:
+
+```vixen
+type CargoToml = struct {
+  package: type Package = struct {
+    name: String,
+    version: String,
+    edition: String?,
+  },
+  dependencies: Map[String, type DependencySpec = String | struct {
+    version: String?,
+    path: String?,
+    git: String?,
+    features: Array[String]?,
+  }]?,
+  dev_dependencies: Map[String, DependencySpec]?,
+  bin: Array[type BinTarget = struct {
+    name: String,
+    path: String?,
+  }]?,
+  lib: type LibTarget = struct {
+    name: String?,
+    path: String?,
+  }?,
+  workspace: type Workspace = struct {
+    members: Array[String]?,
+  }?,
+};
+```
+
+Nested named types are accessible through the parent namespace:
+`CargoToml.Package`, `CargoToml.DependencySpec`, `CargoToml.BinTarget`, etc.
+
+The `DependencySpec` sum type shows how inline definitions compose with the
+rest of the type system — it's defined where `dependencies` first uses it,
+then reused by name for `dev_dependencies`. The anonymous struct inside the
+sum type doesn't need a name since it's only accessed through `DependencySpec`.
+
+## Deserialization
+
+Vixen has built-in parsers for structured data formats (JSON, TOML, etc.).
+Parsing is driven by type — you provide a type parameter and the parser
+produces a value of that type:
+
+```vixen
+manifest = Toml.parse[CargoToml](src.read("Cargo.toml"));
+manifest.package.name   // "my-crate"
+manifest.bin            // Array[CargoToml.BinTarget]?
+```
+
+The same pattern works for other formats:
+
+```vixen
+config = Json.parse[Config](some_blob);
+```
+
+The type drives deserialization — field names map to keys, `Option` fields
+are optional, sum types handle polymorphic values (like `DependencySpec`
+being either a string or a table in TOML).
+
 ## Control flow
 
 `if`/`else` works like in Rust — no parentheses around the condition, braces
@@ -815,19 +879,20 @@ runtime incorporates it into the cache key automatically.
 ## Demand model
 
 A Vixen build starts with a `build.vixen` file at the repository root. The
-entry point is a function that receives the working directory as a `Tree` and
-the command line arguments as an `Args` value, and returns a `Tree`:
+entry point is a function that receives the working directory as a `Tree`,
+the command line arguments, and the process environment, and returns a `Tree`:
 
 ```vixen
-fn build(src: Tree, args: Args) -> Tree {
-  std.rust.workspace(src, args)
+fn build(src: Tree, args: Array[String], env: Map[String, String]) -> Tree {
+  std.rust.workspace(src, args, env)
 }
 ```
 
-The runtime calls `build` with the working directory and the parsed CLI
-arguments. The `src` tree is lazy — it is backed by the local filesystem but
-nothing is hashed or committed to the store until an `exec` actually needs the
-content.
+- `src` — the working directory as a lazy `Tree` (backed by the local
+  filesystem, nothing hashed until an `exec` needs it)
+- `args` — raw CLI arguments as an `Array[String]`, not pre-parsed. The
+  Vixen code decides how to interpret them.
+- `env` — the process environment as a `Map[String, String]`
 
 The returned `Tree` is the build output. The runtime materializes it to disk —
 for a Rust build, this would be a tree containing `target/debug/foo`,
@@ -843,7 +908,8 @@ produce the requested outputs is ever evaluated.
 
 If no `build.vixen` exists, Vixen looks for a `Cargo.toml`. If found, it
 evaluates as if the thin build file above were present — calling
-`std.rust.workspace` with the working directory and CLI args. Target selection
+`std.rust.workspace` with the working directory, CLI args, and environment.
+Target selection
 uses the same flags as cargo: `--bin`, `--lib`, `--package`, `--example`,
 `--test`, `--release`, `--target`, `--features`, etc.
 
