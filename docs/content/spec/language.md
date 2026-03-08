@@ -41,8 +41,9 @@ insert_anchor_links = "heading"
 
 > r[lex.keywords]
 >
-> Reserved words: `fn`, `struct`, `enum`, `newtype`, `of`, `match`, `if`,
-> `else`, `is`, `as`, `import`, `return`, `fail`, `true`, `false`.
+> Reserved words: `fn`, `struct`, `enum`, `newtype`, `of`, `with`,
+> `match`, `if`, `else`, `is`, `as`, `import`, `return`, `fail`, `true`,
+> `false`.
 >
 > These cannot be used as binding or type names.
 
@@ -93,20 +94,22 @@ insert_anchor_links = "heading"
 >
 > Logical: `&&`, `||`, `!` (prefix).
 >
-> Assignment: `=`.
+> Assignment: `=`, `with=` (compound update).
 >
 > Range: `..`, `..=`.
 >
-> Arrow: `=>` (match arms, short closures), `->` (return types).
+> Arrow: `=>` (match arms, short closures, map entries), `->` (return
+> types).
 >
 > Dot: `.` (field access, UFCS function calls).
 >
-> Other: `?` (fallible suffix), `@` (pattern binding, attributes), `:` (type
-> annotations, field-value pairs, enum aliases).
+> Other: `?` (fallible suffix), `@` (pattern binding, attributes), `:` (named
+> slots — type annotations and field-value pairs, always after an identifier),
+> `::` (expression-level type ascription, distinct from `as` conversion).
 
 > r[lex.delimiters]
 >
-> Delimiters: `(` `)`, `[` `]`, `{` `}`.
+> Delimiters: `(` `)`, `[` `]`, `{` `}`, `%{` (map literal opener).
 
 ### Numeric literals
 
@@ -345,7 +348,8 @@ insert_anchor_links = "heading"
 
 > r[type.tuple]
 >
-> Vixen has heterogeneous tuples. Field access uses `.0`, `.1`, etc.
+> Vixen has heterogeneous tuples. Field access uses `._0`, `._1`, etc.
+> (the underscore prefix avoids ambiguity with float literals).
 > Tuples can be spread into other tuples: `(1, ..two_three, 4)`.
 > Trailing commas are allowed.
 
@@ -357,11 +361,36 @@ insert_anchor_links = "heading"
 > construction — `:x` means `x: x` — reuses a binding name as the field
 > name. Spread syntax `..other` copies fields from another value.
 
-> r[type.struct.field-assign]
+> r[type.struct.with]
 >
-> Assigning to a struct field (`name.last = "Wilson"`) is sugar for
-> creating a new struct with that field changed, shadowing the previous
-> binding. This is value semantics — no in-place mutation.
+> `with` creates a new value with some fields changed:
+>
+> ```vixen
+> updated = name with { last: "Wilson" }
+> ```
+>
+> Fields not mentioned are kept from the original value.
+
+> r[type.struct.with-assign]
+>
+> `with=` is compound assignment: `x with= { ... }` means
+> `x = x with { ... }`. The `:` shorthand enables nested updates —
+> `:field` refers to the existing field value:
+>
+> ```vixen
+> config with= {
+>   :package with {
+>     name: "new",
+>     edition: "2024",
+>   },
+>   optimize: true,
+> }
+> // equivalent to:
+> // config = config with {
+> //   package: config.package with { name: "new", edition: "2024" },
+> //   optimize: true,
+> // }
+> ```
 
 > r[type.struct.nested]
 >
@@ -389,7 +418,7 @@ insert_anchor_links = "heading"
 > Variants can have no payload, a tuple payload, or a struct payload:
 >
 > - `Color.Red` — zero-sized type
-> - `Token.Number` — tuple type, fields accessed with `.0`
+> - `Token.Number` — tuple type, fields accessed with `._0`
 > - `Shape.Circle` — struct type, fields accessed by name
 
 > r[type.enum.no-recursion]
@@ -600,9 +629,16 @@ insert_anchor_links = "heading"
 
 > r[collect.map]
 >
-> Map literals use braces with colon syntax:
-> `{ "lat": 53.156, "lng": 145.23 }`. The type is `Map[K, V]`. Keys can
-> be any Vixen type — all types are comparable for equality and hashable.
+> Map literals use `%{ }` with `=>` for entries:
+>
+> ```vixen
+> coords = %{ "lat" => 53.156, "lng" => 145.23 }
+> port_names = %{ 80 => "http", 443 => "https" }
+> build_flags = %{ target => flags_for(target) }
+> ```
+>
+> The type is `Map[K, V]`. Keys can be any Vixen type — all types are
+> comparable for equality and hashable.
 
 ## Ranges
 
