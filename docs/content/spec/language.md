@@ -509,6 +509,18 @@ insert_anchor_links = "heading"
 > changed. Fields not mentioned are kept from the original. See
 > [type.struct.with] and [type.struct.with-assign].
 
+> r[expr.with.path]
+>
+> Dotted field names in `with` blocks are sugar for nested updates:
+>
+> ```vixen
+> config with { package.name: "new", package.edition: "2024" }
+> // desugars to:
+> config with { :package with { name: "new", edition: "2024" } }
+> ```
+>
+> Paths can be arbitrarily deep: `config with { a.b.c: value }`.
+
 ### Closure expressions
 
 > r[expr.closure]
@@ -545,7 +557,57 @@ insert_anchor_links = "heading"
 > ```
 >
 > `$` and `$N` bind to the nearest enclosing function argument position
-> where a closure is expected.
+> where a closure is expected. When `$` appears in nested calls, it
+> belongs to the innermost one:
+>
+> ```vixen
+> // $ belongs to find, not map:
+> items.map(list.find($ == 2))
+>
+> // To reference the map element, use a named closure:
+> items.map((item) => list.find($ == item))
+> // here $ is find's argument, item is map's argument
+> ```
+
+### Partial application expressions
+
+> r[expr.partial]
+>
+> `@f(args, ..)` partially applies a function, producing a new function
+> with some arguments bound. `..` marks where the remaining positional
+> arguments go and appears exactly once:
+>
+> ```vixen
+> add_two = @add(2, ..)              // Fn(U64) -> U64
+> double = @multiply(.., 2)          // Fn(U64) -> U64
+> both = @clamp(0, .., 255)          // Fn(U64) -> U64
+> ```
+
+> r[expr.partial.keyword]
+>
+> Partial application can bind keyword arguments. Once bound, keyword
+> arguments are sealed — they cannot be overridden by the caller:
+>
+> ```vixen
+> fn compile(src: String, { optimize: Bool = false, loudly: Bool = false }) { ... }
+>
+> loud_compile = @compile(.., loudly: true)  // Fn(String) -> ...
+> // loudly is sealed at true, optimize uses its default
+> ```
+
+> r[expr.partial.passable]
+>
+> A function with keyword arguments cannot be passed as a value. Partial
+> application with `@` closes over keyword arguments, producing a plain
+> `Fn` that can be passed:
+>
+> ```vixen
+> fn greet(name: String, { cheerful: Bool = false }) -> String { ... }
+>
+> items.map(greet)                        // ERROR: greet has keyword args
+> items.map(@greet(.., cheerful: true))   // OK: Fn(String) -> String
+> items.map(@greet(..))                   // OK: cheerful uses default
+> ```
 
 ### Conditional expressions
 
@@ -993,7 +1055,8 @@ insert_anchor_links = "heading"
 >
 > Function types use `Fn(Args) -> Ret` syntax. Only functions with
 > positional arguments can have their type named. Functions with keyword
-> arguments cannot be passed as values.
+> arguments cannot be passed as values — use partial application (`@`)
+> to close over keyword arguments and produce a passable `Fn`.
 
 ## Closures
 
@@ -1500,6 +1563,14 @@ insert_anchor_links = "heading"
 > function bodies, discovers their dataflow graph, and schedules internal
 > computations the same way it schedules top-level ones. Demand propagates
 > all the way down.
+
+### Demand depth limit
+
+> r[eval.demand-depth]
+>
+> The evaluator tracks the depth of the demand chain. If it exceeds a
+> maximum depth, the entire branch is poisoned with a circular dependency
+> error. This prevents infinite recursion and runaway demand loops.
 
 ### Memoization
 
