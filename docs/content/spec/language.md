@@ -19,13 +19,6 @@ insert_anchor_links = "heading"
 > field changed — it shadows the previous binding, it does not mutate
 > anything in place.
 
-> r[lang.value-semantics.rebind]
->
-> The `!` suffix on a method call is sugar for rebinding: `x.method!(args)`
-> means `x = x.method(args)`. It works through field access:
-> `config.tags.append!("new")` means
-> `config = Config { ..config, tags: config.tags.append("new") }`.
-
 > r[lang.value-semantics.universal]
 >
 > Because Vixen has value semantics and no references, every value can be
@@ -98,7 +91,7 @@ insert_anchor_links = "heading"
 >
 > Comparison: `==`, `!=`, `<`, `<=`, `>`, `>=`.
 >
-> Logical: `&&`, `||`.
+> Logical: `&&`, `||`, `!` (prefix).
 >
 > Assignment: `=`.
 >
@@ -139,6 +132,29 @@ insert_anchor_links = "heading"
 > Interpolated strings use backticks: `` `Hello ${name}` ``. Arbitrary
 > expressions are allowed inside `${ }`. There is no bare-identifier
 > shorthand — `${ }` is the only interpolation syntax.
+
+### Operator precedence
+
+> r[lex.precedence]
+>
+> From lowest to highest precedence:
+>
+> | Precedence | Operators          | Associativity | Description           |
+> |------------|--------------------|---------------|-----------------------|
+> | 1          | `\|\|`             | left          | Logical OR            |
+> | 2          | `&&`               | left          | Logical AND           |
+> | 3          | `==` `!=`          | left          | Equality              |
+> | 4          | `<` `<=` `>` `>=`  | left          | Comparison            |
+> | 5          | `..` `..=`         | none          | Range                 |
+> | 6          | `+` `-`            | left          | Additive              |
+> | 7          | `*` `/` `%`        | left          | Multiplicative        |
+> | 8          | unary `-` `!`      | prefix        | Negation, logical NOT |
+> | 9          | `as` `as?` `is`    | left          | Type cast / test      |
+> | 10         | `?`                | postfix       | Fallible              |
+> | 11         | `.`                | left          | Field access / UFCS   |
+> | 12         | `()` `[]`          | postfix       | Call, index           |
+>
+> Assignment (`=`) is a statement, not an expression.
 
 ## Modules
 
@@ -289,8 +305,9 @@ insert_anchor_links = "heading"
 > Vixen uses local type inference. Types flow forward from literals and
 > function return types, and backward from function parameter types.
 > Function signatures are always explicit — parameter types and return
-> types must be annotated. Generic type parameters are inferred from
-> arguments.
+> types must be annotated. Closure parameter types are inferred from
+> context (the expected function signature at the call site). Generic type
+> parameters are inferred from arguments.
 >
 > Inference does not cross function boundaries. Each function is checked
 > independently using its explicit signature.
@@ -408,27 +425,47 @@ insert_anchor_links = "heading"
 > `$` is `$0`. For multi-argument closures, use `$0`, `$1`, `$2`, etc.:
 > `items.reduce($0 + $1)` means `items.reduce((a, b) => a + b)`.
 
-## Methods
+## UFCS
 
-> r[fn.method]
+> r[fn.ufcs]
 >
-> Methods are defined with `fn Type.name(self, ...) -> Ret`. They are
-> called with dot syntax: `name.full()`.
-
-> r[fn.method.static]
+> `x.f(args)` where `f` is not a field of `x` desugars to `f(x, args)`.
+> The dot operator tries field access first; if no field matches, it
+> rewrites to a function call with the left-hand side as the first
+> argument. This is the only call chaining mechanism — there is no pipe
+> operator and no methods.
 >
-> Methods that don't take `self` are static — called on the type, not on
-> a value: `Blob.from_string("hello")`. Static methods are how
-> constructors work.
+> ```vixen
+> items.map($ + 1).filter($ > 3).to_array()
+> // desugars to:
+> to_array(filter(map(items, $ + 1), $ > 3))
+> ```
 
-## Pipe operator
+## Function overloading
 
-> r[fn.pipe]
+> r[fn.overload]
 >
-> The pipe operator `|>` passes the left-hand value as the first argument
-> to the right-hand function call. `x |> f` means `f(x)`. If the
-> right-hand side has arguments, the piped value is inserted as the first
-> argument: `x |> f(a)` means `f(x, a)`.
+> Multiple functions can share the same name if they differ in parameter
+> types. The evaluator selects the matching overload based on the known
+> types of the arguments at the call site.
+
+## Constructors
+
+> r[fn.constructor]
+>
+> A type name can be overloaded as a constructor function. The evaluator
+> distinguishes struct literal syntax (`Name { ... }`) from function call
+> syntax (`Name(...)`) by the delimiter:
+>
+> ```vixen
+> Blob = struct { content: String };
+>
+> fn Blob(s: String) -> Blob { Blob { content: s } }
+> fn Blob(n: U64) -> Blob { Blob { content: n.to_string() } }
+>
+> b = Blob("hello")           // function call — constructor
+> b2 = Blob { content: "x" }  // struct literal — direct construction
+> ```
 
 ## Arrays
 
