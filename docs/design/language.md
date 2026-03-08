@@ -497,13 +497,13 @@ match shape {
 }
 ```
 
-This is essential for `Result` — right now `fail` produces errors, but
-callers need a way to inspect them:
+This is essential for `Result` — `f(x)?` gives you the Result for
+inspection instead of auto-propagating:
 
 ```vixen
-port = match parse_port(input) {
+port = match parse_port(input)? {
   Ok(n) => n,
-  Err(msg) => fail `bad port: ${msg}`,
+  Err(_) => 8080,
 };
 ```
 
@@ -1001,6 +1001,47 @@ explicit departures via `fail`.
 
 `fail` works in any function that returns `Result`. Using `fail` in a function
 that doesn't return `Result` is a compile error.
+
+### Calling fallible functions
+
+When a function returns `Result[T, E]` and is called from another function
+that also returns a compatible `Result`, the error auto-propagates. The
+caller sees `T`, not `Result[T, E]`:
+
+```vixen
+fn deploy(input: String) -> Result[Output, String] {
+  port = parse_port(input);   // port is U64 — Err auto-propagates
+  config = load_config(port); // config is Config — same
+  run(config)                 // auto-widens to Result
+}
+```
+
+The happy path has zero noise. No `?` on every call, no unwrapping.
+
+To **opt into** inspecting the Result instead of auto-propagating, use the
+`?` call syntax — `f(x)?` returns the `Result` value:
+
+```vixen
+fn deploy_lenient(input: String) -> Result[Output, String] {
+  port = parse_port(input)?;  // port is Result[U64, String]
+  match port {
+    Ok(n) => run_on(n),
+    Err(_) => run_on(8080),
+  }
+}
+```
+
+This is the inverse of Rust's convention, but consistent with the rest of
+Vixen:
+
+- `as` — resolves (errors on mismatch), `as?` — returns Option
+- `f(x)` — resolves (auto-propagates error), `f(x)?` — returns Result
+
+The `?` suffix always means "give me the uncertain value instead of forcing
+resolution."
+
+Note: `?` is part of the call syntax, not a postfix operator on the return
+value. `f(x)` and `f(x)?` are two different ways to call the same function.
 
 ## Streams
 
