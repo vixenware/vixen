@@ -1002,16 +1002,17 @@ explicit departures via `fail`.
 `fail` works in any function that returns `Result`. Using `fail` in a function
 that doesn't return `Result` is a compile error.
 
-### Calling fallible functions
+### Auto-propagation
 
-When a function returns `Result[T, E]` and is called from another function
-that also returns `Result`, the error auto-propagates via auto-widening.
-The caller sees `T`, not `Result[T, E]`:
+Any function or method call that returns `Result[T, E]` automatically
+unwraps to `T`. The error propagates to the enclosing function, which
+must return a compatible `Result` — if it doesn't, that's a compile error.
+Error type compatibility uses the same auto-widening that enums already
+have.
 
 ```vixen
 // parse_port returns Result[U64, ParseError]
 // load_config returns Result[Config, IoError]
-// The error type of deploy covers both via auto-widening.
 fn deploy(input: String) -> Result[Output, ParseError | IoError] {
   port = parse_port(input);   // port is U64 — ParseError auto-widens
   config = load_config(port); // config is Config — IoError auto-widens
@@ -1019,17 +1020,13 @@ fn deploy(input: String) -> Result[Output, ParseError | IoError] {
 }
 ```
 
-The happy path has zero noise. No `?` on every call, no unwrapping. Error
-type compatibility uses the same auto-widening that enums already have —
-each call site's error type widens into the function's declared error type.
-
-Calling a fallible function from a function that does **not** return
-`Result` is a compile error. You must either handle the error (via `?`
-call syntax + `match`) or propagate it (by declaring your own return type
-as `Result`).
+The happy path has zero noise. No `?` on every call, no unwrapping. This
+applies uniformly to all calls — freestanding functions and methods alike —
+because methods are just functions.
 
 To **opt into** inspecting the Result instead of auto-propagating, use the
-`?` call syntax — `f(x)?` returns the `Result` value:
+`?` call syntax — `f(x)?` returns the `Result` value instead of unwrapping
+it:
 
 ```vixen
 fn deploy_lenient(input: String) -> Result[Output, ParseError | IoError] {
@@ -1048,10 +1045,8 @@ Vixen:
 - `f(x)` — resolves (auto-propagates error), `f(x)?` — returns Result
 
 The `?` suffix always means "give me the uncertain value instead of forcing
-resolution."
-
-Note: `?` is part of the call syntax, not a postfix operator on the return
-value. `f(x)` and `f(x)?` are two different ways to call the same function.
+resolution." It is part of the call syntax, not a postfix operator on the
+return value.
 
 ### Mapping errors
 
@@ -1076,6 +1071,35 @@ The `?` gives you the Result, `.map_err()` wraps the error with context,
 and the resulting Result auto-propagates back into the happy path. It's
 more verbose than a bare call — that's intentional. The common case (just
 propagate) is free; adding context is where you pay the syntax cost.
+
+### Combining `!` and `?`
+
+The `!` suffix (rebinding) and `?` suffix (suppress auto-propagation)
+compose naturally. Recall that `x.method!(args)` is sugar for
+`x = x.method(args)`. Auto-propagation and `?` apply to the call inside
+the sugar:
+
+```vixen
+fn process(items: Array[String]) -> Result[Array[String], ParseError] {
+  // validate! returns Result[Array[String], ParseError]
+  // auto-propagation unwraps it, ! rebinds items to the Array
+  items.validate!();
+
+  // with ?, the Result is not unwrapped — items becomes
+  // Result[Array[String], ParseError], which is probably not
+  // what you want for rebinding, but it's available if needed
+  items.validate!()?;
+}
+```
+
+`items.validate!()` desugars to `items = items.validate()`, where
+`items.validate()` returns `Result[Array[String], ParseError]` and
+auto-propagation unwraps it to `Array[String]`. The `!` rebinds `items`
+to the unwrapped value.
+
+`items.validate!()?` desugars to `items = items.validate()?`, where `?`
+suppresses auto-propagation. `items` becomes the raw Result. This is the
+escape hatch for when you want to inspect the error on a rebinding call.
 
 ## Streams
 
