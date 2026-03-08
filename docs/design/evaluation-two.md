@@ -63,22 +63,26 @@ None of these operations wait. They are just moving handles around.
 
 ## Forcing
 
-A pending value must resolve when the actual data is needed. These
-operations **force** a pending value:
+Almost nothing in the language forces a pending value. Arithmetic,
+comparison, pattern matching, field access, function calls, string
+interpolation — all of these can operate on pending values. They produce
+new pending values that depend on their inputs. They are just more nodes
+in the dataflow graph.
 
-- Comparing for equality: `a == b`
-- Pattern matching: `match x { ... }`
-- Arithmetic: `a + b`
-- Materializing the final output tree to disk
+Two things force:
 
-These operations do **not** force — they just move handles around:
+1. **Crossing the node boundary.** `exec` sends values to a remote
+   executor. To serialize a value and ship it to another machine, the
+   data must be resolved. This is the primary forcing point — and it's
+   the reason the language was designed around value semantics, universal
+   hashability, and serializability in the first place. Everything about
+   the language exists so that values can cross this boundary.
 
-- Constructing a struct, array, tuple, or map
-- Accessing a field
-- Calling a function
-- Returning a value
-- String interpolation (produces a structured value preserving provenance,
-  not a plain string)
+2. **Materializing the final output.** At the very end, the runtime
+   writes the output tree to disk. The data must be resolved to write
+   bytes.
+
+Everything else just builds up the graph.
 
 ## Streams
 

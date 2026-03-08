@@ -41,19 +41,23 @@ None of these operations wait. They are just moving handles around.
 
 ## What forces a value
 
-A pending value must resolve when the actual data is needed. This happens
-at **inspection points**:
+Every expression is just a node that takes inputs and produces a pending
+value. There are no "inspection points" that force values mid-graph.
+`a + b`, `match x { ... }`, `a == b` — these are all nodes like any
+other. They depend on their inputs and produce a result. If nothing
+demands the result, neither the expression nor its inputs are evaluated.
 
-- Comparing for equality: `a == b`
-- Pattern matching: `match x { ... }`
-- Arithmetic: `a + b`
-- Materializing the final output tree to disk
+Demand flows backward from two boundaries:
 
-Constructing a struct, accessing a field, calling a function, returning a
-value, string interpolation — these are NOT inspection points. They do not
-force anything. (String interpolation produces a structured value that
-preserves provenance, not a plain string — so it doesn't need to resolve
-its parts.)
+- **Final output materialization** — the `Tree` returned by `build()` must
+  be written to disk. This is the root of all demand.
+- **The yield boundary** — when an observer yields a value back to the
+  orchestrator, store handles in that value must resolve so the executor
+  can be released.
+
+Everything else is just demand propagating through the graph. `match x`
+depends on `x` — when something downstream demands the match's result,
+that demand flows into `x`, which flows into whatever produces `x`.
 
 ## Where pending values come from
 
@@ -88,10 +92,19 @@ If multiple inputs to a node are poisoned, the node collects all errors.
 Error reporting is deterministic — the same set of errors regardless of
 timing.
 
-## The yield boundary
+## Memoization
 
-Inside an observer, `commit(path)` returns a handle (a `Blob`). The
-handle is lazy. The actual data movement to the content-addressable store
-happens when the observer yields a value containing the handle back to
-the orchestrator. This is the **materialization boundary** — the point
-where store handles must resolve so the executor can be released.
+When the evaluator demands a node, it first checks whether that node has
+already been computed with the same inputs. If so, it returns the cached
+result without re-evaluating. This is what makes incremental builds work —
+on a rebuild, most nodes have the same inputs as before and their results
+are reused.
+
+The cache key is **(function, arguments)**. Because all values are hashable
+and comparable (universal value properties), any function call can be
+memoized transparently.
+
+Functions with `@ttl` annotations are cached provisionally — the runtime
+revalidates them according to their policy. If the revalidated result is
+the same as the cached result, downstream nodes are not re-evaluated
+(early cutoff).
