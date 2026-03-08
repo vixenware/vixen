@@ -136,6 +136,34 @@ Each iteration reads `acc` from the previous iteration, so they must
 run sequentially. The runtime can see this — `acc` is reassigned in the
 loop body and read in the next iteration.
 
+## Determinism
+
+Concurrent execution must produce deterministic results. Two rules:
+
+**Successful results are deterministic.** If `f(x)` and `g(y)` both
+succeed, the values of `a` and `b` are the same regardless of which
+finished first. This follows from value semantics — there's no shared
+mutable state, so evaluation order cannot affect results.
+
+**Error reporting is deterministic.** If both `f(x)` and `g(y)` fail,
+and `c = h(a, b)` depends on both, `c` is poisoned. The error attached
+to `c` includes **all** upstream failures, not just whichever happened
+to be observed first. The runtime collects all errors from a node's
+inputs before poisoning it.
+
+```vixen
+fn build_both(src: Tree) -> Result[Tree, BuildError] {
+  lib = compile_lib(src);      // fails: missing dependency
+  tests = compile_tests(src);  // fails: syntax error
+  Tree.of({ "lib": lib, "tests": tests })
+}
+// Tree.of is poisoned with both errors, regardless of which
+// finished first. The user sees both failures.
+```
+
+This matters for build systems — a build that fails should always report
+the same set of errors, not a different subset depending on timing.
+
 ## The mental model
 
 Think of Vixen code as a dataflow graph, not a sequence of instructions:

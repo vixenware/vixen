@@ -62,80 +62,135 @@ Because recursive types are disallowed, the value graph is always a DAG.
 Reference counting cannot leak — there are no cycles to break. No garbage
 collector is needed.
 
-## Suspension and scheduling
+## Dataflow evaluation
 
 The language says: pending values look like normal values, and evaluation
-suspends when a pending value is actually needed. There is no `await`.
+only pauses where the actual resolved value is needed. There is no `await`.
 
-### What is a pending value?
+The execution model is **dataflow**, not task-based. The runtime does not
+run a single thread of execution that suspends when it hits a pending value.
+Instead, it builds a dependency graph from the program and schedules nodes
+whose inputs are ready.
 
-At runtime, every value slot can be in one of three states:
+### The dependency graph
 
-- **Resolved** — the value is available. Reading it proceeds immediately.
-- **Pending** — the value is not yet available. It is backed by a slot that
-  will be filled when the producing computation completes.
-- **Poisoned** — the producing computation failed. Touching the value
-  propagates the error.
+The evaluator analyzes a function body and builds a graph:
 
-A pending value is a handle to a slot, same as a resolved value is a handle
-to data. The language doesn't distinguish them — the runtime does.
+- Each **binding** is a node.
+- Each **use of a binding** is an edge from the defining node to the
+  consuming node.
+- A node is **ready** when all its inputs are resolved.
 
-### What happens when code touches a pending value?
+```vixen
+fn build_both(src: Tree) -> Result[Tree, BuildError] {
+  lib = compile_lib(src);
+  tests = compile_tests(src);
+  Tree.of({ "lib": lib, "tests": tests })
+}
+```
 
-The evaluator runs as a **task scheduler**. Each independent chain of
-computation is a task. When a task touches a pending value:
+This produces three nodes:
 
-1. The task **suspends**. Its current state (local bindings, position in the
-   function body) is saved as a continuation.
-2. The task is added to the pending value's **waiters list**.
-3. The scheduler picks another runnable task.
-4. When the pending value resolves, all waiters are made runnable again.
+```
+src (input, already resolved)
+  ├─→ lib = compile_lib(src)
+  └─→ tests = compile_tests(src)
+         ├─→ Tree.of({ "lib": lib, "tests": tests })
+         │
+  lib ───┘
+```
 
-This is cooperative scheduling — tasks yield at pending-value boundaries, not
-at arbitrary points. There is no preemption.
+`lib` and `tests` are both ready immediately (their only input, `src`, is
+resolved). The runtime schedules both. `Tree.of` has two inputs that are
+not yet resolved, so it waits. When both complete, `Tree.of` becomes ready
+and runs.
 
-### Where can suspension happen?
+There is no single thread of execution that "enters `build_both`, calls
+`compile_lib`, suspends, calls `compile_tests`, suspends, then resumes."
+The runtime sees three independent computations and schedules them by
+their dependencies.
 
-Anywhere a value is inspected:
+### Value states
 
-- Reading a field: `x.name` suspends if `x` is pending.
-- Function call: `f(x)` suspends if `x` is pending (arguments must resolve
-  before the call proceeds).
-- Comparison: `x == y` suspends if either is pending.
-- Pattern matching: `match x { ... }` suspends if `x` is pending.
-- String interpolation: `` `${x}` `` suspends if `x` is pending.
+Every value slot is in one of three states:
 
-Suspension can happen inside `for` loop bodies, inside closures passed to
-`.map()`, anywhere. The task boundary is the unit of suspension, not the
-function boundary.
+- **Resolved** — the value is available. Downstream nodes that depend on
+  it can check this input off.
+- **Pending** — the producing node hasn't completed yet. Downstream nodes
+  that depend on it are not yet ready.
+- **Poisoned** — the producing computation failed. Downstream nodes that
+  depend on it will also become poisoned when they would otherwise become
+  ready.
 
-### What is a task?
+### How the scheduler works
 
-A task is a lightweight execution context — closer to a coroutine than a
-thread. Tasks are multiplexed onto a thread pool. The runtime decides how
-many tasks to run concurrently based on available parallelism and executor
-capacity.
+The scheduler maintains a **ready queue** of nodes whose inputs are all
+resolved. It pulls nodes from the queue and evaluates them, potentially
+on different threads. When a node completes:
 
-Tasks are created implicitly by the evaluator when independent work is
-discovered. For example, if a function computes `a = f(x); b = g(y);`
-where `f` and `g` have no data dependency, the runtime may evaluate them
-as separate tasks. This is an optimization, not a language-level concept —
-the program behaves the same whether `f` and `g` run concurrently or
-sequentially.
+1. Its output slot transitions from pending to resolved.
+2. All downstream nodes are checked — if all their inputs are now resolved,
+   they move to the ready queue.
+
+This is the same model as a spreadsheet recalculation engine, or an
+incremental computation framework like picante. No coroutines, no
+continuations, no green threads.
+
+### Graph construction
+
+The dependency graph is built by **static analysis of the function body**.
+The evaluator doesn't need to look through function calls — it only needs
+to see which bindings each statement references:
+
+```vixen
+a = f(x);      // depends on: x
+b = g(y);      // depends on: y
+c = h(a, b);   // depends on: a, b
+```
+
+`a` and `b` are independent (they share no inputs that are pending). `c`
+depends on both. This is visible from the syntax alone — no interprocedural
+analysis required.
+
+For function calls, the runtime doesn't need to know what `f` does
+internally. It treats `f(x)` as a node that takes `x` as input and
+produces a result. If `f` itself contains parallelizable code, that's a
+separate graph constructed when `f`'s body is evaluated.
+
+### Loops
+
+For loops are unrolled into the graph. Each iteration becomes a node (or
+subgraph):
+
+```vixen
+for crate_spec in workspace.crates {
+  compile_crate(src, crate_spec)
+}
+```
+
+Each iteration depends on `src` and one element of `workspace.crates`.
+No iteration depends on another, so they're all independent and can run
+concurrently.
+
+But if the loop body uses `!` rebinding:
+
+```vixen
+acc = 0;
+for item in items {
+  acc += process(item);
+}
+```
+
+Each iteration depends on `acc` from the previous iteration. The graph
+edges enforce sequential execution — no special-casing needed.
 
 ### No explicit concurrency primitives
 
 There is no `spawn`, no `async`, no `await`, no channels. Parallelism
-comes from two sources:
+comes from the dependency graph. The user writes sequential-looking code
+that describes what depends on what. The runtime recovers the parallelism.
 
-1. **Data independence** — the scheduler runs independent computations in
-   parallel when possible.
-2. **`exec`** — each exec runs on an executor, potentially a separate
-   machine. Multiple execs can run concurrently.
-
-The user writes sequential-looking code. The runtime extracts parallelism
-from the dependency structure. See `concurrency.md` for concrete examples
-of when parallelism emerges from sequential-looking code.
+See `concurrency.md` for more concrete examples.
 
 ## Exec internals
 
