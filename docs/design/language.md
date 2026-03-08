@@ -1441,10 +1441,11 @@ policy is. The runtime handles the rest.
 
 A Vixen build starts with a `build.vixen` file at the repository root. The
 entry point is a function that receives the working directory as a `Tree`,
-the command line arguments, and the process environment, and returns a `Tree`:
+the command line arguments, and the process environment, and returns a
+`Result[Tree, BuildError]`:
 
 ```vixen
-fn build(src: Tree, args: Array[String], env: Map[String, String]) -> Tree {
+fn build(src: Tree, args: Array[String], env: Map[String, String]) -> Result[Tree, BuildError] {
   std.rust.workspace(src, args, env)
 }
 ```
@@ -1455,10 +1456,15 @@ fn build(src: Tree, args: Array[String], env: Map[String, String]) -> Tree {
   Vixen code decides how to interpret them.
 - `env` — the process environment as a `Map[String, String]`
 
-The returned `Tree` is the build output. The runtime materializes it to disk —
-for a Rust build, this would be a tree containing `target/debug/foo`,
-`target/release/libbar.rlib`, etc. The runtime diffs what's already on disk
-with the output tree and writes only what changed.
+Because the entry point returns `Result`, fallible calls anywhere in the
+build graph can auto-propagate errors all the way up. The runtime handles
+presenting the error to the user — formatting the error chain, showing
+which `exec` failed, what depended on it, etc.
+
+On success, the returned `Tree` is the build output. The runtime
+materializes it to disk — for a Rust build, this would be a tree containing
+`target/debug/foo`, `target/release/libbar.rlib`, etc. The runtime diffs
+what's already on disk with the output tree and writes only what changed.
 
 There is no separate planning phase that enumerates all possible targets.
 The `args` tell the build what's demanded (`--bin foo`, `--release`, etc.),
@@ -1469,9 +1475,9 @@ produce the requested outputs is ever evaluated.
 
 If no `build.vixen` exists, Vixen looks for a `Cargo.toml`. If found, it
 evaluates as if the thin build file above were present — calling
-`std.rust.workspace` with the working directory, CLI args, and environment.
-Target selection
-uses the same flags as cargo: `--bin`, `--lib`, `--package`, `--example`,
+`std.rust.workspace` with the working directory, CLI args, and environment,
+returning a `Result[Tree, BuildError]`. Target selection uses the same
+flags as cargo: `--bin`, `--lib`, `--package`, `--example`,
 `--test`, `--release`, `--target`, `--features`, etc.
 
 This means `vx build` is a drop-in replacement for `cargo build` on any
