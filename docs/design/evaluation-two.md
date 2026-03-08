@@ -61,17 +61,17 @@ You can freely:
 
 None of these operations wait. They are just moving handles around.
 
-## Inspection points
+## Forcing
 
-A pending value must resolve when the actual data is needed. This happens
-at **inspection points**:
+A pending value must resolve when the actual data is needed. These
+operations **force** a pending value:
 
 - Comparing for equality: `a == b`
 - Pattern matching: `match x { ... }`
 - Arithmetic: `a + b`
 - Materializing the final output tree to disk
 
-These are NOT inspection points — they do not force anything:
+These operations do **not** force — they just move handles around:
 
 - Constructing a struct, array, tuple, or map
 - Accessing a field
@@ -107,7 +107,7 @@ element 3 first.
 // compile_crate returns a stream of artifacts
 // .map applies build_artifact to each one
 // results arrive as each build completes, not in source order
-outputs = crates.map((c) => compile(c));
+outputs = crates.map(compile($));
 ```
 
 This means `.map(f)` over a stream is concurrent — each application of
@@ -119,10 +119,10 @@ available elements and resources.
 returns true. Same as `.map` — no ordering guarantee, concurrent evaluation
 of the predicate.
 
-`.find(pred)` returns the first element where `pred` returns true. "First"
-here means first in stream order (the order the producer yields), not
-first to be evaluated. The result is a pending value that resolves when a
-matching element is found.
+`.find(pred)` returns whichever matching element resolves first. If
+multiple elements match, the result is non-deterministic — use `.find()`
+when you expect exactly one match. The result is a pending value that
+resolves when any matching element is found.
 
 ## Poisoned values
 
@@ -130,8 +130,7 @@ When a stream's producer fails (e.g., a process crashes in an `exec`),
 the stream terminates. Any pending value derived from that stream becomes
 **poisoned**.
 
-A poisoned value propagates its error at inspection points — the same
-places where a pending value would force resolution.
+A poisoned value propagates its error when forced — the same operations that force a pending value.
 
 If multiple inputs to a computation are poisoned, all errors are collected.
 Error reporting is deterministic — the same set of errors regardless of
