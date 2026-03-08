@@ -69,14 +69,13 @@ references, every value can be compared for equality, hashed, and
 serialized/deserialized. This is essential — closures and their captured values
 must be serializable to ship to remote executors.
 
-**Pure and impure code.** Most Vixen code is pure — it transforms values and
-cannot compromise the build. Impure code has access to operations that affect
-hermeticity and cacheability: reading process output, committing artifacts to
-the store. This is Vixen's equivalent of Rust's safe/unsafe split. Impure
-functions are explicitly marked with `impure fn`, and impure built-ins (like
-`commit`) can only be called from impure contexts. Observer closures are
-impure. Orchestrator code is pure. `exec` is the boundary between the two
-worlds.
+**Everything is demand-driven.** All operations in Vixen are lazy by default —
+a value is only computed if something downstream needs it. There is no
+pure/impure distinction in the language. Operations like `commit` return
+handles that are materialized when demanded, not when called. The yield
+boundary (where values cross from executor to orchestrator) is the point
+where store handles must resolve. This keeps executor lifecycles clean —
+once all yielded values are materialized, the executor can be released.
 
 ## Conventions
 
@@ -1245,7 +1244,7 @@ exec[T](
   args: Array[...],
   env: Map[String, ...],
   mounts: Map[Path, Mount],
-  observer: impure Fn(Process) -> Stream[T],
+  observer: Fn(Process) -> Stream[T],
 ) -> Stream[T]
 ```
 
@@ -1264,14 +1263,18 @@ The observer receives a `Process` handle and returns a stream of events:
 - `process.stdout` — standard output of the running process
 - `process.stderr` — standard error of the running process
 
-`commit` is a separate top-level built-in that commits a path from the
-virtual filesystem to a shared content-addressable store, returning a `Blob`
-(a Blake3 hash reference). The store is ambient — both orchestrator and
-executor have access to it. Only lightweight references (Blake3 hashes) flow
-between them.
+`commit` returns a handle (a `Blob` — a Blake3 hash reference) promising
+to commit a path from the virtual filesystem to the content-addressable
+store. The actual data movement is lazy — it happens when the handle is
+demanded, which in practice means when the observer yields a value
+containing the handle back to the orchestrator. This is the materialization
+boundary: yielded values must be in the store so the executor can be
+released. The store is ambient — both orchestrator and executor have
+access to it. Only lightweight references (Blake3 hashes) flow between
+them.
 
 ```vixen
-impure fn commit(path: Path) -> Blob
+fn commit(path: Path) -> Blob
 ```
 
 ### Observer patterns
@@ -1350,12 +1353,12 @@ continues.
 ### Memoization and caching
 
 Because all values are hashable and comparable, the runtime can memoize any
-pure function call transparently. A pure function called with the same
-arguments always produces the same result — the runtime caches it
-automatically, keyed on (function, arguments).
+function call transparently. A function called with the same arguments
+always produces the same result — the runtime caches it automatically,
+keyed on (function, arguments).
 
-`exec` is a special case because it is impure. Its cache key includes the
-runner fingerprint in addition to the declared inputs: **(args, env, mounts,
+`exec` is a special case. Its cache key includes the runner fingerprint
+in addition to the declared inputs: **(args, env, mounts,
 observer + captures, runner fingerprint)**. If all of these match a previous
 execution, the runtime replays the cached stream of events without running the
 process again.
@@ -1377,8 +1380,7 @@ a mutable resource whose answer changes over time.
 The core principle: **access to mutable resources is cacheable with
 revalidation, and unchanged results are contained by early cutoff.**
 
-The problem is not "impurity" and it does not need to be contagious. The
-problem is that the evaluator cannot assume the result stays valid forever
+The problem is that the evaluator cannot assume the result stays valid forever
 from the explicit inputs alone. The solution is a revalidation policy:
 
 - The function runs and produces a result
