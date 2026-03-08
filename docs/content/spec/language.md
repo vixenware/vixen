@@ -42,14 +42,103 @@ insert_anchor_links = "heading"
 > type declaration (UpperCamelCase), `name = Name { ... }` is a binding
 > (snake_case). The casing rule makes them unambiguous.
 
-> r[lang.comments]
->
-> Comments are `//` (line) and `/* */` (block).
+## Lexical grammar
 
-> r[lang.semicolons]
+### Keywords
+
+> r[lex.keywords]
+>
+> Reserved words: `fn`, `struct`, `enum`, `newtype`, `of`, `match`, `if`,
+> `else`, `is`, `as`, `import`, `return`, `fail`, `true`, `false`.
+>
+> These cannot be used as binding or type names.
+
+### Identifiers
+
+> r[lex.ident]
+>
+> Identifiers start with a letter or underscore and continue with letters,
+> digits, and underscores. `_` alone is the wildcard pattern — it is not a
+> valid binding name.
+
+> r[lex.ident.case]
+>
+> UpperCamelCase identifiers denote types. snake_case identifiers denote
+> bindings. The evaluator enforces this — using the wrong case is an error.
+> This replaces a `type` keyword: `Name = struct { ... }` is a type
+> declaration because `Name` is UpperCamelCase.
+
+### Whitespace
+
+> r[lex.whitespace]
+>
+> Whitespace (spaces, tabs, newlines) separates tokens but is otherwise
+> insignificant. There is no indentation sensitivity.
+
+### Comments
+
+> r[lex.comments]
+>
+> Line comments begin with `//` and extend to end of line. Block comments
+> begin with `/*` and end with `*/`. Block comments nest —
+> `/* /* inner */ outer */` is one comment.
+
+### Semicolons
+
+> r[lex.semicolons]
 >
 > Statements are separated by semicolons. In blocks, the last expression
 > is what the block evaluates to (this includes functions).
+
+### Operators and delimiters
+
+> r[lex.operators]
+>
+> Arithmetic: `+`, `-`, `*`, `/`, `%`.
+>
+> Comparison: `==`, `!=`, `<`, `<=`, `>`, `>=`.
+>
+> Logical: `&&`, `||`.
+>
+> Assignment: `=`.
+>
+> Range: `..`, `..=`.
+>
+> Arrow: `=>` (match arms, short closures), `->` (return types).
+>
+> Dot: `.` (field access, UFCS function calls).
+>
+> Other: `?` (fallible suffix), `@` (pattern binding, attributes), `:` (type
+> annotations, field-value pairs, enum aliases).
+
+> r[lex.delimiters]
+>
+> Delimiters: `(` `)`, `[` `]`, `{` `}`.
+
+### Numeric literals
+
+> r[lex.numeric]
+>
+> Integer literals are sequences of digits, optionally separated by
+> underscores for readability: `1_000_000`. They default to `U64`. A type
+> suffix selects a different type: `4_I64`, `3_F64`.
+>
+> Float literals contain a decimal point: `3.14`, `0.5`. They default to
+> `F64`.
+
+### String literals
+
+> r[lex.string]
+>
+> String literals are enclosed in double quotes: `"hello"`. Escape
+> sequences: `\\`, `\"`, `\n`, `\t`, `\r`, `\0`, `\u{...}` (Unicode code
+> point).
+
+> r[lex.string.interpolation]
+>
+> Interpolated strings use backticks: `` `Hello ${name}` ``. Arbitrary
+> expressions are allowed inside `${ }`. There is no bare-identifier
+> shorthand — `${ }` is the only interpolation syntax.
 
 ## Modules
 
