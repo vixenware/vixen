@@ -1,34 +1,56 @@
 # Vixen evaluation model
 
-Fundamental truths about how Vixen evaluates programs.
-
 ## Demand-driven dataflow
 
-Vixen uses demand-driven dataflow evaluation. The computation forms a
-dataflow graph — nodes are computations, edges are data dependencies.
-But the graph is not built upfront and executed eagerly. It is discovered
-lazily as evaluation proceeds.
+Vixen uses demand-driven dataflow evaluation.
 
-Evaluation starts from what is demanded — the output `Tree` that the build
-must produce. To evaluate a node, the evaluator looks at its dependencies
-and evaluates those first. If a node has multiple independent dependencies,
-they can be evaluated concurrently. If a node is never needed by anything
-downstream of the demand, it is never evaluated.
+The runtime calls `build`. It needs the return value. That's the demand.
+Everything flows backward from there.
 
-A binding that is never read is never evaluated. A function that is never
-called is never entered. Only the subgraph reachable from the demanded
-output is ever computed.
+```vixen
+fn build(src: Tree, args: Array[String], env: Map[String, String]) -> Result[Tree, BuildError] {
+  a = compile_crate_a(src);
+  b = compile_crate_b(src);
+  output = link(a, b);
+  Tree.of({ "target": output })
+}
+```
 
-## Values and pending-ness
+To produce the return value, `Tree.of` needs `output`. To produce `output`,
+`link` needs `a` and `b`. To produce `a`, `compile_crate_a` needs `src`.
+Same for `b`. `src` is already resolved — it was passed in. So the evaluator
+enters both `compile_crate_a` and `compile_crate_b`, discovers they each
+do an `exec`, gets pending values back for `a` and `b`. Those execs run
+concurrently. `link` has two pending inputs — it doesn't get entered until
+both resolve. When they do, `link` runs, `Tree.of` runs, `build` returns.
 
-Pending is a property of a **value**, not of a binding.
+## Where concurrency comes from
+
+There are no concurrency primitives in Vixen. No `spawn`, no `async`, no
+`await`, no channels. Concurrency comes from the structure of expressions.
+
+Any expression with multiple independent sub-expressions creates
+concurrency. The evaluator demands all sub-expressions, discovers they
+are independent, and evaluates them concurrently:
+
+- Function calls: `link(a, b)` — both arguments concurrently.
+- Array literals: `[f(x), g(y), h(z)]` — all elements concurrently.
+- Struct literals: `Foo { a: f(x), b: g(y) }` — all fields concurrently.
+- Tuple literals: `(f(x), g(y))` — all elements concurrently.
+- Map literals: `{ "k1": f(x), "k2": g(y) }` — all values concurrently.
+
+The structure of the code is the concurrency model. No annotations needed.
+
+## Pending values
+
+Pending is a property of a **value**, not of a binding or a type.
 
 A value is either resolved (the data is available) or pending (the data
-is not yet available). Any value of any type can be pending — scalars,
-structs, arrays, all of them. A struct can exist with some fields resolved
-and some fields pending — the struct itself is not "pending," it is a
-struct. You can access its fields. If you access a resolved field, you
-get the data. If you access a pending field, you get a pending value.
+is not yet available). Any value of any type can be pending. A struct can
+exist with some fields resolved and some fields pending — the struct itself
+is not "pending," it is a struct. You can access its fields. If you access
+a resolved field, you get the data. If you access a pending field, you get
+a pending value.
 
 You can freely:
 
@@ -39,70 +61,106 @@ You can freely:
 
 None of these operations wait. They are just moving handles around.
 
-## What forces a value
+## Forcing
 
-Every expression is just a node that takes inputs and produces a pending
-value. There are no "inspection points" that force values mid-graph.
-`a + b`, `match x { ... }`, `a == b` — these are all nodes like any
-other. They depend on their inputs and produce a result. If nothing
-demands the result, neither the expression nor its inputs are evaluated.
+Almost nothing in the language forces a pending value. Arithmetic,
+comparison, pattern matching, field access, function calls, string
+interpolation — all of these can operate on pending values. They produce
+new pending values that depend on their inputs. They are just more nodes
+in the dataflow graph.
 
-Demand flows backward from two boundaries:
+Two things force:
 
-- **Final output materialization** — the `Tree` returned by `build()` must
-  be written to disk. This is the root of all demand.
-- **The yield boundary** — when an observer yields a value back to the
-  orchestrator, store handles in that value must resolve so the executor
-  can be released.
+1. **Crossing the node boundary.** `exec` sends values to a remote
+   executor. To serialize a value and ship it to another machine, the
+   data must be resolved. This is the primary forcing point — and it's
+   the reason the language was designed around value semantics, universal
+   hashability, and serializability in the first place. Everything about
+   the language exists so that values can cross this boundary.
 
-Everything else is just demand propagating through the graph. `match x`
-depends on `x` — when something downstream demands the match's result,
-that demand flows into `x`, which flows into whatever produces `x`.
+2. **Materializing the final output.** At the very end, the runtime
+   writes the output tree to disk. The data must be resolved to write
+   bytes.
 
-## Where pending values come from
+Everything else just builds up the graph.
 
-Pending values come from **streams**. Any function that returns
-`Stream[T]` and uses `yield` produces values over time. Operations on
-a stream (like `find`) return pending values — handles to data that
-hasn't been produced yet.
+## Streams
 
-`exec` is one way to get a stream, but it's not special — it's a built-in
-that happens to return `Stream[T]`. User code can create streams with
-`yield` in any function that returns `Stream[T]`.
+A stream is a value that produces other values over time. A stream has a
+`.next()` method that returns `Option[T]` — the next value when it becomes
+available, or `None` when the stream is exhausted.
 
-## The dataflow graph
+Each yielded value is a separate node in the dataflow graph. It becomes
+available when its producer yields it.
 
-Nodes are computations — function calls, `exec` invocations, expressions
-that produce values. Edges are data dependencies between them. A node can
-be evaluated when its inputs are available. "Available" does not mean fully
-resolved — a struct with pending fields is available, an array with pending
-elements is available. It just means the value exists.
+Streams come from any function that returns `Stream[T]` and uses `yield`.
+`exec` is one way to get a stream — it's a built-in that returns
+`Stream[T]` — but streams are a general concept.
 
-Nodes with no dependencies between them can be evaluated concurrently.
+## Stream combinators
+
+Stream combinators return new streams. The key property: **stream
+combinators do not impose ordering.**
+
+`.map(f)` applies `f` to each element of the input stream and yields the
+results. But results are yielded as they become available, not in input
+order. If element 3 resolves before element 1, the output stream yields
+element 3 first.
+
+```vixen
+// compile_crate returns a stream of artifacts
+// .map applies build_artifact to each one
+// results arrive as each build completes, not in source order
+outputs = crates.map(compile($));
+```
+
+This means `.map(f)` over a stream is concurrent — each application of
+`f` is an independent computation. The stream is the source of work, and
+the evaluator runs as many applications of `f` concurrently as there are
+available elements and resources.
+
+`.filter(pred)` applies `pred` to each element and yields those where it
+returns true. Same as `.map` — no ordering guarantee, concurrent evaluation
+of the predicate.
+
+`.find(pred)` returns whichever matching element resolves first. If
+multiple elements match, the result is non-deterministic — use `.find()`
+when you expect exactly one match. The result is a pending value that
+resolves when any matching element is found.
 
 ## Poisoned values
 
 When a stream's producer fails (e.g., a process crashes in an `exec`),
 the stream terminates. Any pending value derived from that stream becomes
 **poisoned**.
-A poisoned value propagates its error when demand reaches it — at the
-same boundaries where any pending value would be forced.
 
-If multiple inputs to a node are poisoned, the node collects all errors.
+A poisoned value propagates its error when forced — the same operations that force a pending value.
+
+If multiple inputs to a computation are poisoned, all errors are collected.
 Error reporting is deterministic — the same set of errors regardless of
 timing.
 
+## The evaluator enters functions
+
+When a computation is demanded, the evaluator enters the function body.
+It has to — there's no other way to discover whether the result is ready
+or pending, or what the internal dependency structure looks like.
+
+The evaluator does not treat functions as opaque nodes. It walks into them,
+discovers their dataflow graph, and schedules their internal computations
+the same way it schedules top-level ones. Demand propagates all the way
+down.
+
 ## Memoization
 
-When the evaluator demands a node, it first checks whether that node has
-already been computed with the same inputs. If so, it returns the cached
-result without re-evaluating. This is what makes incremental builds work —
-on a rebuild, most nodes have the same inputs as before and their results
-are reused.
+When the evaluator demands a function call, it first checks whether that
+call has already been computed with the same inputs. If so, it returns the
+cached result without re-entering the function. The cache key is
+**(function, arguments)**. Because all values are hashable and comparable,
+any function call can be memoized transparently.
 
-The cache key is **(function, arguments)**. Because all values are hashable
-and comparable (universal value properties), any function call can be
-memoized transparently.
+This is what makes incremental builds work — on a rebuild, most calls have
+the same inputs as before and their results are reused.
 
 Functions with `@ttl` annotations are cached provisionally — the runtime
 revalidates them according to their policy. If the revalidated result is
