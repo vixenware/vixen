@@ -85,8 +85,8 @@ Nodes with no dependencies between them can be evaluated concurrently.
 When a stream's producer fails (e.g., a process crashes in an `exec`),
 the stream terminates. Any pending value derived from that stream becomes
 **poisoned**.
-A poisoned value propagates its error at inspection points — the same
-places where a pending value would force resolution.
+A poisoned value propagates its error when demand reaches it — at the
+same boundaries where any pending value would be forced.
 
 If multiple inputs to a node are poisoned, the node collects all errors.
 Error reporting is deterministic — the same set of errors regardless of
