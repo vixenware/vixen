@@ -218,6 +218,114 @@ The type drives deserialization — field names map to keys, `Option` fields
 are optional, sum types handle polymorphic values (like `DependencySpec`
 being either a string or a table in TOML).
 
+### Annotations
+
+Annotations use the `@` prefix and control how types map to serialized formats.
+
+**`@rename`** — rename a single field or variant:
+
+```vixen
+CargoToml = struct {
+  @rename("dev-dependencies")
+  dev_dependencies: Map[String, DependencySpec]?,
+};
+```
+
+**`@rename_all`** — rename all fields or variants in a container. Applied to
+the type itself:
+
+```vixen
+@rename_all("kebab-case")
+HttpHeaders = struct {
+  content_type: String?,    // serialized as "content-type"
+  cache_control: String?,   // serialized as "cache-control"
+};
+```
+
+Supported conventions: `"snake_case"`, `"camelCase"`, `"PascalCase"`,
+`"kebab-case"`, `"SCREAMING_SNAKE_CASE"`.
+
+**`@flatten`** — merge a nested struct's fields into the parent:
+
+```vixen
+Common = struct {
+  name: String,
+  version: String,
+};
+
+Package = struct {
+  @flatten
+  common: Common,        // name and version appear at the top level
+  edition: String?,
+};
+```
+
+So `{ "name": "foo", "version": "1.0", "edition": "2021" }` deserializes
+into a `Package` — `name` and `version` are flattened from `Common`.
+
+### Enum tagging
+
+By default, enums are **externally tagged** — the variant name is a wrapper
+key:
+
+```vixen
+Action = enum {
+  Start,
+  Stop,
+  Restart { delay: U64 },
+};
+
+// externally tagged (default):
+// { "Start": null }
+// { "Restart": { "delay": 5 } }
+```
+
+**`@tag`** — internally tagged. The variant name appears as a field inside
+the value:
+
+```vixen
+@tag("type")
+Event = enum {
+  Click { x: F64, y: F64 },
+  Scroll { delta: F64 },
+};
+
+// internally tagged:
+// { "type": "Click", "x": 10.0, "y": 20.0 }
+// { "type": "Scroll", "delta": -3.0 }
+```
+
+**`@tag` with `content`** — adjacently tagged. Variant name and content are
+sibling fields:
+
+```vixen
+@tag("type", content: "data")
+Message = enum {
+  Text(String),
+  Binary(Blob),
+};
+
+// adjacently tagged:
+// { "type": "Text", "data": "hello" }
+// { "type": "Binary", "data": ... }
+```
+
+**`@untagged`** — no tag at all. The deserializer tries each variant in order
+until one matches:
+
+```vixen
+@untagged
+Value = enum {
+  Int(I64),
+  Float(F64),
+  Text(String),
+};
+
+// untagged:
+// 42 → Value.Int(42)
+// "hello" → Value.Text("hello")
+```
+
 ## Control flow
 
 `if`/`else` works like in Rust — no parentheses around the condition, braces
@@ -884,6 +992,75 @@ fingerprinted and tracked: if the toolchain version changes, the cache key
 changes and the result is invalidated. Runner-contributed inputs are not
 visible in the Vixen language — the runner reports its fingerprint and the
 runtime incorporates it into the cache key automatically.
+
+### Mutable resources and revalidation
+
+Not all inputs to a build are stable. A URL with a SHA-256 hash is immutable —
+it can be cached forever. But "what is the current stable Rust version?" reads
+a mutable resource whose answer changes over time.
+
+The core principle: **access to mutable resources is cacheable with
+revalidation, and unchanged results are contained by early cutoff.**
+
+The problem is not "impurity" and it does not need to be contagious. The
+problem is that the evaluator cannot assume the result stays valid forever
+from the explicit inputs alone. The solution is a revalidation policy:
+
+- The function runs and produces a result
+- The result is cached provisionally
+- On a subsequent build, the runtime may re-evaluate the function according
+  to its revalidation policy (TTL, force refresh, etc.)
+- If the result is unchanged, early cutoff prevents downstream recomputation
+- If the result changed, downstream nodes that depend on it are recomputed
+
+This is expressed with annotations on the function:
+
+```vixen
+@ttl("24h")
+fn current_rust_stable() -> String {
+  // fetches from network, returns e.g. "1.78.0"
+}
+```
+
+The `@ttl` annotation tells the runtime: this result is valid for 24 hours.
+After that, re-evaluate. If the new result equals the old one, nothing
+downstream needs to change.
+
+Two kinds of resources:
+
+**Fully stable** — URL + hash, content-addressed. Cached forever. Ordinary
+memoized node:
+
+```vixen
+fn fetch_rustc(version: String, target: String) -> Tree {
+  acquire(
+    `https://static.rust-lang.org/dist/rustc-${version}-${target}.tar.xz`,
+    sha256 = "abc123...",
+  )
+}
+```
+
+**Mutable** — the answer can change. Cached provisionally, revalidated by
+policy. Early cutoff contains the blast radius:
+
+```vixen
+@ttl("1h")
+fn rust_stable_version() -> String {
+  // fetch channel manifest, parse, return version string
+}
+```
+
+Operational questions that become policy knobs:
+
+- Default TTL for mutable queries
+- Whether CI can force a refresh (`vx build --refresh`)
+- Whether local dev can use stale values for speed
+- Whether lockfiles bypass TTL entirely (locked = use this exact value,
+  don't revalidate)
+
+These are runtime/UX decisions, not language semantics. The language just
+marks which functions access mutable resources and what their revalidation
+policy is. The runtime handles the rest.
 
 ## Demand model
 

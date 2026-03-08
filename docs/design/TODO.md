@@ -1,18 +1,21 @@
 # Vixen design TODO
 
-## Discovered inputs and locking
-The distinction between declared inputs (known before evaluation) and
-discovered inputs (emerge during evaluation). Examples: "what's Rust stable
-right now?", "what Xcode does this executor have?", crates.io index queries.
-All affect cache keys. All need to be lockable for reproducibility. How does
-the language represent these? How are they recorded? How do they interact with
-the cache?
+## Error handling
+What happens when an `exec` fails? When a file doesn't exist in a tree?
+When deserialization fails? Is there a Result type? Do errors propagate
+implicitly? Is there try/catch or something else?
 
-Subsumes the old "network / downloads" and "toolchain acquisition" questions —
-downloading a hashed artifact is straightforward (goes to the store, cacheable
-forever), but resolving *which* artifact to download is the hard part.
+## Closure serialization
+Closures with captured values must be serialized to ship to remote executors.
+What does the wire format look like? How are function references serialized?
+What happens with closures that capture other closures?
 
-## Deserialization annotations
-Parsers are built-in and type-driven (resolved). Open question: what syntax
-for annotations like rename (`dev-dependencies` → `dev_dependencies`),
-defaults, flattening, etc.?
+## Early cutoff implementation
+The revalidation model says "if the result is unchanged, early cutoff prevents
+downstream recomputation." How does equality comparison work for large trees?
+Is it hash-based? What about streams — can you early-cutoff a stream?
+
+## std.rust.workspace internals
+Feature resolution, build scripts, proc macros, cfg handling, edition
+handling, target-specific dependencies. This is where the cargo-replacement
+complexity actually lives.
