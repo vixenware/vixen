@@ -8,7 +8,7 @@ The runtime calls `build`. It needs the return value. That's the demand.
 Everything flows backward from there.
 
 ```vixen
-fn build(src: Tree, args: Array[String], env: Map[String, String]) -> Result[Tree, BuildError] {
+fn build(src: Tree, args: Array[String], env: Map[String, String]) -> Tree {
   a = compile_crate_a(src);
   b = compile_crate_b(src);
   output = link(a, b);
@@ -130,15 +130,20 @@ resolves when any matching element is found.
 
 ## Poisoned values
 
-When a stream's producer fails (e.g., a process crashes in an `exec`),
-the stream terminates. Any pending value derived from that stream becomes
-**poisoned**.
+A node becomes poisoned in two ways:
 
-A poisoned value propagates its error when forced — the same operations that force a pending value.
+- **`fail`** — the code explicitly poisons: `fail "message"`.
+- **Stream termination** — a stream's producer dies (e.g., a process
+  crashes). Pending values derived from that stream become poisoned.
+
+These are the same mechanism. A poisoned value propagates its error
+through the graph — any node that depends on a poisoned value also
+becomes poisoned. The runtime attaches context automatically: what
+function was being evaluated, what its inputs were, what demanded it.
 
 If multiple inputs to a computation are poisoned, all errors are collected.
 Error reporting is deterministic — the same set of errors regardless of
-timing.
+timing. Poisoning is not catchable.
 
 ## The evaluator enters functions
 

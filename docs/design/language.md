@@ -496,16 +496,6 @@ match shape {
 }
 ```
 
-This is essential for `Result` — `f(x)?` gives you the Result for
-inspection instead of auto-propagating:
-
-```vixen
-port = match parse_port(input)? {
-  Ok(n) => n,
-  Err(_) => 8080,
-};
-```
-
 `for` iterates over anything iterable (arrays, ranges, maps):
 
 ```vixen
@@ -969,136 +959,38 @@ c = s as? Shape.Circle;    // Option(Some(Shape.Circle { radius: 5.0 }))
 r = s as? Shape.Rectangle; // Option(None)
 ```
 
-## Result and error handling
+## Errors
 
-`Result` is a built-in enum:
+There is no `Result` type. Vixen has one error model: **poisoning**.
 
-```vixen
-Result[T, E] = enum {
-  Ok(T),
-  Err(E),
-};
-```
-
-A function that returns `Result[T, E]` can return `T` directly — auto-widening
-handles the wrapping:
+`fail` is a keyword that poisons the current computation with a message:
 
 ```vixen
-fn parse_port(s: String) -> Result[U64, String] {
+fn parse_port(s: String) -> U64 {
   n = s.parse_u64();
   if n > 65535 {
     fail `port ${s} out of range`;
   }
-  n  // auto-widens to Result.Ok(n)
+  n
 }
 ```
 
-`fail` is a keyword that produces the error variant. It's the only way to
-return an error — there is no `Err(...)` constructor needed. This keeps the
-happy path clean: you just write normal code and return values. Errors are
-explicit departures via `fail`.
+`fail` works anywhere. The function doesn't need a special return type.
+When `fail` is hit, the current node in the dataflow graph becomes
+poisoned. The runtime automatically attaches context: what function was
+being evaluated, what its inputs were, what demanded it, and the full
+chain back to the build entry point.
 
-`fail` works in any function that returns `Result`. Using `fail` in a function
-that doesn't return `Result` is a compile error.
+Poisoning propagates through the graph. If `parse_port` poisons, any
+node that depends on its result also poisons. No manual error propagation
+needed — the graph handles it.
 
-### Auto-propagation
+There is no recovery from `fail`. If a computation fails, the subgraph
+that depends on it fails. Independent subgraphs are unaffected. The
+runtime reports all failures with full context.
 
-Any function or method call that returns `Result[T, E]` automatically
-unwraps to `T`. The error propagates to the enclosing function, which
-must return a compatible `Result` — if it doesn't, that's a compile error.
-Error type compatibility uses the same auto-widening that enums already
-have.
-
-```vixen
-// parse_port returns Result[U64, ParseError]
-// load_config returns Result[Config, IoError]
-fn deploy(input: String) -> Result[Output, ParseError | IoError] {
-  port = parse_port(input);   // port is U64 — ParseError auto-widens
-  config = load_config(port); // config is Config — IoError auto-widens
-  run(config)                 // auto-widens to Result
-}
-```
-
-The happy path has zero noise. No `?` on every call, no unwrapping. This
-applies uniformly to all calls — freestanding functions and methods alike —
-because methods are just functions.
-
-To **opt into** inspecting the Result instead of auto-propagating, use the
-`?` call syntax — `f(x)?` returns the `Result` value instead of unwrapping
-it:
-
-```vixen
-fn deploy_lenient(input: String) -> Result[Output, ParseError | IoError] {
-  port = parse_port(input)?;  // port is Result[U64, ParseError]
-  match port {
-    Ok(n) => run_on(n),
-    Err(_) => run_on(8080),
-  }
-}
-```
-
-This is the inverse of Rust's convention, but consistent with the rest of
-Vixen:
-
-- `as` — resolves (errors on mismatch), `as?` — returns Option
-- `f(x)` — resolves (auto-propagates error), `f(x)?` — returns Result
-
-The `?` suffix always means "give me the uncertain value instead of forcing
-resolution." It is part of the call syntax, not a postfix operator on the
-return value.
-
-### Mapping errors
-
-To add context to an error, use `?` to get the Result, then `.map_err()`
-to transform it. The transformed Result then auto-propagates normally:
-
-```vixen
-fn deploy(input: String) -> Result[Output, DeployError] {
-  port = parse_port(input)?.map_err((e) => DeployError {
-    message: `failed to parse port from "${input}"`,
-    cause: e,
-  });
-  config = load_config(port)?.map_err((e) => DeployError {
-    message: `failed to load config on port ${port}`,
-    cause: e,
-  });
-  run(config)
-}
-```
-
-The `?` gives you the Result, `.map_err()` wraps the error with context,
-and the resulting Result auto-propagates back into the happy path. It's
-more verbose than a bare call — that's intentional. The common case (just
-propagate) is free; adding context is where you pay the syntax cost.
-
-### Combining `!` and `?`
-
-The `!` suffix (rebinding) and `?` suffix (suppress auto-propagation)
-compose naturally. Recall that `x.method!(args)` is sugar for
-`x = x.method(args)`. Auto-propagation and `?` apply to the call inside
-the sugar:
-
-```vixen
-fn process(items: Array[String]) -> Result[Array[String], ParseError] {
-  // validate! returns Result[Array[String], ParseError]
-  // auto-propagation unwraps it, ! rebinds items to the Array
-  items.validate!();
-
-  // with ?, the Result is not unwrapped — items becomes
-  // Result[Array[String], ParseError], which is probably not
-  // what you want for rebinding, but it's available if needed
-  items.validate!()?;
-}
-```
-
-`items.validate!()` desugars to `items = items.validate()`, where
-`items.validate()` returns `Result[Array[String], ParseError]` and
-auto-propagation unwraps it to `Array[String]`. The `!` rebinds `items`
-to the unwrapped value.
-
-`items.validate!()?` desugars to `items = items.validate()?`, where `?`
-suppresses auto-propagation. `items` becomes the raw Result. This is the
-escape hatch for when you want to inspect the error on a rebinding call.
+For optional things — "try to find this, use a fallback if it's not
+there" — use `Option`, not error handling:
 
 ## Streams
 
@@ -1311,44 +1203,16 @@ When a function call depends on multiple pending values, all of them must
 resolve before the call proceeds. There is no `race` or `select` — the
 runtime implicitly joins on all dependencies.
 
-### Stream errors and poisoned values
+### Stream errors
 
-Errors during `exec` fall into two categories:
+When a stream's producer fails (e.g., a process crashes in an `exec`),
+the stream terminates. Any pending value derived from that stream becomes
+poisoned — the same poisoning mechanism as `fail` (see Errors above).
 
-**Application errors** — the observer's responsibility. The process writes
-to stdout/stderr, the observer parses it, and yields typed events. If `rustc`
-reports a compilation error, the observer sees it in the output stream and
-yields it as a structured event. This is normal data flowing through the
-stream — the consuming code decides what to do with it.
-
-**Process failure** — the process dies unexpectedly (signal, crash, executor
-failure). This is not something the observer can handle — the runtime
-terminates the stream. Any pending value that depended on that stream
-becomes a **poisoned value**.
-
-A poisoned value behaves like a pending value that will never resolve.
-Touching a poisoned value — reading a field, passing it to `exec`, comparing
-it — propagates the error. This uses the same mechanism as implicit
-suspension: just as a pending value suspends when touched, a poisoned value
-fails when touched.
-
-```vixen
-artifacts = exec[RustcArtifact](...);
-metadata = artifacts.find($.kind == "metadata");
-
-// If the process crashes before emitting metadata,
-// `metadata` becomes poisoned. This call does not suspend
-// forever — it fails with the recorded error.
-result = compile_dependent(metadata, lib);
-```
-
-Poisoned values are not catchable. A poisoned value means the build has
-encountered an unrecoverable failure in that subgraph. The runtime collects
-as much context as possible: which `exec` failed, what was running, the
-exit signal, stderr contents at the time of death, and which downstream
-values were poisoned. If multiple independent subgraphs are in flight, only
-the one that depends on the failed process is affected — unrelated work
-continues.
+Application-level errors (e.g., `rustc` reporting a compilation error)
+are the observer's responsibility. The observer parses stdout/stderr and
+can call `fail` with a meaningful message. The runtime attaches the full
+context automatically.
 
 ### Memoization and caching
 
@@ -1445,10 +1309,10 @@ policy is. The runtime handles the rest.
 A Vixen build starts with a `build.vixen` file at the repository root. The
 entry point is a function that receives the working directory as a `Tree`,
 the command line arguments, and the process environment, and returns a
-`Result[Tree, BuildError]`:
+`Tree`:
 
 ```vixen
-fn build(src: Tree, args: Array[String], env: Map[String, String]) -> Result[Tree, BuildError] {
+fn build(src: Tree, args: Array[String], env: Map[String, String]) -> Tree {
   std.rust.workspace(src, args, env)
 }
 ```
@@ -1459,10 +1323,9 @@ fn build(src: Tree, args: Array[String], env: Map[String, String]) -> Result[Tre
   Vixen code decides how to interpret them.
 - `env` — the process environment as a `Map[String, String]`
 
-Because the entry point returns `Result`, fallible calls anywhere in the
-build graph can auto-propagate errors all the way up. The runtime handles
-presenting the error to the user — formatting the error chain, showing
-which `exec` failed, what depended on it, etc.
+If any node in the build graph poisons (via `fail` or process failure),
+the runtime handles it — reporting the error chain with full context:
+what failed, what its inputs were, what demanded it.
 
 On success, the returned `Tree` is the build output. The runtime
 materializes it to disk — for a Rust build, this would be a tree containing
@@ -1479,7 +1342,7 @@ produce the requested outputs is ever evaluated.
 If no `build.vixen` exists, Vixen looks for a `Cargo.toml`. If found, it
 evaluates as if the thin build file above were present — calling
 `std.rust.workspace` with the working directory, CLI args, and environment,
-returning a `Result[Tree, BuildError]`. Target selection uses the same
+returning a `Tree`. Target selection uses the same
 flags as cargo: `--bin`, `--lib`, `--package`, `--example`,
 `--test`, `--release`, `--target`, `--features`, etc.
 
