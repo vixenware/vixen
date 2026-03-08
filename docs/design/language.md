@@ -476,6 +476,27 @@ match color {
 }
 ```
 
+Struct patterns can use `..` to ignore fields you don't care about:
+
+```vixen
+match shape {
+  Circle { radius, .. } => 3.14159 * radius * radius,
+  Rectangle { .. } => 0.0,  // don't need any fields
+}
+```
+
+The `@` operator binds the whole variant while also destructuring it:
+
+```vixen
+match shape {
+  c @ Circle { radius } => {
+    log(`circle: ${radius}`);
+    c  // c is the Shape.Circle value
+  },
+  r @ Rectangle { .. } => r,
+}
+```
+
 This is essential for `Result` — right now `fail` produces errors, but
 callers need a way to inspect them:
 
