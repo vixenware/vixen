@@ -1352,10 +1352,11 @@ continues.
 
 ### Memoization and caching
 
-Because all values are hashable and comparable, the runtime can memoize any
-function call transparently. A function called with the same arguments
-always produces the same result — the runtime caches it automatically,
-keyed on (function, arguments).
+Because all values are hashable and comparable, the runtime can memoize
+function calls transparently. A function without revalidation annotations
+(like `@ttl`) is assumed to be deterministic — same arguments, same result,
+cached forever. Functions with `@ttl` are cached provisionally and
+revalidated according to their policy (see Mutable resources below).
 
 `exec` is a special case. Its cache key includes the runner fingerprint
 in addition to the declared inputs: **(args, env, mounts,
