@@ -89,6 +89,44 @@ unambiguous.
 Comments are `//` and `/*`. Statements are separated by semicolons. In blocks,
 the last expression is what the block evaluates to (this includes functions).
 
+## Modules
+
+`import` is an expression that returns a module value. Since everything in
+Vixen is bound with `name = expr`, importing a module works the same way:
+
+```vixen
+std = import("std");
+helpers = import("./lib/helpers");
+```
+
+A `.vixen` file is a module. Its top-level bindings (including types) are
+the module's exports. There is no visibility modifier — everything at the
+top level is visible to importers.
+
+Access module contents with dots:
+
+```vixen
+std = import("std");
+std.rust.workspace(src, args, env);
+```
+
+Destructuring works too:
+
+```vixen
+{ rust } = import("std");
+rust.workspace(src, args, env);
+```
+
+Three kinds of module sources:
+
+- **Local files** — paths starting with `./` are relative to the current
+  file: `import("./lib/helpers")` loads `./lib/helpers.vixen`.
+- **Standard library** — `import("std")` loads the built-in standard library.
+  `std.rust`, `std.rust.workspace`, etc. are submodules.
+- **External packages** — resolution of non-local, non-std imports is a
+  future concern (registries, lockfiles, versioning — TBD). The mechanism
+  is the same: `import` returns a module value.
+
 ## Scalar types
 
 Vixen supports Scalar types out of the box:
@@ -467,6 +505,46 @@ fn sum(items: Array[U64]) -> U64 {
 }
 ```
 
+## Generics
+
+Users can define generic types and functions. Type parameters use square
+brackets, same as built-in generics like `Array[T]` and `Map[K, V]`:
+
+```vixen
+Pair[A, B] = struct {
+  first: A,
+  second: B,
+};
+
+fn swap[A, B](p: Pair[A, B]) -> Pair[B, A] {
+  Pair { first: p.second, second: p.first }
+}
+
+p = Pair { first: "hello", second: 42 };
+q = swap(p); // Pair[U64, String]
+```
+
+There are no trait bounds. Like C++ templates, a generic type or function is
+checked at instantiation — if `T` doesn't support an operation used in the
+body, the error is reported at the call site where the concrete type is
+supplied:
+
+```vixen
+fn double[T](x: T) -> T {
+  x + x
+}
+
+double(5)       // ok — U64 supports +
+double("hi")    // ok — String supports + (concatenation)
+double(true)    // error: Bool does not support +
+```
+
+This means generic code is not verified in isolation — only concrete
+instantiations are type-checked. The tradeoff is simplicity: no trait
+system, no bounds syntax, no where clauses. For a build system language
+where most generics are simple containers and transformations, this is
+sufficient.
+
 ## Maps
 
 Vixen has map literals:
@@ -617,14 +695,14 @@ Color = enum {
   Blue,
 };
 
-Expr = enum {
-  Literal(F64),
-  Add(Expr, Expr),
-};
-
 Shape = enum {
   Circle { radius: F64 },
   Rectangle { width: F64, height: F64 },
+};
+
+Token = enum {
+  Number(F64),
+  Op(String),
 };
 ```
 
@@ -632,17 +710,22 @@ Each variant is a type under the enum's namespace. `Shape.Circle` is a type,
 and `Shape` is a type. They are distinct. This applies to all variant kinds:
 
 - `Color.Red` — a zero-sized type
-- `Expr.Add` — a tuple type, fields accessed with `.0`, `.1`
+- `Token.Number` — a tuple type, fields accessed with `.0`
 - `Shape.Circle` — a struct type, fields accessed by name (`.radius`)
 
 ```vixen
-node = Expr.Add(Expr(Literal(1.0)), Expr(Literal(2.0)));
-node.0 // the left operand, type: Expr
-node.1 // the right operand, type: Expr
+t = Token.Number(3.14);
+t.0 // 3.14
 
 c = Shape.Circle { radius: 5.0 };
 c.radius // 5.0
 ```
+
+**Recursive types are not allowed.** Because Vixen has value semantics,
+every value must have a finite size. A type like `Expr = enum { Literal(F64),
+Add(Expr, Expr) }` would be infinitely sized — there is no indirection
+(no references, no boxing) to break the cycle. The evaluator rejects
+recursive type definitions.
 
 ### Alias variants
 
@@ -1049,6 +1132,45 @@ result = compile_dependent(metadata, lib);
 When a function call depends on multiple pending values, all of them must
 resolve before the call proceeds. There is no `race` or `select` — the
 runtime implicitly joins on all dependencies.
+
+### Stream errors and poisoned values
+
+Errors during `exec` fall into two categories:
+
+**Application errors** — the observer's responsibility. The process writes
+to stdout/stderr, the observer parses it, and yields typed events. If `rustc`
+reports a compilation error, the observer sees it in the output stream and
+yields it as a structured event. This is normal data flowing through the
+stream — the consuming code decides what to do with it.
+
+**Process failure** — the process dies unexpectedly (signal, crash, executor
+failure). This is not something the observer can handle — the runtime
+terminates the stream. Any pending value that depended on that stream
+becomes a **poisoned value**.
+
+A poisoned value behaves like a pending value that will never resolve.
+Touching a poisoned value — reading a field, passing it to `exec`, comparing
+it — propagates the error. This uses the same mechanism as implicit
+suspension: just as a pending value suspends when touched, a poisoned value
+fails when touched.
+
+```vixen
+artifacts = exec[RustcArtifact](...);
+metadata = artifacts.find($.kind == "metadata");
+
+// If the process crashes before emitting metadata,
+// `metadata` becomes poisoned. This call does not suspend
+// forever — it fails with the recorded error.
+result = compile_dependent(metadata, lib);
+```
+
+Poisoned values are not catchable. A poisoned value means the build has
+encountered an unrecoverable failure in that subgraph. The runtime collects
+as much context as possible: which `exec` failed, what was running, the
+exit signal, stderr contents at the time of death, and which downstream
+values were poisoned. If multiple independent subgraphs are in flight, only
+the one that depends on the failed process is affected — unrelated work
+continues.
 
 ### Memoization and caching
 
