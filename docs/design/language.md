@@ -503,10 +503,7 @@ callers need a way to inspect them:
 ```vixen
 port = match parse_port(input) {
   Ok(n) => n,
-  Err(msg) => {
-    log(`bad port: ${msg}`);
-    fail msg;
-  },
+  Err(msg) => fail `bad port: ${msg}`,
 };
 ```
 
