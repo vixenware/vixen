@@ -153,7 +153,7 @@ newtype Blake3 of String;
 
 hash = blake3_hash_of(something); // of type Blake3
 print_string(hash); // error: expected String, got Blake3
-print_string(hash as String); // error: expected String, got Blake3
+print_string(hash as String); // ok — explicit conversion via `as`
 ```
 
 More on the `as` operator later.
@@ -496,22 +496,6 @@ match shape {
 }
 ```
 
-`for` iterates over anything iterable (arrays, ranges, maps):
-
-```vixen
-for item in [1, 2, 3] {
-  // ...
-}
-
-for i in 0..5 {
-  // i takes values 0, 1, 2, 3, 4
-}
-
-for key, value in some_map {
-  // ...
-}
-```
-
 ## Functions
 
 Freestanding functions can be defined with `fn`:
@@ -562,11 +546,7 @@ In order to describe the type of arrays, Vixen must have generics:
 
 ```vixen
 fn sum(items: Array[U64]) -> U64 {
-  acc = 0
-  for i in items {
-    acc += i
-  }
-  acc
+  items.fold(0, (acc, x) => acc + x)
 }
 ```
 
@@ -627,6 +607,57 @@ jane = Name { first: "Jane", last: "Doe" };
 rsvp = { john: false, jane: true }
 ```
 
+## Combinators
+
+There are no `for` loops in Vixen. Iteration is done through combinators.
+
+`.map()` and `.filter()` always return `Stream`, whether called on an
+Array, Map, or Stream. Every element is an independent concurrent
+computation. Results are yielded as they become available, not in input
+order. See `evaluation.md` for details.
+
+```vixen
+items = [1, 2, 3, 4, 5];
+
+items.map($ * 2)                    // Stream[U64]
+items.filter($ > 3)                 // Stream[U64]
+items.find($ > 3)                   // Some(4)
+items.fold(0, (acc, x) => acc + x)  // 15
+items.any($ > 3)                    // true
+items.all($ > 3)                    // false
+```
+
+To get an array or map back from a stream, use `.to_array()` or `.to_map()`:
+
+```vixen
+doubled = items.map($ * 2).to_array();  // Array[U64] — pending until all resolve
+
+scores = { "alice": 10, "bob": 20, "charlie": 30 };
+boosted = scores.map((k, v) => (k, v * 2)).to_map();  // Map[String, U64]
+```
+
+`.to_array()` and `.to_map()` are methods on `Stream`. The result is
+pending until all elements resolve.
+
+Map combinators pass `(key, value)` pairs to the closure:
+
+```vixen
+scores.filter((k, v) => v > 15).to_map()  // { "bob": 20, "charlie": 30 }
+scores.find((k, v) => v > 15)              // Some(("bob", 20))
+scores.keys()                               // Array[String]
+scores.values()                             // Array[U64]
+```
+
+Stream combinators work the same way:
+
+```vixen
+artifacts = exec[Artifact](...);
+
+artifacts.map(process($))            // Stream[Output]
+artifacts.filter($.kind == "lib")    // Stream[Artifact]
+artifacts.find($.kind == "metadata") // Artifact (pending)
+```
+
 ## The type of functions
 
 Function types use `Fn(Args) -> Ret` syntax:
@@ -659,15 +690,7 @@ e = 0..;          // RangeFrom[U64]
 f = ..;           // RangeFull
 ```
 
-Ranges can be used in `for` loops:
-
-```vixen
-for i in 0..5 {
-  // i takes values 0, 1, 2, 3, 4
-}
-```
-
-Ranges can also be used for slicing arrays:
+Ranges can be used for slicing arrays:
 
 ```vixen
 arr = [10, 20, 30, 40, 50];
@@ -676,43 +699,31 @@ slice = arr[1..4]; // [20, 30, 40]
 
 ## Closures
 
-Functions can be defined as top-level and passed to other functions:
+Functions can be passed to other functions. `.find()` on an array takes a
+predicate and returns the first matching element:
 
 ```vixen
-fn find(haystack: Array[String], predicate: Fn(String) -> Bool) -> String? {
-  for item in haystack {
-    if predicate(item) {
-      return item;
-    }
-  }
-  None
-}
+names = ["alice", "bob", "charlie"];
+found = names.find($.starts_with("ch"));
+// found is Some("charlie")
+```
 
+The `$` is a shorthand for single-argument closures. These are all equivalent:
+
+```vixen
+found = names.find(fn(name) { name.starts_with("ch") });
+found = names.find((name) => name.starts_with("ch"));
+found = names.find($.starts_with("ch"));
+```
+
+Named functions work too:
+
+```vixen
 fn starts_with_ch(name: String) -> Bool {
   name.starts_with("ch")
 }
 
-names = ["alice", "bob", "charlie"];
-found = find(names, starts_with_ch);
-// found is "charlie"
-```
-
-Anonymous functions (closures) work too:
-
-```vixen
-found = find(names, fn(name) { name.starts_with("ch") });
-```
-
-There's a shorter arrow syntax (no pipes like in Rust, parens like in JS):
-
-```vixen
-found = find(names, (name) => name.starts_with("ch"));
-```
-
-And for single-argument closures, `$` refers to the argument:
-
-```vixen
-found = find(names, $.starts_with("ch"));
+found = names.find(starts_with_ch);
 ```
 
 ## Methods
@@ -907,7 +918,7 @@ s = Shape(Circle { radius: 5.0 }); // a Shape
 ## The `as` operator
 
 `as` converts between types. The conversion must succeed — if it doesn't,
-it's an error:
+the node poisons:
 
 ```vixen
 // narrowing an enum to a variant
@@ -939,12 +950,7 @@ Option[T] = enum {
 
 ```vixen
 fn first_even(items: Array[U64]) -> U64? {
-  for item in items {
-    if item % 2 == 0 {
-      return item;
-    }
-  }
-  None
+  items.find($ % 2 == 0)
 }
 ```
 
@@ -994,26 +1000,14 @@ there" — use `Option`, not error handling:
 
 ## Streams
 
-`Stream[T]` is a built-in generic type that produces values of type `T` over
-time. A stream is constructed using `yield`:
+`Stream[T]` is a built-in generic type that produces values of type `T`
+over time. Streams come from `exec` observers, from combinators on other
+streams, or from converting arrays and ranges:
 
 ```vixen
-fn count_up(n: U64) -> Stream[U64] {
-  for i in 0..n {
-    yield i;
-  }
-}
-```
-
-`yield` produces a value into the stream. The function's return type is
-`Stream[T]` where `T` matches the type of the yielded values.
-
-Streams support operations like `find`, `filter`, and `map`:
-
-```vixen
-s = count_up(10);
-evens = s.filter($ % 2 == 0);    // Stream[U64]
-first_big = s.find($ > 5);       // U64 — but may be pending
+s = (0..10).stream();            // Stream[U64] from a range
+evens = s.filter($ % 2 == 0);   // Stream[U64]
+first_big = s.find($ > 5);      // U64 — but may be pending
 ```
 
 A stream operation that produces a single value (like `find`) returns a
