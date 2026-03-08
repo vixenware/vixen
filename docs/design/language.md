@@ -1,7 +1,36 @@
 # Vixen language
 
-Vixen is a strongly typed language. Every value has a type. Vixen has arrays,
-maps, functions, and closures.
+Vixen is a strongly typed language for build systems. Every value has a type.
+Vixen has arrays, maps, functions, and closures.
+
+## Core principles
+
+**Value semantics.** There are no references, no borrowing, no ownership. Every
+value can be used as many times as you want. Nothing is ever consumed or moved.
+Passing a value to a function does not prevent you from using it again. There is
+only `Fn` — no `FnOnce`, no `FnMut`. Iterating over an array does not consume it.
+
+**Demand-driven execution.** There is demand at the top (what the build system
+needs), and evaluation is driven downward from that demand. There is no separate
+planning phase that builds a dependency graph and then an execution phase that
+runs it — dependencies are discovered dynamically as evaluation proceeds. The
+core side effect is `exec`, which runs commands on remote executors (see below).
+Values produced by `exec` may not be immediately available; evaluation implicitly
+suspends until the values it depends on resolve.
+
+**Universal value properties.** Because Vixen has value semantics and no
+references, every value can be compared for equality, hashed, and
+serialized/deserialized. This is essential — closures and their captured values
+must be serializable to ship to remote executors.
+
+**Pure and impure code.** Most Vixen code is pure — it transforms values and
+cannot compromise the build. Impure code has access to operations that affect
+hermeticity and cacheability: reading process output, committing artifacts to
+the store. This is Vixen's equivalent of Rust's safe/unsafe split. Impure
+functions are explicitly marked with `impure fn`, and impure built-ins (like
+`commit`) can only be called from impure contexts. Observer closures are
+impure. Orchestrator code is pure. `exec` is the boundary between the two
+worlds.
 
 ## Conventions
 
@@ -232,26 +261,21 @@ rsvp = { john: false, jane: true }
 
 ## The type of functions
 
-You can only name functions that have only positional arguments:
+Function types use `Fn(Args) -> Ret` syntax:
 
 ```vixen
-// type: Fn[(Array[U64],), U64]
-fn sum(items: Array[U64]) -> U64 { /* ... *? }
+// type: Fn(Array[U64]) -> U64
+fn sum(items: Array[U64]) -> U64 { /* ... */ }
+```
 
+Only functions with positional arguments can have their type named. Functions
+with keyword arguments cannot be passed as values:
+
+```vixen
 // type: cannot be named, cannot take its value / pass it to
 // another function, since it has keyword arguments (and they
 // even have defaults)
 fn greet(name: String, { cheerful: Bool = false }) -> String { /* ... */ }
-```
-
-Open question: special syntax for function types, a-la Rust?
-
-```vixen
-// long, annoying to write/read
-Fn[(Array[U64],), U64]
-
-// peaceful, centered, also annoying to parse
-Fn(Array[U64]) -> U64
 ```
 
 ## Ranges
@@ -479,3 +503,178 @@ s = Shape(Circle { radius: 5.0 });
 c = s as? Shape.Circle;    // Option(Some(Shape.Circle { radius: 5.0 }))
 r = s as? Shape.Rectangle; // Option(None)
 ```
+
+## Streams
+
+`Stream[T]` is a built-in generic type that produces values of type `T` over
+time. A stream is constructed using `yield`:
+
+```vixen
+fn count_up(n: U64) -> Stream[U64] {
+  for i in 0..n {
+    yield i;
+  }
+}
+```
+
+`yield` produces a value into the stream. The function's return type is
+`Stream[T]` where `T` matches the type of the yielded values.
+
+Streams support operations like `find`, `filter`, and `map`:
+
+```vixen
+s = count_up(10);
+evens = s.filter($ % 2 == 0);    // Stream[U64]
+first_big = s.find($ > 5);       // U64 — but may be pending
+```
+
+A stream operation that produces a single value (like `find`) returns a
+potentially pending value. A stream operation that produces multiple values
+(like `filter`, `map`) returns another `Stream`.
+
+## Store types
+
+`Blob` and `Tree` are references to content in a shared content-addressable
+store (keyed by Blake3 hashes). A `Blob` is a single file. A `Tree` is a
+directory with its full structure and filenames preserved.
+
+## Paths
+
+`Path` is its own type — not a newtype of `String`. Root paths come from
+`.at()` on store types, which gives them a location in the VFS (relative
+to the working directory). Sub-paths are built with the `/` operator:
+
+```vixen
+src = src_tree.at("src");          // Path — mount this tree at ./src
+entry = src / "lib.rs";            // Path — ./src/lib.rs
+
+deps = deps_tree.at("deps");      // Path — mount at ./deps
+rlib = deps / "libfoo.rlib";      // Path — ./deps/libfoo.rlib
+
+rmeta = rmeta_blob.at("libdep.rmeta");  // Path — a single file
+```
+
+A `Blob` has no name — `.at()` gives it one. A `Tree` already has names
+inside it — `.at()` sets its mount point.
+
+Paths carry their store references. When a `Path` appears in an `exec`
+argument (via string interpolation or directly), the runtime knows which
+blobs and trees need to be materialized in the VFS.
+
+```vixen
+// the path carries the blob reference + desired name
+arg = `--extern=dep=${rmeta}`;
+
+// the path carries the tree reference + mount point
+entry_arg = `${entry}`;
+```
+
+String interpolation with a `Path` produces a structured value (not a plain
+`String`) that preserves the store dependencies. The exact type of `exec`
+args is an open question, but it must support both plain strings and these
+structured values. The same applies to `env` values — an environment
+variable might define an include path pointing to mounted content.
+
+## Exec
+
+`exec` is the core built-in for running external processes. It runs a command
+on an executor — a sandboxed runner with a virtual filesystem, potentially a
+VM in the cloud.
+
+The executor provides a working directory backed by the VFS. All mount paths
+are relative to this working directory — there are no absolute paths in the
+VFS. The sandbox also provides read-only access to system paths (toolchains
+like Xcode, MSVC, GCC) which are fingerprinted but not controlled by Vixen.
+This design works across Linux, macOS, and Windows without requiring root
+or filesystem namespace control.
+
+```vixen
+// Open question: the exact types for args and env values — they must
+// support both plain strings and structured values carrying store refs.
+exec[T](
+  args: Array[...],
+  env: Map[String, ...],
+  mounts: Map[Path, Mount],
+  observer: impure Fn(Process) -> Stream[T],
+) -> Stream[T]
+```
+
+`exec` is generic over `T`. The observer closure determines `T`, and `exec`
+returns the same `Stream[T]` to the caller.
+
+### The observer closure
+
+The observer runs **on the executor**, not the orchestrator. It is serialized
+along with its captured values and shipped to the executor. A closure cannot
+be sent until all its captures are resolved — attempting to serialize a
+pending value is just another form of depending on it, so it suspends.
+
+The observer receives a `Process` handle and returns a stream of events:
+
+- `process.stdout` — standard output of the running process
+- `process.stderr` — standard error of the running process
+
+`commit` is a separate top-level built-in that commits a path from the
+virtual filesystem to a shared content-addressable store, returning a `Blob`
+(a Blake3 hash reference). The store is ambient — both orchestrator and
+executor have access to it. Only lightweight references (Blake3 hashes) flow
+between them.
+
+```vixen
+impure fn commit(path: Path) -> Blob
+```
+
+### Observer patterns
+
+**Streaming observer** — for tools like `rustc` that emit structured output
+during execution. The observer parses stdout incrementally, commits artifacts
+as they appear, and yields events one at a time. This allows dependents to
+start work early. For example, downstream crates can begin compiling as soon
+as `rustc` emits its metadata file, without waiting for code generation to
+finish.
+
+**Simple observer** — for tools where you only care about the final result.
+The observer waits for the process to exit, commits the output directory,
+and yields a single event.
+
+### Pending values
+
+`exec` returns a `Stream[T]`. Operations on that stream — like `find`,
+`filter`, `map` — produce values that may not be immediately available. Code
+that depends on a pending value implicitly suspends until the value resolves.
+There is no explicit `await` or special syntax.
+
+```vixen
+artifacts = exec[RustcArtifact](...);
+
+metadata = artifacts.find($.kind == "metadata");
+lib = artifacts.find($.kind == "lib");
+
+// this call suspends until both metadata and lib are available
+result = compile_dependent(metadata, lib);
+```
+
+When a function call depends on multiple pending values, all of them must
+resolve before the call proceeds. There is no `race` or `select` — the
+runtime implicitly joins on all dependencies.
+
+### Memoization and caching
+
+Because all values are hashable and comparable, the runtime can memoize any
+pure function call transparently. A pure function called with the same
+arguments always produces the same result — the runtime caches it
+automatically, keyed on (function, arguments).
+
+`exec` is a special case because it is impure. Its cache key includes the
+runner fingerprint in addition to the declared inputs: **(args, env, mounts,
+observer + captures, runner fingerprint)**. If all of these match a previous
+execution, the runtime replays the cached stream of events without running the
+process again.
+
+Most `exec` inputs are declared explicitly. But some come from the runner
+itself — toolchain versions like Xcode, MSVC, GCC, etc. These are not mounted
+or installed by Vixen. They are whatever is on the runner. But they are
+fingerprinted and tracked: if the toolchain version changes, the cache key
+changes and the result is invalidated. Runner-contributed inputs are not
+visible in the Vixen language — the runner reports its fingerprint and the
+runtime incorporates it into the cache key automatically.
