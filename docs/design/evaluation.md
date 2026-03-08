@@ -7,11 +7,11 @@ Fundamental truths about how Vixen evaluates programs.
 Pending is a property of a **value**, not of a binding.
 
 A value is either resolved (the data is available) or pending (the data
-is not yet available). Scalars are always resolved. A struct can exist
-with some fields resolved and some fields pending — the struct itself is
-not "pending," it is a struct. You can access its fields. If you access
-a resolved field, you get the data. If you access a pending field, you
-get a pending value.
+is not yet available). Any value of any type can be pending — scalars,
+structs, arrays, all of them. A struct can exist with some fields resolved
+and some fields pending — the struct itself is not "pending," it is a
+struct. You can access its fields. If you access a resolved field, you
+get the data. If you access a pending field, you get a pending value.
 
 You can freely:
 
