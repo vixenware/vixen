@@ -1,21 +1,19 @@
 # Vixen design TODO
 
-## Error handling
-What happens when an `exec` fails? When a file doesn't exist in a tree?
-When deserialization fails? Is there a Result type? Do errors propagate
-implicitly? Is there try/catch or something else?
+## Closure serialization / executor programs
+Two options for how observer closures run on executors:
 
-## Closure serialization
-Closures with captured values must be serialized to ship to remote executors.
-What does the wire format look like? How are function references serialized?
-What happens with closures that capture other closures?
+**Option A: Serialize closures.** No runtime imports — the whole program is
+statically known. The closure + captured values are serialized, shipped to the
+executor, deserialized, and evaluated. Captures must all be resolved (not
+pending) before serialization.
 
-## Early cutoff implementation
-The revalidation model says "if the result is unchanged, early cutoff prevents
-downstream recomputation." How does equality comparison work for large trees?
-Is it hash-based? What about streams — can you early-cutoff a stream?
+**Option B: Send programs, not closures.** Instead of serializing a closure,
+send a self-contained Vixen program to the executor. The program is loaded and
+evaluated, receiving inputs from the runtime. This means the observer can't
+capture anything — it's a separate program. But it can import shared type
+definitions from the same codebase, so types used by the orchestrator and
+executor stay in sync.
 
-## std.rust.workspace internals
-Feature resolution, build scripts, proc macros, cfg handling, edition
-handling, target-specific dependencies. This is where the cargo-replacement
-complexity actually lives.
+Option A is simpler. Option B is more explicit about the boundary but
+complicates exec's generic type parameter.

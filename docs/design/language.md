@@ -765,6 +765,38 @@ c = s as? Shape.Circle;    // Option(Some(Shape.Circle { radius: 5.0 }))
 r = s as? Shape.Rectangle; // Option(None)
 ```
 
+## Result and error handling
+
+`Result` is a built-in enum:
+
+```vixen
+Result[T, E] = enum {
+  Ok(T),
+  Err(E),
+};
+```
+
+A function that returns `Result[T, E]` can return `T` directly — auto-widening
+handles the wrapping:
+
+```vixen
+fn parse_port(s: String) -> Result[U64, String] {
+  n = s.parse_u64();
+  if n > 65535 {
+    fail `port ${s} out of range`;
+  }
+  n  // auto-widens to Result.Ok(n)
+}
+```
+
+`fail` is a keyword that produces the error variant. It's the only way to
+return an error — there is no `Err(...)` constructor needed. This keeps the
+happy path clean: you just write normal code and return values. Errors are
+explicit departures via `fail`.
+
+`fail` works in any function that returns `Result`. Using `fail` in a function
+that doesn't return `Result` is a compile error.
+
 ## Streams
 
 `Stream[T]` is a built-in generic type that produces values of type `T` over
