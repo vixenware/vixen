@@ -9,7 +9,7 @@ How Vixen implements value semantics without copying everything.
 
 ## Persistent data structures
 
-> r[impl.persistent]
+> i[impl.persistent]
 >
 > The runtime represents compound values (arrays, maps, structs, trees)
 > as persistent (structurally-shared) data structures, reference-counted
@@ -17,7 +17,7 @@ How Vixen implements value semantics without copying everything.
 
 ### Array
 
-> r[impl.array]
+> i[impl.array]
 >
 > An `Array` is backed by a balanced tree (e.g., RRB tree or similar).
 > Cloning is O(1) — it increments a reference count on the root.
@@ -26,7 +26,7 @@ How Vixen implements value semantics without copying everything.
 
 ### Map
 
-> r[impl.map]
+> i[impl.map]
 >
 > A `Map` is backed by a hash-array mapped trie (HAMT) or similar
 > persistent hash map. Same properties: O(1) clone, O(log n)
@@ -34,7 +34,7 @@ How Vixen implements value semantics without copying everything.
 
 ### Struct
 
-> r[impl.struct]
+> i[impl.struct]
 >
 > A `struct` is a fixed-size product type. Cloning is shallow — each
 > field is a reference-counted handle. Updating one field creates a new
@@ -42,7 +42,7 @@ How Vixen implements value semantics without copying everything.
 
 ### Tree
 
-> r[impl.tree]
+> i[impl.tree]
 >
 > A `Tree` (store type) is already structurally shared by nature — it's a
 > merkle tree in the content-addressable store. Cloning is O(1) (copy the
@@ -50,14 +50,14 @@ How Vixen implements value semantics without copying everything.
 
 ### Scalars
 
-> r[impl.scalar]
+> i[impl.scalar]
 >
 > Scalars (`U64`, `I64`, `F64`, `Bool`) are unboxed values. They are
 > copied directly — no reference counting needed.
 
 ### Strings
 
-> r[impl.string]
+> i[impl.string]
 >
 > Strings are reference-counted byte buffers. Small strings may be
 > inlined (small-string optimization). String concatenation produces a
@@ -65,7 +65,7 @@ How Vixen implements value semantics without copying everything.
 
 ### Closures
 
-> r[impl.closure]
+> i[impl.closure]
 >
 > Closures are a function pointer plus a tuple of captured values. The
 > captured values are reference-counted handles, same as struct fields.
@@ -73,7 +73,7 @@ How Vixen implements value semantics without copying everything.
 
 ## Rebinding performance
 
-> r[impl.rebind-perf]
+> i[impl.rebind-perf]
 >
 > `items.append!("new")` is O(log n), not O(n). It creates a new path in
 > the persistent array, sharing the unchanged parts. The rebinding
@@ -82,7 +82,7 @@ How Vixen implements value semantics without copying everything.
 
 ## Cycle-free by design
 
-> r[impl.cycle-free]
+> i[impl.cycle-free]
 >
 > Because recursive types are disallowed, the value graph is always a
 > DAG. Reference counting cannot leak — there are no cycles to break. No
