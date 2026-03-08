@@ -364,7 +364,11 @@ name.full() // "John Doe"
 ## Enums
 
 Vixen has Rust-like enums. The main difference is that each variant is
-an actual type:
+an actual type.
+
+### Variant kinds
+
+Variants can have no payload, a tuple payload, or a struct payload:
 
 ```vixen
 enum Color {
@@ -384,9 +388,6 @@ enum Shape {
 }
 ```
 
-Variants can have no payload (`Color.Red`), a tuple payload (`Expr.Literal(3.0)`),
-or a struct payload (`Shape.Circle { radius: 5.0 }`).
-
 Each variant is a type under the enum's namespace. `Shape.Circle` is a type,
 and `Shape` is a type. They are distinct. This applies to all variant kinds:
 
@@ -403,6 +404,49 @@ c = Shape.Circle { radius: 5.0 };
 c.radius // 5.0
 ```
 
+### Alias variants
+
+In addition to the three payload kinds above, a variant can be an alias for
+an existing type, using colon syntax:
+
+```vixen
+enum Entry {
+  File: Blob,
+  Dir: Tree,
+}
+```
+
+`Entry.File` is an alias for `Blob` — an `Entry.File` value *is* a `Blob`.
+`Entry.Dir` is an alias for `Tree`. This is useful when building enums out
+of types that already exist, giving them new names within the enum.
+
+If you don't need to rename, the `@` shorthand reuses the type name as the
+variant name:
+
+```vixen
+enum Entry {
+  @Blob,
+  @Tree,
+}
+```
+
+This is equivalent to `Blob: Blob, Tree: Tree` — the variant `Entry.Blob`
+is an alias for `Blob`, and `Entry.Tree` is an alias for `Tree`.
+
+### Sum type shorthand
+
+For the common case of "one of these types, no renaming needed," there's
+a one-line form:
+
+```vixen
+enum Entry = Blob | Tree;
+```
+
+This is equivalent to the `@` form above. The variant names are the type
+names.
+
+### Building enum values
+
 To build a variant value (narrow type):
 
 ```vixen
@@ -416,6 +460,8 @@ To build an enum value (wide type), use the enum as a constructor. Inside
 s = Shape(Circle { radius: 5.0 }); // s is of type Shape
 ```
 
+### Auto-widening
+
 A `Shape.Circle` can be passed anywhere a `Shape` is expected:
 
 ```vixen
@@ -426,6 +472,22 @@ fn area(s: Shape) -> F64 {
 // both work:
 area(Shape(Circle { radius: 5.0 }));
 area(Shape.Circle { radius: 5.0 });
+```
+
+More generally, if a variant wraps exactly one type (tuple variant with one
+field, or an alias variant), values of that inner type auto-widen into the
+variant, and from there into the enum. This chains:
+
+```vixen
+enum Entry = Blob | Tree;
+
+// Blob auto-widens to Entry.Blob, which auto-widens to Entry:
+fn process(e: Entry) { /* ... */ }
+process(some_blob); // ok — Blob → Entry.Blob → Entry
+
+// Works in collections too:
+entries = { "src": some_tree, "readme.txt": some_blob };
+// Map[String, Entry] — each value auto-widened
 ```
 
 But the reverse is not true — a function that wants a specific variant only
@@ -439,6 +501,8 @@ fn circumference(c: Shape.Circle) -> F64 {
 circumference(Shape.Circle { radius: 5.0 }); // ok
 circumference(Shape(Circle { radius: 5.0 })); // error: expected Shape.Circle, got Shape
 ```
+
+### Type aliases for variants
 
 If a variant name is used often, a type alias can bring it to the top level:
 
@@ -534,9 +598,19 @@ potentially pending value. A stream operation that produces multiple values
 
 ## Store types
 
-`Blob` and `Tree` are references to content in a shared content-addressable
-store (keyed by Blake3 hashes). A `Blob` is a single file. A `Tree` is a
-directory with its full structure and filenames preserved.
+`Blob` is a single file in the content-addressable store (keyed by Blake3
+hashes). `Tree` is a directory with its full structure and filenames preserved.
+
+There is no separate "local tree" vs "store tree" type. A `Tree` might be
+backed by a local directory on disk, by the CAS, or by a mix. The runtime
+handles materialization transparently. When a `Tree` backed by a local
+directory is needed by an `exec` on a remote executor, the runtime lazily
+hashes and commits only the parts that need to move — content-defined chunking,
+merkle trees, and CAS dedup make the transfer efficient. Only missing chunks
+are uploaded.
+
+The Vixen language never exposes Blake3 hashes. The hash is an implementation
+detail of the store, not a language-level concept.
 
 ## Paths
 
@@ -678,3 +752,56 @@ fingerprinted and tracked: if the toolchain version changes, the cache key
 changes and the result is invalidated. Runner-contributed inputs are not
 visible in the Vixen language — the runner reports its fingerprint and the
 runtime incorporates it into the cache key automatically.
+
+## Demand model
+
+A Vixen build starts with a `build.vixen` file at the repository root. The
+entry point is a function that receives the working directory as a `Tree` and
+the command line arguments as an `Args` value, and returns a `Tree`:
+
+```vixen
+fn build(src: Tree, args: Args) -> Tree {
+  std.rust.workspace(src, args)
+}
+```
+
+The runtime calls `build` with the working directory and the parsed CLI
+arguments. The `src` tree is lazy — it is backed by the local filesystem but
+nothing is hashed or committed to the store until an `exec` actually needs the
+content.
+
+The returned `Tree` is the build output. The runtime materializes it to disk —
+for a Rust build, this would be a tree containing `target/debug/foo`,
+`target/release/libbar.rlib`, etc. The runtime diffs what's already on disk
+with the output tree and writes only what changed.
+
+There is no separate planning phase that enumerates all possible targets.
+The `args` tell the build what's demanded (`--bin foo`, `--release`, etc.),
+and evaluation proceeds lazily from that demand. Only the subgraph needed to
+produce the requested outputs is ever evaluated.
+
+### Cargo compatibility
+
+If no `build.vixen` exists, Vixen looks for a `Cargo.toml`. If found, it
+evaluates as if the thin build file above were present — calling
+`std.rust.workspace` with the working directory and CLI args. Target selection
+uses the same flags as cargo: `--bin`, `--lib`, `--package`, `--example`,
+`--test`, `--release`, `--target`, `--features`, etc.
+
+This means `vx build` is a drop-in replacement for `cargo build` on any
+existing Rust project. No configuration needed.
+
+### Source file discovery
+
+`std.rust.workspace` handles discovering which files belong to a crate. It
+reads `Cargo.toml`, follows conventional paths (`src/`, `tests/`, `benches/`),
+and determines what the crate's inputs are.
+
+Simple globbing is insufficient — crates can pull in arbitrary files via
+`include_bytes!`, `include_str!`, `build.rs`, proc macros, etc. The default
+behavior does its best, but it cannot cover cases that require full macro
+evaluation.
+
+For those cases, users write a `build.vixen` that explicitly declares
+additional inputs. This is the escape hatch: the default works for most crates,
+and custom build files handle the rest.
