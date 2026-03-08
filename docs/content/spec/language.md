@@ -521,6 +521,15 @@ insert_anchor_links = "heading"
 >
 > Paths can be arbitrarily deep: `config with { a.b.c: value }`.
 
+### Duplicate resolution
+
+> r[expr.duplicate]
+>
+> In literals and update/spread expressions, when the same field or key
+> is provided more than once, the last occurrence wins. This applies
+> uniformly to struct literals, struct update (`with`) blocks, spread
+> syntax, map literals, and `.to_map()` with duplicate keys.
+
 ### Closure expressions
 
 > r[expr.closure]
@@ -640,8 +649,10 @@ insert_anchor_links = "heading"
 
 > r[expr.import]
 >
-> `import("path")` is an expression that evaluates to a module value.
-> The argument is a string literal — not a general expression.
+> `import("path")` loads a module and makes its exported names available
+> as a namespace. The argument is a string literal — not a general
+> expression. The result supports dot access and destructuring but is
+> not a first-class value.
 
 ### Type cast expressions
 
@@ -702,15 +713,22 @@ insert_anchor_links = "heading"
 
 > r[lang.modules]
 >
-> `import` is an expression that returns a module value. A `.vixen` file
-> is a module. Its top-level bindings (including types) are the module's
-> exports. There is no visibility modifier — everything at the top level
-> is visible to importers.
+> A `.vixen` file is a module. Its top-level bindings (including types)
+> are the module's exports. There is no visibility modifier — everything
+> at the top level is visible to importers.
+
+> r[lang.modules.namespace]
+>
+> Modules are namespaces, not runtime values. `import("path")` makes
+> the module's exported names available. There is no first-class
+> `Module` object that can be stored in a binding, passed to a function,
+> or compared for equality.
 
 > r[lang.modules.access]
 >
 > Access module contents with dots: `std.rust.workspace(src, args, env)`.
-> Destructuring works too: `{ rust } = import("std")`.
+> Destructuring binds names from the namespace:
+> `{ rust } = import("std")`.
 
 > r[lang.modules.sources]
 >
@@ -1070,6 +1088,15 @@ insert_anchor_links = "heading"
 > arguments cannot be passed as values — use partial application (`@`)
 > to close over keyword arguments and produce a passable `Fn`.
 
+> r[fn.identity]
+>
+> A function value is identified relative to the loaded program image.
+> Top-level functions use a stable symbol identity within that program.
+> Closures use a stable closure-site identity plus their captured
+> values. Memoization keys and serialized callable references are
+> relative to the program fingerprint, not reconstructed from isolated
+> source fragments.
+
 ## Closures
 
 > r[fn.closure]
@@ -1196,9 +1223,12 @@ insert_anchor_links = "heading"
 
 > r[comb.find]
 >
-> `.find(pred)` returns whichever matching element resolves first. The
-> result is `Option[T]`. Because streams are unordered, `.find()` is
-> nondeterministic — different runs may return different elements.
+> `.find(pred)` returns the first element to resolve for which `pred`
+> is true. The result is `Option[T]`. If at most one element can satisfy
+> `pred`, the result is deterministic. Nondeterminism arises only when
+> multiple elements may satisfy `pred`, because any of them may resolve
+> first. `None` is returned only if the stream completes with no
+> matching element.
 
 > r[comb.fold]
 >
@@ -1213,6 +1243,21 @@ insert_anchor_links = "heading"
 > r[comb.all]
 >
 > `.all(pred)` returns `true` if all elements satisfy the predicate.
+
+> r[comb.terminal-race]
+>
+> Stream terminal combinators (`any`, `all`, `find`) resolve on the
+> earliest event that determines their result. Poison is such an event —
+> if poison resolves before a decisive result, the combinator poisons.
+> Once a decisive result resolves, remaining stream events are not
+> observed:
+>
+> - `any`: `true` on first satisfying element; `false` only on clean
+>   completion with none satisfying.
+> - `all`: `false` on first failing element; `true` only on clean
+>   completion with all satisfying.
+> - `find`: `Some` on first matching element; `None` only on clean
+>   completion with none matching.
 
 > r[comb.flat-map]
 >
@@ -1256,6 +1301,13 @@ insert_anchor_links = "heading"
 > ordering to produce a deterministic result. `.to_map()` converts a
 > stream of `(key, value)` pairs into a `Map`. Both are pending until
 > all elements resolve.
+
+> r[comb.collect.ordering]
+>
+> Arrays produced by stream collection operations are canonically
+> ordered using Vixen's universal total ordering. This applies to
+> `.to_array()`, group arrays in `.group_by()`, and both arrays
+> returned by `.partition()`.
 
 > r[comb.map-combinators]
 >
@@ -1599,9 +1651,15 @@ insert_anchor_links = "heading"
 
 > r[eval.demand-depth]
 >
-> The evaluator tracks the depth of the demand chain. If it exceeds a
-> maximum depth, the entire branch is poisoned with a circular dependency
-> error. This prevents infinite recursion and runaway demand loops.
+> The evaluator tracks the depth of the demand chain. Two distinct
+> failure modes exist:
+>
+> - **Circular dependency** — the evaluator detects that a value
+>   transitively demands itself. This is a logic error in the program
+>   and poisons with a circular dependency diagnostic.
+> - **Depth exhaustion** — the demand chain exceeds a maximum depth
+>   without cycling. This is a resource limit and poisons with a
+>   recursion depth diagnostic. The limit is configurable.
 
 ### Memoization
 
@@ -1616,6 +1674,13 @@ insert_anchor_links = "heading"
 > **(args, env, mounts, observer + captures, runner fingerprint)**.
 > Runner-contributed inputs (toolchain versions) are fingerprinted and
 > tracked.
+
+> r[eval.memoization.pending]
+>
+> Only fully resolved values participate in memoization. Pending values
+> are not hashable for cache-key purposes and do not participate in
+> memo table lookup. A function call is memoized only once all its
+> arguments have resolved.
 
 ### Mutable resources
 
