@@ -3,41 +3,779 @@ title = "Specification"
 insert_anchor_links = "heading"
 +++
 
-vixen does not yet publish a frozen, versioned specification. This page captures
-what is currently specified, what is intentionally out of scope, and what is
-still under design.
+# Vixen Language Specification
 
-## Current guarantees
+## Value semantics
 
-The current implementation commits to the following behavior:
+> r[lang.value-semantics]
+>
+> Every value in Vixen has value semantics. There are no references, no
+> borrowing, no ownership. Passing a value to a function does not prevent
+> the caller from using it again. There is only `Fn` — no `FnOnce`, no
+> `FnMut`. Iterating over an array does not consume it.
+>
+> There is no way to observe mutation from another binding. Reassignment
+> (`x.field = val`) is syntactic sugar for creating a new value with that
+> field changed — it shadows the previous binding, it does not mutate
+> anything in place.
 
-- Build orchestration is handled by `vxd`; storage and execution are separate daemons
-- Build artifacts are stored in content-addressed storage
-- Build actions run in a sandboxed virtual filesystem
-- Unsupported project shapes fail explicitly instead of silently degrading
+> r[lang.value-semantics.rebind]
+>
+> The `!` suffix on a method call is sugar for rebinding: `x.method!(args)`
+> means `x = x.method(args)`. It works through field access:
+> `config.tags.append!("new")` means
+> `config = Config { ..config, tags: config.tags.append("new") }`.
 
-## Current support
+> r[lang.value-semantics.universal]
+>
+> Because Vixen has value semantics and no references, every value can be
+> compared for equality, hashed, and serialized/deserialized. Closures and
+> their captured values are serializable.
 
-vixen currently supports a restricted Rust subset. Current support is
-intentionally narrow relative to the long-term goal, and support is expected to
-expand over time as core guarantees harden.
+## Conventions
 
-## Not yet specified
+> r[lang.naming]
+>
+> All types are written in UpperCamelCase. All bindings are written in
+> snake_case. This is enforced by the evaluator. Because of this
+> distinction, there is no `type` keyword — `Name = struct { ... }` is a
+> type declaration (UpperCamelCase), `name = Name { ... }` is a binding
+> (snake_case). The casing rule makes them unambiguous.
 
-These areas are active work and not yet stable:
+> r[lang.comments]
+>
+> Comments are `//` (line) and `/* */` (block).
 
-- Rule language syntax and semantics
-- Full remote/distributed execution behavior
-- Cross-project cache sharing and policy controls
-- Compatibility commitments across future releases
+> r[lang.semicolons]
+>
+> Statements are separated by semicolons. In blocks, the last expression
+> is what the block evaluates to (this includes functions).
 
-## Source of truth today
+## Modules
 
-Until a formal spec is published, use these references:
+> r[lang.modules]
+>
+> `import` is an expression that returns a module value. A `.vixen` file
+> is a module. Its top-level bindings (including types) are the module's
+> exports. There is no visibility modifier — everything at the top level
+> is visible to importers.
 
-- [README](https://github.com/bearcove/vixen)
-- [Internals](/internals/)
-- [Daemon topologies](/daemons/)
+> r[lang.modules.access]
+>
+> Access module contents with dots: `std.rust.workspace(src, args, env)`.
+> Destructuring works too: `{ rust } = import("std")`.
 
-This page will be replaced by a versioned specification once interfaces and
-behavioral guarantees stabilize.
+> r[lang.modules.sources]
+>
+> Three kinds of module sources:
+>
+> - **Local files** — paths starting with `./` are relative to the current
+>   file: `import("./lib/helpers")` loads `./lib/helpers.vixen`.
+> - **Standard library** — `import("std")` loads the built-in standard
+>   library.
+> - **External packages** — resolution of non-local, non-std imports is a
+>   future concern. The mechanism is the same: `import` returns a module
+>   value.
+
+## Scalar types
+
+> r[type.scalar]
+>
+> Vixen has scalar types: `U64`, `I64`, `F64`, `Bool`, `String`.
+
+> r[type.scalar.literals]
+>
+> Integer literals default to `U64`. Float literals default to `F64`.
+> String literals use double quotes. String interpolation uses backticks:
+> `` `Hello ${name}` ``. Explicit type suffixes are supported:
+> `4_U64`.
+
+## Newtypes
+
+> r[type.newtype]
+>
+> `newtype` creates a new type backed by an existing scalar type. The new
+> type requires explicit conversion via `as`:
+>
+> ```vixen
+> newtype Blake3 of String;
+> hash = blake3_hash_of(something); // type Blake3
+> raw = hash as String;             // explicit conversion
+> ```
+
+## Tuples
+
+> r[type.tuple]
+>
+> Vixen has heterogeneous tuples. Field access uses `.0`, `.1`, etc.
+> Tuples can be spread into other tuples: `(1, ..two_three, 4)`.
+> Trailing commas are allowed.
+
+## Structs
+
+> r[type.struct]
+>
+> Structs are defined with `Name = struct { ... }`. The `:` shorthand in
+> construction — `:x` means `x: x` — reuses a binding name as the field
+> name. Spread syntax `..other` copies fields from another value.
+
+> r[type.struct.field-assign]
+>
+> Assigning to a struct field (`name.last = "Wilson"`) is sugar for
+> creating a new struct with that field changed, shadowing the previous
+> binding. This is value semantics — no in-place mutation.
+
+> r[type.struct.nested]
+>
+> Types can be declared inline in field position: `package: Package =
+> struct { ... }`. The nested type lives under the parent's namespace and
+> can be referenced as `CargoToml.Package`.
+
+> r[type.struct.destructure]
+>
+> Structs can be destructured in bindings. The type name is not needed —
+> it is inferred from the right-hand side: `{ first, last } = name`.
+> For enum variants in `match` or `is`, the variant name is always
+> required.
+
+## Enums
+
+> r[type.enum]
+>
+> Vixen has Rust-like enums. Each variant is a type under the enum's
+> namespace. `Shape.Circle` is a type, and `Shape` is a type. They are
+> distinct.
+
+> r[type.enum.variant-kinds]
+>
+> Variants can have no payload, a tuple payload, or a struct payload:
+>
+> - `Color.Red` — zero-sized type
+> - `Token.Number` — tuple type, fields accessed with `.0`
+> - `Shape.Circle` — struct type, fields accessed by name
+
+> r[type.enum.no-recursion]
+>
+> Recursive types are not allowed. Every value must have a finite size.
+> There is no indirection (no references, no boxing) to break cycles.
+
+> r[type.enum.alias]
+>
+> A variant can be an alias for an existing type using colon syntax:
+> `File: Blob`. The `:` shorthand reuses the type name: `:Blob` means
+> `Blob: Blob`.
+
+> r[type.enum.sum-shorthand]
+>
+> `Entry = Blob | Tree` is shorthand for an enum where each variant is
+> an alias named after its type.
+
+> r[type.enum.auto-widen]
+>
+> A variant value auto-widens to the parent enum type when the context
+> expects the enum. This chains through alias variants. The reverse is
+> not true — narrowing requires `as` or `match`.
+
+> r[type.enum.build]
+>
+> To build a variant value (narrow type): `Shape.Circle { radius: 5.0 }`.
+> To build an enum value (wide type), use the enum as a constructor:
+> `Shape(Circle { radius: 5.0 })` — variant names are in scope inside
+> the constructor.
+
+## Generics
+
+> r[type.generic]
+>
+> Type parameters use square brackets: `Pair[A, B]`, `Array[T]`,
+> `Map[K, V]`. Generic types and functions are checked at instantiation,
+> not in isolation — there are no trait bounds. If a concrete type doesn't
+> support an operation used in the body, the error is reported at the call
+> site.
+
+## Type inference
+
+> r[type.inference]
+>
+> Vixen uses local type inference. Types flow forward from literals and
+> function return types, and backward from function parameter types.
+> Function signatures are always explicit — parameter types and return
+> types must be annotated. Generic type parameters are inferred from
+> arguments.
+>
+> Inference does not cross function boundaries. Each function is checked
+> independently using its explicit signature.
+
+## Control flow
+
+### if / else
+
+> r[control.if]
+>
+> `if`/`else` works like in Rust — no parentheses around the condition,
+> braces required. `if`/`else` is an expression — it evaluates to a value.
+
+### match
+
+> r[control.match]
+>
+> `match` branches on a value and binds variables in one step. `match` is
+> an expression. It must be exhaustive — every variant must be covered. A
+> wildcard `_` catches everything else. Struct patterns can use `..` to
+> ignore unneeded fields. The `@` operator binds the whole value while
+> also destructuring it.
+
+> r[control.match.guard]
+>
+> A match arm can have a guard — a boolean condition after `if`:
+> `n if n < 1024 => "privileged"`. The guard is checked after the pattern
+> matches. If the guard is false, the next arm is tried.
+
+> r[control.match.literal]
+>
+> `match` works on any value, not just enums. String and number literals
+> are valid patterns.
+
+> r[control.match.or-pattern]
+>
+> Multiple patterns in one arm, separated by `|`. Or-patterns can include
+> bindings as long as every alternative binds the same names with the same
+> types.
+
+> r[control.match.tuple]
+>
+> `match` works on tuples:
+> `match (status, kind) { (0, "lib") => ..., (code, _) => ... }`.
+
+> r[control.match.nested]
+>
+> Patterns can be nested arbitrarily — a struct pattern can contain
+> literal patterns, other struct patterns, tuple patterns, etc.
+
+### The `is` operator
+
+> r[control.is]
+>
+> `is` tests whether a value matches a pattern, binding variables on
+> success. It replaces `if let` from Rust — Vixen has no `let` keyword.
+> `is` is an expression that evaluates to `Bool`.
+>
+> ```vixen
+> if config.edition is Some(edition) {
+>   use_edition(edition)
+> } else {
+>   use_default()
+> }
+> ```
+
+### Block expressions
+
+> r[control.block]
+>
+> A block `{ ... }` is an expression. The last expression in the block is
+> its value. Bindings inside a block are scoped to that block. Blocks
+> replace `let`/`in` and `where` clauses from other languages.
+
+## Functions
+
+> r[fn.define]
+>
+> Freestanding functions are defined with `fn`. The last expression in the
+> body is the return value. `return` can be used for early exit.
+
+> r[fn.keyword-args]
+>
+> Functions can take keyword arguments after positional arguments:
+> `fn greet(name: String, { cheerful: Bool = false })`. Keyword arguments
+> can have defaults. Functions with keyword arguments cannot be passed as
+> values.
+
+> r[fn.recursion]
+>
+> Recursive functions are allowed. Recursive types are not. Most iteration
+> should use combinators; recursion is available for tree-walking and
+> similar algorithms.
+
+> r[fn.type]
+>
+> Function types use `Fn(Args) -> Ret` syntax. Only functions with
+> positional arguments can have their type named.
+
+## Closures
+
+> r[fn.closure]
+>
+> Closures can be written as `fn(x) { body }` or `(x) => body`.
+
+> r[fn.closure.dollar]
+>
+> `$` is shorthand for the first argument of a closure. `$` works
+> anywhere in an expression, including in function arguments, enabling
+> partial application: `items.map(add($, 1))` means
+> `items.map((x) => add(x, 1))`.
+
+> r[fn.closure.numbered]
+>
+> `$` is `$0`. For multi-argument closures, use `$0`, `$1`, `$2`, etc.:
+> `items.reduce($0 + $1)` means `items.reduce((a, b) => a + b)`.
+
+## Methods
+
+> r[fn.method]
+>
+> Methods are defined with `fn Type.name(self, ...) -> Ret`. They are
+> called with dot syntax: `name.full()`.
+
+> r[fn.method.static]
+>
+> Methods that don't take `self` are static — called on the type, not on
+> a value: `Blob.from_string("hello")`. Static methods are how
+> constructors work.
+
+## Pipe operator
+
+> r[fn.pipe]
+>
+> The pipe operator `|>` passes the left-hand value as the first argument
+> to the right-hand function call. `x |> f` means `f(x)`. If the
+> right-hand side has arguments, the piped value is inserted as the first
+> argument: `x |> f(a)` means `f(x, a)`.
+
+## Arrays
+
+> r[collect.array]
+>
+> Array literals use square brackets: `[1, 2, 3]`. The type is
+> `Array[T]`.
+
+## Maps
+
+> r[collect.map]
+>
+> Map literals use braces with colon syntax:
+> `{ "lat": 53.156, "lng": 145.23 }`. The type is `Map[K, V]`. Keys can
+> be any Vixen type — all types are comparable for equality and hashable.
+
+## Ranges
+
+> r[collect.range]
+>
+> Range literals: `0..10` (exclusive), `0..=10` (inclusive), `..10`
+> (to), `0..` (from), `..` (full). Ranges can be used for slicing
+> arrays.
+
+## Combinators
+
+> r[comb.model]
+>
+> There are no `for` loops in Vixen. Iteration is done through
+> combinators. `.map()` and `.filter()` always return `Stream`, whether
+> called on an Array, Map, or Stream. Every element is an independent
+> concurrent computation. Results are produced as they become available,
+> not in input order.
+
+> r[comb.map]
+>
+> `.map(f)` applies `f` to each element and returns a `Stream` of results.
+
+> r[comb.filter]
+>
+> `.filter(pred)` returns a `Stream` of elements where `pred` is true.
+
+> r[comb.find]
+>
+> `.find(pred)` returns whichever matching element resolves first. The
+> result is `Option[T]`.
+
+> r[comb.fold]
+>
+> `.fold(init, f)` reduces all elements to a single value using an
+> accumulator.
+
+> r[comb.any]
+>
+> `.any(pred)` returns `true` if any element satisfies the predicate.
+
+> r[comb.all]
+>
+> `.all(pred)` returns `true` if all elements satisfy the predicate.
+
+> r[comb.flat-map]
+>
+> `.flat_map(f)` maps each element to a stream (or array) and flattens
+> the results into a single stream. `.flatten()` flattens a stream of
+> streams.
+
+> r[comb.filter-map]
+>
+> `.filter_map(f)` maps and filters in one step — the function returns
+> `Option[T]`. `Some` values are produced, `None` values are skipped.
+
+> r[comb.reduce]
+>
+> `.reduce(f)` is like `.fold` but uses the first element as the initial
+> accumulator.
+
+> r[comb.group-by]
+>
+> `.group_by(f)` groups elements by key function, returning
+> `Map[K, Array[T]]`.
+
+> r[comb.partition]
+>
+> `.partition(pred)` splits elements into two arrays by predicate,
+> returned as a tuple `(matching, non_matching)`.
+
+> r[comb.no-positional]
+>
+> Streams are unordered — elements arrive as they resolve, not in input
+> order. Positional combinators like `take(n)`, `skip(n)`, `enumerate`,
+> `zip`, `chunks`, `windows`, `take_while`, and `skip_while` are not
+> available on streams. "Take the first 5" has no meaning when there is
+> no first. These operations exist on `Array` (which is ordered).
+
+> r[comb.collect]
+>
+> `.to_array()` and `.to_map()` convert a `Stream` back into an `Array`
+> or `Map`. The result is pending until all elements resolve.
+
+> r[comb.map-combinators]
+>
+> Map combinators pass `(key, value)` pairs to the closure. `.keys()`
+> returns `Array[K]`, `.values()` returns `Array[V]`.
+
+## Option
+
+> r[option.type]
+>
+> `Option[T]` is a built-in enum with variants `Some(T)` and `None`.
+
+> r[option.sugar]
+>
+> `T?` is sugar for `Option[T]`.
+
+> r[option.methods]
+>
+> Option methods: `.unwrap_or(default)` provides a fallback value.
+> `.map(f)` transforms the inner value (`None` stays `None`).
+> `.and_then(f)` flat maps — `f` returns `Option`, the result is
+> flattened. `.is_some()` and `.is_none()` return `Bool`.
+
+## The `as` operator
+
+> r[type.as]
+>
+> `as` converts between types. The conversion must succeed or the node
+> poisons. Used for narrowing enums to variants and converting newtypes.
+
+> r[type.as-fallible]
+>
+> `as?` is the fallible version of `as`. Returns `Option` — `Some` on
+> success, `None` on failure.
+
+## Errors
+
+> r[error.poison]
+>
+> There is no `Result` type. Vixen has one error model: poisoning. A
+> poisoned value propagates through the dataflow graph — any node that
+> depends on a poisoned value also becomes poisoned. The runtime attaches
+> context automatically: what function was being evaluated, what its
+> inputs were, what demanded it.
+
+> r[error.fail]
+>
+> `fail` is a keyword that poisons the current computation with a message.
+> It works anywhere. The function doesn't need a special return type.
+
+> r[error.propagation]
+>
+> Poisoning propagates through the graph automatically. No manual error
+> propagation needed. Independent subgraphs are unaffected. If multiple
+> inputs are poisoned, all errors are collected. Error reporting is
+> deterministic.
+
+> r[error.catch]
+>
+> Any function or method call can be suffixed with `?` to catch poisoning
+> and return `Option` instead. `f(x)?` returns `None` on failure,
+> `Some(result)` on success. The `?` suffix always means "the fallible
+> version that returns Option instead of poisoning."
+>
+> This is the same pattern as `as` / `as?`.
+
+## Streams
+
+> r[stream.type]
+>
+> `Stream[T]` is a built-in generic type that produces values of type `T`
+> over time. Streams come from `exec` observers, from combinators on
+> other streams, or from converting arrays and ranges.
+
+> r[stream.unordered]
+>
+> Stream combinators do not impose ordering. Results are produced as they
+> become available, not in input order. `.map(f)` over a stream is
+> concurrent — each application of `f` is an independent computation.
+
+> r[stream.of]
+>
+> `Stream.of(value)` creates a single-element stream.
+
+## Store types
+
+> r[store.blob]
+>
+> `Blob` is a single file in the content-addressable store (keyed by
+> Blake3 hashes). `Blob.from_string(s)` creates a blob from a text
+> string. Blobs with binary content come from `exec`.
+
+> r[store.tree]
+>
+> `Tree` is a directory with its full structure and filenames preserved.
+> There is no separate "local tree" vs "store tree" type — the runtime
+> handles materialization transparently.
+>
+> `Tree.of(map)` creates a tree from a map of names to entries.
+> `.subtree(path)` selects a subtree. `.glob(pattern)` filters by glob.
+> `.merge(other)` merges two trees (later entries win). These operations
+> are lazy.
+
+> r[store.path]
+>
+> `Path` is its own type — not a newtype of `String`. Root paths come
+> from `.at()` on store types. Sub-paths are built with the `/` operator.
+> Paths carry their store references — when a `Path` appears in an `exec`
+> argument, the runtime materializes the referenced content in the VFS.
+>
+> String interpolation with a `Path` produces an `ExecArg` (not a plain
+> `String`) that preserves store dependencies.
+
+## Exec
+
+> r[exec.signature]
+>
+> `exec` runs an external process on an executor — a sandboxed runner
+> with a virtual filesystem. It is generic over `T`:
+>
+> ```vixen
+> exec[T](
+>   args: Array[ExecArg],
+>   env: Map[String, ExecArg],
+>   mounts: Map[Path, Mount],
+>   observer: Fn(Process, Tree) -> Stream[T],
+> ) -> Stream[T]
+> ```
+
+> r[exec.arg]
+>
+> `ExecArg = String | Path`. A plain `String` is a literal argument. A
+> `Path` carries a store reference — the runtime ensures the referenced
+> content is available in the VFS.
+
+> r[exec.mount]
+>
+> `Mount` has a `source: Blob | Tree` and `writable: Bool`. Read-only
+> mounts (default) make content available but immutable. Writable mounts
+> allow the process to write output. All mount paths are relative.
+
+> r[exec.process]
+>
+> `Process` has `stdout: Stream[Blob]`, `stderr: Stream[Blob]`, and
+> `exit_code: U64` (pending until the process exits). No stdin — processes
+> are not interactive. No signal API.
+
+> r[exec.observer]
+>
+> The observer runs on the executor, not the orchestrator. It is
+> serialized along with its captured values and shipped to the executor.
+> A closure cannot be sent until all its captures are resolved. The
+> observer receives a `Process` and the VFS root as a `Tree`, and returns
+> `Stream[T]`.
+
+> r[exec.observer.materialization]
+>
+> When the observer produces a value back to the orchestrator, any VFS
+> paths in the value are committed to the content-addressable store
+> automatically. The runtime handles data movement so the executor can be
+> released.
+
+> r[exec.observer.streaming]
+>
+> Streaming observers parse process output incrementally and produce
+> events as artifacts become available. Downstream dependents can start
+> work early — e.g., compiling a dependent crate as soon as metadata is
+> emitted, without waiting for code generation.
+
+> r[exec.observer.simple]
+>
+> Simple observers reference `exit_code` and VFS paths for output.
+> Everything resolves when the process finishes.
+
+> r[exec.errors]
+>
+> When a process crashes or the executor fails, the stream terminates.
+> Pending values derived from that stream become poisoned.
+> Application-level errors are the observer's responsibility — parse
+> stdout/stderr and call `fail`.
+
+## Deserialization
+
+> r[deser.parse]
+>
+> Vixen has built-in parsers for structured data formats. Parsing is
+> driven by type: `Toml.parse[CargoToml](blob)`. Field names map to keys,
+> `Option` fields are optional, sum types handle polymorphic values.
+
+> r[deser.rename]
+>
+> `@rename("name")` renames a single field or variant.
+> `@rename_all("kebab-case")` renames all fields or variants in a
+> container. Supported conventions: `"snake_case"`, `"camelCase"`,
+> `"PascalCase"`, `"kebab-case"`, `"SCREAMING_SNAKE_CASE"`.
+
+> r[deser.flatten]
+>
+> `@flatten` merges a nested struct's fields into the parent during
+> serialization/deserialization.
+
+> r[deser.tag]
+>
+> Enum tagging modes: externally tagged (default), `@tag("field")` for
+> internally tagged, `@tag("field", content: "data")` for adjacently
+> tagged, `@untagged` for untagged (tries each variant in order).
+
+## String methods
+
+> r[string.test]
+>
+> `.starts_with(s)`, `.ends_with(s)`, `.contains(s)`, `.is_empty()` — all
+> return `Bool`.
+
+> r[string.split]
+>
+> `.split(sep)` returns `Array[String]`. `.split_once(sep)` returns
+> `Option[(String, String)]`. `.join(sep)` on an array joins elements.
+> `.lines()` splits by newline.
+
+> r[string.transform]
+>
+> `.trim()`, `.trim_start()`, `.trim_end()` strip whitespace.
+> `.to_upper()`, `.to_lower()` change case. `.replace(old, new)` replaces
+> all occurrences. `.replace_once(old, new)` replaces the first.
+
+> r[string.slice]
+>
+> `.len()` returns byte length. `.chars()` returns `Array[String]` of
+> Unicode grapheme clusters. `.slice(range)` returns a substring.
+
+> r[string.parse]
+>
+> `.parse_u64()`, `.parse_i64()`, `.parse_f64()` parse strings to numbers.
+> They poison on invalid input. The `?` suffix returns `Option` instead.
+
+> r[string.regex]
+>
+> `.matches(pattern)` tests a regex. `.find_all(pattern)` returns all
+> matches. `.captures(pattern)` returns capture groups.
+> `.replace_regex(pattern, replacement)` replaces by regex.
+
+> r[string.path-ops]
+>
+> `.strip_prefix(s)` and `.strip_suffix(s)` return `Option[String]`.
+
+## Evaluation model
+
+### Demand-driven dataflow
+
+> r[eval.demand]
+>
+> Vixen uses demand-driven dataflow evaluation. The runtime calls `build`
+> and needs its return value — that's the demand. Everything flows backward
+> from there. There is no separate planning phase.
+
+### Concurrency
+
+> r[eval.concurrency]
+>
+> There are no concurrency primitives. No `spawn`, no `async`, no `await`,
+> no channels. Concurrency comes from the structure of expressions — any
+> expression with multiple independent sub-expressions evaluates them
+> concurrently. Function arguments, array elements, struct fields, tuple
+> elements, and map values all evaluate concurrently when independent.
+
+### Pending values
+
+> r[eval.pending]
+>
+> A value is either resolved or pending. Any value of any type can be
+> pending. A struct can have some fields resolved and some pending.
+> Pending values can be freely passed to functions, stored in fields, put
+> in arrays, and returned. None of these operations wait.
+
+### Forcing
+
+> r[eval.forcing]
+>
+> Almost nothing in the language forces a pending value. Two things force:
+>
+> 1. **Crossing the exec boundary** — to serialize a value and ship it
+>    to an executor, the data must be resolved.
+> 2. **Materializing the final output** — at the very end, the runtime
+>    writes the output tree to disk.
+>
+> Everything else just builds up the dataflow graph.
+
+### The evaluator enters functions
+
+> r[eval.enter-functions]
+>
+> The evaluator does not treat functions as opaque nodes. It enters
+> function bodies, discovers their dataflow graph, and schedules internal
+> computations the same way it schedules top-level ones. Demand propagates
+> all the way down.
+
+### Memoization
+
+> r[eval.memoization]
+>
+> The runtime memoizes function calls transparently. The cache key is
+> **(function, arguments)**. Because all values are hashable and
+> comparable, any function call can be memoized. This is what makes
+> incremental builds work.
+>
+> `exec` cache keys additionally include the runner fingerprint:
+> **(args, env, mounts, observer + captures, runner fingerprint)**.
+> Runner-contributed inputs (toolchain versions) are fingerprinted and
+> tracked.
+
+### Mutable resources
+
+> r[eval.ttl]
+>
+> `@ttl("duration")` marks functions that access mutable resources. The
+> runtime caches results provisionally and revalidates according to the
+> policy. If the revalidated result equals the cached result, downstream
+> nodes are not re-evaluated (early cutoff).
+
+## Demand model
+
+> r[eval.entry]
+>
+> A Vixen build starts with a `build.vixen` file at the repository root.
+> The entry point receives the working directory as a `Tree`, CLI
+> arguments as `Array[String]`, and the environment as
+> `Map[String, String]`, and returns a `Tree`.
+
+> r[eval.entry.cargo-compat]
+>
+> If no `build.vixen` exists and a `Cargo.toml` is found, Vixen evaluates
+> as if a thin build file were present calling `std.rust.workspace`. This
+> makes `vx build` a drop-in replacement for `cargo build`.
+
+## Acquire
+
+> r[exec.acquire]
+>
+> `acquire(url, sha256 = hash)` fetches a resource by URL. Cached forever
+> when a hash is provided.
