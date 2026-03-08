@@ -288,3 +288,64 @@ fn Name.full(self) -> String {
 name = Name { first: "John", last: "Doe" };
 name.full() // "John Doe"
 ```
+
+## Enums
+
+Vixen has Rust-like enums. The main difference is that struct variants are
+actual types:
+
+```vixen
+enum Shape {
+  Circle { radius: F64 },
+  Rectangle { width: F64, height: F64 },
+}
+```
+
+Each variant is a type under the enum's namespace. `Shape.Circle` is a type,
+and `Shape` is a type. They are distinct.
+
+To build a variant value (narrow type):
+
+```vixen
+c = Shape.Circle { radius: 5.0 }; // c is of type Shape.Circle
+```
+
+To build an enum value (wide type), use the enum as a constructor. Inside
+`Shape(...)`, variant names are in scope — no need to qualify them:
+
+```vixen
+s = Shape(Circle { radius: 5.0 }); // s is of type Shape
+```
+
+A `Shape.Circle` can be passed anywhere a `Shape` is expected:
+
+```vixen
+fn area(s: Shape) -> F64 {
+  // ...
+}
+
+// both work:
+area(Shape(Circle { radius: 5.0 }));
+area(Shape.Circle { radius: 5.0 });
+```
+
+But the reverse is not true — a function that wants a specific variant only
+accepts that variant:
+
+```vixen
+fn circumference(c: Shape.Circle) -> F64 {
+  2.0 * 3.14159 * c.radius
+}
+
+circumference(Shape.Circle { radius: 5.0 }); // ok
+circumference(Shape(Circle { radius: 5.0 })); // error: expected Shape.Circle, got Shape
+```
+
+If a variant name is used often, a type alias can bring it to the top level:
+
+```vixen
+type Circle = Shape.Circle;
+
+c = Circle { radius: 5.0 };        // a Circle (aka Shape.Circle)
+s = Shape(Circle { radius: 5.0 }); // a Shape
+```
