@@ -1182,27 +1182,6 @@ finish.
 The observer waits for the process to exit, commits the output directory,
 and yields a single event.
 
-### Pending values
-
-`exec` returns a `Stream[T]`. Operations on that stream — like `find`,
-`filter`, `map` — produce values that may not be immediately available. Code
-that depends on a pending value implicitly suspends until the value resolves.
-There is no explicit `await` or special syntax.
-
-```vixen
-artifacts = exec[RustcArtifact](...);
-
-metadata = artifacts.find($.kind == "metadata");
-lib = artifacts.find($.kind == "lib");
-
-// this call suspends until both metadata and lib are available
-result = compile_dependent(metadata, lib);
-```
-
-When a function call depends on multiple pending values, all of them must
-resolve before the call proceeds. There is no `race` or `select` — the
-runtime implicitly joins on all dependencies.
-
 ### Stream errors
 
 When a stream's producer fails (e.g., a process crashes in an `exec`),

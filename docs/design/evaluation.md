@@ -17,12 +17,13 @@ fn build(src: Tree, args: Array[String], env: Map[String, String]) -> Tree {
 ```
 
 To produce the return value, `Tree.of` needs `output`. To produce `output`,
-`link` needs `a` and `b`. To produce `a`, `compile_crate_a` needs `src`.
-Same for `b`. `src` is already resolved — it was passed in. So the evaluator
-enters both `compile_crate_a` and `compile_crate_b`, discovers they each
-do an `exec`, gets pending values back for `a` and `b`. Those execs run
-concurrently. `link` has two pending inputs — it doesn't get entered until
-both resolve. When they do, `link` runs, `Tree.of` runs, `build` returns.
+the evaluator enters `link` — it discovers `link` needs `a` and `b`. To
+produce `a`, it enters `compile_crate_a`, discovers an `exec` inside, and
+gets a pending value back. Same for `b` via `compile_crate_b`. Those execs
+run concurrently. Inside `link`, the evaluator discovers another `exec`
+that needs the resolved values of `a` and `b` — that exec is the node
+boundary that forces them. When both resolve, that exec runs, its result
+flows through `Tree.of`, and `build` returns.
 
 ## Where concurrency comes from
 
