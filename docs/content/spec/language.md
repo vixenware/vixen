@@ -1126,12 +1126,53 @@ insert_anchor_links = "heading"
 
 > r[fn.identity]
 >
-> A function value is identified relative to the loaded program image.
-> Top-level functions use a stable symbol identity within that program.
-> Closures use a stable closure-site identity plus their captured
-> values. Memoization keys and serialized callable references are
-> relative to the program fingerprint, not reconstructed from isolated
-> source fragments.
+> Every function has a **code identity** — a fingerprint of the code it
+> will execute, transitively. The code identity is computed from:
+>
+> 1. The function's **canonical AST** — its body and signature,
+>    normalized (comments, whitespace, and formatting are excluded).
+> 2. The **code identities of all callees** — every function name
+>    referenced in the body contributes the code identities of all
+>    overloads of that name visible in scope.
+>
+> This is transitive: if `f` calls `g` and `g` calls `h`, then a
+> change to `h` changes `g`'s code identity, which changes `f`'s.
+> Editing a comment does not change any code identity. Editing an
+> unrelated function does not change code identities that do not
+> reference it.
+
+> r[fn.identity.scc]
+>
+> Mutually recursive functions form a strongly connected component
+> (SCC). All functions in an SCC share one code identity — the hash
+> of the entire component. A change to any function in the cycle
+> invalidates all of them.
+
+> r[fn.identity.closure]
+>
+> A closure's code identity is derived from its enclosing function's
+> canonical AST (which includes the closure site). At runtime, the
+> closure's full identity for memoization and serialization is
+> **(code identity, captured values)** — the code identity comes from
+> the source, the captures come from evaluation.
+
+> r[fn.identity.overloads]
+>
+> When a function body references a name that has multiple overloads,
+> all visible overloads contribute to the code identity. This is
+> conservative — changing an overload that is never called still
+> invalidates callers. But it is sound without requiring static
+> overload resolution, which depends on type information that may
+> not be available until evaluation.
+
+> r[fn.identity.stability]
+>
+> Code identity is stable across: comment edits, whitespace changes,
+> formatting changes, and edits to unrelated functions. It changes
+> when: the function's logic changes, a callee's logic changes, or the
+> set of visible overloads for a referenced name changes. This
+> stability is what makes `exec` caching and distributed execution
+> correct without whole-program invalidation.
 
 ## Closures
 
@@ -1713,14 +1754,20 @@ insert_anchor_links = "heading"
 > r[eval.memoization]
 >
 > The runtime memoizes function calls transparently. The cache key is
-> **(function, arguments)**. Because all values are hashable and
-> comparable, any function call can be memoized. This is what makes
-> incremental builds work.
+> **(code identity, arguments)** — the function's transitive code
+> identity (see [fn.identity]) plus its resolved argument values.
+> Because all values are hashable and comparable, any function call can
+> be memoized. This is what makes incremental builds work — and because
+> code identity is stable across comment/formatting edits, the cache
+> survives source changes that do not affect behavior.
 >
 > `exec` cache keys additionally include the runner fingerprint:
-> **(args, env, mounts, observer + captures, runner fingerprint)**.
-> Runner-contributed inputs (toolchain versions) are fingerprinted and
-> tracked.
+> **(observer code identity, observer captures, args, env, mounts,
+> runner fingerprint)**. Runner-contributed inputs (toolchain versions)
+> are fingerprinted and tracked. Because the observer's code identity
+> is transitive, changing a helper function that the observer calls
+> invalidates the `exec` cache — even though the observer's own AST
+> did not change.
 
 > r[eval.memoization.pending]
 >
