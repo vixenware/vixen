@@ -6,6 +6,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use vx_parser::{self as vx, AstNode, Parsed, SourceFile};
+use vx_resolve::NameResolution;
 
 pub struct VxLanguageServer {
     client: Client,
@@ -17,16 +18,19 @@ struct DocumentState {
     text: String,
     parsed: Parsed<SourceFile>,
     line_index: vx::LineIndex,
+    resolution: NameResolution,
 }
 
 impl DocumentState {
     fn new(text: String) -> Self {
         let parsed = vx::parse_source_file(&text);
         let line_index = vx::LineIndex::new(&text);
+        let resolution = vx_resolve::resolve(&parsed.tree());
         Self {
             text,
             parsed,
             line_index,
+            resolution,
         }
     }
 
@@ -65,6 +69,7 @@ impl LanguageServer for VxLanguageServer {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
+                definition_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 semantic_tokens_provider: Some(
@@ -172,21 +177,69 @@ impl LanguageServer for VxLanguageServer {
             })
         }))
     }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let result = self.with_document(uri, |state| {
+            let offset = state.line_index.offset(vx::Position {
+                line: pos.line,
+                col: pos.character,
+            })?;
+
+            // Find a resolved ref whose range contains the cursor
+            let resolved = state
+                .resolution
+                .refs
+                .iter()
+                .find(|r| r.ref_range.contains_inclusive(offset))?;
+
+            let def = resolved.target.as_ref().ok()?;
+            let range = state.to_lsp_range(def.name_range);
+            Some(GotoDefinitionResponse::Scalar(Location {
+                uri: uri.clone(),
+                range,
+            }))
+        });
+
+        Ok(result.flatten())
+    }
 }
 
 impl VxLanguageServer {
     async fn publish_diagnostics(&self, uri: &Url, state: &DocumentState) {
-        let diagnostics: Vec<Diagnostic> = state
+        let mut diagnostics: Vec<Diagnostic> = state
             .parsed
             .errors()
             .iter()
             .map(|err| Diagnostic {
                 range: state.to_lsp_range(err.range),
                 severity: Some(DiagnosticSeverity::ERROR),
+                source: Some("vx-parser".to_string()),
                 message: err.message.clone(),
                 ..Default::default()
             })
             .collect();
+
+        // Unresolved name diagnostics from resolution
+        for err in &state.resolution.errors {
+            match err {
+                vx_resolve::ResolveError::Unresolved { name, range } => {
+                    diagnostics.push(Diagnostic {
+                        range: state.to_lsp_range(*range),
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        source: Some("vx-resolve".to_string()),
+                        message: format!("unresolved name `{name}`"),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;

@@ -352,13 +352,13 @@ pub struct SemanticToken {
 pub fn semantic_tokens(root: &SyntaxNode) -> Vec<SemanticToken> {
     let mut tokens = Vec::new();
     for event in root.preorder_with_tokens() {
-        if let WalkEvent::Enter(rowan::NodeOrToken::Token(token)) = event {
-            if let Some(token_type) = classify_token(&token) {
-                tokens.push(SemanticToken {
-                    range: token.text_range(),
-                    token_type,
-                });
-            }
+        if let WalkEvent::Enter(rowan::NodeOrToken::Token(token)) = event
+            && let Some(token_type) = classify_token(&token)
+        {
+            tokens.push(SemanticToken {
+                range: token.text_range(),
+                token_type,
+            });
         }
     }
     tokens

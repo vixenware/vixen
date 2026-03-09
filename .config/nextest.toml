@@ -3,6 +3,9 @@
 # Enable experimental setup scripts feature
 experimental = ["setup-scripts"]
 
+[profile.default]
+slow-timeout = { period = "5s", terminate-after = 6 }
+
 [scripts.setup.setup-unix]
 command = 'bash tests/setup.sh'
 

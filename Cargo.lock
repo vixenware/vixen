@@ -528,12 +528,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dissimilar"
-version = "1.0.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8975ffdaa0ef3661bfe02dbdcc06c9f829dfafe6a3c474de366a8d5e44276921"
-
-[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -600,16 +594,6 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
  "pin-project-lite",
-]
-
-[[package]]
-name = "expect-test"
-version = "1.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63af43ff4431e848fb47472a920f14fa71c24de13255a5692e93d4e90302acb0"
-dependencies = [
- "dissimilar",
- "once_cell",
 ]
 
 [[package]]
@@ -3488,11 +3472,11 @@ version = "0.1.0"
 dependencies = [
  "eyre",
  "rowan",
- "serde_json",
  "tokio",
  "tower-lsp",
  "tracing",
  "vx-parser",
+ "vx-resolve",
  "vx-tracing",
 ]
 
@@ -3564,7 +3548,6 @@ dependencies = [
 name = "vx-resolve"
 version = "0.1.0"
 dependencies = [
- "expect-test",
  "rowan",
  "vx-parser",
 ]

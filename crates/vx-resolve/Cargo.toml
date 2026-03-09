@@ -15,4 +15,3 @@ vx-parser = { path = "../vx-parser" }
 rowan = "0.16.1"
 
 [dev-dependencies]
-expect-test = "1"
