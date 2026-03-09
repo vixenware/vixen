@@ -355,6 +355,7 @@ pub struct ChunkEntry {
 // DirectoryNode (Merkle directory)
 // =============================================================================
 
+// i[impl impl.tree]
 /// A content-addressed directory node in the Merkle tree.
 /// Replaces the flat TreeManifest.
 ///
@@ -1412,6 +1413,7 @@ mod tests {
     }
 
     #[test]
+    // i[verify impl.tree]
     fn test_cas_node_directory_roundtrip() {
         let node = CasNode::Directory(DirectoryNode {
             entries: vec![
@@ -1460,6 +1462,46 @@ mod tests {
             }
             other => panic!("expected Directory, got {other:?}"),
         }
+    }
+
+    #[test]
+    // i[verify impl.tree]
+    fn directory_nodes_reference_subtrees_by_hash() {
+        let child = CasNode::Directory(DirectoryNode {
+            entries: vec![DirEntry {
+                name: "lib.rs".to_string(),
+                kind: DirEntryKind::SmallFile {
+                    content_hash: ContentHash(Blake3Hash([0x11; 32])),
+                    size: 123,
+                    executable: false,
+                },
+            }],
+            total_size: 123,
+        });
+        let (_, child_hash) = child.to_bytes_and_hash();
+
+        let parent = CasNode::Directory(DirectoryNode {
+            entries: vec![DirEntry {
+                name: "src".to_string(),
+                kind: DirEntryKind::Dir {
+                    hash: child_hash,
+                    total_size: 123,
+                },
+            }],
+            total_size: 123,
+        });
+
+        let bytes = parent.to_bytes();
+        let decoded = CasNode::from_bytes(&bytes).expect("deserialize parent directory");
+        let CasNode::Directory(dir) = decoded else {
+            panic!("expected Directory node");
+        };
+        let DirEntryKind::Dir { hash, total_size } = &dir.entries[0].kind else {
+            panic!("expected child directory entry");
+        };
+
+        assert_eq!(*hash, child_hash);
+        assert_eq!(*total_size, 123);
     }
 
     #[test]
