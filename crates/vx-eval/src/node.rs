@@ -51,6 +51,7 @@ pub enum NodeJob {
         then_branch: instr::Block,
         else_branch: instr::Block,
         bindings: Arc<HashMap<String, Value>>,
+        scope_identity: Arc<str>,
     },
     Call {
         function: Value,

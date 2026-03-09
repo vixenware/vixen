@@ -241,6 +241,51 @@ fn function_as_value() {
 }
 
 #[test]
+// r[verify expr.closure]
+// r[verify fn.closure]
+fn closures_capture_by_value_and_support_block_bodies() {
+    let val = eval(
+        "fn apply(f: Fn(U64) -> U64, x: U64) { f(x) }
+         fn main() {
+           let offset = 40;
+           let add = (x) => {
+             let y = offset + x;
+             y
+           };
+           let offset = 1;
+           apply(add, 2)
+         }",
+        "main",
+    )
+    .unwrap();
+    assert_eq!(val, Value::U64(42));
+}
+
+#[test]
+// r[verify fn.identity.closure]
+fn closure_identity_includes_the_capture_set() {
+    let engine = engine("fn make(offset: U64) { (x) => offset + x }");
+
+    let first = engine.call("make", vec![Value::U64(1)]).unwrap();
+    let same = engine.call("make", vec![Value::U64(1)]).unwrap();
+    let different = engine.call("make", vec![Value::U64(2)]).unwrap();
+
+    let Value::Function(first) = first else {
+        panic!("expected closure value");
+    };
+    let Value::Function(same) = same else {
+        panic!("expected closure value");
+    };
+    let Value::Function(different) = different else {
+        panic!("expected closure value");
+    };
+
+    assert_eq!(first.identity(), same.identity());
+    assert_eq!(first.key(), same.key());
+    assert_ne!(first.key(), different.key());
+}
+
+#[test]
 fn shadowing() {
     let val = eval(
         "fn main() {

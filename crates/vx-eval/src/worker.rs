@@ -180,6 +180,19 @@ impl Engine {
         }
     }
 
+    fn closure_function_value(
+        &self,
+        def: Arc<instr::FnDef>,
+        code_identity: Arc<str>,
+        captures: Arc<[(Arc<str>, Value)]>,
+    ) -> FunctionValue {
+        FunctionValue {
+            code_identity,
+            def,
+            captures,
+        }
+    }
+
     fn function_identity(&self, def: &Arc<instr::FnDef>) -> Arc<str> {
         self.function_identities
             .get(&fn_ptr(def))
@@ -439,15 +452,16 @@ impl Engine {
                 then_branch,
                 else_branch,
                 bindings,
+                scope_identity,
             } => {
                 let cond = self.force_value(cond.clone())?;
                 match cond {
-                    Value::Bool(true) => {
-                        self.eval_block(then_branch, bindings.as_ref()).into_value()
-                    }
-                    Value::Bool(false) => {
-                        self.eval_block(else_branch, bindings.as_ref()).into_value()
-                    }
+                    Value::Bool(true) => self
+                        .eval_block(then_branch, bindings.as_ref(), scope_identity.as_ref())
+                        .into_value(),
+                    Value::Bool(false) => self
+                        .eval_block(else_branch, bindings.as_ref(), scope_identity.as_ref())
+                        .into_value(),
                     other => Err(self.type_error(&format!(
                         "if condition must be Bool, got {}",
                         other.type_name()
@@ -528,29 +542,41 @@ impl Engine {
             }
         }
 
-        self.eval_block(&function.def.body, &bindings).into_value()
+        self.eval_block(
+            &function.def.body,
+            &bindings,
+            function.code_identity.as_ref(),
+        )
+        .into_value()
     }
 
-    fn eval_block(&self, block: &instr::Block, bindings: &HashMap<String, Value>) -> BuildResult {
+    fn eval_block(
+        &self,
+        block: &instr::Block,
+        bindings: &HashMap<String, Value>,
+        current_code_identity: &str,
+    ) -> BuildResult {
         let mut local_bindings = bindings.clone();
 
         for (index, stmt) in block.stmts.iter().enumerate() {
             let is_last = index + 1 == block.stmts.len();
             match stmt {
                 instr::Stmt::Let { name, value } | instr::Stmt::Assign { name, value } => {
-                    match self.eval_expr(value, &local_bindings) {
+                    match self.eval_expr(value, &local_bindings, current_code_identity) {
                         BuildResult::Value(value) => {
                             local_bindings.insert(name.clone(), value);
                         }
                         other => return other,
                     }
                 }
-                instr::Stmt::Return(expr) => match self.eval_expr(expr, &local_bindings) {
-                    BuildResult::Value(value) | BuildResult::Returned(value) => {
-                        return BuildResult::Returned(value);
+                instr::Stmt::Return(expr) => {
+                    match self.eval_expr(expr, &local_bindings, current_code_identity) {
+                        BuildResult::Value(value) | BuildResult::Returned(value) => {
+                            return BuildResult::Returned(value);
+                        }
+                        BuildResult::Poisoned(error) => return BuildResult::Poisoned(error),
                     }
-                    BuildResult::Poisoned(error) => return BuildResult::Poisoned(error),
-                },
+                }
                 instr::Stmt::FnDecl(def) => {
                     local_bindings.insert(
                         def.name.clone(),
@@ -562,14 +588,16 @@ impl Engine {
                         ),
                     );
                 }
-                instr::Stmt::Expr(expr) => match self.eval_expr(expr, &local_bindings) {
-                    BuildResult::Value(value) => {
-                        if is_last {
-                            return BuildResult::Value(value);
+                instr::Stmt::Expr(expr) => {
+                    match self.eval_expr(expr, &local_bindings, current_code_identity) {
+                        BuildResult::Value(value) => {
+                            if is_last {
+                                return BuildResult::Value(value);
+                            }
                         }
+                        other => return other,
                     }
-                    other => return other,
-                },
+                }
             }
         }
 
@@ -577,7 +605,12 @@ impl Engine {
     }
 
     // r[impl eval.forcing]
-    fn eval_expr(&self, expr: &instr::Expr, bindings: &HashMap<String, Value>) -> BuildResult {
+    fn eval_expr(
+        &self,
+        expr: &instr::Expr,
+        bindings: &HashMap<String, Value>,
+        current_code_identity: &str,
+    ) -> BuildResult {
         match expr {
             instr::Expr::LitInt(n) => BuildResult::Value(Value::U64(*n)),
             instr::Expr::LitFloat(n) => BuildResult::Value(Value::F64(*n)),
@@ -598,11 +631,11 @@ impl Engine {
                 }
             }
             instr::Expr::Binary { op, left, right } => {
-                let left = match self.eval_expr(left, bindings) {
+                let left = match self.eval_expr(left, bindings, current_code_identity) {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
-                let right = match self.eval_expr(right, bindings) {
+                let right = match self.eval_expr(right, bindings, current_code_identity) {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
@@ -621,7 +654,7 @@ impl Engine {
                 }
             }
             instr::Expr::Unary { op, operand } => {
-                let operand = match self.eval_expr(operand, bindings) {
+                let operand = match self.eval_expr(operand, bindings, current_code_identity) {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
@@ -635,27 +668,32 @@ impl Engine {
                     ))
                 }
             }
-            instr::Expr::Block(block) => self.eval_block(block, bindings),
+            instr::Expr::Block(block) => self.eval_block(block, bindings, current_code_identity),
             // r[impl eval.control-demand]
             instr::Expr::If {
                 cond,
                 then_branch,
                 else_branch,
             } => {
-                let cond = match self.eval_expr(cond, bindings) {
+                let cond = match self.eval_expr(cond, bindings, current_code_identity) {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
 
                 match cond {
-                    Value::Bool(true) => self.eval_block(then_branch, bindings),
-                    Value::Bool(false) => self.eval_block(else_branch, bindings),
+                    Value::Bool(true) => {
+                        self.eval_block(then_branch, bindings, current_code_identity)
+                    }
+                    Value::Bool(false) => {
+                        self.eval_block(else_branch, bindings, current_code_identity)
+                    }
                     Value::Pending(_) => BuildResult::Value(self.pending_value(
                         NodeJob::If {
                             cond,
                             then_branch: then_branch.clone(),
                             else_branch: else_branch.clone(),
                             bindings: Arc::new(bindings.clone()),
+                            scope_identity: Arc::from(current_code_identity),
                         },
                         "if(..)".into(),
                     )),
@@ -665,21 +703,30 @@ impl Engine {
                     ))),
                 }
             }
+            // r[impl fn.closure]
+            // r[impl fn.identity.closure]
+            instr::Expr::Closure { closure_id, def } => {
+                BuildResult::Value(Value::Function(self.closure_function_value(
+                    def.clone(),
+                    Arc::from(format!("{current_code_identity}::closure#{closure_id}")),
+                    capture_bindings(bindings),
+                )))
+            }
             instr::Expr::Call { func, args, kwargs } => {
-                let function = match self.eval_expr(func, bindings) {
+                let function = match self.eval_expr(func, bindings, current_code_identity) {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
                 let mut arg_values = Vec::with_capacity(args.len());
                 for arg in args {
-                    match self.eval_expr(arg, bindings) {
+                    match self.eval_expr(arg, bindings, current_code_identity) {
                         BuildResult::Value(value) => arg_values.push(value),
                         other => return other,
                     }
                 }
                 let mut kwarg_values = Vec::with_capacity(kwargs.len());
                 for (name, arg) in kwargs {
-                    match self.eval_expr(arg, bindings) {
+                    match self.eval_expr(arg, bindings, current_code_identity) {
                         BuildResult::Value(value) => {
                             kwarg_values.push((Arc::from(name.as_str()), value));
                         }
@@ -691,7 +738,7 @@ impl Engine {
             instr::Expr::StructLit { name, fields } => {
                 let mut values = Vec::with_capacity(fields.len());
                 for (field_name, field_expr) in fields {
-                    match self.eval_expr(field_expr, bindings) {
+                    match self.eval_expr(field_expr, bindings, current_code_identity) {
                         BuildResult::Value(value) => {
                             values.push((Arc::from(field_name.as_str()), value));
                         }
@@ -706,7 +753,7 @@ impl Engine {
             instr::Expr::Array(items) => {
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
-                    match self.eval_expr(item, bindings) {
+                    match self.eval_expr(item, bindings, current_code_identity) {
                         BuildResult::Value(value) => values.push(value),
                         other => return other,
                     }
@@ -716,11 +763,11 @@ impl Engine {
             instr::Expr::Map(entries) => {
                 let mut values = Vec::with_capacity(entries.len());
                 for (key_expr, value_expr) in entries {
-                    let key = match self.eval_expr(key_expr, bindings) {
+                    let key = match self.eval_expr(key_expr, bindings, current_code_identity) {
                         BuildResult::Value(value) => value,
                         other => return other,
                     };
-                    let value = match self.eval_expr(value_expr, bindings) {
+                    let value = match self.eval_expr(value_expr, bindings, current_code_identity) {
                         BuildResult::Value(value) => value,
                         other => return other,
                     };
@@ -731,7 +778,7 @@ impl Engine {
                 }))
             }
             instr::Expr::Field { receiver, field } => {
-                let receiver = match self.eval_expr(receiver, bindings) {
+                let receiver = match self.eval_expr(receiver, bindings, current_code_identity) {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
@@ -750,7 +797,7 @@ impl Engine {
             }
             // r[impl error.fail]
             instr::Expr::Fail(message) => {
-                let message = match self.eval_expr(message, bindings) {
+                let message = match self.eval_expr(message, bindings, current_code_identity) {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
@@ -759,7 +806,7 @@ impl Engine {
             instr::Expr::Tuple(elems) => {
                 let mut values = Vec::with_capacity(elems.len());
                 for elem in elems {
-                    match self.eval_expr(elem, bindings) {
+                    match self.eval_expr(elem, bindings, current_code_identity) {
                         BuildResult::Value(value) => values.push(value),
                         other => return other,
                     }
@@ -2090,6 +2137,13 @@ fn collect_expr_callee_names(
             collect_block_callee_names(then_branch, &mut then_scope, top_level_names, deps);
             let mut else_scope = visible_locals.clone();
             collect_block_callee_names(else_branch, &mut else_scope, top_level_names, deps);
+        }
+        instr::Expr::Closure { def, .. } => {
+            let mut closure_scope = visible_locals.clone();
+            for param in &def.params {
+                closure_scope.insert(param.name.clone());
+            }
+            collect_block_callee_names(&def.body, &mut closure_scope, top_level_names, deps);
         }
         instr::Expr::Call { func, args, kwargs } => {
             if let instr::Expr::Var(name) = func.as_ref()

@@ -87,6 +87,9 @@ pub enum Expr {
         else_branch: Block,
     },
 
+    /// Closure literal: `(x, y) => body`
+    Closure { closure_id: usize, def: Arc<FnDef> },
+
     /// Function call: `f(args...; kw: value, ...)`
     Call {
         func: Box<Expr>,
