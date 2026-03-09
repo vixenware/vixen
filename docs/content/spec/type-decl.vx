@@ -1,0 +1,306 @@
+// ============================================================================
+// Type Declarations in Vixen
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Structs
+// ----------------------------------------------------------------------------
+
+// A simple struct with named fields.
+struct Point {
+    x: F64,
+    y: F64,
+}
+
+// A zero-sized struct — no braces needed.
+struct Unit
+
+// Structs can have default values for fields.
+struct Config {
+    width: U64 = 800,
+    height: U64 = 600,
+    title: String = "untitled",
+}
+
+// Generic structs use square brackets for type parameters.
+struct Pair[A, B] {
+    first: A,
+    second: B,
+}
+
+// ----------------------------------------------------------------------------
+// Enums
+// ----------------------------------------------------------------------------
+
+// An enum's variants are type declarations themselves.
+// Each variant is a struct, and the struct name is the variant name.
+// Variants are separated by commas.
+
+// Simple enum — zero-sized struct variants, no braces needed.
+enum Direction {
+    struct North,
+    struct South,
+    struct East,
+    struct West,
+}
+
+// Enum with data-carrying variants.
+enum Shape {
+    struct Circle {
+        radius: F64,
+    },
+
+    struct Rectangle {
+        width: F64,
+        height: F64,
+    },
+
+    // Zero-sized variants mix freely with data-carrying ones.
+    struct Unknown,
+}
+
+// ----------------------------------------------------------------------------
+// Nesting: inline types in struct fields
+// ----------------------------------------------------------------------------
+
+// A struct field's type can be an inline type definition.
+// The inline type is accessible as a dotted path from the parent.
+
+struct HttpResponse {
+    status: U64,
+
+    // `HttpResponse.Body` is the full path to this type.
+    body: enum Body {
+        struct Json {
+            data: String,
+        },
+
+        struct Html {
+            content: String,
+        },
+
+        struct Binary {
+            bytes: Array[U8],
+        },
+
+        struct Empty,
+    },
+}
+
+// ----------------------------------------------------------------------------
+// Deep nesting
+// ----------------------------------------------------------------------------
+
+// Inline types can nest arbitrarily deep.
+
+struct Connection {
+    id: U64,
+
+    state: enum State {
+        struct Connecting {
+            attempt: U64,
+        },
+
+        struct Connected {
+            // `Connection.State.Connected.Health` — fully qualified path.
+            health: enum Health {
+                struct Healthy,
+                struct Degraded {
+                    reason: String,
+                },
+                struct Unknown,
+            },
+        },
+
+        struct Disconnected {
+            reason: String,
+        },
+    },
+}
+
+// ----------------------------------------------------------------------------
+// Real-world example: protocol messages
+// ----------------------------------------------------------------------------
+
+// This pattern replaces Rust's structstruck macro — each enum variant
+// is a named struct, accessible by its dotted path.
+
+struct Message {
+    connection_id: U64,
+
+    payload: enum Payload {
+        // Control messages
+        struct Hello {
+            version: U32,
+            metadata: Metadata,
+        },
+
+        struct HelloResponse {
+            metadata: Metadata,
+        },
+
+        struct Error {
+            description: String,
+        },
+
+        // RPC messages
+        struct Request {
+            id: U64,
+
+            body: enum RequestBody {
+                struct Call {
+                    method_id: U64,
+                    channels: Array[U64],
+                    args: Array[U8],
+                },
+
+                struct Response {
+                    channels: Array[U64],
+                    ret: Array[U8],
+                },
+
+                struct Cancel,
+            },
+        },
+
+        // Channel messages
+        struct ChannelMessage {
+            id: U64,
+
+            body: enum ChannelBody {
+                struct Item {
+                    data: Array[U8],
+                },
+
+                struct Close,
+
+                struct Reset,
+
+                struct GrantCredit {
+                    additional: U32,
+                },
+            },
+        },
+
+        // Keepalive
+        struct Ping {
+            nonce: U64,
+        },
+
+        struct Pong {
+            nonce: U64,
+        },
+    },
+}
+
+// ----------------------------------------------------------------------------
+// Attributes on type declarations
+// ----------------------------------------------------------------------------
+
+// Attributes attach to the declaration that follows them.
+@untagged
+enum Content {
+    struct Text {
+        value: String,
+    },
+
+    struct Number {
+        value: F64,
+    },
+}
+
+@tag("type")
+enum Event {
+    @rename("click")
+    struct Click {
+        x: F64,
+        y: F64,
+    },
+
+    @rename("keypress")
+    struct KeyPress {
+        key: String,
+    },
+}
+
+// Attributes on struct fields.
+struct ApiResponse {
+    @rename("status_code")
+    status: U64,
+
+    @flatten
+    metadata: Metadata,
+}
+
+// ----------------------------------------------------------------------------
+// Generic enums
+// ----------------------------------------------------------------------------
+
+enum Result[T, E] {
+    struct Ok {
+        value: T,
+    },
+
+    struct Err {
+        error: E,
+    },
+}
+
+enum Option[T] {
+    struct Some {
+        value: T,
+    },
+
+    struct None,
+}
+
+// ----------------------------------------------------------------------------
+// Inline types in field position — anonymous vs named
+// ----------------------------------------------------------------------------
+
+// Named inline type — accessible as `Dashboard.Layout`.
+struct Dashboard {
+    layout: enum Layout {
+        struct Grid,
+        struct List,
+        struct Kanban,
+    },
+
+    // Multiple inline types in the same struct.
+    theme: enum Theme {
+        struct Light,
+        struct Dark,
+        struct Custom {
+            primary: String,
+            secondary: String,
+        },
+    },
+}
+
+// ----------------------------------------------------------------------------
+// Structs as building blocks
+// ----------------------------------------------------------------------------
+
+// Structs compose naturally. No inheritance, just fields.
+struct Metadata {
+    created_at: U64,
+    updated_at: U64,
+    tags: Array[String],
+}
+
+struct Document {
+    id: String,
+    title: String,
+    metadata: Metadata,
+
+    // Inline enum for document-specific state.
+    state: enum State {
+        struct Draft,
+        struct Published {
+            url: String,
+        },
+        struct Archived {
+            reason: String,
+        },
+    },
+}

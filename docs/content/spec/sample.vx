@@ -1,7 +1,7 @@
 
 struct BuildInput {
     fs: Fs,
-    workspace: Path,
+    workspace_root: Path,
     args: Array[String],
     env: Map[String, String],
 }
@@ -13,10 +13,11 @@ struct BuildOutput {
 // TODO: this is totally gucci, we don't need `..`
 fn build({ fs, workspace_root }: BuildInput) -> BuildOutput {
     // these both end up Tree(s)
-    source_files = fs.glob(workspace_root / "**/*.c");
-    toolchain = fs.glob("/opt/c-toolchain");
+    let source_files = fs.glob(workspace_root / "**/*.c");
+    let toolchain = fs.glob("/opt/c-toolchain");
 
-    hello = exec(
+    let hello = exec(
+        ;
         mounts: %{
             "src" => source_files,
             "toolchain" => toolchain,
@@ -36,15 +37,4 @@ fn build({ fs, workspace_root }: BuildInput) -> BuildOutput {
     BuildOutput {
         targets: %{ "hello" => hello }
     }
-}
-
-
-BuildFacts = struct {
-    foo: Fn() => FooFact,
-    bar: Fn() => BarFact,
-}
-
-??? = struct {
-    foo: FooFact,
-    bar: BarFact,
 }

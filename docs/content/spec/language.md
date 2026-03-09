@@ -33,10 +33,9 @@ insert_anchor_links = "heading"
 > r[lang.naming]
 >
 > All types are written in UpperCamelCase. All bindings are written in
-> snake_case. This is enforced by the evaluator. Because of this
-> distinction, there is no `type` keyword — `Name = struct { ... }` is a
-> type declaration (UpperCamelCase), `name = Name { ... }` is a binding
-> (snake_case). The casing rule makes them unambiguous.
+> snake_case. This is enforced by the evaluator. Type declarations are
+> keyword-led (`struct Name`, `enum Name`, `newtype Name`, `type Name = ...`);
+> bindings remain snake_case (`let name = Name { ... }`).
 
 ## Lexical grammar
 
@@ -44,9 +43,9 @@ insert_anchor_links = "heading"
 
 > r[lex.keywords]
 >
-> Reserved words: `fn`, `struct`, `enum`, `newtype`, `of`, `with`,
-> `match`, `if`, `else`, `is`, `as`, `import`, `return`, `fail`, `true`,
-> `false`.
+> Reserved words: `fn`, `let`, `type`, `struct`, `enum`, `newtype`,
+> `of`, `with`, `match`, `if`, `else`, `is`, `as`, `import`, `return`,
+> `fail`, `true`, `false`.
 >
 > These cannot be used as binding or type names.
 
@@ -62,8 +61,9 @@ insert_anchor_links = "heading"
 >
 > UpperCamelCase identifiers denote types. snake_case identifiers denote
 > bindings. The evaluator enforces this — using the wrong case is an error.
-> This replaces a `type` keyword: `Name = struct { ... }` is a type
-> declaration because `Name` is UpperCamelCase.
+> Top-level type declarations are keyword-led (`struct Name`, `enum Name`,
+> `newtype Name`, `type Name = ...`). Casing still distinguishes type
+> names from bindings everywhere else.
 
 ### Whitespace
 
@@ -92,7 +92,7 @@ insert_anchor_links = "heading"
 > ```vixen
 > @tag("type")
 > @rename_all("kebab-case")
-> Shape = enum { ... }
+> enum Shape { ... }
 > ```
 >
 > Attributes may appear before:
@@ -111,13 +111,19 @@ insert_anchor_links = "heading"
 
 > r[lex.semicolons]
 >
-> Semicolons separate statements. This applies uniformly — at module
-> top level and inside blocks. A trailing semicolon after the last
-> statement is permitted but not required. In blocks, the last
-> expression (without a trailing semicolon) is the block's value; a
+> Semicolons separate statements inside blocks. A trailing semicolon
+> after the last statement is permitted but not required. In blocks, the
+> last expression (without a trailing semicolon) is the block's value; a
 > trailing semicolon turns it into a statement and the block evaluates
-> to `()`. A source file is a sequence of semicolon-separated
-> statements; there is no trailing expression value at file level.
+> to `()`.
+>
+> At file scope, Vixen has **top-level items**, not statements. A source
+> file is a sequence of top-level type and function declarations; there
+> is no file-level trailing expression value.
+>
+> Semicolons also separate positional from keyword parameters and
+> arguments: `fn build(path: Path; release: Bool = false)` and
+> `build(path; release: true)`.
 
 ### Operators and delimiters
 
@@ -206,30 +212,31 @@ insert_anchor_links = "heading"
 
 > r[decl.binding]
 >
-> A binding associates a name with a value: `name = expr`. An optional
-> type annotation can be added: `name: Type = expr`. The name must be
-> snake_case. There is no `let` keyword — casing distinguishes bindings
-> from type declarations.
+> A binding associates a pattern with a value:
+> `let name = expr`. An optional type annotation can be added:
+> `let name: Type = expr`. Bindings are always introduced with `let`.
 
 > r[decl.binding.destructure]
 >
-> Bindings can destructure: `{ first, last } = name`. The type is inferred
-> from the right-hand side. Tuple destructuring: `(a, b) = pair`.
+> Bindings can destructure: `let { first, last } = name`. The type is
+> inferred from the right-hand side. Tuple destructuring:
+> `let (a, b) = pair`.
 
 ### Type declarations
 
 > r[decl.type]
 >
-> A type declaration uses UpperCamelCase on the left side of `=`:
-> `Name = struct { ... }` or `Name = enum { ... }`. No `type` keyword —
-> casing is sufficient.
+> Top-level type declarations are keyword-led:
+> `struct Name { ... }`, `enum Name { ... }`, `newtype Name of T`.
+> The `type` keyword is reserved for aliases:
+> `type Name = Foo | Bar`.
 
 ### Struct declarations
 
 > r[decl.struct]
 >
 > ```vixen
-> Point = struct {
+> struct Point {
 >   x: F64,
 >   y: F64,
 > }
@@ -242,7 +249,7 @@ insert_anchor_links = "heading"
 > Fields can have default values:
 >
 > ```vixen
-> Config = struct {
+> struct Config {
 >   optimize: Bool = false,
 >   jobs: U64 = 8,
 >   target: String,
@@ -256,11 +263,11 @@ insert_anchor_links = "heading"
 
 > r[decl.struct.nested]
 >
-> A field type can be declared inline:
+> A slot type can be declared inline immediately after `:`:
 >
 > ```vixen
-> CargoToml = struct {
->   package: Package = struct {
+> struct CargoToml {
+>   package: struct Package {
 >     name: String,
 >     edition: String,
 >   },
@@ -274,32 +281,27 @@ insert_anchor_links = "heading"
 > r[decl.enum]
 >
 > ```vixen
-> Shape = enum {
->   Circle { radius: F64 },
->   Rect { width: F64, height: F64 },
->   Empty,
+> enum Shape {
+>   struct Circle {
+>     radius: F64,
+>   },
+>   struct Rect {
+>     width: F64,
+>     height: F64,
+>   },
+>   struct Empty,
 > }
 > ```
 >
-> Variants are comma-separated. Each variant can have no payload, a tuple
-> payload (`Variant(Type)`), or a struct payload (`Variant { field: Type }`).
-
-> r[decl.enum.alias]
->
-> A variant can alias an existing type: `File: Blob`. The shorthand `:Blob`
-> means `Blob: Blob`.
-
-> r[decl.enum.sum]
->
-> `Entry = Blob | Tree` is shorthand for an enum where each variant is an
-> alias named after its type.
+> Variants are comma-separated. Every variant is an explicit named struct
+> declaration. Zero-sized variants can omit the body: `struct Empty`.
 
 ### Newtype declarations
 
 > r[decl.newtype]
 >
 > ```vixen
-> Blake3 = newtype of String;
+> newtype Blake3 of String
 > ```
 >
 > Creates a distinct type backed by an existing type. Requires explicit
@@ -348,23 +350,27 @@ insert_anchor_links = "heading"
 
 > r[decl.fn.keyword-args]
 >
-> Keyword arguments follow positional arguments in a separate braced group:
+> Keyword parameters and arguments follow positional ones after `;`:
 >
 > ```vixen
-> fn greet(name: String, { cheerful: Bool = false }) -> String {
+> fn greet(name: String; cheerful: Bool = false) -> String {
 >   if cheerful { `Hey ${name}!!!` } else { `Hello ${name}` }
 > }
 >
-> greet("Amos", cheerful: true)
+> greet("Amos"; cheerful: true)
 > ```
 
 ### Scope
 
 > r[decl.scope]
 >
-> Declarations (bindings, types, functions) can appear anywhere — at
-> module top level or inside any block. Declarations inside a block are
-> scoped to that block.
+> Top-level items are type declarations (`struct`, `enum`, `newtype`,
+> `type`) and function declarations. Bindings do not appear at top
+> level.
+>
+> Inside blocks, bindings and local functions are allowed. Top-level type
+> declarations are not allowed in statement position; nested type
+> declarations appear only in slot type position, immediately after `:`.
 
 ## Expression grammar
 
@@ -399,8 +405,8 @@ insert_anchor_links = "heading"
 > `match`, and nested interpolations:
 >
 > ```vixen
-> msg = `found ${results.len()} results in ${elapsed}s`
-> label = `status: ${if ok { "pass" } else { "fail" }}`
+> let msg = `found ${results.len()} results in ${elapsed}s`
+> let label = `status: ${if ok { "pass" } else { "fail" }}`
 > ```
 >
 > There is no bare-identifier shorthand — `${ }` is the only
@@ -440,9 +446,9 @@ insert_anchor_links = "heading"
 > Declarations inside a block are scoped to that block.
 >
 > ```vixen
-> area = {
->   w = rect.width;
->   h = rect.height;
+> let area = {
+>   let w = rect.width;
+>   let h = rect.height;
 >   w * h
 > }
 > ```
@@ -462,8 +468,8 @@ insert_anchor_links = "heading"
 > Map literals use `%{ }` with `=>` separating keys from values:
 >
 > ```vixen
-> coords = %{ "lat" => 53.156, "lng" => 145.23 }
-> port_names = %{ 80 => "http", 443 => "https" }
+> let coords = %{ "lat" => 53.156, "lng" => 145.23 }
+> let port_names = %{ 80 => "http", 443 => "https" }
 > ```
 >
 > Keys and values are arbitrary expressions. Trailing commas are allowed.
@@ -474,12 +480,12 @@ insert_anchor_links = "heading"
 > r[expr.call]
 >
 > `f(arg1, arg2)` calls a function with positional arguments. Trailing
-> commas are allowed. Keyword arguments follow positional arguments using
-> `:` syntax:
+> commas are allowed. Keyword arguments follow positional arguments after
+> `;`:
 >
 > ```vixen
-> greet("Amos", cheerful: true)
-> acquire(url, sha256: hash)
+> greet("Amos"; cheerful: true)
+> acquire(url; sha256: hash)
 > ```
 >
 > Keyword arguments can appear in any order but must come after all
@@ -493,10 +499,10 @@ insert_anchor_links = "heading"
 > keyword arguments after the spread override spread values.
 >
 > ```vixen
-> fn render(template: String, { width: U64, height: U64, title: String }) { ... }
+> fn render(template: String; width: U64, height: U64, title: String) { ... }
 >
-> defaults = Config { width: 800, height: 600, title: "untitled", debug: true };
-> render("page.html", ..defaults, title: "Home")
+> let defaults = Config { width: 800, height: 600, title: "untitled", debug: true };
+> render("page.html", ..defaults; title: "Home")
 > // debug is ignored (not a keyword param), title is overridden
 > ```
 
@@ -510,9 +516,9 @@ insert_anchor_links = "heading"
 > Trailing commas are allowed.
 >
 > ```vixen
-> p = Point { x: 1.0, y: 2.0 }
-> p2 = Point { :x, y: 2.0 }
-> p3 = Point { ..p, y: 3.0 }
+> let p = Point { x: 1.0, y: 2.0 }
+> let p2 = Point { :x, y: 2.0 }
+> let p3 = Point { ..p, y: 3.0 }
 > ```
 
 ### Index expressions
@@ -586,12 +592,9 @@ insert_anchor_links = "heading"
 
 > r[expr.closure]
 >
-> Two syntactic forms:
->
-> - Block form: `fn(x, y) { body }` — parameters in parentheses, body in
->   braces.
-> - Arrow form: `(x, y) => expr` — parameters in parentheses, body is a
->   single expression.
+> Closures use arrow syntax only: `(x, y) => expr`. The body may be any
+> expression, including a block: `(x) => { let y = x + 1; y }`.
+> `fn` is declaration-only.
 >
 > Parameter types are inferred from context. Closures capture bindings
 > from their enclosing scope by value.
@@ -639,9 +642,9 @@ insert_anchor_links = "heading"
 > arguments go and appears exactly once:
 >
 > ```vixen
-> add_two = @add(2, ..)              // Fn(U64) -> U64
-> double = @multiply(.., 2)          // Fn(U64) -> U64
-> both = @clamp(0, .., 255)          // Fn(U64) -> U64
+> let add_two = @add(2, ..)              // Fn(U64) -> U64
+> let double = @multiply(.., 2)          // Fn(U64) -> U64
+> let both = @clamp(0, .., 255)          // Fn(U64) -> U64
 > ```
 
 > r[expr.partial.keyword]
@@ -650,9 +653,9 @@ insert_anchor_links = "heading"
 > arguments are sealed — they cannot be overridden by the caller:
 >
 > ```vixen
-> fn compile(src: String, { optimize: Bool = false, loudly: Bool = false }) { ... }
+> fn compile(src: String; optimize: Bool = false, loudly: Bool = false) { ... }
 >
-> loud_compile = @compile(.., loudly: true)  // Fn(String) -> ...
+> let loud_compile = @compile(..; loudly: true)  // Fn(String) -> ...
 > // loudly is sealed at true, optimize uses its default
 > ```
 
@@ -663,10 +666,10 @@ insert_anchor_links = "heading"
 > `Fn` that can be passed:
 >
 > ```vixen
-> fn greet(name: String, { cheerful: Bool = false }) -> String { ... }
+> fn greet(name: String; cheerful: Bool = false) -> String { ... }
 >
 > items.map(greet)                        // ERROR: greet has keyword args
-> items.map(@greet(.., cheerful: true))   // OK: Fn(String) -> String
+> items.map(@greet(..; cheerful: true))   // OK: Fn(String) -> String
 > items.map(@greet(..))                   // OK: cheerful uses default
 > ```
 
@@ -676,9 +679,8 @@ insert_anchor_links = "heading"
 >
 > `if condition { then_body } else { else_body }`. No parentheses around
 > the condition, braces required around both branches. `else if` chains
-> are allowed. When used as an expression (its value is used), the `else`
-> branch is required. When used as a statement (value discarded), the
-> `else` branch is optional and the whole thing evaluates to `()`.
+> are allowed. `if` is always an expression, so `else` is always
+> required.
 
 ### Match expressions
 
@@ -724,8 +726,8 @@ insert_anchor_links = "heading"
 > disambiguating literal types and documenting intent:
 >
 > ```vixen
-> zero = 0 :: I64    // literal 0 as I64, no conversion
-> pi = 3.14 :: F64   // explicit (though F64 is the default)
+> let zero = 0 :: I64    // literal 0 as I64, no conversion
+> let pi = 3.14 :: F64   // explicit (though F64 is the default)
 > ```
 >
 > Spaces around `::` are canonical formatting but not required:
@@ -740,7 +742,7 @@ insert_anchor_links = "heading"
 > `if` body:
 >
 > ```vixen
-> if config.edition is Some(edition) {
+> if config.edition is Some { value: edition } {
 >   use_edition(edition)
 > }
 > ```
@@ -750,10 +752,10 @@ insert_anchor_links = "heading"
 > r[expr.fallible]
 >
 > The `?` suffix catches poisoning and returns `Option` instead:
-> `Some(result)` on success, `None` on failure. It applies to any
+> success becomes `Some`, failure becomes `None`. It applies to any
 > expression that may poison — function calls (`f(x)?`), UFCS calls
 > (`x.f()?`), and index expressions (`array[i]?`). The `as?` operator
-> follows the same pattern (see [type.as-fallible]).
+> follows the same pattern (see `r[type.as-fallible]`).
 
 ### Statements
 
@@ -767,7 +769,7 @@ insert_anchor_links = "heading"
 
 > r[lang.modules]
 >
-> A `.vixen` file is a module. Its top-level bindings (including types)
+> A `.vx` file is a module. Its top-level bindings (including types)
 > are the module's exports. There is no visibility modifier — everything
 > at the top level is visible to importers.
 
@@ -789,7 +791,7 @@ insert_anchor_links = "heading"
 > Three kinds of module sources:
 >
 > - **Local files** — paths starting with `./` are relative to the current
->   file: `import("./lib/helpers")` loads `./lib/helpers.vixen`.
+>   file: `import("./lib/helpers")` loads `./lib/helpers.vx`.
 > - **Standard library** — `import("std")` loads the built-in standard
 >   library.
 > - **External packages** — resolution of non-local, non-std imports is a
@@ -805,8 +807,8 @@ insert_anchor_links = "heading"
 > r[type.scalar.literals]
 >
 > Integer literals default to `U64`. Float literals default to `F64`.
-> Literal syntax is specified in [lex.numeric], [lex.string], and
-> [lex.string.interpolation]. Type ascription selects a different type:
+> Literal syntax is specified in `r[lex.numeric]`, `r[lex.string]`, and
+> `r[lex.string.interpolation]`. Type ascription selects a different type:
 > `4::I64`.
 
 ## Newtypes
@@ -817,9 +819,9 @@ insert_anchor_links = "heading"
 > requires explicit conversion via `as`:
 >
 > ```vixen
-> Blake3 = newtype of String;
-> hash = blake3_hash_of(something); // type Blake3
-> raw = hash as String;             // explicit conversion
+> newtype Blake3 of String
+> let hash = blake3_hash_of(something); // type Blake3
+> let raw = hash as String;             // explicit conversion
 > ```
 
 ## Tuples
@@ -835,16 +837,17 @@ insert_anchor_links = "heading"
 
 > r[type.struct]
 >
-> Structs are defined with `Name = struct { ... }`. The `:` shorthand in
-> construction — `:x` means `x: x` — reuses a binding name as the field
-> name. Spread syntax `..other` copies fields from another value.
+> Structs are declared with `struct Name { ... }`. Zero-sized structs may
+> omit the body: `struct Unit`. The `:` shorthand in construction —
+> `:x` means `x: x` — reuses a binding name as the field name. Spread
+> syntax `..other` copies fields from another value.
 
 > r[type.struct.with]
 >
 > `with` creates a new value with some fields changed:
 >
 > ```vixen
-> updated = name with { last: "Wilson" }
+> let updated = name with { last: "Wilson" }
 > ```
 >
 > Fields not mentioned are kept from the original value.
@@ -872,9 +875,11 @@ insert_anchor_links = "heading"
 
 > r[type.struct.nested]
 >
-> Types can be declared inline in field position: `package: Package =
-> struct { ... }`. The nested type lives under the parent's namespace and
-> can be referenced as `CargoToml.Package`.
+> Types can be declared inline in slot position, immediately after `:`:
+> `package: struct Package { ... }` or `state: enum { ... }`. Named
+> inline types live under the parent's namespace and can be referenced as
+> `CargoToml.Package`. Anonymous inline types are allowed when no
+> reusable name is needed.
 
 > r[type.struct.destructure]
 >
@@ -887,17 +892,18 @@ insert_anchor_links = "heading"
 
 > r[type.enum]
 >
-> Vixen has Rust-like enums. Each variant is a type under the enum's
-> namespace. `Shape.Circle` is a type, and `Shape` is a type. They are
-> distinct.
+> Enums are declared with `enum Name { ... }`. Each variant is a named
+> struct declaration under the enum's namespace. `Shape.Circle` is a
+> type, and `Shape` is a type. They are distinct.
 
 > r[type.enum.variant-kinds]
 >
-> Variants can have no payload, a tuple payload, or a struct payload:
+> Variants are always explicit named structs:
 >
-> - `Color.Red` — zero-sized type
-> - `Token.Number` — tuple type, fields accessed with `._0`
-> - `Shape.Circle` — struct type, fields accessed by name
+> - `struct Red,` — zero-sized variant
+> - `struct Circle { radius: F64 },` — data-carrying variant
+>
+> Variants are comma-separated.
 
 > r[type.enum.no-recursion]
 >
@@ -906,21 +912,14 @@ insert_anchor_links = "heading"
 
 > r[type.enum.alias]
 >
-> A variant can be an alias for an existing type using colon syntax:
-> `File: Blob`. The `:` shorthand reuses the type name: `:Blob` means
-> `Blob: Blob`.
-
-> r[type.enum.sum-shorthand]
->
-> `Entry = Blob | Tree` is shorthand for an enum where each variant is
-> an alias named after its type.
+> Enum variants do not use alias syntax. Shared or sum-like types should
+> be named separately with `type Name = A | B`.
 
 > r[type.enum.build]
 >
-> To build a variant value (narrow type): `Shape.Circle { radius: 5.0 }`.
-> To build an enum value (wide type), use the enum as a constructor:
-> `Shape(Circle { radius: 5.0 })` — variant names are in scope inside
-> the constructor.
+> To build a variant value, use its struct literal form:
+> `Shape.Circle { radius: 5.0 }`. Zero-sized variants use the type name:
+> `Direction.North`.
 
 ## Generics
 
@@ -1039,11 +1038,11 @@ insert_anchor_links = "heading"
 > r[control.is]
 >
 > `is` tests whether a value matches a pattern, binding variables on
-> success. It replaces `if let` from Rust — Vixen has no `let` keyword.
+> success. It replaces `if let` from Rust.
 > `is` is an expression that evaluates to `Bool`.
 >
 > ```vixen
-> if config.edition is Some(edition) {
+> if config.edition is Some { value: edition } {
 >   use_edition(edition)
 > } else {
 >   use_default()
@@ -1088,7 +1087,7 @@ insert_anchor_links = "heading"
 > r[pattern.variant]
 >
 > Enum variant patterns require the variant name:
-> `Circle { radius }`, `Some(value)`, `None`. In `match`, the variant
+> `Circle { radius }`, `Some { value }`, `None`. In `match`, the variant
 > name is always required (unlike struct destructuring in bindings where
 > it's inferred).
 
@@ -1139,7 +1138,7 @@ insert_anchor_links = "heading"
 >
 > Function types use `Fn(Args) -> Ret` syntax. Capability tags appear
 > between the parameter list and the return type arrow: `Fn(Args) #fs -> Ret`.
-> See [cap.model]. Only functions with positional arguments can have their
+> See `r[cap.model]`. Only functions with positional arguments can have their
 > type named. Functions with keyword arguments cannot be passed as values —
 > use partial application (`@`) to close over keyword arguments and produce
 > a passable `Fn`.
@@ -1198,7 +1197,7 @@ insert_anchor_links = "heading"
 
 > r[fn.closure]
 >
-> Closures can be written as `fn(x) { body }` or `(x) => body`.
+> Closures use arrow syntax only: `(x) => body`.
 
 > r[fn.closure.dollar]
 >
@@ -1241,7 +1240,7 @@ insert_anchor_links = "heading"
 >
 > Overload resolution does not synthesize dispatch over enum variants.
 > If `fn digest(x: Blob)` and `fn digest(x: Tree)` both exist, calling
-> `digest(entry)` where `entry: Entry` (and `Entry = Blob | Tree`) is
+> `digest(entry)` where `entry: Entry` (and `type Entry = Blob | Tree`) is
 > an error — there is no overload for `Entry`. Write an explicit `match`
 > or add `fn digest(x: Entry)`.
 
@@ -1254,13 +1253,15 @@ insert_anchor_links = "heading"
 > syntax (`Name(...)`) by the delimiter:
 >
 > ```vixen
-> Blob = struct { content: String };
+> struct Blob {
+>   content: String,
+> }
 >
 > fn Blob(s: String) -> Blob { Blob { content: s } }
 > fn Blob(n: U64) -> Blob { Blob { content: n.to_string() } }
 >
-> b = Blob("hello")           // function call — constructor
-> b2 = Blob { content: "x" }  // struct literal — direct construction
+> let b = Blob("hello")           // function call — constructor
+> let b2 = Blob { content: "x" }  // struct literal — direct construction
 > ```
 
 ## Arrays
@@ -1277,9 +1278,9 @@ insert_anchor_links = "heading"
 > Map literals use `%{ }` with `=>` for entries:
 >
 > ```vixen
-> coords = %{ "lat" => 53.156, "lng" => 145.23 }
-> port_names = %{ 80 => "http", 443 => "https" }
-> build_flags = %{ target => flags_for(target) }
+> let coords = %{ "lat" => 53.156, "lng" => 145.23 }
+> let port_names = %{ 80 => "http", 443 => "https" }
+> let build_flags = %{ target => flags_for(target) }
 > ```
 >
 > The type is `Map[K, V]`. Keys can be any Vixen type — all types are
@@ -1426,7 +1427,8 @@ insert_anchor_links = "heading"
 
 > r[option.type]
 >
-> `Option[T]` is a built-in enum with variants `Some(T)` and `None`.
+> `Option[T]` is a built-in enum with variants `struct Some { value: T }`
+> and `struct None`.
 
 > r[option.sugar]
 >
@@ -1580,14 +1582,14 @@ insert_anchor_links = "heading"
 > ```vixen
 > exec[T](
 >   args: Array[ExecArg],
->   {
+>   ;
 >     env: Map[String, ExecArg] = %{},
 >     mounts: Map[Path, Blob | Tree] = %{},
 >     writable: Array[Path] = [],
 >     executor: ExecutorClass = executor_class("default"),
->     verifier: Fn() -> () = fn() {},
+>     verifier: Fn() -> () = () => {},
 >     observer: Fn(Process, Tree) -> Stream[T],
->   }
+>   
 > ) -> Stream[T]
 > ```
 
@@ -1680,13 +1682,13 @@ insert_anchor_links = "heading"
 > be checked, compose them into a single closure:
 >
 > ```vixen
-> verifier = fn() {
+> let verifier = () => {
 >   check_gcc();
 >   check_ld();
 >   check_sdk_version();
 > }
 >
-> exec(["gcc", "-c", "main.c"], verifier: verifier, ...)
+> exec(["gcc", "-c", "main.c"]; verifier: verifier, ...)
 > ```
 
 > r[exec.executor-class]
@@ -1954,7 +1956,7 @@ insert_anchor_links = "heading"
 
 > r[eval.entry]
 >
-> A Vixen build starts with a `build.vixen` file at the repository root.
+> A Vixen build starts with a `build.vx` file at the repository root.
 > The entry point is invoked by the `build` intrinsic, which grants the
 > `#fs` capability. The entry point receives the workspace path as a
 > `Path`, CLI arguments as `Array[String]`, and the environment as
@@ -1972,7 +1974,7 @@ insert_anchor_links = "heading"
 
 > r[eval.entry.cargo-compat]
 >
-> If no `build.vixen` exists and a `Cargo.toml` is found, Vixen evaluates
+> If no `build.vx` exists and a `Cargo.toml` is found, Vixen evaluates
 > as if a thin build file were present calling `std.rust.workspace`. This
 > makes `vx build` a drop-in replacement for `cargo build`.
 
@@ -2169,14 +2171,14 @@ insert_anchor_links = "heading"
 >
 > ```vixen
 > stabilize(
->   witness: fn() { ... },
->   resolve: fn(inputs) {
+>   witness: () => { ... },
+>   resolve: (inputs) => {
 >     // outer resolve has #discover, not #fs
 >     stabilize(
->       witness: fn() { ... },
+>       witness: () => { ... },
 >       // inner witness: #fs granted by inner stabilize,
 >       // #discover from outer resolve filtered by mask
->       resolve: fn(inner) { ... },
+>       resolve: (inner) => { ... },
 >       // inner resolve: #discover granted by inner stabilize
 >     )
 >   },
