@@ -201,6 +201,33 @@ impl ScopeTree {
         self.scopes.iter().flat_map(|s| s.definitions.iter())
     }
 
+    /// Enumerate all definitions visible at a given offset, walking up the scope chain.
+    /// Respects sequential visibility in blocks (only defs before offset).
+    /// Later bindings shadow earlier ones with the same name.
+    pub fn visible_at(&self, offset: rowan::TextSize) -> Vec<&Definition> {
+        let from = self.scope_at(offset);
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        let mut scope_id = Some(from);
+
+        while let Some(id) = scope_id {
+            let scope = &self.scopes[id.index()];
+            for def in scope.definitions.iter().rev() {
+                // In blocks, only show defs before the cursor
+                if scope.kind == ScopeKind::Block && def.name_range.start() >= offset {
+                    continue;
+                }
+                // First occurrence wins (shadowing)
+                if seen.insert(&def.name) {
+                    result.push(def);
+                }
+            }
+            scope_id = scope.parent;
+        }
+
+        result
+    }
+
     /// Get the number of scopes.
     pub fn scope_count(&self) -> usize {
         self.scopes.len()

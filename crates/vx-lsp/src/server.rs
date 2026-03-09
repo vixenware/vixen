@@ -14,7 +14,6 @@ pub struct VxLanguageServer {
 }
 
 struct DocumentState {
-    #[allow(dead_code)]
     text: String,
     parsed: Parsed<SourceFile>,
     line_index: vx::LineIndex,
@@ -70,6 +69,17 @@ impl DocumentState {
             .collect()
     }
 
+    /// Extract a declaration snippet for hover display.
+    /// Takes the first line of the full declaration range.
+    fn declaration_snippet(&self, def: &vx_resolve::Definition) -> String {
+        let start = u32::from(def.full_range.start()) as usize;
+        let end = u32::from(def.full_range.end()) as usize;
+        let slice = &self.text[start..end];
+        // Take up to the first line break, or the first `{`/`=` for multiline decls
+        let first_line = slice.lines().next().unwrap_or(slice);
+        first_line.trim().to_string()
+    }
+
     fn to_lsp_range(&self, range: TextRange) -> Range {
         let start = self.line_index.position(range.start());
         let end = self.line_index.position(range.end());
@@ -105,6 +115,11 @@ impl LanguageServer for VxLanguageServer {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(vec![".".to_string()]),
+                    ..Default::default()
+                }),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
@@ -347,6 +362,61 @@ impl LanguageServer for VxLanguageServer {
 
         Ok(result.flatten())
     }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let result = self.with_document(uri, |state| {
+            let offset = state.line_index.offset(vx::Position {
+                line: pos.line,
+                col: pos.character,
+            })?;
+
+            let def = state.definition_at(offset)?;
+            let kind_label = def_kind_label(def.kind);
+            let snippet = state.declaration_snippet(def);
+
+            let markdown = format!("```vx\n{snippet}\n```\n---\n*{kind_label}*");
+
+            Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: markdown,
+                }),
+                range: Some(state.to_lsp_range(def.name_range)),
+            })
+        });
+
+        Ok(result.flatten())
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+
+        let result = self.with_document(uri, |state| {
+            let offset = state.line_index.offset(vx::Position {
+                line: pos.line,
+                col: pos.character,
+            })?;
+
+            let visible = state.resolution.scopes.visible_at(offset);
+            let items: Vec<CompletionItem> = visible
+                .into_iter()
+                .map(|def| CompletionItem {
+                    label: def.name.clone(),
+                    kind: Some(def_kind_to_completion(def.kind)),
+                    detail: Some(state.declaration_snippet(def)),
+                    ..Default::default()
+                })
+                .collect();
+
+            Some(CompletionResponse::Array(items))
+        });
+
+        Ok(result.flatten())
+    }
 }
 
 impl VxLanguageServer {
@@ -411,6 +481,34 @@ fn convert_symbol_kind(kind: vx::SymbolKind) -> SymbolKind {
         vx::SymbolKind::Field => SymbolKind::FIELD,
         vx::SymbolKind::Newtype => SymbolKind::TYPE_PARAMETER,
         vx::SymbolKind::TypeAlias => SymbolKind::TYPE_PARAMETER,
+    }
+}
+
+fn def_kind_label(kind: vx_resolve::DefKind) -> &'static str {
+    match kind {
+        vx_resolve::DefKind::Function => "function",
+        vx_resolve::DefKind::Struct => "struct",
+        vx_resolve::DefKind::Enum => "enum",
+        vx_resolve::DefKind::Newtype => "newtype",
+        vx_resolve::DefKind::TypeAlias => "type alias",
+        vx_resolve::DefKind::Binding => "binding",
+        vx_resolve::DefKind::Parameter => "parameter",
+        vx_resolve::DefKind::Variant => "variant",
+        vx_resolve::DefKind::Field => "field",
+    }
+}
+
+fn def_kind_to_completion(kind: vx_resolve::DefKind) -> CompletionItemKind {
+    match kind {
+        vx_resolve::DefKind::Function => CompletionItemKind::FUNCTION,
+        vx_resolve::DefKind::Struct => CompletionItemKind::STRUCT,
+        vx_resolve::DefKind::Enum => CompletionItemKind::ENUM,
+        vx_resolve::DefKind::Newtype => CompletionItemKind::CLASS,
+        vx_resolve::DefKind::TypeAlias => CompletionItemKind::TYPE_PARAMETER,
+        vx_resolve::DefKind::Binding => CompletionItemKind::VARIABLE,
+        vx_resolve::DefKind::Parameter => CompletionItemKind::VARIABLE,
+        vx_resolve::DefKind::Variant => CompletionItemKind::ENUM_MEMBER,
+        vx_resolve::DefKind::Field => CompletionItemKind::FIELD,
     }
 }
 
