@@ -100,6 +100,35 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 }
 
 #[test]
+// r[verify exec.verifier]
+fn build_vx_verifier_failures_poison_exec() {
+    let env = TestEnv::new();
+    env.write_file(
+        "build.vx",
+        r#"fn verify() { fail "toolchain drift" }
+
+fn observe(process: Process, tree: Tree) {
+  Tree.of(%{
+    "stdout.txt" => process.stdout,
+  })
+}
+
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  exec(
+    ["/bin/sh", "-c", "printf built"];
+    observer: observe,
+    verifier: verify,
+  )
+}
+"#,
+    );
+
+    let result = env.build().run();
+    result.assert_failure_contains("VerificationFailure");
+    result.assert_failure_contains("toolchain drift");
+}
+
+#[test]
 fn second_build_is_cache_hit() {
     let env = TestEnv::new();
     create_hello_world(&env);

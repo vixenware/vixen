@@ -29,7 +29,7 @@ use vx_store_proto::{ManifestHash, ServiceVersion, StoreProgress};
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 8;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 9;
 
 // =============================================================================
 // Rust Compilation
@@ -308,8 +308,15 @@ pub struct RunEvalPayload {
     pub module: TransportModule,
     /// Optional observer closure to run after the process exits.
     pub observer: Option<ShippedFunction>,
-    /// Optional verifier closure to run after the observer.
+    /// Optional verifier closure to run alongside the process.
     pub verifier: Option<ShippedFunction>,
+}
+
+#[derive(Debug, Clone, Facet, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RunFailureKind {
+    User,
+    VerificationFailure,
 }
 
 /// Request to run a sandboxed toolchain command.
@@ -371,6 +378,7 @@ pub struct RunResult {
     pub duration_ms: u64,
     pub output_manifest: Option<ManifestHash>,
     pub observer_value: Option<TransportValue>,
+    pub error_kind: Option<RunFailureKind>,
     pub error: Option<String>,
 }
 

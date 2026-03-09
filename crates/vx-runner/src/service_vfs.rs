@@ -7,12 +7,13 @@ use camino::Utf8PathBuf;
 use jiff::Zoned;
 use moire::task::FutureExt;
 use std::time::Instant;
+use tokio::task::spawn_blocking;
 use tracing::{debug, info};
 use vx_eval::PathValue;
 use vx_runner_proto::{
-    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RunArg, RunFileMount,
-    RunOutput, RunRequest, RunResult, RunTreeMount, RustCompileRequest, RustCompileResult,
-    TransportValue,
+    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RunArg, RunFailureKind,
+    RunFileMount, RunOutput, RunRequest, RunResult, RunTreeMount, RustCompileRequest,
+    RustCompileResult, TransportValue,
 };
 use vx_store_proto::{
     Blake3Hash, CasNode, ChunkHash, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry,
@@ -20,7 +21,7 @@ use vx_store_proto::{
 };
 
 use crate::RunnerService;
-use crate::eval_boundary::evaluate_shipped_observer;
+use crate::eval_boundary::{evaluate_shipped_observer, evaluate_shipped_verifier};
 use crate::sandbox::{ActionKind, CommandError};
 
 fn is_relative_vfs_path(path: &str) -> bool {
@@ -75,6 +76,17 @@ fn run_failure_result(
     stderr: String,
     error: Option<String>,
 ) -> RunResult {
+    run_failure_result_with_kind(start, exit_code, stdout, stderr, None, error)
+}
+
+fn run_failure_result_with_kind(
+    start: Instant,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+    error_kind: Option<RunFailureKind>,
+    error: Option<String>,
+) -> RunResult {
     RunResult {
         success: false,
         exit_code,
@@ -83,6 +95,7 @@ fn run_failure_result(
         duration_ms: start.elapsed().as_millis() as u64,
         output_manifest: None,
         observer_value: None,
+        error_kind,
         error,
     }
 }
@@ -103,8 +116,21 @@ fn run_success_result(
         duration_ms: start.elapsed().as_millis() as u64,
         output_manifest,
         observer_value,
+        error_kind: None,
         error: None,
     }
+}
+
+fn append_process_output(mut message: String, stdout: &str, stderr: &str) -> String {
+    if !stderr.trim().is_empty() {
+        message.push_str("\nprocess stderr:\n");
+        message.push_str(stderr);
+    }
+    if !stdout.trim().is_empty() {
+        message.push_str("\nprocess stdout:\n");
+        message.push_str(stdout);
+    }
+    message
 }
 
 /// Action execution context with all paths and sandbox config.
@@ -1620,6 +1646,11 @@ impl RunnerService {
         } else {
             ActionKind::CcLink
         };
+        let verifier_task = request
+            .eval
+            .as_ref()
+            .and_then(|eval| eval.verifier.as_ref().map(|_| eval.clone()))
+            .map(|eval| spawn_blocking(move || evaluate_shipped_verifier(&eval)));
 
         let output = match crate::sandbox::run_sandboxed_command(
             cmd,
@@ -1679,7 +1710,7 @@ impl RunnerService {
 
         let exit_code = output.exit_status.code().unwrap_or(-1);
         // r[impl exec.errors]
-        let observer_value = match request.eval.as_ref() {
+        let observer_result: Result<Option<TransportValue>, String> = match request.eval.as_ref() {
             Some(eval) => match evaluate_shipped_observer(
                 self.cas.as_ref(),
                 eval,
@@ -1690,28 +1721,66 @@ impl RunnerService {
             )
             .await
             {
-                Ok(observer_value) => observer_value,
+                Ok(observer_value) => Ok(observer_value),
+                Err(error) => Err(error),
+            },
+            None => Ok(None),
+        };
+
+        let verifier_error = match verifier_task {
+            Some(task) => match task.await {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error),
                 Err(error) => {
-                    let mut message = format!("failed to evaluate shipped observer: {error}");
-                    if !output.stderr.trim().is_empty() {
-                        message.push_str("\nprocess stderr:\n");
-                        message.push_str(&output.stderr);
-                    }
-                    if !output.stdout.trim().is_empty() {
-                        message.push_str("\nprocess stdout:\n");
-                        message.push_str(&output.stdout);
-                    }
                     self.remove_action_prefix(&action.prefix_id).await;
                     return run_failure_result(
                         start,
                         exit_code,
                         output.stdout.clone(),
                         output.stderr.clone(),
-                        Some(message),
+                        Some(format!("failed to join shipped verifier task: {error}")),
                     );
                 }
             },
             None => None,
+        };
+
+        if let Some(error) = verifier_error {
+            let mut message = format!("shipped verifier failed: {error}");
+            if let Err(observer_error) = &observer_result {
+                message.push_str("\nobserver error:\n");
+                message.push_str(observer_error);
+            }
+            let message = append_process_output(message, &output.stdout, &output.stderr);
+            self.remove_action_prefix(&action.prefix_id).await;
+            return run_failure_result_with_kind(
+                start,
+                exit_code,
+                output.stdout.clone(),
+                output.stderr.clone(),
+                Some(RunFailureKind::VerificationFailure),
+                Some(message),
+            );
+        }
+
+        let observer_value = match observer_result {
+            Ok(observer_value) => observer_value,
+            Err(error) => {
+                let message = append_process_output(
+                    format!("failed to evaluate shipped observer: {error}"),
+                    &output.stdout,
+                    &output.stderr,
+                );
+                self.remove_action_prefix(&action.prefix_id).await;
+                return run_failure_result_with_kind(
+                    start,
+                    exit_code,
+                    output.stdout.clone(),
+                    output.stderr.clone(),
+                    Some(RunFailureKind::User),
+                    Some(message),
+                );
+            }
         };
 
         if !output.exit_status.success() && observer_value.is_none() {

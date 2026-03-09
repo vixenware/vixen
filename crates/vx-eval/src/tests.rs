@@ -827,6 +827,29 @@ fn exec_runs_a_local_process_with_keyword_args_and_snapshots_outputs() {
 }
 
 #[test]
+fn exec_verifier_failures_poison_locally() {
+    let engine = engine(
+        r#"fn verify() { fail "toolchain drift" }
+
+             fn observe(process: Process, tree: Tree) {
+               Tree.empty()
+             }
+
+             fn build() {
+               exec(
+                 ["/bin/sh", "-c", "printf built"];
+                 observer: observe,
+                 verifier: verify,
+               )
+             }"#,
+    );
+
+    let err = engine.call("build", vec![]).unwrap_err();
+    assert_eq!(err.kind, PoisonKind::VerificationFailure);
+    assert!(err.message.contains("toolchain drift"));
+}
+
+#[test]
 fn exec_can_be_routed_through_a_host_handler() {
     let captured = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&captured);
@@ -883,5 +906,6 @@ fn exec_can_be_routed_through_a_host_handler() {
     );
     assert_eq!(request.writable_roots, vec![PathValue::new("out")]);
     assert_eq!(request.observer.def.name, "observe");
+    assert!(request.verifier.is_none());
     assert_eq!(request.module.functions.len(), 2);
 }

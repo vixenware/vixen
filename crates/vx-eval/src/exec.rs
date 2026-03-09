@@ -35,6 +35,7 @@ pub struct ExecRequest {
     pub writable_roots: Vec<PathValue>,
     pub module: TransportModule,
     pub observer: ShippedFunction,
+    pub verifier: Option<ShippedFunction>,
 }
 
 pub type ExecHandler = dyn Fn(ExecRequest) -> Result<Value, PoisonError> + Send + Sync + 'static;

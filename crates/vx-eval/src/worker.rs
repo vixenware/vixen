@@ -46,6 +46,7 @@ struct ParsedExecRequest {
     mounts: Vec<(PathValue, Value)>,
     writable_roots: Vec<PathValue>,
     observer: Value,
+    verifier: Option<Value>,
 }
 
 /// The evaluation engine.
@@ -1110,6 +1111,7 @@ impl Engine {
         let mut env_value = None;
         let mut mounts_value = None;
         let mut observer_value = None;
+        let mut verifier_value = None;
         let mut writable_value = None;
 
         for (name, value) in kwargs {
@@ -1117,6 +1119,7 @@ impl Engine {
                 "env" => env_value = Some(value.clone()),
                 "mounts" => mounts_value = Some(value.clone()),
                 "observer" => observer_value = Some(value.clone()),
+                "verifier" => verifier_value = Some(value.clone()),
                 "writable" => writable_value = Some(value.clone()),
                 other => {
                     return Err(self
@@ -1146,6 +1149,19 @@ impl Engine {
             }
         }
 
+        let verifier = verifier_value
+            .map(|verifier| {
+                let verifier = self.force_value(verifier)?;
+                match &verifier {
+                    Value::Function(_) | Value::Builtin(_) => Ok(verifier),
+                    other => Err(self.type_error(&format!(
+                        "exec verifier must be callable, got {}",
+                        other.type_name()
+                    ))),
+                }
+            })
+            .transpose()?;
+
         let mounts = self.exec_mounts_from_value(mounts_value)?;
         let writable_roots = self.exec_writable_from_value(writable_value)?;
         let env = self.exec_env_from_value(env_value, &mounts, &writable_roots)?;
@@ -1163,6 +1179,7 @@ impl Engine {
             mounts,
             writable_roots,
             observer,
+            verifier,
         })
     }
 
@@ -1183,6 +1200,11 @@ impl Engine {
             writable_roots: request.writable_roots.clone(),
             module: self.transport_module(),
             observer: self.ship_function(request.observer.clone())?,
+            verifier: request
+                .verifier
+                .clone()
+                .map(|verifier| self.ship_function(verifier))
+                .transpose()?,
         })
     }
 
@@ -1198,6 +1220,18 @@ impl Engine {
         for root in &request.writable_roots {
             self.ensure_dir(&sandbox_root.join(root.as_str()))?;
         }
+
+        let verifier_task = request
+            .verifier
+            .clone()
+            .map(|verifier| {
+                let module = self.transport_module();
+                let verifier = self.ship_function(verifier)?;
+                Ok(thread::spawn(move || {
+                    Engine::invoke_shipped(&module, &verifier, vec![]).map(|_| ())
+                }))
+            })
+            .transpose()?;
 
         let rendered_args = request
             .args
@@ -1229,8 +1263,29 @@ impl Engine {
             request.observer,
             Arc::from(vec![process, tree]),
             Arc::from([]),
-        )?;
+        );
 
+        if let Some(verifier_task) = verifier_task {
+            match verifier_task.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    return Err(PoisonError::new(
+                        PoisonKind::VerificationFailure,
+                        format!("exec verifier failed: {error}"),
+                        self.current_demand_chain(None),
+                    ));
+                }
+                Err(_) => {
+                    return Err(PoisonError::new(
+                        PoisonKind::Internal,
+                        "exec verifier task panicked",
+                        self.current_demand_chain(None),
+                    ));
+                }
+            }
+        }
+
+        let observed = observed?;
         self.snapshot_value(observed)
     }
 

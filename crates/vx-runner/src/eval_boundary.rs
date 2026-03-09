@@ -44,10 +44,6 @@ pub fn evaluate_shipped_observer<'a>(
     sandbox_root: &'a PathValue,
 ) -> BoundaryFuture<'a, Option<TransportValue>> {
     Box::pin(async move {
-        if eval.verifier.is_some() {
-            return Err("run verifiers are not implemented yet".into());
-        }
-
         let Some(observer) = &eval.observer else {
             return Ok(None);
         };
@@ -64,6 +60,17 @@ pub fn evaluate_shipped_observer<'a>(
 
         commit_value_to_transport(cas, observed).await.map(Some)
     })
+}
+
+// r[impl exec.verifier]
+pub fn evaluate_shipped_verifier(eval: &RunEvalPayload) -> Result<(), String> {
+    let Some(verifier) = &eval.verifier else {
+        return Ok(());
+    };
+
+    Engine::invoke_shipped(&eval.module, verifier, vec![])
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn commit_value<'a>(cas: &'a StoreClient, value: Value) -> BoundaryFuture<'a, Value> {
@@ -367,7 +374,7 @@ mod tests {
     use vx_runner_proto::RunEvalPayload;
     use vx_store_proto::{CasNode, ChunkHash, DirectoryNode, StoreClient};
 
-    use super::{commit_value_to_transport, evaluate_shipped_observer};
+    use super::{commit_value_to_transport, evaluate_shipped_observer, evaluate_shipped_verifier};
 
     struct StoreTestEnv {
         _root: TempDir,
@@ -539,6 +546,27 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "output.txt");
         assert_eq!(entries[1].name, "stdout.txt");
+    }
+
+    #[test]
+    fn shipped_verifiers_can_poison() {
+        let engine = shipped_function_engine(
+            r#"fn verify() { fail "toolchain drift" }
+
+               fn make() { verify }"#,
+        );
+        let eval = RunEvalPayload {
+            module: engine.transport_module(),
+            observer: None,
+            verifier: Some(
+                engine
+                    .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
+                    .expect("verifier should ship"),
+            ),
+        };
+
+        let error = evaluate_shipped_verifier(&eval).expect_err("verifier should poison");
+        assert!(error.contains("toolchain drift"));
     }
 
     fn shipped_function_engine(source: &str) -> Engine {

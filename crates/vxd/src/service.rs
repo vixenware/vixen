@@ -38,7 +38,9 @@ use vx_report::{
     RulePlanProvenance, RulePlanSource, RulePlanSourceId, RulePlanSpan, RulePlanValue,
 };
 use vx_rs::CrateGraph;
-use vx_runner_proto::{RunArg, RunEvalPayload, RunRequest, RunTreeMount, RunnerClient};
+use vx_runner_proto::{
+    RunArg, RunEvalPayload, RunFailureKind, RunRequest, RunTreeMount, RunnerClient,
+};
 use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
 use vx_store_proto::{
     Blake3Hash, BlobRef, CasNode, ChunkHash, ContentHash, DirEntryKind, DirectoryNode,
@@ -841,12 +843,17 @@ async fn run_build_vx_exec_via_runner(
     store: &StoreClient,
     exec: &RunnerClient,
     request: ExecRequest,
-) -> std::result::Result<Value, String> {
+) -> std::result::Result<Value, PoisonError> {
     let mut args = request.args.into_iter();
-    let program = args
-        .next()
-        .ok_or_else(|| "exec requires at least one program argument".to_string())?;
-    let root_mount = store_exec_mounts(store, &request.mounts).await?;
+    let program = args.next().ok_or_else(|| {
+        exec_bridge_poison(
+            PoisonKind::UserFail,
+            "exec requires at least one program argument",
+        )
+    })?;
+    let root_mount = store_exec_mounts(store, &request.mounts)
+        .await
+        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message))?;
     let progress = roam::Tx::<StoreProgress>::unbound();
 
     let result = exec
@@ -880,27 +887,38 @@ async fn run_build_vx_exec_via_runner(
                 eval: Some(RunEvalPayload {
                     module: request.module,
                     observer: Some(request.observer),
-                    verifier: None,
+                    verifier: request.verifier,
                 }),
                 macos_commandlinetools_version: None,
             },
             progress,
         )
         .await
-        .map_err(|error| format!("{error:?}"))?;
+        .map_err(|error| exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}")))?;
 
     if !result.success {
-        return Err(result.error.unwrap_or(result.stderr));
+        let kind = match result.error_kind {
+            Some(RunFailureKind::VerificationFailure) => PoisonKind::VerificationFailure,
+            _ => PoisonKind::UserFail,
+        };
+        return Err(exec_bridge_poison(
+            kind,
+            result.error.unwrap_or(result.stderr),
+        ));
     }
 
-    let observer_value = result
-        .observer_value
-        .ok_or_else(|| "runner did not return an observer value".to_string())?;
-    Value::try_from(observer_value).map_err(|error| error.to_string())
+    let observer_value = result.observer_value.ok_or_else(|| {
+        exec_bridge_poison(
+            PoisonKind::UserFail,
+            "runner did not return an observer value",
+        )
+    })?;
+    Value::try_from(observer_value)
+        .map_err(|error| exec_bridge_poison(PoisonKind::UserFail, error.to_string()))
 }
 
-fn exec_bridge_poison(message: impl Into<String>) -> PoisonError {
-    PoisonError::new(PoisonKind::UserFail, message, DemandChain::new())
+fn exec_bridge_poison(kind: PoisonKind, message: impl Into<String>) -> PoisonError {
+    PoisonError::new(kind, message, DemandChain::new())
 }
 
 fn build_rule_plan_from_crate_graph(graph: &CrateGraph) -> RulePlan {
@@ -1436,9 +1454,7 @@ impl VxdService {
                         let exec = Arc::clone(&exec);
                         let runtime = runtime.clone();
                         block_in_place(|| {
-                            runtime
-                                .block_on(run_build_vx_exec_via_runner(&store, &exec, request))
-                                .map_err(exec_bridge_poison)
+                            runtime.block_on(run_build_vx_exec_via_runner(&store, &exec, request))
                         })
                     }));
                 let output = engine
