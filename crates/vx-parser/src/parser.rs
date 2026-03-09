@@ -153,6 +153,12 @@ impl<'a> Parser<'a> {
                 TextRange::new(end, end)
             })
     }
+
+    fn recover_while(&mut self, mut keep_going: impl FnMut(SyntaxKind) -> bool) {
+        while self.current() != SyntaxKind::EOF && keep_going(self.current()) {
+            self.bump();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -285,7 +291,15 @@ fn item(p: &mut Parser<'_>) {
         SyntaxKind::ENUM_KW => enum_decl_rest(p, SyntaxKind::ENUM_DECL),
         SyntaxKind::NEWTYPE_KW => newtype_decl_rest(p, SyntaxKind::NEWTYPE_DECL),
         SyntaxKind::TYPE_KW => type_alias_decl_rest(p, SyntaxKind::TYPE_ALIAS_DECL),
-        _ => p.error_and_bump("expected top-level declaration"),
+        _ => {
+            let marker = p.start();
+            p.error("expected top-level declaration");
+            p.recover_while(|kind| !is_item_start(kind));
+            if p.current_range().is_empty() {
+                p.error_and_bump("expected top-level declaration");
+            }
+            marker.complete(p, SyntaxKind::ERROR);
+        }
     }
 }
 
@@ -743,23 +757,61 @@ fn block_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.expect(SyntaxKind::L_CURLY);
     while !p.at(SyntaxKind::R_CURLY) && !p.at(SyntaxKind::EOF) {
-        stmt(p);
-        if !p.eat(SyntaxKind::SEMICOLON) {
+        let stmt_kind = stmt(p);
+        if p.eat(SyntaxKind::SEMICOLON) {
+            continue;
+        }
+        if p.at(SyntaxKind::R_CURLY) || p.at(SyntaxKind::EOF) {
             break;
         }
+        if stmt_kind == StmtKind::Expr && is_stmt_start(p.current()) {
+            p.error("expected SEMICOLON");
+            continue;
+        }
+        if stmt_kind == StmtKind::Delimited {
+            p.error("expected SEMICOLON");
+        } else {
+            p.error("expected R_CURLY or SEMICOLON");
+        }
+        recover_block(p);
+        p.eat(SyntaxKind::SEMICOLON);
     }
     p.expect(SyntaxKind::R_CURLY);
     marker.complete(p, SyntaxKind::BLOCK_EXPR)
 }
 
-fn stmt(p: &mut Parser<'_>) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StmtKind {
+    Expr,
+    Delimited,
+}
+
+fn stmt(p: &mut Parser<'_>) -> StmtKind {
     match p.current() {
-        SyntaxKind::LET_KW => let_stmt(p),
-        SyntaxKind::RETURN_KW => return_stmt(p),
-        SyntaxKind::FN_KW => fn_decl_rest(p),
-        SyntaxKind::LOWER_IDENT if p.nth(1) == SyntaxKind::WITH_EQ => compound_update_stmt(p),
-        SyntaxKind::LOWER_IDENT if looks_like_assignment_stmt(p) => assign_or_field_assign_stmt(p),
-        _ => expr(p),
+        SyntaxKind::LET_KW => {
+            let_stmt(p);
+            StmtKind::Delimited
+        }
+        SyntaxKind::RETURN_KW => {
+            return_stmt(p);
+            StmtKind::Delimited
+        }
+        SyntaxKind::FN_KW => {
+            fn_decl_rest(p);
+            StmtKind::Delimited
+        }
+        SyntaxKind::LOWER_IDENT if p.nth(1) == SyntaxKind::WITH_EQ => {
+            compound_update_stmt(p);
+            StmtKind::Delimited
+        }
+        SyntaxKind::LOWER_IDENT if looks_like_assignment_stmt(p) => {
+            assign_or_field_assign_stmt(p);
+            StmtKind::Delimited
+        }
+        _ => {
+            expr(p);
+            StmtKind::Expr
+        }
     }
 }
 
@@ -1349,9 +1401,15 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
         p.expect(SyntaxKind::FAT_ARROW);
         expr(p);
         arm.complete(p, SyntaxKind::MATCH_ARM);
-        if !p.eat(SyntaxKind::COMMA) {
+        if p.eat(SyntaxKind::COMMA) {
+            continue;
+        }
+        if p.at(SyntaxKind::R_CURLY) || p.at(SyntaxKind::EOF) {
             break;
         }
+        p.error("expected COMMA");
+        recover_match(p);
+        p.eat(SyntaxKind::COMMA);
     }
     p.expect(SyntaxKind::R_CURLY);
     marker.complete(p, SyntaxKind::MATCH_EXPR)
@@ -1556,6 +1614,56 @@ fn starts_expr(kind: SyntaxKind) -> bool {
             | SyntaxKind::TRUE_KW
             | SyntaxKind::FALSE_KW
     )
+}
+
+fn is_item_start(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::AT
+            | SyntaxKind::FN_KW
+            | SyntaxKind::STRUCT_KW
+            | SyntaxKind::ENUM_KW
+            | SyntaxKind::NEWTYPE_KW
+            | SyntaxKind::TYPE_KW
+    )
+}
+
+fn is_stmt_start(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::LET_KW | SyntaxKind::RETURN_KW | SyntaxKind::FN_KW | SyntaxKind::LOWER_IDENT
+    ) || starts_expr(kind)
+}
+
+fn is_pattern_start(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::UNDERSCORE
+            | SyntaxKind::LOWER_IDENT
+            | SyntaxKind::UPPER_IDENT
+            | SyntaxKind::L_PAREN
+            | SyntaxKind::L_CURLY
+            | SyntaxKind::L_BRACKET
+            | SyntaxKind::INT
+            | SyntaxKind::FLOAT
+            | SyntaxKind::STRING
+            | SyntaxKind::TRUE_KW
+            | SyntaxKind::FALSE_KW
+    )
+}
+
+fn recover_block(p: &mut Parser<'_>) {
+    p.recover_while(|kind| {
+        !matches!(kind, SyntaxKind::SEMICOLON | SyntaxKind::R_CURLY)
+            && !is_stmt_start(kind)
+            && !is_item_start(kind)
+    });
+}
+
+fn recover_match(p: &mut Parser<'_>) {
+    p.recover_while(|kind| {
+        !matches!(kind, SyntaxKind::COMMA | SyntaxKind::R_CURLY) && !is_pattern_start(kind)
+    });
 }
 
 fn looks_like_assignment_stmt(p: &Parser<'_>) -> bool {

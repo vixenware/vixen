@@ -313,3 +313,78 @@ fn greet(name: String) -> String {
         .collect::<Vec<_>>();
     assert!(kinds.contains(&SyntaxKind::LITERAL_EXPR));
 }
+
+#[test]
+fn recovers_to_later_top_level_items() {
+    let input = r#"
+let bad = 1
+
+struct Good {
+  x: U64,
+}
+
+fn ok() -> U64 {
+  1
+}
+"#;
+
+    let parse = parse(input);
+    assert!(!parse.errors().is_empty());
+
+    let kinds = parse
+        .syntax()
+        .children()
+        .map(|node| node.kind())
+        .filter(|kind| *kind != SyntaxKind::ATTRIBUTE_LIST)
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&SyntaxKind::STRUCT_DECL));
+    assert!(kinds.contains(&SyntaxKind::FN_DECL));
+}
+
+#[test]
+fn recovers_inside_blocks_after_missing_semicolons() {
+    let input = r#"
+fn demo() -> U64 {
+  let x = 1
+  let y = 2;
+  y
+}
+"#;
+
+    let parse = parse(input);
+    assert!(!parse.errors().is_empty());
+
+    let kinds = parse
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect::<Vec<_>>();
+    let let_count = kinds
+        .iter()
+        .filter(|kind| **kind == SyntaxKind::LET_STMT)
+        .count();
+    assert_eq!(let_count, 2);
+    assert!(kinds.contains(&SyntaxKind::NAME_REF_EXPR));
+}
+
+#[test]
+fn recovers_match_arms_after_missing_commas() {
+    let input = r#"
+fn demo(value: Value) -> String {
+  match value {
+    _ => "a"
+    _ => "b",
+  }
+}
+"#;
+
+    let parse = parse(input);
+    assert!(!parse.errors().is_empty());
+
+    let arm_count = parse
+        .syntax()
+        .descendants()
+        .filter(|node| node.kind() == SyntaxKind::MATCH_ARM)
+        .count();
+    assert_eq!(arm_count, 2);
+}
