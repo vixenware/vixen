@@ -9,9 +9,11 @@ use std::fs;
 use std::future::Future;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
+use tempfile::TempDir;
 use vx_eval::{
     BlobValue, Engine, MapValue, PathValue, StructValue, TransportValue, TreeValue, Value,
 };
@@ -62,6 +64,16 @@ pub fn evaluate_shipped_observer<'a>(
 
         commit_value_to_transport(cas, observed).await.map(Some)
     })
+}
+
+pub async fn materialize_tree_snapshot(
+    cas: &StoreClient,
+    root: NodeHash,
+) -> Result<TempDir, String> {
+    let snapshot = tempfile::tempdir()
+        .map_err(|error| format!("failed to create tempdir for observer snapshot: {error}"))?;
+    materialize_store_tree(cas, root, snapshot.path()).await?;
+    Ok(snapshot)
 }
 
 fn commit_value<'a>(cas: &'a StoreClient, value: Value) -> BoundaryFuture<'a, Value> {
@@ -118,6 +130,76 @@ fn commit_value<'a>(cas: &'a StoreClient, value: Value) -> BoundaryFuture<'a, Va
     })
 }
 
+async fn materialize_store_tree(
+    cas: &StoreClient,
+    root: NodeHash,
+    destination: &Path,
+) -> Result<(), String> {
+    fs::create_dir_all(destination).map_err(|error| {
+        format!(
+            "failed to create observer snapshot dir {}: {error}",
+            destination.display()
+        )
+    })?;
+
+    let mut pending = vec![(root, destination.to_path_buf())];
+    while let Some((node_hash, dir_path)) = pending.pop() {
+        fs::create_dir_all(&dir_path).map_err(|error| {
+            format!(
+                "failed to create observer snapshot dir {}: {error}",
+                dir_path.display()
+            )
+        })?;
+
+        let directory = load_directory(cas, node_hash).await?;
+        for entry in directory.entries {
+            let entry_path = dir_path.join(&entry.name);
+            match entry.kind {
+                DirEntryKind::SmallFile {
+                    content_hash,
+                    size,
+                    executable,
+                } => {
+                    let bytes = fetch_blob_bytes(
+                        cas,
+                        &BlobRef::Small {
+                            chunk: content_hash.0,
+                            size,
+                        },
+                    )
+                    .await?;
+                    write_materialized_blob(&entry_path, &bytes, executable)?;
+                }
+                DirEntryKind::LargeFile {
+                    blob_node,
+                    content_hash,
+                    size,
+                    executable,
+                } => {
+                    let bytes = fetch_blob_bytes(
+                        cas,
+                        &BlobRef::Large {
+                            blob_node,
+                            content_hash,
+                            size,
+                        },
+                    )
+                    .await?;
+                    write_materialized_blob(&entry_path, &bytes, executable)?;
+                }
+                DirEntryKind::Dir { hash, .. } => pending.push((hash, entry_path)),
+                DirEntryKind::Symlink { target } => {
+                    return Err(format!(
+                        "observer snapshots do not support store-backed symlinks yet (target: {target})"
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn process_value(exit_code: i32, stdout: &str, stderr: &str) -> Value {
     Value::Struct(StructValue {
         type_name: Arc::from("Process"),
@@ -133,6 +215,98 @@ fn process_value(exit_code: i32, stdout: &str, stderr: &str) -> Value {
             ),
         ]),
     })
+}
+
+async fn fetch_blob_bytes(cas: &StoreClient, blob_ref: &BlobRef) -> Result<Vec<u8>, String> {
+    match blob_ref {
+        BlobRef::Small { chunk, .. } => cas
+            .get_chunk(*chunk)
+            .await
+            .map_err(|error| format!("failed to fetch chunk {}: {error:?}", chunk.to_hex()))?
+            .ok_or_else(|| format!("chunk {} not found", chunk.to_hex())),
+        BlobRef::Large {
+            blob_node,
+            content_hash: _,
+            size: _,
+        } => {
+            let node_bytes = cas
+                .get_node(*blob_node)
+                .await
+                .map_err(|error| format!("failed to fetch blob node {blob_node}: {error:?}"))?
+                .ok_or_else(|| format!("blob node {blob_node} not found"))?;
+            let blob_node = match CasNode::from_bytes(&node_bytes) {
+                Ok(CasNode::Blob(blob)) => blob,
+                Ok(_) => return Err(format!("node {blob_node} is not a Blob node")),
+                Err(error) => {
+                    return Err(format!(
+                        "failed to deserialize blob node {blob_node}: {error}"
+                    ));
+                }
+            };
+
+            let mut result = Vec::with_capacity(blob_node.total_size as usize);
+            for chunk in &blob_node.chunks {
+                let chunk_bytes = cas
+                    .get_chunk(chunk.hash)
+                    .await
+                    .map_err(|error| {
+                        format!("failed to fetch chunk {}: {error:?}", chunk.hash.to_hex())
+                    })?
+                    .ok_or_else(|| format!("chunk {} not found", chunk.hash.to_hex()))?;
+                result.extend_from_slice(&chunk_bytes);
+            }
+            Ok(result)
+        }
+    }
+}
+
+async fn load_directory(cas: &StoreClient, root: NodeHash) -> Result<DirectoryNode, String> {
+    let node_bytes = cas
+        .get_node(root)
+        .await
+        .map_err(|error| format!("failed to fetch directory node {root}: {error:?}"))?
+        .ok_or_else(|| format!("directory node {root} not found"))?;
+    match CasNode::from_bytes(&node_bytes) {
+        Ok(CasNode::Directory(directory)) => Ok(directory),
+        Ok(_) => Err(format!("node {root} is not a Directory node")),
+        Err(error) => Err(format!(
+            "failed to deserialize directory node {root}: {error}"
+        )),
+    }
+}
+
+fn write_materialized_blob(path: &Path, bytes: &[u8], executable: bool) -> Result<(), String> {
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "observer snapshot path {} has no parent directory",
+            path.display()
+        )
+    })?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    fs::write(path, bytes)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+    set_executable_if_needed(path, executable)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_executable_if_needed(path: &Path, executable: bool) -> Result<(), String> {
+    if !executable {
+        return Ok(());
+    }
+
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("failed to stat {}: {error}", path.display()))?;
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(permissions.mode() | 0o111);
+    fs::set_permissions(path, permissions)
+        .map_err(|error| format!("failed to chmod {}: {error}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_executable_if_needed(_path: &Path, _executable: bool) -> Result<(), String> {
+    Ok(())
 }
 
 fn sandbox_tree_value(sandbox_root: &PathValue) -> Value {

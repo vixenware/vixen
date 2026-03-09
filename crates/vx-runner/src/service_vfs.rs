@@ -27,6 +27,10 @@ fn is_relative_vfs_path(path: &str) -> bool {
     !path.is_empty() && !path.starts_with('/') && !path.split('/').any(|segment| segment == "..")
 }
 
+fn is_tree_mount_path(path: &str) -> bool {
+    path.is_empty() || is_relative_vfs_path(path)
+}
+
 fn covers_path(prefix: &str, path: &str) -> bool {
     prefix.is_empty()
         || path == prefix
@@ -1264,7 +1268,7 @@ impl RunnerService {
             .map(|path| path.as_str().to_string());
 
         for mount in &request.tree_mounts {
-            if !is_relative_vfs_path(&mount.mount) {
+            if !is_tree_mount_path(&mount.mount) {
                 self.remove_action_prefix(&action.prefix_id).await;
                 return run_failure_result(
                     start,
@@ -1841,8 +1845,16 @@ mod tests {
     fn vfs_paths_must_be_relative() {
         assert!(is_relative_vfs_path("src"));
         assert!(is_relative_vfs_path("out/app"));
+        assert!(!is_relative_vfs_path(""));
         assert!(!is_relative_vfs_path("/src"));
         assert!(!is_relative_vfs_path("../src"));
+    }
+
+    #[test]
+    fn root_tree_mounts_are_allowed() {
+        assert!(is_tree_mount_path(""));
+        assert!(is_tree_mount_path("src"));
+        assert!(!is_tree_mount_path("/src"));
     }
 
     #[test]

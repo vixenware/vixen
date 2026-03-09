@@ -5,13 +5,14 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tempfile::TempDir;
 use vx_parser::SourceFile;
 use vx_store_proto::{Blake3Hash, BlobRef, ChunkHash, NodeHash};
 
+use crate::exec::ExecArgValue;
 use crate::lower::lower_source_file;
 use crate::poison::PoisonKind;
 use crate::transport::TransportValue;
@@ -823,4 +824,64 @@ fn exec_runs_a_local_process_with_keyword_args_and_snapshots_outputs() {
         entries[1].1,
         Value::Blob(BlobValue::from_string("hello from workspace"))
     );
+}
+
+#[test]
+fn exec_can_be_routed_through_a_host_handler() {
+    let captured = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let engine = engine(
+        r#"fn observe(process: Process, tree: Tree) {
+               process.exit_code
+             }
+
+             fn build(workspace: Path) {
+               exec(
+                 ["/bin/cp", "src/input.txt", "out/output.txt"];
+                 env: %{ "INPUT" => "src/input.txt" },
+                 mounts: %{ "src" => workspace },
+                 writable: ["out"],
+                 observer: observe,
+               )
+             }"#,
+    )
+    .with_exec_handler(Arc::new(move |request| {
+        *sink.lock().unwrap() = Some(request);
+        Ok(Value::U64(7))
+    }));
+
+    let value = engine
+        .call("build", vec![Value::Path(PathValue::new("/workspace"))])
+        .unwrap();
+    assert_eq!(value, Value::U64(7));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("exec request should be captured");
+    assert_eq!(
+        request.args,
+        vec![
+            ExecArgValue::Literal("/bin/cp".to_string()),
+            ExecArgValue::Literal("src/input.txt".to_string()),
+            ExecArgValue::Literal("out/output.txt".to_string()),
+        ]
+    );
+    assert_eq!(
+        request.env,
+        vec![(
+            "INPUT".to_string(),
+            ExecArgValue::Literal("src/input.txt".to_string())
+        )]
+    );
+    assert_eq!(request.mounts.len(), 1);
+    assert_eq!(request.mounts[0].path, PathValue::new("src"));
+    assert_eq!(
+        request.mounts[0].value,
+        Value::Path(PathValue::new("/workspace"))
+    );
+    assert_eq!(request.writable_roots, vec![PathValue::new("out")]);
+    assert_eq!(request.observer.def.name, "observe");
+    assert_eq!(request.module.functions.len(), 2);
 }

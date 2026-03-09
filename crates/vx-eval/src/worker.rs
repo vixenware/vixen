@@ -17,6 +17,7 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use tempfile::TempDir;
 
+use crate::exec::{ExecArgValue, ExecMount, ExecRequest, SharedExecHandler};
 use crate::instr::{self, BinOp, UnaryOp};
 use crate::node::{Node, NodeId, NodeJob, NodeKey, Outcome, Waiter};
 use crate::poison::{DemandChain, DemandEntry, PoisonError, PoisonKind};
@@ -38,6 +39,15 @@ enum BuildResult {
     Poisoned(PoisonError),
 }
 
+#[derive(Clone)]
+struct ParsedExecRequest {
+    args: Vec<ExecArgValue>,
+    env: Vec<(String, ExecArgValue)>,
+    mounts: Vec<(PathValue, Value)>,
+    writable_roots: Vec<PathValue>,
+    observer: Value,
+}
+
 /// The evaluation engine.
 pub struct Engine {
     module: instr::Module,
@@ -46,6 +56,7 @@ pub struct Engine {
     functions: HashMap<String, Vec<Arc<instr::FnDef>>>,
     function_identities: HashMap<usize, Arc<str>>,
     max_demand_depth: usize,
+    exec_handler: Option<SharedExecHandler>,
 }
 
 impl Engine {
@@ -67,12 +78,18 @@ impl Engine {
             functions,
             function_identities,
             max_demand_depth: DEFAULT_MAX_DEMAND_DEPTH,
+            exec_handler: None,
         }
     }
 
     // r[impl eval.demand-depth]
     pub fn with_max_demand_depth(mut self, max_demand_depth: usize) -> Self {
         self.max_demand_depth = max_demand_depth;
+        self
+    }
+
+    pub fn with_exec_handler(mut self, exec_handler: SharedExecHandler) -> Self {
+        self.exec_handler = Some(exec_handler);
         self
     }
 
@@ -1075,6 +1092,19 @@ impl Engine {
         args: &[Value],
         kwargs: &[(Arc<str>, Value)],
     ) -> Result<Value, PoisonError> {
+        let request = self.parse_exec_request(args, kwargs)?;
+        if let Some(exec_handler) = &self.exec_handler {
+            let request = self.ship_exec_request(&request)?;
+            return exec_handler(request);
+        }
+        self.exec_builtin_local(request)
+    }
+
+    fn parse_exec_request(
+        &self,
+        args: &[Value],
+        kwargs: &[(Arc<str>, Value)],
+    ) -> Result<ParsedExecRequest, PoisonError> {
         self.check_arity("exec", args, 1)?;
 
         let mut env_value = None;
@@ -1119,34 +1149,70 @@ impl Engine {
         let mounts = self.exec_mounts_from_value(mounts_value)?;
         let writable_roots = self.exec_writable_from_value(writable_value)?;
         let env = self.exec_env_from_value(env_value, &mounts, &writable_roots)?;
+        let exec_args = exec_args_raw
+            .iter()
+            .map(|value| self.parse_exec_arg(value, &mounts, &writable_roots, "exec arg"))
+            .collect::<Result<Vec<_>, _>>()?;
+        if exec_args.is_empty() {
+            return Err(self.type_error("exec requires at least one program argument"));
+        }
 
+        Ok(ParsedExecRequest {
+            args: exec_args,
+            env,
+            mounts,
+            writable_roots,
+            observer,
+        })
+    }
+
+    fn ship_exec_request(&self, request: &ParsedExecRequest) -> Result<ExecRequest, PoisonError> {
+        Ok(ExecRequest {
+            args: request.args.clone(),
+            env: request.env.clone(),
+            mounts: request
+                .mounts
+                .iter()
+                .map(|(path, value)| {
+                    Ok(ExecMount {
+                        path: path.clone(),
+                        value: self.snapshot_value(value.clone())?,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            writable_roots: request.writable_roots.clone(),
+            module: self.transport_module(),
+            observer: self.ship_function(request.observer.clone())?,
+        })
+    }
+
+    fn exec_builtin_local(&self, request: ParsedExecRequest) -> Result<Value, PoisonError> {
         let sandbox = TempDir::new().map_err(|error| {
             self.internal_error(&format!("failed to create exec sandbox: {error}"))
         })?;
         let sandbox_root = PathValue::new(sandbox.path().to_string_lossy());
 
-        for (mount_path, value) in &mounts {
+        for (mount_path, value) in &request.mounts {
             self.materialize_mount_value(&sandbox_root, mount_path, value)?;
         }
-        for root in &writable_roots {
+        for root in &request.writable_roots {
             self.ensure_dir(&sandbox_root.join(root.as_str()))?;
         }
 
-        let rendered_args = exec_args_raw
+        let rendered_args = request
+            .args
             .iter()
-            .map(|value| {
-                self.render_exec_arg(value, &sandbox_root, &mounts, &writable_roots, "exec arg")
-            })
+            .map(|value| self.render_exec_arg(value, &sandbox_root, "exec arg"))
             .collect::<Result<Vec<_>, _>>()?;
-        if rendered_args.is_empty() {
-            return Err(self.type_error("exec requires at least one program argument"));
-        }
 
         let mut command = Command::new(&rendered_args[0]);
         command.args(&rendered_args[1..]);
         command.current_dir(sandbox.path());
-        for (key, value) in env {
-            command.env(key, value);
+        for (key, value) in &request.env {
+            command.env(
+                key,
+                self.render_exec_arg(value, &sandbox_root, "exec env value")?,
+            );
         }
 
         let output = command.output().map_err(|error| {
@@ -1159,8 +1225,11 @@ impl Engine {
 
         let process = self.exec_process_value(&output);
         let tree = Value::Tree(TreeValue::FsDir(sandbox_root.clone()));
-        let observed =
-            self.execute_call(observer, Arc::from(vec![process, tree]), Arc::from([]))?;
+        let observed = self.execute_call(
+            request.observer,
+            Arc::from(vec![process, tree]),
+            Arc::from([]),
+        )?;
 
         self.snapshot_value(observed)
     }
@@ -1226,7 +1295,7 @@ impl Engine {
         value: Option<Value>,
         mounts: &[(PathValue, Value)],
         writable_roots: &[PathValue],
-    ) -> Result<Vec<(String, String)>, PoisonError> {
+    ) -> Result<Vec<(String, ExecArgValue)>, PoisonError> {
         let Some(value) = value else {
             return Ok(Vec::new());
         };
@@ -1249,29 +1318,22 @@ impl Engine {
                     )));
                 }
             };
-            let value = self.render_exec_arg(
-                value,
-                &PathValue::new(""),
-                mounts,
-                writable_roots,
-                "exec env value",
-            )?;
+            let value = self.parse_exec_arg(value, mounts, writable_roots, "exec env value")?;
             env.push((key, value));
         }
         Ok(env)
     }
 
-    fn render_exec_arg(
+    fn parse_exec_arg(
         &self,
         value: &Value,
-        sandbox_root: &PathValue,
         mounts: &[(PathValue, Value)],
         writable_roots: &[PathValue],
         context: &str,
-    ) -> Result<String, PoisonError> {
+    ) -> Result<ExecArgValue, PoisonError> {
         let value = self.force_value(value.clone())?;
         match value {
-            Value::String(text) => Ok(text.to_string()),
+            Value::String(text) => Ok(ExecArgValue::Literal(text.to_string())),
             Value::Path(path) => {
                 let path = self.expect_relative_path(&Value::Path(path), context)?;
                 if !self.exec_path_is_covered(path.as_str(), mounts, writable_roots) {
@@ -1280,12 +1342,24 @@ impl Engine {
                         path.as_str()
                     )));
                 }
-                Ok(sandbox_root.join(path.as_str()).as_str().to_string())
+                Ok(ExecArgValue::Path(path))
             }
             other => Err(self.type_error(&format!(
                 "{context} must be String or Path, got {}",
                 other.type_name()
             ))),
+        }
+    }
+
+    fn render_exec_arg(
+        &self,
+        value: &ExecArgValue,
+        sandbox_root: &PathValue,
+        _context: &str,
+    ) -> Result<String, PoisonError> {
+        match value {
+            ExecArgValue::Literal(text) => Ok(text.clone()),
+            ExecArgValue::Path(path) => Ok(sandbox_root.join(path.as_str()).as_str().to_string()),
         }
     }
 

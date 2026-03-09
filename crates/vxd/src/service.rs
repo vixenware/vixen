@@ -26,7 +26,10 @@ use tokio::runtime::Handle;
 use tokio::task::block_in_place;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-use vx_eval::{BlobValue, Engine, PathValue, TreeValue, Value, lower_source_file};
+use vx_eval::{
+    BlobValue, DemandChain, Engine, ExecArgValue, ExecMount, ExecRequest, PathValue, PoisonError,
+    PoisonKind, TreeValue, Value, lower_source_file,
+};
 use vx_io::spawn::ServiceHandle;
 use vx_parser::SourceFile;
 use vx_report::{
@@ -35,11 +38,12 @@ use vx_report::{
     RulePlanProvenance, RulePlanSource, RulePlanSourceId, RulePlanSpan, RulePlanValue,
 };
 use vx_rs::CrateGraph;
-use vx_runner_proto::RunnerClient;
+use vx_runner_proto::{RunArg, RunEvalPayload, RunRequest, RunTreeMount, RunnerClient};
+use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
 use vx_store_proto::{
     Blake3Hash, BlobRef, CasNode, ChunkHash, ContentHash, DirEntryKind, DirectoryNode,
     EnsureStatus, NodeHash, RustChannel, RustComponent, RustToolchainSpec, ServiceVersion,
-    StoreClient,
+    StoreClient, StoreProgress,
 };
 use vxd_proto::{
     ActionType, BuildRequest, BuildResult, ProgressListenerClient, UnpublishResult,
@@ -627,6 +631,278 @@ fn set_executable_if_needed(_path: &Utf8Path, _executable: bool) -> Result<()> {
     Ok(())
 }
 
+fn exec_arg_to_run_arg(arg: &ExecArgValue) -> RunArg {
+    match arg {
+        ExecArgValue::Literal(value) => RunArg::literal(value.clone()),
+        ExecArgValue::Path(path) => RunArg::path(path.as_str()),
+    }
+}
+
+fn join_exec_mount_path(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}/{name}")
+    }
+}
+
+fn exec_blob_kind_from_blob_ref(blob_ref: &BlobRef, executable: bool) -> DirEntryKind {
+    match blob_ref {
+        BlobRef::Small { chunk, size } => DirEntryKind::SmallFile {
+            content_hash: ContentHash(chunk.0),
+            size: *size,
+            executable,
+        },
+        BlobRef::Large {
+            blob_node,
+            content_hash,
+            size,
+        } => DirEntryKind::LargeFile {
+            blob_node: *blob_node,
+            content_hash: *content_hash,
+            size: *size,
+            executable,
+        },
+    }
+}
+
+async fn store_exec_blob(
+    store: &StoreClient,
+    blob: &BlobValue,
+) -> std::result::Result<DirEntryKind, String> {
+    match blob {
+        BlobValue::Inline(bytes) => {
+            let prepared = prepare_blob(bytes.as_ref());
+            let blob_ref = store_prepared_blob(store, &prepared, bytes.as_ref()).await?;
+            Ok(exec_blob_kind_from_blob_ref(&blob_ref, false))
+        }
+        BlobValue::Store(blob_ref) => Ok(exec_blob_kind_from_blob_ref(blob_ref, false)),
+        BlobValue::FsFile(path) => {
+            let bytes = fs::read(path.as_str())
+                .map_err(|error| format!("failed to read {}: {error}", path.as_str()))?;
+            let prepared = prepare_blob(&bytes);
+            let blob_ref = store_prepared_blob(store, &prepared, &bytes).await?;
+            Ok(exec_blob_kind_from_blob_ref(&blob_ref, false))
+        }
+    }
+}
+
+#[cfg(unix)]
+fn host_path_is_executable(path: &PathValue) -> std::result::Result<bool, String> {
+    let metadata = fs::metadata(path.as_str())
+        .map_err(|error| format!("failed to stat {}: {error}", path.as_str()))?;
+    Ok(metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn host_path_is_executable(_path: &PathValue) -> std::result::Result<bool, String> {
+    Ok(false)
+}
+
+async fn store_exec_mounts(
+    store: &StoreClient,
+    mounts: &[ExecMount],
+) -> std::result::Result<Option<NodeHash>, String> {
+    enum PendingMount {
+        Value(String, Value),
+        HostPath(String, PathValue),
+        StoreDir(String, NodeHash),
+    }
+
+    let mut pending = mounts
+        .iter()
+        .map(|mount| PendingMount::Value(mount.path.as_str().to_string(), mount.value.clone()))
+        .collect::<Vec<_>>();
+    let mut files = Vec::new();
+
+    while let Some(item) = pending.pop() {
+        match item {
+            PendingMount::Value(path, value) => match value {
+                Value::Blob(blob) => files.push(crate::cas_tree::TreeFile {
+                    path,
+                    kind: store_exec_blob(store, &blob).await?,
+                }),
+                Value::Tree(TreeValue::Inline(entries)) => {
+                    let mut entries = entries.iter().cloned().collect::<Vec<_>>();
+                    entries.sort_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
+                    for (name, value) in entries.into_iter().rev() {
+                        pending.push(PendingMount::Value(
+                            join_exec_mount_path(&path, name.as_ref()),
+                            value,
+                        ));
+                    }
+                }
+                Value::Tree(TreeValue::Store(root)) => {
+                    pending.push(PendingMount::StoreDir(path, root))
+                }
+                Value::Tree(TreeValue::FsDir(dir)) => {
+                    pending.push(PendingMount::HostPath(path, dir))
+                }
+                Value::Path(host_path) => pending.push(PendingMount::HostPath(path, host_path)),
+                other => {
+                    return Err(format!(
+                        "exec mount values must be Blob, Tree, or Path, got {}",
+                        other.type_name()
+                    ));
+                }
+            },
+            PendingMount::HostPath(path, host_path) => {
+                let metadata = fs::metadata(host_path.as_str())
+                    .map_err(|error| format!("failed to stat {}: {error}", host_path.as_str()))?;
+                if metadata.is_dir() {
+                    let mut names = fs::read_dir(host_path.as_str())
+                        .map_err(|error| format!("failed to read {}: {error}", host_path.as_str()))?
+                        .map(|entry| {
+                            entry
+                                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                                .map_err(|error| {
+                                    format!("failed to read {}: {error}", host_path.as_str())
+                                })
+                        })
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    names.sort();
+                    for name in names.into_iter().rev() {
+                        pending.push(PendingMount::HostPath(
+                            join_exec_mount_path(&path, &name),
+                            host_path.join(&name),
+                        ));
+                    }
+                } else {
+                    let bytes = fs::read(host_path.as_str()).map_err(|error| {
+                        format!("failed to read {}: {error}", host_path.as_str())
+                    })?;
+                    let prepared = prepare_blob(&bytes);
+                    let blob_ref = store_prepared_blob(store, &prepared, &bytes).await?;
+                    files.push(crate::cas_tree::TreeFile {
+                        path,
+                        kind: exec_blob_kind_from_blob_ref(
+                            &blob_ref,
+                            host_path_is_executable(&host_path)?,
+                        ),
+                    });
+                }
+            }
+            PendingMount::StoreDir(path, root) => {
+                let directory = load_store_directory(store, root)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                for entry in directory.entries.into_iter().rev() {
+                    let entry_path = join_exec_mount_path(&path, &entry.name);
+                    match entry.kind {
+                        DirEntryKind::SmallFile {
+                            content_hash,
+                            size,
+                            executable,
+                        } => files.push(crate::cas_tree::TreeFile {
+                            path: entry_path,
+                            kind: DirEntryKind::SmallFile {
+                                content_hash,
+                                size,
+                                executable,
+                            },
+                        }),
+                        DirEntryKind::LargeFile {
+                            blob_node,
+                            content_hash,
+                            size,
+                            executable,
+                        } => files.push(crate::cas_tree::TreeFile {
+                            path: entry_path,
+                            kind: DirEntryKind::LargeFile {
+                                blob_node,
+                                content_hash,
+                                size,
+                                executable,
+                            },
+                        }),
+                        DirEntryKind::Dir { hash, .. } => {
+                            pending.push(PendingMount::StoreDir(entry_path, hash));
+                        }
+                        DirEntryKind::Symlink { target } => files.push(crate::cas_tree::TreeFile {
+                            path: entry_path,
+                            kind: DirEntryKind::Symlink { target },
+                        }),
+                    }
+                }
+            }
+        }
+    }
+
+    if files.is_empty() {
+        return Ok(None);
+    }
+
+    crate::cas_tree::build_merkle_tree(store, files)
+        .await
+        .map(|(root, _)| Some(root))
+}
+
+async fn run_build_vx_exec_via_runner(
+    store: &StoreClient,
+    exec: &RunnerClient,
+    request: ExecRequest,
+) -> std::result::Result<Value, String> {
+    let mut args = request.args.into_iter();
+    let program = args
+        .next()
+        .ok_or_else(|| "exec requires at least one program argument".to_string())?;
+    let root_mount = store_exec_mounts(store, &request.mounts).await?;
+    let progress = roam::Tx::<StoreProgress>::unbound();
+
+    let result = exec
+        .run(
+            RunRequest {
+                toolchain_manifest: Blake3Hash([0; 32]),
+                program_rel: String::new(),
+                program: Some(exec_arg_to_run_arg(&program)),
+                args: args.map(|arg| exec_arg_to_run_arg(&arg)).collect(),
+                tree_mounts: root_mount
+                    .into_iter()
+                    .map(|root| RunTreeMount {
+                        mount: String::new(),
+                        manifest: root.0,
+                    })
+                    .collect(),
+                file_mounts: Vec::new(),
+                outputs: Vec::new(),
+                writable_roots: request
+                    .writable_roots
+                    .iter()
+                    .map(|path| path.as_str().to_string())
+                    .collect(),
+                cwd: None,
+                env: request
+                    .env
+                    .iter()
+                    .map(|(key, value)| (key.clone(), exec_arg_to_run_arg(value)))
+                    .collect(),
+                clear_env: false,
+                eval: Some(RunEvalPayload {
+                    module: request.module,
+                    observer: Some(request.observer),
+                    verifier: None,
+                }),
+                macos_commandlinetools_version: None,
+            },
+            progress,
+        )
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+
+    if !result.success {
+        return Err(result.error.unwrap_or(result.stderr));
+    }
+
+    let observer_value = result
+        .observer_value
+        .ok_or_else(|| "runner did not return an observer value".to_string())?;
+    Value::try_from(observer_value).map_err(|error| error.to_string())
+}
+
+fn exec_bridge_poison(message: impl Into<String>) -> PoisonError {
+    PoisonError::new(PoisonKind::UserFail, message, DemandChain::new())
+}
+
 fn build_rule_plan_from_crate_graph(graph: &CrateGraph) -> RulePlan {
     let source_id = RulePlanSourceId::from("rust_planner".to_string());
     let mut nodes = Vec::new();
@@ -1151,7 +1427,20 @@ impl VxdService {
 
                 let root = SourceFile::cast_root(parse.syntax());
                 let module = lower_source_file(&root);
-                let engine = Engine::from_module(&module);
+                let store = Arc::clone(&self.store);
+                let exec = Arc::clone(&self.exec);
+                let runtime = Handle::current();
+                let engine =
+                    Engine::from_module(&module).with_exec_handler(Arc::new(move |request| {
+                        let store = Arc::clone(&store);
+                        let exec = Arc::clone(&exec);
+                        let runtime = runtime.clone();
+                        block_in_place(|| {
+                            runtime
+                                .block_on(run_build_vx_exec_via_runner(&store, &exec, request))
+                                .map_err(exec_bridge_poison)
+                        })
+                    }));
                 let output = engine
                     .call_entry(
                         "build",

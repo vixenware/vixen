@@ -8,6 +8,9 @@
 mod capability;
 pub use capability::CapabilitySet;
 
+mod exec;
+pub use exec::{ExecArgValue, ExecHandler, ExecMount, ExecRequest, SharedExecHandler};
+
 mod instr;
 pub use instr::{BinOp, Expr, FnDef, Module, Stmt, UnaryOp};
 
