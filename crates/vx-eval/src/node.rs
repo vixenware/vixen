@@ -68,6 +68,11 @@ pub enum NodeJob {
         message: Value,
     },
     #[cfg(test)]
+    Sleep {
+        millis: u64,
+        value: Value,
+    },
+    #[cfg(test)]
     Poison(PoisonError),
 }
 

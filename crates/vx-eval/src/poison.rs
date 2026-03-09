@@ -39,6 +39,8 @@ pub enum PoisonKind {
     VerificationFailure,
     /// Circular dependency detected.
     CircularDependency,
+    /// The demand chain exceeded the configured maximum depth.
+    DemandDepthExceeded,
     /// Multiple independent poisons were collected together.
     Multiple,
     /// Internal evaluator error (bug).

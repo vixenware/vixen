@@ -5,9 +5,11 @@
 //! resolved dependency.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::thread;
+#[cfg(test)]
+use std::time::Duration;
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
@@ -18,8 +20,10 @@ use crate::poison::{DemandChain, DemandEntry, PoisonError, PoisonKind};
 use crate::value::{FunctionValue, StructValue, Value};
 
 thread_local! {
-    static ACTIVE_NODES: RefCell<Vec<NodeId>> = const { RefCell::new(Vec::new()) };
+    static DEMAND_STACK: RefCell<Vec<NodeId>> = const { RefCell::new(Vec::new()) };
 }
+
+const DEFAULT_MAX_DEMAND_DEPTH: usize = 1_024;
 
 enum BuildResult {
     Value(Value),
@@ -32,6 +36,8 @@ pub struct Engine {
     nodes: DashMap<NodeId, Arc<Node>>,
     call_memo: DashMap<NodeKey, Arc<Node>>,
     functions: HashMap<String, Vec<Arc<instr::FnDef>>>,
+    function_identities: HashMap<usize, Arc<str>>,
+    max_demand_depth: usize,
 }
 
 impl Engine {
@@ -44,38 +50,41 @@ impl Engine {
                 .or_insert_with(Vec::new)
                 .push(func.clone());
         }
+        let function_identities = compute_function_identities(&module.functions);
 
         Self {
             nodes: DashMap::new(),
             call_memo: DashMap::new(),
             functions,
+            function_identities,
+            max_demand_depth: DEFAULT_MAX_DEMAND_DEPTH,
         }
+    }
+
+    // r[impl eval.demand-depth]
+    pub fn with_max_demand_depth(mut self, max_demand_depth: usize) -> Self {
+        self.max_demand_depth = max_demand_depth;
+        self
     }
 
     // r[impl eval.forcing.boundary]
     /// Evaluate a top-level function by name at the external forcing boundary.
     pub fn call(&self, name: &str, args: Vec<Value>) -> Result<Value, PoisonError> {
-        let function = FunctionValue {
-            def: self.resolve_function(name, &args)?,
-            captures: Arc::from([]),
-        };
+        let function = self.global_function_value(self.resolve_function(name, &args)?);
         let value = self.build_call(Value::Function(function), args);
         self.force_value(value)
     }
 
     #[cfg(test)]
     pub(crate) fn call_unforced(&self, name: &str, args: Vec<Value>) -> Result<Value, PoisonError> {
-        let function = FunctionValue {
-            def: self.resolve_function(name, &args)?,
-            captures: Arc::from([]),
-        };
+        let function = self.global_function_value(self.resolve_function(name, &args)?);
         Ok(self.build_call(Value::Function(function), args))
     }
 
     #[cfg(test)]
     pub(crate) fn force_shallow(&self, value: Value) -> Result<Value, PoisonError> {
         match value {
-            Value::Pending(node_id) => self.force_node(node_id),
+            Value::Pending(node_id) => self.force_pending_shallow(node_id),
             other => Ok(other),
         }
     }
@@ -94,6 +103,48 @@ impl Engine {
     #[cfg(test)]
     pub(crate) fn memoized_call_count(&self) -> usize {
         self.call_memo.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sleep_value(&self, millis: u64, value: Value) -> Value {
+        self.pending_value(
+            NodeJob::Sleep { millis, value },
+            format!("sleep({millis}ms)"),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn function_key(&self, name: &str) -> Result<String, PoisonError> {
+        self.global_function_value(self.resolve_function(name, &[])?)
+            .key()
+            .ok_or_else(|| self.internal_error("top-level function key should be resolved"))
+    }
+
+    fn global_function_value(&self, def: Arc<instr::FnDef>) -> FunctionValue {
+        FunctionValue {
+            code_identity: self.function_identity(&def),
+            def,
+            captures: Arc::from([]),
+        }
+    }
+
+    fn local_function_value(
+        &self,
+        def: Arc<instr::FnDef>,
+        captures: Arc<[(Arc<str>, Value)]>,
+    ) -> FunctionValue {
+        FunctionValue {
+            code_identity: Arc::from(stable_fn_repr(&def)),
+            def,
+            captures,
+        }
+    }
+
+    fn function_identity(&self, def: &Arc<instr::FnDef>) -> Arc<str> {
+        self.function_identities
+            .get(&fn_ptr(def))
+            .cloned()
+            .unwrap_or_else(|| Arc::from(stable_fn_repr(def)))
     }
 
     // r[impl eval.pending]
@@ -155,10 +206,10 @@ impl Engine {
     // r[impl eval.forcing.boundary]
     fn force_value(&self, value: Value) -> Result<Value, PoisonError> {
         match value {
-            Value::Pending(node_id) => {
+            Value::Pending(node_id) => self.with_demand(node_id, || {
                 let value = self.force_node(node_id)?;
                 self.force_value(value)
-            }
+            }),
             Value::Tuple(elems) => {
                 let forced = self.force_many(elems.iter().cloned().collect())?;
                 Ok(Value::Tuple(Arc::from(forced)))
@@ -228,14 +279,6 @@ impl Engine {
     }
 
     fn force_node(&self, node_id: NodeId) -> Result<Value, PoisonError> {
-        if ACTIVE_NODES.with(|stack| stack.borrow().contains(&node_id)) {
-            return Err(PoisonError::new(
-                PoisonKind::CircularDependency,
-                format!("circular dependency while demanding node {}", node_id.0),
-                self.current_demand_chain(Some(node_id)),
-            ));
-        }
-
         let node = self
             .nodes
             .get(&node_id)
@@ -245,7 +288,7 @@ impl Engine {
 
         match node.try_start_or_wait(Waiter { sender }) {
             Ok(()) => {
-                let result = self.with_active_node(node_id, || self.execute_node(&node));
+                let result = self.execute_node(&node);
                 match result {
                     Ok(value) => {
                         node.resolve(value.clone());
@@ -307,6 +350,11 @@ impl Engine {
             }
             NodeJob::Fail { message } => Err(self.user_fail(message.clone())?),
             #[cfg(test)]
+            NodeJob::Sleep { millis, value } => {
+                thread::sleep(Duration::from_millis(*millis));
+                Ok(value.clone())
+            }
+            #[cfg(test)]
             NodeJob::Poison(error) => Err(error.clone()),
         }
     }
@@ -321,8 +369,9 @@ impl Engine {
         };
 
         if function.key().is_some() && args.iter().all(|value| value.key().is_some()) {
-            return self
-                .force_node(self.memoized_invoke_node(function, args.iter().cloned().collect()));
+            return self.force_pending_shallow(
+                self.memoized_invoke_node(function, args.iter().cloned().collect()),
+            );
         }
 
         self.invoke_function(&function, args)
@@ -348,10 +397,7 @@ impl Engine {
             if !bindings.contains_key(name) {
                 bindings.insert(
                     name.clone(),
-                    Value::Function(FunctionValue {
-                        def: overloads[0].clone(),
-                        captures: Arc::from([]),
-                    }),
+                    Value::Function(self.global_function_value(overloads[0].clone())),
                 );
             }
         }
@@ -382,10 +428,12 @@ impl Engine {
                 instr::Stmt::FnDecl(def) => {
                     local_bindings.insert(
                         def.name.clone(),
-                        Value::Function(FunctionValue {
-                            def: def.clone(),
-                            captures: capture_bindings(&local_bindings),
-                        }),
+                        Value::Function(
+                            self.local_function_value(
+                                def.clone(),
+                                capture_bindings(&local_bindings),
+                            ),
+                        ),
                     );
                 }
                 instr::Stmt::Expr(expr) => match self.eval_expr(expr, &local_bindings) {
@@ -414,10 +462,9 @@ impl Engine {
                 if let Some(value) = bindings.get(name) {
                     BuildResult::Value(value.clone())
                 } else if let Some(overloads) = self.functions.get(name) {
-                    BuildResult::Value(Value::Function(FunctionValue {
-                        def: overloads[0].clone(),
-                        captures: Arc::from([]),
-                    }))
+                    BuildResult::Value(Value::Function(
+                        self.global_function_value(overloads[0].clone()),
+                    ))
                 } else {
                     BuildResult::Poisoned(self.unresolved_name(name))
                 }
@@ -733,7 +780,7 @@ impl Engine {
 
     fn current_demand_chain(&self, next: Option<NodeId>) -> DemandChain {
         let mut entries = Vec::new();
-        ACTIVE_NODES.with(|stack| {
+        DEMAND_STACK.with(|stack| {
             for node_id in stack.borrow().iter().copied().chain(next) {
                 if let Some(node) = self.nodes.get(&node_id) {
                     entries.push(DemandEntry {
@@ -746,10 +793,39 @@ impl Engine {
         DemandChain { entries }
     }
 
-    fn with_active_node<T>(&self, node_id: NodeId, f: impl FnOnce() -> T) -> T {
-        ACTIVE_NODES.with(|stack| stack.borrow_mut().push(node_id));
+    fn force_pending_shallow(&self, node_id: NodeId) -> Result<Value, PoisonError> {
+        self.with_demand(node_id, || self.force_node(node_id))
+    }
+
+    // r[impl eval.demand-depth]
+    fn with_demand<T>(
+        &self,
+        node_id: NodeId,
+        f: impl FnOnce() -> Result<T, PoisonError>,
+    ) -> Result<T, PoisonError> {
+        if DEMAND_STACK.with(|stack| stack.borrow().contains(&node_id)) {
+            return Err(PoisonError::new(
+                PoisonKind::CircularDependency,
+                format!("circular dependency while demanding node {}", node_id.0),
+                self.current_demand_chain(Some(node_id)),
+            ));
+        }
+
+        let next_depth = DEMAND_STACK.with(|stack| stack.borrow().len() + 1);
+        if next_depth > self.max_demand_depth {
+            return Err(PoisonError::new(
+                PoisonKind::DemandDepthExceeded,
+                format!(
+                    "demand chain exceeded configured depth limit of {}",
+                    self.max_demand_depth
+                ),
+                self.current_demand_chain(Some(node_id)),
+            ));
+        }
+
+        DEMAND_STACK.with(|stack| stack.borrow_mut().push(node_id));
         let result = f();
-        ACTIVE_NODES.with(|stack| {
+        DEMAND_STACK.with(|stack| {
             let popped = stack.borrow_mut().pop();
             debug_assert_eq!(popped, Some(node_id));
         });
@@ -780,4 +856,298 @@ fn capture_bindings(bindings: &HashMap<String, Value>) -> Arc<[(Arc<str>, Value)
         .collect::<Vec<_>>();
     captures.sort_by(|left, right| left.0.cmp(&right.0));
     Arc::from(captures)
+}
+
+fn fn_ptr(def: &Arc<instr::FnDef>) -> usize {
+    Arc::as_ptr(def) as usize
+}
+
+fn stable_fn_repr(def: &instr::FnDef) -> String {
+    format!("{def:?}")
+}
+
+// r[impl fn.identity]
+// r[impl fn.identity.overloads]
+// r[impl fn.identity.scc]
+// r[impl fn.identity.stability]
+// r[impl eval.memoization]
+fn compute_function_identities(functions: &[Arc<instr::FnDef>]) -> HashMap<usize, Arc<str>> {
+    let top_level_names = functions
+        .iter()
+        .map(|function| function.name.clone())
+        .collect::<HashSet<_>>();
+    let overloads = functions.iter().enumerate().fold(
+        BTreeMap::<String, Vec<usize>>::new(),
+        |mut overloads, (index, function)| {
+            overloads
+                .entry(function.name.clone())
+                .or_default()
+                .push(index);
+            overloads
+        },
+    );
+
+    let edges = functions
+        .iter()
+        .map(|function| {
+            collect_global_callee_names(function, &top_level_names)
+                .into_iter()
+                .flat_map(|name| overloads.get(&name).into_iter().flatten().copied())
+                .collect::<BTreeSet<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    let (component_of, components) = strongly_connected_components(&edges);
+    let mut component_identities = vec![None; components.len()];
+
+    for component_index in 0..components.len() {
+        component_identity(
+            component_index,
+            &components,
+            &component_of,
+            &edges,
+            functions,
+            &mut component_identities,
+        );
+    }
+
+    functions
+        .iter()
+        .enumerate()
+        .map(|(index, function)| {
+            (
+                fn_ptr(function),
+                component_identities[component_of[index]]
+                    .clone()
+                    .expect("component identity should be computed"),
+            )
+        })
+        .collect()
+}
+
+fn component_identity(
+    component_index: usize,
+    components: &[Vec<usize>],
+    component_of: &[usize],
+    edges: &[BTreeSet<usize>],
+    functions: &[Arc<instr::FnDef>],
+    component_identities: &mut [Option<Arc<str>>],
+) -> Arc<str> {
+    if let Some(identity) = &component_identities[component_index] {
+        return identity.clone();
+    }
+
+    let mut members = components[component_index]
+        .iter()
+        .map(|&index| stable_fn_repr(&functions[index]))
+        .collect::<Vec<_>>();
+    members.sort();
+
+    let mut callees = components[component_index]
+        .iter()
+        .flat_map(|&index| edges[index].iter().copied())
+        .map(|callee| component_of[callee])
+        .filter(|&callee_component| callee_component != component_index)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|callee_component| {
+            component_identity(
+                callee_component,
+                components,
+                component_of,
+                edges,
+                functions,
+                component_identities,
+            )
+            .to_string()
+        })
+        .collect::<Vec<_>>();
+    callees.sort();
+
+    let identity: Arc<str> = Arc::from(format!(
+        "component:[{}]->[{}]",
+        members.join("|"),
+        callees.join("|")
+    ));
+    component_identities[component_index] = Some(identity.clone());
+    identity
+}
+
+fn strongly_connected_components(edges: &[BTreeSet<usize>]) -> (Vec<usize>, Vec<Vec<usize>>) {
+    struct Tarjan<'a> {
+        edges: &'a [BTreeSet<usize>],
+        index: usize,
+        stack: Vec<usize>,
+        on_stack: Vec<bool>,
+        indices: Vec<Option<usize>>,
+        lowlinks: Vec<usize>,
+        component_of: Vec<usize>,
+        components: Vec<Vec<usize>>,
+    }
+
+    impl<'a> Tarjan<'a> {
+        fn visit(&mut self, node: usize) {
+            let node_index = self.index;
+            self.indices[node] = Some(node_index);
+            self.lowlinks[node] = node_index;
+            self.index += 1;
+            self.stack.push(node);
+            self.on_stack[node] = true;
+
+            for &next in &self.edges[node] {
+                if self.indices[next].is_none() {
+                    self.visit(next);
+                    self.lowlinks[node] = self.lowlinks[node].min(self.lowlinks[next]);
+                } else if self.on_stack[next] {
+                    self.lowlinks[node] =
+                        self.lowlinks[node].min(self.indices[next].expect("known index"));
+                }
+            }
+
+            if self.lowlinks[node] == node_index {
+                let component_index = self.components.len();
+                let mut component = Vec::new();
+                loop {
+                    let member = self.stack.pop().expect("stack should not be empty");
+                    self.on_stack[member] = false;
+                    self.component_of[member] = component_index;
+                    component.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                self.components.push(component);
+            }
+        }
+    }
+
+    let mut tarjan = Tarjan {
+        edges,
+        index: 0,
+        stack: Vec::new(),
+        on_stack: vec![false; edges.len()],
+        indices: vec![None; edges.len()],
+        lowlinks: vec![0; edges.len()],
+        component_of: vec![0; edges.len()],
+        components: Vec::new(),
+    };
+
+    for node in 0..edges.len() {
+        if tarjan.indices[node].is_none() {
+            tarjan.visit(node);
+        }
+    }
+
+    (tarjan.component_of, tarjan.components)
+}
+
+fn collect_global_callee_names(
+    function: &instr::FnDef,
+    top_level_names: &HashSet<String>,
+) -> BTreeSet<String> {
+    let mut visible_locals = function
+        .params
+        .iter()
+        .map(|param| param.name.clone())
+        .collect::<HashSet<_>>();
+    let mut deps = BTreeSet::new();
+    collect_block_callee_names(
+        &function.body,
+        &mut visible_locals,
+        top_level_names,
+        &mut deps,
+    );
+    deps
+}
+
+fn collect_block_callee_names(
+    block: &instr::Block,
+    visible_locals: &mut HashSet<String>,
+    top_level_names: &HashSet<String>,
+    deps: &mut BTreeSet<String>,
+) {
+    let mut local_scope = visible_locals.clone();
+
+    for stmt in &block.stmts {
+        match stmt {
+            instr::Stmt::Let { name, value } | instr::Stmt::Assign { name, value } => {
+                collect_expr_callee_names(value, &local_scope, top_level_names, deps);
+                local_scope.insert(name.clone());
+            }
+            instr::Stmt::Expr(expr) | instr::Stmt::Return(expr) => {
+                collect_expr_callee_names(expr, &local_scope, top_level_names, deps);
+            }
+            instr::Stmt::FnDecl(def) => {
+                local_scope.insert(def.name.clone());
+                let mut fn_scope = local_scope.clone();
+                for param in &def.params {
+                    fn_scope.insert(param.name.clone());
+                }
+                collect_block_callee_names(&def.body, &mut fn_scope, top_level_names, deps);
+            }
+        }
+    }
+}
+
+fn collect_expr_callee_names(
+    expr: &instr::Expr,
+    visible_locals: &HashSet<String>,
+    top_level_names: &HashSet<String>,
+    deps: &mut BTreeSet<String>,
+) {
+    match expr {
+        instr::Expr::LitInt(_)
+        | instr::Expr::LitFloat(_)
+        | instr::Expr::LitBool(_)
+        | instr::Expr::LitString(_)
+        | instr::Expr::Unit
+        | instr::Expr::Var(_) => {}
+        instr::Expr::Binary { left, right, .. } => {
+            collect_expr_callee_names(left, visible_locals, top_level_names, deps);
+            collect_expr_callee_names(right, visible_locals, top_level_names, deps);
+        }
+        instr::Expr::Unary { operand, .. } | instr::Expr::Fail(operand) => {
+            collect_expr_callee_names(operand, visible_locals, top_level_names, deps);
+        }
+        instr::Expr::Block(block) => {
+            let mut nested_scope = visible_locals.clone();
+            collect_block_callee_names(block, &mut nested_scope, top_level_names, deps);
+        }
+        instr::Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_expr_callee_names(cond, visible_locals, top_level_names, deps);
+            let mut then_scope = visible_locals.clone();
+            collect_block_callee_names(then_branch, &mut then_scope, top_level_names, deps);
+            let mut else_scope = visible_locals.clone();
+            collect_block_callee_names(else_branch, &mut else_scope, top_level_names, deps);
+        }
+        instr::Expr::Call { func, args } => {
+            if let instr::Expr::Var(name) = func.as_ref()
+                && !visible_locals.contains(name)
+                && top_level_names.contains(name)
+            {
+                deps.insert(name.clone());
+            }
+            collect_expr_callee_names(func, visible_locals, top_level_names, deps);
+            for arg in args {
+                collect_expr_callee_names(arg, visible_locals, top_level_names, deps);
+            }
+        }
+        instr::Expr::StructLit { fields, .. } => {
+            for (_, value) in fields {
+                collect_expr_callee_names(value, visible_locals, top_level_names, deps);
+            }
+        }
+        instr::Expr::Field { receiver, .. } => {
+            collect_expr_callee_names(receiver, visible_locals, top_level_names, deps);
+        }
+        instr::Expr::Tuple(elems) => {
+            for elem in elems {
+                collect_expr_callee_names(elem, visible_locals, top_level_names, deps);
+            }
+        }
+    }
 }

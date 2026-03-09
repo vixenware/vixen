@@ -4,6 +4,7 @@
 //! asserting the result.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use vx_parser::SourceFile;
 
@@ -309,6 +310,7 @@ fn field_access_does_not_force_other_fields() {
 }
 
 #[test]
+// r[verify eval.memoization]
 // r[verify eval.memoization.pending]
 fn resolved_calls_are_memoized() {
     let engine = engine("fn double(x: U64) { x + x }");
@@ -375,6 +377,16 @@ fn binary_ops_with_pending_inputs_produce_pending_results() {
 }
 
 #[test]
+// r[verify eval.demand]
+fn top_level_calls_build_a_pending_graph_until_forced() {
+    let engine = engine("fn main() { 1 + 2 }");
+    let call = engine.call_unforced("main", vec![]).unwrap();
+
+    assert!(matches!(call, Value::Pending(_)));
+    assert_eq!(engine.force_fully(call).unwrap(), Value::U64(3));
+}
+
+#[test]
 // r[verify eval.control-demand]
 // r[verify eval.enter-functions]
 fn demand_only_reaches_the_taken_if_branch() {
@@ -430,4 +442,127 @@ fn multiple_independent_poisons_are_collected_deterministically() {
     assert_eq!(err.causes.len(), 2);
     assert_eq!(err.causes[0].message, "left");
     assert_eq!(err.causes[1].message, "right");
+}
+
+#[test]
+// r[verify eval.demand-depth]
+fn circular_recursion_poisons_with_a_circular_dependency() {
+    let err = eval(
+        "fn loop_forever(n: U64) { loop_forever(n) }
+         fn main() { loop_forever(1) }",
+        "main",
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind, PoisonKind::CircularDependency);
+}
+
+#[test]
+// r[verify eval.demand-depth]
+fn deep_demand_chain_respects_the_configured_limit() {
+    let engine = engine(
+        "fn countdown(n: U64) {
+           if n == 0 { 0 } else { countdown(n - 1) }
+         }",
+    )
+    .with_max_demand_depth(4);
+    let err = engine.call("countdown", vec![Value::U64(10)]).unwrap_err();
+
+    assert_eq!(err.kind, PoisonKind::DemandDepthExceeded);
+    assert!(err.message.contains("depth limit of 4"));
+}
+
+#[test]
+// r[verify eval.concurrency]
+fn independent_children_are_forced_concurrently() {
+    let engine = engine("fn pair(x: U64, y: U64) { Pair { left: x, right: y } }");
+    let call = engine
+        .call_unforced(
+            "pair",
+            vec![
+                engine.sleep_value(200, Value::U64(1)),
+                engine.sleep_value(200, Value::U64(2)),
+            ],
+        )
+        .unwrap();
+
+    let start = Instant::now();
+    let value = engine.force_fully(call).unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        value,
+        Value::Struct(StructValue {
+            type_name: Arc::from("Pair"),
+            fields: Arc::from([
+                (Arc::from("left"), Value::U64(1)),
+                (Arc::from("right"), Value::U64(2)),
+            ]),
+        })
+    );
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[test]
+// r[verify fn.identity]
+// r[verify eval.memoization]
+fn transitive_callee_changes_update_the_caller_identity() {
+    let source_a = "fn helper() { 1 } fn wrapper() { helper() }";
+    let source_b = "fn helper() { 2 } fn wrapper() { helper() }";
+
+    let key_a = engine(source_a).function_key("wrapper").unwrap();
+    let key_b = engine(source_b).function_key("wrapper").unwrap();
+
+    assert_ne!(key_a, key_b);
+}
+
+#[test]
+// r[verify fn.identity.overloads]
+fn all_visible_overloads_contribute_to_caller_identity() {
+    let source_a = "fn helper(x: U64) { 1 }
+                    fn helper(x: Bool) { 2 }
+                    fn wrapper() { helper(1) }";
+    let source_b = "fn helper(x: U64) { 1 }
+                    fn helper(x: Bool) { 99 }
+                    fn wrapper() { helper(1) }";
+
+    let key_a = engine(source_a).function_key("wrapper").unwrap();
+    let key_b = engine(source_b).function_key("wrapper").unwrap();
+
+    assert_ne!(key_a, key_b);
+}
+
+#[test]
+// r[verify fn.identity.stability]
+fn comments_and_whitespace_do_not_change_function_identity() {
+    let source_a = "fn helper() { 1 }\nfn wrapper() { helper() }";
+    let source_b = r#"
+// wrapper should keep the same identity
+fn helper() {
+  // this comment is ignored by lowering
+  1
+}
+
+fn wrapper() {
+  helper()
+}
+"#;
+
+    let key_a = engine(source_a).function_key("wrapper").unwrap();
+    let key_b = engine(source_b).function_key("wrapper").unwrap();
+
+    assert_eq!(key_a, key_b);
+}
+
+#[test]
+// r[verify fn.identity.scc]
+fn mutually_recursive_functions_share_one_code_identity() {
+    let source = "fn even(n: U64) { if n == 0 { true } else { odd(n - 1) } }
+                  fn odd(n: U64) { if n == 0 { false } else { even(n - 1) } }";
+    let engine = engine(source);
+
+    assert_eq!(
+        engine.function_key("even").unwrap(),
+        engine.function_key("odd").unwrap()
+    );
 }

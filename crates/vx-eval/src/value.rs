@@ -51,6 +51,7 @@ pub struct StructValue {
 #[derive(Debug, Clone)]
 pub struct FunctionValue {
     pub def: Arc<FnDef>,
+    pub code_identity: Arc<str>,
     /// Captured bindings from the enclosing scope, kept in sorted order.
     pub captures: Arc<[(Arc<str>, Value)]>,
 }
@@ -118,7 +119,7 @@ impl StructValue {
 
 impl FunctionValue {
     pub fn identity(&self) -> String {
-        format!("{:?}", self.def)
+        self.code_identity.to_string()
     }
 
     pub fn key(&self) -> Option<String> {
