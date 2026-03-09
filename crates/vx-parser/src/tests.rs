@@ -224,3 +224,36 @@ fn value(message: Message, direction: Direction, items: Array[String], code: U64
     assert!(kinds.contains(&SyntaxKind::ARRAY_REST_PATTERN));
     assert!(kinds.contains(&SyntaxKind::LITERAL_PATTERN));
 }
+
+#[test]
+fn parses_closures_type_operators_and_ranges() {
+    let input = r#"
+fn closures(items: Array[U64]) -> Array[U64] {
+  items.map((x) => { let y = x + 1; y })
+}
+
+fn operators(a: U64) -> Bool {
+  let cast = a as? U64;
+  let typed = 0 :: I64;
+  let checked = a is 0 | 1;
+  0..=10;
+  ..10;
+  cast;
+  typed;
+  checked
+}
+"#;
+
+    let parse = parse(input);
+    assert_eq!(parse.errors(), []);
+
+    let kinds = parse
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&SyntaxKind::CLOSURE_EXPR));
+    assert!(kinds.contains(&SyntaxKind::CLOSURE_PARAM_CLAUSE));
+    assert!(kinds.contains(&SyntaxKind::TYPE_OP_EXPR));
+    assert!(kinds.contains(&SyntaxKind::RANGE_EXPR));
+}
