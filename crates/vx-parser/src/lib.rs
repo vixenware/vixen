@@ -19,8 +19,9 @@ pub use lexer::{Token, lex};
 
 mod lsp;
 pub use lsp::{
-    Breadcrumb, DocumentSymbol, FoldingRange, FoldingRangeKind, LineIndex, Position, SymbolKind,
-    document_symbols, enclosing_nodes, folding_ranges,
+    Breadcrumb, DocumentSymbol, FoldingRange, FoldingRangeKind, LineIndex, Position, SemanticToken,
+    SemanticTokenType, SymbolKind, document_symbols, enclosing_nodes, folding_ranges,
+    semantic_tokens,
 };
 
 mod parser;

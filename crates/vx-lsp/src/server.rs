@@ -67,6 +67,22 @@ impl LanguageServer for VxLanguageServer {
                 )),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: SemanticTokensLegend {
+                                token_types: vx::SemanticTokenType::LEGEND
+                                    .iter()
+                                    .map(|s| SemanticTokenType::new(s))
+                                    .collect(),
+                                token_modifiers: vec![],
+                            },
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            range: None,
+                            ..Default::default()
+                        },
+                    ),
+                ),
                 ..Default::default()
             },
             ..Default::default()
@@ -140,6 +156,22 @@ impl LanguageServer for VxLanguageServer {
         });
         Ok(ranges)
     }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let data = self.with_document(&params.text_document.uri, |state| {
+            let tokens = vx::semantic_tokens(&state.parsed.tree().syntax());
+            encode_semantic_tokens(&tokens, &state.line_index)
+        });
+        Ok(data.map(|data| {
+            SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data,
+            })
+        }))
+    }
 }
 
 impl VxLanguageServer {
@@ -188,4 +220,39 @@ fn convert_symbol_kind(kind: vx::SymbolKind) -> SymbolKind {
         vx::SymbolKind::Newtype => SymbolKind::TYPE_PARAMETER,
         vx::SymbolKind::TypeAlias => SymbolKind::TYPE_PARAMETER,
     }
+}
+
+/// Encode semantic tokens as LSP delta-encoded 5-tuples.
+fn encode_semantic_tokens(
+    tokens: &[vx::SemanticToken],
+    line_index: &vx::LineIndex,
+) -> Vec<tower_lsp::lsp_types::SemanticToken> {
+    let mut result = Vec::with_capacity(tokens.len());
+    let mut prev_line = 0u32;
+    let mut prev_col = 0u32;
+
+    for token in tokens {
+        let start = line_index.position(token.range.start());
+        let len = u32::from(token.range.len());
+
+        let delta_line = start.line - prev_line;
+        let delta_start = if delta_line == 0 {
+            start.col - prev_col
+        } else {
+            start.col
+        };
+
+        result.push(tower_lsp::lsp_types::SemanticToken {
+            delta_line,
+            delta_start,
+            length: len,
+            token_type: token.token_type as u32,
+            token_modifiers_bitset: 0,
+        });
+
+        prev_line = start.line;
+        prev_col = start.col;
+    }
+
+    result
 }

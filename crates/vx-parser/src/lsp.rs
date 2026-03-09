@@ -1,8 +1,8 @@
-use rowan::{TextRange, TextSize};
+use rowan::{TextRange, TextSize, WalkEvent};
 
 use crate::{
     AstNode, EnumDecl, FnDecl, Item, NewtypeDecl, SourceFile, StructDecl, SyntaxKind, SyntaxNode,
-    TypeAliasDecl, ast::VariantDecl,
+    SyntaxToken, TypeAliasDecl, ast::VariantDecl,
 };
 
 /// Line/column position (both 0-based).
@@ -301,4 +301,209 @@ fn is_foldable(kind: SyntaxKind) -> bool {
             | SyntaxKind::MATCH_EXPR
             | SyntaxKind::BLOCK_COMMENT
     )
+}
+
+// --- Semantic tokens ---
+
+/// Semantic token types used by the vixen LSP.
+///
+/// The order here defines the token type index in the LSP legend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SemanticTokenType {
+    Keyword = 0,
+    Function = 1,
+    Variable = 2,
+    Parameter = 3,
+    Type = 4,
+    Property = 5,
+    EnumMember = 6,
+    Number = 7,
+    String = 8,
+    Comment = 9,
+    Operator = 10,
+}
+
+impl SemanticTokenType {
+    /// The LSP legend entries in order.
+    pub const LEGEND: &[&str] = &[
+        "keyword",
+        "function",
+        "variable",
+        "parameter",
+        "type",
+        "property",
+        "enumMember",
+        "number",
+        "string",
+        "comment",
+        "operator",
+    ];
+}
+
+/// A single classified token for semantic highlighting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticToken {
+    pub range: TextRange,
+    pub token_type: SemanticTokenType,
+}
+
+/// Extract semantic tokens from a syntax tree.
+pub fn semantic_tokens(root: &SyntaxNode) -> Vec<SemanticToken> {
+    let mut tokens = Vec::new();
+    for event in root.preorder_with_tokens() {
+        if let WalkEvent::Enter(rowan::NodeOrToken::Token(token)) = event {
+            if let Some(token_type) = classify_token(&token) {
+                tokens.push(SemanticToken {
+                    range: token.text_range(),
+                    token_type,
+                });
+            }
+        }
+    }
+    tokens
+}
+
+fn classify_token(token: &SyntaxToken) -> Option<SemanticTokenType> {
+    use SemanticTokenType as T;
+
+    match token.kind() {
+        // Keywords
+        SyntaxKind::FN_KW
+        | SyntaxKind::LET_KW
+        | SyntaxKind::TYPE_KW
+        | SyntaxKind::STRUCT_KW
+        | SyntaxKind::ENUM_KW
+        | SyntaxKind::NEWTYPE_KW
+        | SyntaxKind::OF_KW
+        | SyntaxKind::MATCH_KW
+        | SyntaxKind::IF_KW
+        | SyntaxKind::ELSE_KW
+        | SyntaxKind::WITH_KW
+        | SyntaxKind::IS_KW
+        | SyntaxKind::AS_KW
+        | SyntaxKind::IMPORT_KW
+        | SyntaxKind::RETURN_KW
+        | SyntaxKind::FAIL_KW
+        | SyntaxKind::TRUE_KW
+        | SyntaxKind::FALSE_KW
+        | SyntaxKind::FN_TYPE_KW => Some(T::Keyword),
+
+        // Literals
+        SyntaxKind::INT | SyntaxKind::FLOAT => Some(T::Number),
+        SyntaxKind::STRING | SyntaxKind::INTERP_TEXT | SyntaxKind::BACKTICK => Some(T::String),
+
+        // Comments
+        SyntaxKind::LINE_COMMENT | SyntaxKind::BLOCK_COMMENT => Some(T::Comment),
+
+        // Operators and punctuation with semantic meaning
+        SyntaxKind::EQ2
+        | SyntaxKind::BANG_EQ
+        | SyntaxKind::LT
+        | SyntaxKind::LT_EQ
+        | SyntaxKind::GT
+        | SyntaxKind::GT_EQ
+        | SyntaxKind::PLUS
+        | SyntaxKind::MINUS
+        | SyntaxKind::STAR
+        | SyntaxKind::SLASH
+        | SyntaxKind::PERCENT
+        | SyntaxKind::AMP2
+        | SyntaxKind::PIPE2
+        | SyntaxKind::BANG
+        | SyntaxKind::DOT2
+        | SyntaxKind::DOT2_EQ
+        | SyntaxKind::PIPE
+        | SyntaxKind::QUESTION => Some(T::Operator),
+
+        // Interpolation delimiters
+        SyntaxKind::INTERP_START | SyntaxKind::INTERP_END => Some(T::Operator),
+
+        // Context-sensitive identifiers
+        SyntaxKind::UPPER_IDENT => classify_upper_ident(token),
+        SyntaxKind::LOWER_IDENT => classify_lower_ident(token),
+        SyntaxKind::DOLLAR_IDENT => Some(T::Parameter),
+
+        _ => None,
+    }
+}
+
+fn classify_upper_ident(token: &SyntaxToken) -> Option<SemanticTokenType> {
+    let parent = token.parent()?;
+    match parent.kind() {
+        SyntaxKind::VARIANT_PATTERN | SyntaxKind::VARIANT_DECL => {
+            Some(SemanticTokenType::EnumMember)
+        }
+        _ => Some(SemanticTokenType::Type),
+    }
+}
+
+fn classify_lower_ident(token: &SyntaxToken) -> Option<SemanticTokenType> {
+    let parent = token.parent()?;
+    match parent.kind() {
+        // Function declaration name
+        SyntaxKind::FN_DECL => Some(SemanticTokenType::Function),
+
+        // Field declarations and access
+        SyntaxKind::FIELD_DECL
+        | SyntaxKind::FIELD_EXPR
+        | SyntaxKind::STRUCT_LITERAL_FIELD
+        | SyntaxKind::STRUCT_PATTERN_FIELD
+        | SyntaxKind::FIELD_ASSIGN_TARGET
+        | SyntaxKind::UPDATE_FIELD
+        | SyntaxKind::KEYWORD_ARG => Some(SemanticTokenType::Property),
+
+        // Call expressions — the callee identifier is a function
+        SyntaxKind::CALL_EXPR | SyntaxKind::PARTIAL_APP_EXPR => Some(SemanticTokenType::Function),
+
+        // Name references — could be variable or function, default to variable
+        SyntaxKind::NAME_REF_EXPR => Some(SemanticTokenType::Variable),
+
+        // Capability tags
+        SyntaxKind::CAPABILITY_TAG => Some(SemanticTokenType::Type),
+
+        // Closure parameters
+        SyntaxKind::CLOSURE_PARAM_CLAUSE => Some(SemanticTokenType::Parameter),
+
+        // Keyword parameters (name directly under KEYWORD_PARAMETER)
+        SyntaxKind::KEYWORD_PARAMETER => Some(SemanticTokenType::Parameter),
+
+        // Binding patterns — check if inside a parameter or a let binding
+        SyntaxKind::BINDING_PATTERN | SyntaxKind::AT_PATTERN => classify_binding_context(&parent),
+
+        _ => Some(SemanticTokenType::Variable),
+    }
+}
+
+/// A binding pattern can appear in parameters or in let statements.
+/// Walk up to find out which.
+fn classify_binding_context(binding: &SyntaxNode) -> Option<SemanticTokenType> {
+    let mut node = binding.parent()?;
+    loop {
+        match node.kind() {
+            SyntaxKind::PARAMETER | SyntaxKind::KEYWORD_PARAMETER => {
+                return Some(SemanticTokenType::Parameter);
+            }
+            SyntaxKind::CLOSURE_PARAM_CLAUSE => {
+                return Some(SemanticTokenType::Parameter);
+            }
+            SyntaxKind::LET_STMT => {
+                return Some(SemanticTokenType::Variable);
+            }
+            SyntaxKind::MATCH_ARM => {
+                return Some(SemanticTokenType::Variable);
+            }
+            // Keep climbing through pattern wrappers
+            SyntaxKind::TUPLE_PATTERN
+            | SyntaxKind::STRUCT_PATTERN
+            | SyntaxKind::STRUCT_PATTERN_FIELD
+            | SyntaxKind::ARRAY_PATTERN
+            | SyntaxKind::PAREN_PATTERN
+            | SyntaxKind::OR_PATTERN
+            | SyntaxKind::VARIANT_PATTERN
+            | SyntaxKind::AT_PATTERN => {}
+            _ => return Some(SemanticTokenType::Variable),
+        }
+        node = node.parent()?;
+    }
 }

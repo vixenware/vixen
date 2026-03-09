@@ -2,8 +2,8 @@ use rowan::TextSize;
 
 use crate::{
     AstNode, Expr, FoldingRangeKind, InterpolatedStringExpr, Item, LineIndex, Pattern, Position,
-    SourceFile, Stmt, StringPart, SymbolKind, SyntaxKind, Type, document_symbols, enclosing_nodes,
-    folding_ranges, parse, parse_source_file,
+    SemanticTokenType, SourceFile, Stmt, StringPart, SymbolKind, SyntaxKind, Type,
+    document_symbols, enclosing_nodes, folding_ranges, parse, parse_source_file, semantic_tokens,
 };
 
 #[test]
@@ -1021,4 +1021,137 @@ fn build() -> U64 {
     assert!(kinds.iter().all(|k| *k == FoldingRangeKind::Block));
     // At minimum: struct decl, struct body, fn decl, fn body block, if expr
     assert!(ranges.len() >= 5);
+}
+
+#[test]
+fn semantic_tokens_classifies_all_token_kinds() {
+    let input = r#"
+struct Point {
+  x: F64,
+  y: F64,
+}
+
+fn distance(a: Point, b: Point) -> F64 {
+  let dx = a.x - b.x;
+  let dy = a.y - b.y;
+  dx * dy
+}
+"#;
+
+    let parsed = parse_source_file(input);
+    assert_eq!(parsed.errors(), []);
+
+    let tokens = semantic_tokens(&parsed.tree().syntax());
+
+    // Collect (text, type) pairs using the source
+    let classified: Vec<(&str, SemanticTokenType)> = tokens
+        .iter()
+        .map(|t| {
+            let start = u32::from(t.range.start()) as usize;
+            let end = u32::from(t.range.end()) as usize;
+            (&input[start..end], t.token_type)
+        })
+        .collect();
+
+    use SemanticTokenType as T;
+
+    // Check keywords
+    assert!(classified.contains(&("struct", T::Keyword)));
+    assert!(classified.contains(&("fn", T::Keyword)));
+    assert!(classified.contains(&("let", T::Keyword)));
+
+    // Check type names
+    assert!(classified.contains(&("Point", T::Type)));
+    assert!(classified.contains(&("F64", T::Type)));
+
+    // Check function name
+    assert!(classified.contains(&("distance", T::Function)));
+
+    // Check parameters
+    assert!(classified.contains(&("a", T::Parameter)));
+    assert!(classified.contains(&("b", T::Parameter)));
+
+    // Check field names
+    assert!(classified.contains(&("x", T::Property)));
+    assert!(classified.contains(&("y", T::Property)));
+
+    // Check variables
+    assert!(classified.contains(&("dx", T::Variable)));
+    assert!(classified.contains(&("dy", T::Variable)));
+
+    // Check operators
+    assert!(classified.contains(&("-", T::Operator)));
+    assert!(classified.contains(&("*", T::Operator)));
+}
+
+#[test]
+fn semantic_tokens_handles_strings_and_interpolation() {
+    let input = r#"
+fn greet(name: String) -> String {
+  let greeting = "hello";
+  `${greeting}, ${name}!`
+}
+"#;
+
+    let parsed = parse_source_file(input);
+    assert_eq!(parsed.errors(), []);
+
+    let tokens = semantic_tokens(&parsed.tree().syntax());
+    let classified: Vec<(&str, SemanticTokenType)> = tokens
+        .iter()
+        .map(|t| {
+            let start = u32::from(t.range.start()) as usize;
+            let end = u32::from(t.range.end()) as usize;
+            (&input[start..end], t.token_type)
+        })
+        .collect();
+
+    use SemanticTokenType as T;
+
+    assert!(classified.contains(&("\"hello\"", T::String)));
+    assert!(classified.contains(&("greet", T::Function)));
+    assert!(classified.contains(&("name", T::Parameter)));
+    assert!(classified.contains(&("greeting", T::Variable)));
+    // Backtick delimiters
+    assert!(classified.iter().filter(|(_, ty)| *ty == T::String).count() >= 2);
+    // Interpolation delimiters
+    assert!(classified.contains(&("${", T::Operator)));
+}
+
+#[test]
+fn semantic_tokens_handles_match_and_enum_patterns() {
+    let input = r#"
+enum Shape {
+  struct Circle { radius: F64 },
+  struct Rect { w: F64, h: F64 },
+}
+
+fn area(s: Shape) -> F64 {
+  match s {
+    Circle { radius } => radius * radius,
+    Rect { w, h } => w * h,
+  }
+}
+"#;
+
+    let parsed = parse_source_file(input);
+    assert_eq!(parsed.errors(), []);
+
+    let tokens = semantic_tokens(&parsed.tree().syntax());
+    let classified: Vec<(&str, SemanticTokenType)> = tokens
+        .iter()
+        .map(|t| {
+            let start = u32::from(t.range.start()) as usize;
+            let end = u32::from(t.range.end()) as usize;
+            (&input[start..end], t.token_type)
+        })
+        .collect();
+
+    use SemanticTokenType as T;
+
+    assert!(classified.contains(&("match", T::Keyword)));
+    assert!(classified.contains(&("enum", T::Keyword)));
+    assert!(classified.contains(&("Shape", T::Type)));
+    assert!(classified.contains(&("area", T::Function)));
+    assert!(classified.contains(&("radius", T::Property)));
 }
