@@ -1579,7 +1579,10 @@ insert_anchor_links = "heading"
 > r[exec.signature]
 >
 > `exec` runs an external process on an executor — a sandboxed runner
-> with a virtual filesystem. It is generic over `T`:
+> with a virtual filesystem. `exec` is a builtin function available in
+> the standard environment, not a reserved keyword or special form. It
+> uses ordinary call syntax and can be shadowed by user bindings. It is
+> generic over `T`:
 >
 > ```vixen
 > exec[T](

@@ -300,6 +300,17 @@ fn shadowing() {
 }
 
 #[test]
+fn user_bindings_can_shadow_exec() {
+    let val = eval(
+        "fn exec() { 42 }
+         fn main() { exec() }",
+        "main",
+    )
+    .unwrap();
+    assert_eq!(val, Value::U64(42));
+}
+
+#[test]
 fn early_return() {
     let val = eval(
         "fn check(n: U64) {
