@@ -559,7 +559,7 @@ insert_anchor_links = "heading"
 >
 > `value with { field: new_value }` produces a new value with some fields
 > changed. Fields not mentioned are kept from the original. See
-> [type.struct.with] and [type.struct.with-assign].
+> `r[type.struct.with]` and `r[type.struct.with-assign]`.
 
 > r[expr.with.path]
 >
