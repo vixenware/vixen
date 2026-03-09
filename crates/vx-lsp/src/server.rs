@@ -168,6 +168,9 @@ impl LanguageServer for VxLanguageServer {
                 ),
                 call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
+                linked_editing_range_provider: Some(LinkedEditingRangeServerCapabilities::Simple(
+                    true,
+                )),
                 ..Default::default()
             },
             ..Default::default()
@@ -430,8 +433,10 @@ impl LanguageServer for VxLanguageServer {
                 col: pos.character,
             })?;
 
-            let visible = state.resolution.scopes.visible_at(offset);
-            let items: Vec<CompletionItem> = visible
+            let mut items: Vec<CompletionItem> = state
+                .resolution
+                .scopes
+                .visible_at(offset)
                 .into_iter()
                 .map(|def| {
                     let documentation = state.doc_comment_for(def).map(|doc| {
@@ -449,6 +454,9 @@ impl LanguageServer for VxLanguageServer {
                     }
                 })
                 .collect();
+
+            // Add keyword snippets
+            items.extend(keyword_completions());
 
             Some(CompletionResponse::Array(items))
         });
@@ -1016,6 +1024,35 @@ impl LanguageServer for VxLanguageServer {
 
         Ok(Some(results))
     }
+
+    async fn linked_editing_range(
+        &self,
+        params: LinkedEditingRangeParams,
+    ) -> Result<Option<LinkedEditingRanges>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let result = self.with_document(uri, |state| {
+            let offset = state.line_index.offset(vx::Position {
+                line: pos.line,
+                col: pos.character,
+            })?;
+
+            let def = state.definition_at(offset)?;
+
+            let mut ranges = vec![state.to_lsp_range(def.name_range)];
+            for ref_range in state.references_to(def) {
+                ranges.push(state.to_lsp_range(ref_range));
+            }
+
+            Some(LinkedEditingRanges {
+                ranges,
+                word_pattern: None,
+            })
+        });
+
+        Ok(result.flatten())
+    }
 }
 
 impl VxLanguageServer {
@@ -1221,6 +1258,48 @@ fn def_kind_to_symbol(kind: vx_resolve::DefKind) -> SymbolKind {
         vx_resolve::DefKind::Variant => SymbolKind::ENUM_MEMBER,
         vx_resolve::DefKind::Field => SymbolKind::FIELD,
     }
+}
+
+fn keyword_completions() -> Vec<CompletionItem> {
+    let snippets = [
+        (
+            "fn",
+            "fn ${1:name}(${2}) {\n\t$0\n}",
+            "Function declaration",
+        ),
+        ("let", "let ${1:name} = ${0}", "Let binding"),
+        (
+            "match",
+            "match ${1:expr} {\n\t${2:pattern} => ${0}\n}",
+            "Match expression",
+        ),
+        ("if", "if ${1:condition} {\n\t$0\n}", "If expression"),
+        (
+            "struct",
+            "struct ${1:Name} {\n\t${0}\n}",
+            "Struct declaration",
+        ),
+        ("enum", "enum ${1:Name} {\n\t${0}\n}", "Enum declaration"),
+        (
+            "newtype",
+            "newtype ${1:Name} of ${0:Type}",
+            "Newtype declaration",
+        ),
+        ("type", "type ${1:Name} = ${0:Type}", "Type alias"),
+        ("return", "return ${0}", "Return statement"),
+    ];
+
+    snippets
+        .into_iter()
+        .map(|(label, snippet, detail)| CompletionItem {
+            label: label.to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some(detail.to_string()),
+            insert_text: Some(snippet.to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        })
+        .collect()
 }
 
 /// Check if an ARG node is a simple name reference matching the parameter name.
