@@ -212,12 +212,8 @@ fn lower_prefix(pre: &PrefixExpr) -> Option<instr::Expr> {
 }
 
 fn lower_if(if_expr: &IfExpr) -> Option<instr::Expr> {
-    let syntax = if_expr.syntax();
-    let mut exprs = syntax.children().filter_map(AstExpr::cast);
-
-    let cond = lower_expr(&exprs.next()?)?;
-
-    let then_expr = exprs.next()?;
+    let cond = lower_expr(&if_expr.condition()?)?;
+    let then_expr = if_expr.then_branch()?;
     let then_branch = match then_expr {
         AstExpr::Block(b) => lower_block(&b),
         other => instr::Block {
@@ -225,7 +221,7 @@ fn lower_if(if_expr: &IfExpr) -> Option<instr::Expr> {
         },
     };
 
-    let else_branch = match exprs.next() {
+    let else_branch = match if_expr.else_branch() {
         Some(AstExpr::Block(b)) => lower_block(&b),
         Some(other) => instr::Block {
             stmts: vec![instr::Stmt::Expr(lower_expr(&other)?)],
@@ -246,14 +242,10 @@ fn lower_call(call: &CallExpr) -> Option<instr::Expr> {
     let callee = call.callee()?;
     let func = lower_expr(&callee)?;
 
-    // Arguments are inside an ARG_LIST child node
     let args: Vec<instr::Expr> = call
-        .syntax()
-        .children()
-        .find(|c| c.kind() == SyntaxKind::ARG_LIST)
-        .into_iter()
-        .flat_map(|arg_list| arg_list.children().filter_map(AstExpr::cast))
-        .filter_map(|e| lower_expr(&e))
+        .args()
+        .filter_map(|arg| arg.expr())
+        .filter_map(|expr| lower_expr(&expr))
         .collect();
 
     Some(instr::Expr::Call {

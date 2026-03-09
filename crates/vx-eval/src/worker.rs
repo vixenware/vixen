@@ -58,6 +58,8 @@ struct SuspendedFrame {
 enum EvalResult {
     /// Got a value.
     Ready(Value),
+    /// A `return` escaped the current expression context.
+    Returned(Value),
     /// Need to wait for these nodes. The SuspendedFrame should be saved.
     Blocked(Vec<NodeId>),
     /// Evaluation poisoned.
@@ -117,7 +119,7 @@ impl Engine {
 
         loop {
             match self.evaluate_frame(&mut frame, &wake_tx) {
-                EvalResult::Ready(value) => {
+                EvalResult::Ready(value) | EvalResult::Returned(value) => {
                     node.resolve(value.clone());
                     return Ok(value);
                 }
@@ -222,6 +224,7 @@ impl Engine {
                             frame.bindings.insert(name.clone(), val);
                             frame.stmt_index += 1;
                         }
+                        EvalResult::Returned(val) => return EvalResult::Ready(val),
                         other => return other,
                     }
                 }
@@ -231,11 +234,17 @@ impl Engine {
                             frame.bindings.insert(name.clone(), val);
                             frame.stmt_index += 1;
                         }
+                        EvalResult::Returned(val) => return EvalResult::Ready(val),
                         other => return other,
                     }
                 }
                 instr::Stmt::Return(expr) => {
-                    return self.eval_expr(expr, &frame.bindings, wake_tx);
+                    return match self.eval_expr(expr, &frame.bindings, wake_tx) {
+                        EvalResult::Ready(val) | EvalResult::Returned(val) => {
+                            EvalResult::Ready(val)
+                        }
+                        other => other,
+                    };
                 }
                 instr::Stmt::FnDecl(def) => {
                     // Local function — add to bindings as a function value
@@ -255,6 +264,7 @@ impl Engine {
                             // Not last statement — discard the value
                             frame.stmt_index += 1;
                         }
+                        EvalResult::Returned(val) => return EvalResult::Ready(val),
                         other => return other,
                     }
                 }
@@ -300,10 +310,12 @@ impl Engine {
             instr::Expr::Binary { op, left, right } => {
                 let lhs = match self.eval_expr(left, bindings, wake_tx) {
                     EvalResult::Ready(v) => v,
+                    EvalResult::Returned(v) => return EvalResult::Returned(v),
                     other => return other,
                 };
                 let rhs = match self.eval_expr(right, bindings, wake_tx) {
                     EvalResult::Ready(v) => v,
+                    EvalResult::Returned(v) => return EvalResult::Returned(v),
                     other => return other,
                 };
                 eval_binary_op(*op, &lhs, &rhs)
@@ -312,6 +324,7 @@ impl Engine {
             instr::Expr::Unary { op, operand } => {
                 let val = match self.eval_expr(operand, bindings, wake_tx) {
                     EvalResult::Ready(v) => v,
+                    EvalResult::Returned(v) => return EvalResult::Returned(v),
                     other => return other,
                 };
                 eval_unary_op(*op, &val)
@@ -328,6 +341,9 @@ impl Engine {
                                 EvalResult::Ready(val) => {
                                     local_bindings.insert(name.clone(), val);
                                 }
+                                EvalResult::Returned(val) => {
+                                    return EvalResult::Returned(val);
+                                }
                                 other => return other,
                             }
                         }
@@ -336,11 +352,19 @@ impl Engine {
                                 EvalResult::Ready(val) => {
                                     local_bindings.insert(name.clone(), val);
                                 }
+                                EvalResult::Returned(val) => {
+                                    return EvalResult::Returned(val);
+                                }
                                 other => return other,
                             }
                         }
                         instr::Stmt::Return(expr) => {
-                            return self.eval_expr(expr, &local_bindings, wake_tx);
+                            return match self.eval_expr(expr, &local_bindings, wake_tx) {
+                                EvalResult::Ready(val) | EvalResult::Returned(val) => {
+                                    EvalResult::Returned(val)
+                                }
+                                other => other,
+                            };
                         }
                         instr::Stmt::FnDecl(def) => {
                             let func_val = Value::Function(FunctionValue {
@@ -355,6 +379,9 @@ impl Engine {
                                     if is_last {
                                         return EvalResult::Ready(val);
                                     }
+                                }
+                                EvalResult::Returned(val) => {
+                                    return EvalResult::Returned(val);
                                 }
                                 other => return other,
                             }
@@ -371,6 +398,7 @@ impl Engine {
             } => {
                 let cond_val = match self.eval_expr(cond, bindings, wake_tx) {
                     EvalResult::Ready(v) => v,
+                    EvalResult::Returned(v) => return EvalResult::Returned(v),
                     other => return other,
                 };
                 match cond_val {
@@ -394,6 +422,7 @@ impl Engine {
                 // Evaluate the callee
                 let func_val = match self.eval_expr(func, bindings, wake_tx) {
                     EvalResult::Ready(v) => v,
+                    EvalResult::Returned(v) => return EvalResult::Returned(v),
                     other => return other,
                 };
 
@@ -402,6 +431,7 @@ impl Engine {
                 for arg in args {
                     match self.eval_expr(arg, bindings, wake_tx) {
                         EvalResult::Ready(v) => arg_vals.push(v),
+                        EvalResult::Returned(v) => return EvalResult::Returned(v),
                         other => return other,
                     }
                 }
@@ -423,6 +453,7 @@ impl Engine {
                         EvalResult::Ready(val) => {
                             field_vals.push((Arc::from(field_name.as_str()), val));
                         }
+                        EvalResult::Returned(val) => return EvalResult::Returned(val),
                         other => return other,
                     }
                 }
@@ -435,6 +466,7 @@ impl Engine {
             instr::Expr::Field { receiver, field } => {
                 let recv_val = match self.eval_expr(receiver, bindings, wake_tx) {
                     EvalResult::Ready(v) => v,
+                    EvalResult::Returned(v) => return EvalResult::Returned(v),
                     other => return other,
                 };
                 match &recv_val {
@@ -482,6 +514,7 @@ impl Engine {
                 for elem in elems {
                     match self.eval_expr(elem, bindings, wake_tx) {
                         EvalResult::Ready(v) => vals.push(v),
+                        EvalResult::Returned(v) => return EvalResult::Returned(v),
                         other => return other,
                     }
                 }
@@ -526,6 +559,7 @@ impl Engine {
                         EvalResult::Ready(val) => {
                             bindings.insert(name.clone(), val);
                         }
+                        EvalResult::Returned(val) => return EvalResult::Ready(val),
                         other => return other,
                     }
                 }
@@ -534,11 +568,17 @@ impl Engine {
                         EvalResult::Ready(val) => {
                             bindings.insert(name.clone(), val);
                         }
+                        EvalResult::Returned(val) => return EvalResult::Ready(val),
                         other => return other,
                     }
                 }
                 instr::Stmt::Return(expr) => {
-                    return self.eval_expr(expr, &bindings, wake_tx);
+                    return match self.eval_expr(expr, &bindings, wake_tx) {
+                        EvalResult::Ready(val) | EvalResult::Returned(val) => {
+                            EvalResult::Ready(val)
+                        }
+                        other => other,
+                    };
                 }
                 instr::Stmt::FnDecl(local_def) => {
                     let func_val = Value::Function(FunctionValue {
@@ -553,6 +593,7 @@ impl Engine {
                             return EvalResult::Ready(val);
                         }
                     }
+                    EvalResult::Returned(val) => return EvalResult::Ready(val),
                     other => return other,
                 },
             }

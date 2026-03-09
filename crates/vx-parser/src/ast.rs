@@ -83,8 +83,11 @@ ast_node!(ClosureExpr, SyntaxKind::CLOSURE_EXPR);
 ast_node!(ClosureParamClause, SyntaxKind::CLOSURE_PARAM_CLAUSE);
 ast_node!(PartialAppExpr, SyntaxKind::PARTIAL_APP_EXPR);
 ast_node!(CallExpr, SyntaxKind::CALL_EXPR);
+ast_node!(ArgList, SyntaxKind::ARG_LIST);
+ast_node!(Arg, SyntaxKind::ARG);
 ast_node!(IndexExpr, SyntaxKind::INDEX_EXPR);
 ast_node!(IfExpr, SyntaxKind::IF_EXPR);
+ast_node!(ElseClause, SyntaxKind::ELSE_CLAUSE);
 ast_node!(MatchExpr, SyntaxKind::MATCH_EXPR);
 ast_node!(MatchArm, SyntaxKind::MATCH_ARM);
 ast_node!(ArrayExpr, SyntaxKind::ARRAY_EXPR);
@@ -680,6 +683,16 @@ impl CallExpr {
     pub fn callee(&self) -> Option<Expr> {
         self.syntax().children().find_map(Expr::cast)
     }
+
+    pub fn args(&self) -> AstChildren<Arg> {
+        nested_children(self.syntax(), &[SyntaxKind::ARG_LIST])
+    }
+}
+
+impl Arg {
+    pub fn expr(&self) -> Option<Expr> {
+        child(self.syntax())
+    }
 }
 
 impl IndexExpr {
@@ -695,6 +708,20 @@ impl IndexExpr {
 impl IfExpr {
     pub fn condition(&self) -> Option<Expr> {
         self.syntax().children().find_map(Expr::cast)
+    }
+
+    pub fn then_branch(&self) -> Option<Expr> {
+        self.syntax().children().filter_map(Expr::cast).nth(1)
+    }
+
+    pub fn else_branch(&self) -> Option<Expr> {
+        child::<ElseClause>(self.syntax())?.expr()
+    }
+}
+
+impl ElseClause {
+    pub fn expr(&self) -> Option<Expr> {
+        child(self.syntax())
     }
 }
 

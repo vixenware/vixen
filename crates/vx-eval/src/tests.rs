@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use vx_parser::{AstNode, SourceFile};
+use vx_parser::SourceFile;
 
 use crate::lower::lower_source_file;
 use crate::poison::PoisonKind;
@@ -18,18 +18,6 @@ fn eval(source: &str, entry: &str) -> Result<Value, crate::poison::PoisonError> 
     let module = lower_source_file(&root);
     let engine = Engine::from_module(&module);
     engine.call(entry, vec![])
-}
-
-fn eval_with_args(
-    source: &str,
-    entry: &str,
-    args: Vec<Value>,
-) -> Result<Value, crate::poison::PoisonError> {
-    let parse = vx_parser::parse(source);
-    let root = SourceFile::cast_root(parse.syntax());
-    let module = lower_source_file(&root);
-    let engine = Engine::from_module(&module);
-    engine.call(entry, args)
 }
 
 #[test]
@@ -100,7 +88,7 @@ fn if_with_condition() {
 #[test]
 fn function_call() {
     let val = eval(
-        "fn double(x) { x + x }
+        "fn double(x: U64) { x + x }
          fn main() { double(21) }",
         "main",
     )
@@ -111,7 +99,7 @@ fn function_call() {
 #[test]
 fn nested_function_calls() {
     let val = eval(
-        "fn add(a, b) { a + b }
+        "fn add(a: U64, b: U64) { a + b }
          fn main() { add(add(1, 2), add(3, 4)) }",
         "main",
     )
@@ -122,7 +110,7 @@ fn nested_function_calls() {
 #[test]
 fn recursive_function() {
     let val = eval(
-        "fn factorial(n) {
+        "fn factorial(n: U64) {
            if n <= 1 { 1 } else { n * factorial(n - 1) }
          }
          fn main() { factorial(5) }",
@@ -233,8 +221,8 @@ fn empty_function_returns_unit() {
 #[test]
 fn function_as_value() {
     let val = eval(
-        "fn add(a, b) { a + b }
-         fn apply(f, x, y) { f(x, y) }
+        "fn add(a: U64, b: U64) { a + b }
+         fn apply(f: Fn(U64, U64) -> U64, x: U64, y: U64) { f(x, y) }
          fn main() { apply(add, 3, 4) }",
         "main",
     )
@@ -259,8 +247,8 @@ fn shadowing() {
 #[test]
 fn early_return() {
     let val = eval(
-        "fn check(n) {
-           if n > 10 { return 999 };
+        "fn check(n: U64) {
+           if n > 10 { return 999 } else { () };
            n + 1
          }
          fn main() { check(20) }",
@@ -273,7 +261,7 @@ fn early_return() {
 #[test]
 fn fibonacci() {
     let val = eval(
-        "fn fib(n) {
+        "fn fib(n: U64) {
            if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
          }
          fn main() { fib(10) }",
@@ -281,20 +269,4 @@ fn fibonacci() {
     )
     .unwrap();
     assert_eq!(val, Value::U64(55));
-}
-
-#[test]
-fn debug_lowering() {
-    let source = "fn double(x) { x + x }
-                  fn main() { double(21) }";
-    let parse = vx_parser::parse(source);
-    eprintln!("CST:\n{:#?}", parse.syntax());
-    let root = SourceFile::cast_root(parse.syntax());
-    let module = lower_source_file(&root);
-    for func in &module.functions {
-        eprintln!(
-            "fn {}: params={:?}, body={:?}",
-            func.name, func.params, func.body
-        );
-    }
 }
