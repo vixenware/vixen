@@ -23,7 +23,7 @@ use vx_store_proto::{ManifestHash, ServiceVersion, StoreProgress};
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 3;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 4;
 
 // =============================================================================
 // Rust Compilation
@@ -224,6 +224,47 @@ pub struct CcLinkResult {
 // Generic Sandboxed Tool Execution
 // =============================================================================
 
+// r[impl exec.arg]
+/// A single argument or env value for sandboxed execution.
+///
+/// `Literal` values are passed through exactly. `Path` values name VFS
+/// locations and keep slash-delimited semantics until the runner rewrites
+/// them for the host platform at process launch.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Facet)]
+#[repr(u8)]
+pub enum RunArg {
+    Literal(String),
+    Path(String),
+}
+
+impl RunArg {
+    pub fn literal(value: impl Into<String>) -> Self {
+        Self::Literal(value.into())
+    }
+
+    pub fn path(value: impl Into<String>) -> Self {
+        Self::Path(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Literal(value) | Self::Path(value) => value,
+        }
+    }
+
+    pub fn render_for_host(&self) -> String {
+        self.render_with_separator(std::path::MAIN_SEPARATOR)
+    }
+
+    fn render_with_separator(&self, separator: char) -> String {
+        match self {
+            Self::Literal(value) => value.clone(),
+            Self::Path(value) if separator == '/' => value.clone(),
+            Self::Path(value) => value.replace('/', &separator.to_string()),
+        }
+    }
+}
+
 /// Mount a CAS tree manifest into the action VFS prefix.
 #[derive(Debug, Clone, Facet)]
 pub struct RunTreeMount {
@@ -266,7 +307,7 @@ pub struct RunRequest {
     pub program_rel: String,
 
     /// Arguments passed to the program (no shell parsing).
-    pub args: Vec<String>,
+    pub args: Vec<RunArg>,
 
     /// CAS trees to mount into the action prefix.
     pub tree_mounts: Vec<RunTreeMount>,
@@ -282,7 +323,7 @@ pub struct RunRequest {
     pub cwd: Option<String>,
 
     /// Key/value env vars to set for the process.
-    pub env: Vec<(String, String)>,
+    pub env: Vec<(String, RunArg)>,
 
     /// Whether to clear the environment before setting `env`.
     pub clear_env: bool,
@@ -362,4 +403,27 @@ pub trait Runner {
 
     /// Run a sandboxed command with hermetic inputs/outputs via CAS/VFS.
     async fn run(&self, request: RunRequest, progress: roam::Tx<StoreProgress>) -> RunResult;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunArg;
+
+    #[test]
+    // r[verify exec.arg]
+    fn path_args_render_with_host_separators() {
+        assert_eq!(
+            RunArg::path("src/bin/main.rs").render_with_separator('\\'),
+            "src\\bin\\main.rs"
+        );
+    }
+
+    #[test]
+    // r[verify exec.arg]
+    fn literal_args_are_not_rewritten() {
+        assert_eq!(
+            RunArg::literal("--flag=a/b").render_with_separator('\\'),
+            "--flag=a/b"
+        );
+    }
 }

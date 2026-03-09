@@ -1028,20 +1028,20 @@ impl VxdService {
                         let out_rel = format!("out/{object_filename}");
 
                         let mut args = vec![
-                            "cc".to_string(),
-                            "-c".to_string(),
-                            format!("src/{source}"),
-                            "-o".to_string(),
-                            out_rel.clone(),
-                            "-target".to_string(),
-                            target_triple.clone(),
+                            vx_runner_proto::RunArg::literal("cc"),
+                            vx_runner_proto::RunArg::literal("-c"),
+                            vx_runner_proto::RunArg::path(format!("src/{source}")),
+                            vx_runner_proto::RunArg::literal("-o"),
+                            vx_runner_proto::RunArg::path(out_rel.clone()),
+                            vx_runner_proto::RunArg::literal("-target"),
+                            vx_runner_proto::RunArg::literal(target_triple.clone()),
                         ];
 
                         if profile == "release" {
-                            args.push("-O3".to_string());
+                            args.push(vx_runner_proto::RunArg::literal("-O3"));
                         } else {
-                            args.push("-O0".to_string());
-                            args.push("-g".to_string());
+                            args.push(vx_runner_proto::RunArg::literal("-O0"));
+                            args.push(vx_runner_proto::RunArg::literal("-g"));
                         }
 
                         let compile_node = graph.add_action(Action::Run {
@@ -1083,15 +1083,15 @@ impl VxdService {
                     let out_rel = format!("out/{binary_filename}");
 
                     let mut args = vec![
-                        "cc".to_string(),
-                        "-target".to_string(),
-                        target_triple.clone(),
+                        vx_runner_proto::RunArg::literal("cc"),
+                        vx_runner_proto::RunArg::literal("-target"),
+                        vx_runner_proto::RunArg::literal(target_triple.clone()),
                     ];
                     for (idx, _) in sources.iter().enumerate() {
-                        args.push(format!("obj/{idx:04}.o"));
+                        args.push(vx_runner_proto::RunArg::path(format!("obj/{idx:04}.o")));
                     }
-                    args.push("-o".to_string());
-                    args.push(out_rel.clone());
+                    args.push(vx_runner_proto::RunArg::literal("-o"));
+                    args.push(vx_runner_proto::RunArg::path(out_rel.clone()));
 
                     let link_node = graph.add_action(Action::Run {
                         label: format!("link {}", bin.name),

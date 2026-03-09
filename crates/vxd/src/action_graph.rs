@@ -9,7 +9,7 @@ use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
 use vx_report::{RulePlan, RulePlanEdge, RulePlanEdgeKind, RulePlanNode, RulePlanNodeKind};
 use vx_rs::crate_graph::{CrateGraph, CrateId, CrateSource, CrateType};
-use vx_runner_proto::{RunFileMount, RunOutput, RunTreeMount};
+use vx_runner_proto::{RunArg, RunFileMount, RunOutput, RunTreeMount};
 use vx_store_proto::{RustChannel, RustComponent, RustToolchainSpec};
 
 use crate::inputs::{BuildConfig, RustToolchain};
@@ -166,8 +166,8 @@ pub enum Action {
         kind: RunKind,
         toolchain: RunToolchain,
         program_rel: String,
-        args: Vec<String>,
-        env: Vec<(String, String)>,
+        args: Vec<RunArg>,
+        env: Vec<(String, RunArg)>,
         cwd: Option<String>,
         clear_env: bool,
         tree_mounts: Vec<RunTreeMount>,
@@ -598,40 +598,40 @@ impl ActionGraph {
 
             // Keep paths relative to the action prefix; runner expands ${VX_TOOLCHAIN}.
             let mut args = vec![
-                "--sysroot".to_string(),
-                "${VX_TOOLCHAIN}/sysroot".to_string(),
-                "--crate-name".to_string(),
-                crate_node.crate_name.clone(),
-                "--crate-type".to_string(),
-                crate_node.crate_type.as_str().to_string(),
-                "--edition".to_string(),
-                crate_node.edition.as_str().to_string(),
-                "--target".to_string(),
-                target_triple_str.clone(),
-                "-o".to_string(),
-                output_rel.clone(),
+                RunArg::literal("--sysroot"),
+                RunArg::path("${VX_TOOLCHAIN}/sysroot"),
+                RunArg::literal("--crate-name"),
+                RunArg::literal(crate_node.crate_name.clone()),
+                RunArg::literal("--crate-type"),
+                RunArg::literal(crate_node.crate_type.as_str()),
+                RunArg::literal("--edition"),
+                RunArg::literal(crate_node.edition.as_str()),
+                RunArg::literal("--target"),
+                RunArg::literal(target_triple_str.clone()),
+                RunArg::literal("-o"),
+                RunArg::path(output_rel.clone()),
             ];
 
             if profile_str == "release" {
-                args.push("-C".to_string());
-                args.push("opt-level=3".to_string());
+                args.push(RunArg::literal("-C"));
+                args.push(RunArg::literal("opt-level=3"));
             } else {
-                args.push("-C".to_string());
-                args.push("opt-level=0".to_string());
-                args.push("-g".to_string());
+                args.push(RunArg::literal("-C"));
+                args.push(RunArg::literal("opt-level=0"));
+                args.push(RunArg::literal("-g"));
             }
 
             // Add --extern flags; the corresponding .rlib files are mounted at deps/.
             for dep in &action_deps {
-                args.push("--extern".to_string());
-                args.push(format!(
+                args.push(RunArg::literal("--extern"));
+                args.push(RunArg::literal(format!(
                     "{}=deps/lib{}.rlib",
                     dep.extern_name, dep.extern_name
-                ));
+                )));
             }
 
             // Crate root
-            args.push(format!("src/{}", crate_node.crate_root_rel));
+            args.push(RunArg::path(format!("src/{}", crate_node.crate_root_rel)));
 
             let outputs = vec![RunOutput {
                 logical: if crate_node.crate_type.as_str() == "lib" {
@@ -1059,38 +1059,38 @@ impl ActionGraph {
             let output_rel = format!("out/{output_filename}");
 
             let mut args = vec![
-                "--sysroot".to_string(),
-                "${VX_TOOLCHAIN}/sysroot".to_string(),
-                "--crate-name".to_string(),
-                crate_node.crate_name.clone(),
-                "--crate-type".to_string(),
-                crate_node.crate_type.as_str().to_string(),
-                "--edition".to_string(),
-                crate_node.edition.as_str().to_string(),
-                "--target".to_string(),
-                target_triple_str.clone(),
-                "-o".to_string(),
-                output_rel.clone(),
+                RunArg::literal("--sysroot"),
+                RunArg::path("${VX_TOOLCHAIN}/sysroot"),
+                RunArg::literal("--crate-name"),
+                RunArg::literal(crate_node.crate_name.clone()),
+                RunArg::literal("--crate-type"),
+                RunArg::literal(crate_node.crate_type.as_str()),
+                RunArg::literal("--edition"),
+                RunArg::literal(crate_node.edition.as_str()),
+                RunArg::literal("--target"),
+                RunArg::literal(target_triple_str.clone()),
+                RunArg::literal("-o"),
+                RunArg::path(output_rel.clone()),
             ];
 
             if profile_str == "release" {
-                args.push("-C".to_string());
-                args.push("opt-level=3".to_string());
+                args.push(RunArg::literal("-C"));
+                args.push(RunArg::literal("opt-level=3"));
             } else {
-                args.push("-C".to_string());
-                args.push("opt-level=0".to_string());
-                args.push("-g".to_string());
+                args.push(RunArg::literal("-C"));
+                args.push(RunArg::literal("opt-level=0"));
+                args.push(RunArg::literal("-g"));
             }
 
             for dep in &action_deps {
-                args.push("--extern".to_string());
-                args.push(format!(
+                args.push(RunArg::literal("--extern"));
+                args.push(RunArg::literal(format!(
                     "{}=deps/lib{}.rlib",
                     dep.extern_name, dep.extern_name
-                ));
+                )));
             }
 
-            args.push(format!("src/{}", crate_node.crate_root_rel));
+            args.push(RunArg::path(format!("src/{}", crate_node.crate_root_rel)));
 
             let outputs = vec![RunOutput {
                 logical: if crate_node.crate_type.as_str() == "lib" {
@@ -1459,11 +1459,14 @@ fn wants_registry_lowering(node: &RulePlanNode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
+    use vx_manifest::Edition;
     use vx_report::{
         RuleId, RulePlan, RulePlanEdge, RulePlanFact, RulePlanFactId, RulePlanNode, RulePlanNodeId,
         RulePlanProvenance, RulePlanSource, RulePlanSourceId, RulePlanSpan, RulePlanValue,
     };
+    use vx_runner_proto::RunArg;
+    use vx_store_proto::{Blake3Hash, RustChannel};
 
     fn provenance(rule: &str, line: u32) -> RulePlanProvenance {
         RulePlanProvenance {
@@ -1538,6 +1541,55 @@ mod tests {
                 value: RulePlanValue::from("true".to_string()),
                 provenance: provenance("rule.fact.emit", 13),
             }],
+        }
+    }
+
+    fn sample_crate_graph() -> CrateGraph {
+        let util_id = CrateId::for_path(camino::Utf8Path::new("util"), "util");
+        let app_id = CrateId::for_path(camino::Utf8Path::new("app"), "app");
+
+        let util = vx_rs::crate_graph::CrateNode {
+            id: util_id,
+            package_name: "util".to_string(),
+            crate_name: "util".to_string(),
+            source: CrateSource::Path {
+                workspace_rel: "util".into(),
+            },
+            workspace_rel: "util".into(),
+            crate_root_rel: "util/src/lib.rs".into(),
+            edition: Edition::E2021,
+            crate_type: CrateType::Lib,
+            deps: vec![],
+            build_script_rel: None,
+            build_script_output: None,
+        };
+
+        let app = vx_rs::crate_graph::CrateNode {
+            id: app_id,
+            package_name: "app".to_string(),
+            crate_name: "app".to_string(),
+            source: CrateSource::Path {
+                workspace_rel: "app".into(),
+            },
+            workspace_rel: "app".into(),
+            crate_root_rel: "app/src/main.rs".into(),
+            edition: Edition::E2021,
+            crate_type: CrateType::Bin,
+            deps: vec![vx_rs::crate_graph::DepEdge {
+                extern_name: "util".to_string(),
+                crate_id: util_id,
+            }],
+            build_script_rel: None,
+            build_script_output: None,
+        };
+
+        CrateGraph {
+            workspace_root: "/workspace".into(),
+            nodes: HashMap::from([(util_id, util), (app_id, app)]),
+            topo_order: vec![util_id, app_id],
+            root_crate: app_id,
+            registry_crates: vec![],
+            reachable_packages: None,
         }
     }
 
@@ -1665,6 +1717,69 @@ mod tests {
                 .iter()
                 .any(|node| node.node_id == "compile-bin:app" && node.kind == "rust.compile_bin")
         );
+    }
+
+    #[test]
+    // r[verify exec.arg]
+    fn crate_graph_lowering_marks_vfs_paths_as_path_args() {
+        let db = crate::db::Database::new();
+        let toolchain = crate::inputs::RustToolchain::new(
+            &db,
+            Blake3Hash([1; 32]),
+            Blake3Hash([2; 32]),
+            "aarch64-apple-darwin".to_string(),
+            "aarch64-apple-darwin".to_string(),
+        )
+        .expect("toolchain input");
+        let config = crate::inputs::BuildConfig::new(
+            &db,
+            crate::inputs::BuildConfig::compute_key(
+                "debug",
+                "aarch64-apple-darwin",
+                "/workspace",
+                "",
+            ),
+            "debug".to_string(),
+            "aarch64-apple-darwin".to_string(),
+            "/workspace".to_string(),
+            String::new(),
+        )
+        .expect("build config input");
+        let graph = ActionGraph::from_crate_graph(
+            &sample_crate_graph(),
+            RustChannel::Stable,
+            "aarch64-apple-darwin".to_string(),
+            toolchain,
+            config,
+            &db,
+        )
+        .expect("lowering should succeed");
+
+        let run_args = graph
+            .graph
+            .node_weights()
+            .find_map(|node| match &node.action {
+                Action::Run {
+                    label,
+                    args,
+                    dep_tree_mounts,
+                    dep_file_mounts,
+                    ..
+                } if label == "rustc app" => {
+                    assert_eq!(dep_tree_mounts[0].mount, "src");
+                    assert_eq!(dep_file_mounts[0].path, "deps/libutil.rlib");
+                    Some(args)
+                }
+                _ => None,
+            })
+            .expect("compile action for app");
+
+        assert!(matches!(run_args[1], RunArg::Path(ref p) if p == "${VX_TOOLCHAIN}/sysroot"));
+        assert!(matches!(run_args[11], RunArg::Path(ref p) if p == "out/app"));
+        assert!(matches!(
+            run_args.last(),
+            Some(RunArg::Path(path)) if path == "src/app/src/main.rs"
+        ));
     }
 
     #[test]

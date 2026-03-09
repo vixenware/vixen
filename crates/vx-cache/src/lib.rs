@@ -17,7 +17,7 @@ pub const RUST_CACHE_KEY_VERSION: u32 = 1;
 pub const CC_CACHE_KEY_VERSION: u32 = 2;
 
 /// Current cache key schema version for generic tool execution.
-pub const RUN_CACHE_KEY_VERSION: u32 = 1;
+pub const RUN_CACHE_KEY_VERSION: u32 = 2;
 
 /// Compute a cache key for a Rust compile request.
 ///
@@ -248,7 +248,11 @@ pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
 
     for arg in &request.args {
         hasher.update(b"arg:");
-        hasher.update(arg.as_bytes());
+        hasher.update(match arg {
+            vx_runner_proto::RunArg::Literal(_) => b"literal:",
+            vx_runner_proto::RunArg::Path(_) => b"path:",
+        });
+        hasher.update(arg.as_str().as_bytes());
         hasher.update(b"\n");
     }
 
@@ -258,7 +262,11 @@ pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
         hasher.update(b"env:");
         hasher.update(k.as_bytes());
         hasher.update(b"=");
-        hasher.update(v.as_bytes());
+        hasher.update(match v {
+            vx_runner_proto::RunArg::Literal(_) => b"literal:",
+            vx_runner_proto::RunArg::Path(_) => b"path:",
+        });
+        hasher.update(v.as_str().as_bytes());
         hasher.update(b"\n");
     }
 
@@ -311,7 +319,7 @@ pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vx_runner_proto::RustDep;
+    use vx_runner_proto::{RunArg, RunRequest, RustDep};
 
     #[test]
     fn test_cache_key_determinism() {
@@ -377,5 +385,27 @@ mod tests {
         let key2 = rust_compile_cache_key(&request2);
 
         assert_eq!(key1, key2, "cache key should be independent of dep order");
+    }
+
+    #[test]
+    fn run_cache_key_distinguishes_literal_and_path_args() {
+        let request = RunRequest {
+            toolchain_manifest: Blake3Hash([1; 32]),
+            program_rel: "bin/rustc".to_string(),
+            args: vec![RunArg::literal("src/main.rs")],
+            tree_mounts: vec![],
+            file_mounts: vec![],
+            outputs: vec![],
+            cwd: None,
+            env: vec![],
+            clear_env: true,
+            macos_commandlinetools_version: None,
+        };
+        let path_request = RunRequest {
+            args: vec![RunArg::path("src/main.rs")],
+            ..request.clone()
+        };
+
+        assert_ne!(run_cache_key(&request), run_cache_key(&path_request));
     }
 }

@@ -9,7 +9,7 @@ use moire::task::FutureExt;
 use std::time::Instant;
 use tracing::{debug, info};
 use vx_runner_proto::{
-    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RunRequest, RunResult,
+    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RunArg, RunRequest, RunResult,
     RustCompileRequest, RustCompileResult,
 };
 use vx_store_proto::{
@@ -73,6 +73,15 @@ impl ActionContext {
 }
 
 impl RunnerService {
+    // r[impl exec.arg]
+    fn expand_run_arg(arg: &RunArg, toolchain_path: &str) -> String {
+        let expanded = arg.as_str().replace("${VX_TOOLCHAIN}", toolchain_path);
+        match arg {
+            RunArg::Literal(_) => expanded,
+            RunArg::Path(_) => RunArg::path(expanded).render_for_host(),
+        }
+    }
+
     /// Create action execution context with prefix, paths, and sandbox config.
     async fn create_action_context(&self) -> ActionContext {
         let prefix_id = self.create_action_prefix().await;
@@ -1147,7 +1156,6 @@ impl RunnerService {
         };
         let toolchain_path = action.mount_base.join(&toolchain_prefix_id);
         let toolchain_path_str = toolchain_path.as_str().to_string();
-        let expand = |s: &str| s.replace("${VX_TOOLCHAIN}", &toolchain_path_str);
 
         // Mount CAS trees into the prefix.
         for mount in &request.tree_mounts {
@@ -1349,7 +1357,7 @@ impl RunnerService {
         ));
         let mut cmd = crate::sandbox::sandboxed_command(program_path.as_str(), &action);
         for arg in &request.args {
-            cmd.arg(expand(arg));
+            cmd.arg(Self::expand_run_arg(arg, &toolchain_path_str));
         }
 
         let cwd = request
@@ -1364,7 +1372,7 @@ impl RunnerService {
         }
 
         for (k, v) in &request.env {
-            cmd.env(k, expand(v));
+            cmd.env(k, Self::expand_run_arg(v, &toolchain_path_str));
         }
 
         // Zig needs its lib dir set to locate libc and friends.
@@ -1375,10 +1383,10 @@ impl RunnerService {
         let action_desc = format!(
             "{} {}",
             request.program_rel,
-            request.args.first().cloned().unwrap_or_default()
+            request.args.first().map(RunArg::as_str).unwrap_or_default()
         );
 
-        let action_kind = if request.args.iter().any(|a| a == "-c") {
+        let action_kind = if request.args.iter().any(|arg| arg.as_str() == "-c") {
             ActionKind::CcCompile
         } else {
             ActionKind::CcLink
