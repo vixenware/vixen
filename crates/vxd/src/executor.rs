@@ -1937,6 +1937,7 @@ async fn execute_action(
             let request = RunRequest {
                 toolchain_manifest,
                 program_rel,
+                program: None,
                 args,
                 cwd,
                 clear_env,

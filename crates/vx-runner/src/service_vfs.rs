@@ -60,6 +60,10 @@ fn outputs_stay_within_writable_roots(outputs: &[RunOutput], writable_roots: &[S
     })
 }
 
+fn uses_toolchain_placeholder(value: &RunArg) -> bool {
+    value.as_str().contains("${VX_TOOLCHAIN}")
+}
+
 fn run_failure_result(
     start: Instant,
     exit_code: i32,
@@ -154,8 +158,11 @@ impl ActionContext {
 
 impl RunnerService {
     // r[impl exec.arg]
-    fn expand_run_arg(arg: &RunArg, toolchain_path: &str) -> String {
-        let expanded = arg.as_str().replace("${VX_TOOLCHAIN}", toolchain_path);
+    fn expand_run_arg(arg: &RunArg, toolchain_path: Option<&str>) -> String {
+        let expanded = match toolchain_path {
+            Some(toolchain_path) => arg.as_str().replace("${VX_TOOLCHAIN}", toolchain_path),
+            None => arg.as_str().to_string(),
+        };
         match arg {
             RunArg::Literal(_) => expanded,
             RunArg::Path(_) => RunArg::path(expanded).render_for_host(),
@@ -1220,24 +1227,41 @@ impl RunnerService {
             .named("runner.run_vfs.create_action_context")
             .await;
 
-        let toolchain_prefix_id = match self
-            .ensure_toolchain_prefix(request.toolchain_manifest)
-            .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return run_failure_result(
-                    start,
-                    -1,
-                    String::new(),
-                    String::new(),
-                    Some(format!("failed to ensure toolchain: {e}")),
-                );
-            }
+        let needs_toolchain = request.program.is_none()
+            || request
+                .program
+                .as_ref()
+                .is_some_and(uses_toolchain_placeholder)
+            || request.args.iter().any(uses_toolchain_placeholder)
+            || request
+                .env
+                .iter()
+                .any(|(_, value)| uses_toolchain_placeholder(value));
+
+        let toolchain_path = if needs_toolchain {
+            let toolchain_prefix_id = match self
+                .ensure_toolchain_prefix(request.toolchain_manifest)
+                .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    self.remove_action_prefix(&action.prefix_id).await;
+                    return run_failure_result(
+                        start,
+                        -1,
+                        String::new(),
+                        String::new(),
+                        Some(format!("failed to ensure toolchain: {e}")),
+                    );
+                }
+            };
+            Some(action.mount_base.join(&toolchain_prefix_id))
+        } else {
+            None
         };
-        let toolchain_path = action.mount_base.join(&toolchain_prefix_id);
-        let toolchain_path_str = toolchain_path.as_str().to_string();
+        let toolchain_path_str = toolchain_path
+            .as_ref()
+            .map(|path| path.as_str().to_string());
 
         for mount in &request.tree_mounts {
             if !is_relative_vfs_path(&mount.mount) {
@@ -1533,14 +1557,25 @@ impl RunnerService {
             );
         }
 
-        let program_path = toolchain_path.join(format!(
-            "{}{}",
-            request.program_rel,
-            std::env::consts::EXE_SUFFIX
-        ));
-        let mut cmd = crate::sandbox::sandboxed_command(program_path.as_str(), &action);
+        let program_path = match &request.program {
+            Some(program) => Self::expand_run_arg(program, toolchain_path_str.as_deref()),
+            None => {
+                let toolchain_path = toolchain_path
+                    .as_ref()
+                    .expect("legacy run requests must resolve a toolchain path");
+                toolchain_path
+                    .join(format!(
+                        "{}{}",
+                        request.program_rel,
+                        std::env::consts::EXE_SUFFIX
+                    ))
+                    .as_str()
+                    .to_string()
+            }
+        };
+        let mut cmd = crate::sandbox::sandboxed_command(&program_path, &action);
         for arg in &request.args {
-            cmd.arg(Self::expand_run_arg(arg, &toolchain_path_str));
+            cmd.arg(Self::expand_run_arg(arg, toolchain_path_str.as_deref()));
         }
 
         let cwd = request
@@ -1555,17 +1590,24 @@ impl RunnerService {
         }
 
         for (k, v) in &request.env {
-            cmd.env(k, Self::expand_run_arg(v, &toolchain_path_str));
+            cmd.env(k, Self::expand_run_arg(v, toolchain_path_str.as_deref()));
         }
 
         // Zig needs its lib dir set to locate libc and friends.
-        if request.program_rel == "zig" {
+        if request.program.is_none() && request.program_rel == "zig" {
+            let toolchain_path = toolchain_path
+                .as_ref()
+                .expect("zig toolchain requests must resolve a toolchain path");
             cmd.env("ZIG_LIB_DIR", toolchain_path.join("lib").as_str());
         }
 
         let action_desc = format!(
             "{} {}",
-            request.program_rel,
+            request
+                .program
+                .as_ref()
+                .map(RunArg::as_str)
+                .unwrap_or(&request.program_rel),
             request.args.first().map(RunArg::as_str).unwrap_or_default()
         );
 
@@ -1703,7 +1745,14 @@ impl RunnerService {
 
         let cache_key = vx_cache::run_cache_key(&request);
         let manifest = NodeManifest {
-            node_id: NodeId(format!("run:{}", request.program_rel)),
+            node_id: NodeId(format!(
+                "run:{}",
+                request
+                    .program
+                    .as_ref()
+                    .map(RunArg::as_str)
+                    .unwrap_or(&request.program_rel)
+            )),
             cache_key,
             produced_at: Zoned::now().to_string(),
             outputs,

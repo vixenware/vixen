@@ -18,8 +18,8 @@ pub const RUST_CACHE_KEY_VERSION: u32 = 1;
 pub const CC_CACHE_KEY_VERSION: u32 = 2;
 
 /// Current cache key schema version for generic tool execution.
-/// Version 4: Added shipped evaluator payload hashing.
-pub const RUN_CACHE_KEY_VERSION: u32 = 4;
+/// Version 5: Added direct program hashing for executor-side exec requests.
+pub const RUN_CACHE_KEY_VERSION: u32 = 5;
 
 /// Compute a cache key for a Rust compile request.
 ///
@@ -228,9 +228,22 @@ pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
     hasher.update(&request.toolchain_manifest.0);
     hasher.update(b"\n");
 
-    hasher.update(b"program:");
-    hasher.update(request.program_rel.as_bytes());
-    hasher.update(b"\n");
+    match &request.program {
+        Some(program) => {
+            hasher.update(b"program:direct:");
+            hasher.update(match program {
+                vx_runner_proto::RunArg::Literal(_) => b"literal:",
+                vx_runner_proto::RunArg::Path(_) => b"path:",
+            });
+            hasher.update(program.as_str().as_bytes());
+            hasher.update(b"\n");
+        }
+        None => {
+            hasher.update(b"program:toolchain:");
+            hasher.update(request.program_rel.as_bytes());
+            hasher.update(b"\n");
+        }
+    }
 
     if let Some(cwd) = &request.cwd {
         hasher.update(b"cwd:");
@@ -412,6 +425,7 @@ mod tests {
         let request = RunRequest {
             toolchain_manifest: Blake3Hash([1; 32]),
             program_rel: "bin/rustc".to_string(),
+            program: None,
             args: vec![RunArg::literal("src/main.rs")],
             tree_mounts: vec![],
             file_mounts: vec![],
@@ -436,6 +450,7 @@ mod tests {
         let request = RunRequest {
             toolchain_manifest: Blake3Hash([1; 32]),
             program_rel: "bin/tool".to_string(),
+            program: None,
             args: vec![RunArg::literal("--version")],
             tree_mounts: vec![],
             file_mounts: vec![],
@@ -487,5 +502,30 @@ mod tests {
             run_cache_key(&first_request),
             run_cache_key(&second_request)
         );
+    }
+
+    #[test]
+    fn run_cache_key_includes_direct_program_identity() {
+        let request = RunRequest {
+            toolchain_manifest: Blake3Hash([1; 32]),
+            program_rel: "bin/tool".to_string(),
+            program: None,
+            args: vec![RunArg::literal("--version")],
+            tree_mounts: vec![],
+            file_mounts: vec![],
+            outputs: vec![],
+            writable_roots: vec!["out".to_string()],
+            cwd: None,
+            env: vec![],
+            clear_env: true,
+            eval: None,
+            macos_commandlinetools_version: None,
+        };
+        let direct_request = RunRequest {
+            program: Some(RunArg::literal("/bin/sh")),
+            ..request.clone()
+        };
+
+        assert_ne!(run_cache_key(&request), run_cache_key(&direct_request));
     }
 }

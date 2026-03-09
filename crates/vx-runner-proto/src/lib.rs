@@ -29,7 +29,7 @@ use vx_store_proto::{ManifestHash, ServiceVersion, StoreProgress};
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 7;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 8;
 
 // =============================================================================
 // Rust Compilation
@@ -318,10 +318,16 @@ pub struct RunEvalPayload {
 #[derive(Debug, Clone, Facet)]
 pub struct RunRequest {
     /// Toolchain manifest hash (runner materializes locally).
+    /// Ignored when `program` is set and no `${VX_TOOLCHAIN}` placeholders are used.
     pub toolchain_manifest: ManifestHash,
 
     /// Program path relative to the toolchain root (e.g. "zig").
+    /// Used by legacy action-graph runs when `program` is `None`.
     pub program_rel: String,
+
+    /// Direct program path for executor-side `exec` requests.
+    /// Literal paths are passed through as-is; `Path` values are resolved inside the VFS.
+    pub program: Option<RunArg>,
 
     /// Arguments passed to the program (no shell parsing).
     pub args: Vec<RunArg>,
