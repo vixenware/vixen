@@ -16,6 +16,13 @@ struct Lexer<'a> {
     source: &'a str,
     pos: usize,
     tokens: Vec<Token>,
+    modes: Vec<Mode>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Mode {
+    Template,
+    TemplateExpr { brace_depth: usize },
 }
 
 impl<'a> Lexer<'a> {
@@ -24,73 +31,167 @@ impl<'a> Lexer<'a> {
             source,
             pos: 0,
             tokens: Vec::new(),
+            modes: Vec::new(),
         }
     }
 
     fn lex(mut self) -> Vec<Token> {
         while !self.is_eof() {
             let start = self.pos;
-            let kind = match self.current_char() {
-                Some(ch) if ch.is_whitespace() => {
-                    self.bump_char();
-                    while matches!(self.current_char(), Some(next) if next.is_whitespace()) {
-                        self.bump_char();
-                    }
-                    SyntaxKind::WHITESPACE
-                }
-                Some('/') if self.starts_with("//") => self.line_comment(),
-                Some('/') if self.starts_with("/*") => self.block_comment(),
-                Some('"') => self.string(),
-                Some('`') => self.interp_string(),
-                Some('$') => self.dollar_ident(),
-                Some(ch) if is_ident_start(ch) => self.ident_or_keyword(),
-                Some(ch) if ch.is_ascii_digit() => self.number(),
-                Some('(') => self.bump_one(SyntaxKind::L_PAREN),
-                Some(')') => self.bump_one(SyntaxKind::R_PAREN),
-                Some('[') => self.bump_one(SyntaxKind::L_BRACKET),
-                Some(']') => self.bump_one(SyntaxKind::R_BRACKET),
-                Some('{') => self.bump_one(SyntaxKind::L_CURLY),
-                Some('}') => self.bump_one(SyntaxKind::R_CURLY),
-                Some(',') => self.bump_one(SyntaxKind::COMMA),
-                Some(';') => self.bump_one(SyntaxKind::SEMICOLON),
-                Some(':') if self.starts_with("::") => self.bump_two(SyntaxKind::COLON2),
-                Some(':') => self.bump_one(SyntaxKind::COLON),
-                Some('.') if self.starts_with("..=") => self.bump_three(SyntaxKind::DOT2_EQ),
-                Some('.') if self.starts_with("..") => self.bump_two(SyntaxKind::DOT2),
-                Some('.') => self.bump_one(SyntaxKind::DOT),
-                Some('=') if self.starts_with("=>") => self.bump_two(SyntaxKind::FAT_ARROW),
-                Some('=') if self.starts_with("==") => self.bump_two(SyntaxKind::EQ2),
-                Some('=') => self.bump_one(SyntaxKind::EQ),
-                Some('!') if self.starts_with("!=") => self.bump_two(SyntaxKind::BANG_EQ),
-                Some('!') => self.bump_one(SyntaxKind::BANG),
-                Some('<') if self.starts_with("<=") => self.bump_two(SyntaxKind::LT_EQ),
-                Some('<') => self.bump_one(SyntaxKind::LT),
-                Some('>') if self.starts_with(">=") => self.bump_two(SyntaxKind::GT_EQ),
-                Some('>') => self.bump_one(SyntaxKind::GT),
-                Some('+') => self.bump_one(SyntaxKind::PLUS),
-                Some('-') if self.starts_with("->") => self.bump_two(SyntaxKind::THIN_ARROW),
-                Some('-') => self.bump_one(SyntaxKind::MINUS),
-                Some('*') => self.bump_one(SyntaxKind::STAR),
-                Some('%') => self.bump_one(SyntaxKind::PERCENT),
-                Some('&') if self.starts_with("&&") => self.bump_two(SyntaxKind::AMP2),
-                Some('|') if self.starts_with("||") => self.bump_two(SyntaxKind::PIPE2),
-                Some('|') => self.bump_one(SyntaxKind::PIPE),
-                Some('@') => self.bump_one(SyntaxKind::AT),
-                Some('#') => self.bump_one(SyntaxKind::HASH),
-                Some('?') => self.bump_one(SyntaxKind::QUESTION),
-                Some('/') => self.bump_one(SyntaxKind::SLASH),
-                Some(_) => {
-                    self.bump_char();
-                    SyntaxKind::ERROR_TOKEN
-                }
-                None => break,
+            let kind = match self.modes.last().copied() {
+                Some(Mode::Template) => self.template_chunk(),
+                Some(Mode::TemplateExpr { .. }) => self.template_expr_token(),
+                None => match self.normal_token() {
+                    Some(kind) => kind,
+                    None => break,
+                },
             };
+            if self.pos == start {
+                break;
+            }
             self.tokens.push(Token {
                 kind,
                 range: range(start, self.pos),
             });
         }
         self.tokens
+    }
+
+    fn normal_token(&mut self) -> Option<SyntaxKind> {
+        let kind = match self.current_char() {
+            Some(ch) if ch.is_whitespace() => {
+                self.bump_char();
+                while matches!(self.current_char(), Some(next) if next.is_whitespace()) {
+                    self.bump_char();
+                }
+                SyntaxKind::WHITESPACE
+            }
+            Some('/') if self.starts_with("//") => self.line_comment(),
+            Some('/') if self.starts_with("/*") => self.block_comment(),
+            Some('"') => self.string(),
+            Some('`') => {
+                self.bump_char();
+                self.modes.push(Mode::Template);
+                SyntaxKind::BACKTICK
+            }
+            Some('$') => self.dollar_ident(),
+            Some(ch) if is_ident_start(ch) => self.ident_or_keyword(),
+            Some(ch) if ch.is_ascii_digit() => self.number(),
+            Some('(') => self.bump_one(SyntaxKind::L_PAREN),
+            Some(')') => self.bump_one(SyntaxKind::R_PAREN),
+            Some('[') => self.bump_one(SyntaxKind::L_BRACKET),
+            Some(']') => self.bump_one(SyntaxKind::R_BRACKET),
+            Some('{') => self.bump_one(SyntaxKind::L_CURLY),
+            Some('}') => self.bump_one(SyntaxKind::R_CURLY),
+            Some(',') => self.bump_one(SyntaxKind::COMMA),
+            Some(';') => self.bump_one(SyntaxKind::SEMICOLON),
+            Some(':') if self.starts_with("::") => self.bump_two(SyntaxKind::COLON2),
+            Some(':') => self.bump_one(SyntaxKind::COLON),
+            Some('.') if self.starts_with("..=") => self.bump_three(SyntaxKind::DOT2_EQ),
+            Some('.') if self.starts_with("..") => self.bump_two(SyntaxKind::DOT2),
+            Some('.') => self.bump_one(SyntaxKind::DOT),
+            Some('=') if self.starts_with("=>") => self.bump_two(SyntaxKind::FAT_ARROW),
+            Some('=') if self.starts_with("==") => self.bump_two(SyntaxKind::EQ2),
+            Some('=') => self.bump_one(SyntaxKind::EQ),
+            Some('!') if self.starts_with("!=") => self.bump_two(SyntaxKind::BANG_EQ),
+            Some('!') => self.bump_one(SyntaxKind::BANG),
+            Some('<') if self.starts_with("<=") => self.bump_two(SyntaxKind::LT_EQ),
+            Some('<') => self.bump_one(SyntaxKind::LT),
+            Some('>') if self.starts_with(">=") => self.bump_two(SyntaxKind::GT_EQ),
+            Some('>') => self.bump_one(SyntaxKind::GT),
+            Some('+') => self.bump_one(SyntaxKind::PLUS),
+            Some('-') if self.starts_with("->") => self.bump_two(SyntaxKind::THIN_ARROW),
+            Some('-') => self.bump_one(SyntaxKind::MINUS),
+            Some('*') => self.bump_one(SyntaxKind::STAR),
+            Some('%') => self.bump_one(SyntaxKind::PERCENT),
+            Some('&') if self.starts_with("&&") => self.bump_two(SyntaxKind::AMP2),
+            Some('|') if self.starts_with("||") => self.bump_two(SyntaxKind::PIPE2),
+            Some('|') => self.bump_one(SyntaxKind::PIPE),
+            Some('@') => self.bump_one(SyntaxKind::AT),
+            Some('#') => self.bump_one(SyntaxKind::HASH),
+            Some('?') => self.bump_one(SyntaxKind::QUESTION),
+            Some('/') => self.bump_one(SyntaxKind::SLASH),
+            Some(_) => {
+                self.bump_char();
+                SyntaxKind::ERROR_TOKEN
+            }
+            None => return None,
+        };
+        Some(kind)
+    }
+
+    fn template_chunk(&mut self) -> SyntaxKind {
+        if self.current_char() == Some('`') {
+            self.bump_char();
+            self.modes.pop();
+            return SyntaxKind::BACKTICK;
+        }
+        if self.starts_with("${") {
+            self.pos += 2;
+            self.modes.push(Mode::TemplateExpr { brace_depth: 0 });
+            return SyntaxKind::INTERP_START;
+        }
+
+        while let Some(ch) = self.current_char() {
+            if ch == '`' || self.starts_with("${") {
+                break;
+            }
+            if ch == '\\' {
+                self.bump_char();
+                if !self.is_eof() {
+                    self.bump_char();
+                }
+            } else {
+                self.bump_char();
+            }
+        }
+        SyntaxKind::INTERP_TEXT
+    }
+
+    fn template_expr_token(&mut self) -> SyntaxKind {
+        if self.current_char() == Some('`') {
+            self.bump_char();
+            self.modes.push(Mode::Template);
+            return SyntaxKind::BACKTICK;
+        }
+
+        match self.current_char() {
+            Some('{') => {
+                self.bump_char();
+                self.bump_template_brace_depth(1);
+                SyntaxKind::L_CURLY
+            }
+            Some('}') if self.template_brace_depth() == 0 => {
+                self.bump_char();
+                self.modes.pop();
+                SyntaxKind::INTERP_END
+            }
+            Some('}') => {
+                self.bump_char();
+                self.bump_template_brace_depth(-1);
+                SyntaxKind::R_CURLY
+            }
+            _ => self
+                .normal_token()
+                .expect("template expr mode should only run before eof"),
+        }
+    }
+
+    fn template_brace_depth(&self) -> usize {
+        match self.modes.last().copied() {
+            Some(Mode::TemplateExpr { brace_depth }) => brace_depth,
+            _ => 0,
+        }
+    }
+
+    fn bump_template_brace_depth(&mut self, delta: isize) {
+        if let Some(Mode::TemplateExpr { brace_depth }) = self.modes.last_mut() {
+            if delta.is_positive() {
+                *brace_depth += delta as usize;
+            } else {
+                *brace_depth -= (-delta) as usize;
+            };
+        }
     }
 
     fn line_comment(&mut self) -> SyntaxKind {
@@ -134,36 +235,6 @@ impl<'a> Lexer<'a> {
                     if !self.is_eof() {
                         self.bump_char();
                     }
-                }
-                _ => self.bump_char(),
-            }
-        }
-        SyntaxKind::ERROR_TOKEN
-    }
-
-    fn interp_string(&mut self) -> SyntaxKind {
-        self.bump_char();
-        let mut interp_depth = 0usize;
-        while let Some(ch) = self.current_char() {
-            match ch {
-                '`' if interp_depth == 0 => {
-                    self.bump_char();
-                    return SyntaxKind::INTERP_STRING;
-                }
-                '\\' => {
-                    self.bump_char();
-                    if !self.is_eof() {
-                        self.bump_char();
-                    }
-                }
-                '$' if self.starts_with("${") => {
-                    self.pos += 2;
-                    interp_depth += 1;
-                }
-                '{' if interp_depth > 0 => self.bump_char(),
-                '}' if interp_depth > 0 => {
-                    self.bump_char();
-                    interp_depth -= 1;
                 }
                 _ => self.bump_char(),
             }

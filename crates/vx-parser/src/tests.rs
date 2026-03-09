@@ -297,11 +297,11 @@ fn greet(name: String) -> String {
 "#;
 
     let tokens = crate::lex(input);
-    assert!(
-        tokens
-            .iter()
-            .any(|token| token.kind == SyntaxKind::INTERP_STRING)
-    );
+    let kinds = tokens.iter().map(|token| token.kind).collect::<Vec<_>>();
+    assert!(kinds.contains(&SyntaxKind::BACKTICK));
+    assert!(kinds.contains(&SyntaxKind::INTERP_TEXT));
+    assert!(kinds.contains(&SyntaxKind::INTERP_START));
+    assert!(kinds.contains(&SyntaxKind::INTERP_END));
 
     let parse = parse(input);
     assert_eq!(parse.errors(), []);
@@ -311,7 +311,29 @@ fn greet(name: String) -> String {
         .descendants()
         .map(|node| node.kind())
         .collect::<Vec<_>>();
-    assert!(kinds.contains(&SyntaxKind::LITERAL_EXPR));
+    assert!(kinds.contains(&SyntaxKind::INTERPOLATED_STRING_EXPR));
+    assert!(kinds.contains(&SyntaxKind::STRING_INTERPOLATION));
+}
+
+#[test]
+fn parses_interpolated_strings_with_nested_braces() {
+    let input = r#"
+fn label(ok: Bool) -> String {
+  `status: ${if ok { "pass" } else { "fail" }}`
+}
+"#;
+
+    let parse = parse(input);
+    assert_eq!(parse.errors(), []);
+
+    let kinds = parse
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&SyntaxKind::INTERPOLATED_STRING_EXPR));
+    assert!(kinds.contains(&SyntaxKind::STRING_INTERPOLATION));
+    assert!(kinds.contains(&SyntaxKind::IF_EXPR));
 }
 
 #[test]

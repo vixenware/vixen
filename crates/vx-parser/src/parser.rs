@@ -1113,10 +1113,10 @@ fn atom_expr(p: &mut Parser<'_>) -> CompletedMarker {
         SyntaxKind::IMPORT_KW => import_expr(p),
         SyntaxKind::LOWER_IDENT | SyntaxKind::DOLLAR_IDENT => name_expr(p),
         SyntaxKind::UPPER_IDENT => upper_expr(p),
+        SyntaxKind::BACKTICK => interpolated_string_expr(p),
         SyntaxKind::INT
         | SyntaxKind::FLOAT
         | SyntaxKind::STRING
-        | SyntaxKind::INTERP_STRING
         | SyntaxKind::TRUE_KW
         | SyntaxKind::FALSE_KW => literal_expr(p),
         _ => {
@@ -1156,6 +1156,26 @@ fn literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.bump();
     marker.complete(p, SyntaxKind::LITERAL_EXPR)
+}
+
+fn interpolated_string_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    p.expect(SyntaxKind::BACKTICK);
+    while !p.at(SyntaxKind::BACKTICK) && !p.at(SyntaxKind::EOF) {
+        if p.at(SyntaxKind::INTERP_TEXT) {
+            p.bump();
+        } else if p.at(SyntaxKind::INTERP_START) {
+            let interpolation = p.start();
+            p.bump();
+            expr(p);
+            p.expect(SyntaxKind::INTERP_END);
+            interpolation.complete(p, SyntaxKind::STRING_INTERPOLATION);
+        } else {
+            p.error_and_bump("expected interpolated string content");
+        }
+    }
+    p.expect(SyntaxKind::BACKTICK);
+    marker.complete(p, SyntaxKind::INTERPOLATED_STRING_EXPR)
 }
 
 fn tuple_or_paren_expr(p: &mut Parser<'_>) -> CompletedMarker {
@@ -1607,10 +1627,10 @@ fn starts_expr(kind: SyntaxKind) -> bool {
             | SyntaxKind::L_CURLY
             | SyntaxKind::PERCENT
             | SyntaxKind::AT
+            | SyntaxKind::BACKTICK
             | SyntaxKind::INT
             | SyntaxKind::FLOAT
             | SyntaxKind::STRING
-            | SyntaxKind::INTERP_STRING
             | SyntaxKind::TRUE_KW
             | SyntaxKind::FALSE_KW
     )
