@@ -5,7 +5,7 @@ use rowan::TextRange;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
-use vx_parser::{self as vx, AstNode, Parsed, SourceFile};
+use vx_parser::{self as vx, AstNode, FnDecl, Parsed, SourceFile, SyntaxKind};
 use vx_resolve::NameResolution;
 
 pub struct VxLanguageServer {
@@ -129,12 +129,23 @@ impl LanguageServer for VxLanguageServer {
                     trigger_characters: Some(vec![".".to_string()]),
                     ..Default::default()
                 }),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec![
+                        "(".to_string(),
+                        ",".to_string(),
+                        ";".to_string(),
+                    ]),
+                    retrigger_characters: None,
+                    work_done_progress_options: Default::default(),
+                }),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
                     work_done_progress_options: Default::default(),
                 })),
+                inlay_hint_provider: Some(OneOf::Left(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
                 selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
@@ -443,6 +454,303 @@ impl LanguageServer for VxLanguageServer {
         Ok(result.flatten())
     }
 
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let result = self.with_document(&params.text_document.uri, |state| {
+            let formatted = vx::format(&state.parsed.tree().syntax());
+            let last_line = state.text.lines().count() as u32;
+            let last_col = state.text.lines().last().map_or(0, |l| l.len() as u32);
+            vec![TextEdit {
+                range: Range {
+                    start: Position::new(0, 0),
+                    end: Position::new(last_line, last_col),
+                },
+                new_text: formatted,
+            }]
+        });
+        Ok(result)
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri = &params.text_document.uri;
+
+        let result = self.with_document(uri, |state| {
+            let root = state.parsed.tree().syntax().clone();
+            let mut hints = Vec::new();
+
+            // Walk all CALL_EXPR nodes in the document
+            for node in root.descendants() {
+                if node.kind() != SyntaxKind::CALL_EXPR {
+                    continue;
+                }
+
+                let call = match vx::CallExpr::cast(node) {
+                    Some(c) => c,
+                    None => continue,
+                };
+
+                // Get callee — must be a simple name reference
+                let callee = match call.callee() {
+                    Some(vx::Expr::NameRef(nr)) => nr,
+                    _ => continue,
+                };
+                let callee_token = match callee.token() {
+                    Some(t) => t,
+                    None => continue,
+                };
+
+                // Resolve to definition
+                let callee_range = callee_token.text_range();
+                let resolved = state
+                    .resolution
+                    .refs
+                    .iter()
+                    .find(|r| r.ref_range == callee_range);
+                let def = match resolved.and_then(|r| r.target.as_ref().ok()) {
+                    Some(d) if d.kind == vx_resolve::DefKind::Function => d,
+                    _ => continue,
+                };
+
+                // Find FnDecl at definition site
+                let def_token = match root.token_at_offset(def.full_range.start()).right_biased() {
+                    Some(t) => t,
+                    None => continue,
+                };
+                let fn_node = match def_token.parent_ancestors().find_map(FnDecl::cast) {
+                    Some(f) => f,
+                    None => continue,
+                };
+
+                let params: Vec<_> = fn_node.parameters().collect();
+                let kw_params: Vec<_> = fn_node.keyword_parameters().collect();
+
+                // Find the ARG_LIST child of this CALL_EXPR
+                let arg_list = match call
+                    .syntax()
+                    .children()
+                    .find(|c| c.kind() == SyntaxKind::ARG_LIST)
+                {
+                    Some(al) => al,
+                    None => continue,
+                };
+
+                // Collect positional ARG nodes
+                let args: Vec<_> = arg_list
+                    .children()
+                    .filter(|c| c.kind() == SyntaxKind::ARG)
+                    .collect();
+
+                // Emit hints for positional args that match named parameters
+                for (i, arg) in args.iter().enumerate() {
+                    let param = match params.get(i) {
+                        Some(p) => p,
+                        None => break,
+                    };
+                    let param_name = match param.name() {
+                        Some(t) => t.text().to_string(),
+                        None => continue,
+                    };
+
+                    // Skip if the argument is already a simple name matching the parameter
+                    // (e.g., `foo(x)` where param is `x` — hint would be redundant)
+                    if is_same_name_as_param(arg, &param_name) {
+                        continue;
+                    }
+
+                    let pos = state.line_index.position(arg.text_range().start());
+                    hints.push(InlayHint {
+                        position: Position::new(pos.line, pos.col),
+                        label: InlayHintLabel::String(format!("{param_name}:")),
+                        kind: Some(InlayHintKind::PARAMETER),
+                        text_edits: None,
+                        tooltip: None,
+                        padding_left: None,
+                        padding_right: Some(true),
+                        data: None,
+                    });
+                }
+
+                // Emit hints for keyword args (these already have names in the source,
+                // so we skip them — the user already wrote `name: value`)
+                let _ = kw_params;
+            }
+
+            hints
+        });
+
+        Ok(result)
+    }
+
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let result = self.with_document(uri, |state| {
+            let offset = state.line_index.offset(vx::Position {
+                line: pos.line,
+                col: pos.character,
+            })?;
+
+            let root = state.parsed.tree().syntax().clone();
+            let token = root.token_at_offset(offset).left_biased()?;
+
+            // Walk up to find enclosing ARG_LIST inside a CALL_EXPR
+            let mut node = token.parent();
+            let mut arg_list_node = None;
+            while let Some(n) = node {
+                if n.kind() == SyntaxKind::ARG_LIST {
+                    arg_list_node = Some(n.clone());
+                    break;
+                }
+                node = n.parent();
+            }
+            let arg_list_node = arg_list_node?;
+            let call_node = arg_list_node.parent()?;
+            if call_node.kind() != SyntaxKind::CALL_EXPR {
+                return None;
+            }
+
+            // Determine active parameter: count commas and semicolons before cursor
+            let mut active_param = 0u32;
+            let mut in_keyword_section = false;
+            for child in arg_list_node.children_with_tokens() {
+                let child_end = child.text_range().end();
+                if child_end > offset {
+                    break;
+                }
+                match child {
+                    rowan::NodeOrToken::Token(ref t) if t.kind() == SyntaxKind::COMMA => {
+                        active_param += 1;
+                    }
+                    rowan::NodeOrToken::Token(ref t) if t.kind() == SyntaxKind::SEMICOLON => {
+                        in_keyword_section = true;
+                        active_param += 1;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Get callee name via the first child expr of CALL_EXPR
+            let callee_name = call_node.children().find_map(vx::Expr::cast)?;
+            let callee_token = match callee_name {
+                vx::Expr::NameRef(ref nr) => nr.token()?,
+                _ => return None,
+            };
+
+            // Resolve the callee to its definition
+            let callee_range = callee_token.text_range();
+            let resolved = state
+                .resolution
+                .refs
+                .iter()
+                .find(|r| r.ref_range == callee_range)?;
+            let def = resolved.target.as_ref().ok()?;
+
+            if def.kind != vx_resolve::DefKind::Function {
+                return None;
+            }
+
+            // Find the FnDecl node at the definition site
+            let def_token = root
+                .token_at_offset(def.full_range.start())
+                .right_biased()?;
+            let fn_node = def_token.parent_ancestors().find_map(FnDecl::cast)?;
+
+            // Build parameter info
+            let mut params = Vec::new();
+            let mut label_parts = Vec::new();
+
+            let fn_name = fn_node
+                .name()
+                .map(|t| t.text().to_string())
+                .unwrap_or_default();
+            label_parts.push(format!("fn {fn_name}("));
+
+            let positional: Vec<_> = fn_node.parameters().collect();
+            let keyword: Vec<_> = fn_node.keyword_parameters().collect();
+
+            for (i, param) in positional.iter().enumerate() {
+                if i > 0 {
+                    label_parts.push(", ".to_string());
+                }
+                let name = param
+                    .name()
+                    .map(|t| t.text().to_string())
+                    .unwrap_or("_".to_string());
+                let type_str = param
+                    .slot_type()
+                    .map(|st| st.syntax().text().to_string())
+                    .unwrap_or_default();
+                let param_label = format!("{name}{type_str}");
+                params.push(ParameterInformation {
+                    label: ParameterLabel::Simple(param_label.clone()),
+                    documentation: None,
+                });
+                label_parts.push(param_label);
+            }
+
+            if !keyword.is_empty() {
+                if !positional.is_empty() {
+                    label_parts.push("; ".to_string());
+                }
+                for (i, kw) in keyword.iter().enumerate() {
+                    if i > 0 {
+                        label_parts.push(", ".to_string());
+                    }
+                    let name = kw
+                        .name()
+                        .map(|t| t.text().to_string())
+                        .unwrap_or("_".to_string());
+                    let type_str = kw
+                        .slot_type()
+                        .map(|st| st.syntax().text().to_string())
+                        .unwrap_or_default();
+                    let param_label = format!("{name}{type_str}");
+                    params.push(ParameterInformation {
+                        label: ParameterLabel::Simple(param_label.clone()),
+                        documentation: None,
+                    });
+                    label_parts.push(param_label);
+                }
+            }
+
+            label_parts.push(")".to_string());
+
+            if let Some(ret) = fn_node.return_type() {
+                let ret_text = ret.syntax().text().to_string();
+                label_parts.push(format!(" {ret_text}"));
+            }
+
+            let label = label_parts.concat();
+            let doc = state.doc_comment_for(def);
+
+            // Clamp active_param if past keyword args, stay in bounds
+            let _ = in_keyword_section;
+            let active_param = if params.is_empty() {
+                None
+            } else {
+                Some(active_param.min(params.len() as u32 - 1))
+            };
+
+            Some(SignatureHelp {
+                signatures: vec![SignatureInformation {
+                    label,
+                    documentation: doc.map(|d| {
+                        Documentation::MarkupContent(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: d,
+                        })
+                    }),
+                    parameters: Some(params),
+                    active_parameter: active_param,
+                }],
+                active_signature: Some(0),
+                active_parameter: active_param,
+            })
+        });
+
+        Ok(result.flatten())
+    }
+
     async fn document_highlight(
         &self,
         params: DocumentHighlightParams,
@@ -672,4 +980,16 @@ fn encode_semantic_tokens(
     }
 
     result
+}
+
+/// Check if an ARG node is a simple name reference matching the parameter name.
+/// If so, the inlay hint would be redundant (e.g., `foo(x)` where param is `x`).
+fn is_same_name_as_param(arg: &vx::SyntaxNode, param_name: &str) -> bool {
+    // An ARG node wraps an expression. Check if it's a NAME_REF_EXPR
+    // with the same name as the parameter.
+    let expr = arg.children().find_map(vx::Expr::cast);
+    match expr {
+        Some(vx::Expr::NameRef(nr)) => nr.token().is_some_and(|t| t.text() == param_name),
+        _ => false,
+    }
 }

@@ -1223,3 +1223,76 @@ struct Point {
     let doc = doc_comment(items[0].syntax()).expect("should have doc comment");
     assert_eq!(doc, "A 2D point.");
 }
+
+// ── Formatter tests ──────────────────────────────────────────────────
+
+use crate::format;
+
+#[test]
+fn fmt_simple_struct() {
+    let input = "struct  Point{x:F64,  y:F64}";
+    let parsed = parse_source_file(input);
+    let out = format(&parsed.tree().syntax());
+    assert_eq!(out, "struct Point {\n    x: F64,\n    y: F64,\n}\n");
+}
+
+#[test]
+fn fmt_enum_with_variants() {
+    let input = "enum Direction{struct North,struct South}";
+    let parsed = parse_source_file(input);
+    let out = format(&parsed.tree().syntax());
+    assert_eq!(
+        out,
+        "enum Direction {\n    struct North,\n    struct South,\n}\n"
+    );
+}
+
+#[test]
+fn fmt_function() {
+    let input = "fn  add(a:I64,b:I64)->I64{a+b}";
+    let parsed = parse_source_file(input);
+    let out = format(&parsed.tree().syntax());
+    assert_eq!(out, "fn add(a: I64, b: I64) -> I64 {\n    a + b\n}\n");
+}
+
+#[test]
+fn fmt_preserves_comments() {
+    let input = "// A point\nstruct Point {\n    // x coord\n    x: F64,\n}";
+    let parsed = parse_source_file(input);
+    let out = format(&parsed.tree().syntax());
+    assert!(out.contains("// A point"), "should preserve top comment");
+    assert!(out.contains("// x coord"), "should preserve field comment");
+}
+
+#[test]
+fn fmt_idempotent_struct() {
+    let input = "struct Point {\n    x: F64,\n    y: F64,\n}\n";
+    let parsed = parse_source_file(input);
+    let pass1 = format(&parsed.tree().syntax());
+    let parsed2 = parse_source_file(&pass1);
+    let pass2 = format(&parsed2.tree().syntax());
+    assert_eq!(pass1, pass2, "formatter should be idempotent");
+}
+
+#[test]
+fn fmt_idempotent_type_decl_vx() {
+    let input = include_str!("../../../docs/content/spec/type-decl.vx");
+    let parsed = parse_source_file(input);
+    let pass1 = format(&parsed.tree().syntax());
+    let parsed2 = parse_source_file(&pass1);
+    let pass2 = format(&parsed2.tree().syntax());
+    assert_eq!(
+        pass1, pass2,
+        "formatter should be idempotent on type-decl.vx"
+    );
+}
+
+#[test]
+fn fmt_idempotent_sample_vx() {
+    let input = include_str!("../../../docs/content/spec/sample.vx");
+    let parsed = parse_source_file(input);
+    let pass1 = format(&parsed.tree().syntax());
+    let parsed2 = parse_source_file(&pass1);
+    let pass2 = format(&parsed2.tree().syntax());
+    assert_eq!(pass1, pass2, "formatter should be idempotent on sample.vx");
+}

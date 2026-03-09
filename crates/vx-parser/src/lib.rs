@@ -6,14 +6,17 @@ pub use ast::{
     AtPattern, BinaryExpr, BindingPattern, BlockExpr, CallExpr, ClosureExpr, ClosureParamClause,
     CompoundUpdateStmt, ElseClause, EnumDecl, Expr, FailExpr, FallibleExpr, FieldAssignStmt,
     FieldAssignTarget, FieldDecl, FieldExpr, FnDecl, FunctionType, IfExpr, IndexExpr,
-    InterpolatedStringExpr, Item, LetStmt, LiteralExpr, LiteralPattern, MapEntry, MapExpr,
-    MatchArm, MatchExpr, NameRefExpr, NewtypeDecl, OptionalType, OrPattern, Parameter,
+    InterpolatedStringExpr, Item, KeywordParameter, LetStmt, LiteralExpr, LiteralPattern, MapEntry,
+    MapExpr, MatchArm, MatchExpr, NameRefExpr, NewtypeDecl, OptionalType, OrPattern, Parameter,
     ParenPattern, ParenType, PartialAppExpr, Pattern, PrefixExpr, RangeExpr, ReturnStmt,
     ReturnType, SlotType, SourceFile, Stmt, StringInterpolation, StringPart, StructDecl,
     StructLiteralExpr, StructLiteralField, StructPattern, StructPatternField, SumType,
     TuplePattern, TupleType, Type, TypeAliasDecl, TypeArgs, TypeOpExpr, TypePath, UnitPattern,
-    VariantPattern, WildcardPattern, WithExpr, doc_comment,
+    VariantDecl, VariantPattern, WildcardPattern, WithExpr, doc_comment,
 };
+
+mod fmt;
+pub use fmt::format;
 
 mod lexer;
 pub use lexer::{Token, lex};
