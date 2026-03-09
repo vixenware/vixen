@@ -289,7 +289,7 @@ pub struct RunFileMount {
 pub struct RunOutput {
     /// Logical output name (e.g. "object", "bin").
     pub logical: String,
-    /// Path within the action prefix (must be under "out/").
+    /// Path within the action prefix (must be under one of the writable roots).
     pub path: String,
     /// Whether the output should be marked executable in CAS.
     pub executable: bool,
@@ -318,6 +318,7 @@ pub struct RunRequest {
     /// Outputs that must be produced (and will be flushed to CAS).
     pub outputs: Vec<RunOutput>,
 
+    // r[impl exec.writable]
     /// Writable directories to create within the action prefix.
     pub writable_roots: Vec<String>,
 

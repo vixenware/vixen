@@ -9,6 +9,7 @@
 use crate::harness::{TestEnv, create_hello_world, create_hello_world_at, init_test_tracing};
 
 #[test]
+// r[verify exec.writable]
 fn fresh_build_succeeds() {
     init_test_tracing();
     let env = TestEnv::new();

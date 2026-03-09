@@ -10,7 +10,7 @@ use std::time::Instant;
 use tracing::{debug, info};
 use vx_runner_proto::{
     CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RunArg, RunFileMount,
-    RunRequest, RunResult, RunTreeMount, RustCompileRequest, RustCompileResult,
+    RunOutput, RunRequest, RunResult, RunTreeMount, RustCompileRequest, RustCompileResult,
 };
 use vx_store_proto::{
     CasNode, ChunkHash, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry, StoreProgress,
@@ -46,6 +46,14 @@ fn path_is_covered(
         .any(|mount| covers_path(&mount.mount, path))
         || file_mounts.iter().any(|mount| mount.path == path)
         || writable_roots.iter().any(|root| covers_path(root, path))
+}
+
+fn outputs_stay_within_writable_roots(outputs: &[RunOutput], writable_roots: &[String]) -> bool {
+    outputs.iter().all(|out| {
+        writable_roots
+            .iter()
+            .any(|root| covers_path(root, &out.path))
+    })
 }
 
 /// Action execution context with all paths and sandbox config.
@@ -1410,31 +1418,35 @@ impl RunnerService {
             }
         }
 
+        // r[impl exec.writable]
         for root in &request.writable_roots {
             self.vfs.add_dir_to_prefix(&action.prefix_id, root).await;
         }
 
-        // Validate outputs are under writable roots.
-        for out in &request.outputs {
-            if !request
-                .writable_roots
+        if !outputs_stay_within_writable_roots(&request.outputs, &request.writable_roots) {
+            let offending = request
+                .outputs
                 .iter()
-                .any(|root| covers_path(root, &out.path))
-            {
-                self.remove_action_prefix(&action.prefix_id).await;
-                return RunResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!(
-                        "output '{}' must be under a writable root (got '{}')",
-                        out.logical, out.path
-                    )),
-                };
-            }
+                .find(|out| {
+                    !request
+                        .writable_roots
+                        .iter()
+                        .any(|root| covers_path(root, &out.path))
+                })
+                .expect("offending output must exist when containment check fails");
+            self.remove_action_prefix(&action.prefix_id).await;
+            return RunResult {
+                success: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                output_manifest: None,
+                error: Some(format!(
+                    "output '{}' must be under a writable root (got '{}')",
+                    offending.logical, offending.path
+                )),
+            };
         }
 
         for arg in &request.args {
@@ -1765,5 +1777,38 @@ mod tests {
         assert!(is_relative_vfs_path("out/app"));
         assert!(!is_relative_vfs_path("/src"));
         assert!(!is_relative_vfs_path("../src"));
+    }
+
+    #[test]
+    // r[verify exec.writable]
+    fn outputs_must_stay_within_writable_roots() {
+        let outputs = vec![
+            RunOutput {
+                logical: "bin".to_string(),
+                path: "out/bin/app".to_string(),
+                executable: true,
+            },
+            RunOutput {
+                logical: "dep-info".to_string(),
+                path: "scratch/dep/app.d".to_string(),
+                executable: false,
+            },
+        ];
+        let writable_roots = vec!["out".to_string(), "scratch".to_string()];
+
+        assert!(outputs_stay_within_writable_roots(
+            &outputs,
+            &writable_roots,
+        ));
+
+        let uncovered = vec![RunOutput {
+            logical: "bin".to_string(),
+            path: "tmp/app".to_string(),
+            executable: true,
+        }];
+        assert!(!outputs_stay_within_writable_roots(
+            &uncovered,
+            &writable_roots,
+        ));
     }
 }
