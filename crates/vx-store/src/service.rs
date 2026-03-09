@@ -1,4 +1,8 @@
+use crate::registry::download_crate;
+use crate::types::StoreService;
+use moire::task::FutureExt;
 use vx_store_proto::Store as StoreRpc;
+use vx_store_proto::chunking::{PreparedBlob, prepare_blob};
 use vx_store_proto::{
     Blake3Hash, BlobRef, CDC_MAX_CHUNK, CacheKey, CasNode, ChunkHash, DirEntryKind, DirectoryNode,
     EnsureRegistryCrateResult, EnsureRustToolchainComponentResult, EnsureStatus,
@@ -8,11 +12,6 @@ use vx_store_proto::{
     RustComponent, RustToolchainSpec, STORE_PROTOCOL_VERSION, ServiceVersion, StoreProgress,
     ToolchainKind, ToolchainManifest, ToolchainSpecKey, ZigToolchainSpec,
 };
-
-use crate::chunking;
-use crate::registry::download_crate;
-use crate::types::StoreService;
-use moire::task::FutureExt;
 
 const CRATES_IO_REGISTRY: &str = "https://crates.io";
 const MATERIALIZATION_LAYOUT_VERSION: u32 = 2;
@@ -332,7 +331,7 @@ impl StoreService {
                         .await;
 
                     // Store tarball as chunks
-                    let prepared = chunking::prepare_blob(&tarball_bytes);
+                    let prepared = prepare_blob(&tarball_bytes);
                     let tarball_ref =
                         match store_prepared_blob(&this2, &prepared, &tarball_bytes).await {
                             Ok(r) => r,
@@ -729,7 +728,7 @@ fn validate_directory_node(dir: &DirectoryNode) -> Result<(), String> {
 /// Returns a BlobRef describing how to fetch the data.
 async fn store_prepared_blob(
     service: &StoreService,
-    prepared: &chunking::PreparedBlob,
+    prepared: &PreparedBlob,
     data: &[u8],
 ) -> Result<BlobRef, String> {
     // Store all chunks

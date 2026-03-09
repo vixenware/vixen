@@ -3694,6 +3694,7 @@ dependencies = [
  "blake3",
  "facet",
  "facet-postcard",
+ "fastcdc",
  "hex",
  "roam",
 ]

@@ -9,6 +9,7 @@
 //! or reassembles.
 
 pub mod cas_tree;
+pub mod chunking;
 
 use core::fmt;
 use std::collections::HashMap;

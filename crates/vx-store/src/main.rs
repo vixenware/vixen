@@ -2,7 +2,6 @@
 //!
 //! Provides CAS, toolchain, and registry services over TCP or Unix sockets using Roam.
 
-pub(crate) mod chunking;
 pub(crate) mod hash_reader;
 pub(crate) mod registry;
 pub(crate) mod service;

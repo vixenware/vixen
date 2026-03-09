@@ -4,6 +4,7 @@ use futures_util::{StreamExt, future::join};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+use vx_store_proto::chunking::prepare_blob;
 use vx_store_proto::{
     Blake3Hash, BlobRef, CDC_MAX_CHUNK, CasNode, ChunkHash, ContentHash, DirEntry, DirEntryKind,
     DirectoryNode, EnsureRustToolchainComponentResult, EnsureStatus,
@@ -13,7 +14,6 @@ use vx_store_proto::{
 };
 use vx_tarball::Compression;
 
-use crate::chunking;
 use crate::types::StoreService;
 
 #[derive(Debug, Clone)]
@@ -372,7 +372,7 @@ impl ToolchainManager {
 
 /// Store blob data as chunks, return a BlobRef.
 async fn store_blob_chunked(service: &StoreService, data: &[u8]) -> Result<BlobRef, String> {
-    let prepared = chunking::prepare_blob(data);
+    let prepared = prepare_blob(data);
 
     // Store all chunks
     for chunk_info in &prepared.chunks {
@@ -879,7 +879,7 @@ impl StoreService {
                         progress,
                         async move |data: Vec<u8>| {
                             let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
-                            let prepared = chunking::prepare_blob(&data);
+                            let prepared = prepare_blob(&data);
                             // Store chunks
                             for ci in &prepared.chunks {
                                 let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
@@ -933,7 +933,7 @@ impl StoreService {
                         progress,
                         async move |data: Vec<u8>| {
                             let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
-                            let prepared = chunking::prepare_blob(&data);
+                            let prepared = prepare_blob(&data);
                             for ci in &prepared.chunks {
                                 let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
                                 this2
@@ -1461,7 +1461,7 @@ impl StoreService {
             strip_components,
             async move |data: Vec<u8>| {
                 let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
-                let prepared = chunking::prepare_blob(&data);
+                let prepared = prepare_blob(&data);
                 for ci in &prepared.chunks {
                     let chunk_data = &data[ci.offset..ci.offset + ci.size as usize];
                     this.storage
