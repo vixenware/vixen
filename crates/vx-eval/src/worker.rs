@@ -1,542 +1,308 @@
-//! The evaluation engine: worker pool + demand-driven evaluation.
+//! Demand-driven evaluation.
 //!
-//! The engine manages a pool of worker threads and a memo table of nodes.
-//! Evaluation is demand-driven: `demand(node_id)` checks the memo table,
-//! and if the value isn't there, evaluates it. When a function body hits
-//! a dependency that isn't ready, it parks (saves its position in a
-//! SuspendedFrame) and resumes when the dependency resolves.
+//! Expressions build lazy value graphs. Forcing only happens at the
+//! external boundary or inside a node whose operation truly needs a
+//! resolved dependency.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::thread;
 
-use crossbeam_channel::Sender;
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 
-use crate::capability::CapabilitySet;
 use crate::instr::{self, BinOp, UnaryOp};
-use crate::node::{Node, NodeId, Outcome, Waiter};
-use crate::poison::{DemandChain, PoisonError, PoisonKind};
+use crate::node::{Node, NodeId, NodeJob, NodeKey, Outcome, Waiter};
+use crate::poison::{DemandChain, DemandEntry, PoisonError, PoisonKind};
 use crate::value::{FunctionValue, StructValue, Value};
+
+thread_local! {
+    static ACTIVE_NODES: RefCell<Vec<NodeId>> = const { RefCell::new(Vec::new()) };
+}
+
+enum BuildResult {
+    Value(Value),
+    Returned(Value),
+    Poisoned(PoisonError),
+}
 
 /// The evaluation engine.
 pub struct Engine {
-    /// All nodes in the dataflow graph, keyed by NodeId.
     nodes: DashMap<NodeId, Arc<Node>>,
-    /// The function table: name → list of definitions (for overloading).
+    call_memo: DashMap<NodeKey, Arc<Node>>,
     functions: HashMap<String, Vec<Arc<instr::FnDef>>>,
-}
-
-/// A task submitted to the work queue.
-struct Task {
-    node: Arc<Node>,
-    frame: SuspendedFrame,
-}
-
-/// The saved state of a paused function evaluation.
-///
-/// When evaluation hits a pending dependency, we save where we are
-/// (which statement in the block, what bindings we've accumulated)
-/// and resume from exactly that point when the dependency resolves.
-#[derive(Clone)]
-struct SuspendedFrame {
-    /// The function being evaluated.
-    func: Arc<instr::FnDef>,
-    /// Arguments passed to this call.
-    args: Vec<Value>,
-    /// Local bindings accumulated so far (name → value).
-    bindings: HashMap<String, Value>,
-    /// Which statement index in the body we're about to execute.
-    stmt_index: usize,
-    /// Capabilities available to this evaluation.
-    capabilities: CapabilitySet,
-    /// The demand chain for debugging.
-    demand_chain: DemandChain,
-}
-
-/// The result of trying to evaluate an expression: either we got a value,
-/// or we need to wait for some nodes before we can continue.
-enum EvalResult {
-    /// Got a value.
-    Ready(Value),
-    /// A `return` escaped the current expression context.
-    Returned(Value),
-    /// Need to wait for these nodes. The SuspendedFrame should be saved.
-    Blocked(Vec<NodeId>),
-    /// Evaluation poisoned.
-    Poisoned(PoisonError),
 }
 
 impl Engine {
     /// Create a new engine from a lowered module.
     pub fn from_module(module: &instr::Module) -> Self {
-        let mut functions: HashMap<String, Vec<Arc<instr::FnDef>>> = HashMap::new();
+        let mut functions = HashMap::new();
         for func in &module.functions {
             functions
                 .entry(func.name.clone())
-                .or_default()
+                .or_insert_with(Vec::new)
                 .push(func.clone());
         }
 
         Self {
             nodes: DashMap::new(),
+            call_memo: DashMap::new(),
             functions,
         }
     }
 
-    /// Evaluate a top-level function by name with the given arguments.
-    /// This is the main entry point — it demands the result and blocks
-    /// until it's available (this is a forcing boundary).
+    /// Evaluate a top-level function by name at the external forcing boundary.
     pub fn call(&self, name: &str, args: Vec<Value>) -> Result<Value, PoisonError> {
-        let func = self.resolve_function(name, &args)?;
+        let function = FunctionValue {
+            def: self.resolve_function(name, &args)?,
+            captures: Arc::from([]),
+        };
+        let value = self.build_call(Value::Function(function), args);
+        self.force_value(value)
+    }
 
-        let node = Arc::new(Node::new(format!("{}(..)", name)));
-        let node_id = node.id;
-        self.nodes.insert(node_id, node.clone());
-
-        // Start evaluation directly on this thread
-        let frame = SuspendedFrame {
-            func,
-            args,
-            bindings: HashMap::new(),
-            stmt_index: 0,
-            capabilities: CapabilitySet::NONE,
+    #[cfg(test)]
+    pub(crate) fn poison_value(&self, message: &str) -> Value {
+        let error = PoisonError {
+            kind: PoisonKind::UserFail,
+            message: message.into(),
             demand_chain: DemandChain::new(),
         };
-
-        self.run_to_completion(node, frame)
+        self.pending_value(NodeJob::Poison(error), format!("poison({message})"))
     }
 
-    /// Run a task to completion, handling park/wake cycles.
-    /// This is the forcing boundary — it blocks the calling thread
-    /// until the node resolves.
-    fn run_to_completion(
-        &self,
-        node: Arc<Node>,
-        mut frame: SuspendedFrame,
-    ) -> Result<Value, PoisonError> {
-        // Channel for receiving wake notifications
-        let (wake_tx, wake_rx) = crossbeam_channel::unbounded();
+    #[cfg(test)]
+    pub(crate) fn memoized_call_count(&self) -> usize {
+        self.call_memo.len()
+    }
 
-        loop {
-            match self.evaluate_frame(&mut frame, &wake_tx) {
-                EvalResult::Ready(value) | EvalResult::Returned(value) => {
-                    node.resolve(value.clone());
-                    return Ok(value);
-                }
-                EvalResult::Poisoned(err) => {
-                    node.poison(err.clone());
-                    return Err(err);
-                }
-                EvalResult::Blocked(deps) => {
-                    // Register as waiter on all pending deps
-                    let mut pending_count = 0;
-                    for &dep_id in &deps {
-                        if let Some(dep_node) = self.nodes.get(&dep_id) {
-                            match dep_node.outcome() {
-                                Some(Outcome::Value(_)) => {
-                                    // Already resolved, no need to wait
-                                }
-                                Some(Outcome::Poison(err)) => {
-                                    // Dependency poisoned — propagate
-                                    node.poison(err.clone());
-                                    return Err(err);
-                                }
-                                None => {
-                                    // Still evaluating — register as waiter
-                                    let mut state = dep_node.state.lock();
-                                    match &mut *state {
-                                        crate::node::NodeState::Evaluating { waiters } => {
-                                            waiters.push(Waiter {
-                                                node_id: node.id,
-                                                sender: wake_tx.clone(),
-                                            });
-                                            pending_count += 1;
-                                        }
-                                        crate::node::NodeState::Resolved(_) => {}
-                                        crate::node::NodeState::Poisoned(err) => {
-                                            let err = err.clone();
-                                            drop(state);
-                                            node.poison(err.clone());
-                                            return Err(err);
-                                        }
-                                        crate::node::NodeState::Pending => {
-                                            // This shouldn't happen — we should have
-                                            // started evaluation on the dep
-                                            pending_count += 1;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+    fn build_call(&self, function: Value, args: Vec<Value>) -> Value {
+        if let Value::Function(function_value) = &function
+            && function_value.key().is_some()
+            && args.iter().all(|value| value.key().is_some())
+        {
+            return Value::Pending(self.memoized_invoke_node(function_value.clone(), args));
+        }
 
-                    if pending_count == 0 {
-                        // All deps actually resolved while we were checking,
-                        // just loop and re-evaluate
-                        continue;
-                    }
+        self.pending_value(
+            NodeJob::Call {
+                function,
+                args: Arc::from(args),
+            },
+            "call(..)".into(),
+        )
+    }
 
-                    // Wait for at least one dependency to resolve
-                    match wake_rx.recv() {
-                        Ok((_resolved_id, Outcome::Poison(err))) => {
-                            node.poison(err.clone());
-                            return Err(err);
-                        }
-                        Ok((_resolved_id, Outcome::Value(_))) => {
-                            // A dep resolved — loop and continue evaluation
-                            // from where the frame left off
-                            continue;
-                        }
-                        Err(_) => {
-                            let err = PoisonError {
-                                kind: PoisonKind::Internal,
-                                message: "all dependency senders dropped".into(),
-                                demand_chain: frame.demand_chain.clone(),
-                            };
-                            node.poison(err.clone());
-                            return Err(err);
-                        }
-                    }
-                }
+    fn memoized_invoke_node(&self, function: FunctionValue, args: Vec<Value>) -> NodeId {
+        let key = NodeKey {
+            identity: format!(
+                "call:{}({})",
+                function.key().unwrap_or_else(|| "<unresolved>".into()),
+                args.iter()
+                    .map(|value| value.key().unwrap_or_else(|| "<pending>".into()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        };
+
+        match self.call_memo.entry(key) {
+            Entry::Occupied(entry) => entry.get().id,
+            Entry::Vacant(entry) => {
+                let node = Arc::new(Node::new(
+                    NodeJob::Invoke {
+                        function,
+                        args: Arc::from(args),
+                    },
+                    "invoke(..)".into(),
+                ));
+                let node_id = node.id;
+                self.nodes.insert(node_id, node.clone());
+                entry.insert(node);
+                node_id
             }
         }
     }
 
-    /// Evaluate a suspended frame as far as possible.
-    ///
-    /// Returns Ready if the function completes, Blocked if it needs to
-    /// wait for dependencies, or Poisoned if something went wrong.
-    fn evaluate_frame(
-        &self,
-        frame: &mut SuspendedFrame,
-        wake_tx: &Sender<(NodeId, Outcome)>,
-    ) -> EvalResult {
-        let stmts = &frame.func.body.stmts;
-
-        while frame.stmt_index < stmts.len() {
-            let is_last = frame.stmt_index == stmts.len() - 1;
-            let stmt = &stmts[frame.stmt_index];
-
-            match stmt {
-                instr::Stmt::Let { name, value } => {
-                    match self.eval_expr(value, &frame.bindings, wake_tx) {
-                        EvalResult::Ready(val) => {
-                            frame.bindings.insert(name.clone(), val);
-                            frame.stmt_index += 1;
-                        }
-                        EvalResult::Returned(val) => return EvalResult::Ready(val),
-                        other => return other,
-                    }
-                }
-                instr::Stmt::Assign { name, value } => {
-                    match self.eval_expr(value, &frame.bindings, wake_tx) {
-                        EvalResult::Ready(val) => {
-                            frame.bindings.insert(name.clone(), val);
-                            frame.stmt_index += 1;
-                        }
-                        EvalResult::Returned(val) => return EvalResult::Ready(val),
-                        other => return other,
-                    }
-                }
-                instr::Stmt::Return(expr) => {
-                    return match self.eval_expr(expr, &frame.bindings, wake_tx) {
-                        EvalResult::Ready(val) | EvalResult::Returned(val) => {
-                            EvalResult::Ready(val)
-                        }
-                        other => other,
-                    };
-                }
-                instr::Stmt::FnDecl(def) => {
-                    // Local function — add to bindings as a function value
-                    let func_val = Value::Function(FunctionValue {
-                        def: def.clone(),
-                        captures: Arc::from([]),
-                    });
-                    frame.bindings.insert(def.name.clone(), func_val);
-                    frame.stmt_index += 1;
-                }
-                instr::Stmt::Expr(expr) => {
-                    match self.eval_expr(expr, &frame.bindings, wake_tx) {
-                        EvalResult::Ready(val) => {
-                            if is_last {
-                                return EvalResult::Ready(val);
-                            }
-                            // Not last statement — discard the value
-                            frame.stmt_index += 1;
-                        }
-                        EvalResult::Returned(val) => return EvalResult::Ready(val),
-                        other => return other,
-                    }
-                }
-            }
-        }
-
-        // Empty body or all statements were non-expression → Unit
-        EvalResult::Ready(Value::Unit)
+    fn pending_value(&self, job: NodeJob, description: String) -> Value {
+        let node = Arc::new(Node::new(job, description));
+        let node_id = node.id;
+        self.nodes.insert(node_id, node);
+        Value::Pending(node_id)
     }
 
-    /// Evaluate an expression in the current binding environment.
-    fn eval_expr(
-        &self,
-        expr: &instr::Expr,
-        bindings: &HashMap<String, Value>,
-        wake_tx: &Sender<(NodeId, Outcome)>,
-    ) -> EvalResult {
-        match expr {
-            instr::Expr::LitInt(n) => EvalResult::Ready(Value::U64(*n)),
-            instr::Expr::LitFloat(n) => EvalResult::Ready(Value::F64(*n)),
-            instr::Expr::LitBool(b) => EvalResult::Ready(Value::Bool(*b)),
-            instr::Expr::LitString(s) => EvalResult::Ready(Value::String(Arc::from(s.as_str()))),
-            instr::Expr::Unit => EvalResult::Ready(Value::Unit),
-
-            instr::Expr::Var(name) => {
-                if let Some(val) = bindings.get(name) {
-                    EvalResult::Ready(val.clone())
-                } else if let Some(overloads) = self.functions.get(name) {
-                    // Return the function as a value
-                    EvalResult::Ready(Value::Function(FunctionValue {
-                        def: overloads[0].clone(),
-                        captures: Arc::from([]),
-                    }))
-                } else {
-                    EvalResult::Poisoned(PoisonError {
-                        kind: PoisonKind::UnresolvedName,
-                        message: format!("unresolved name: {name}"),
-                        demand_chain: DemandChain::new(),
-                    })
-                }
+    fn force_value(&self, value: Value) -> Result<Value, PoisonError> {
+        match value {
+            Value::Pending(node_id) => {
+                let value = self.force_node(node_id)?;
+                self.force_value(value)
             }
-
-            instr::Expr::Binary { op, left, right } => {
-                let lhs = match self.eval_expr(left, bindings, wake_tx) {
-                    EvalResult::Ready(v) => v,
-                    EvalResult::Returned(v) => return EvalResult::Returned(v),
-                    other => return other,
-                };
-                let rhs = match self.eval_expr(right, bindings, wake_tx) {
-                    EvalResult::Ready(v) => v,
-                    EvalResult::Returned(v) => return EvalResult::Returned(v),
-                    other => return other,
-                };
-                eval_binary_op(*op, &lhs, &rhs)
+            Value::Tuple(elems) => {
+                let forced = self.force_many(elems.iter().cloned().collect())?;
+                Ok(Value::Tuple(Arc::from(forced)))
             }
-
-            instr::Expr::Unary { op, operand } => {
-                let val = match self.eval_expr(operand, bindings, wake_tx) {
-                    EvalResult::Ready(v) => v,
-                    EvalResult::Returned(v) => return EvalResult::Returned(v),
-                    other => return other,
-                };
-                eval_unary_op(*op, &val)
+            Value::Struct(struct_value) => {
+                let names = struct_value
+                    .fields
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .collect::<Vec<_>>();
+                let values = struct_value
+                    .fields
+                    .iter()
+                    .map(|(_, value)| value.clone())
+                    .collect::<Vec<_>>();
+                let forced = self.force_many(values)?;
+                let fields = names.into_iter().zip(forced).collect::<Vec<_>>();
+                Ok(Value::Struct(StructValue {
+                    type_name: struct_value.type_name,
+                    fields: Arc::from(fields),
+                }))
             }
+            other => Ok(other),
+        }
+    }
 
-            instr::Expr::Block(block) => {
-                let mut local_bindings = bindings.clone();
-                let stmts = &block.stmts;
-                for (i, stmt) in stmts.iter().enumerate() {
-                    let is_last = i == stmts.len() - 1;
-                    match stmt {
-                        instr::Stmt::Let { name, value } => {
-                            match self.eval_expr(value, &local_bindings, wake_tx) {
-                                EvalResult::Ready(val) => {
-                                    local_bindings.insert(name.clone(), val);
-                                }
-                                EvalResult::Returned(val) => {
-                                    return EvalResult::Returned(val);
-                                }
-                                other => return other,
-                            }
-                        }
-                        instr::Stmt::Assign { name, value } => {
-                            match self.eval_expr(value, &local_bindings, wake_tx) {
-                                EvalResult::Ready(val) => {
-                                    local_bindings.insert(name.clone(), val);
-                                }
-                                EvalResult::Returned(val) => {
-                                    return EvalResult::Returned(val);
-                                }
-                                other => return other,
-                            }
-                        }
-                        instr::Stmt::Return(expr) => {
-                            return match self.eval_expr(expr, &local_bindings, wake_tx) {
-                                EvalResult::Ready(val) | EvalResult::Returned(val) => {
-                                    EvalResult::Returned(val)
-                                }
-                                other => other,
-                            };
-                        }
-                        instr::Stmt::FnDecl(def) => {
-                            let func_val = Value::Function(FunctionValue {
-                                def: def.clone(),
-                                captures: Arc::from([]),
-                            });
-                            local_bindings.insert(def.name.clone(), func_val);
-                        }
-                        instr::Stmt::Expr(expr) => {
-                            match self.eval_expr(expr, &local_bindings, wake_tx) {
-                                EvalResult::Ready(val) => {
-                                    if is_last {
-                                        return EvalResult::Ready(val);
-                                    }
-                                }
-                                EvalResult::Returned(val) => {
-                                    return EvalResult::Returned(val);
-                                }
-                                other => return other,
-                            }
-                        }
+    fn force_many(&self, values: Vec<Value>) -> Result<Vec<Value>, PoisonError> {
+        if values.len() <= 1 {
+            return values
+                .into_iter()
+                .map(|value| self.force_value(value))
+                .collect();
+        }
+
+        thread::scope(|scope| {
+            let mut iter = values.into_iter();
+            let first = iter.next().expect("checked length above");
+            let handles = iter
+                .map(|value| scope.spawn(move || self.force_value(value)))
+                .collect::<Vec<_>>();
+
+            let mut forced = vec![self.force_value(first)?];
+            for handle in handles {
+                let value = handle
+                    .join()
+                    .map_err(|_| self.internal_error("force worker panicked"))??;
+                forced.push(value);
+            }
+            Ok(forced)
+        })
+    }
+
+    fn force_node(&self, node_id: NodeId) -> Result<Value, PoisonError> {
+        if ACTIVE_NODES.with(|stack| stack.borrow().contains(&node_id)) {
+            return Err(PoisonError {
+                kind: PoisonKind::CircularDependency,
+                message: format!("circular dependency while demanding node {}", node_id.0),
+                demand_chain: self.current_demand_chain(Some(node_id)),
+            });
+        }
+
+        let node = self
+            .nodes
+            .get(&node_id)
+            .map(|entry| entry.clone())
+            .ok_or_else(|| self.internal_error(&format!("missing node {}", node_id.0)))?;
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+
+        match node.try_start_or_wait(Waiter { sender }) {
+            Ok(()) => {
+                let result = self.with_active_node(node_id, || self.execute_node(&node));
+                match result {
+                    Ok(value) => {
+                        node.resolve(value.clone());
+                        Ok(value)
+                    }
+                    Err(error) => {
+                        node.poison(error.clone());
+                        Err(error)
                     }
                 }
-                EvalResult::Ready(Value::Unit)
             }
+            Err(Some(Outcome::Value(value))) => Ok(value),
+            Err(Some(Outcome::Poison(error))) => Err(error),
+            Err(None) => match receiver.recv() {
+                Ok((_node_id, Outcome::Value(value))) => Ok(value),
+                Ok((_node_id, Outcome::Poison(error))) => Err(error),
+                Err(_) => Err(self.internal_error("all waiters dropped")),
+            },
+        }
+    }
 
-            instr::Expr::If {
+    fn execute_node(&self, node: &Arc<Node>) -> Result<Value, PoisonError> {
+        match &node.job {
+            NodeJob::Binary { op, left, right } => {
+                let mut values = self.force_many(vec![left.clone(), right.clone()])?;
+                let right = values.pop().expect("pair has two values");
+                let left = values.pop().expect("pair has two values");
+                self.compute_binary(*op, &left, &right)
+            }
+            NodeJob::Unary { op, operand } => {
+                let operand = self.force_value(operand.clone())?;
+                self.compute_unary(*op, &operand)
+            }
+            NodeJob::If {
                 cond,
                 then_branch,
                 else_branch,
+                bindings,
             } => {
-                let cond_val = match self.eval_expr(cond, bindings, wake_tx) {
-                    EvalResult::Ready(v) => v,
-                    EvalResult::Returned(v) => return EvalResult::Returned(v),
-                    other => return other,
-                };
-                match cond_val {
+                let cond = self.force_value(cond.clone())?;
+                match cond {
                     Value::Bool(true) => {
-                        let block_expr = instr::Expr::Block(then_branch.clone());
-                        self.eval_expr(&block_expr, bindings, wake_tx)
+                        self.eval_block(then_branch, bindings.as_ref()).into_value()
                     }
                     Value::Bool(false) => {
-                        let block_expr = instr::Expr::Block(else_branch.clone());
-                        self.eval_expr(&block_expr, bindings, wake_tx)
+                        self.eval_block(else_branch, bindings.as_ref()).into_value()
                     }
-                    other => EvalResult::Poisoned(PoisonError {
-                        kind: PoisonKind::TypeError,
-                        message: format!("if condition must be Bool, got {}", other.type_name()),
-                        demand_chain: DemandChain::new(),
-                    }),
+                    other => Err(self.type_error(&format!(
+                        "if condition must be Bool, got {}",
+                        other.type_name()
+                    ))),
                 }
             }
-
-            instr::Expr::Call { func, args } => {
-                // Evaluate the callee
-                let func_val = match self.eval_expr(func, bindings, wake_tx) {
-                    EvalResult::Ready(v) => v,
-                    EvalResult::Returned(v) => return EvalResult::Returned(v),
-                    other => return other,
-                };
-
-                // Evaluate arguments
-                let mut arg_vals = Vec::with_capacity(args.len());
-                for arg in args {
-                    match self.eval_expr(arg, bindings, wake_tx) {
-                        EvalResult::Ready(v) => arg_vals.push(v),
-                        EvalResult::Returned(v) => return EvalResult::Returned(v),
-                        other => return other,
-                    }
-                }
-
-                match func_val {
-                    Value::Function(fv) => self.call_function(&fv.def, arg_vals, wake_tx),
-                    other => EvalResult::Poisoned(PoisonError {
-                        kind: PoisonKind::TypeError,
-                        message: format!("cannot call {}", other.type_name()),
-                        demand_chain: DemandChain::new(),
-                    }),
-                }
+            NodeJob::Call { function, args } => self.execute_call(function.clone(), args.clone()),
+            NodeJob::Invoke { function, args } => self.invoke_function(function, args.clone()),
+            NodeJob::Field { receiver, field } => {
+                let receiver = self.force_value(receiver.clone())?;
+                self.extract_field(&receiver, field)
             }
-
-            instr::Expr::StructLit { name, fields } => {
-                let mut field_vals = Vec::with_capacity(fields.len());
-                for (field_name, field_expr) in fields {
-                    match self.eval_expr(field_expr, bindings, wake_tx) {
-                        EvalResult::Ready(val) => {
-                            field_vals.push((Arc::from(field_name.as_str()), val));
-                        }
-                        EvalResult::Returned(val) => return EvalResult::Returned(val),
-                        other => return other,
-                    }
-                }
-                EvalResult::Ready(Value::Struct(StructValue {
-                    type_name: Arc::from(name.as_str()),
-                    fields: Arc::from(field_vals),
-                }))
-            }
-
-            instr::Expr::Field { receiver, field } => {
-                let recv_val = match self.eval_expr(receiver, bindings, wake_tx) {
-                    EvalResult::Ready(v) => v,
-                    EvalResult::Returned(v) => return EvalResult::Returned(v),
-                    other => return other,
-                };
-                match &recv_val {
-                    Value::Struct(s) => {
-                        for (name, val) in s.fields.iter() {
-                            if name.as_ref() == field {
-                                return EvalResult::Ready(val.clone());
-                            }
-                        }
-                        EvalResult::Poisoned(PoisonError {
-                            kind: PoisonKind::TypeError,
-                            message: format!("no field '{}' on struct {}", field, s.type_name),
-                            demand_chain: DemandChain::new(),
-                        })
-                    }
-                    Value::Tuple(elems) => {
-                        // Tuple field access: _0, _1, etc.
-                        if let Some(idx_str) = field.strip_prefix('_') {
-                            if let Ok(idx) = idx_str.parse::<usize>() {
-                                if idx < elems.len() {
-                                    return EvalResult::Ready(elems[idx].clone());
-                                }
-                            }
-                        }
-                        EvalResult::Poisoned(PoisonError {
-                            kind: PoisonKind::TypeError,
-                            message: format!("invalid tuple field '{}'", field),
-                            demand_chain: DemandChain::new(),
-                        })
-                    }
-                    other => EvalResult::Poisoned(PoisonError {
-                        kind: PoisonKind::TypeError,
-                        message: format!(
-                            "cannot access field '{}' on {}",
-                            field,
-                            other.type_name()
-                        ),
-                        demand_chain: DemandChain::new(),
-                    }),
-                }
-            }
-
-            instr::Expr::Tuple(elems) => {
-                let mut vals = Vec::with_capacity(elems.len());
-                for elem in elems {
-                    match self.eval_expr(elem, bindings, wake_tx) {
-                        EvalResult::Ready(v) => vals.push(v),
-                        EvalResult::Returned(v) => return EvalResult::Returned(v),
-                        other => return other,
-                    }
-                }
-                EvalResult::Ready(Value::Tuple(Arc::from(vals)))
-            }
+            #[cfg(test)]
+            NodeJob::Poison(error) => Err(error.clone()),
         }
     }
 
-    /// Call a function with resolved arguments, evaluating its body.
-    fn call_function(
+    fn execute_call(&self, function: Value, args: Arc<[Value]>) -> Result<Value, PoisonError> {
+        let function = match self.force_value(function)? {
+            Value::Function(function) => function,
+            other => {
+                return Err(self.type_error(&format!("cannot call {}", other.type_name())));
+            }
+        };
+
+        if function.key().is_some() && args.iter().all(|value| value.key().is_some()) {
+            return self
+                .force_node(self.memoized_invoke_node(function, args.iter().cloned().collect()));
+        }
+
+        self.invoke_function(&function, args)
+    }
+
+    fn invoke_function(
         &self,
-        def: &Arc<instr::FnDef>,
-        args: Vec<Value>,
-        wake_tx: &Sender<(NodeId, Outcome)>,
-    ) -> EvalResult {
-        // Bind parameters
+        function: &FunctionValue,
+        args: Arc<[Value]>,
+    ) -> Result<Value, PoisonError> {
         let mut bindings = HashMap::new();
-        for (param, arg) in def.params.iter().zip(args.iter()) {
+
+        for (name, value) in function.captures.iter() {
+            bindings.insert(name.to_string(), value.clone());
+        }
+
+        for (param, arg) in function.def.params.iter().zip(args.iter()) {
             bindings.insert(param.name.clone(), arg.clone());
         }
 
-        // Add all top-level functions to scope
         for (name, overloads) in &self.functions {
             if !bindings.contains_key(name) {
                 bindings.insert(
@@ -549,60 +315,307 @@ impl Engine {
             }
         }
 
-        // Evaluate body
-        let stmts = &def.body.stmts;
-        for (i, stmt) in stmts.iter().enumerate() {
-            let is_last = i == stmts.len() - 1;
+        self.eval_block(&function.def.body, &bindings).into_value()
+    }
+
+    fn eval_block(&self, block: &instr::Block, bindings: &HashMap<String, Value>) -> BuildResult {
+        let mut local_bindings = bindings.clone();
+
+        for (index, stmt) in block.stmts.iter().enumerate() {
+            let is_last = index + 1 == block.stmts.len();
             match stmt {
-                instr::Stmt::Let { name, value } => {
-                    match self.eval_expr(value, &bindings, wake_tx) {
-                        EvalResult::Ready(val) => {
-                            bindings.insert(name.clone(), val);
+                instr::Stmt::Let { name, value } | instr::Stmt::Assign { name, value } => {
+                    match self.eval_expr(value, &local_bindings) {
+                        BuildResult::Value(value) => {
+                            local_bindings.insert(name.clone(), value);
                         }
-                        EvalResult::Returned(val) => return EvalResult::Ready(val),
                         other => return other,
                     }
                 }
-                instr::Stmt::Assign { name, value } => {
-                    match self.eval_expr(value, &bindings, wake_tx) {
-                        EvalResult::Ready(val) => {
-                            bindings.insert(name.clone(), val);
-                        }
-                        EvalResult::Returned(val) => return EvalResult::Ready(val),
-                        other => return other,
+                instr::Stmt::Return(expr) => match self.eval_expr(expr, &local_bindings) {
+                    BuildResult::Value(value) | BuildResult::Returned(value) => {
+                        return BuildResult::Returned(value);
                     }
+                    BuildResult::Poisoned(error) => return BuildResult::Poisoned(error),
+                },
+                instr::Stmt::FnDecl(def) => {
+                    local_bindings.insert(
+                        def.name.clone(),
+                        Value::Function(FunctionValue {
+                            def: def.clone(),
+                            captures: capture_bindings(&local_bindings),
+                        }),
+                    );
                 }
-                instr::Stmt::Return(expr) => {
-                    return match self.eval_expr(expr, &bindings, wake_tx) {
-                        EvalResult::Ready(val) | EvalResult::Returned(val) => {
-                            EvalResult::Ready(val)
-                        }
-                        other => other,
-                    };
-                }
-                instr::Stmt::FnDecl(local_def) => {
-                    let func_val = Value::Function(FunctionValue {
-                        def: local_def.clone(),
-                        captures: Arc::from([]),
-                    });
-                    bindings.insert(local_def.name.clone(), func_val);
-                }
-                instr::Stmt::Expr(expr) => match self.eval_expr(expr, &bindings, wake_tx) {
-                    EvalResult::Ready(val) => {
+                instr::Stmt::Expr(expr) => match self.eval_expr(expr, &local_bindings) {
+                    BuildResult::Value(value) => {
                         if is_last {
-                            return EvalResult::Ready(val);
+                            return BuildResult::Value(value);
                         }
                     }
-                    EvalResult::Returned(val) => return EvalResult::Ready(val),
                     other => return other,
                 },
             }
         }
-        EvalResult::Ready(Value::Unit)
+
+        BuildResult::Value(Value::Unit)
     }
 
-    /// Resolve a function by name, picking the right overload for the given args.
-    /// For 0.1, just picks the first overload.
+    fn eval_expr(&self, expr: &instr::Expr, bindings: &HashMap<String, Value>) -> BuildResult {
+        match expr {
+            instr::Expr::LitInt(n) => BuildResult::Value(Value::U64(*n)),
+            instr::Expr::LitFloat(n) => BuildResult::Value(Value::F64(*n)),
+            instr::Expr::LitBool(b) => BuildResult::Value(Value::Bool(*b)),
+            instr::Expr::LitString(s) => BuildResult::Value(Value::String(Arc::from(s.as_str()))),
+            instr::Expr::Unit => BuildResult::Value(Value::Unit),
+            instr::Expr::Var(name) => {
+                if let Some(value) = bindings.get(name) {
+                    BuildResult::Value(value.clone())
+                } else if let Some(overloads) = self.functions.get(name) {
+                    BuildResult::Value(Value::Function(FunctionValue {
+                        def: overloads[0].clone(),
+                        captures: Arc::from([]),
+                    }))
+                } else {
+                    BuildResult::Poisoned(self.unresolved_name(name))
+                }
+            }
+            instr::Expr::Binary { op, left, right } => {
+                let left = match self.eval_expr(left, bindings) {
+                    BuildResult::Value(value) => value,
+                    other => return other,
+                };
+                let right = match self.eval_expr(right, bindings) {
+                    BuildResult::Value(value) => value,
+                    other => return other,
+                };
+
+                if left.key().is_some() && right.key().is_some() {
+                    BuildResult::from_result(self.compute_binary(*op, &left, &right))
+                } else {
+                    BuildResult::Value(self.pending_value(
+                        NodeJob::Binary {
+                            op: *op,
+                            left,
+                            right,
+                        },
+                        format!("binary({op:?})"),
+                    ))
+                }
+            }
+            instr::Expr::Unary { op, operand } => {
+                let operand = match self.eval_expr(operand, bindings) {
+                    BuildResult::Value(value) => value,
+                    other => return other,
+                };
+
+                if operand.key().is_some() {
+                    BuildResult::from_result(self.compute_unary(*op, &operand))
+                } else {
+                    BuildResult::Value(self.pending_value(
+                        NodeJob::Unary { op: *op, operand },
+                        format!("unary({op:?})"),
+                    ))
+                }
+            }
+            instr::Expr::Block(block) => self.eval_block(block, bindings),
+            instr::Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                let cond = match self.eval_expr(cond, bindings) {
+                    BuildResult::Value(value) => value,
+                    other => return other,
+                };
+
+                match cond {
+                    Value::Bool(true) => self.eval_block(then_branch, bindings),
+                    Value::Bool(false) => self.eval_block(else_branch, bindings),
+                    Value::Pending(_) => BuildResult::Value(self.pending_value(
+                        NodeJob::If {
+                            cond,
+                            then_branch: then_branch.clone(),
+                            else_branch: else_branch.clone(),
+                            bindings: Arc::new(bindings.clone()),
+                        },
+                        "if(..)".into(),
+                    )),
+                    other => BuildResult::Poisoned(self.type_error(&format!(
+                        "if condition must be Bool, got {}",
+                        other.type_name()
+                    ))),
+                }
+            }
+            instr::Expr::Call { func, args } => {
+                let function = match self.eval_expr(func, bindings) {
+                    BuildResult::Value(value) => value,
+                    other => return other,
+                };
+                let mut arg_values = Vec::with_capacity(args.len());
+                for arg in args {
+                    match self.eval_expr(arg, bindings) {
+                        BuildResult::Value(value) => arg_values.push(value),
+                        other => return other,
+                    }
+                }
+                BuildResult::Value(self.build_call(function, arg_values))
+            }
+            instr::Expr::StructLit { name, fields } => {
+                let mut values = Vec::with_capacity(fields.len());
+                for (field_name, field_expr) in fields {
+                    match self.eval_expr(field_expr, bindings) {
+                        BuildResult::Value(value) => {
+                            values.push((Arc::from(field_name.as_str()), value));
+                        }
+                        other => return other,
+                    }
+                }
+                BuildResult::Value(Value::Struct(StructValue {
+                    type_name: Arc::from(name.as_str()),
+                    fields: Arc::from(values),
+                }))
+            }
+            instr::Expr::Field { receiver, field } => {
+                let receiver = match self.eval_expr(receiver, bindings) {
+                    BuildResult::Value(value) => value,
+                    other => return other,
+                };
+
+                match &receiver {
+                    Value::Struct(_) | Value::Tuple(_) => {
+                        BuildResult::from_result(self.extract_field(&receiver, field))
+                    }
+                    Value::Pending(_) => BuildResult::Value(self.pending_value(
+                        NodeJob::Field {
+                            receiver,
+                            field: Arc::from(field.as_str()),
+                        },
+                        format!("field(.{field})"),
+                    )),
+                    other => BuildResult::Poisoned(self.type_error(&format!(
+                        "cannot access field '{}' on {}",
+                        field,
+                        other.type_name()
+                    ))),
+                }
+            }
+            instr::Expr::Tuple(elems) => {
+                let mut values = Vec::with_capacity(elems.len());
+                for elem in elems {
+                    match self.eval_expr(elem, bindings) {
+                        BuildResult::Value(value) => values.push(value),
+                        other => return other,
+                    }
+                }
+                BuildResult::Value(Value::Tuple(Arc::from(values)))
+            }
+        }
+    }
+
+    fn extract_field(&self, receiver: &Value, field: &str) -> Result<Value, PoisonError> {
+        match receiver {
+            Value::Struct(struct_value) => struct_value
+                .fields
+                .iter()
+                .find(|(name, _)| name.as_ref() == field)
+                .map(|(_, value)| value.clone())
+                .ok_or_else(|| {
+                    self.type_error(&format!(
+                        "no field '{}' on struct {}",
+                        field, struct_value.type_name
+                    ))
+                }),
+            Value::Tuple(elems) => {
+                if let Some(index) = field.strip_prefix('_')
+                    && let Ok(index) = index.parse::<usize>()
+                    && let Some(value) = elems.get(index)
+                {
+                    return Ok(value.clone());
+                }
+                Err(self.type_error(&format!("invalid tuple field '{}'", field)))
+            }
+            other => Err(self.type_error(&format!(
+                "cannot access field '{}' on {}",
+                field,
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn compute_binary(&self, op: BinOp, left: &Value, right: &Value) -> Result<Value, PoisonError> {
+        match (op, left, right) {
+            (BinOp::Add, Value::U64(a), Value::U64(b)) => Ok(Value::U64(a.wrapping_add(*b))),
+            (BinOp::Sub, Value::U64(a), Value::U64(b)) => Ok(Value::U64(a.wrapping_sub(*b))),
+            (BinOp::Mul, Value::U64(a), Value::U64(b)) => Ok(Value::U64(a.wrapping_mul(*b))),
+            (BinOp::Div, Value::U64(_), Value::U64(0)) => {
+                Err(self.arithmetic_error("division by zero"))
+            }
+            (BinOp::Div, Value::U64(a), Value::U64(b)) => Ok(Value::U64(a / b)),
+            (BinOp::Mod, Value::U64(_), Value::U64(0)) => {
+                Err(self.arithmetic_error("modulo by zero"))
+            }
+            (BinOp::Mod, Value::U64(a), Value::U64(b)) => Ok(Value::U64(a % b)),
+
+            (BinOp::Add, Value::I64(a), Value::I64(b)) => Ok(Value::I64(a.wrapping_add(*b))),
+            (BinOp::Sub, Value::I64(a), Value::I64(b)) => Ok(Value::I64(a.wrapping_sub(*b))),
+            (BinOp::Mul, Value::I64(a), Value::I64(b)) => Ok(Value::I64(a.wrapping_mul(*b))),
+            (BinOp::Div, Value::I64(_), Value::I64(0)) => {
+                Err(self.arithmetic_error("division by zero"))
+            }
+            (BinOp::Div, Value::I64(a), Value::I64(b)) => Ok(Value::I64(a / b)),
+
+            (BinOp::Add, Value::F64(a), Value::F64(b)) => Ok(Value::F64(a + b)),
+            (BinOp::Sub, Value::F64(a), Value::F64(b)) => Ok(Value::F64(a - b)),
+            (BinOp::Mul, Value::F64(a), Value::F64(b)) => Ok(Value::F64(a * b)),
+            (BinOp::Div, Value::F64(a), Value::F64(b)) => Ok(Value::F64(a / b)),
+
+            (BinOp::Eq, a, b) => Ok(Value::Bool(a == b)),
+            (BinOp::Ne, a, b) => Ok(Value::Bool(a != b)),
+
+            (BinOp::Lt, Value::U64(a), Value::U64(b)) => Ok(Value::Bool(a < b)),
+            (BinOp::Le, Value::U64(a), Value::U64(b)) => Ok(Value::Bool(a <= b)),
+            (BinOp::Gt, Value::U64(a), Value::U64(b)) => Ok(Value::Bool(a > b)),
+            (BinOp::Ge, Value::U64(a), Value::U64(b)) => Ok(Value::Bool(a >= b)),
+
+            (BinOp::Lt, Value::I64(a), Value::I64(b)) => Ok(Value::Bool(a < b)),
+            (BinOp::Le, Value::I64(a), Value::I64(b)) => Ok(Value::Bool(a <= b)),
+            (BinOp::Gt, Value::I64(a), Value::I64(b)) => Ok(Value::Bool(a > b)),
+            (BinOp::Ge, Value::I64(a), Value::I64(b)) => Ok(Value::Bool(a >= b)),
+
+            (BinOp::Lt, Value::F64(a), Value::F64(b)) => Ok(Value::Bool(a < b)),
+            (BinOp::Le, Value::F64(a), Value::F64(b)) => Ok(Value::Bool(a <= b)),
+            (BinOp::Gt, Value::F64(a), Value::F64(b)) => Ok(Value::Bool(a > b)),
+            (BinOp::Ge, Value::F64(a), Value::F64(b)) => Ok(Value::Bool(a >= b)),
+
+            (BinOp::And, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a && *b)),
+            (BinOp::Or, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(*a || *b)),
+
+            (BinOp::Add, Value::String(a), Value::String(b)) => {
+                let mut value = String::with_capacity(a.len() + b.len());
+                value.push_str(a);
+                value.push_str(b);
+                Ok(Value::String(Arc::from(value)))
+            }
+
+            _ => Err(self.type_error(&format!(
+                "cannot apply {:?} to {} and {}",
+                op,
+                left.type_name(),
+                right.type_name()
+            ))),
+        }
+    }
+
+    fn compute_unary(&self, op: UnaryOp, value: &Value) -> Result<Value, PoisonError> {
+        match (op, value) {
+            (UnaryOp::Neg, Value::I64(n)) => Ok(Value::I64(-n)),
+            (UnaryOp::Neg, Value::F64(n)) => Ok(Value::F64(-n)),
+            (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
+            _ => Err(self.type_error(&format!("cannot apply {:?} to {}", op, value.type_name()))),
+        }
+    }
+
     fn resolve_function(
         &self,
         name: &str,
@@ -611,132 +624,96 @@ impl Engine {
         self.functions
             .get(name)
             .and_then(|overloads| overloads.first().cloned())
-            .ok_or_else(|| PoisonError {
-                kind: PoisonKind::UnresolvedName,
-                message: format!("no function named '{name}'"),
-                demand_chain: DemandChain::new(),
-            })
+            .ok_or_else(|| self.unresolved_function(name))
+    }
+
+    fn unresolved_name(&self, name: &str) -> PoisonError {
+        PoisonError {
+            kind: PoisonKind::UnresolvedName,
+            message: format!("unresolved name: {name}"),
+            demand_chain: self.current_demand_chain(None),
+        }
+    }
+
+    fn unresolved_function(&self, name: &str) -> PoisonError {
+        PoisonError {
+            kind: PoisonKind::UnresolvedName,
+            message: format!("no function named '{name}'"),
+            demand_chain: self.current_demand_chain(None),
+        }
+    }
+
+    fn type_error(&self, message: &str) -> PoisonError {
+        PoisonError {
+            kind: PoisonKind::TypeError,
+            message: message.into(),
+            demand_chain: self.current_demand_chain(None),
+        }
+    }
+
+    fn arithmetic_error(&self, message: &str) -> PoisonError {
+        PoisonError {
+            kind: PoisonKind::ArithmeticError,
+            message: message.into(),
+            demand_chain: self.current_demand_chain(None),
+        }
+    }
+
+    fn internal_error(&self, message: &str) -> PoisonError {
+        PoisonError {
+            kind: PoisonKind::Internal,
+            message: message.into(),
+            demand_chain: self.current_demand_chain(None),
+        }
+    }
+
+    fn current_demand_chain(&self, next: Option<NodeId>) -> DemandChain {
+        let mut entries = Vec::new();
+        ACTIVE_NODES.with(|stack| {
+            for node_id in stack.borrow().iter().copied().chain(next) {
+                if let Some(node) = self.nodes.get(&node_id) {
+                    entries.push(DemandEntry {
+                        node_id,
+                        description: node.description.clone(),
+                    });
+                }
+            }
+        });
+        DemandChain { entries }
+    }
+
+    fn with_active_node<T>(&self, node_id: NodeId, f: impl FnOnce() -> T) -> T {
+        ACTIVE_NODES.with(|stack| stack.borrow_mut().push(node_id));
+        let result = f();
+        ACTIVE_NODES.with(|stack| {
+            let popped = stack.borrow_mut().pop();
+            debug_assert_eq!(popped, Some(node_id));
+        });
+        result
     }
 }
 
-fn eval_binary_op(op: BinOp, lhs: &Value, rhs: &Value) -> EvalResult {
-    match (op, lhs, rhs) {
-        // U64 arithmetic
-        (BinOp::Add, Value::U64(a), Value::U64(b)) => {
-            EvalResult::Ready(Value::U64(a.wrapping_add(*b)))
+impl BuildResult {
+    fn from_result(result: Result<Value, PoisonError>) -> Self {
+        match result {
+            Ok(value) => Self::Value(value),
+            Err(error) => Self::Poisoned(error),
         }
-        (BinOp::Sub, Value::U64(a), Value::U64(b)) => {
-            EvalResult::Ready(Value::U64(a.wrapping_sub(*b)))
+    }
+
+    fn into_value(self) -> Result<Value, PoisonError> {
+        match self {
+            BuildResult::Value(value) | BuildResult::Returned(value) => Ok(value),
+            BuildResult::Poisoned(error) => Err(error),
         }
-        (BinOp::Mul, Value::U64(a), Value::U64(b)) => {
-            EvalResult::Ready(Value::U64(a.wrapping_mul(*b)))
-        }
-        (BinOp::Div, Value::U64(_), Value::U64(0)) => EvalResult::Poisoned(PoisonError {
-            kind: PoisonKind::ArithmeticError,
-            message: "division by zero".into(),
-            demand_chain: DemandChain::new(),
-        }),
-        (BinOp::Div, Value::U64(a), Value::U64(b)) => EvalResult::Ready(Value::U64(a / b)),
-        (BinOp::Mod, Value::U64(_), Value::U64(0)) => EvalResult::Poisoned(PoisonError {
-            kind: PoisonKind::ArithmeticError,
-            message: "modulo by zero".into(),
-            demand_chain: DemandChain::new(),
-        }),
-        (BinOp::Mod, Value::U64(a), Value::U64(b)) => EvalResult::Ready(Value::U64(a % b)),
-
-        // I64 arithmetic
-        (BinOp::Add, Value::I64(a), Value::I64(b)) => {
-            EvalResult::Ready(Value::I64(a.wrapping_add(*b)))
-        }
-        (BinOp::Sub, Value::I64(a), Value::I64(b)) => {
-            EvalResult::Ready(Value::I64(a.wrapping_sub(*b)))
-        }
-        (BinOp::Mul, Value::I64(a), Value::I64(b)) => {
-            EvalResult::Ready(Value::I64(a.wrapping_mul(*b)))
-        }
-        (BinOp::Div, Value::I64(_), Value::I64(0)) => EvalResult::Poisoned(PoisonError {
-            kind: PoisonKind::ArithmeticError,
-            message: "division by zero".into(),
-            demand_chain: DemandChain::new(),
-        }),
-        (BinOp::Div, Value::I64(a), Value::I64(b)) => EvalResult::Ready(Value::I64(a / b)),
-
-        // F64 arithmetic
-        (BinOp::Add, Value::F64(a), Value::F64(b)) => EvalResult::Ready(Value::F64(a + b)),
-        (BinOp::Sub, Value::F64(a), Value::F64(b)) => EvalResult::Ready(Value::F64(a - b)),
-        (BinOp::Mul, Value::F64(a), Value::F64(b)) => EvalResult::Ready(Value::F64(a * b)),
-        (BinOp::Div, Value::F64(a), Value::F64(b)) => EvalResult::Ready(Value::F64(a / b)),
-
-        // U64 comparisons
-        (BinOp::Eq, Value::U64(a), Value::U64(b)) => EvalResult::Ready(Value::Bool(a == b)),
-        (BinOp::Ne, Value::U64(a), Value::U64(b)) => EvalResult::Ready(Value::Bool(a != b)),
-        (BinOp::Lt, Value::U64(a), Value::U64(b)) => EvalResult::Ready(Value::Bool(a < b)),
-        (BinOp::Le, Value::U64(a), Value::U64(b)) => EvalResult::Ready(Value::Bool(a <= b)),
-        (BinOp::Gt, Value::U64(a), Value::U64(b)) => EvalResult::Ready(Value::Bool(a > b)),
-        (BinOp::Ge, Value::U64(a), Value::U64(b)) => EvalResult::Ready(Value::Bool(a >= b)),
-
-        // I64 comparisons
-        (BinOp::Eq, Value::I64(a), Value::I64(b)) => EvalResult::Ready(Value::Bool(a == b)),
-        (BinOp::Ne, Value::I64(a), Value::I64(b)) => EvalResult::Ready(Value::Bool(a != b)),
-        (BinOp::Lt, Value::I64(a), Value::I64(b)) => EvalResult::Ready(Value::Bool(a < b)),
-        (BinOp::Le, Value::I64(a), Value::I64(b)) => EvalResult::Ready(Value::Bool(a <= b)),
-        (BinOp::Gt, Value::I64(a), Value::I64(b)) => EvalResult::Ready(Value::Bool(a > b)),
-        (BinOp::Ge, Value::I64(a), Value::I64(b)) => EvalResult::Ready(Value::Bool(a >= b)),
-
-        // F64 comparisons
-        (BinOp::Eq, Value::F64(a), Value::F64(b)) => {
-            EvalResult::Ready(Value::Bool(a.to_bits() == b.to_bits()))
-        }
-        (BinOp::Ne, Value::F64(a), Value::F64(b)) => {
-            EvalResult::Ready(Value::Bool(a.to_bits() != b.to_bits()))
-        }
-        (BinOp::Lt, Value::F64(a), Value::F64(b)) => EvalResult::Ready(Value::Bool(a < b)),
-        (BinOp::Le, Value::F64(a), Value::F64(b)) => EvalResult::Ready(Value::Bool(a <= b)),
-        (BinOp::Gt, Value::F64(a), Value::F64(b)) => EvalResult::Ready(Value::Bool(a > b)),
-        (BinOp::Ge, Value::F64(a), Value::F64(b)) => EvalResult::Ready(Value::Bool(a >= b)),
-
-        // Bool comparisons
-        (BinOp::Eq, Value::Bool(a), Value::Bool(b)) => EvalResult::Ready(Value::Bool(a == b)),
-        (BinOp::Ne, Value::Bool(a), Value::Bool(b)) => EvalResult::Ready(Value::Bool(a != b)),
-
-        // String comparisons
-        (BinOp::Eq, Value::String(a), Value::String(b)) => EvalResult::Ready(Value::Bool(a == b)),
-        (BinOp::Ne, Value::String(a), Value::String(b)) => EvalResult::Ready(Value::Bool(a != b)),
-
-        // Logical
-        (BinOp::And, Value::Bool(a), Value::Bool(b)) => EvalResult::Ready(Value::Bool(*a && *b)),
-        (BinOp::Or, Value::Bool(a), Value::Bool(b)) => EvalResult::Ready(Value::Bool(*a || *b)),
-
-        // String concatenation via +
-        (BinOp::Add, Value::String(a), Value::String(b)) => {
-            let mut s = String::with_capacity(a.len() + b.len());
-            s.push_str(a);
-            s.push_str(b);
-            EvalResult::Ready(Value::String(Arc::from(s)))
-        }
-
-        _ => EvalResult::Poisoned(PoisonError {
-            kind: PoisonKind::TypeError,
-            message: format!(
-                "cannot apply {:?} to {} and {}",
-                op,
-                lhs.type_name(),
-                rhs.type_name()
-            ),
-            demand_chain: DemandChain::new(),
-        }),
     }
 }
 
-fn eval_unary_op(op: UnaryOp, val: &Value) -> EvalResult {
-    match (op, val) {
-        (UnaryOp::Neg, Value::I64(n)) => EvalResult::Ready(Value::I64(-n)),
-        (UnaryOp::Neg, Value::F64(n)) => EvalResult::Ready(Value::F64(-n)),
-        (UnaryOp::Not, Value::Bool(b)) => EvalResult::Ready(Value::Bool(!b)),
-        _ => EvalResult::Poisoned(PoisonError {
-            kind: PoisonKind::TypeError,
-            message: format!("cannot apply {:?} to {}", op, val.type_name()),
-            demand_chain: DemandChain::new(),
-        }),
-    }
+fn capture_bindings(bindings: &HashMap<String, Value>) -> Arc<[(Arc<str>, Value)]> {
+    let mut captures = bindings
+        .iter()
+        .map(|(name, value)| (Arc::<str>::from(name.as_str()), value.clone()))
+        .collect::<Vec<_>>();
+    captures.sort_by(|left, right| left.0.cmp(&right.0));
+    Arc::from(captures)
 }

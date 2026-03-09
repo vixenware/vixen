@@ -9,15 +9,19 @@ use vx_parser::SourceFile;
 
 use crate::lower::lower_source_file;
 use crate::poison::PoisonKind;
-use crate::value::Value;
+use crate::value::{StructValue, Value};
 use crate::worker::Engine;
 
 fn eval(source: &str, entry: &str) -> Result<Value, crate::poison::PoisonError> {
+    let engine = engine(source);
+    engine.call(entry, vec![])
+}
+
+fn engine(source: &str) -> Engine {
     let parse = vx_parser::parse(source);
     let root = SourceFile::cast_root(parse.syntax());
     let module = lower_source_file(&root);
-    let engine = Engine::from_module(&module);
-    engine.call(entry, vec![])
+    Engine::from_module(&module)
 }
 
 #[test]
@@ -269,4 +273,51 @@ fn fibonacci() {
     )
     .unwrap();
     assert_eq!(val, Value::U64(55));
+}
+
+#[test]
+fn unused_pending_arg_is_not_forced() {
+    let engine = engine("fn first(x: U64, y: U64) { x }");
+    let pending = engine.poison_value("unused");
+
+    let value = engine.call("first", vec![Value::U64(1), pending]).unwrap();
+
+    assert_eq!(value, Value::U64(1));
+}
+
+#[test]
+fn field_access_does_not_force_other_fields() {
+    let engine = engine("fn get_x(pair: Pair) { pair.x }");
+    let value = engine
+        .call(
+            "get_x",
+            vec![Value::Struct(StructValue {
+                type_name: Arc::from("Pair"),
+                fields: Arc::from([
+                    (Arc::from("x"), Value::U64(7)),
+                    (Arc::from("y"), engine.poison_value("unused field")),
+                ]),
+            })],
+        )
+        .unwrap();
+
+    assert_eq!(value, Value::U64(7));
+}
+
+#[test]
+fn resolved_calls_are_memoized() {
+    let engine = engine("fn double(x: U64) { x + x }");
+
+    assert_eq!(engine.memoized_call_count(), 0);
+    assert_eq!(
+        engine.call("double", vec![Value::U64(21)]).unwrap(),
+        Value::U64(42)
+    );
+    assert_eq!(engine.memoized_call_count(), 1);
+
+    assert_eq!(
+        engine.call("double", vec![Value::U64(21)]).unwrap(),
+        Value::U64(42)
+    );
+    assert_eq!(engine.memoized_call_count(), 1);
 }

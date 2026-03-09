@@ -1,17 +1,18 @@
-//! The node state machine — the kernel of the evaluator.
+//! The node state machine for demand-driven evaluation.
 //!
-//! Each computation in the dataflow graph is a `Node`. Nodes transition
-//! through states: Pending → Evaluating → Resolved | Poisoned.
-//!
-//! When a node resolves, it wakes all its waiters. When it poisons,
-//! it propagates the poison to all waiters.
+//! Nodes represent lazy computations. They transition through
+//! Pending -> Evaluating -> Resolved | Poisoned. Waiters can subscribe to an
+//! in-flight node and wake up when it finishes.
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
+use crate::instr::{self, BinOp, UnaryOp};
 use crate::poison::PoisonError;
-use crate::value::Value;
+use crate::value::{FunctionValue, Value};
 
 /// A unique identifier for a node in the dataflow graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,12 +26,44 @@ impl NodeId {
     }
 }
 
-/// The key used to look up nodes in the memo table.
-/// For 0.1, this is a function name + serialized arguments.
-/// Real code identity comes later.
+/// The key used to look up memoized nodes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NodeKey {
     pub identity: String,
+}
+
+/// A lazy computation that can produce a `Value`.
+#[derive(Debug, Clone)]
+pub enum NodeJob {
+    Binary {
+        op: BinOp,
+        left: Value,
+        right: Value,
+    },
+    Unary {
+        op: UnaryOp,
+        operand: Value,
+    },
+    If {
+        cond: Value,
+        then_branch: instr::Block,
+        else_branch: instr::Block,
+        bindings: Arc<HashMap<String, Value>>,
+    },
+    Call {
+        function: Value,
+        args: Arc<[Value]>,
+    },
+    Invoke {
+        function: FunctionValue,
+        args: Arc<[Value]>,
+    },
+    Field {
+        receiver: Value,
+        field: Arc<str>,
+    },
+    #[cfg(test)]
+    Poison(PoisonError),
 }
 
 /// The outcome of a resolved node — either a value or a poison.
@@ -43,7 +76,6 @@ pub enum Outcome {
 /// A waiter handle: when a node resolves, it sends the outcome through
 /// this channel to wake the waiting task.
 pub struct Waiter {
-    pub node_id: NodeId,
     pub sender: crossbeam_channel::Sender<(NodeId, Outcome)>,
 }
 
@@ -56,7 +88,7 @@ pub enum NodeState {
     /// register themselves here.
     Evaluating { waiters: Vec<Waiter> },
 
-    /// The value is computed and cached.
+    /// The value graph is built and cached.
     Resolved(Value),
 
     /// The node poisoned.
@@ -67,25 +99,27 @@ pub enum NodeState {
 pub struct Node {
     pub id: NodeId,
     pub state: Mutex<NodeState>,
-    /// Human-readable description for the demand chain.
+    pub job: NodeJob,
+    /// Human-readable description for diagnostics.
     pub description: String,
 }
 
 impl Node {
-    pub fn new(description: String) -> Self {
+    pub fn new(job: NodeJob, description: String) -> Self {
         Self {
             id: NodeId::next(),
             state: Mutex::new(NodeState::Pending),
+            job,
             description,
         }
     }
 
     /// Attempt to start evaluating this node.
-    /// Returns `Ok(())` if we transitioned from Pending → Evaluating.
+    /// Returns `Ok(())` if we transitioned from Pending -> Evaluating.
     /// Returns `Err(existing_outcome)` if it was already resolved/poisoned.
     /// If it's currently being evaluated by someone else, registers the
-    /// waiter and returns `Err(None)` — the caller should park.
-    pub fn try_start_or_wait(&self, waiter: Option<Waiter>) -> Result<(), Option<Outcome>> {
+    /// waiter and returns `Err(None)` — the caller should wait.
+    pub fn try_start_or_wait(&self, waiter: Waiter) -> Result<(), Option<Outcome>> {
         let mut state = self.state.lock();
         match &mut *state {
             NodeState::Pending => {
@@ -95,10 +129,8 @@ impl Node {
                 Ok(())
             }
             NodeState::Evaluating { waiters } => {
-                if let Some(w) = waiter {
-                    waiters.push(w);
-                }
-                Err(None) // caller should park
+                waiters.push(waiter);
+                Err(None)
             }
             NodeState::Resolved(val) => Err(Some(Outcome::Value(val.clone()))),
             NodeState::Poisoned(err) => Err(Some(Outcome::Poison(err.clone()))),
@@ -116,7 +148,7 @@ impl Node {
             *state = NodeState::Resolved(value.clone());
             waiters
         };
-        // Wake all waiters outside the lock
+
         for waiter in waiters {
             let _ = waiter.sender.send((self.id, Outcome::Value(value.clone())));
         }
@@ -133,20 +165,11 @@ impl Node {
             *state = NodeState::Poisoned(error.clone());
             waiters
         };
+
         for waiter in waiters {
             let _ = waiter
                 .sender
                 .send((self.id, Outcome::Poison(error.clone())));
-        }
-    }
-
-    /// Get the current outcome if already resolved/poisoned.
-    pub fn outcome(&self) -> Option<Outcome> {
-        let state = self.state.lock();
-        match &*state {
-            NodeState::Resolved(val) => Some(Outcome::Value(val.clone())),
-            NodeState::Poisoned(err) => Some(Outcome::Poison(err.clone())),
-            _ => None,
         }
     }
 }
