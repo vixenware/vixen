@@ -1,0 +1,27 @@
+[package]
+name = "vx-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+[[bin]]
+name = "vx-lsp"
+path = "src/main.rs"
+
+[dependencies]
+vx-parser = { path = "../vx-parser" }
+rowan = "0.16"
+vx-tracing = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+eyre = { workspace = true }
+tower-lsp = "0.20"
+serde_json = "1"
+
+[lints]
+workspace = true
