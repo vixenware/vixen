@@ -33,6 +33,7 @@ const DEFAULT_LINK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PROGRESS_TICK_INTERVAL: Duration = Duration::from_millis(250);
 
 /// What kind of action is being executed (affects default timeout).
+#[derive(Debug)]
 pub enum ActionKind {
     RustCompile,
     CcCompile,
@@ -61,12 +62,16 @@ fn env_timeout(var: &str, default: Duration) -> Duration {
 }
 
 /// Result of running a sandboxed command with streaming and timeout.
+#[derive(Debug)]
 pub struct CommandOutput {
     pub exit_status: ExitStatus,
+    pub stdout: String,
+    pub stderr: String,
     pub combined_output: String,
 }
 
 /// Error from `run_sandboxed_command`.
+#[derive(Debug)]
 pub enum CommandError {
     /// Failed to spawn the child process.
     SpawnFailed(std::io::Error),
@@ -137,6 +142,14 @@ pub async fn run_sandboxed_command(
         "runner/combined_output",
         String::new(),
     ));
+    let stdout_output = std::sync::Arc::new(moire::sync::SyncMutex::new(
+        "runner/stdout_output",
+        String::new(),
+    ));
+    let stderr_output = std::sync::Arc::new(moire::sync::SyncMutex::new(
+        "runner/stderr_output",
+        String::new(),
+    ));
     let latest_line = std::sync::Arc::new(moire::sync::SyncMutex::new(
         "runner/latest_line",
         String::new(),
@@ -144,6 +157,7 @@ pub async fn run_sandboxed_command(
 
     // Spawn readers for both streams
     let combined_for_stdout = combined_output.clone();
+    let stdout_for_stdout = stdout_output.clone();
     let latest_for_stdout = latest_line.clone();
     let stdout_task = moire::task::spawn(
         async move {
@@ -156,6 +170,7 @@ pub async fn run_sandboxed_command(
                     Ok(_) => {
                         let trimmed = line.trim_end().to_string();
                         combined_for_stdout.lock().push_str(&line);
+                        stdout_for_stdout.lock().push_str(&line);
                         if !trimmed.is_empty() {
                             *latest_for_stdout.lock() = trimmed;
                         }
@@ -168,6 +183,7 @@ pub async fn run_sandboxed_command(
     );
 
     let combined_for_stderr = combined_output.clone();
+    let stderr_for_stderr = stderr_output.clone();
     let latest_for_stderr = latest_line.clone();
     let stderr_task = moire::task::spawn(
         async move {
@@ -180,6 +196,7 @@ pub async fn run_sandboxed_command(
                     Ok(_) => {
                         let trimmed = line.trim_end().to_string();
                         combined_for_stderr.lock().push_str(&line);
+                        stderr_for_stderr.lock().push_str(&line);
                         if !trimmed.is_empty() {
                             *latest_for_stderr.lock() = trimmed;
                         }
@@ -256,10 +273,14 @@ pub async fn run_sandboxed_command(
             }
             let _ = stdout_task.await;
             let _ = stderr_task.await;
-            let output = combined_output.lock().clone();
+            let stdout = stdout_output.lock().clone();
+            let stderr = stderr_output.lock().clone();
+            let combined = combined_output.lock().clone();
             Ok(CommandOutput {
                 exit_status,
-                combined_output: output,
+                stdout,
+                stderr,
+                combined_output: combined,
             })
         }
         Outcome::Exited(Err(io_err)) => {
@@ -494,4 +515,35 @@ pub fn sandboxed_command(program: &str, _action: &ActionContext) -> Command {
         "sandboxed_command: no sandbox (unsupported platform)"
     );
     Command::new(program)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ActionKind, run_sandboxed_command};
+    use moire::process::Command;
+    use roam::Tx;
+    use vx_store_proto::StoreProgress;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn captures_stdout_and_stderr_separately() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("printf 'stdout line\\n'; printf 'stderr line\\n' >&2");
+
+        let output = run_sandboxed_command(
+            cmd,
+            &ActionKind::CcCompile,
+            "capture-test",
+            Tx::<StoreProgress>::unbound(),
+            None,
+        )
+        .await
+        .expect("command should run");
+
+        assert_eq!(output.stdout, "stdout line\n");
+        assert_eq!(output.stderr, "stderr line\n");
+        assert!(output.combined_output.contains("stdout line\n"));
+        assert!(output.combined_output.contains("stderr line\n"));
+    }
 }

@@ -382,7 +382,11 @@ impl RunnerService {
         let exit_code = output.exit_status.code().unwrap_or(-1);
 
         if !output.exit_status.success() {
-            let mut stderr = output.combined_output;
+            let mut stderr = if output.stderr.trim().is_empty() {
+                output.combined_output.clone()
+            } else {
+                output.stderr.clone()
+            };
 
             // When sandbox-exec wraps the compiler, it can exit non-zero with no
             // output if the inner program is missing. Add diagnostics so the
@@ -410,7 +414,7 @@ impl RunnerService {
             return RustCompileResult {
                 success: false,
                 exit_code,
-                stdout: String::new(),
+                stdout: output.stdout.clone(),
                 stderr,
                 duration_ms,
                 output_manifest: None,
@@ -493,8 +497,8 @@ impl RunnerService {
         RustCompileResult {
             success: true,
             exit_code,
-            stdout: String::new(),
-            stderr: output.combined_output,
+            stdout: output.stdout,
+            stderr: output.stderr,
             duration_ms,
             output_manifest: Some(manifest_hash),
             error: None,
@@ -692,8 +696,8 @@ impl RunnerService {
             return CcCompileResult {
                 success: false,
                 exit_code,
-                stdout: String::new(),
-                stderr: output.combined_output,
+                stdout: output.stdout.clone(),
+                stderr: output.stderr.clone(),
                 duration_ms,
                 output_manifest: None,
                 discovered_deps: vec![],
@@ -712,8 +716,8 @@ impl RunnerService {
                 return CcCompileResult {
                     success: false,
                     exit_code: -1,
-                    stdout: String::new(),
-                    stderr: output.combined_output,
+                    stdout: output.stdout.clone(),
+                    stderr: output.stderr.clone(),
                     duration_ms,
                     output_manifest: None,
                     discovered_deps: vec![],
@@ -754,8 +758,8 @@ impl RunnerService {
             return CcCompileResult {
                 success: false,
                 exit_code: -1,
-                stdout: String::new(),
-                stderr: output.combined_output,
+                stdout: output.stdout.clone(),
+                stderr: output.stderr.clone(),
                 duration_ms,
                 output_manifest: None,
                 discovered_deps: vec![],
@@ -776,8 +780,8 @@ impl RunnerService {
         CcCompileResult {
             success: true,
             exit_code,
-            stdout: String::new(),
-            stderr: output.combined_output,
+            stdout: output.stdout,
+            stderr: output.stderr,
             duration_ms,
             output_manifest: Some(manifest_hash),
             discovered_deps: vec![], // TODO: parse depfile if generated
@@ -1085,8 +1089,8 @@ impl RunnerService {
             return CcLinkResult {
                 success: false,
                 exit_code,
-                stdout: String::new(),
-                stderr: output.combined_output,
+                stdout: output.stdout.clone(),
+                stderr: output.stderr.clone(),
                 duration_ms,
                 output_manifest: None,
                 error: None,
@@ -1101,8 +1105,8 @@ impl RunnerService {
                 return CcLinkResult {
                     success: false,
                     exit_code: -1,
-                    stdout: String::new(),
-                    stderr: output.combined_output,
+                    stdout: output.stdout.clone(),
+                    stderr: output.stderr.clone(),
                     duration_ms,
                     output_manifest: None,
                     error: Some(format!("output {} not found in VFS", output_rel_path)),
@@ -1139,8 +1143,8 @@ impl RunnerService {
             return CcLinkResult {
                 success: false,
                 exit_code: -1,
-                stdout: String::new(),
-                stderr: output.combined_output,
+                stdout: output.stdout.clone(),
+                stderr: output.stderr.clone(),
                 duration_ms,
                 output_manifest: None,
                 error: Some(format!("failed to store manifest: {:?}", e)),
@@ -1152,8 +1156,8 @@ impl RunnerService {
         CcLinkResult {
             success: true,
             exit_code,
-            stdout: String::new(),
-            stderr: output.combined_output,
+            stdout: output.stdout,
+            stderr: output.stderr,
             duration_ms,
             output_manifest: Some(manifest_hash),
             error: None,
@@ -1633,8 +1637,8 @@ impl RunnerService {
             return RunResult {
                 success: false,
                 exit_code,
-                stdout: String::new(),
-                stderr: output.combined_output,
+                stdout: output.stdout.clone(),
+                stderr: output.stderr.clone(),
                 duration_ms,
                 output_manifest: None,
                 error: None,
@@ -1655,8 +1659,8 @@ impl RunnerService {
                     return RunResult {
                         success: false,
                         exit_code: -1,
-                        stdout: String::new(),
-                        stderr: output.combined_output,
+                        stdout: output.stdout.clone(),
+                        stderr: output.stderr.clone(),
                         duration_ms,
                         output_manifest: None,
                         error: Some(format!("output {} not found in VFS", out.path)),
@@ -1697,8 +1701,8 @@ impl RunnerService {
             return RunResult {
                 success: false,
                 exit_code: -1,
-                stdout: String::new(),
-                stderr: output.combined_output,
+                stdout: output.stdout.clone(),
+                stderr: output.stderr.clone(),
                 duration_ms,
                 output_manifest: None,
                 error: Some(format!("failed to store manifest: {:?}", e)),
@@ -1710,8 +1714,8 @@ impl RunnerService {
         RunResult {
             success: true,
             exit_code,
-            stdout: String::new(),
-            stderr: output.combined_output,
+            stdout: output.stdout,
+            stderr: output.stderr,
             duration_ms,
             output_manifest: Some(manifest_hash),
             error: None,
