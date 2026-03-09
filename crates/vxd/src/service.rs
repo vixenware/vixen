@@ -1066,6 +1066,7 @@ impl VxdService {
                                 path: out_rel,
                                 executable: false,
                             }],
+                            writable_roots: vec!["out".to_string()],
                             materialize: vec![],
                         });
 
@@ -1117,6 +1118,7 @@ impl VxdService {
                             path: out_rel,
                             executable: true,
                         }],
+                        writable_roots: vec!["out".to_string()],
                         materialize: vec![crate::action_graph::RunMaterialize {
                             logical: "binary".to_string(),
                             workspace_rel_path: binary_output.clone(),

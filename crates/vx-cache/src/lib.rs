@@ -17,7 +17,7 @@ pub const RUST_CACHE_KEY_VERSION: u32 = 1;
 pub const CC_CACHE_KEY_VERSION: u32 = 2;
 
 /// Current cache key schema version for generic tool execution.
-pub const RUN_CACHE_KEY_VERSION: u32 = 2;
+pub const RUN_CACHE_KEY_VERSION: u32 = 3;
 
 /// Compute a cache key for a Rust compile request.
 ///
@@ -284,6 +284,14 @@ pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
         hasher.update(b"\n");
     }
 
+    let mut writable_roots: Vec<_> = request.writable_roots.iter().collect();
+    writable_roots.sort();
+    for root in writable_roots {
+        hasher.update(b"writable:");
+        hasher.update(root.as_bytes());
+        hasher.update(b"\n");
+    }
+
     let mut file_mounts: Vec<_> = request.file_mounts.iter().collect();
     file_mounts.sort_by(|a, b| {
         a.path
@@ -396,6 +404,7 @@ mod tests {
             tree_mounts: vec![],
             file_mounts: vec![],
             outputs: vec![],
+            writable_roots: vec!["out".to_string()],
             cwd: None,
             env: vec![],
             clear_env: true,

@@ -1806,6 +1806,7 @@ async fn execute_action(
             dep_file_mounts,
             collect_file_mounts,
             outputs,
+            writable_roots,
             materialize,
         } => {
             let toolchain_manifest = match toolchain {
@@ -1943,6 +1944,7 @@ async fn execute_action(
                 tree_mounts: resolved_tree_mounts,
                 file_mounts: resolved_file_mounts,
                 outputs,
+                writable_roots,
                 macos_commandlinetools_version: macos_commandlinetools_version.clone(),
             };
 

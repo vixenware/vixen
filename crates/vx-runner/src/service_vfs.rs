@@ -9,8 +9,8 @@ use moire::task::FutureExt;
 use std::time::Instant;
 use tracing::{debug, info};
 use vx_runner_proto::{
-    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RunArg, RunRequest, RunResult,
-    RustCompileRequest, RustCompileResult,
+    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RunArg, RunFileMount,
+    RunRequest, RunResult, RunTreeMount, RustCompileRequest, RustCompileResult,
 };
 use vx_store_proto::{
     CasNode, ChunkHash, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry, StoreProgress,
@@ -18,6 +18,35 @@ use vx_store_proto::{
 
 use crate::RunnerService;
 use crate::sandbox::{ActionKind, CommandError};
+
+fn is_relative_vfs_path(path: &str) -> bool {
+    !path.is_empty() && !path.starts_with('/') && !path.split('/').any(|segment| segment == "..")
+}
+
+fn covers_path(prefix: &str, path: &str) -> bool {
+    prefix.is_empty()
+        || path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn path_is_covered(
+    path: &str,
+    tree_mounts: &[RunTreeMount],
+    file_mounts: &[RunFileMount],
+    writable_roots: &[String],
+) -> bool {
+    if path.starts_with("${VX_TOOLCHAIN}/") {
+        return true;
+    }
+
+    tree_mounts
+        .iter()
+        .any(|mount| covers_path(&mount.mount, path))
+        || file_mounts.iter().any(|mount| mount.path == path)
+        || writable_roots.iter().any(|root| covers_path(root, path))
+}
 
 /// Action execution context with all paths and sandbox config.
 pub struct ActionContext {
@@ -1157,6 +1186,61 @@ impl RunnerService {
         let toolchain_path = action.mount_base.join(&toolchain_prefix_id);
         let toolchain_path_str = toolchain_path.as_str().to_string();
 
+        for mount in &request.tree_mounts {
+            if !is_relative_vfs_path(&mount.mount) {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return RunResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!(
+                        "tree mount '{}' must be a relative VFS path",
+                        mount.mount
+                    )),
+                };
+            }
+        }
+
+        for mount in &request.file_mounts {
+            if !is_relative_vfs_path(&mount.path) {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return RunResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!(
+                        "file mount '{}' must be a relative VFS path",
+                        mount.path
+                    )),
+                };
+            }
+        }
+
+        for root in &request.writable_roots {
+            if !is_relative_vfs_path(root) {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return RunResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!(
+                        "writable root '{}' must be a relative VFS path",
+                        root
+                    )),
+                };
+            }
+        }
+
+        // r[impl exec.mount]
         // Mount CAS trees into the prefix.
         for mount in &request.tree_mounts {
             match self.cas.get_node(NodeHash(mount.manifest)).await {
@@ -1326,14 +1410,17 @@ impl RunnerService {
             }
         }
 
-        // Ensure out/ exists.
-        self.create_output_dir_in_prefix(&action.prefix_id)
-            .named("runner.run_vfs.create_output_dir")
-            .await;
+        for root in &request.writable_roots {
+            self.vfs.add_dir_to_prefix(&action.prefix_id, root).await;
+        }
 
-        // Validate outputs are under out/.
+        // Validate outputs are under writable roots.
         for out in &request.outputs {
-            if !out.path.starts_with("out/") {
+            if !request
+                .writable_roots
+                .iter()
+                .any(|root| covers_path(root, &out.path))
+            {
                 self.remove_action_prefix(&action.prefix_id).await;
                 return RunResult {
                     success: false,
@@ -1343,11 +1430,84 @@ impl RunnerService {
                     duration_ms: start.elapsed().as_millis() as u64,
                     output_manifest: None,
                     error: Some(format!(
-                        "output '{}' must be under 'out/' (got '{}')",
+                        "output '{}' must be under a writable root (got '{}')",
                         out.logical, out.path
                     )),
                 };
             }
+        }
+
+        for arg in &request.args {
+            if let RunArg::Path(path) = arg
+                && !path_is_covered(
+                    path,
+                    &request.tree_mounts,
+                    &request.file_mounts,
+                    &request.writable_roots,
+                )
+            {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return RunResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!(
+                        "path arg '{}' is not covered by a mount or writable root",
+                        path
+                    )),
+                };
+            }
+        }
+
+        for (key, value) in &request.env {
+            if let RunArg::Path(path) = value
+                && !path_is_covered(
+                    path,
+                    &request.tree_mounts,
+                    &request.file_mounts,
+                    &request.writable_roots,
+                )
+            {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return RunResult {
+                    success: false,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    output_manifest: None,
+                    error: Some(format!(
+                        "env path '{}' for '{}' is not covered by a mount or writable root",
+                        path, key
+                    )),
+                };
+            }
+        }
+
+        if let Some(cwd) = &request.cwd
+            && !path_is_covered(
+                cwd,
+                &request.tree_mounts,
+                &request.file_mounts,
+                &request.writable_roots,
+            )
+        {
+            self.remove_action_prefix(&action.prefix_id).await;
+            return RunResult {
+                success: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                output_manifest: None,
+                error: Some(format!(
+                    "cwd '{}' is not covered by a mount or writable root",
+                    cwd
+                )),
+            };
         }
 
         let program_path = toolchain_path.join(format!(
@@ -1544,5 +1704,66 @@ impl RunnerService {
             output_manifest: Some(manifest_hash),
             error: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vx_store_proto::Blake3Hash;
+
+    #[test]
+    // r[verify exec.mount]
+    fn path_coverage_uses_mounts_and_writable_roots() {
+        let tree_mounts = vec![RunTreeMount {
+            mount: "src".to_string(),
+            manifest: Blake3Hash([1; 32]),
+        }];
+        let file_mounts = vec![RunFileMount {
+            path: "deps/libutil.rlib".to_string(),
+            manifest: Blake3Hash([2; 32]),
+            logical: "rlib".to_string(),
+        }];
+        let writable_roots = vec!["out".to_string()];
+
+        assert!(path_is_covered(
+            "src/main.rs",
+            &tree_mounts,
+            &file_mounts,
+            &writable_roots,
+        ));
+        assert!(path_is_covered(
+            "deps/libutil.rlib",
+            &tree_mounts,
+            &file_mounts,
+            &writable_roots,
+        ));
+        assert!(path_is_covered(
+            "out/app",
+            &tree_mounts,
+            &file_mounts,
+            &writable_roots,
+        ));
+        assert!(path_is_covered(
+            "${VX_TOOLCHAIN}/sysroot",
+            &tree_mounts,
+            &file_mounts,
+            &writable_roots,
+        ));
+        assert!(!path_is_covered(
+            "tmp/scratch",
+            &tree_mounts,
+            &file_mounts,
+            &writable_roots,
+        ));
+    }
+
+    #[test]
+    // r[verify exec.mount]
+    fn vfs_paths_must_be_relative() {
+        assert!(is_relative_vfs_path("src"));
+        assert!(is_relative_vfs_path("out/app"));
+        assert!(!is_relative_vfs_path("/src"));
+        assert!(!is_relative_vfs_path("../src"));
     }
 }

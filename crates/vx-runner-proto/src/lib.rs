@@ -23,7 +23,7 @@ use vx_store_proto::{ManifestHash, ServiceVersion, StoreProgress};
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 4;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 5;
 
 // =============================================================================
 // Rust Compilation
@@ -317,6 +317,9 @@ pub struct RunRequest {
 
     /// Outputs that must be produced (and will be flushed to CAS).
     pub outputs: Vec<RunOutput>,
+
+    /// Writable directories to create within the action prefix.
+    pub writable_roots: Vec<String>,
 
     /// Optional working directory within the action prefix.
     /// If unset, runner uses the action prefix root.

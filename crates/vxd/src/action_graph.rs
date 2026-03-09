@@ -176,6 +176,7 @@ pub enum Action {
         dep_file_mounts: Vec<RunDepFileMount>,
         collect_file_mounts: Vec<RunCollectInput>,
         outputs: Vec<RunOutput>,
+        writable_roots: Vec<String>,
         materialize: Vec<RunMaterialize>,
     },
 
@@ -672,6 +673,7 @@ impl ActionGraph {
                     .collect(),
                 collect_file_mounts: vec![],
                 outputs,
+                writable_roots: vec!["out".to_string()],
                 materialize: if crate_node.crate_type.as_str() == "bin" {
                     vec![RunMaterialize {
                         logical: "bin".to_string(),
@@ -1131,6 +1133,7 @@ impl ActionGraph {
                     .collect(),
                 collect_file_mounts: vec![],
                 outputs,
+                writable_roots: vec!["out".to_string()],
                 materialize: if crate_node.crate_type.as_str() == "bin" {
                     vec![RunMaterialize {
                         logical: "bin".to_string(),
