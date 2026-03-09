@@ -237,6 +237,23 @@ insert_anchor_links = "heading"
 >
 > Fields are comma-separated. Trailing commas are allowed.
 
+> r[decl.struct.defaults]
+>
+> Fields can have default values:
+>
+> ```vixen
+> Config = struct {
+>   optimize: Bool = false,
+>   jobs: U64 = 8,
+>   target: String,
+> }
+> ```
+>
+> When constructing, fields with defaults can be omitted:
+> `Config { target: "x86_64" }` uses the defaults for `optimize` and
+> `jobs`. Providing a value overrides the default. Defaults are
+> evaluated at construction time.
+
 > r[decl.struct.nested]
 >
 > A field type can be declared inline:
