@@ -1558,19 +1558,21 @@ insert_anchor_links = "heading"
 
 > r[store.path]
 >
-> `Path` is its own type — not a newtype of `String`. Root paths come
-> from `.at()` on store types. Sub-paths are built with the `/` operator.
-> Paths carry their store references — they remember which `Tree` or
-> `Blob` they point into and what sub-path within it.
+> `Path` is its own type at the language level, implemented as a
+> normalized slash-delimited path string rather than a plain `String`.
+> Root paths come from the build entry point and from `exec` mount keys.
+> Sub-paths are built with the `/` operator.
 >
 > In `exec`, Paths in `args` and `env` are resolved to VFS locations
-> using the mount table. The runtime finds the mount that covers the
-> Path's store reference and constructs the VFS path (mount point +
-> sub-path). If no mount covers the referenced content, the evaluator
-> reports an error. See [exec.mount].
+> directly. The executor rewrites `/` separators as needed for the host
+> platform when launching the process. `Path` is a locator only — reads
+> through `#fs` or through `Tree` operations create dependencies and
+> yield `Blob` or `Tree` values. Bare `Path` values do not carry store
+> identity and are not themselves cross-boundary content. See
+> [exec.mount].
 >
 > String interpolation with a `Path` produces an `ExecArg` (not a plain
-> `String`) that preserves store dependencies.
+> `String`) so path values remain paths when passed to `exec`.
 
 ## Exec
 
@@ -1596,8 +1598,10 @@ insert_anchor_links = "heading"
 > r[exec.arg]
 >
 > `ExecArg = String | Path`. A plain `String` is a literal argument. A
-> `Path` carries a store reference — the runtime ensures the referenced
-> content is available in the VFS.
+> `Path` names a VFS location. The runtime preserves it as a path and
+> rewrites separators for the host platform at process launch. It does
+> not implicitly materialize content — the referenced path must be
+> supplied by `mounts` or `writable`.
 
 > r[exec.mount]
 >
@@ -1607,11 +1611,11 @@ insert_anchor_links = "heading"
 > default.
 >
 > Every `Path` that appears in `args` or `env` must be covered by a
-> mount — the runtime resolves each `Path` to its VFS location by
-> finding the mount whose content matches the Path's store reference,
-> then joining the mount point with the Path's sub-path. If no mount
-> covers a referenced `Path`, the evaluator reports an error. This
-> makes the VFS layout explicit — nothing is silently materialized.
+> mount or writable root. Paths refer to VFS locations directly; the
+> runtime does not reverse-map them through content identity. If no
+> mount or writable root covers a referenced `Path`, the evaluator
+> reports an error. This makes the VFS layout explicit — nothing is
+> silently materialized.
 
 > r[exec.writable]
 >
