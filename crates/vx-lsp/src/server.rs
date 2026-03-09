@@ -126,6 +126,8 @@ impl LanguageServer for VxLanguageServer {
                     prepare_provider: Some(true),
                     work_done_progress_options: Default::default(),
                 })),
+                document_highlight_provider: Some(OneOf::Left(true)),
+                selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 semantic_tokens_provider: Some(
@@ -417,6 +419,62 @@ impl LanguageServer for VxLanguageServer {
 
         Ok(result.flatten())
     }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let result = self.with_document(uri, |state| {
+            let offset = state.line_index.offset(vx::Position {
+                line: pos.line,
+                col: pos.character,
+            })?;
+
+            let def = state.definition_at(offset)?;
+
+            let mut highlights = vec![DocumentHighlight {
+                range: state.to_lsp_range(def.name_range),
+                kind: Some(DocumentHighlightKind::WRITE),
+            }];
+
+            for ref_range in state.references_to(def) {
+                highlights.push(DocumentHighlight {
+                    range: state.to_lsp_range(ref_range),
+                    kind: Some(DocumentHighlightKind::READ),
+                });
+            }
+
+            Some(highlights)
+        });
+
+        Ok(result.flatten())
+    }
+
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> Result<Option<Vec<SelectionRange>>> {
+        let uri = &params.text_document.uri;
+
+        let result = self.with_document(uri, |state| {
+            params
+                .positions
+                .iter()
+                .map(|pos| {
+                    let offset = state.line_index.offset(vx::Position {
+                        line: pos.line,
+                        col: pos.character,
+                    });
+                    build_selection_range(state, offset)
+                })
+                .collect::<Vec<_>>()
+        });
+
+        Ok(result)
+    }
 }
 
 impl VxLanguageServer {
@@ -510,6 +568,52 @@ fn def_kind_to_completion(kind: vx_resolve::DefKind) -> CompletionItemKind {
         vx_resolve::DefKind::Variant => CompletionItemKind::ENUM_MEMBER,
         vx_resolve::DefKind::Field => CompletionItemKind::FIELD,
     }
+}
+
+/// Build a nested selection range chain by walking up the syntax tree from a token.
+fn build_selection_range(state: &DocumentState, offset: Option<rowan::TextSize>) -> SelectionRange {
+    let Some(offset) = offset else {
+        return SelectionRange {
+            range: Range::default(),
+            parent: None,
+        };
+    };
+
+    // Find the token at offset, then collect ancestor node ranges
+    let root = state.parsed.tree().syntax().clone();
+    let token = root.token_at_offset(offset).right_biased();
+
+    let mut ranges: Vec<Range> = Vec::new();
+
+    if let Some(token) = token {
+        // Start with the token itself
+        ranges.push(state.to_lsp_range(token.text_range()));
+
+        // Walk up through parent nodes
+        let mut node = token.parent();
+        while let Some(n) = node {
+            let range = state.to_lsp_range(n.text_range());
+            // Only add if it's strictly larger than the previous
+            if ranges.last().is_none_or(|last| range != *last) {
+                ranges.push(range);
+            }
+            node = n.parent();
+        }
+    }
+
+    // Build the linked list from innermost to outermost
+    let mut result = SelectionRange {
+        range: ranges.pop().unwrap_or_default(),
+        parent: None,
+    };
+    while let Some(range) = ranges.pop() {
+        result = SelectionRange {
+            range,
+            parent: Some(Box::new(result)),
+        };
+    }
+
+    result
 }
 
 /// Encode semantic tokens as LSP delta-encoded 5-tuples.
