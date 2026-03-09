@@ -96,6 +96,12 @@ pub enum Expr {
         fields: Vec<(String, Expr)>,
     },
 
+    /// Array literal: `[a, b, c]`
+    Array(Vec<Expr>),
+
+    /// Map literal: `%{ key => value, ... }`
+    Map(Vec<(Expr, Expr)>),
+
     /// Field access: `expr.field`
     Field { receiver: Box<Expr>, field: String },
 

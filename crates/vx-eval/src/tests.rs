@@ -3,14 +3,17 @@
 //! Each test parses Vixen source, lowers it, and evaluates a function call,
 //! asserting the result.
 
+use std::collections::BTreeMap;
+use std::fs;
 use std::sync::Arc;
 use std::time::Instant;
 
+use tempfile::TempDir;
 use vx_parser::SourceFile;
 
 use crate::lower::lower_source_file;
 use crate::poison::PoisonKind;
-use crate::value::{StructValue, Value};
+use crate::value::{BlobValue, PathValue, StructValue, TreeValue, Value};
 use crate::worker::Engine;
 
 fn eval(source: &str, entry: &str) -> Result<Value, crate::poison::PoisonError> {
@@ -20,6 +23,7 @@ fn eval(source: &str, entry: &str) -> Result<Value, crate::poison::PoisonError> 
 
 fn engine(source: &str) -> Engine {
     let parse = vx_parser::parse(source);
+    assert_eq!(parse.errors(), []);
     let root = SourceFile::cast_root(parse.syntax());
     let module = lower_source_file(&root);
     Engine::from_module(&module)
@@ -565,4 +569,94 @@ fn mutually_recursive_functions_share_one_code_identity() {
         engine.function_key("even").unwrap(),
         engine.function_key("odd").unwrap()
     );
+}
+
+#[test]
+// r[verify store.path]
+fn path_values_join_with_normalized_slashes() {
+    let engine = engine(r#"fn main(root: Path) { root / "src" / "./lib.rs" }"#);
+    let value = engine
+        .call("main", vec![Value::Path(PathValue::new("/workspace//"))])
+        .unwrap();
+
+    assert_eq!(value, Value::Path(PathValue::new("/workspace/src/lib.rs")));
+}
+
+#[test]
+// r[verify store.blob]
+// r[verify store.blob.to-string]
+fn blob_from_string_round_trips_text() {
+    let value = eval(
+        r#"fn main() { Blob.from_string("hello").to_string() }"#,
+        "main",
+    )
+    .unwrap();
+    assert_eq!(value, Value::String(Arc::from("hello")));
+}
+
+#[test]
+// r[verify store.tree]
+// r[verify store.tree.file]
+fn tree_of_and_file_only_force_the_selected_entry() {
+    let engine = engine(
+        r#"fn main(other: Blob) {
+               Tree.of(%{
+                 "a.txt" => Blob.from_string("alpha"),
+                 "b.txt" => other,
+               }).file("a.txt").to_string()
+             }"#,
+    );
+    let value = engine
+        .call("main", vec![engine.poison_value("unused tree entry")])
+        .unwrap();
+
+    assert_eq!(value, Value::String(Arc::from("alpha")));
+}
+
+#[test]
+// r[verify store.tree]
+// r[verify store.tree.file]
+// r[verify store.blob.to-string]
+fn fs_backed_trees_read_files_on_demand() {
+    let tempdir = TempDir::new().unwrap();
+    let file_path = tempdir.path().join("hello.txt");
+    fs::write(&file_path, "hello from fs").unwrap();
+
+    let engine = engine(r#"fn main(tree: Tree) { tree.file("hello.txt").to_string() }"#);
+    let tree = Value::Tree(TreeValue::FsDir(PathValue::new(
+        tempdir.path().to_string_lossy(),
+    )));
+    let value = engine.call("main", vec![tree]).unwrap();
+
+    assert_eq!(value, Value::String(Arc::from("hello from fs")));
+}
+
+#[test]
+// r[verify eval.entry]
+fn call_entry_passes_workspace_as_a_path() {
+    let engine = engine(
+        r#"fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+               Tree.of(%{
+                 "workspace.txt" => Blob.from_string(workspace / "src" / "main.rs"),
+               })
+             }"#,
+    );
+    let value = engine
+        .call_entry(
+            "build",
+            "/repo",
+            vec!["build".into()],
+            BTreeMap::from([(String::from("MODE"), String::from("debug"))]),
+        )
+        .unwrap();
+
+    let Value::Tree(TreeValue::Inline(entries)) = value else {
+        panic!("expected tree result");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0.as_ref(), "workspace.txt");
+    let Value::Blob(blob) = &entries[0].1 else {
+        panic!("expected blob entry");
+    };
+    assert_eq!(blob, &BlobValue::from_string("/repo/src/main.rs"));
 }

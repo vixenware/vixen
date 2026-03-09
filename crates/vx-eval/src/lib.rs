@@ -6,18 +6,24 @@
 //! dependency resolves.
 
 mod capability;
-mod instr;
-mod lower;
-mod node;
-mod poison;
-mod value;
-mod worker;
-
 pub use capability::CapabilitySet;
+
+mod instr;
 pub use instr::{BinOp, Expr, FnDef, Module, Stmt, UnaryOp};
+
+mod lower;
+pub use lower::lower_source_file;
+
+mod node;
 pub use node::{NodeId, NodeKey};
+
+mod poison;
 pub use poison::{DemandChain, PoisonError, PoisonKind};
-pub use value::Value;
+
+mod value;
+pub use value::{BlobValue, MapValue, PathValue, TreeValue, Value};
+
+mod worker;
 pub use worker::Engine;
 
 #[cfg(test)]

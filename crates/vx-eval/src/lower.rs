@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use vx_parser::{
-    AstNode, BinaryExpr, BlockExpr, CallExpr, Expr as AstExpr, FailExpr, FieldExpr, FnDecl, IfExpr,
-    Item, LiteralExpr, Parameter, PrefixExpr, SourceFile, Stmt as AstStmt, StructLiteralExpr,
-    StructLiteralField, SyntaxKind,
+    ArrayExpr, AstNode, BinaryExpr, BlockExpr, CallExpr, Expr as AstExpr, FailExpr, FieldExpr,
+    FnDecl, IfExpr, Item, LiteralExpr, MapEntry, MapExpr, Parameter, PrefixExpr, SourceFile,
+    Stmt as AstStmt, StructLiteralExpr, StructLiteralField, SyntaxKind,
 };
 
 use crate::instr;
@@ -103,12 +103,12 @@ fn lower_expr(expr: &AstExpr) -> Option<instr::Expr> {
         AstExpr::Field(field) => lower_field(field),
         AstExpr::Fail(fail) => lower_fail(fail),
         AstExpr::StructLiteral(lit) => lower_struct_literal(lit),
+        AstExpr::Array(array) => lower_array(array),
+        AstExpr::Map(map) => lower_map(map),
         AstExpr::Closure(_)
         | AstExpr::PartialApp(_)
         | AstExpr::Index(_)
         | AstExpr::Match(_)
-        | AstExpr::Array(_)
-        | AstExpr::Map(_)
         | AstExpr::Range(_)
         | AstExpr::TypeOp(_)
         | AstExpr::With(_)
@@ -281,4 +281,21 @@ fn lower_struct_literal(lit: &StructLiteralExpr) -> Option<instr::Expr> {
         .collect();
 
     Some(instr::Expr::StructLit { name, fields })
+}
+
+fn lower_array(array: &ArrayExpr) -> Option<instr::Expr> {
+    let items = array.items().filter_map(|expr| lower_expr(&expr)).collect();
+    Some(instr::Expr::Array(items))
+}
+
+fn lower_map(map: &MapExpr) -> Option<instr::Expr> {
+    let entries = map
+        .entries()
+        .filter_map(|entry: MapEntry| {
+            let key = lower_expr(&entry.key()?)?;
+            let value = lower_expr(&entry.value()?)?;
+            Some((key, value))
+        })
+        .collect();
+    Some(instr::Expr::Map(entries))
 }

@@ -20,3 +20,4 @@ crossbeam-deque = "0.8"
 crossbeam-channel = "0.5"
 
 [dev-dependencies]
+tempfile.workspace = true

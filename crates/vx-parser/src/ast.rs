@@ -795,7 +795,10 @@ impl FieldExpr {
 
     pub fn field_name(&self) -> Option<SyntaxToken> {
         last_token(self.syntax(), |kind| {
-            matches!(kind, SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT)
+            matches!(
+                kind,
+                SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT | SyntaxKind::OF_KW
+            )
         })
     }
 }
@@ -877,7 +880,7 @@ impl NameRefExpr {
             .find(|token| {
                 matches!(
                     token.kind(),
-                    SyntaxKind::LOWER_IDENT | SyntaxKind::DOLLAR_IDENT
+                    SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT | SyntaxKind::DOLLAR_IDENT
                 )
             })
     }

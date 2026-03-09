@@ -4,6 +4,7 @@
 //! `Value::Pending` points at a node whose result will be demanded later.
 
 use std::fmt;
+use std::fs;
 use std::sync::Arc;
 
 use crate::instr::FnDef;
@@ -27,14 +28,57 @@ pub enum Value {
     Bool(bool),
     /// String
     String(Arc<str>),
+    // r[impl store.path]
+    /// A normalized slash-delimited path.
+    Path(PathValue),
+    // r[impl store.blob]
+    /// A file-like content handle.
+    Blob(BlobValue),
+    // r[impl store.tree]
+    /// A directory-like content handle.
+    Tree(TreeValue),
     /// Unit `()`
     Unit,
     /// Tuple
     Tuple(Arc<[Value]>),
+    // i[impl impl.array]
+    /// Ordered array.
+    Array(Arc<[Value]>),
+    // i[impl impl.map]
+    /// Ordered map.
+    Map(MapValue),
     /// Struct instance
     Struct(StructValue),
     /// A function (closure or named function)
     Function(FunctionValue),
+    /// Builtin namespace or bound builtin method.
+    Builtin(BuiltinValue),
+}
+
+/// An ordered map.
+#[derive(Debug, Clone)]
+pub struct MapValue {
+    pub entries: Arc<[(Value, Value)]>,
+}
+
+/// A normalized slash-delimited path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PathValue {
+    raw: Arc<str>,
+}
+
+/// Blob storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlobValue {
+    Inline(Arc<[u8]>),
+    FsFile(PathValue),
+}
+
+/// Tree storage.
+#[derive(Debug, Clone)]
+pub enum TreeValue {
+    Inline(Arc<[(Arc<str>, Value)]>),
+    FsDir(PathValue),
 }
 
 // i[impl impl.persistent]
@@ -56,6 +100,27 @@ pub struct FunctionValue {
     pub captures: Arc<[(Arc<str>, Value)]>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BuiltinNamespace {
+    Blob,
+    Tree,
+}
+
+#[derive(Debug, Clone)]
+pub enum BuiltinMethod {
+    BlobFromString,
+    TreeOf,
+    TreeEmpty,
+    BlobToString { receiver: Box<Value> },
+    TreeFile { receiver: Box<Value> },
+}
+
+#[derive(Debug, Clone)]
+pub enum BuiltinValue {
+    Namespace(BuiltinNamespace),
+    Method(BuiltinMethod),
+}
+
 impl Value {
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -65,10 +130,16 @@ impl Value {
             Value::F64(_) => "F64",
             Value::Bool(_) => "Bool",
             Value::String(_) => "String",
+            Value::Path(_) => "Path",
+            Value::Blob(_) => "Blob",
+            Value::Tree(_) => "Tree",
             Value::Unit => "()",
             Value::Tuple(_) => "Tuple",
+            Value::Array(_) => "Array",
+            Value::Map(_) => "Map",
             Value::Struct(_) => "Struct",
             Value::Function(_) => "Fn",
+            Value::Builtin(_) => "Builtin",
         }
     }
 
@@ -76,11 +147,18 @@ impl Value {
         match self {
             Value::Pending(_) => false,
             Value::Tuple(elems) => elems.iter().all(Self::is_fully_resolved),
+            Value::Array(items) => items.iter().all(Self::is_fully_resolved),
+            Value::Map(map) => map
+                .entries
+                .iter()
+                .all(|(key, value)| key.is_fully_resolved() && value.is_fully_resolved()),
+            Value::Tree(tree) => tree.is_fully_resolved(),
             Value::Struct(s) => s.fields.iter().all(|(_, value)| value.is_fully_resolved()),
             Value::Function(f) => f
                 .captures
                 .iter()
                 .all(|(_, value)| value.is_fully_resolved()),
+            Value::Builtin(builtin) => builtin.is_fully_resolved(),
             _ => true,
         }
     }
@@ -93,11 +171,19 @@ impl Value {
             Value::F64(n) => Some(format!("f64:{}", float_key(*n))),
             Value::Bool(b) => Some(format!("bool:{b}")),
             Value::String(s) => Some(format!("string:{s:?}")),
+            Value::Path(path) => Some(path.key()),
+            Value::Blob(blob) => blob.key(),
+            Value::Tree(tree) => tree.key(),
             Value::Unit => Some("unit".into()),
             Value::Tuple(elems) => {
                 let parts = elems.iter().map(Value::key).collect::<Option<Vec<_>>>()?;
                 Some(format!("tuple:[{}]", parts.join(",")))
             }
+            Value::Array(items) => {
+                let parts = items.iter().map(Value::key).collect::<Option<Vec<_>>>()?;
+                Some(format!("array:[{}]", parts.join(",")))
+            }
+            Value::Map(map) => map.key(),
             Value::Struct(s) => {
                 let parts = s
                     .fields
@@ -107,6 +193,87 @@ impl Value {
                 Some(format!("struct:{}{{{}}}", s.type_name, parts.join(",")))
             }
             Value::Function(function) => Some(function.key()?),
+            Value::Builtin(builtin) => builtin.key(),
+        }
+    }
+}
+
+impl MapValue {
+    pub fn key(&self) -> Option<String> {
+        let parts = self
+            .entries
+            .iter()
+            .map(|(key, value)| Some(format!("{}=>{}", key.key()?, value.key()?)))
+            .collect::<Option<Vec<_>>>()?;
+        Some(format!("map:[{}]", parts.join(",")))
+    }
+}
+
+impl PathValue {
+    pub fn new(path: impl AsRef<str>) -> Self {
+        Self {
+            raw: Arc::from(normalize_path(path.as_ref())),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.raw.as_ref()
+    }
+
+    pub fn join(&self, child: &str) -> Self {
+        Self::new(join_paths(self.as_str(), child))
+    }
+
+    pub fn key(&self) -> String {
+        format!("path:{}", self.as_str())
+    }
+}
+
+impl BlobValue {
+    pub fn from_string(value: impl AsRef<str>) -> Self {
+        Self::Inline(Arc::from(value.as_ref().as_bytes()))
+    }
+
+    // r[impl store.blob.to-string]
+    pub fn to_utf8_string(&self) -> Result<Arc<str>, String> {
+        let bytes = match self {
+            BlobValue::Inline(bytes) => bytes.to_vec(),
+            BlobValue::FsFile(path) => fs::read(path.as_str())
+                .map_err(|error| format!("failed to read {}: {error}", path.as_str()))?,
+        };
+        let text =
+            String::from_utf8(bytes).map_err(|error| format!("blob is not UTF-8: {error}"))?;
+        Ok(Arc::from(text))
+    }
+
+    pub fn key(&self) -> Option<String> {
+        match self {
+            BlobValue::Inline(bytes) => Some(format!("blob:{}", hex_bytes(bytes))),
+            BlobValue::FsFile(_) => None,
+        }
+    }
+}
+
+impl TreeValue {
+    pub fn is_fully_resolved(&self) -> bool {
+        match self {
+            TreeValue::Inline(entries) => {
+                entries.iter().all(|(_, value)| value.is_fully_resolved())
+            }
+            TreeValue::FsDir(_) => true,
+        }
+    }
+
+    pub fn key(&self) -> Option<String> {
+        match self {
+            TreeValue::Inline(entries) => {
+                let parts = entries
+                    .iter()
+                    .map(|(name, value)| Some(format!("{name}:{}", value.key()?)))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(format!("tree:{{{}}}", parts.join(",")))
+            }
+            TreeValue::FsDir(_) => None,
         }
     }
 }
@@ -132,6 +299,39 @@ impl FunctionValue {
     }
 }
 
+impl BuiltinValue {
+    pub fn is_fully_resolved(&self) -> bool {
+        match self {
+            BuiltinValue::Namespace(_)
+            | BuiltinValue::Method(BuiltinMethod::BlobFromString)
+            | BuiltinValue::Method(BuiltinMethod::TreeOf)
+            | BuiltinValue::Method(BuiltinMethod::TreeEmpty) => true,
+            BuiltinValue::Method(BuiltinMethod::BlobToString { receiver })
+            | BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => {
+                receiver.is_fully_resolved()
+            }
+        }
+    }
+
+    pub fn key(&self) -> Option<String> {
+        match self {
+            BuiltinValue::Namespace(BuiltinNamespace::Blob) => Some("builtin:Blob".into()),
+            BuiltinValue::Namespace(BuiltinNamespace::Tree) => Some("builtin:Tree".into()),
+            BuiltinValue::Method(BuiltinMethod::BlobFromString) => {
+                Some("builtin:Blob.from_string".into())
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeOf) => Some("builtin:Tree.of".into()),
+            BuiltinValue::Method(BuiltinMethod::TreeEmpty) => Some("builtin:Tree.empty".into()),
+            BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
+                Some(format!("builtin:blob.to_string({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => {
+                Some(format!("builtin:tree.file({})", receiver.key()?))
+            }
+        }
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -141,6 +341,9 @@ impl fmt::Display for Value {
             Value::F64(n) => write!(f, "{n}"),
             Value::Bool(b) => write!(f, "{b}"),
             Value::String(s) => write!(f, "{s}"),
+            Value::Path(path) => write!(f, "{}", path.as_str()),
+            Value::Blob(blob) => write!(f, "{blob}"),
+            Value::Tree(tree) => write!(f, "{tree}"),
             Value::Unit => write!(f, "()"),
             Value::Tuple(elems) => {
                 write!(f, "(")?;
@@ -155,6 +358,26 @@ impl fmt::Display for Value {
                 }
                 write!(f, ")")
             }
+            Value::Array(items) => {
+                write!(f, "[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, "]")
+            }
+            Value::Map(map) => {
+                write!(f, "%{{")?;
+                for (i, (key, value)) in map.entries.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{key} => {value}")?;
+                }
+                write!(f, "}}")
+            }
             Value::Struct(s) => {
                 write!(f, "{} {{ ", s.type_name)?;
                 for (i, (name, val)) in s.fields.iter().enumerate() {
@@ -166,6 +389,7 @@ impl fmt::Display for Value {
                 write!(f, " }}")
             }
             Value::Function(func) => write!(f, "<fn {}>", func.def.name),
+            Value::Builtin(builtin) => write!(f, "{builtin}"),
         }
     }
 }
@@ -179,20 +403,115 @@ impl PartialEq for Value {
             (Value::F64(a), Value::F64(b)) => float_eq(*a, *b),
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
+            (Value::Path(a), Value::Path(b)) => a == b,
+            (Value::Blob(a), Value::Blob(b)) => a == b,
+            (Value::Tree(a), Value::Tree(b)) => a == b,
             (Value::Unit, Value::Unit) => true,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
+            (Value::Array(a), Value::Array(b)) => a == b,
+            (Value::Map(a), Value::Map(b)) => a == b,
             (Value::Struct(a), Value::Struct(b)) => {
                 a.type_name == b.type_name && a.fields == b.fields
             }
             (Value::Function(a), Value::Function(b)) => {
                 a.identity() == b.identity() && a.captures == b.captures
             }
+            (Value::Builtin(a), Value::Builtin(b)) => a == b,
             _ => false,
         }
     }
 }
 
 impl Eq for Value {}
+
+impl PartialEq for MapValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+
+impl Eq for MapValue {}
+
+impl PartialEq for TreeValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TreeValue::Inline(a), TreeValue::Inline(b)) => a == b,
+            (TreeValue::FsDir(a), TreeValue::FsDir(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for TreeValue {}
+
+impl PartialEq for BuiltinMethod {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (BuiltinMethod::BlobFromString, BuiltinMethod::BlobFromString)
+            | (BuiltinMethod::TreeOf, BuiltinMethod::TreeOf)
+            | (BuiltinMethod::TreeEmpty, BuiltinMethod::TreeEmpty) => true,
+            (
+                BuiltinMethod::BlobToString { receiver: left },
+                BuiltinMethod::BlobToString { receiver: right },
+            )
+            | (
+                BuiltinMethod::TreeFile { receiver: left },
+                BuiltinMethod::TreeFile { receiver: right },
+            ) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for BuiltinMethod {}
+
+impl PartialEq for BuiltinValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (BuiltinValue::Namespace(a), BuiltinValue::Namespace(b)) => a == b,
+            (BuiltinValue::Method(a), BuiltinValue::Method(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for BuiltinValue {}
+
+impl fmt::Display for BlobValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BlobValue::Inline(bytes) => write!(f, "<blob {} bytes>", bytes.len()),
+            BlobValue::FsFile(path) => write!(f, "<blob {}>", path.as_str()),
+        }
+    }
+}
+
+impl fmt::Display for TreeValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TreeValue::Inline(entries) => write!(f, "<tree {} entries>", entries.len()),
+            TreeValue::FsDir(path) => write!(f, "<tree {}>", path.as_str()),
+        }
+    }
+}
+
+impl fmt::Display for BuiltinValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BuiltinValue::Namespace(BuiltinNamespace::Blob) => write!(f, "Blob"),
+            BuiltinValue::Namespace(BuiltinNamespace::Tree) => write!(f, "Tree"),
+            BuiltinValue::Method(BuiltinMethod::BlobFromString) => write!(f, "Blob.from_string"),
+            BuiltinValue::Method(BuiltinMethod::TreeOf) => write!(f, "Tree.of"),
+            BuiltinValue::Method(BuiltinMethod::TreeEmpty) => write!(f, "Tree.empty"),
+            BuiltinValue::Method(BuiltinMethod::BlobToString { .. }) => {
+                write!(f, "<bound blob.to_string>")
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeFile { .. }) => {
+                write!(f, "<bound tree.file>")
+            }
+        }
+    }
+}
 
 fn float_eq(left: f64, right: f64) -> bool {
     if left.is_nan() && right.is_nan() {
@@ -212,4 +531,55 @@ fn float_key(value: f64) -> String {
     } else {
         value.to_bits().to_string()
     }
+}
+
+fn normalize_path(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    let is_absolute = path.starts_with('/');
+    let mut parts = Vec::new();
+
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.last().is_some_and(|segment: &&str| *segment != "..") {
+                    parts.pop();
+                } else if !is_absolute {
+                    parts.push("..");
+                }
+            }
+            _ => parts.push(part),
+        }
+    }
+
+    let joined = parts.join("/");
+    if is_absolute {
+        if joined.is_empty() {
+            "/".into()
+        } else {
+            format!("/{joined}")
+        }
+    } else if joined.is_empty() {
+        ".".into()
+    } else {
+        joined
+    }
+}
+
+fn join_paths(base: &str, child: &str) -> String {
+    if child.starts_with('/') {
+        return normalize_path(child);
+    }
+    let base = normalize_path(base);
+    if base == "/" {
+        return normalize_path(&format!("/{child}"));
+    }
+    if base == "." {
+        return normalize_path(child);
+    }
+    normalize_path(&format!("{base}/{child}"))
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

@@ -1,9 +1,10 @@
 use rowan::TextSize;
 
 use crate::{
-    AstNode, Expr, FoldingRangeKind, InterpolatedStringExpr, Item, LineIndex, Pattern, Position,
-    SemanticTokenType, SourceFile, Stmt, StringPart, SymbolKind, SyntaxKind, Type, doc_comment,
-    document_symbols, enclosing_nodes, folding_ranges, parse, parse_source_file, semantic_tokens,
+    AstNode, Expr, FieldExpr, FoldingRangeKind, InterpolatedStringExpr, Item, LineIndex, Pattern,
+    Position, SemanticTokenType, SourceFile, Stmt, StringPart, SymbolKind, SyntaxKind, Type,
+    doc_comment, document_symbols, enclosing_nodes, folding_ranges, parse, parse_source_file,
+    semantic_tokens,
 };
 
 #[test]
@@ -110,6 +111,39 @@ fn value(x: F64, p: Point, defaults: Config) -> Point {
     assert!(kinds.contains(&SyntaxKind::STRUCT_LITERAL_EXPR));
     assert!(kinds.contains(&SyntaxKind::WITH_EXPR));
     assert!(kinds.contains(&SyntaxKind::UPDATE_BODY));
+}
+
+#[test]
+fn upper_ident_name_refs_expose_their_token() {
+    let parse = parse(r#"fn value() { Blob.from_string("hello") }"#);
+    assert_eq!(parse.errors(), []);
+
+    let name_refs = parse
+        .syntax()
+        .descendants()
+        .filter_map(Expr::cast)
+        .filter_map(|expr| match expr {
+            Expr::NameRef(name_ref) => Some(name_ref.token().unwrap().text().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert!(name_refs.contains(&"Blob".to_string()));
+}
+
+#[test]
+fn keyword_like_field_names_parse_after_dot() {
+    let parse = parse(r#"fn value() { Tree.of(%{}) }"#);
+    assert_eq!(parse.errors(), []);
+
+    let field_names = parse
+        .syntax()
+        .descendants()
+        .filter_map(FieldExpr::cast)
+        .map(|field| field.field_name().unwrap().text().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(field_names.contains(&"of".to_string()));
 }
 
 #[test]

@@ -6,6 +6,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs;
 use std::sync::Arc;
 use std::thread;
 #[cfg(test)]
@@ -17,7 +18,10 @@ use dashmap::mapref::entry::Entry;
 use crate::instr::{self, BinOp, UnaryOp};
 use crate::node::{Node, NodeId, NodeJob, NodeKey, Outcome, Waiter};
 use crate::poison::{DemandChain, DemandEntry, PoisonError, PoisonKind};
-use crate::value::{FunctionValue, StructValue, Value};
+use crate::value::{
+    BlobValue, BuiltinMethod, BuiltinNamespace, BuiltinValue, FunctionValue, MapValue, PathValue,
+    StructValue, TreeValue, Value,
+};
 
 thread_local! {
     static DEMAND_STACK: RefCell<Vec<NodeId>> = const { RefCell::new(Vec::new()) };
@@ -83,10 +87,7 @@ impl Engine {
 
     #[cfg(test)]
     pub(crate) fn force_shallow(&self, value: Value) -> Result<Value, PoisonError> {
-        match value {
-            Value::Pending(node_id) => self.force_pending_shallow(node_id),
-            other => Ok(other),
-        }
+        self.force_value_shallow(value)
     }
 
     #[cfg(test)]
@@ -118,6 +119,43 @@ impl Engine {
         self.global_function_value(self.resolve_function(name, &[])?)
             .key()
             .ok_or_else(|| self.internal_error("top-level function key should be resolved"))
+    }
+
+    // r[impl eval.entry]
+    pub fn call_entry(
+        &self,
+        name: &str,
+        workspace: impl AsRef<str>,
+        args: Vec<String>,
+        env: BTreeMap<String, String>,
+    ) -> Result<Value, PoisonError> {
+        let workspace = Value::Path(PathValue::new(workspace.as_ref()));
+        let args = Value::Array(Arc::from(
+            args.into_iter()
+                .map(|arg| Value::String(Arc::from(arg)))
+                .collect::<Vec<_>>(),
+        ));
+        let env = Value::Map(MapValue {
+            entries: Arc::from(
+                env.into_iter()
+                    .map(|(key, value)| {
+                        (
+                            Value::String(Arc::from(key)),
+                            Value::String(Arc::from(value)),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        });
+
+        let value = self.call(name, vec![workspace, args, env])?;
+        match value {
+            Value::Tree(_) => Ok(value),
+            other => Err(self.type_error(&format!(
+                "build entry must return Tree, got {}",
+                other.type_name()
+            ))),
+        }
     }
 
     fn global_function_value(&self, def: Arc<instr::FnDef>) -> FunctionValue {
@@ -203,6 +241,13 @@ impl Engine {
         Value::Pending(node_id)
     }
 
+    fn force_value_shallow(&self, value: Value) -> Result<Value, PoisonError> {
+        match value {
+            Value::Pending(node_id) => self.force_pending_shallow(node_id),
+            other => Ok(other),
+        }
+    }
+
     // r[impl eval.forcing.boundary]
     fn force_value(&self, value: Value) -> Result<Value, PoisonError> {
         match value {
@@ -214,6 +259,50 @@ impl Engine {
                 let forced = self.force_many(elems.iter().cloned().collect())?;
                 Ok(Value::Tuple(Arc::from(forced)))
             }
+            Value::Array(items) => {
+                let forced = self.force_many(items.iter().cloned().collect())?;
+                Ok(Value::Array(Arc::from(forced)))
+            }
+            Value::Map(map) => {
+                let keys = map
+                    .entries
+                    .iter()
+                    .map(|(key, _)| key.clone())
+                    .collect::<Vec<_>>();
+                let values = map
+                    .entries
+                    .iter()
+                    .map(|(_, value)| value.clone())
+                    .collect::<Vec<_>>();
+                let forced_keys = self.force_many(keys)?;
+                let forced_values = self.force_many(values)?;
+                Ok(Value::Map(MapValue {
+                    entries: Arc::from(
+                        forced_keys
+                            .into_iter()
+                            .zip(forced_values)
+                            .collect::<Vec<_>>(),
+                    ),
+                }))
+            }
+            Value::Tree(tree) => match tree {
+                TreeValue::Inline(entries) => {
+                    let names = entries
+                        .iter()
+                        .map(|(name, _)| name.clone())
+                        .collect::<Vec<_>>();
+                    let values = entries
+                        .iter()
+                        .map(|(_, value)| value.clone())
+                        .collect::<Vec<_>>();
+                    let forced = self.force_many(values)?;
+                    self.validate_tree_entries(&forced)?;
+                    Ok(Value::Tree(TreeValue::Inline(Arc::from(
+                        names.into_iter().zip(forced).collect::<Vec<_>>(),
+                    ))))
+                }
+                TreeValue::FsDir(path) => Ok(Value::Tree(TreeValue::FsDir(path))),
+            },
             Value::Struct(struct_value) => {
                 let names = struct_value
                     .fields
@@ -345,8 +434,8 @@ impl Engine {
             NodeJob::Call { function, args } => self.execute_call(function.clone(), args.clone()),
             NodeJob::Invoke { function, args } => self.invoke_function(function, args.clone()),
             NodeJob::Field { receiver, field } => {
-                let receiver = self.force_value(receiver.clone())?;
-                self.extract_field(&receiver, field)
+                let receiver = self.force_value_shallow(receiver.clone())?;
+                self.select_field(&receiver, field)
             }
             NodeJob::Fail { message } => Err(self.user_fail(message.clone())?),
             #[cfg(test)]
@@ -363,6 +452,7 @@ impl Engine {
     fn execute_call(&self, function: Value, args: Arc<[Value]>) -> Result<Value, PoisonError> {
         let function = match self.force_value(function)? {
             Value::Function(function) => function,
+            Value::Builtin(builtin) => return self.invoke_builtin(&builtin, &args),
             other => {
                 return Err(self.type_error(&format!("cannot call {}", other.type_name())));
             }
@@ -465,6 +555,8 @@ impl Engine {
                     BuildResult::Value(Value::Function(
                         self.global_function_value(overloads[0].clone()),
                     ))
+                } else if let Some(builtin) = builtin_namespace(name) {
+                    BuildResult::Value(Value::Builtin(builtin))
                 } else {
                     BuildResult::Poisoned(self.unresolved_name(name))
                 }
@@ -566,28 +658,49 @@ impl Engine {
                     fields: Arc::from(values),
                 }))
             }
+            instr::Expr::Array(items) => {
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    match self.eval_expr(item, bindings) {
+                        BuildResult::Value(value) => values.push(value),
+                        other => return other,
+                    }
+                }
+                BuildResult::Value(Value::Array(Arc::from(values)))
+            }
+            instr::Expr::Map(entries) => {
+                let mut values = Vec::with_capacity(entries.len());
+                for (key_expr, value_expr) in entries {
+                    let key = match self.eval_expr(key_expr, bindings) {
+                        BuildResult::Value(value) => value,
+                        other => return other,
+                    };
+                    let value = match self.eval_expr(value_expr, bindings) {
+                        BuildResult::Value(value) => value,
+                        other => return other,
+                    };
+                    values.push((key, value));
+                }
+                BuildResult::Value(Value::Map(MapValue {
+                    entries: Arc::from(values),
+                }))
+            }
             instr::Expr::Field { receiver, field } => {
                 let receiver = match self.eval_expr(receiver, bindings) {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
 
-                match &receiver {
-                    Value::Struct(_) | Value::Tuple(_) => {
-                        BuildResult::from_result(self.extract_field(&receiver, field))
-                    }
-                    Value::Pending(_) => BuildResult::Value(self.pending_value(
+                if matches!(receiver, Value::Pending(_)) {
+                    BuildResult::Value(self.pending_value(
                         NodeJob::Field {
                             receiver,
                             field: Arc::from(field.as_str()),
                         },
                         format!("field(.{field})"),
-                    )),
-                    other => BuildResult::Poisoned(self.type_error(&format!(
-                        "cannot access field '{}' on {}",
-                        field,
-                        other.type_name()
-                    ))),
+                    ))
+                } else {
+                    BuildResult::from_result(self.select_field(&receiver, field))
                 }
             }
             // r[impl error.fail]
@@ -611,7 +724,7 @@ impl Engine {
         }
     }
 
-    fn extract_field(&self, receiver: &Value, field: &str) -> Result<Value, PoisonError> {
+    fn select_field(&self, receiver: &Value, field: &str) -> Result<Value, PoisonError> {
         match receiver {
             Value::Struct(struct_value) => struct_value
                 .fields
@@ -632,6 +745,31 @@ impl Engine {
                     return Ok(value.clone());
                 }
                 Err(self.type_error(&format!("invalid tuple field '{}'", field)))
+            }
+            Value::Blob(_) if field == "to_string" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::BlobToString {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::Tree(_) if field == "file" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::TreeFile {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::Builtin(BuiltinValue::Namespace(BuiltinNamespace::Blob))
+                if field == "from_string" =>
+            {
+                Ok(Value::Builtin(BuiltinValue::Method(
+                    BuiltinMethod::BlobFromString,
+                )))
+            }
+            Value::Builtin(BuiltinValue::Namespace(BuiltinNamespace::Tree)) if field == "of" => {
+                Ok(Value::Builtin(BuiltinValue::Method(BuiltinMethod::TreeOf)))
+            }
+            Value::Builtin(BuiltinValue::Namespace(BuiltinNamespace::Tree)) if field == "empty" => {
+                Ok(Value::Builtin(BuiltinValue::Method(
+                    BuiltinMethod::TreeEmpty,
+                )))
             }
             other => Err(self.type_error(&format!(
                 "cannot access field '{}' on {}",
@@ -662,6 +800,13 @@ impl Engine {
                 Err(self.arithmetic_error("division by zero"))
             }
             (BinOp::Div, Value::I64(a), Value::I64(b)) => Ok(Value::I64(a / b)),
+
+            (BinOp::Div, Value::Path(base), Value::String(child)) => {
+                Ok(Value::Path(base.join(child.as_ref())))
+            }
+            (BinOp::Div, Value::Path(base), Value::Path(child)) => {
+                Ok(Value::Path(base.join(child.as_str())))
+            }
 
             (BinOp::Add, Value::F64(a), Value::F64(b)) => Ok(Value::F64(a + b)),
             (BinOp::Sub, Value::F64(a), Value::F64(b)) => Ok(Value::F64(a - b)),
@@ -712,6 +857,250 @@ impl Engine {
             (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
             _ => Err(self.type_error(&format!("cannot apply {:?} to {}", op, value.type_name()))),
         }
+    }
+
+    fn invoke_builtin(&self, builtin: &BuiltinValue, args: &[Value]) -> Result<Value, PoisonError> {
+        match builtin {
+            BuiltinValue::Namespace(namespace) => {
+                Err(self.type_error(&format!("cannot call builtin namespace {:?}", namespace)))
+            }
+            BuiltinValue::Method(BuiltinMethod::BlobFromString) => {
+                self.check_arity("Blob.from_string", args, 1)?;
+                let value = &args[0];
+                let value = self.force_value(value.clone())?;
+                let text = self.stringify_scalar(&value)?;
+                Ok(Value::Blob(BlobValue::from_string(text)))
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeOf) => {
+                self.check_arity("Tree.of", args, 1)?;
+                let value = &args[0];
+                let value = self.force_value_shallow(value.clone())?;
+                let Value::Map(map) = value else {
+                    return Err(
+                        self.type_error(&format!("Tree.of expects Map, got {}", value.type_name()))
+                    );
+                };
+                self.tree_from_map(&map)
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeEmpty) => {
+                self.check_arity("Tree.empty", args, 0)?;
+                Ok(Value::Tree(TreeValue::Inline(Arc::from([]))))
+            }
+            BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
+                self.check_arity("blob.to_string", args, 0)?;
+                let receiver = self.force_value(receiver.as_ref().clone())?;
+                let Value::Blob(blob) = receiver else {
+                    return Err(self.type_error("blob.to_string receiver must be Blob"));
+                };
+                let text = blob.to_utf8_string().map_err(|message| {
+                    PoisonError::new(
+                        PoisonKind::TypeError,
+                        message,
+                        self.current_demand_chain(None),
+                    )
+                })?;
+                Ok(Value::String(text))
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => {
+                self.check_arity("tree.file", args, 1)?;
+                let path = &args[0];
+                let path = self.force_value(path.clone())?;
+                let path = self.expect_relative_path(&path, "tree.file path")?;
+                let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
+                let Value::Tree(tree) = receiver else {
+                    return Err(self.type_error("tree.file receiver must be Tree"));
+                };
+                self.tree_file(&tree, path)
+            }
+        }
+    }
+
+    fn tree_from_map(&self, map: &MapValue) -> Result<Value, PoisonError> {
+        let mut entries = Vec::with_capacity(map.entries.len());
+        for (key, value) in map.entries.iter() {
+            let key = self.force_value(key.clone())?;
+            let name = self.expect_tree_entry_name(&key)?;
+            entries.push((Arc::from(name), value.clone()));
+        }
+        self.validate_tree_entries(
+            &entries
+                .iter()
+                .map(|(_, value)| value.clone())
+                .collect::<Vec<_>>(),
+        )?;
+        Ok(Value::Tree(TreeValue::Inline(Arc::from(entries))))
+    }
+
+    // r[impl store.tree.file]
+    fn tree_file(&self, tree: &TreeValue, path: PathValue) -> Result<Value, PoisonError> {
+        match tree {
+            TreeValue::Inline(entries) => self.tree_file_inline(entries, &path),
+            TreeValue::FsDir(root) => {
+                let full_path = root.join(path.as_str());
+                let metadata = fs::metadata(full_path.as_str()).map_err(|error| {
+                    PoisonError::new(
+                        PoisonKind::UserFail,
+                        format!("missing file {}: {error}", full_path.as_str()),
+                        self.current_demand_chain(None),
+                    )
+                })?;
+                if metadata.is_dir() {
+                    return Err(PoisonError::new(
+                        PoisonKind::UserFail,
+                        format!("{} is a directory", full_path.as_str()),
+                        self.current_demand_chain(None),
+                    ));
+                }
+                Ok(Value::Blob(BlobValue::FsFile(full_path)))
+            }
+        }
+    }
+
+    fn tree_file_inline(
+        &self,
+        entries: &[(Arc<str>, Value)],
+        path: &PathValue,
+    ) -> Result<Value, PoisonError> {
+        let segments = path
+            .as_str()
+            .split('/')
+            .filter(|segment| !segment.is_empty() && *segment != ".")
+            .collect::<Vec<_>>();
+        if segments.is_empty() {
+            return Err(PoisonError::new(
+                PoisonKind::UserFail,
+                "tree.file path must not be empty",
+                self.current_demand_chain(None),
+            ));
+        }
+        self.tree_file_inline_segments(entries, &segments, path)
+    }
+
+    fn tree_file_inline_segments(
+        &self,
+        entries: &[(Arc<str>, Value)],
+        segments: &[&str],
+        original_path: &PathValue,
+    ) -> Result<Value, PoisonError> {
+        let segment = segments[0];
+        let (_, value) = entries
+            .iter()
+            .find(|(name, _)| name.as_ref() == segment)
+            .ok_or_else(|| {
+                PoisonError::new(
+                    PoisonKind::UserFail,
+                    format!("missing file {}", original_path.as_str()),
+                    self.current_demand_chain(None),
+                )
+            })?;
+        let value = self.force_value(value.clone())?;
+
+        if segments.len() == 1 {
+            return match value {
+                Value::Blob(blob) => Ok(Value::Blob(blob)),
+                Value::Tree(_) => Err(PoisonError::new(
+                    PoisonKind::UserFail,
+                    format!("{} points to a directory", original_path.as_str()),
+                    self.current_demand_chain(None),
+                )),
+                other => Err(self.type_error(&format!(
+                    "tree entry must be Blob or Tree, got {}",
+                    other.type_name()
+                ))),
+            };
+        }
+
+        match value {
+            Value::Tree(TreeValue::Inline(entries)) => {
+                self.tree_file_inline_segments(entries.as_ref(), &segments[1..], original_path)
+            }
+            Value::Tree(TreeValue::FsDir(root)) => self.tree_file(
+                &TreeValue::FsDir(root),
+                PathValue::new(segments[1..].join("/")),
+            ),
+            Value::Blob(_) => Err(PoisonError::new(
+                PoisonKind::UserFail,
+                format!("{} points inside a file", original_path.as_str()),
+                self.current_demand_chain(None),
+            )),
+            other => Err(self.type_error(&format!(
+                "tree entry must be Blob or Tree, got {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn validate_tree_entries(&self, values: &[Value]) -> Result<(), PoisonError> {
+        for value in values {
+            match value {
+                Value::Blob(_) | Value::Tree(_) | Value::Pending(_) => {}
+                other => {
+                    return Err(self.type_error(&format!(
+                        "tree entries must be Blob or Tree, got {}",
+                        other.type_name()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_arity(&self, name: &str, args: &[Value], expected: usize) -> Result<(), PoisonError> {
+        if args.len() != expected {
+            return Err(self.type_error(&format!(
+                "{name} expects {expected} argument(s), got {}",
+                args.len()
+            )));
+        }
+        Ok(())
+    }
+
+    fn stringify_scalar(&self, value: &Value) -> Result<String, PoisonError> {
+        match value {
+            Value::String(text) => Ok(text.to_string()),
+            Value::Path(path) => Ok(path.as_str().to_string()),
+            Value::Bool(_) | Value::U64(_) | Value::I64(_) | Value::F64(_) | Value::Unit => {
+                Ok(value.to_string())
+            }
+            other => {
+                Err(self.type_error(&format!("cannot turn {} into Blob text", other.type_name())))
+            }
+        }
+    }
+
+    fn expect_tree_entry_name<'a>(&self, value: &'a Value) -> Result<&'a str, PoisonError> {
+        match value {
+            Value::String(name) => Ok(name.as_ref()),
+            Value::Path(path) => {
+                let name = path.as_str();
+                if name == "." || name == "/" || name.contains('/') {
+                    Err(self.type_error("Tree.of entry names must be a single path segment"))
+                } else {
+                    Ok(name)
+                }
+            }
+            other => Err(self.type_error(&format!(
+                "Tree.of keys must be String or Path, got {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn expect_relative_path(&self, value: &Value, context: &str) -> Result<PathValue, PoisonError> {
+        let path = match value {
+            Value::Path(path) => path.clone(),
+            Value::String(path) => PathValue::new(path.as_ref()),
+            other => {
+                return Err(self.type_error(&format!(
+                    "{context} must be Path or String, got {}",
+                    other.type_name()
+                )));
+            }
+        };
+        if path.as_str().starts_with('/') {
+            return Err(self.type_error(&format!("{context} must be relative")));
+        }
+        Ok(path)
     }
 
     fn resolve_function(
@@ -856,6 +1245,14 @@ fn capture_bindings(bindings: &HashMap<String, Value>) -> Arc<[(Arc<str>, Value)
         .collect::<Vec<_>>();
     captures.sort_by(|left, right| left.0.cmp(&right.0));
     Arc::from(captures)
+}
+
+fn builtin_namespace(name: &str) -> Option<BuiltinValue> {
+    match name {
+        "Blob" => Some(BuiltinValue::Namespace(BuiltinNamespace::Blob)),
+        "Tree" => Some(BuiltinValue::Namespace(BuiltinNamespace::Tree)),
+        _ => None,
+    }
 }
 
 fn fn_ptr(def: &Arc<instr::FnDef>) -> usize {
@@ -1138,6 +1535,17 @@ fn collect_expr_callee_names(
         }
         instr::Expr::StructLit { fields, .. } => {
             for (_, value) in fields {
+                collect_expr_callee_names(value, visible_locals, top_level_names, deps);
+            }
+        }
+        instr::Expr::Array(items) => {
+            for item in items {
+                collect_expr_callee_names(item, visible_locals, top_level_names, deps);
+            }
+        }
+        instr::Expr::Map(entries) => {
+            for (key, value) in entries {
+                collect_expr_callee_names(key, visible_locals, top_level_names, deps);
                 collect_expr_callee_names(value, visible_locals, top_level_names, deps);
             }
         }

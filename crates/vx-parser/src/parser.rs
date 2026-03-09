@@ -1113,7 +1113,7 @@ fn postfix_expr(p: &mut Parser<'_>) -> CompletedMarker {
             p.bump();
             if matches!(
                 p.current(),
-                SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT
+                SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT | SyntaxKind::OF_KW
             ) {
                 p.bump();
             } else {
