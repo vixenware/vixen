@@ -26,12 +26,14 @@ impl NodeId {
     }
 }
 
+// r[impl eval.memoization.pending]
 /// The key used to look up memoized nodes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NodeKey {
     pub identity: String,
 }
 
+// r[impl eval.demand]
 /// A lazy computation that can produce a `Value`.
 #[derive(Debug, Clone)]
 pub enum NodeJob {
@@ -79,6 +81,7 @@ pub struct Waiter {
     pub sender: crossbeam_channel::Sender<(NodeId, Outcome)>,
 }
 
+// i[impl impl.persistent]
 /// The state of a node in the dataflow graph.
 pub enum NodeState {
     /// Evaluation hasn't started yet.

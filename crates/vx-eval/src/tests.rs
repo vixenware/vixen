@@ -276,6 +276,8 @@ fn fibonacci() {
 }
 
 #[test]
+// r[verify eval.forcing.boundary]
+// r[verify eval.pending]
 fn unused_pending_arg_is_not_forced() {
     let engine = engine("fn first(x: U64, y: U64) { x }");
     let pending = engine.poison_value("unused");
@@ -286,6 +288,7 @@ fn unused_pending_arg_is_not_forced() {
 }
 
 #[test]
+// r[verify eval.pending]
 fn field_access_does_not_force_other_fields() {
     let engine = engine("fn get_x(pair: Pair) { pair.x }");
     let value = engine
@@ -305,6 +308,7 @@ fn field_access_does_not_force_other_fields() {
 }
 
 #[test]
+// r[verify eval.memoization.pending]
 fn resolved_calls_are_memoized() {
     let engine = engine("fn double(x: U64) { x + x }");
 
@@ -320,4 +324,72 @@ fn resolved_calls_are_memoized() {
         Value::U64(42)
     );
     assert_eq!(engine.memoized_call_count(), 1);
+}
+
+#[test]
+// r[verify eval.pending]
+// r[verify eval.enter-functions]
+fn structs_can_hold_pending_children_inside_the_orchestrator() {
+    let engine = engine("fn pair(x: U64, y: U64) { Pair { x: x, y: y } }");
+    let call = engine
+        .call_unforced(
+            "pair",
+            vec![Value::U64(1), engine.poison_value("pending child")],
+        )
+        .unwrap();
+
+    let pair = engine.force_shallow(call).unwrap();
+    let Value::Struct(pair) = pair else {
+        panic!("expected struct result");
+    };
+    assert_eq!(pair.fields[0].0.as_ref(), "x");
+    assert_eq!(pair.fields[0].1, Value::U64(1));
+    assert_eq!(pair.fields[1].0.as_ref(), "y");
+    assert!(matches!(pair.fields[1].1, Value::Pending(_)));
+
+    let err = engine.force_fully(Value::Struct(pair)).unwrap_err();
+    assert_eq!(err.kind, PoisonKind::UserFail);
+}
+
+#[test]
+// r[verify eval.forcing]
+fn binary_ops_with_pending_inputs_produce_pending_results() {
+    let engine = engine(
+        "fn first(x: U64, y: U64) { x }
+         fn add(x: U64, y: U64) { x + y }",
+    );
+    let left = engine
+        .call_unforced(
+            "first",
+            vec![Value::U64(1), engine.poison_value("left pending")],
+        )
+        .unwrap();
+    let call = engine
+        .call_unforced("add", vec![left, Value::U64(2)])
+        .unwrap();
+
+    let result = engine.force_shallow(call).unwrap();
+    assert!(matches!(result, Value::Pending(_)));
+    assert_eq!(engine.force_fully(result).unwrap(), Value::U64(3));
+}
+
+#[test]
+// r[verify eval.control-demand]
+// r[verify eval.enter-functions]
+fn demand_only_reaches_the_taken_if_branch() {
+    let engine = engine(
+        "fn choose(flag: Bool, unused: U64) { flag }
+         fn branch(flag: Bool, poison: U64) {
+           if choose(flag, poison) { 1 } else { poison }
+         }",
+    );
+    let call = engine
+        .call_unforced(
+            "branch",
+            vec![Value::Bool(true), engine.poison_value("dead branch")],
+        )
+        .unwrap();
+
+    assert!(matches!(call, Value::Pending(_)));
+    assert_eq!(engine.force_fully(call).unwrap(), Value::U64(1));
 }

@@ -9,6 +9,9 @@ use std::sync::Arc;
 use crate::instr::FnDef;
 use crate::node::NodeId;
 
+// r[impl eval.pending]
+// i[impl impl.scalar]
+// i[impl impl.string]
 /// A runtime value.
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -34,6 +37,8 @@ pub enum Value {
     Function(FunctionValue),
 }
 
+// i[impl impl.persistent]
+// i[impl impl.struct]
 /// A struct value: type name + fields.
 #[derive(Debug, Clone)]
 pub struct StructValue {
@@ -41,6 +46,7 @@ pub struct StructValue {
     pub fields: Arc<[(Arc<str>, Value)]>,
 }
 
+// i[impl impl.closure]
 /// A function value — either a named top-level function or a closure.
 #[derive(Debug, Clone)]
 pub struct FunctionValue {

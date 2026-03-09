@@ -52,6 +52,7 @@ impl Engine {
         }
     }
 
+    // r[impl eval.forcing.boundary]
     /// Evaluate a top-level function by name at the external forcing boundary.
     pub fn call(&self, name: &str, args: Vec<Value>) -> Result<Value, PoisonError> {
         let function = FunctionValue {
@@ -59,6 +60,28 @@ impl Engine {
             captures: Arc::from([]),
         };
         let value = self.build_call(Value::Function(function), args);
+        self.force_value(value)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn call_unforced(&self, name: &str, args: Vec<Value>) -> Result<Value, PoisonError> {
+        let function = FunctionValue {
+            def: self.resolve_function(name, &args)?,
+            captures: Arc::from([]),
+        };
+        Ok(self.build_call(Value::Function(function), args))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_shallow(&self, value: Value) -> Result<Value, PoisonError> {
+        match value {
+            Value::Pending(node_id) => self.force_node(node_id),
+            other => Ok(other),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_fully(&self, value: Value) -> Result<Value, PoisonError> {
         self.force_value(value)
     }
 
@@ -77,6 +100,8 @@ impl Engine {
         self.call_memo.len()
     }
 
+    // r[impl eval.pending]
+    // r[impl eval.memoization.pending]
     fn build_call(&self, function: Value, args: Vec<Value>) -> Value {
         if let Value::Function(function_value) = &function
             && function_value.key().is_some()
@@ -131,6 +156,7 @@ impl Engine {
         Value::Pending(node_id)
     }
 
+    // r[impl eval.forcing.boundary]
     fn force_value(&self, value: Value) -> Result<Value, PoisonError> {
         match value {
             Value::Pending(node_id) => {
@@ -163,6 +189,7 @@ impl Engine {
         }
     }
 
+    // r[impl eval.concurrency]
     fn force_many(&self, values: Vec<Value>) -> Result<Vec<Value>, PoisonError> {
         if values.len() <= 1 {
             return values
@@ -272,6 +299,7 @@ impl Engine {
         }
     }
 
+    // r[impl eval.enter-functions]
     fn execute_call(&self, function: Value, args: Arc<[Value]>) -> Result<Value, PoisonError> {
         let function = match self.force_value(function)? {
             Value::Function(function) => function,
@@ -288,6 +316,7 @@ impl Engine {
         self.invoke_function(&function, args)
     }
 
+    // r[impl eval.enter-functions]
     fn invoke_function(
         &self,
         function: &FunctionValue,
@@ -361,6 +390,7 @@ impl Engine {
         BuildResult::Value(Value::Unit)
     }
 
+    // r[impl eval.forcing]
     fn eval_expr(&self, expr: &instr::Expr, bindings: &HashMap<String, Value>) -> BuildResult {
         match expr {
             instr::Expr::LitInt(n) => BuildResult::Value(Value::U64(*n)),
@@ -419,6 +449,7 @@ impl Engine {
                 }
             }
             instr::Expr::Block(block) => self.eval_block(block, bindings),
+            // r[impl eval.control-demand]
             instr::Expr::If {
                 cond,
                 then_branch,
