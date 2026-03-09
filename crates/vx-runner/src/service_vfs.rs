@@ -1691,13 +1691,22 @@ impl RunnerService {
             {
                 Ok(observer_value) => observer_value,
                 Err(error) => {
+                    let mut message = format!("failed to evaluate shipped observer: {error}");
+                    if !output.stderr.trim().is_empty() {
+                        message.push_str("\nprocess stderr:\n");
+                        message.push_str(&output.stderr);
+                    }
+                    if !output.stdout.trim().is_empty() {
+                        message.push_str("\nprocess stdout:\n");
+                        message.push_str(&output.stdout);
+                    }
                     self.remove_action_prefix(&action.prefix_id).await;
                     return run_failure_result(
                         start,
                         exit_code,
                         output.stdout.clone(),
                         output.stderr.clone(),
-                        Some(format!("failed to evaluate shipped observer: {error}")),
+                        Some(message),
                     );
                 }
             },

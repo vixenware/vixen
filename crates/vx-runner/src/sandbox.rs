@@ -399,7 +399,8 @@ fn reap_process_group(_pid: u32) {}
 ///
 /// Security model:
 /// - Base: inherits system.sb for process startup, dyld, system libraries
-/// - Process exec: VFS_ROOT + /usr/bin (for linker tools - TODO: use hermetic Zig lld)
+/// - Process exec: VFS_ROOT plus system tool directories (`/bin`, `/usr/bin`,
+///   `/Library/Developer/CommandLineTools`)
 /// - File reads/maps: restricted to VFS_ROOT only
 /// - File writes: WRITE_DIR (action output) + /private/var/folders (temp files)
 /// - Network: denied entirely — actions must be hermetic.
@@ -413,6 +414,7 @@ const SEATBELT_PROFILE: &str = r#"(version 1)
 (allow process-fork)
 (allow process-exec (subpath (param "VFS_ROOT")))
 (allow process-exec (subpath (param "VFS_ROOT_ALT")))
+(allow process-exec (subpath "/bin"))
 (allow process-exec (subpath "/usr/bin"))
 (allow process-exec (subpath "/Library/Developer/CommandLineTools"))
 (allow file-read* (subpath (param "VFS_ROOT")))
@@ -519,10 +521,18 @@ pub fn sandboxed_command(program: &str, _action: &ActionContext) -> Command {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use super::SEATBELT_PROFILE;
     use super::{ActionKind, run_sandboxed_command};
     use moire::process::Command;
     use roam::Tx;
     use vx_store_proto::StoreProgress;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_allows_bin_execs() {
+        assert!(SEATBELT_PROFILE.contains("(allow process-exec (subpath \"/bin\"))"));
+    }
 
     #[cfg(unix)]
     #[tokio::test]
