@@ -257,3 +257,59 @@ fn operators(a: U64) -> Bool {
     assert!(kinds.contains(&SyntaxKind::TYPE_OP_EXPR));
     assert!(kinds.contains(&SyntaxKind::RANGE_EXPR));
 }
+
+#[test]
+fn parses_partial_application_and_assignment_statements() {
+    let input = r#"
+fn demo(src: String, config: Config, state: State) -> String {
+  @compile(..; loudly: true);
+  @compile(src; optimize: true);
+  config with= {
+    build.jobs: 4,
+  };
+  state.count = 1;
+  src = "next";
+  src
+}
+"#;
+
+    let parse = parse(input);
+    assert_eq!(parse.errors(), []);
+
+    let kinds = parse
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&SyntaxKind::PARTIAL_APP_EXPR));
+    assert!(kinds.contains(&SyntaxKind::ARG_PLACEHOLDER));
+    assert!(kinds.contains(&SyntaxKind::COMPOUND_UPDATE_STMT));
+    assert!(kinds.contains(&SyntaxKind::FIELD_ASSIGN_STMT));
+    assert!(kinds.contains(&SyntaxKind::ASSIGN_STMT));
+}
+
+#[test]
+fn lexes_and_parses_interpolated_strings() {
+    let input = r#"
+fn greet(name: String) -> String {
+  `hello ${name}`
+}
+"#;
+
+    let tokens = crate::lex(input);
+    assert!(
+        tokens
+            .iter()
+            .any(|token| token.kind == SyntaxKind::INTERP_STRING)
+    );
+
+    let parse = parse(input);
+    assert_eq!(parse.errors(), []);
+
+    let kinds = parse
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&SyntaxKind::LITERAL_EXPR));
+}

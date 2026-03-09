@@ -41,6 +41,7 @@ impl<'a> Lexer<'a> {
                 Some('/') if self.starts_with("//") => self.line_comment(),
                 Some('/') if self.starts_with("/*") => self.block_comment(),
                 Some('"') => self.string(),
+                Some('`') => self.interp_string(),
                 Some('$') => self.dollar_ident(),
                 Some(ch) if is_ident_start(ch) => self.ident_or_keyword(),
                 Some(ch) if ch.is_ascii_digit() => self.number(),
@@ -133,6 +134,36 @@ impl<'a> Lexer<'a> {
                     if !self.is_eof() {
                         self.bump_char();
                     }
+                }
+                _ => self.bump_char(),
+            }
+        }
+        SyntaxKind::ERROR_TOKEN
+    }
+
+    fn interp_string(&mut self) -> SyntaxKind {
+        self.bump_char();
+        let mut interp_depth = 0usize;
+        while let Some(ch) = self.current_char() {
+            match ch {
+                '`' if interp_depth == 0 => {
+                    self.bump_char();
+                    return SyntaxKind::INTERP_STRING;
+                }
+                '\\' => {
+                    self.bump_char();
+                    if !self.is_eof() {
+                        self.bump_char();
+                    }
+                }
+                '$' if self.starts_with("${") => {
+                    self.pos += 2;
+                    interp_depth += 1;
+                }
+                '{' if interp_depth > 0 => self.bump_char(),
+                '}' if interp_depth > 0 => {
+                    self.bump_char();
+                    interp_depth -= 1;
                 }
                 _ => self.bump_char(),
             }

@@ -757,6 +757,8 @@ fn stmt(p: &mut Parser<'_>) {
         SyntaxKind::LET_KW => let_stmt(p),
         SyntaxKind::RETURN_KW => return_stmt(p),
         SyntaxKind::FN_KW => fn_decl_rest(p),
+        SyntaxKind::LOWER_IDENT if p.nth(1) == SyntaxKind::WITH_EQ => compound_update_stmt(p),
+        SyntaxKind::LOWER_IDENT if looks_like_assignment_stmt(p) => assign_or_field_assign_stmt(p),
         _ => expr(p),
     }
 }
@@ -780,6 +782,40 @@ fn return_stmt(p: &mut Parser<'_>) {
         expr(p);
     }
     marker.complete(p, SyntaxKind::RETURN_STMT);
+}
+
+fn compound_update_stmt(p: &mut Parser<'_>) {
+    let marker = p.start();
+    p.expect(SyntaxKind::LOWER_IDENT);
+    p.expect(SyntaxKind::WITH_EQ);
+    update_body(p);
+    marker.complete(p, SyntaxKind::COMPOUND_UPDATE_STMT);
+}
+
+fn assign_or_field_assign_stmt(p: &mut Parser<'_>) {
+    if matches!(p.nth(1), SyntaxKind::EQ | SyntaxKind::COLON) {
+        let marker = p.start();
+        p.expect(SyntaxKind::LOWER_IDENT);
+        if p.eat(SyntaxKind::COLON) {
+            slot_type(p);
+        }
+        p.expect(SyntaxKind::EQ);
+        expr(p);
+        marker.complete(p, SyntaxKind::ASSIGN_STMT);
+        return;
+    }
+
+    let marker = p.start();
+    let target = p.start();
+    p.expect(SyntaxKind::LOWER_IDENT);
+    while p.at(SyntaxKind::DOT) {
+        p.bump();
+        p.expect(SyntaxKind::LOWER_IDENT);
+    }
+    target.complete(p, SyntaxKind::FIELD_ASSIGN_TARGET);
+    p.expect(SyntaxKind::EQ);
+    expr(p);
+    marker.complete(p, SyntaxKind::FIELD_ASSIGN_STMT);
 }
 
 fn expr(p: &mut Parser<'_>) {
@@ -895,6 +931,7 @@ fn multiplicative_expr(p: &mut Parser<'_>) -> CompletedMarker {
 
 fn prefix_expr(p: &mut Parser<'_>) -> CompletedMarker {
     match p.current() {
+        SyntaxKind::AT => partial_app_expr(p),
         SyntaxKind::BANG | SyntaxKind::MINUS => {
             let marker = p.start();
             p.bump();
@@ -909,6 +946,42 @@ fn prefix_expr(p: &mut Parser<'_>) -> CompletedMarker {
         }
         _ => type_op_expr(p),
     }
+}
+
+fn partial_app_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    p.expect(SyntaxKind::AT);
+    partial_app_callee(p);
+    arg_list(p);
+    marker.complete(p, SyntaxKind::PARTIAL_APP_EXPR)
+}
+
+fn partial_app_callee(p: &mut Parser<'_>) -> CompletedMarker {
+    let mut lhs = atom_expr(p);
+    loop {
+        if p.at(SyntaxKind::DOT) {
+            let marker = lhs.precede(p);
+            p.bump();
+            if matches!(
+                p.current(),
+                SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT
+            ) {
+                p.bump();
+            } else {
+                p.error("expected field name");
+            }
+            lhs = marker.complete(p, SyntaxKind::FIELD_EXPR);
+        } else if p.at(SyntaxKind::L_BRACKET) {
+            let marker = lhs.precede(p);
+            p.bump();
+            expr(p);
+            p.expect(SyntaxKind::R_BRACKET);
+            lhs = marker.complete(p, SyntaxKind::INDEX_EXPR);
+        } else {
+            break;
+        }
+    }
+    lhs
 }
 
 fn type_op_expr(p: &mut Parser<'_>) -> CompletedMarker {
@@ -991,6 +1064,7 @@ fn atom_expr(p: &mut Parser<'_>) -> CompletedMarker {
         SyntaxKind::INT
         | SyntaxKind::FLOAT
         | SyntaxKind::STRING
+        | SyntaxKind::INTERP_STRING
         | SyntaxKind::TRUE_KW
         | SyntaxKind::FALSE_KW => literal_expr(p),
         _ => {
@@ -1118,12 +1192,21 @@ fn arg_list(p: &mut Parser<'_>) {
         SyntaxKind::R_PAREN | SyntaxKind::SEMICOLON | SyntaxKind::EOF
     ) {
         let arg = p.start();
-        if p.at(SyntaxKind::DOT2) {
+        if p.at(SyntaxKind::DOT2)
+            && matches!(
+                p.nth(1),
+                SyntaxKind::COMMA | SyntaxKind::SEMICOLON | SyntaxKind::R_PAREN
+            )
+        {
+            p.bump();
+            arg.complete(p, SyntaxKind::ARG_PLACEHOLDER);
+        } else if p.at(SyntaxKind::DOT2) {
             spread_expr(p);
+            arg.complete(p, SyntaxKind::ARG);
         } else {
             expr(p);
+            arg.complete(p, SyntaxKind::ARG);
         }
-        arg.complete(p, SyntaxKind::ARG);
         if !p.eat(SyntaxKind::COMMA) {
             break;
         }
@@ -1465,12 +1548,32 @@ fn starts_expr(kind: SyntaxKind) -> bool {
             | SyntaxKind::L_BRACKET
             | SyntaxKind::L_CURLY
             | SyntaxKind::PERCENT
+            | SyntaxKind::AT
             | SyntaxKind::INT
             | SyntaxKind::FLOAT
             | SyntaxKind::STRING
+            | SyntaxKind::INTERP_STRING
             | SyntaxKind::TRUE_KW
             | SyntaxKind::FALSE_KW
     )
+}
+
+fn looks_like_assignment_stmt(p: &Parser<'_>) -> bool {
+    if p.current() != SyntaxKind::LOWER_IDENT {
+        return false;
+    }
+
+    let mut offset = 1usize;
+    if p.nth(offset) == SyntaxKind::COLON {
+        return true;
+    }
+    if p.nth(offset) == SyntaxKind::EQ {
+        return true;
+    }
+    while p.nth(offset) == SyntaxKind::DOT && p.nth(offset + 1) == SyntaxKind::LOWER_IDENT {
+        offset += 2;
+    }
+    p.nth(offset) == SyntaxKind::EQ
 }
 
 fn name(p: &mut Parser<'_>, allow_upper: bool) {
