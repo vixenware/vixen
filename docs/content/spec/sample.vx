@@ -1,23 +1,28 @@
-
+/// The input to a build
 struct BuildInput {
+    /// The virtual filesystem to read from
     fs: Fs,
+    /// The root of the workspace
     workspace_root: Path,
+    /// Command-line arguments
     args: Array[String],
+    /// Environment variables
     env: Map[String, String],
 }
 
+/// The output of a build
 struct BuildOutput {
+    /// Named output trees, keyed by target name
     targets: Map[String, Tree],
 }
 
 // TODO: this is totally gucci, we don't need `..`
-fn build({ fs, workspace_root }: BuildInput) -> BuildOutput {
+/// Build the workspace, producing named output trees
+fn build({fs, workspace_root}: BuildInput) -> BuildOutput {
     // these both end up Tree(s)
     let source_files = fs.glob(workspace_root / "**/*.c");
     let toolchain = fs.glob("/opt/c-toolchain");
-
-    let hello = exec(
-        ;
+    let hello = exec(;
         mounts: %{
             "src" => source_files,
             "toolchain" => toolchain,
@@ -26,15 +31,13 @@ fn build({ fs, workspace_root }: BuildInput) -> BuildOutput {
         args: [
             "toolchain/bin/gcc",
             ..source_files,
-            "-o", "out/hello"
+            "-o",
+            "out/hello",
         ],
         observer: (process, tree) => {
             // TBD: Stream & Tree constructors
             Stream(Tree("out/hello"))
         }
     ).next();
-
-    BuildOutput {
-        targets: %{ "hello" => hello }
-    }
+    BuildOutput { targets: %{ "hello" => hello } }
 }
