@@ -6,9 +6,11 @@
 
 mod resolve;
 mod scope;
+mod type_collect;
 
 pub use resolve::{NameResolution, ResolveError, resolve};
 pub use scope::{DefKind, Definition, ScopeId, ScopeKind, ScopeTree};
+pub use type_collect::{TypeCollection, collect_types};
 
 #[cfg(test)]
 mod tests;

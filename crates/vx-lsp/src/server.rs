@@ -18,6 +18,7 @@ struct DocumentState {
     parsed: Parsed<SourceFile>,
     line_index: vx::LineIndex,
     resolution: NameResolution,
+    types: vx_resolve::TypeCollection,
 }
 
 impl DocumentState {
@@ -25,11 +26,13 @@ impl DocumentState {
         let parsed = vx::parse_source_file(&text);
         let line_index = vx::LineIndex::new(&text);
         let resolution = vx_resolve::resolve(&parsed.tree());
+        let types = vx_resolve::collect_types(&parsed.tree());
         Self {
             text,
             parsed,
             line_index,
             resolution,
+            types,
         }
     }
 
@@ -406,6 +409,32 @@ impl LanguageServer for VxLanguageServer {
             let doc = state.doc_comment_for(def);
 
             let mut markdown = format!("```vx\n{snippet}\n```\n---\n*{kind_label}*");
+
+            // Show type signature for functions
+            if let Some(sig) = state.types.range_to_fn_sig.get(&def.name_range) {
+                markdown.push_str(&format!("\n\nReturns `{}`", sig.ret));
+            }
+
+            // Show fields for structs
+            if let Some(&type_id) = state.types.range_to_type.get(&def.name_range) {
+                match &state.types.env[type_id] {
+                    vx_types::TypeDef::Struct(s) if !s.fields.is_empty() => {
+                        markdown.push_str("\n\n**Fields:**\n");
+                        for f in &s.fields {
+                            markdown.push_str(&format!("- `{}`: `{}`\n", f.name, f.ty));
+                        }
+                    }
+                    vx_types::TypeDef::Enum(e) if !e.variants.is_empty() => {
+                        markdown.push_str("\n\n**Variants:**\n");
+                        for &vid in &e.variants {
+                            let vname = state.types.env[vid].name();
+                            markdown.push_str(&format!("- `{vname}`\n"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
             if let Some(doc) = doc {
                 markdown.push_str("\n\n");
                 markdown.push_str(&doc);
@@ -432,6 +461,13 @@ impl LanguageServer for VxLanguageServer {
                 line: pos.line,
                 col: pos.character,
             })?;
+
+            let root = state.parsed.tree().syntax().clone();
+
+            // Check if we're after a `.` — provide field/variant completions
+            if let Some(items) = dot_completions(&root, offset, state) {
+                return Some(CompletionResponse::Array(items));
+            }
 
             let mut items: Vec<CompletionItem> = state
                 .resolution
@@ -1257,6 +1293,139 @@ fn def_kind_to_symbol(kind: vx_resolve::DefKind) -> SymbolKind {
         vx_resolve::DefKind::Parameter => SymbolKind::VARIABLE,
         vx_resolve::DefKind::Variant => SymbolKind::ENUM_MEMBER,
         vx_resolve::DefKind::Field => SymbolKind::FIELD,
+    }
+}
+
+/// Provide field/variant completions when the cursor is after a `.`.
+fn dot_completions(
+    root: &vx::SyntaxNode,
+    offset: rowan::TextSize,
+    state: &DocumentState,
+) -> Option<Vec<CompletionItem>> {
+    // Find the token just before the cursor — should be DOT or an ident after DOT
+    let token = root.token_at_offset(offset).left_biased()?;
+
+    // Walk up to find a FIELD_EXPR or look for a DOT token
+    let dot_token = if token.kind() == SyntaxKind::DOT {
+        token
+    } else {
+        // Maybe we're on the field name after the dot — look for DOT sibling
+        return None;
+    };
+
+    // The receiver is the expression before the dot in the parent node
+    let parent = dot_token.parent()?;
+
+    // The receiver could be:
+    // 1. A name reference to an enum → suggest variants
+    // 2. A name reference to a struct-typed binding → suggest fields
+    let receiver_expr = parent.children().find_map(vx::Expr::cast)?;
+
+    match &receiver_expr {
+        vx::Expr::NameRef(nr) => {
+            let name_token = nr.token()?;
+            let name_range = name_token.text_range();
+
+            // Try to resolve this name
+            let resolved = state
+                .resolution
+                .refs
+                .iter()
+                .find(|r| r.ref_range == name_range)?;
+            let def = resolved.target.as_ref().ok()?;
+
+            // If it's an enum, offer variants
+            if def.kind == vx_resolve::DefKind::Enum {
+                let type_id = state.types.range_to_type.get(&def.name_range)?;
+                if let vx_types::TypeDef::Enum(e) = &state.types.env[*type_id] {
+                    let items: Vec<CompletionItem> = e
+                        .variants
+                        .iter()
+                        .filter_map(|&vid| {
+                            let vdef = &state.types.env[vid];
+                            let vname = vdef.name().to_string();
+                            Some(CompletionItem {
+                                label: vname,
+                                kind: Some(CompletionItemKind::ENUM_MEMBER),
+                                ..Default::default()
+                            })
+                        })
+                        .collect();
+                    return Some(items);
+                }
+            }
+
+            // If it's a struct-typed binding, offer fields
+            if matches!(
+                def.kind,
+                vx_resolve::DefKind::Binding | vx_resolve::DefKind::Parameter
+            ) {
+                // Try to find the type of this binding via function signature
+                if let Some(fields) = resolve_binding_fields(def, state) {
+                    return Some(fields);
+                }
+            }
+
+            // If it's a function, offer fields of the return type
+            if def.kind == vx_resolve::DefKind::Function {
+                if let Some(sig) = state.types.range_to_fn_sig.get(&def.name_range) {
+                    if let Some(fields) = struct_fields_from_ty(&sig.ret, state) {
+                        return Some(fields);
+                    }
+                }
+            }
+
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Try to determine the type of a binding and return its struct fields as completions.
+fn resolve_binding_fields(
+    def: &vx_resolve::Definition,
+    state: &DocumentState,
+) -> Option<Vec<CompletionItem>> {
+    // Check if this binding is a function parameter with a type annotation
+    for sig in state.types.range_to_fn_sig.values() {
+        for param in &sig.positional_params {
+            if param.name == def.name {
+                // This is a rough match — in a real type checker you'd match by range.
+                // For now, check if the param name matches and the Ty is a struct.
+                return struct_fields_from_ty(&param.ty, state);
+            }
+        }
+        for kw in &sig.keyword_params {
+            if kw.name == def.name {
+                return struct_fields_from_ty(&kw.ty, state);
+            }
+        }
+    }
+    None
+}
+
+/// Given a Ty, if it's a struct, return field completions.
+fn struct_fields_from_ty(ty: &vx_types::Ty, state: &DocumentState) -> Option<Vec<CompletionItem>> {
+    match ty {
+        vx_types::Ty::Struct(s) => {
+            if let vx_types::TypeDef::Struct(sdef) = &state.types.env[s.id] {
+                let items: Vec<CompletionItem> = sdef
+                    .fields
+                    .iter()
+                    .map(|f| CompletionItem {
+                        label: f.name.clone(),
+                        kind: Some(CompletionItemKind::FIELD),
+                        detail: Some(format!("{}", f.ty)),
+                        ..Default::default()
+                    })
+                    .collect();
+                if items.is_empty() { None } else { Some(items) }
+            } else {
+                None
+            }
+        }
+        vx_types::Ty::Optional(inner) => struct_fields_from_ty(inner, state),
+        _ => None,
     }
 }
 

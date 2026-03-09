@@ -210,3 +210,166 @@ fn main() {
         "$ should not be resolved through normal lookup"
     );
 }
+
+#[test]
+fn type_collect_structs_and_enums() {
+    let file = parse_file(
+        r#"
+struct Point {
+    x: F64,
+    y: F64,
+}
+
+struct Config {
+    width: U64 = 800,
+    title: String = "untitled",
+}
+
+enum Shape {
+    struct Circle {
+        radius: F64,
+    },
+    struct Rectangle {
+        width: F64,
+        height: F64,
+    },
+    struct Unknown,
+}
+
+fn area(shape: Shape) -> F64 {}
+"#,
+    );
+
+    let tc = crate::collect_types(&file);
+
+    // Point should have 2 fields of type F64
+    let point_ids = tc.env.lookup("Point");
+    assert_eq!(point_ids.len(), 1);
+    let point = tc.env.get(point_ids[0]);
+    match point {
+        vx_types::TypeDef::Struct(s) => {
+            assert_eq!(s.fields.len(), 2);
+            assert_eq!(s.fields[0].name, "x");
+            assert!(matches!(
+                s.fields[0].ty,
+                vx_types::Ty::Scalar(vx_types::Scalar::F64)
+            ));
+            assert_eq!(s.fields[1].name, "y");
+        }
+        _ => panic!("expected struct"),
+    }
+
+    // Config should have has_default on both fields
+    let config_ids = tc.env.lookup("Config");
+    assert_eq!(config_ids.len(), 1);
+    match tc.env.get(config_ids[0]) {
+        vx_types::TypeDef::Struct(s) => {
+            assert_eq!(s.fields.len(), 2);
+            assert!(s.fields[0].has_default);
+            assert!(s.fields[1].has_default);
+        }
+        _ => panic!("expected struct"),
+    }
+
+    // Shape should be an enum with 3 variants
+    let shape_ids = tc.env.lookup("Shape");
+    assert_eq!(shape_ids.len(), 1);
+    match tc.env.get(shape_ids[0]) {
+        vx_types::TypeDef::Enum(e) => {
+            assert_eq!(e.variants.len(), 3);
+            // Circle variant should have a radius field
+            let circle = &tc.env[e.variants[0]];
+            match circle {
+                vx_types::TypeDef::Struct(s) => {
+                    assert_eq!(s.name, "Circle");
+                    assert_eq!(s.fields.len(), 1);
+                    assert_eq!(s.fields[0].name, "radius");
+                    assert!(s.parent_enum.is_some());
+                }
+                _ => panic!("expected struct variant"),
+            }
+            // Unknown should have no fields
+            let unknown = &tc.env[e.variants[2]];
+            match unknown {
+                vx_types::TypeDef::Struct(s) => {
+                    assert_eq!(s.name, "Unknown");
+                    assert!(s.fields.is_empty());
+                }
+                _ => panic!("expected struct variant"),
+            }
+        }
+        _ => panic!("expected enum"),
+    }
+
+    // Function signature should be collected
+    assert_eq!(tc.range_to_fn_sig.len(), 1);
+    let sig = tc.range_to_fn_sig.values().next().unwrap();
+    assert_eq!(sig.name, "area");
+    assert_eq!(sig.positional_params.len(), 1);
+    assert_eq!(sig.positional_params[0].name, "shape");
+    assert!(matches!(
+        sig.ret,
+        vx_types::Ty::Scalar(vx_types::Scalar::F64)
+    ));
+}
+
+#[test]
+fn type_collect_generics_and_newtypes() {
+    let file = parse_file(
+        r#"
+struct Pair[A, B] {
+    first: A,
+    second: B,
+}
+
+newtype UserId of U64
+
+type Name = String
+"#,
+    );
+
+    let tc = crate::collect_types(&file);
+
+    // Pair should have type params and field types referencing them
+    let pair_ids = tc.env.lookup("Pair");
+    assert_eq!(pair_ids.len(), 1);
+    match tc.env.get(pair_ids[0]) {
+        vx_types::TypeDef::Struct(s) => {
+            assert_eq!(s.type_params, vec!["A", "B"]);
+            assert_eq!(s.fields.len(), 2);
+            assert!(
+                matches!(&s.fields[0].ty, vx_types::Ty::Param(p) if p.name == "A" && p.index == 0)
+            );
+            assert!(
+                matches!(&s.fields[1].ty, vx_types::Ty::Param(p) if p.name == "B" && p.index == 1)
+            );
+        }
+        _ => panic!("expected struct"),
+    }
+
+    // UserId should be a newtype wrapping U64
+    let uid_ids = tc.env.lookup("UserId");
+    assert_eq!(uid_ids.len(), 1);
+    match tc.env.get(uid_ids[0]) {
+        vx_types::TypeDef::Newtype(n) => {
+            assert!(matches!(
+                n.inner,
+                vx_types::Ty::Scalar(vx_types::Scalar::U64)
+            ));
+        }
+        _ => panic!("expected newtype"),
+    }
+
+    // Name should be an alias for String
+    let name_ids = tc.env.lookup("Name");
+    assert_eq!(name_ids.len(), 1);
+    match tc.env.get(name_ids[0]) {
+        vx_types::TypeDef::Alias(a) => {
+            assert!(matches!(
+                a.target,
+                vx_types::Ty::Scalar(vx_types::Scalar::String)
+            ));
+        }
+        _ => panic!("expected alias"),
+    }
+}

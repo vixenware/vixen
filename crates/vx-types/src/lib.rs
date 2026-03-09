@@ -285,6 +285,20 @@ impl TypeEnv {
     }
 }
 
+impl std::ops::Index<TypeId> for TypeEnv {
+    type Output = TypeDef;
+
+    fn index(&self, id: TypeId) -> &TypeDef {
+        &self.defs[id.0 as usize]
+    }
+}
+
+impl std::ops::IndexMut<TypeId> for TypeEnv {
+    fn index_mut(&mut self, id: TypeId) -> &mut TypeDef {
+        &mut self.defs[id.0 as usize]
+    }
+}
+
 impl TypeDef {
     /// The name of this type definition.
     pub fn name(&self) -> &str {

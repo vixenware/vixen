@@ -3523,6 +3523,7 @@ dependencies = [
  "vx-parser",
  "vx-resolve",
  "vx-tracing",
+ "vx-types",
 ]
 
 [[package]]
@@ -3595,6 +3596,7 @@ version = "0.1.0"
 dependencies = [
  "rowan",
  "vx-parser",
+ "vx-types",
 ]
 
 [[package]]
