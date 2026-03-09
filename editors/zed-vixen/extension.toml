@@ -1,0 +1,26 @@
+id = "vixen"
+name = "Vixen"
+version = "0.1.0"
+schema_version = 1
+description = "Vixen language support."
+repository = "https://github.com/bearcove/vixen"
+authors = ["Amos Wenger <amos@bearcove.eu>"]
+themes = []
+icon_themes = []
+languages = ["languages/vixen"]
+capabilities = []
+
+[lib]
+
+[grammars.vixen]
+repository = "https://github.com/bearcove/vixen"
+rev = "2d3629d09e5ec8896dd637784a10982fe7ca1cbc"
+path = "crates/tree-sitter-vixen"
+
+[language_servers]
+
+[context_servers]
+
+[agent_servers]
+
+[slash_commands]

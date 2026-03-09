@@ -1,0 +1,93 @@
+================================================================================
+Type and function declarations
+================================================================================
+
+@tag("type")
+Shape = enum {
+  Circle { radius: F64 },
+  Rect { width: F64, height: F64 },
+  Empty,
+};
+
+Point = struct {
+  x: F64,
+  y: F64,
+};
+
+fn first[T](items: Array[T]) -> T {
+  items[0]
+}
+
+--------------------------------------------------------------------------------
+
+(document
+  (statement_list
+    (type_declaration
+      (attribute_list
+        (attribute
+          (lower_identifier)
+          (attribute_arguments
+            (primary_expression
+              (string_literal
+                (string_content))))))
+      (upper_identifier)
+      (enum_type_definition
+        (enum_type_body
+          (enum_variant
+            (upper_identifier)
+            (struct_variant_payload
+              (struct_field_declaration
+                (lower_identifier)
+                (type_path
+                  (upper_identifier)))))
+          (enum_variant
+            (upper_identifier)
+            (struct_variant_payload
+              (struct_field_declaration
+                (lower_identifier)
+                (type_path
+                  (upper_identifier)))
+              (struct_field_declaration
+                (lower_identifier)
+                (type_path
+                  (upper_identifier)))))
+          (enum_variant
+            (upper_identifier)))))
+    (type_declaration
+      (upper_identifier)
+      (struct_type_definition
+        (struct_type_body
+          (struct_field_declaration
+            (lower_identifier)
+            (type_path
+              (upper_identifier)))
+          (struct_field_declaration
+            (lower_identifier)
+            (type_path
+              (upper_identifier))))))
+    (function_declaration
+      (lower_identifier)
+      (type_parameter_list
+        (type_parameter
+          (upper_identifier)))
+      (parameter_clause
+        (parameter_item
+          (parameter
+            (binding_pattern
+              (lower_identifier))
+            (type_path
+              (upper_identifier)
+              (type_arguments
+                (type_path
+                  (upper_identifier)))))))
+      (return_type
+        (type_path
+          (upper_identifier)))
+      (block
+        (statement_list
+          (index_expression
+            (primary_expression
+              (identifier_expression
+                (lower_identifier)))
+            (primary_expression
+              (integer_literal))))))))

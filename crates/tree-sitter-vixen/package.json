@@ -1,0 +1,31 @@
+{
+  "name": "tree-sitter-vixen",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for the Vixen language",
+  "license": "AGPL-3.0-or-later",
+  "files": [
+    "grammar.js",
+    "queries/*",
+    "src/**",
+    "tree-sitter.json"
+  ],
+  "devDependencies": {
+    "tree-sitter-cli": "^0.25.10"
+  },
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test",
+    "parse": "tree-sitter parse"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.vixen",
+      "injection-regex": "^(vixen|vx)$",
+      "file-types": [
+        "vixen",
+        "vx"
+      ],
+      "highlights": "queries/highlights.scm"
+    }
+  ]
+}

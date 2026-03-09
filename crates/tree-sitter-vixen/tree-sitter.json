@@ -1,0 +1,20 @@
+{
+  "metadata": {
+    "version": "0.1.0",
+    "license": "AGPL-3.0-or-later",
+    "description": "Tree-sitter grammar for the Vixen language",
+    "authors": [],
+    "links": {
+      "repository": "https://github.com/bearcove/vixen"
+    }
+  },
+  "grammars": [
+    {
+      "name": "vixen",
+      "scope": "source.vixen",
+      "injection-regex": "^(vixen|vx)$",
+      "file-types": ["vixen", "vx"],
+      "highlights": "queries/highlights.scm"
+    }
+  ]
+}
