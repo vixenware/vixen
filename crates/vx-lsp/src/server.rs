@@ -166,6 +166,8 @@ impl LanguageServer for VxLanguageServer {
                         },
                     ),
                 ),
+                call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -806,6 +808,214 @@ impl LanguageServer for VxLanguageServer {
 
         Ok(result)
     }
+
+    async fn prepare_call_hierarchy(
+        &self,
+        params: CallHierarchyPrepareParams,
+    ) -> Result<Option<Vec<CallHierarchyItem>>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let result = self.with_document(uri, |state| {
+            let offset = state.line_index.offset(vx::Position {
+                line: pos.line,
+                col: pos.character,
+            })?;
+
+            let def = state.definition_at(offset)?;
+            if def.kind != vx_resolve::DefKind::Function {
+                return None;
+            }
+
+            Some(vec![make_call_hierarchy_item(uri, def, state)])
+        });
+
+        Ok(result.flatten())
+    }
+
+    async fn incoming_calls(
+        &self,
+        params: CallHierarchyIncomingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
+        let uri = &params.item.uri;
+
+        let result = self.with_document(uri, |state| {
+            let root = state.parsed.tree().syntax().clone();
+
+            // Find the definition that matches this item's selection range
+            let item_start = state.line_index.offset(vx::Position {
+                line: params.item.selection_range.start.line,
+                col: params.item.selection_range.start.character,
+            })?;
+            let target_def = state.definition_at(item_start)?;
+
+            // Find all call sites that reference this function
+            let call_refs: Vec<_> = state
+                .resolution
+                .refs
+                .iter()
+                .filter(|r| {
+                    r.target
+                        .as_ref()
+                        .ok()
+                        .is_some_and(|d| d.name_range == target_def.name_range)
+                })
+                .filter(|r| {
+                    // Only include refs that are callees of a CALL_EXPR
+                    let token = root.token_at_offset(r.ref_range.start()).right_biased();
+                    token.is_some_and(|t| {
+                        t.parent()
+                            .is_some_and(|p| p.kind() == SyntaxKind::CALL_EXPR)
+                    })
+                })
+                .collect();
+
+            // Group by enclosing function
+            let mut by_caller: HashMap<rowan::TextRange, (vx_resolve::Definition, Vec<TextRange>)> =
+                HashMap::new();
+            for r in &call_refs {
+                let token = root.token_at_offset(r.ref_range.start()).right_biased()?;
+                // Walk up to find the enclosing FN_DECL
+                let fn_node = token.parent_ancestors().find_map(FnDecl::cast)?;
+                let caller_name_token = fn_node.name()?;
+                let caller_name_range = caller_name_token.text_range();
+
+                // Find the definition for this enclosing function
+                let caller_def = state
+                    .resolution
+                    .scopes
+                    .all_definitions()
+                    .find(|d| d.name_range == caller_name_range)?;
+
+                by_caller
+                    .entry(caller_name_range)
+                    .or_insert_with(|| (caller_def.clone(), Vec::new()))
+                    .1
+                    .push(r.ref_range);
+            }
+
+            let calls: Vec<_> = by_caller
+                .into_values()
+                .map(|(caller_def, ranges)| CallHierarchyIncomingCall {
+                    from: make_call_hierarchy_item(uri, &caller_def, state),
+                    from_ranges: ranges.into_iter().map(|r| state.to_lsp_range(r)).collect(),
+                })
+                .collect();
+
+            Some(calls)
+        });
+
+        Ok(result.flatten())
+    }
+
+    async fn outgoing_calls(
+        &self,
+        params: CallHierarchyOutgoingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+        let uri = &params.item.uri;
+
+        let result = self.with_document(uri, |state| {
+            let root = state.parsed.tree().syntax().clone();
+
+            // Find the FN_DECL for this item
+            let item_start = state.line_index.offset(vx::Position {
+                line: params.item.selection_range.start.line,
+                col: params.item.selection_range.start.character,
+            })?;
+            let token = root.token_at_offset(item_start).right_biased()?;
+            let fn_node = token.parent_ancestors().find_map(FnDecl::cast)?;
+            let fn_range = fn_node.syntax().text_range();
+
+            // Find all CALL_EXPR nodes inside this function
+            let mut by_target: HashMap<rowan::TextRange, (vx_resolve::Definition, Vec<TextRange>)> =
+                HashMap::new();
+
+            for node in fn_node.syntax().descendants() {
+                if node.kind() != SyntaxKind::CALL_EXPR {
+                    continue;
+                }
+                let call = vx::CallExpr::cast(node)?;
+                let callee = match call.callee() {
+                    Some(vx::Expr::NameRef(nr)) => nr,
+                    _ => continue,
+                };
+                let callee_token = callee.token()?;
+                let callee_range = callee_token.text_range();
+
+                // Must be inside our function
+                if !fn_range.contains_range(callee_range) {
+                    continue;
+                }
+
+                // Resolve the callee
+                let resolved = state
+                    .resolution
+                    .refs
+                    .iter()
+                    .find(|r| r.ref_range == callee_range)?;
+                let def = resolved.target.as_ref().ok()?;
+                if def.kind != vx_resolve::DefKind::Function {
+                    continue;
+                }
+
+                by_target
+                    .entry(def.name_range)
+                    .or_insert_with(|| (def.clone(), Vec::new()))
+                    .1
+                    .push(callee_range);
+            }
+
+            let calls: Vec<_> = by_target
+                .into_values()
+                .map(|(target_def, ranges)| CallHierarchyOutgoingCall {
+                    to: make_call_hierarchy_item(uri, &target_def, state),
+                    from_ranges: ranges.into_iter().map(|r| state.to_lsp_range(r)).collect(),
+                })
+                .collect();
+
+            Some(calls)
+        });
+
+        Ok(result.flatten())
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let query = params.query.to_lowercase();
+        let docs = self.documents.lock().unwrap();
+
+        let mut results = Vec::new();
+        for (uri, state) in docs.iter() {
+            for def in state.resolution.scopes.all_definitions() {
+                // Skip local bindings/parameters — only top-level-ish symbols
+                if matches!(
+                    def.kind,
+                    vx_resolve::DefKind::Binding | vx_resolve::DefKind::Parameter
+                ) {
+                    continue;
+                }
+
+                if query.is_empty() || def.name.to_lowercase().contains(&query) {
+                    #[allow(deprecated)]
+                    results.push(SymbolInformation {
+                        name: def.name.clone(),
+                        kind: def_kind_to_symbol(def.kind),
+                        tags: None,
+                        deprecated: None,
+                        location: Location {
+                            uri: uri.clone(),
+                            range: state.to_lsp_range(def.name_range),
+                        },
+                        container_name: None,
+                    });
+                }
+            }
+        }
+
+        Ok(Some(results))
+    }
 }
 
 impl VxLanguageServer {
@@ -980,6 +1190,37 @@ fn encode_semantic_tokens(
     }
 
     result
+}
+
+fn make_call_hierarchy_item(
+    uri: &Url,
+    def: &vx_resolve::Definition,
+    state: &DocumentState,
+) -> CallHierarchyItem {
+    CallHierarchyItem {
+        name: def.name.clone(),
+        kind: def_kind_to_symbol(def.kind),
+        tags: None,
+        detail: None,
+        uri: uri.clone(),
+        range: state.to_lsp_range(def.full_range),
+        selection_range: state.to_lsp_range(def.name_range),
+        data: None,
+    }
+}
+
+fn def_kind_to_symbol(kind: vx_resolve::DefKind) -> SymbolKind {
+    match kind {
+        vx_resolve::DefKind::Function => SymbolKind::FUNCTION,
+        vx_resolve::DefKind::Struct => SymbolKind::STRUCT,
+        vx_resolve::DefKind::Enum => SymbolKind::ENUM,
+        vx_resolve::DefKind::Newtype => SymbolKind::CLASS,
+        vx_resolve::DefKind::TypeAlias => SymbolKind::TYPE_PARAMETER,
+        vx_resolve::DefKind::Binding => SymbolKind::VARIABLE,
+        vx_resolve::DefKind::Parameter => SymbolKind::VARIABLE,
+        vx_resolve::DefKind::Variant => SymbolKind::ENUM_MEMBER,
+        vx_resolve::DefKind::Field => SymbolKind::FIELD,
+    }
 }
 
 /// Check if an ARG node is a simple name reference matching the parameter name.
