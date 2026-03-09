@@ -1642,6 +1642,10 @@ insert_anchor_links = "heading"
 > are not interactive. No signal API. `Process` exists on the executor;
 > the orchestrator observes it only through the shipped observer's
 > return stream.
+>
+> A nonzero exit code is not a runtime failure by itself. The process
+> still terminates, the observer still runs, and user code decides what
+> that exit status means.
 
 > r[exec.observer]
 >
@@ -1675,12 +1679,19 @@ insert_anchor_links = "heading"
 > r[exec.observer.simple]
 >
 > Simple observers reference `exit_code` and VFS paths for output.
-> Everything resolves when the process finishes.
+> Everything resolves when the process finishes, even if the process
+> exits nonzero.
 
 > r[exec.errors]
 >
-> When a process crashes or the executor fails, the stream terminates.
-> Pending values derived from that stream become poisoned.
+> If the executor cannot start the process, loses the process entirely,
+> or otherwise fails before it can hand `Process` and `Tree` to the
+> observer, the stream terminates and pending values derived from that
+> stream become poisoned.
+>
+> By contrast, ordinary process failure is observer-visible data. A
+> process that exits nonzero, is terminated by the OS, or writes error
+> output still produces a `Process`; the observer interprets that result.
 > Application-level errors are the observer's responsibility — parse
 > stdout/stderr and call `fail`.
 
