@@ -10,6 +10,7 @@
 //! `FsStorage` with an optional read-only base for layered access.
 
 use std::io;
+use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use tokio::io::AsyncWriteExt;
@@ -289,9 +290,32 @@ impl CasStore {
 // =============================================================================
 
 async fn read_hash_mapping(path: &Utf8Path) -> io::Result<Option<Blake3Hash>> {
-    match moire::fs::read_to_string(path).await {
-        Ok(content) => Ok(Blake3Hash::from_hex(content.trim())),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
+    const MAX_ATTEMPTS: usize = 20;
+    const RETRY_DELAY: Duration = Duration::from_millis(10);
+
+    for attempt in 0..MAX_ATTEMPTS {
+        match moire::fs::read_to_string(path).await {
+            Ok(content) => {
+                let trimmed = content.trim();
+                if let Some(hash) = Blake3Hash::from_hex(trimmed) {
+                    return Ok(Some(hash));
+                }
+                if attempt + 1 < MAX_ATTEMPTS {
+                    tokio::time::sleep(RETRY_DELAY).await;
+                    continue;
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid hash mapping in {}", path),
+                ));
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        }
     }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("failed to read hash mapping in {}", path),
+    ))
 }

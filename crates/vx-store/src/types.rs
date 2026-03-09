@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use moire::sync::SyncMutex;
 use tokio::sync::Semaphore;
-use vx_store_proto::{BlobRef, RustComponent, ToolchainSpecKey};
+use vx_store_proto::{
+    BlobRef, EnsureRustToolchainComponentResult, RustComponent, ToolchainSpecKey,
+};
 
 use crate::{
     RegistryManager,
@@ -46,8 +48,24 @@ pub(crate) struct StoreServiceInner {
     pub(crate) rust_component_tarballs:
         SyncMutex<std::collections::HashMap<(ToolchainSpecKey, RustComponent), BlobRef>>,
 
+    /// In-flight Rust component tarball downloads by (spec_key, component)
+    pub(crate) rust_component_tarball_flights: SyncMutex<
+        std::collections::HashMap<
+            (ToolchainSpecKey, RustComponent),
+            Arc<moire::sync::OnceCell<EnsureRustToolchainComponentResult>>,
+        >,
+    >,
+
     /// Extracted Rust toolchain components by (spec_key, component)
     pub(crate) rust_component_trees: SyncMutex<
         std::collections::HashMap<(ToolchainSpecKey, RustComponent), ExtractedRustComponent>,
+    >,
+
+    /// In-flight Rust component extractions by (spec_key, component)
+    pub(crate) rust_component_tree_flights: SyncMutex<
+        std::collections::HashMap<
+            (ToolchainSpecKey, RustComponent),
+            Arc<moire::sync::OnceCell<EnsureRustToolchainComponentResult>>,
+        >,
     >,
 }

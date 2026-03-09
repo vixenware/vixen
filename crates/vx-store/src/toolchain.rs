@@ -1,6 +1,7 @@
 //! Toolchain Manager (Inflight Deduplication)
 
 use futures_util::{StreamExt, future::join};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,6 +33,9 @@ struct ExtractedFileInfo {
     size: u64,
     executable: bool,
 }
+
+type RustComponentKey = (ToolchainSpecKey, RustComponent);
+type InflightComponentFuture = Arc<moire::sync::OnceCell<EnsureRustToolchainComponentResult>>;
 
 const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_millis(25);
 
@@ -69,94 +73,43 @@ async fn download_component(
     component_name: &str,
     progress: &roam::Tx<StoreProgress>,
 ) -> Result<Vec<u8>, vx_toolchain::ToolchainError> {
-    use http_body_util::BodyExt;
-    use tokio::io::AsyncReadExt;
-
     tracing::info!(url = %url, "downloading component");
-
-    let response =
-        vx_http::get(url)
-            .await
-            .map_err(|e| vx_toolchain::ToolchainError::FetchError {
-                url: url.to_string(),
-                source: Box::new(e),
-            })?;
-
-    let status = response.status();
-    if !status.is_success() {
-        return Err(vx_toolchain::ToolchainError::FetchError {
-            url: url.to_string(),
-            source: Box::new(std::io::Error::other(format!("HTTP {}", status))),
-        });
-    }
-
-    let content_length = response
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok());
 
     send_progress_best_effort(
         progress,
         StoreProgress {
             message: format!("downloading {component_name}"),
             current: Some(0),
-            total: content_length,
+            total: None,
         },
     )
     .await;
 
-    let body_reader = tokio_util::io::StreamReader::new(
-        response
-            .into_body()
-            .into_data_stream()
-            .map(|result| result.map_err(std::io::Error::other)),
-    );
+    let bytes =
+        vx_http::get_bytes(url)
+            .await
+            .map_err(|e| vx_toolchain::ToolchainError::FetchError {
+                url: url.to_string(),
+                source: Box::new(e),
+            })?;
 
-    let mut verifying_reader =
-        crate::hash_reader::Sha256VerifyingReader::new(body_reader, expected_hash.to_string());
-
-    let mut bytes = Vec::with_capacity(content_length.unwrap_or(0) as usize);
-    let mut buf = vec![0u8; 256 * 1024];
-    let mut bytes_read: u64 = 0;
-    let mut last_progress = std::time::Instant::now();
-
-    loop {
-        match verifying_reader.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => {
-                bytes.extend_from_slice(&buf[..n]);
-                bytes_read += n as u64;
-                let now = std::time::Instant::now();
-                if now.duration_since(last_progress) >= std::time::Duration::from_millis(250) {
-                    last_progress = now;
-                    send_progress_best_effort(
-                        progress,
-                        StoreProgress {
-                            message: format!("downloading {component_name}"),
-                            current: Some(bytes_read),
-                            total: content_length,
-                        },
-                    )
-                    .await;
-                }
-            }
-            Err(e) => {
-                return Err(vx_toolchain::ToolchainError::ChecksumMismatch {
-                    url: url.to_string(),
-                    expected: expected_hash.to_string(),
-                    actual: e.to_string(),
-                });
-            }
-        }
+    let actual_hash = hex::encode(Sha256::digest(&bytes));
+    if actual_hash != expected_hash {
+        return Err(vx_toolchain::ToolchainError::ChecksumMismatch {
+            url: url.to_string(),
+            expected: expected_hash.to_string(),
+            actual: actual_hash,
+        });
     }
+
+    let bytes_read = bytes.len() as u64;
 
     send_progress_best_effort(
         progress,
         StoreProgress {
             message: format!("downloading {component_name}"),
             current: Some(bytes_read),
-            total: content_length,
+            total: Some(bytes_read),
         },
     )
     .await;
@@ -165,7 +118,7 @@ async fn download_component(
         url = %url,
         size = bytes.len(),
         hash = %expected_hash,
-        "component downloaded and verified"
+        "component downloaded, verified, and cached if configured"
     );
 
     Ok(bytes)
@@ -315,6 +268,33 @@ fn rust_component_name(component: &RustComponent) -> Option<&'static str> {
 }
 
 type InflightFuture = Arc<moire::sync::OnceCell<EnsureToolchainResult>>;
+
+async fn singleflight_component(
+    flights: &moire::sync::SyncMutex<HashMap<RustComponentKey, InflightComponentFuture>>,
+    key: RustComponentKey,
+    cell_name: &'static str,
+    acquire_fn: impl AsyncFn() -> EnsureRustToolchainComponentResult,
+) -> EnsureRustToolchainComponentResult {
+    let cell = {
+        let mut inflight = flights.lock();
+        inflight
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(moire::sync::OnceCell::new(cell_name)))
+            .clone()
+    };
+
+    #[allow(clippy::redundant_closure)]
+    let result = cell.get_or_init(|| acquire_fn()).await.clone();
+
+    let mut inflight = flights.lock();
+    if let Some(existing) = inflight.get(&key)
+        && Arc::ptr_eq(existing, &cell)
+    {
+        inflight.remove(&key);
+    }
+
+    result
+}
 
 /// Manages in-flight toolchain acquisitions with deduplication.
 pub(crate) struct ToolchainManager {
@@ -1190,19 +1170,16 @@ impl StoreService {
         component: RustComponent,
         progress: roam::Tx<StoreProgress>,
     ) -> EnsureRustToolchainComponentResult {
-        let component_name = match rust_component_name(&component) {
-            Some(name) => name,
-            None => {
-                return EnsureRustToolchainComponentResult {
-                    spec_key: None,
-                    component,
-                    tarball: None,
-                    tree_root: None,
-                    status: EnsureStatus::Failed,
-                    error: Some("unsupported component for Rust toolchain acquisition".to_string()),
-                };
-            }
-        };
+        if rust_component_name(&component).is_none() {
+            return EnsureRustToolchainComponentResult {
+                spec_key: None,
+                component,
+                tarball: None,
+                tree_root: None,
+                status: EnsureStatus::Failed,
+                error: Some("unsupported component for Rust toolchain acquisition".to_string()),
+            };
+        }
 
         let spec_key = match spec.spec_key() {
             Ok(k) => {
@@ -1250,6 +1227,52 @@ impl StoreService {
                 error: None,
             };
         }
+
+        let this = self.clone();
+        let spec_for_flight = spec.clone();
+        let component_for_flight = component.clone();
+        let progress = Arc::new(progress);
+        singleflight_component(
+            &self.rust_component_tarball_flights,
+            key,
+            "rust_component_tarball_flight",
+            async move || {
+                let this = this.clone();
+                let spec_for_flight = spec_for_flight.clone();
+                let component_for_flight = component_for_flight.clone();
+                let progress = Arc::clone(&progress);
+                this.download_rust_toolchain_component_impl(
+                    spec_key,
+                    spec_for_flight,
+                    component_for_flight,
+                    progress.as_ref(),
+                )
+                .await
+            },
+        )
+        .await
+    }
+
+    async fn download_rust_toolchain_component_impl(
+        &self,
+        spec_key: ToolchainSpecKey,
+        spec: RustToolchainSpec,
+        component: RustComponent,
+        progress: &roam::Tx<StoreProgress>,
+    ) -> EnsureRustToolchainComponentResult {
+        let component_name = match rust_component_name(&component) {
+            Some(name) => name,
+            None => {
+                return EnsureRustToolchainComponentResult {
+                    spec_key: Some(spec_key),
+                    component,
+                    tarball: None,
+                    tree_root: None,
+                    status: EnsureStatus::Failed,
+                    error: Some("unsupported component for Rust toolchain acquisition".to_string()),
+                };
+            }
+        };
 
         let channel = match &spec.channel {
             RustChannel::Stable => vx_toolchain::Channel::Stable,
@@ -1349,19 +1372,16 @@ impl StoreService {
         tarball_ref: BlobRef,
         progress: roam::Tx<StoreProgress>,
     ) -> EnsureRustToolchainComponentResult {
-        let component_name = match rust_component_name(&component) {
-            Some(name) => name,
-            None => {
-                return EnsureRustToolchainComponentResult {
-                    spec_key: None,
-                    component,
-                    tarball: None,
-                    tree_root: None,
-                    status: EnsureStatus::Failed,
-                    error: Some("unsupported component for Rust toolchain extraction".to_string()),
-                };
-            }
-        };
+        if rust_component_name(&component).is_none() {
+            return EnsureRustToolchainComponentResult {
+                spec_key: None,
+                component,
+                tarball: None,
+                tree_root: None,
+                status: EnsureStatus::Failed,
+                error: Some("unsupported component for Rust toolchain extraction".to_string()),
+            };
+        }
 
         let spec_key = match spec.spec_key() {
             Ok(k) => {
@@ -1414,6 +1434,56 @@ impl StoreService {
                 error: None,
             };
         }
+
+        let this = self.clone();
+        let spec_for_flight = spec.clone();
+        let component_for_flight = component.clone();
+        let tarball_for_flight = tarball_ref.clone();
+        let progress = Arc::new(progress);
+        singleflight_component(
+            &self.rust_component_tree_flights,
+            extracted_key,
+            "rust_component_tree_flight",
+            async move || {
+                let this = this.clone();
+                let spec_for_flight = spec_for_flight.clone();
+                let component_for_flight = component_for_flight.clone();
+                let tarball_for_flight = tarball_for_flight.clone();
+                let progress = Arc::clone(&progress);
+                this.extract_rust_toolchain_component_impl(
+                    spec_key,
+                    spec_for_flight,
+                    component_for_flight,
+                    tarball_for_flight,
+                    progress.as_ref(),
+                )
+                .await
+            },
+        )
+        .await
+    }
+
+    async fn extract_rust_toolchain_component_impl(
+        &self,
+        spec_key: ToolchainSpecKey,
+        spec: RustToolchainSpec,
+        component: RustComponent,
+        tarball_ref: BlobRef,
+        progress: &roam::Tx<StoreProgress>,
+    ) -> EnsureRustToolchainComponentResult {
+        let component_name = match rust_component_name(&component) {
+            Some(name) => name,
+            None => {
+                return EnsureRustToolchainComponentResult {
+                    spec_key: Some(spec_key),
+                    component,
+                    tarball: Some(tarball_ref),
+                    tree_root: None,
+                    status: EnsureStatus::Failed,
+                    error: Some("unsupported component for Rust toolchain extraction".to_string()),
+                };
+            }
+        };
 
         // Read tarball from CAS
         let tarball = match read_blob_from_ref(self, &tarball_ref).await {
@@ -1527,6 +1597,7 @@ impl StoreService {
         };
 
         let unique_chunks = file_info.lock().len() as u32;
+        let extracted_key = (spec_key, component.clone());
 
         self.rust_component_trees.lock().insert(
             extracted_key,

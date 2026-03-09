@@ -200,8 +200,16 @@ impl StoreService {
                     "store/rust_component_tarballs",
                     std::collections::HashMap::new(),
                 ),
+                rust_component_tarball_flights: moire::sync::SyncMutex::new(
+                    "store/rust_component_tarball_flights",
+                    std::collections::HashMap::new(),
+                ),
                 rust_component_trees: moire::sync::SyncMutex::new(
                     "store/rust_component_trees",
+                    std::collections::HashMap::new(),
+                ),
+                rust_component_tree_flights: moire::sync::SyncMutex::new(
+                    "store/rust_component_tree_flights",
                     std::collections::HashMap::new(),
                 ),
             }),
