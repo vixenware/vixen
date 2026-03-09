@@ -1,0 +1,22 @@
+[package]
+name = "vx-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+[dependencies]
+vx-parser = { path = "../vx-parser" }
+vx-resolve = { path = "../vx-resolve" }
+vx-types = { path = "../vx-types" }
+dashmap = "6"
+parking_lot = "0.12"
+crossbeam-deque = "0.8"
+crossbeam-channel = "0.5"
+
+[dev-dependencies]
