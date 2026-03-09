@@ -25,6 +25,7 @@ syntax_kinds!(
     WHITESPACE,
     LINE_COMMENT,
     BLOCK_COMMENT,
+    DOC_COMMENT,
     ERROR_TOKEN,
     LOWER_IDENT,
     UPPER_IDENT,
@@ -192,7 +193,7 @@ impl SyntaxKind {
     pub const fn is_trivia(self) -> bool {
         matches!(
             self,
-            Self::WHITESPACE | Self::LINE_COMMENT | Self::BLOCK_COMMENT
+            Self::WHITESPACE | Self::LINE_COMMENT | Self::BLOCK_COMMENT | Self::DOC_COMMENT
         )
     }
 }

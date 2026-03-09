@@ -1076,3 +1076,57 @@ fn last_token(
         .filter(|token| predicate(token.kind()))
         .last()
 }
+
+/// Extract doc comment text from the leading trivia of a syntax node.
+///
+/// Walks backward from the node's first token through preceding siblings,
+/// collecting contiguous `///` doc comment lines. Returns `None` if there
+/// are no doc comments.
+pub fn doc_comment(node: &SyntaxNode) -> Option<String> {
+    // Find the first non-trivia token of this node
+    let first_token = node
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| !t.kind().is_trivia())?;
+
+    // Walk backward through preceding siblings collecting doc comments
+    let mut doc_tokens = Vec::new();
+    let mut tok = first_token.prev_sibling_or_token();
+    while let Some(el) = tok {
+        match el {
+            rowan::NodeOrToken::Token(ref t) => match t.kind() {
+                SyntaxKind::DOC_COMMENT => {
+                    doc_tokens.push(t.clone());
+                }
+                SyntaxKind::WHITESPACE => {
+                    // whitespace between doc comment lines is fine
+                }
+                _ => break,
+            },
+            rowan::NodeOrToken::Node(_) => break,
+        }
+        tok = el.prev_sibling_or_token();
+    }
+
+    if doc_tokens.is_empty() {
+        return None;
+    }
+
+    // Reverse since we collected backward
+    doc_tokens.reverse();
+
+    let text = doc_tokens
+        .iter()
+        .map(|t| {
+            let s = t.text();
+            // Strip the `///` prefix and optional leading space
+            s.strip_prefix("///")
+                .unwrap_or(s)
+                .strip_prefix(' ')
+                .unwrap_or(s.strip_prefix("///").unwrap_or(s))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Some(text)
+}

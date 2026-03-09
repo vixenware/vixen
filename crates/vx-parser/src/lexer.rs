@@ -202,6 +202,9 @@ impl<'a> Lexer<'a> {
 
     // r[lex.comment.line]
     fn line_comment(&mut self) -> SyntaxKind {
+        // r[lex.comment.doc] — `///` is a doc comment, but `////` is not
+        let is_doc = self.source[self.pos..].starts_with("///")
+            && !self.source[self.pos..].starts_with("////");
         self.pos += 2;
         while let Some(ch) = self.current_char() {
             if ch == '\n' {
@@ -209,7 +212,11 @@ impl<'a> Lexer<'a> {
             }
             self.bump_char();
         }
-        SyntaxKind::LINE_COMMENT
+        if is_doc {
+            SyntaxKind::DOC_COMMENT
+        } else {
+            SyntaxKind::LINE_COMMENT
+        }
     }
 
     // r[lex.comment.block]

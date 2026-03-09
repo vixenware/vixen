@@ -75,9 +75,18 @@ impl DocumentState {
         let start = u32::from(def.full_range.start()) as usize;
         let end = u32::from(def.full_range.end()) as usize;
         let slice = &self.text[start..end];
-        // Take up to the first line break, or the first `{`/`=` for multiline decls
         let first_line = slice.lines().next().unwrap_or(slice);
         first_line.trim().to_string()
+    }
+
+    /// Extract the doc comment attached to a definition's syntax node.
+    fn doc_comment_for(&self, def: &vx_resolve::Definition) -> Option<String> {
+        let root = self.parsed.tree().syntax().clone();
+        let token = root
+            .token_at_offset(def.full_range.start())
+            .right_biased()?;
+        let node = token.parent()?;
+        vx::doc_comment(&node)
     }
 
     fn to_lsp_range(&self, range: TextRange) -> Range {
@@ -378,8 +387,13 @@ impl LanguageServer for VxLanguageServer {
             let def = state.definition_at(offset)?;
             let kind_label = def_kind_label(def.kind);
             let snippet = state.declaration_snippet(def);
+            let doc = state.doc_comment_for(def);
 
-            let markdown = format!("```vx\n{snippet}\n```\n---\n*{kind_label}*");
+            let mut markdown = format!("```vx\n{snippet}\n```\n---\n*{kind_label}*");
+            if let Some(doc) = doc {
+                markdown.push_str("\n\n");
+                markdown.push_str(&doc);
+            }
 
             Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
@@ -406,11 +420,20 @@ impl LanguageServer for VxLanguageServer {
             let visible = state.resolution.scopes.visible_at(offset);
             let items: Vec<CompletionItem> = visible
                 .into_iter()
-                .map(|def| CompletionItem {
-                    label: def.name.clone(),
-                    kind: Some(def_kind_to_completion(def.kind)),
-                    detail: Some(state.declaration_snippet(def)),
-                    ..Default::default()
+                .map(|def| {
+                    let documentation = state.doc_comment_for(def).map(|doc| {
+                        Documentation::MarkupContent(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: doc,
+                        })
+                    });
+                    CompletionItem {
+                        label: def.name.clone(),
+                        kind: Some(def_kind_to_completion(def.kind)),
+                        detail: Some(state.declaration_snippet(def)),
+                        documentation,
+                        ..Default::default()
+                    }
                 })
                 .collect();
 

@@ -2,7 +2,7 @@ use rowan::TextSize;
 
 use crate::{
     AstNode, Expr, FoldingRangeKind, InterpolatedStringExpr, Item, LineIndex, Pattern, Position,
-    SemanticTokenType, SourceFile, Stmt, StringPart, SymbolKind, SyntaxKind, Type,
+    SemanticTokenType, SourceFile, Stmt, StringPart, SymbolKind, SyntaxKind, Type, doc_comment,
     document_symbols, enclosing_nodes, folding_ranges, parse, parse_source_file, semantic_tokens,
 };
 
@@ -1154,4 +1154,72 @@ fn area(s: Shape) -> F64 {
     assert!(classified.contains(&("Shape", T::Type)));
     assert!(classified.contains(&("area", T::Function)));
     assert!(classified.contains(&("radius", T::Property)));
+}
+
+#[test]
+fn doc_comments_lexed_as_distinct_kind() {
+    let input = "/// doc\n// regular\n//// not doc\n";
+    let tokens = crate::lex(input);
+    let kinds: Vec<_> = tokens
+        .iter()
+        .filter(|t| !matches!(t.kind, SyntaxKind::WHITESPACE))
+        .map(|t| t.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            SyntaxKind::DOC_COMMENT,
+            SyntaxKind::LINE_COMMENT,
+            SyntaxKind::LINE_COMMENT,
+        ]
+    );
+}
+
+#[test]
+fn doc_comment_extracted_from_fn_decl() {
+    let input = r#"
+/// Adds two numbers.
+/// Returns their sum.
+fn add(a: U64, b: U64) -> U64 {
+    a
+}
+"#;
+    let parsed = parse_source_file(input);
+    assert_eq!(parsed.errors(), []);
+
+    let items: Vec<_> = parsed.tree().items().collect();
+    assert_eq!(items.len(), 1);
+    let doc = doc_comment(items[0].syntax()).expect("should have doc comment");
+    assert_eq!(doc, "Adds two numbers.\nReturns their sum.");
+}
+
+#[test]
+fn doc_comment_none_without_doc_lines() {
+    let input = r#"
+// Just a regular comment
+fn foo() {}
+"#;
+    let parsed = parse_source_file(input);
+    assert_eq!(parsed.errors(), []);
+
+    let items: Vec<_> = parsed.tree().items().collect();
+    let doc = doc_comment(items[0].syntax());
+    assert!(doc.is_none(), "regular comments should not be doc comments");
+}
+
+#[test]
+fn doc_comment_on_struct() {
+    let input = r#"
+/// A 2D point.
+struct Point {
+    x: F64,
+    y: F64,
+}
+"#;
+    let parsed = parse_source_file(input);
+    assert_eq!(parsed.errors(), []);
+
+    let items: Vec<_> = parsed.tree().items().collect();
+    let doc = doc_comment(items[0].syntax()).expect("should have doc comment");
+    assert_eq!(doc, "A 2D point.");
 }

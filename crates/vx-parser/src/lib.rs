@@ -12,6 +12,7 @@ pub use ast::{
     StringInterpolation, StringPart, StructDecl, StructLiteralExpr, StructLiteralField,
     StructPattern, StructPatternField, SumType, TuplePattern, TupleType, Type, TypeAliasDecl,
     TypeArgs, TypeOpExpr, TypePath, UnitPattern, VariantPattern, WildcardPattern, WithExpr,
+    doc_comment,
 };
 
 mod lexer;

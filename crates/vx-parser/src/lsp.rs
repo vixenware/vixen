@@ -394,7 +394,9 @@ fn classify_token(token: &SyntaxToken) -> Option<SemanticTokenType> {
         SyntaxKind::STRING | SyntaxKind::INTERP_TEXT | SyntaxKind::BACKTICK => Some(T::String),
 
         // Comments
-        SyntaxKind::LINE_COMMENT | SyntaxKind::BLOCK_COMMENT => Some(T::Comment),
+        SyntaxKind::LINE_COMMENT | SyntaxKind::BLOCK_COMMENT | SyntaxKind::DOC_COMMENT => {
+            Some(T::Comment)
+        }
 
         // Operators and punctuation with semantic meaning
         SyntaxKind::EQ2
