@@ -170,6 +170,7 @@ impl<'a> Lexer<'a> {
             "true" => SyntaxKind::TRUE_KW,
             "false" => SyntaxKind::FALSE_KW,
             "Fn" => SyntaxKind::FN_TYPE_KW,
+            "_" => SyntaxKind::UNDERSCORE,
             text if text.chars().next().is_some_and(|ch| ch.is_uppercase()) => {
                 SyntaxKind::UPPER_IDENT
             }

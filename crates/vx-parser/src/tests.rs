@@ -158,3 +158,69 @@ fn value(flag: Bool) -> String {
     assert!(kinds.contains(&SyntaxKind::IMPORT_EXPR));
     assert!(kinds.contains(&SyntaxKind::FAIL_EXPR));
 }
+
+#[test]
+fn parses_match_with_variant_and_nested_patterns() {
+    let input = r#"
+fn classify(flag: Bool, value: Value) -> String {
+  if flag {
+    "yes"
+  } else {
+    match value {
+      Message.Hello { body } => body,
+      _ => "no",
+    }
+  }
+}
+"#;
+
+    let parse = parse(input);
+    assert_eq!(parse.errors(), []);
+
+    let kinds = parse
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&SyntaxKind::MATCH_EXPR));
+    assert!(kinds.contains(&SyntaxKind::MATCH_ARM));
+    assert!(kinds.contains(&SyntaxKind::VARIANT_PATTERN));
+    assert!(kinds.contains(&SyntaxKind::WILDCARD_PATTERN));
+}
+
+#[test]
+fn parses_literal_or_at_and_array_rest_patterns() {
+    let input = r#"
+fn value(message: Message, direction: Direction, items: Array[String], code: U64) -> String {
+  match message {
+    whole @ Message.Hello { body } => whole.body,
+    _ => "x",
+  };
+  match direction {
+    Direction.North | Direction.South => "ns",
+    _ => "other",
+  };
+  match items {
+    [first, ..rest] => first,
+    [] => "empty",
+  };
+  match code {
+    0 => "ok",
+    _ => "error",
+  }
+}
+"#;
+
+    let parse = parse(input);
+    assert_eq!(parse.errors(), []);
+
+    let kinds = parse
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&SyntaxKind::AT_PATTERN));
+    assert!(kinds.contains(&SyntaxKind::OR_PATTERN));
+    assert!(kinds.contains(&SyntaxKind::ARRAY_REST_PATTERN));
+    assert!(kinds.contains(&SyntaxKind::LITERAL_PATTERN));
+}
