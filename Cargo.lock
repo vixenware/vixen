@@ -3439,6 +3439,7 @@ dependencies = [
  "crossbeam-channel",
  "crossbeam-deque",
  "dashmap 6.1.0",
+ "facet",
  "parking_lot",
  "tempfile",
  "vx-parser",

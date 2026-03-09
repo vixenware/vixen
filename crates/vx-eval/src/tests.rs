@@ -13,6 +13,7 @@ use vx_parser::SourceFile;
 
 use crate::lower::lower_source_file;
 use crate::poison::PoisonKind;
+use crate::transport::TransportValue;
 use crate::value::{BlobValue, PathValue, StructValue, TreeValue, Value};
 use crate::worker::Engine;
 
@@ -283,6 +284,52 @@ fn closure_identity_includes_the_capture_set() {
     assert_eq!(first.identity(), same.identity());
     assert_eq!(first.key(), same.key());
     assert_ne!(first.key(), different.key());
+}
+
+#[test]
+fn shipped_functions_preserve_global_calls_and_captures() {
+    let engine = engine(
+        "fn helper(x: U64) { x + 1 }
+         fn make(offset: U64) {
+           let base = 40;
+           (x) => helper(base + offset + x)
+         }",
+    );
+
+    let module = engine.transport_module();
+    let shipped = engine
+        .ship_function(engine.call("make", vec![Value::U64(1)]).unwrap())
+        .unwrap();
+    let value = Engine::invoke_shipped(&module, &shipped, vec![Value::U64(1)]).unwrap();
+
+    assert_eq!(value, Value::U64(43));
+}
+
+#[test]
+fn inline_values_round_trip_through_transport() {
+    let engine = engine(
+        r#"fn pack(root: Path) {
+               %{
+                 "root" => root,
+                 "tree" => Tree.of(%{
+                   "hello.txt" => Blob.from_string("hello"),
+                 }),
+                 "values" => [41, 42],
+               }
+             }"#,
+    );
+    let value = engine
+        .call("pack", vec![Value::Path(PathValue::new("src"))])
+        .unwrap();
+
+    let shipped = engine.ship_value(value.clone()).unwrap();
+    let round_trip = Value::try_from(shipped).unwrap();
+
+    assert_eq!(round_trip, value);
+    assert!(matches!(
+        engine.ship_value(value).unwrap(),
+        TransportValue::Map(_)
+    ));
 }
 
 #[test]

@@ -20,6 +20,9 @@ pub use node::{NodeId, NodeKey};
 mod poison;
 pub use poison::{DemandChain, PoisonError, PoisonKind};
 
+mod transport;
+pub use transport::{ShippedFunction, TransportModule, TransportValue};
+
 mod value;
 pub use value::{BlobValue, MapValue, PathValue, TreeValue, Value};
 

@@ -20,6 +20,7 @@ use tempfile::TempDir;
 use crate::instr::{self, BinOp, UnaryOp};
 use crate::node::{Node, NodeId, NodeJob, NodeKey, Outcome, Waiter};
 use crate::poison::{DemandChain, DemandEntry, PoisonError, PoisonKind};
+use crate::transport::{ShippedFunction, TransportModule, TransportValue};
 use crate::value::{
     BlobValue, BuiltinFunction, BuiltinMethod, BuiltinNamespace, BuiltinValue, FunctionValue,
     MapValue, PathValue, StructValue, TreeValue, Value,
@@ -39,6 +40,7 @@ enum BuildResult {
 
 /// The evaluation engine.
 pub struct Engine {
+    module: instr::Module,
     nodes: DashMap<NodeId, Arc<Node>>,
     call_memo: DashMap<NodeKey, Arc<Node>>,
     functions: HashMap<String, Vec<Arc<instr::FnDef>>>,
@@ -59,6 +61,7 @@ impl Engine {
         let function_identities = compute_function_identities(&module.functions);
 
         Self {
+            module: module.clone(),
             nodes: DashMap::new(),
             call_memo: DashMap::new(),
             functions,
@@ -79,6 +82,38 @@ impl Engine {
         let function = self.global_function_value(self.resolve_function(name, &args)?);
         let value = self.build_call(Value::Function(function), args);
         self.force_value(value)
+    }
+
+    pub fn transport_module(&self) -> TransportModule {
+        TransportModule::from(&self.module)
+    }
+
+    pub fn ship_value(&self, value: Value) -> Result<TransportValue, PoisonError> {
+        let value = self.force_value(value)?;
+        TransportValue::try_from(&value).map_err(|message| self.type_error(&message))
+    }
+
+    pub fn ship_function(&self, value: Value) -> Result<ShippedFunction, PoisonError> {
+        let value = self.force_value(value)?;
+        let Value::Function(function) = value else {
+            return Err(self.type_error("shipped observers and verifiers must be functions"));
+        };
+        ShippedFunction::try_from(&function).map_err(|message| self.type_error(&message))
+    }
+
+    pub fn invoke_shipped(
+        module: &TransportModule,
+        function: &ShippedFunction,
+        args: Vec<Value>,
+    ) -> Result<Value, PoisonError> {
+        let module: instr::Module = module.clone().into();
+        let engine = Self::from_module(&module);
+        let function = function
+            .to_runtime()
+            .map_err(|message| engine.type_error(&message))?;
+        let value =
+            engine.execute_call(Value::Function(function), Arc::from(args), Arc::from([]))?;
+        engine.force_value(value)
     }
 
     #[cfg(test)]
