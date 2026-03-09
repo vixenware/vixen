@@ -8,15 +8,19 @@ use jiff::Zoned;
 use moire::task::FutureExt;
 use std::time::Instant;
 use tracing::{debug, info};
+use vx_eval::PathValue;
 use vx_runner_proto::{
     CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RunArg, RunFileMount,
     RunOutput, RunRequest, RunResult, RunTreeMount, RustCompileRequest, RustCompileResult,
+    TransportValue,
 };
 use vx_store_proto::{
-    CasNode, ChunkHash, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry, StoreProgress,
+    Blake3Hash, CasNode, ChunkHash, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry,
+    StoreProgress,
 };
 
 use crate::RunnerService;
+use crate::eval_boundary::evaluate_shipped_observer;
 use crate::sandbox::{ActionKind, CommandError};
 
 fn is_relative_vfs_path(path: &str) -> bool {
@@ -54,6 +58,45 @@ fn outputs_stay_within_writable_roots(outputs: &[RunOutput], writable_roots: &[S
             .iter()
             .any(|root| covers_path(root, &out.path))
     })
+}
+
+fn run_failure_result(
+    start: Instant,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+    error: Option<String>,
+) -> RunResult {
+    RunResult {
+        success: false,
+        exit_code,
+        stdout,
+        stderr,
+        duration_ms: start.elapsed().as_millis() as u64,
+        output_manifest: None,
+        observer_value: None,
+        error,
+    }
+}
+
+fn run_success_result(
+    start: Instant,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+    output_manifest: Option<Blake3Hash>,
+    observer_value: Option<TransportValue>,
+) -> RunResult {
+    RunResult {
+        success: true,
+        exit_code,
+        stdout,
+        stderr,
+        duration_ms: start.elapsed().as_millis() as u64,
+        output_manifest,
+        observer_value,
+        error: None,
+    }
 }
 
 /// Action execution context with all paths and sandbox config.
@@ -1184,15 +1227,13 @@ impl RunnerService {
             Ok(id) => id,
             Err(e) => {
                 self.remove_action_prefix(&action.prefix_id).await;
-                return RunResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!("failed to ensure toolchain: {e}")),
-                };
+                return run_failure_result(
+                    start,
+                    -1,
+                    String::new(),
+                    String::new(),
+                    Some(format!("failed to ensure toolchain: {e}")),
+                );
             }
         };
         let toolchain_path = action.mount_base.join(&toolchain_prefix_id);
@@ -1201,54 +1242,47 @@ impl RunnerService {
         for mount in &request.tree_mounts {
             if !is_relative_vfs_path(&mount.mount) {
                 self.remove_action_prefix(&action.prefix_id).await;
-                return RunResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!(
+                return run_failure_result(
+                    start,
+                    -1,
+                    String::new(),
+                    String::new(),
+                    Some(format!(
                         "tree mount '{}' must be a relative VFS path",
                         mount.mount
                     )),
-                };
+                );
             }
         }
 
         for mount in &request.file_mounts {
             if !is_relative_vfs_path(&mount.path) {
                 self.remove_action_prefix(&action.prefix_id).await;
-                return RunResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!(
+                return run_failure_result(
+                    start,
+                    -1,
+                    String::new(),
+                    String::new(),
+                    Some(format!(
                         "file mount '{}' must be a relative VFS path",
                         mount.path
                     )),
-                };
+                );
             }
         }
 
         for root in &request.writable_roots {
             if !is_relative_vfs_path(root) {
                 self.remove_action_prefix(&action.prefix_id).await;
-                return RunResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!(
-                        "writable root '{}' must be a relative VFS path",
-                        root
+                return run_failure_result(
+                    start,
+                    -1,
+                    String::new(),
+                    String::new(),
+                    Some(format!(
+                        "writable root '{root}' must be a relative VFS path"
                     )),
-                };
+                );
             }
         }
 
@@ -1259,30 +1293,26 @@ impl RunnerService {
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     self.remove_action_prefix(&action.prefix_id).await;
-                    return RunResult {
-                        success: false,
-                        exit_code: -1,
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        duration_ms: start.elapsed().as_millis() as u64,
-                        output_manifest: None,
-                        error: Some(format!(
+                    return run_failure_result(
+                        start,
+                        -1,
+                        String::new(),
+                        String::new(),
+                        Some(format!(
                             "tree manifest {} not found in CAS (mount '{}')",
                             mount.manifest, mount.mount
                         )),
-                    };
+                    );
                 }
                 Err(e) => {
                     self.remove_action_prefix(&action.prefix_id).await;
-                    return RunResult {
-                        success: false,
-                        exit_code: -1,
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        duration_ms: start.elapsed().as_millis() as u64,
-                        output_manifest: None,
-                        error: Some(format!("failed to fetch tree manifest: {e:?}")),
-                    };
+                    return run_failure_result(
+                        start,
+                        -1,
+                        String::new(),
+                        String::new(),
+                        Some(format!("failed to fetch tree manifest: {e:?}")),
+                    );
                 }
             }
 
@@ -1293,15 +1323,13 @@ impl RunnerService {
                 .await
             {
                 self.remove_action_prefix(&action.prefix_id).await;
-                return RunResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!("failed to mount tree '{}': {e}", mount.mount)),
-                };
+                return run_failure_result(
+                    start,
+                    -1,
+                    String::new(),
+                    String::new(),
+                    Some(format!("failed to mount tree '{}': {e}", mount.mount)),
+                );
             }
         }
 
@@ -1313,58 +1341,50 @@ impl RunnerService {
                         Ok(CasNode::Manifest(m)) => m,
                         Ok(_) => {
                             self.remove_action_prefix(&action.prefix_id).await;
-                            return RunResult {
-                                success: false,
-                                exit_code: -1,
-                                stdout: String::new(),
-                                stderr: String::new(),
-                                duration_ms: start.elapsed().as_millis() as u64,
-                                output_manifest: None,
-                                error: Some(format!(
+                            return run_failure_result(
+                                start,
+                                -1,
+                                String::new(),
+                                String::new(),
+                                Some(format!(
                                     "input manifest {} is not a Manifest node",
                                     fm.manifest
                                 )),
-                            };
+                            );
                         }
                         Err(e) => {
                             self.remove_action_prefix(&action.prefix_id).await;
-                            return RunResult {
-                                success: false,
-                                exit_code: -1,
-                                stdout: String::new(),
-                                stderr: String::new(),
-                                duration_ms: start.elapsed().as_millis() as u64,
-                                output_manifest: None,
-                                error: Some(format!(
+                            return run_failure_result(
+                                start,
+                                -1,
+                                String::new(),
+                                String::new(),
+                                Some(format!(
                                     "failed to decode input manifest {}: {}",
                                     fm.manifest, e
                                 )),
-                            };
+                            );
                         }
                     },
                     Ok(None) => {
                         self.remove_action_prefix(&action.prefix_id).await;
-                        return RunResult {
-                            success: false,
-                            exit_code: -1,
-                            stdout: String::new(),
-                            stderr: String::new(),
-                            duration_ms: start.elapsed().as_millis() as u64,
-                            output_manifest: None,
-                            error: Some(format!("input manifest {} not found in CAS", fm.manifest)),
-                        };
+                        return run_failure_result(
+                            start,
+                            -1,
+                            String::new(),
+                            String::new(),
+                            Some(format!("input manifest {} not found in CAS", fm.manifest)),
+                        );
                     }
                     Err(e) => {
                         self.remove_action_prefix(&action.prefix_id).await;
-                        return RunResult {
-                            success: false,
-                            exit_code: -1,
-                            stdout: String::new(),
-                            stderr: String::new(),
-                            duration_ms: start.elapsed().as_millis() as u64,
-                            output_manifest: None,
-                            error: Some(format!("failed to fetch input manifest: {e:?}")),
-                        };
+                        return run_failure_result(
+                            start,
+                            -1,
+                            String::new(),
+                            String::new(),
+                            Some(format!("failed to fetch input manifest: {e:?}")),
+                        );
                     }
                 };
 
@@ -1372,18 +1392,16 @@ impl RunnerService {
                     Some(e) => e,
                     None => {
                         self.remove_action_prefix(&action.prefix_id).await;
-                        return RunResult {
-                            success: false,
-                            exit_code: -1,
-                            stdout: String::new(),
-                            stderr: String::new(),
-                            duration_ms: start.elapsed().as_millis() as u64,
-                            output_manifest: None,
-                            error: Some(format!(
+                        return run_failure_result(
+                            start,
+                            -1,
+                            String::new(),
+                            String::new(),
+                            Some(format!(
                                 "input manifest {} missing logical output '{}'",
                                 fm.manifest, fm.logical
                             )),
-                        };
+                        );
                     }
                 };
 
@@ -1406,18 +1424,16 @@ impl RunnerService {
                     .await
                 {
                     self.remove_action_prefix(&action.prefix_id).await;
-                    return RunResult {
-                        success: false,
-                        exit_code: -1,
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        duration_ms: start.elapsed().as_millis() as u64,
-                        output_manifest: None,
-                        error: Some(format!(
+                    return run_failure_result(
+                        start,
+                        -1,
+                        String::new(),
+                        String::new(),
+                        Some(format!(
                             "failed to materialize file mount '{}': {e}",
                             fm.path
                         )),
-                    };
+                    );
                 }
             }
         }
@@ -1439,18 +1455,16 @@ impl RunnerService {
                 })
                 .expect("offending output must exist when containment check fails");
             self.remove_action_prefix(&action.prefix_id).await;
-            return RunResult {
-                success: false,
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: String::new(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_manifest: None,
-                error: Some(format!(
+            return run_failure_result(
+                start,
+                -1,
+                String::new(),
+                String::new(),
+                Some(format!(
                     "output '{}' must be under a writable root (got '{}')",
                     offending.logical, offending.path
                 )),
-            };
+            );
         }
 
         for arg in &request.args {
@@ -1463,18 +1477,16 @@ impl RunnerService {
                 )
             {
                 self.remove_action_prefix(&action.prefix_id).await;
-                return RunResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!(
+                return run_failure_result(
+                    start,
+                    -1,
+                    String::new(),
+                    String::new(),
+                    Some(format!(
                         "path arg '{}' is not covered by a mount or writable root",
                         path
                     )),
-                };
+                );
             }
         }
 
@@ -1488,18 +1500,16 @@ impl RunnerService {
                 )
             {
                 self.remove_action_prefix(&action.prefix_id).await;
-                return RunResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!(
+                return run_failure_result(
+                    start,
+                    -1,
+                    String::new(),
+                    String::new(),
+                    Some(format!(
                         "env path '{}' for '{}' is not covered by a mount or writable root",
                         path, key
                     )),
-                };
+                );
             }
         }
 
@@ -1512,18 +1522,15 @@ impl RunnerService {
             )
         {
             self.remove_action_prefix(&action.prefix_id).await;
-            return RunResult {
-                success: false,
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: String::new(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                output_manifest: None,
-                error: Some(format!(
-                    "cwd '{}' is not covered by a mount or writable root",
-                    cwd
+            return run_failure_result(
+                start,
+                -1,
+                String::new(),
+                String::new(),
+                Some(format!(
+                    "cwd '{cwd}' is not covered by a mount or writable root"
                 )),
-            };
+            );
         }
 
         let program_path = toolchain_path.join(format!(
@@ -1581,15 +1588,13 @@ impl RunnerService {
             Ok(o) => o,
             Err(CommandError::SpawnFailed(e)) => {
                 self.remove_action_prefix(&action.prefix_id).await;
-                return RunResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!("failed to execute command: {e}")),
-                };
+                return run_failure_result(
+                    start,
+                    -1,
+                    String::new(),
+                    String::new(),
+                    Some(format!("failed to execute command: {e}")),
+                );
             }
             Err(CommandError::TimedOut {
                 action_desc,
@@ -1598,51 +1603,64 @@ impl RunnerService {
                 ..
             }) => {
                 self.remove_action_prefix(&action.prefix_id).await;
-                return RunResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: partial_output,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!(
+                return run_failure_result(
+                    start,
+                    -1,
+                    String::new(),
+                    partial_output,
+                    Some(format!(
                         "action '{}' timed out after {}s (limit: {}s)",
                         action_desc,
                         timeout.as_secs(),
                         timeout.as_secs()
                     )),
-                };
+                );
             }
             Err(CommandError::Cancelled {
                 action_desc,
                 partial_output,
             }) => {
                 self.remove_action_prefix(&action.prefix_id).await;
-                return RunResult {
-                    success: false,
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: partial_output,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    output_manifest: None,
-                    error: Some(format!("action '{}' cancelled", action_desc)),
-                };
+                return run_failure_result(
+                    start,
+                    -1,
+                    String::new(),
+                    partial_output,
+                    Some(format!("action '{}' cancelled", action_desc)),
+                );
             }
         };
 
-        let duration_ms = start.elapsed().as_millis() as u64;
         let exit_code = output.exit_status.code().unwrap_or(-1);
-        if !output.exit_status.success() {
-            self.remove_action_prefix(&action.prefix_id).await;
-            return RunResult {
-                success: false,
+        let observer_value = match request.eval.as_ref() {
+            Some(eval) => match evaluate_shipped_observer(
+                self.cas.as_ref(),
+                eval,
                 exit_code,
-                stdout: output.stdout.clone(),
-                stderr: output.stderr.clone(),
-                duration_ms,
-                output_manifest: None,
-                error: None,
-            };
+                &output.stdout,
+                &output.stderr,
+                &PathValue::new(action.prefix_path.as_str()),
+            )
+            .await
+            {
+                Ok(observer_value) => observer_value,
+                Err(error) => {
+                    self.remove_action_prefix(&action.prefix_id).await;
+                    return run_failure_result(
+                        start,
+                        exit_code,
+                        output.stdout.clone(),
+                        output.stderr.clone(),
+                        Some(format!("failed to evaluate shipped observer: {error}")),
+                    );
+                }
+            },
+            None => None,
+        };
+
+        if !output.exit_status.success() && observer_value.is_none() {
+            self.remove_action_prefix(&action.prefix_id).await;
+            return run_failure_result(start, exit_code, output.stdout, output.stderr, None);
         }
 
         let flushed = self
@@ -1656,15 +1674,13 @@ impl RunnerService {
                 Some(&(h, s)) => (h, s),
                 None => {
                     self.remove_action_prefix(&action.prefix_id).await;
-                    return RunResult {
-                        success: false,
-                        exit_code: -1,
-                        stdout: output.stdout.clone(),
-                        stderr: output.stderr.clone(),
-                        duration_ms,
-                        output_manifest: None,
-                        error: Some(format!("output {} not found in VFS", out.path)),
-                    };
+                    return run_failure_result(
+                        start,
+                        -1,
+                        output.stdout.clone(),
+                        output.stderr.clone(),
+                        Some(format!("output {} not found in VFS", out.path)),
+                    );
                 }
             };
 
@@ -1698,28 +1714,25 @@ impl RunnerService {
         let manifest_hash = node_hash.0;
         if let Err(e) = self.cas.put_node(node_hash, node_bytes).await {
             self.remove_action_prefix(&action.prefix_id).await;
-            return RunResult {
-                success: false,
-                exit_code: -1,
-                stdout: output.stdout.clone(),
-                stderr: output.stderr.clone(),
-                duration_ms,
-                output_manifest: None,
-                error: Some(format!("failed to store manifest: {:?}", e)),
-            };
+            return run_failure_result(
+                start,
+                -1,
+                output.stdout.clone(),
+                output.stderr.clone(),
+                Some(format!("failed to store manifest: {:?}", e)),
+            );
         }
 
         self.remove_action_prefix(&action.prefix_id).await;
 
-        RunResult {
-            success: true,
+        run_success_result(
+            start,
             exit_code,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            duration_ms,
-            output_manifest: Some(manifest_hash),
-            error: None,
-        }
+            output.stdout,
+            output.stderr,
+            Some(manifest_hash),
+            observer_value,
+        )
     }
 }
 

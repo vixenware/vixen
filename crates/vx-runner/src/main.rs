@@ -10,6 +10,7 @@
 //! - Return output manifest hashes
 
 pub(crate) mod error;
+pub(crate) mod eval_boundary;
 pub(crate) mod sandbox;
 pub(crate) mod service;
 pub(crate) mod service_vfs;
