@@ -70,6 +70,14 @@ ast_node!(VariantDecl, SyntaxKind::VARIANT_DECL);
 ast_node!(Parameter, SyntaxKind::PARAMETER);
 ast_node!(KeywordParameter, SyntaxKind::KEYWORD_PARAMETER);
 ast_node!(ReturnType, SyntaxKind::RETURN_TYPE);
+ast_node!(SlotType, SyntaxKind::SLOT_TYPE);
+ast_node!(TypeArgs, SyntaxKind::TYPE_ARGS);
+ast_node!(OptionalType, SyntaxKind::OPTIONAL_TYPE);
+ast_node!(FunctionType, SyntaxKind::FUNCTION_TYPE);
+ast_node!(TupleType, SyntaxKind::TUPLE_TYPE);
+ast_node!(ParenType, SyntaxKind::PAREN_TYPE);
+ast_node!(SumType, SyntaxKind::SUM_TYPE);
+ast_node!(TypePath, SyntaxKind::TYPE_PATH);
 ast_node!(BlockExpr, SyntaxKind::BLOCK_EXPR);
 ast_node!(CallExpr, SyntaxKind::CALL_EXPR);
 ast_node!(IfExpr, SyntaxKind::IF_EXPR);
@@ -93,6 +101,19 @@ ast_node!(CompoundUpdateStmt, SyntaxKind::COMPOUND_UPDATE_STMT);
 ast_node!(FieldAssignStmt, SyntaxKind::FIELD_ASSIGN_STMT);
 ast_node!(FieldAssignTarget, SyntaxKind::FIELD_ASSIGN_TARGET);
 ast_node!(ReturnStmt, SyntaxKind::RETURN_STMT);
+ast_node!(BindingPattern, SyntaxKind::BINDING_PATTERN);
+ast_node!(WildcardPattern, SyntaxKind::WILDCARD_PATTERN);
+ast_node!(LiteralPattern, SyntaxKind::LITERAL_PATTERN);
+ast_node!(TuplePattern, SyntaxKind::TUPLE_PATTERN);
+ast_node!(StructPattern, SyntaxKind::STRUCT_PATTERN);
+ast_node!(StructPatternField, SyntaxKind::STRUCT_PATTERN_FIELD);
+ast_node!(ArrayPattern, SyntaxKind::ARRAY_PATTERN);
+ast_node!(ArrayRestPattern, SyntaxKind::ARRAY_REST_PATTERN);
+ast_node!(ParenPattern, SyntaxKind::PAREN_PATTERN);
+ast_node!(UnitPattern, SyntaxKind::UNIT_PATTERN);
+ast_node!(VariantPattern, SyntaxKind::VARIANT_PATTERN);
+ast_node!(AtPattern, SyntaxKind::AT_PATTERN);
+ast_node!(OrPattern, SyntaxKind::OR_PATTERN);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Item {
@@ -152,6 +173,124 @@ pub enum Expr {
     NameRef(NameRefExpr),
     Literal(LiteralExpr),
     InterpolatedString(InterpolatedStringExpr),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Type {
+    Optional(OptionalType),
+    Function(FunctionType),
+    Tuple(TupleType),
+    Paren(ParenType),
+    Sum(SumType),
+    Path(TypePath),
+}
+
+impl AstNode for Type {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        matches!(
+            kind,
+            SyntaxKind::OPTIONAL_TYPE
+                | SyntaxKind::FUNCTION_TYPE
+                | SyntaxKind::TUPLE_TYPE
+                | SyntaxKind::PAREN_TYPE
+                | SyntaxKind::SUM_TYPE
+                | SyntaxKind::TYPE_PATH
+        )
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        match node.kind() {
+            SyntaxKind::OPTIONAL_TYPE => Some(Self::Optional(OptionalType::cast(node)?)),
+            SyntaxKind::FUNCTION_TYPE => Some(Self::Function(FunctionType::cast(node)?)),
+            SyntaxKind::TUPLE_TYPE => Some(Self::Tuple(TupleType::cast(node)?)),
+            SyntaxKind::PAREN_TYPE => Some(Self::Paren(ParenType::cast(node)?)),
+            SyntaxKind::SUM_TYPE => Some(Self::Sum(SumType::cast(node)?)),
+            SyntaxKind::TYPE_PATH => Some(Self::Path(TypePath::cast(node)?)),
+            _ => None,
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        match self {
+            Self::Optional(node) => node.syntax(),
+            Self::Function(node) => node.syntax(),
+            Self::Tuple(node) => node.syntax(),
+            Self::Paren(node) => node.syntax(),
+            Self::Sum(node) => node.syntax(),
+            Self::Path(node) => node.syntax(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Pattern {
+    Binding(BindingPattern),
+    Wildcard(WildcardPattern),
+    Literal(LiteralPattern),
+    Tuple(TuplePattern),
+    Struct(StructPattern),
+    Array(ArrayPattern),
+    ArrayRest(ArrayRestPattern),
+    Paren(ParenPattern),
+    Unit(UnitPattern),
+    Variant(VariantPattern),
+    At(AtPattern),
+    Or(OrPattern),
+}
+
+impl AstNode for Pattern {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        matches!(
+            kind,
+            SyntaxKind::BINDING_PATTERN
+                | SyntaxKind::WILDCARD_PATTERN
+                | SyntaxKind::LITERAL_PATTERN
+                | SyntaxKind::TUPLE_PATTERN
+                | SyntaxKind::STRUCT_PATTERN
+                | SyntaxKind::ARRAY_PATTERN
+                | SyntaxKind::ARRAY_REST_PATTERN
+                | SyntaxKind::PAREN_PATTERN
+                | SyntaxKind::UNIT_PATTERN
+                | SyntaxKind::VARIANT_PATTERN
+                | SyntaxKind::AT_PATTERN
+                | SyntaxKind::OR_PATTERN
+        )
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        match node.kind() {
+            SyntaxKind::BINDING_PATTERN => Some(Self::Binding(BindingPattern::cast(node)?)),
+            SyntaxKind::WILDCARD_PATTERN => Some(Self::Wildcard(WildcardPattern::cast(node)?)),
+            SyntaxKind::LITERAL_PATTERN => Some(Self::Literal(LiteralPattern::cast(node)?)),
+            SyntaxKind::TUPLE_PATTERN => Some(Self::Tuple(TuplePattern::cast(node)?)),
+            SyntaxKind::STRUCT_PATTERN => Some(Self::Struct(StructPattern::cast(node)?)),
+            SyntaxKind::ARRAY_PATTERN => Some(Self::Array(ArrayPattern::cast(node)?)),
+            SyntaxKind::ARRAY_REST_PATTERN => Some(Self::ArrayRest(ArrayRestPattern::cast(node)?)),
+            SyntaxKind::PAREN_PATTERN => Some(Self::Paren(ParenPattern::cast(node)?)),
+            SyntaxKind::UNIT_PATTERN => Some(Self::Unit(UnitPattern::cast(node)?)),
+            SyntaxKind::VARIANT_PATTERN => Some(Self::Variant(VariantPattern::cast(node)?)),
+            SyntaxKind::AT_PATTERN => Some(Self::At(AtPattern::cast(node)?)),
+            SyntaxKind::OR_PATTERN => Some(Self::Or(OrPattern::cast(node)?)),
+            _ => None,
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        match self {
+            Self::Binding(node) => node.syntax(),
+            Self::Wildcard(node) => node.syntax(),
+            Self::Literal(node) => node.syntax(),
+            Self::Tuple(node) => node.syntax(),
+            Self::Struct(node) => node.syntax(),
+            Self::Array(node) => node.syntax(),
+            Self::ArrayRest(node) => node.syntax(),
+            Self::Paren(node) => node.syntax(),
+            Self::Unit(node) => node.syntax(),
+            Self::Variant(node) => node.syntax(),
+            Self::At(node) => node.syntax(),
+            Self::Or(node) => node.syntax(),
+        }
+    }
 }
 
 impl AstNode for Expr {
@@ -346,17 +485,29 @@ impl NewtypeDecl {
     pub fn name(&self) -> Option<SyntaxToken> {
         first_token(self.syntax(), |kind| kind == SyntaxKind::UPPER_IDENT)
     }
+
+    pub fn inner_type(&self) -> Option<Type> {
+        self.syntax().children().find_map(Type::cast)
+    }
 }
 
 impl TypeAliasDecl {
     pub fn name(&self) -> Option<SyntaxToken> {
         first_token(self.syntax(), |kind| kind == SyntaxKind::UPPER_IDENT)
     }
+
+    pub fn aliased_type(&self) -> Option<Type> {
+        self.syntax().children().find_map(Type::cast)
+    }
 }
 
 impl FieldDecl {
     pub fn name(&self) -> Option<SyntaxToken> {
         first_token(self.syntax(), |kind| kind == SyntaxKind::LOWER_IDENT)
+    }
+
+    pub fn slot_type(&self) -> Option<SlotType> {
+        child(self.syntax())
     }
 }
 
@@ -376,11 +527,90 @@ impl Parameter {
             matches!(kind, SyntaxKind::LOWER_IDENT | SyntaxKind::UNDERSCORE)
         })
     }
+
+    pub fn slot_type(&self) -> Option<SlotType> {
+        child(self.syntax())
+    }
 }
 
 impl KeywordParameter {
     pub fn name(&self) -> Option<SyntaxToken> {
         first_token(self.syntax(), |kind| kind == SyntaxKind::LOWER_IDENT)
+    }
+
+    pub fn slot_type(&self) -> Option<SlotType> {
+        child(self.syntax())
+    }
+}
+
+impl ReturnType {
+    pub fn ty(&self) -> Option<Type> {
+        child(self.syntax())
+    }
+}
+
+impl SlotType {
+    pub fn ty(&self) -> Option<Type> {
+        child(self.syntax())
+    }
+}
+
+impl TypeArgs {
+    pub fn types(&self) -> AstChildren<Type> {
+        AstChildren::new(self.syntax())
+    }
+}
+
+impl OptionalType {
+    pub fn inner(&self) -> Option<Type> {
+        self.syntax().children().find_map(Type::cast)
+    }
+}
+
+impl FunctionType {
+    pub fn parameter_types(&self) -> AstChildren<Type> {
+        let mut types = self
+            .syntax()
+            .children()
+            .filter_map(Type::cast)
+            .collect::<Vec<_>>();
+        let _ = types.pop();
+        AstChildren::from_nodes(types.into_iter().map(|ty| ty.syntax().clone()).collect())
+    }
+
+    pub fn return_type(&self) -> Option<Type> {
+        self.syntax().children().filter_map(Type::cast).last()
+    }
+}
+
+impl TupleType {
+    pub fn items(&self) -> AstChildren<Type> {
+        AstChildren::new(self.syntax())
+    }
+}
+
+impl ParenType {
+    pub fn inner(&self) -> Option<Type> {
+        child(self.syntax())
+    }
+}
+
+impl SumType {
+    pub fn variants(&self) -> AstChildren<Type> {
+        AstChildren::new(self.syntax())
+    }
+}
+
+impl TypePath {
+    pub fn segments(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.syntax()
+            .children_with_tokens()
+            .filter_map(|child| child.into_token())
+            .filter(|token| token.kind() == SyntaxKind::UPPER_IDENT)
+    }
+
+    pub fn type_args(&self) -> Option<TypeArgs> {
+        child(self.syntax())
     }
 }
 
@@ -413,6 +643,10 @@ impl MatchExpr {
 }
 
 impl MatchArm {
+    pub fn pattern(&self) -> Option<Pattern> {
+        child(self.syntax())
+    }
+
     pub fn expr(&self) -> Option<Expr> {
         self.syntax().children().filter_map(Expr::cast).last()
     }
@@ -589,6 +823,98 @@ impl FieldAssignTarget {
 impl ReturnStmt {
     pub fn expr(&self) -> Option<Expr> {
         child(self.syntax())
+    }
+}
+
+impl BindingPattern {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        first_descendant_token(self.syntax(), |kind| {
+            matches!(kind, SyntaxKind::LOWER_IDENT | SyntaxKind::UNDERSCORE)
+        })
+    }
+}
+
+impl LiteralPattern {
+    pub fn token(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| {
+            matches!(
+                kind,
+                SyntaxKind::INT
+                    | SyntaxKind::FLOAT
+                    | SyntaxKind::STRING
+                    | SyntaxKind::TRUE_KW
+                    | SyntaxKind::FALSE_KW
+            )
+        })
+    }
+}
+
+impl TuplePattern {
+    pub fn items(&self) -> AstChildren<Pattern> {
+        AstChildren::new(self.syntax())
+    }
+}
+
+impl StructPattern {
+    pub fn fields(&self) -> AstChildren<StructPatternField> {
+        AstChildren::new(self.syntax())
+    }
+}
+
+impl StructPatternField {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| kind == SyntaxKind::LOWER_IDENT)
+    }
+
+    pub fn pattern(&self) -> Option<Pattern> {
+        self.syntax().children().find_map(Pattern::cast)
+    }
+}
+
+impl ArrayPattern {
+    pub fn items(&self) -> AstChildren<Pattern> {
+        AstChildren::new(self.syntax())
+    }
+}
+
+impl ArrayRestPattern {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| kind == SyntaxKind::LOWER_IDENT)
+    }
+}
+
+impl ParenPattern {
+    pub fn inner(&self) -> Option<Pattern> {
+        child(self.syntax())
+    }
+}
+
+impl VariantPattern {
+    pub fn segments(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.syntax()
+            .children_with_tokens()
+            .filter_map(|child| child.into_token())
+            .filter(|token| token.kind() == SyntaxKind::UPPER_IDENT)
+    }
+
+    pub fn fields(&self) -> Option<StructPattern> {
+        child(self.syntax())
+    }
+}
+
+impl AtPattern {
+    pub fn binding_name(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| kind == SyntaxKind::LOWER_IDENT)
+    }
+
+    pub fn pattern(&self) -> Option<Pattern> {
+        self.syntax().children().find_map(Pattern::cast)
+    }
+}
+
+impl OrPattern {
+    pub fn patterns(&self) -> AstChildren<Pattern> {
+        AstChildren::new(self.syntax())
     }
 }
 

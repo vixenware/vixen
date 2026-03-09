@@ -2,12 +2,15 @@
 
 mod ast;
 pub use ast::{
-    ArrayExpr, AssignStmt, AstChildren, AstNode, BinaryExpr, BlockExpr, CallExpr,
-    CompoundUpdateStmt, EnumDecl, Expr, FieldAssignStmt, FieldAssignTarget, FieldDecl, FieldExpr,
-    FnDecl, IfExpr, InterpolatedStringExpr, Item, LetStmt, LiteralExpr, MapEntry, MapExpr,
-    MatchArm, MatchExpr, NameRefExpr, NewtypeDecl, Parameter, ReturnStmt, SourceFile, Stmt,
+    ArrayExpr, ArrayPattern, ArrayRestPattern, AssignStmt, AstChildren, AstNode, AtPattern,
+    BinaryExpr, BindingPattern, BlockExpr, CallExpr, CompoundUpdateStmt, EnumDecl, Expr,
+    FieldAssignStmt, FieldAssignTarget, FieldDecl, FieldExpr, FnDecl, FunctionType, IfExpr,
+    InterpolatedStringExpr, Item, LetStmt, LiteralExpr, LiteralPattern, MapEntry, MapExpr,
+    MatchArm, MatchExpr, NameRefExpr, NewtypeDecl, OptionalType, OrPattern, Parameter,
+    ParenPattern, ParenType, Pattern, ReturnStmt, ReturnType, SlotType, SourceFile, Stmt,
     StringInterpolation, StringPart, StructDecl, StructLiteralExpr, StructLiteralField,
-    TypeAliasDecl, WithExpr,
+    StructPattern, StructPatternField, SumType, TuplePattern, TupleType, Type, TypeAliasDecl,
+    TypeArgs, TypePath, UnitPattern, VariantPattern, WildcardPattern, WithExpr,
 };
 
 mod lexer;

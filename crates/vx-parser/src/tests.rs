@@ -1,5 +1,6 @@
 use crate::{
-    AstNode, Expr, InterpolatedStringExpr, Item, SourceFile, Stmt, StringPart, SyntaxKind, parse,
+    AstNode, Expr, InterpolatedStringExpr, Item, Pattern, SourceFile, Stmt, StringPart, SyntaxKind,
+    Type, parse,
 };
 
 #[test]
@@ -594,4 +595,139 @@ fn demo(input: Config, state: State) -> String {
         expr => panic!("expected field expr, got {expr:?}"),
     };
     assert_eq!(return_expr.field_name().unwrap().text(), "jobs");
+}
+
+#[test]
+fn ast_wraps_types_and_patterns_for_lowering() {
+    let input = r#"
+type Entry = Blob | Fn(String, Bool) #fs -> Result?
+
+fn decode(input: Array[String]?, item: Message, ; loudly: Bool = false) -> Map[String, Entry?] {
+  match item {
+    whole @ Message.Hello { body } => body,
+    Direction.North | Direction.South => "ns",
+    [first, ..rest] => first,
+    _ => "other",
+  }
+}
+"#;
+
+    let parse = parse(input);
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let items = file.items().collect::<Vec<_>>();
+
+    let type_alias = match &items[0] {
+        Item::TypeAliasDecl(node) => node,
+        item => panic!("expected type alias, got {item:?}"),
+    };
+    let sum = match type_alias.aliased_type().expect("aliased type") {
+        Type::Sum(node) => node,
+        ty => panic!("expected sum type, got {ty:?}"),
+    };
+    let variants = sum.variants().collect::<Vec<_>>();
+    assert_eq!(variants.len(), 2);
+    assert!(matches!(&variants[0], Type::Optional(_)));
+    let function = match &variants[1] {
+        Type::Optional(node) => match node.inner().expect("inner function type") {
+            Type::Function(node) => node,
+            ty => panic!("expected function type, got {ty:?}"),
+        },
+        ty => panic!("expected function type, got {ty:?}"),
+    };
+    let params = function.parameter_types().collect::<Vec<_>>();
+    assert_eq!(params.len(), 2);
+    assert!(matches!(&params[0], Type::Optional(_)));
+    assert!(matches!(function.return_type(), Some(Type::Optional(_))));
+
+    let function = match &items[1] {
+        Item::FnDecl(node) => node,
+        item => panic!("expected fn decl, got {item:?}"),
+    };
+    let input_param = function.parameters().next().expect("input parameter");
+    let input_type = input_param
+        .slot_type()
+        .and_then(|slot| slot.ty())
+        .expect("input type");
+    let input_type = match input_type {
+        Type::Optional(node) => node,
+        ty => panic!("expected optional input type, got {ty:?}"),
+    };
+    let input_path = match input_type.inner().expect("inner input type") {
+        Type::Path(node) => node,
+        ty => panic!("expected path type, got {ty:?}"),
+    };
+    let input_segments = input_path
+        .segments()
+        .map(|token| token.text().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(input_segments, vec!["Array".to_string()]);
+    let input_args = input_path.type_args().expect("type args");
+    let arg_types = input_args.types().collect::<Vec<_>>();
+    assert_eq!(arg_types.len(), 1);
+
+    let return_type = function
+        .return_type()
+        .and_then(|ret| ret.ty())
+        .expect("return type");
+    let return_path = match return_type {
+        Type::Optional(node) => match node.inner().expect("map inner type") {
+            Type::Path(node) => node,
+            ty => panic!("expected path type, got {ty:?}"),
+        },
+        ty => panic!("expected optional return wrapper, got {ty:?}"),
+    };
+    assert_eq!(
+        return_path
+            .segments()
+            .map(|token| token.text().to_string())
+            .collect::<Vec<_>>(),
+        vec!["Map".to_string()]
+    );
+
+    let body = function.body().expect("function body");
+    let match_expr = body
+        .syntax()
+        .descendants()
+        .find_map(crate::MatchExpr::cast)
+        .expect("match expr");
+    let arms = match_expr.arms().collect::<Vec<_>>();
+    assert_eq!(arms.len(), 4);
+
+    let at_pattern = match arms[0].pattern().expect("at pattern") {
+        Pattern::At(node) => node,
+        pattern => panic!("expected at pattern, got {pattern:?}"),
+    };
+    assert_eq!(at_pattern.binding_name().unwrap().text(), "whole");
+    let variant = match at_pattern.pattern().expect("variant pattern") {
+        Pattern::Variant(node) => node,
+        pattern => panic!("expected variant pattern, got {pattern:?}"),
+    };
+    assert_eq!(
+        variant
+            .segments()
+            .map(|token| token.text().to_string())
+            .collect::<Vec<_>>(),
+        vec!["Message".to_string(), "Hello".to_string()]
+    );
+
+    let or_pattern = match arms[1].pattern().expect("or pattern") {
+        Pattern::Or(node) => node,
+        pattern => panic!("expected or pattern, got {pattern:?}"),
+    };
+    assert_eq!(or_pattern.patterns().count(), 2);
+
+    let array_pattern = match arms[2].pattern().expect("array pattern") {
+        Pattern::Array(node) => node,
+        pattern => panic!("expected array pattern, got {pattern:?}"),
+    };
+    let items = array_pattern.items().collect::<Vec<_>>();
+    assert_eq!(items.len(), 2);
+    assert!(matches!(&items[0], Pattern::Binding(_)));
+    let rest = match &items[1] {
+        Pattern::ArrayRest(node) => node,
+        pattern => panic!("expected array rest pattern, got {pattern:?}"),
+    };
+    assert_eq!(rest.name().unwrap().text(), "rest");
 }
