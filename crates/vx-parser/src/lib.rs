@@ -1,5 +1,12 @@
 //! Event-based parser for Vixen source files.
 
+mod ast;
+pub use ast::{
+    AstChildren, AstNode, BlockExpr, CallExpr, EnumDecl, Expr, FieldDecl, FnDecl, IfExpr,
+    InterpolatedStringExpr, Item, MatchArm, MatchExpr, NameRefExpr, NewtypeDecl, Parameter,
+    SourceFile, StringInterpolation, StringPart, StructDecl, TypeAliasDecl,
+};
+
 mod lexer;
 pub use lexer::{Token, lex};
 

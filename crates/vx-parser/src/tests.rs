@@ -1,4 +1,6 @@
-use crate::{SyntaxKind, parse};
+use crate::{
+    AstNode, Expr, InterpolatedStringExpr, Item, SourceFile, StringPart, SyntaxKind, parse,
+};
 
 #[test]
 fn parses_top_level_declarations_from_corpus() {
@@ -409,4 +411,119 @@ fn demo(value: Value) -> String {
         .filter(|node| node.kind() == SyntaxKind::MATCH_ARM)
         .count();
     assert_eq!(arm_count, 2);
+}
+
+#[test]
+fn ast_wraps_top_level_items_for_symbols() {
+    let input = r#"
+struct Config {
+  jobs: U64,
+}
+
+enum Message {
+  struct Hello {
+    body: String,
+  },
+  struct Goodbye,
+}
+
+fn build(src: String) -> String {
+  src
+}
+"#;
+
+    let parse = parse(input);
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let items = file.items().collect::<Vec<_>>();
+    assert_eq!(items.len(), 3);
+
+    let names = items
+        .iter()
+        .map(|item| item.name().map(|token| token.text().to_string()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            Some("Config".to_string()),
+            Some("Message".to_string()),
+            Some("build".to_string())
+        ]
+    );
+
+    let struct_decl = match &items[0] {
+        Item::StructDecl(node) => node,
+        item => panic!("expected struct decl, got {item:?}"),
+    };
+    let field_names = struct_decl
+        .fields()
+        .map(|field| field.name().unwrap().text().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(field_names, vec!["jobs".to_string()]);
+
+    let enum_decl = match &items[1] {
+        Item::EnumDecl(node) => node,
+        item => panic!("expected enum decl, got {item:?}"),
+    };
+    let variant_names = enum_decl
+        .variants()
+        .map(|variant| variant.name().unwrap().text().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        variant_names,
+        vec!["Hello".to_string(), "Goodbye".to_string()]
+    );
+}
+
+#[test]
+fn ast_wraps_key_expressions() {
+    let input = r#"
+fn demo(value: Value) -> String {
+  if value.flag {
+    `hello ${value.name}`
+  } else {
+    match value {
+      _ => greet(value.name),
+    }
+  }
+}
+"#;
+
+    let parse = parse(input);
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let mut exprs = body.exprs();
+
+    let if_expr = match exprs.next().expect("if expr") {
+        Expr::If(node) => node,
+        expr => panic!("expected if expr, got {expr:?}"),
+    };
+    assert!(if_expr.condition().is_some());
+
+    let interpolated = body
+        .syntax()
+        .descendants()
+        .find_map(InterpolatedStringExpr::cast)
+        .expect("interpolated string");
+    let parts = interpolated.parts().collect::<Vec<_>>();
+    assert!(matches!(&parts[0], StringPart::Text(token) if token.text() == "hello "));
+    assert!(matches!(&parts[1], StringPart::Interpolation(_)));
+
+    let match_expr = body
+        .syntax()
+        .descendants()
+        .find_map(crate::MatchExpr::cast)
+        .expect("match expr");
+    let arm = match_expr.arms().next().expect("match arm");
+    match arm.expr().expect("arm expr") {
+        Expr::Call(_) => {}
+        expr => panic!("expected call expr, got {expr:?}"),
+    }
 }
