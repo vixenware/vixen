@@ -1460,6 +1460,12 @@ insert_anchor_links = "heading"
 > depends on a poisoned value also becomes poisoned. The runtime attaches
 > context automatically: what function was being evaluated, what its
 > inputs were, what demanded it.
+>
+> Poison values carry a **kind** that distinguishes the failure mode.
+> The kind is used by the runtime and tooling — not by user code — to
+> decide how to report and respond. One distinct kind is **verification
+> failure** (see [exec.verifier]), which signals that an executor's
+> environment drifted from its recorded discovery.
 
 > r[error.fail]
 >
@@ -1578,6 +1584,8 @@ insert_anchor_links = "heading"
 >     env: Map[String, ExecArg] = %{},
 >     mounts: Map[Path, Blob | Tree] = %{},
 >     writable: Array[Path] = [],
+>     executor: ExecutorClass = executor_class("default"),
+>     verifier: Fn() -> () = fn() {},
 >     observer: Fn(Process, Tree) -> Stream[T],
 >   }
 > ) -> Stream[T]
@@ -1651,6 +1659,101 @@ insert_anchor_links = "heading"
 > Pending values derived from that stream become poisoned.
 > Application-level errors are the observer's responsibility — parse
 > stdout/stderr and call `fail`.
+
+> r[exec.verifier]
+>
+> The `verifier` parameter is an optional closure that runs on the
+> executor in parallel with the actual process. It checks that the
+> host environment matches what was discovered — hashing binaries,
+> checking paths, verifying versions. If the verifier poisons, the
+> `exec` result poisons with a **verification failure**, a distinct
+> poison kind that signals the executor's environment has drifted from
+> the recorded discovery.
+>
+> Verification does not gate execution. The process runs speculatively
+> while verification proceeds concurrently. If verification fails after
+> the process completes, the result is discarded and the exec poisons.
+
+> r[exec.verifier.compose]
+>
+> `exec` accepts one verifier. If multiple environment properties must
+> be checked, compose them into a single closure:
+>
+> ```vixen
+> verifier = fn() {
+>   check_gcc();
+>   check_ld();
+>   check_sdk_version();
+> }
+>
+> exec(["gcc", "-c", "main.c"], verifier: verifier, ...)
+> ```
+
+> r[exec.executor-class]
+>
+> `executor_class(label: String) -> ExecutorClass` creates a value
+> representing a class of executor environments (e.g.,
+> `executor_class("ubuntu-22.04")`). The class is the unit of cache
+> reuse for `exec` — cached results are keyed by executor class, not
+> by specific runner instance. Different instances of the same class
+> are expected to be equivalent; the verifier detects when they are
+> not.
+
+## Executor discovery
+
+> r[exec.discover]
+>
+> Some toolchains cannot be acquired through `acquire` — they are
+> non-redistributable (MSVC, Xcode) or must be found on the executor
+> host. `discover_exec` probes an executor without sandboxing. It runs
+> a command directly on the host and returns its output. It requires
+> the `#discover` capability and must run inside a `stabilize` resolve
+> callback.
+>
+> ```vixen
+> fn discover_exec(
+>   class: ExecutorClass,
+>   args: Array[String],
+>   { env: Map[String, String] = %{} },
+> ) -> DiscoveryProcess;
+> ```
+>
+> `DiscoveryProcess` has `stdout: Blob`, `stderr: Blob`, and
+> `exit_code: U64`. There is no VFS, no mounts, no observer — the
+> process sees the executor's real host filesystem.
+
+> r[exec.discover.verifier]
+>
+> Discovery results are opaque to the build graph. The build does not
+> branch on what version of MSVC was found — it just runs `cl.exe`.
+> What discovery produces is a **verifier**: a closure that re-checks
+> the same facts on the concrete executor instance running each `exec`.
+>
+> The verifier is constructed from discovery output by library or user
+> code and passed to `exec` via the `verifier` parameter. The runtime
+> does not inspect or synthesize verifiers — they are ordinary closures.
+
+> r[exec.discover.reuse]
+>
+> Discovery results are cached by executor class through `stabilize`.
+> The witness reads local project state (what toolchain is requested);
+> the resolve calls `discover_exec` to learn what is actually present.
+> The stabilized result — including the verifier — is reused across
+> builds as long as the witness is unchanged.
+>
+> Per-instance verification happens at every `exec`: the verifier runs
+> on the actual runner that executes the work. If verification fails
+> (the runner drifted from what was discovered), the exec poisons with
+> a verification failure. The cached discovery for that class is
+> invalidated and rediscovery runs on retry.
+
+> r[exec.discover.retry]
+>
+> A verification failure poison carries structured evidence: what was
+> expected, what was observed. This distinguishes it from other poison
+> kinds. The runtime or caller may retry by rerunning the `stabilize`
+> witness/resolve cycle to update the cached discovery, then retrying
+> the exec with the new verifier.
 
 ## Deserialization
 
@@ -1832,13 +1935,13 @@ insert_anchor_links = "heading"
 > code identity is stable across comment/formatting edits, the cache
 > survives source changes that do not affect behavior.
 >
-> `exec` cache keys additionally include the runner fingerprint:
-> **(observer code identity, observer captures, args, env, mounts,
-> runner fingerprint)**. Runner-contributed inputs (toolchain versions)
-> are fingerprinted and tracked. Because the observer's code identity
-> is transitive, changing a helper function that the observer calls
-> invalidates the `exec` cache — even though the observer's own AST
-> did not change.
+> `exec` cache keys are **(observer code identity, observer captures,
+> args, env, mounts, executor class)**. The executor class is the unit
+> of cache reuse — two `exec` calls with the same inputs and the same
+> executor class may share a cached result. Because the observer's code
+> identity is transitive, changing a helper function that the observer
+> calls invalidates the `exec` cache — even though the observer's own
+> AST did not change.
 
 > r[eval.memoization.pending]
 >
