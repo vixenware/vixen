@@ -1217,7 +1217,24 @@ impl VxdService {
             return self.build_from_vx_styx(request, vx_styx_path).await;
         }
 
-        // Fall back to Cargo.toml (Rust-only projects)
+        let build_vx_path = project_path.join("build.vx");
+        if build_vx_path.exists() {
+            return Err(VxdError::InvalidManifest(
+                "build.vx evaluation is not wired into vx build yet".to_string(),
+            )
+            .into());
+        }
+
+        let cargo_manifest_path = project_path.join("Cargo.toml");
+        if !cargo_manifest_path.exists() {
+            return Err(VxdError::InvalidManifest(
+                "expected vx.styx or Cargo.toml at the project root".to_string(),
+            )
+            .into());
+        }
+
+        // r[impl eval.entry.cargo-compat]
+        // Fall back to Cargo.toml (Rust-only projects) only when no build.vx exists.
         // Build the crate graph with lockfile support
         let graph = CrateGraph::build_with_lockfile(project_path)
             .map_err(|e| VxdError::CrateGraph(format!("{e:?}")))?;

@@ -19,6 +19,18 @@ fn fresh_build_succeeds() {
 }
 
 #[test]
+// r[verify eval.entry.cargo-compat]
+fn cargo_compat_build_succeeds_without_build_vx() {
+    let env = TestEnv::new();
+    create_hello_world(&env);
+
+    assert!(!env.file_exists("build.vx"));
+    assert!(!env.file_exists("vx.styx"));
+
+    env.build().run().assert_success();
+}
+
+#[test]
 fn second_build_is_cache_hit() {
     let env = TestEnv::new();
     create_hello_world(&env);
