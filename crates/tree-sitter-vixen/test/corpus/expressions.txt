@@ -1,0 +1,86 @@
+================================================================================
+Expressions and updates
+================================================================================
+
+msg = `found ${results.len()} results`;
+updated = config with {
+  package.name: "new",
+  package.edition: "2024",
+};
+render("page.html", ..defaults, title: "Home");
+add_two = @add(2, ..);
+
+--------------------------------------------------------------------------------
+
+(document
+  (statement_list
+    (binding_statement
+      (binding_pattern
+        (lower_identifier))
+      (primary_expression
+        (interpolated_string
+          (string_content)
+          (string_interpolation
+            (call_expression
+              (field_expression
+                (primary_expression
+                  (identifier_expression
+                    (lower_identifier)))
+                (lower_identifier))
+              (argument_list)))
+          (string_content))))
+    (binding_statement
+      (binding_pattern
+        (lower_identifier))
+      (with_expression
+        (primary_expression
+          (identifier_expression
+            (lower_identifier)))
+        (update_body
+          (update_field
+            (field_path
+              (lower_identifier)
+              (lower_identifier))
+            (primary_expression
+              (string_literal
+                (string_content))))
+          (update_field
+            (field_path
+              (lower_identifier)
+              (lower_identifier))
+            (primary_expression
+              (string_literal
+                (string_content)))))))
+    (call_expression
+      (primary_expression
+        (identifier_expression
+          (lower_identifier)))
+      (argument_list
+        (argument
+          (primary_expression
+            (string_literal
+              (string_content))))
+        (argument
+          (spread_expression
+            (primary_expression
+              (identifier_expression
+                (lower_identifier)))))
+        (argument
+          (keyword_argument
+            (lower_identifier)
+            (primary_expression
+              (string_literal
+                (string_content)))))))
+    (binding_statement
+      (binding_pattern
+        (lower_identifier))
+      (partial_application_expression
+        (primary_expression
+          (identifier_expression
+            (lower_identifier)))
+        (argument_list
+          (argument
+            (primary_expression
+              (integer_literal)))
+          (argument
+            (argument_placeholder)))))))

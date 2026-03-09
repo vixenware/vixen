@@ -1,0 +1,14 @@
+name = "Vixen"
+grammar = "vixen"
+path_suffixes = ["vixen", "vx"]
+line_comments = ["//"]
+block_comments = [["/*", "*/"]]
+autoclose_before = "]})"
+brackets = [
+    { start = "{", end = "}", close = true, newline = true },
+    { start = "(", end = ")", close = true, newline = false },
+    { start = "[", end = "]", close = true, newline = false },
+    { start = "\"", end = "\"", close = true, newline = false, not_in = ["string"] },
+    { start = "`", end = "`", close = true, newline = false, not_in = ["string"] },
+]
+word_characters = ["_"]
