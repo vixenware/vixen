@@ -1504,6 +1504,11 @@ insert_anchor_links = "heading"
 > Blake3 hashes). `Blob.from_string(s)` creates a blob from a text
 > string. Blobs with binary content come from `exec`.
 
+> r[store.blob.to-string]
+>
+> `blob.to_string()` returns the blob's content interpreted as a UTF-8
+> string. Poisons if the content is not valid UTF-8.
+
 > r[store.tree]
 >
 > `Tree` is a directory with its full structure and filenames preserved.
@@ -1511,16 +1516,30 @@ insert_anchor_links = "heading"
 > handles materialization transparently.
 >
 > `Tree.of(map)` creates a tree from a map of names to entries.
+> `Tree.empty()` is shorthand for `Tree.of(%{})`.
 > `.subtree(path)` selects a subtree. `.glob(pattern)` filters by glob.
 > `.merge(other)` merges two trees (later entries win). These operations
 > are lazy.
+
+> r[store.tree.file]
+>
+> `tree.file(path)` returns the `Blob` at the given relative path
+> within the tree. Poisons if the path does not exist or points to a
+> directory. The fallible version `tree.file(path)?` returns
+> `Option[Blob]`.
 
 > r[store.path]
 >
 > `Path` is its own type — not a newtype of `String`. Root paths come
 > from `.at()` on store types. Sub-paths are built with the `/` operator.
-> Paths carry their store references — when a `Path` appears in an `exec`
-> argument, the runtime materializes the referenced content in the VFS.
+> Paths carry their store references — they remember which `Tree` or
+> `Blob` they point into and what sub-path within it.
+>
+> In `exec`, Paths in `args` and `env` are resolved to VFS locations
+> using the mount table. The runtime finds the mount that covers the
+> Path's store reference and constructs the VFS path (mount point +
+> sub-path). If no mount covers the referenced content, the evaluator
+> reports an error. See [exec.mount].
 >
 > String interpolation with a `Path` produces an `ExecArg` (not a plain
 > `String`) that preserves store dependencies.
@@ -1535,9 +1554,12 @@ insert_anchor_links = "heading"
 > ```vixen
 > exec[T](
 >   args: Array[ExecArg],
->   env: Map[String, ExecArg],
->   mounts: Map[Path, Mount],
->   observer: Fn(Process, Tree) -> Stream[T],
+>   {
+>     env: Map[String, ExecArg] = %{},
+>     mounts: Map[Path, Blob | Tree] = %{},
+>     writable: Array[Path] = [],
+>     observer: Fn(Process, Tree) -> Stream[T],
+>   }
 > ) -> Stream[T]
 > ```
 
@@ -1549,9 +1571,26 @@ insert_anchor_links = "heading"
 
 > r[exec.mount]
 >
-> `Mount` has a `source: Blob | Tree` and `writable: Bool`. Read-only
-> mounts (default) make content available but immutable. Writable mounts
-> allow the process to write output. All mount paths are relative.
+> Mounts map VFS paths (`Path`) to store content (`Blob` or `Tree`).
+> The content is available at the specified path in the sandbox
+> filesystem. All mount paths are relative. Mounts are read-only by
+> default.
+>
+> Every `Path` that appears in `args` or `env` must be covered by a
+> mount — the runtime resolves each `Path` to its VFS location by
+> finding the mount whose content matches the Path's store reference,
+> then joining the mount point with the Path's sub-path. If no mount
+> covers a referenced `Path`, the evaluator reports an error. This
+> makes the VFS layout explicit — nothing is silently materialized.
+
+> r[exec.writable]
+>
+> `writable` lists VFS paths (`Path`) where the process is allowed to
+> write. These are empty directories created before the process starts.
+> The process can create files and subdirectories within them. The
+> observer can read written content from the VFS tree after the process
+> runs. Writable paths are scratch space — they have nothing to do
+> with store types.
 
 > r[exec.process]
 >
@@ -1598,8 +1637,20 @@ insert_anchor_links = "heading"
 > r[deser.parse]
 >
 > Vixen has built-in parsers for structured data formats. Parsing is
-> driven by type: `Toml.parse[CargoToml](blob)`. Field names map to keys,
-> `Option` fields are optional, sum types handle polymorphic values.
+> driven by type — the target type's shape determines how the input is
+> deserialized. Field names map to keys, `Option` fields are optional,
+> sum types handle polymorphic values.
+
+> r[deser.formats]
+>
+> Built-in formats:
+>
+> - `Toml.parse[T](blob)` — TOML.
+> - `Json.parse[T](blob)` — JSON.
+> - `Yaml.parse[T](blob)` — YAML.
+>
+> All take a `Blob` and return a value of type `T`. Parsing poisons on
+> malformed input or type mismatches.
 
 > r[deser.rename]
 >
@@ -1804,5 +1855,22 @@ insert_anchor_links = "heading"
 
 > r[exec.acquire]
 >
-> `acquire(url, sha256: hash)` fetches a resource by URL. Cached forever
-> when a hash is provided.
+> `acquire(url)` fetches a resource by URL and returns a `Blob`.
+>
+> - With a hash — `acquire(url, sha256: hash)` — the result is
+>   content-addressed and cached permanently. The hash is verified;
+>   a mismatch poisons.
+> - Without a hash — `acquire(url)` — the result is cached according
+>   to the `@ttl` policy of the calling function. Calling `acquire`
+>   without a hash outside a `@ttl` function is an error (the result
+>   would be non-reproducible).
+
+> r[exec.acquire.extract]
+>
+> `acquire(url, sha256: hash, extract: format)` fetches a URL and
+> extracts the archive in one streaming step, returning a `Tree`.
+> Supported formats: `"tar.gz"`, `"tar.xz"`, `"tar.zst"`, `"zip"`.
+> Extraction streams directly to the content-addressable store — the
+> `Tree` is pending until extraction completes, and the entire
+> operation (fetch + extract) is a single cached unit keyed by URL and
+> hash.
