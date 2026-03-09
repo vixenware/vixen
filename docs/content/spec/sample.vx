@@ -1,0 +1,50 @@
+
+struct BuildInput {
+    fs: Fs,
+    workspace: Path,
+    args: Array[String],
+    env: Map[String, String],
+}
+
+struct BuildOutput {
+    targets: Map[String, Tree],
+}
+
+// TODO: this is totally gucci, we don't need `..`
+fn build({ fs, workspace_root }: BuildInput) -> BuildOutput {
+    // these both end up Tree(s)
+    source_files = fs.glob(workspace_root / "**/*.c");
+    toolchain = fs.glob("/opt/c-toolchain");
+
+    hello = exec(
+        mounts: %{
+            "src" => source_files,
+            "toolchain" => toolchain,
+        },
+        writable: ["out"],
+        args: [
+            "toolchain/bin/gcc",
+            ..source_files,
+            "-o", "out/hello"
+        ],
+        observer: (process, tree) => {
+            // TBD: Stream & Tree constructors
+            Stream(Tree("out/hello"))
+        }
+    ).next();
+
+    BuildOutput {
+        targets: %{ "hello" => hello }
+    }
+}
+
+
+BuildFacts = struct {
+    foo: Fn() => FooFact,
+    bar: Fn() => BarFact,
+}
+
+??? = struct {
+    foo: FooFact,
+    bar: BarFact,
+}
