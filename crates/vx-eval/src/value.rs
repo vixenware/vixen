@@ -13,6 +13,7 @@ use crate::node::NodeId;
 // r[impl eval.pending]
 // i[impl impl.scalar]
 // i[impl impl.string]
+// i[impl impl.cycle-free]
 /// A runtime value.
 #[derive(Debug, Clone)]
 pub enum Value {
