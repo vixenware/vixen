@@ -79,7 +79,11 @@ ast_node!(ParenType, SyntaxKind::PAREN_TYPE);
 ast_node!(SumType, SyntaxKind::SUM_TYPE);
 ast_node!(TypePath, SyntaxKind::TYPE_PATH);
 ast_node!(BlockExpr, SyntaxKind::BLOCK_EXPR);
+ast_node!(ClosureExpr, SyntaxKind::CLOSURE_EXPR);
+ast_node!(ClosureParamClause, SyntaxKind::CLOSURE_PARAM_CLAUSE);
+ast_node!(PartialAppExpr, SyntaxKind::PARTIAL_APP_EXPR);
 ast_node!(CallExpr, SyntaxKind::CALL_EXPR);
+ast_node!(IndexExpr, SyntaxKind::INDEX_EXPR);
 ast_node!(IfExpr, SyntaxKind::IF_EXPR);
 ast_node!(MatchExpr, SyntaxKind::MATCH_EXPR);
 ast_node!(MatchArm, SyntaxKind::MATCH_ARM);
@@ -89,8 +93,12 @@ ast_node!(MapEntry, SyntaxKind::MAP_ENTRY);
 ast_node!(StructLiteralExpr, SyntaxKind::STRUCT_LITERAL_EXPR);
 ast_node!(StructLiteralField, SyntaxKind::STRUCT_LITERAL_FIELD);
 ast_node!(FieldExpr, SyntaxKind::FIELD_EXPR);
+ast_node!(PrefixExpr, SyntaxKind::PREFIX_EXPR);
 ast_node!(BinaryExpr, SyntaxKind::BINARY_EXPR);
+ast_node!(RangeExpr, SyntaxKind::RANGE_EXPR);
+ast_node!(TypeOpExpr, SyntaxKind::TYPE_OP_EXPR);
 ast_node!(WithExpr, SyntaxKind::WITH_EXPR);
+ast_node!(FallibleExpr, SyntaxKind::FALLIBLE_EXPR);
 ast_node!(NameRefExpr, SyntaxKind::NAME_REF_EXPR);
 ast_node!(LiteralExpr, SyntaxKind::LITERAL_EXPR);
 ast_node!(InterpolatedStringExpr, SyntaxKind::INTERPOLATED_STRING_EXPR);
@@ -161,15 +169,22 @@ impl AstNode for Item {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     Block(BlockExpr),
+    Closure(ClosureExpr),
+    PartialApp(PartialAppExpr),
     Call(CallExpr),
+    Index(IndexExpr),
     If(IfExpr),
     Match(MatchExpr),
     Array(ArrayExpr),
     Map(MapExpr),
     StructLiteral(StructLiteralExpr),
     Field(FieldExpr),
+    Prefix(PrefixExpr),
     Binary(BinaryExpr),
+    Range(RangeExpr),
+    TypeOp(TypeOpExpr),
     With(WithExpr),
+    Fallible(FallibleExpr),
     NameRef(NameRefExpr),
     Literal(LiteralExpr),
     InterpolatedString(InterpolatedStringExpr),
@@ -298,15 +313,22 @@ impl AstNode for Expr {
         matches!(
             kind,
             SyntaxKind::BLOCK_EXPR
+                | SyntaxKind::CLOSURE_EXPR
+                | SyntaxKind::PARTIAL_APP_EXPR
                 | SyntaxKind::CALL_EXPR
+                | SyntaxKind::INDEX_EXPR
                 | SyntaxKind::IF_EXPR
                 | SyntaxKind::MATCH_EXPR
                 | SyntaxKind::ARRAY_EXPR
                 | SyntaxKind::MAP_EXPR
                 | SyntaxKind::STRUCT_LITERAL_EXPR
                 | SyntaxKind::FIELD_EXPR
+                | SyntaxKind::PREFIX_EXPR
                 | SyntaxKind::BINARY_EXPR
+                | SyntaxKind::RANGE_EXPR
+                | SyntaxKind::TYPE_OP_EXPR
                 | SyntaxKind::WITH_EXPR
+                | SyntaxKind::FALLIBLE_EXPR
                 | SyntaxKind::NAME_REF_EXPR
                 | SyntaxKind::LITERAL_EXPR
                 | SyntaxKind::INTERPOLATED_STRING_EXPR
@@ -316,7 +338,10 @@ impl AstNode for Expr {
     fn cast(node: SyntaxNode) -> Option<Self> {
         match node.kind() {
             SyntaxKind::BLOCK_EXPR => Some(Self::Block(BlockExpr::cast(node)?)),
+            SyntaxKind::CLOSURE_EXPR => Some(Self::Closure(ClosureExpr::cast(node)?)),
+            SyntaxKind::PARTIAL_APP_EXPR => Some(Self::PartialApp(PartialAppExpr::cast(node)?)),
             SyntaxKind::CALL_EXPR => Some(Self::Call(CallExpr::cast(node)?)),
+            SyntaxKind::INDEX_EXPR => Some(Self::Index(IndexExpr::cast(node)?)),
             SyntaxKind::IF_EXPR => Some(Self::If(IfExpr::cast(node)?)),
             SyntaxKind::MATCH_EXPR => Some(Self::Match(MatchExpr::cast(node)?)),
             SyntaxKind::ARRAY_EXPR => Some(Self::Array(ArrayExpr::cast(node)?)),
@@ -325,8 +350,12 @@ impl AstNode for Expr {
                 Some(Self::StructLiteral(StructLiteralExpr::cast(node)?))
             }
             SyntaxKind::FIELD_EXPR => Some(Self::Field(FieldExpr::cast(node)?)),
+            SyntaxKind::PREFIX_EXPR => Some(Self::Prefix(PrefixExpr::cast(node)?)),
             SyntaxKind::BINARY_EXPR => Some(Self::Binary(BinaryExpr::cast(node)?)),
+            SyntaxKind::RANGE_EXPR => Some(Self::Range(RangeExpr::cast(node)?)),
+            SyntaxKind::TYPE_OP_EXPR => Some(Self::TypeOp(TypeOpExpr::cast(node)?)),
             SyntaxKind::WITH_EXPR => Some(Self::With(WithExpr::cast(node)?)),
+            SyntaxKind::FALLIBLE_EXPR => Some(Self::Fallible(FallibleExpr::cast(node)?)),
             SyntaxKind::NAME_REF_EXPR => Some(Self::NameRef(NameRefExpr::cast(node)?)),
             SyntaxKind::LITERAL_EXPR => Some(Self::Literal(LiteralExpr::cast(node)?)),
             SyntaxKind::INTERPOLATED_STRING_EXPR => Some(Self::InterpolatedString(
@@ -339,15 +368,22 @@ impl AstNode for Expr {
     fn syntax(&self) -> &SyntaxNode {
         match self {
             Self::Block(node) => node.syntax(),
+            Self::Closure(node) => node.syntax(),
+            Self::PartialApp(node) => node.syntax(),
             Self::Call(node) => node.syntax(),
+            Self::Index(node) => node.syntax(),
             Self::If(node) => node.syntax(),
             Self::Match(node) => node.syntax(),
             Self::Array(node) => node.syntax(),
             Self::Map(node) => node.syntax(),
             Self::StructLiteral(node) => node.syntax(),
             Self::Field(node) => node.syntax(),
+            Self::Prefix(node) => node.syntax(),
             Self::Binary(node) => node.syntax(),
+            Self::Range(node) => node.syntax(),
+            Self::TypeOp(node) => node.syntax(),
             Self::With(node) => node.syntax(),
+            Self::Fallible(node) => node.syntax(),
             Self::NameRef(node) => node.syntax(),
             Self::Literal(node) => node.syntax(),
             Self::InterpolatedString(node) => node.syntax(),
@@ -624,9 +660,35 @@ impl BlockExpr {
     }
 }
 
+impl ClosureExpr {
+    pub fn parameters(&self) -> AstChildren<BindingPattern> {
+        nested_children(self.syntax(), &[SyntaxKind::CLOSURE_PARAM_CLAUSE])
+    }
+
+    pub fn body(&self) -> Option<Expr> {
+        self.syntax().children().filter_map(Expr::cast).last()
+    }
+}
+
+impl PartialAppExpr {
+    pub fn callee(&self) -> Option<Expr> {
+        child(self.syntax())
+    }
+}
+
 impl CallExpr {
     pub fn callee(&self) -> Option<Expr> {
         self.syntax().children().find_map(Expr::cast)
+    }
+}
+
+impl IndexExpr {
+    pub fn receiver(&self) -> Option<Expr> {
+        nth_expr(self.syntax(), 0)
+    }
+
+    pub fn index(&self) -> Option<Expr> {
+        nth_expr(self.syntax(), 1)
     }
 }
 
@@ -706,6 +768,18 @@ impl FieldExpr {
     }
 }
 
+impl PrefixExpr {
+    pub fn operator_token(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| {
+            matches!(kind, SyntaxKind::BANG | SyntaxKind::MINUS)
+        })
+    }
+
+    pub fn expr(&self) -> Option<Expr> {
+        child(self.syntax())
+    }
+}
+
 impl BinaryExpr {
     pub fn lhs(&self) -> Option<Expr> {
         nth_expr(self.syntax(), 0)
@@ -716,9 +790,44 @@ impl BinaryExpr {
     }
 }
 
+impl RangeExpr {
+    pub fn operands(&self) -> AstChildren<Expr> {
+        AstChildren::new(self.syntax())
+    }
+}
+
+impl TypeOpExpr {
+    pub fn expr(&self) -> Option<Expr> {
+        child(self.syntax())
+    }
+
+    pub fn operator_token(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| {
+            matches!(
+                kind,
+                SyntaxKind::AS_KW | SyntaxKind::IS_KW | SyntaxKind::COLON2
+            )
+        })
+    }
+
+    pub fn ty(&self) -> Option<Type> {
+        self.syntax().children().find_map(Type::cast)
+    }
+
+    pub fn pattern(&self) -> Option<Pattern> {
+        self.syntax().children().find_map(Pattern::cast)
+    }
+}
+
 impl WithExpr {
     pub fn receiver(&self) -> Option<Expr> {
         nth_expr(self.syntax(), 0)
+    }
+}
+
+impl FallibleExpr {
+    pub fn expr(&self) -> Option<Expr> {
+        child(self.syntax())
     }
 }
 

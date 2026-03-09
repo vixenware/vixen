@@ -1,6 +1,9 @@
+use rowan::TextSize;
+
 use crate::{
-    AstNode, Expr, InterpolatedStringExpr, Item, Pattern, SourceFile, Stmt, StringPart, SyntaxKind,
-    Type, parse, parse_source_file,
+    AstNode, Expr, FoldingRangeKind, InterpolatedStringExpr, Item, LineIndex, Pattern, Position,
+    SourceFile, Stmt, StringPart, SymbolKind, SyntaxKind, Type, document_symbols, enclosing_nodes,
+    folding_ranges, parse, parse_source_file,
 };
 
 #[test]
@@ -768,4 +771,254 @@ fn ok() -> U64 {
     let items = file.items().collect::<Vec<_>>();
     assert_eq!(items.len(), 1);
     assert!(matches!(&items[0], Item::FnDecl(_)));
+}
+
+#[test]
+fn ast_wraps_remaining_operator_and_postfix_expressions() {
+    let input = r#"
+fn demo(xs: Array[String], value: String) -> String {
+  @compile(xs[0]);
+  let closure = (item) => item?;
+  let casted = xs[0] as String;
+  let typed = 0 :: I64;
+  let checked = value is Message.Hello { body };
+  let ranged = ..10;
+  let negated = -1;
+  closure(value)
+}
+"#;
+
+    let parse = parse(input);
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let statements = body.statements().collect::<Vec<_>>();
+
+    let partial_app = match &statements[0] {
+        Stmt::Expr(Expr::PartialApp(node)) => node,
+        stmt => panic!("expected partial app expr, got {stmt:?}"),
+    };
+    assert!(matches!(partial_app.callee(), Some(Expr::NameRef(_))));
+
+    let closure_stmt = match &statements[1] {
+        Stmt::Let(node) => node,
+        stmt => panic!("expected let stmt, got {stmt:?}"),
+    };
+    let closure = match closure_stmt.expr().expect("closure expr") {
+        Expr::Closure(node) => node,
+        expr => panic!("expected closure expr, got {expr:?}"),
+    };
+    assert_eq!(closure.parameters().count(), 1);
+    assert!(matches!(closure.body(), Some(Expr::Fallible(_))));
+
+    let cast_stmt = match &statements[2] {
+        Stmt::Let(node) => node,
+        stmt => panic!("expected cast let stmt, got {stmt:?}"),
+    };
+    let cast = match cast_stmt.expr().expect("cast expr") {
+        Expr::TypeOp(node) => node,
+        expr => panic!("expected type op expr, got {expr:?}"),
+    };
+    assert_eq!(cast.operator_token().unwrap().text(), "as");
+    assert!(matches!(cast.expr(), Some(Expr::Index(_))));
+    assert!(matches!(cast.ty(), Some(Type::Optional(_))));
+
+    let typed_stmt = match &statements[3] {
+        Stmt::Let(node) => node,
+        stmt => panic!("expected typed let stmt, got {stmt:?}"),
+    };
+    let typed = match typed_stmt.expr().expect("typed expr") {
+        Expr::TypeOp(node) => node,
+        expr => panic!("expected type op expr, got {expr:?}"),
+    };
+    assert_eq!(typed.operator_token().unwrap().text(), "::");
+    assert!(matches!(typed.ty(), Some(Type::Optional(_))));
+
+    let checked_stmt = match &statements[4] {
+        Stmt::Let(node) => node,
+        stmt => panic!("expected checked let stmt, got {stmt:?}"),
+    };
+    let checked = match checked_stmt.expr().expect("checked expr") {
+        Expr::TypeOp(node) => node,
+        expr => panic!("expected type op expr, got {expr:?}"),
+    };
+    assert_eq!(checked.operator_token().unwrap().text(), "is");
+    assert!(matches!(checked.pattern(), Some(Pattern::Variant(_))));
+
+    let ranged_stmt = match &statements[5] {
+        Stmt::Let(node) => node,
+        stmt => panic!("expected range let stmt, got {stmt:?}"),
+    };
+    let range = match ranged_stmt.expr().expect("range expr") {
+        Expr::Range(node) => node,
+        expr => panic!("expected range expr, got {expr:?}"),
+    };
+    assert_eq!(range.operands().count(), 1);
+
+    let negated_stmt = match &statements[6] {
+        Stmt::Let(node) => node,
+        stmt => panic!("expected prefix let stmt, got {stmt:?}"),
+    };
+    let prefix = match negated_stmt.expr().expect("prefix expr") {
+        Expr::Prefix(node) => node,
+        expr => panic!("expected prefix expr, got {expr:?}"),
+    };
+    assert_eq!(prefix.operator_token().unwrap().text(), "-");
+    assert!(matches!(prefix.expr(), Some(Expr::Literal(_))));
+
+    let call = match &statements[7] {
+        Stmt::Expr(Expr::Call(node)) => node,
+        stmt => panic!("expected call expr, got {stmt:?}"),
+    };
+    assert!(matches!(call.callee(), Some(Expr::NameRef(_))));
+}
+
+#[test]
+fn line_index_basics() {
+    let idx = LineIndex::new("abc\ndef\nghi");
+    assert_eq!(idx.line_count(), 3);
+    assert_eq!(
+        idx.position(TextSize::from(0)),
+        Position { line: 0, col: 0 }
+    );
+    assert_eq!(
+        idx.position(TextSize::from(4)),
+        Position { line: 1, col: 0 }
+    );
+    assert_eq!(
+        idx.position(TextSize::from(5)),
+        Position { line: 1, col: 1 }
+    );
+    assert_eq!(
+        idx.position(TextSize::from(8)),
+        Position { line: 2, col: 0 }
+    );
+
+    assert_eq!(
+        idx.offset(Position { line: 1, col: 0 }),
+        Some(TextSize::from(4))
+    );
+    assert_eq!(
+        idx.offset(Position { line: 2, col: 2 }),
+        Some(TextSize::from(10))
+    );
+}
+
+#[test]
+fn document_symbols_extracts_items_with_children() {
+    let input = r#"
+struct Config {
+  jobs: U64,
+  name: String,
+}
+
+enum Message {
+  struct Hello {
+    body: String,
+  },
+  struct Goodbye,
+}
+
+newtype PathBuf of String
+
+type Entry = Blob | Tree
+
+fn build(src: String) -> String {
+  src
+}
+"#;
+
+    let parsed = parse_source_file(input);
+    assert_eq!(parsed.errors(), []);
+
+    let symbols = document_symbols(&parsed.tree());
+    assert_eq!(symbols.len(), 5);
+
+    assert_eq!(symbols[0].name, "Config");
+    assert_eq!(symbols[0].kind, SymbolKind::Struct);
+    assert_eq!(symbols[0].children.len(), 2);
+    assert_eq!(symbols[0].children[0].name, "jobs");
+    assert_eq!(symbols[0].children[0].kind, SymbolKind::Field);
+    assert_eq!(symbols[0].children[1].name, "name");
+
+    assert_eq!(symbols[1].name, "Message");
+    assert_eq!(symbols[1].kind, SymbolKind::Enum);
+    assert_eq!(symbols[1].children.len(), 2);
+    assert_eq!(symbols[1].children[0].name, "Hello");
+    assert_eq!(symbols[1].children[0].kind, SymbolKind::Variant);
+    assert_eq!(symbols[1].children[0].children.len(), 1);
+    assert_eq!(symbols[1].children[0].children[0].name, "body");
+    assert_eq!(symbols[1].children[1].name, "Goodbye");
+    assert_eq!(symbols[1].children[1].children.len(), 0);
+
+    assert_eq!(symbols[2].name, "PathBuf");
+    assert_eq!(symbols[2].kind, SymbolKind::Newtype);
+
+    assert_eq!(symbols[3].name, "Entry");
+    assert_eq!(symbols[3].kind, SymbolKind::TypeAlias);
+
+    assert_eq!(symbols[4].name, "build");
+    assert_eq!(symbols[4].kind, SymbolKind::Function);
+}
+
+#[test]
+fn enclosing_nodes_finds_breadcrumb_trail() {
+    let input = r#"fn outer() -> U64 {
+  match 1 {
+    _ => {
+      42
+    },
+  }
+}"#;
+
+    let parsed = parse_source_file(input);
+    assert_eq!(parsed.errors(), []);
+
+    // Offset inside the "42" literal within the match arm body block
+    let offset = TextSize::from(input.find("42").unwrap() as u32);
+    let crumbs = enclosing_nodes(&parsed.tree().syntax(), offset);
+
+    let kinds: Vec<_> = crumbs.iter().map(|b| b.kind).collect();
+    assert!(kinds.contains(&SyntaxKind::SOURCE_FILE));
+    assert!(kinds.contains(&SyntaxKind::FN_DECL));
+    assert!(kinds.contains(&SyntaxKind::MATCH_EXPR));
+    assert!(kinds.contains(&SyntaxKind::MATCH_ARM));
+    assert!(kinds.contains(&SyntaxKind::BLOCK_EXPR));
+
+    let fn_crumb = crumbs
+        .iter()
+        .find(|b| b.kind == SyntaxKind::FN_DECL)
+        .unwrap();
+    assert_eq!(fn_crumb.name.as_deref(), Some("outer"));
+}
+
+#[test]
+fn folding_ranges_finds_blocks_and_items() {
+    let input = r#"
+struct Config {
+  jobs: U64,
+}
+
+fn build() -> U64 {
+  if true {
+    1
+  } else {
+    0
+  }
+}
+"#;
+
+    let parsed = parse_source_file(input);
+    assert_eq!(parsed.errors(), []);
+
+    let ranges = folding_ranges(&parsed.tree().syntax());
+    let kinds: Vec<_> = ranges.iter().map(|r| r.kind).collect();
+    assert!(kinds.iter().all(|k| *k == FoldingRangeKind::Block));
+    // At minimum: struct decl, struct body, fn decl, fn body block, if expr
+    assert!(ranges.len() >= 5);
 }
