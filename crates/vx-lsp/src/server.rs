@@ -34,6 +34,42 @@ impl DocumentState {
         }
     }
 
+    /// Find the definition under the cursor. Works whether the cursor is on
+    /// a definition site or on a reference that resolves to one.
+    fn definition_at(&self, offset: rowan::TextSize) -> Option<&vx_resolve::Definition> {
+        // Check if cursor is on a reference
+        if let Some(resolved) = self
+            .resolution
+            .refs
+            .iter()
+            .find(|r| r.ref_range.contains_inclusive(offset))
+        {
+            return resolved.target.as_ref().ok();
+        }
+
+        // Check if cursor is on a definition site
+        self.resolution
+            .scopes
+            .all_definitions()
+            .find(|d| d.name_range.contains_inclusive(offset))
+    }
+
+    /// Find all reference ranges that point to a given definition.
+    fn references_to(&self, def: &vx_resolve::Definition) -> Vec<TextRange> {
+        self.resolution
+            .refs
+            .iter()
+            .filter_map(|r| {
+                let target = r.target.as_ref().ok()?;
+                if target.name_range == def.name_range {
+                    Some(r.ref_range)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     fn to_lsp_range(&self, range: TextRange) -> Range {
         let start = self.line_index.position(range.start());
         let end = self.line_index.position(range.end());
@@ -70,6 +106,11 @@ impl LanguageServer for VxLanguageServer {
                     TextDocumentSyncKind::FULL,
                 )),
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 semantic_tokens_provider: Some(
@@ -204,6 +245,104 @@ impl LanguageServer for VxLanguageServer {
                 uri: uri.clone(),
                 range,
             }))
+        });
+
+        Ok(result.flatten())
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let include_declaration = params.context.include_declaration;
+
+        let result = self.with_document(uri, |state| {
+            let offset = state.line_index.offset(vx::Position {
+                line: pos.line,
+                col: pos.character,
+            })?;
+
+            let def = state.definition_at(offset)?;
+            let mut locations: Vec<Location> = state
+                .references_to(def)
+                .into_iter()
+                .map(|range| Location {
+                    uri: uri.clone(),
+                    range: state.to_lsp_range(range),
+                })
+                .collect();
+
+            if include_declaration {
+                locations.push(Location {
+                    uri: uri.clone(),
+                    range: state.to_lsp_range(def.name_range),
+                });
+            }
+
+            Some(locations)
+        });
+
+        Ok(result.flatten())
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = &params.text_document.uri;
+        let pos = params.position;
+
+        let result = self.with_document(uri, |state| {
+            let offset = state.line_index.offset(vx::Position {
+                line: pos.line,
+                col: pos.character,
+            })?;
+
+            let def = state.definition_at(offset)?;
+            Some(PrepareRenameResponse::RangeWithPlaceholder {
+                range: state.to_lsp_range(def.name_range),
+                placeholder: def.name.clone(),
+            })
+        });
+
+        Ok(result.flatten())
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let new_name = params.new_name;
+
+        let result = self.with_document(uri, |state| {
+            let offset = state.line_index.offset(vx::Position {
+                line: pos.line,
+                col: pos.character,
+            })?;
+
+            let def = state.definition_at(offset)?;
+
+            // Collect all edits: the definition site + all references
+            let mut edits: Vec<TextEdit> = state
+                .references_to(def)
+                .into_iter()
+                .map(|range| TextEdit {
+                    range: state.to_lsp_range(range),
+                    new_text: new_name.clone(),
+                })
+                .collect();
+
+            // Also rename the definition itself
+            edits.push(TextEdit {
+                range: state.to_lsp_range(def.name_range),
+                new_text: new_name.clone(),
+            });
+
+            let mut changes = HashMap::new();
+            changes.insert(uri.clone(), edits);
+
+            Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            })
         });
 
         Ok(result.flatten())
