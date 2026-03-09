@@ -71,6 +71,23 @@ How Vixen implements value semantics without copying everything.
 > captured values are reference-counted handles, same as struct fields.
 > Cloning a closure is shallow.
 
+## Executor-side evaluation
+
+Observers and verifiers passed to `exec` are not host callbacks. The
+runtime lowers them into transportable evaluator payloads: code
+identity, lowered function body, and resolved captures.
+
+The orchestrator and executor share the same evaluator semantics. In a
+split-process implementation, that usually means both sides link the
+same evaluator crate. The executor reconstructs the shipped closure,
+binds it to executor-local values like `Process` and the sandbox `Tree`,
+and evaluates it there.
+
+When those executor-local values cross back to the orchestrator, they
+are first committed into the content-addressable store. The boundary
+carries store-backed `Blob` and `Tree` values, not raw executor
+filesystem paths.
+
 ## Persistent data structures
 
 > i[impl.persistent]

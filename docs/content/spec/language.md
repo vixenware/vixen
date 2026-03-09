@@ -1582,7 +1582,13 @@ insert_anchor_links = "heading"
 > with a virtual filesystem. `exec` is a builtin function available in
 > the standard environment, not a reserved keyword or special form. It
 > uses ordinary call syntax and can be shadowed by user bindings. It is
-> generic over `T`:
+> generic over `T`.
+>
+> The orchestrator does not run the process or inspect the sandbox
+> directly. It serializes the full `exec` payload, including the
+> observer and verifier closures, and ships that payload to an executor.
+> The executor runs the process, evaluates those closures, and returns
+> only the observer's produced values back across the boundary.
 >
 > ```vixen
 > exec[T](
@@ -1633,22 +1639,31 @@ insert_anchor_links = "heading"
 >
 > `Process` has `stdout: Stream[Blob]`, `stderr: Stream[Blob]`, and
 > `exit_code: U64` (pending until the process exits). No stdin — processes
-> are not interactive. No signal API.
+> are not interactive. No signal API. `Process` exists on the executor;
+> the orchestrator observes it only through the shipped observer's
+> return stream.
 
 > r[exec.observer]
 >
 > The observer runs on the executor, not the orchestrator. It is
 > serialized along with its captured values and shipped to the executor.
-> A closure cannot be sent until all its captures are resolved. The
-> observer receives a `Process` and the VFS root as a `Tree`, and returns
-> `Stream[T]`.
+> A closure cannot be sent until all its captures are resolved.
+>
+> Serialization preserves the observer's code identity, lowered body,
+> and resolved captures. The executor evaluates that payload with the
+> same language semantics as the orchestrator. The observer receives a
+> `Process` and the VFS root as a `Tree`, and returns `Stream[T]`.
 
 > r[exec.observer.materialization]
 >
 > When the observer produces a value back to the orchestrator, any VFS
-> paths in the value are committed to the content-addressable store
-> automatically. The runtime handles data movement so the executor can be
-> released.
+> content referenced by that value is committed to the
+> content-addressable store automatically. `Blob` and `Tree` values
+> backed by the executor's sandbox are materialized into store objects
+> and cross the boundary as store-backed values rather than
+> executor-local filesystem handles. Bare `Path` values are locators only
+> and do not carry content across the boundary. The runtime handles this
+> data movement so the executor can be released.
 
 > r[exec.observer.streaming]
 >
@@ -1678,6 +1693,10 @@ insert_anchor_links = "heading"
 > `exec` result poisons with a **verification failure**, a distinct
 > poison kind that signals the executor's environment has drifted from
 > the recorded discovery.
+>
+> Like the observer, the verifier is serialized as code plus resolved
+> captures and evaluated on the executor with ordinary language
+> semantics. It is not a special host-side callback.
 >
 > Verification does not gate execution. The process runs speculatively
 > while verification proceeds concurrently. If verification fails after
@@ -1887,9 +1906,9 @@ insert_anchor_links = "heading"
 > environments:
 >
 > 1. **Orchestrator → Executor** — when calling `exec`, the arguments,
->    mounts, and serialized observer must be fully resolved before they
->    can be shipped to the executor process. This is a serialization
->    boundary.
+>    mounts, and serialized observer/verifier payloads must be fully
+>    resolved before they can be shipped to the executor process. This
+>    is a serialization boundary.
 > 2. **Orchestrator → External caller** — the external environment (CLI,
 >    API, or other driver) demands the final result. This is where the
 >    output tree must be fully materialized.
