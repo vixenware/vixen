@@ -74,3 +74,27 @@ proc-macro = true
     let result = env.build().run();
     result.assert_failure_contains("proc-macro");
 }
+
+#[test]
+fn invalid_build_vx_reports_parse_errors() {
+    let env = TestEnv::new();
+    env.write_file("build.vx", "fn build(");
+
+    let result = env.build().run();
+    result.assert_failure_contains("failed to parse build.vx");
+}
+
+#[test]
+fn build_vx_requires_tree_output() {
+    let env = TestEnv::new();
+    env.write_file(
+        "build.vx",
+        r#"fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  42
+}
+"#,
+    );
+
+    let result = env.build().run();
+    result.assert_failure_contains("must return Tree");
+}

@@ -7,6 +7,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
+use std::process::Command;
 use std::sync::Arc;
 use std::thread;
 #[cfg(test)]
@@ -14,13 +15,14 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
+use tempfile::TempDir;
 
 use crate::instr::{self, BinOp, UnaryOp};
 use crate::node::{Node, NodeId, NodeJob, NodeKey, Outcome, Waiter};
 use crate::poison::{DemandChain, DemandEntry, PoisonError, PoisonKind};
 use crate::value::{
-    BlobValue, BuiltinMethod, BuiltinNamespace, BuiltinValue, FunctionValue, MapValue, PathValue,
-    StructValue, TreeValue, Value,
+    BlobValue, BuiltinFunction, BuiltinMethod, BuiltinNamespace, BuiltinValue, FunctionValue,
+    MapValue, PathValue, StructValue, TreeValue, Value,
 };
 
 thread_local! {
@@ -199,6 +201,27 @@ impl Engine {
             NodeJob::Call {
                 function,
                 args: Arc::from(args),
+                kwargs: Arc::from([]),
+            },
+            "call(..)".into(),
+        )
+    }
+
+    fn build_call_with_kwargs(
+        &self,
+        function: Value,
+        args: Vec<Value>,
+        kwargs: Vec<(Arc<str>, Value)>,
+    ) -> Value {
+        if kwargs.is_empty() {
+            return self.build_call(function, args);
+        }
+
+        self.pending_value(
+            NodeJob::Call {
+                function,
+                args: Arc::from(args),
+                kwargs: Arc::from(kwargs),
             },
             "call(..)".into(),
         )
@@ -431,7 +454,11 @@ impl Engine {
                     ))),
                 }
             }
-            NodeJob::Call { function, args } => self.execute_call(function.clone(), args.clone()),
+            NodeJob::Call {
+                function,
+                args,
+                kwargs,
+            } => self.execute_call(function.clone(), args.clone(), kwargs.clone()),
             NodeJob::Invoke { function, args } => self.invoke_function(function, args.clone()),
             NodeJob::Field { receiver, field } => {
                 let receiver = self.force_value_shallow(receiver.clone())?;
@@ -449,14 +476,23 @@ impl Engine {
     }
 
     // r[impl eval.enter-functions]
-    fn execute_call(&self, function: Value, args: Arc<[Value]>) -> Result<Value, PoisonError> {
+    fn execute_call(
+        &self,
+        function: Value,
+        args: Arc<[Value]>,
+        kwargs: Arc<[(Arc<str>, Value)]>,
+    ) -> Result<Value, PoisonError> {
         let function = match self.force_value(function)? {
             Value::Function(function) => function,
-            Value::Builtin(builtin) => return self.invoke_builtin(&builtin, &args),
+            Value::Builtin(builtin) => return self.invoke_builtin(&builtin, &args, &kwargs),
             other => {
                 return Err(self.type_error(&format!("cannot call {}", other.type_name())));
             }
         };
+
+        if !kwargs.is_empty() {
+            return Err(self.type_error("keyword arguments are only supported for builtins"));
+        }
 
         if function.key().is_some() && args.iter().all(|value| value.key().is_some()) {
             return self.force_pending_shallow(
@@ -629,7 +665,7 @@ impl Engine {
                     ))),
                 }
             }
-            instr::Expr::Call { func, args } => {
+            instr::Expr::Call { func, args, kwargs } => {
                 let function = match self.eval_expr(func, bindings) {
                     BuildResult::Value(value) => value,
                     other => return other,
@@ -641,7 +677,16 @@ impl Engine {
                         other => return other,
                     }
                 }
-                BuildResult::Value(self.build_call(function, arg_values))
+                let mut kwarg_values = Vec::with_capacity(kwargs.len());
+                for (name, arg) in kwargs {
+                    match self.eval_expr(arg, bindings) {
+                        BuildResult::Value(value) => {
+                            kwarg_values.push((Arc::from(name.as_str()), value));
+                        }
+                        other => return other,
+                    }
+                }
+                BuildResult::Value(self.build_call_with_kwargs(function, arg_values, kwarg_values))
             }
             instr::Expr::StructLit { name, fields } => {
                 let mut values = Vec::with_capacity(fields.len());
@@ -859,12 +904,19 @@ impl Engine {
         }
     }
 
-    fn invoke_builtin(&self, builtin: &BuiltinValue, args: &[Value]) -> Result<Value, PoisonError> {
+    fn invoke_builtin(
+        &self,
+        builtin: &BuiltinValue,
+        args: &[Value],
+        kwargs: &[(Arc<str>, Value)],
+    ) -> Result<Value, PoisonError> {
         match builtin {
             BuiltinValue::Namespace(namespace) => {
                 Err(self.type_error(&format!("cannot call builtin namespace {:?}", namespace)))
             }
+            BuiltinValue::Function(BuiltinFunction::Exec) => self.exec_builtin(args, kwargs),
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => {
+                self.require_no_kwargs("Blob.from_string", kwargs)?;
                 self.check_arity("Blob.from_string", args, 1)?;
                 let value = &args[0];
                 let value = self.force_value(value.clone())?;
@@ -872,6 +924,7 @@ impl Engine {
                 Ok(Value::Blob(BlobValue::from_string(text)))
             }
             BuiltinValue::Method(BuiltinMethod::TreeOf) => {
+                self.require_no_kwargs("Tree.of", kwargs)?;
                 self.check_arity("Tree.of", args, 1)?;
                 let value = &args[0];
                 let value = self.force_value_shallow(value.clone())?;
@@ -883,10 +936,12 @@ impl Engine {
                 self.tree_from_map(&map)
             }
             BuiltinValue::Method(BuiltinMethod::TreeEmpty) => {
+                self.require_no_kwargs("Tree.empty", kwargs)?;
                 self.check_arity("Tree.empty", args, 0)?;
                 Ok(Value::Tree(TreeValue::Inline(Arc::from([]))))
             }
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
+                self.require_no_kwargs("blob.to_string", kwargs)?;
                 self.check_arity("blob.to_string", args, 0)?;
                 let receiver = self.force_value(receiver.as_ref().clone())?;
                 let Value::Blob(blob) = receiver else {
@@ -902,6 +957,7 @@ impl Engine {
                 Ok(Value::String(text))
             }
             BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => {
+                self.require_no_kwargs("tree.file", kwargs)?;
                 self.check_arity("tree.file", args, 1)?;
                 let path = &args[0];
                 let path = self.force_value(path.clone())?;
@@ -928,6 +984,501 @@ impl Engine {
                 .map(|(_, value)| value.clone())
                 .collect::<Vec<_>>(),
         )?;
+        Ok(Value::Tree(TreeValue::Inline(Arc::from(entries))))
+    }
+
+    fn exec_builtin(
+        &self,
+        args: &[Value],
+        kwargs: &[(Arc<str>, Value)],
+    ) -> Result<Value, PoisonError> {
+        self.check_arity("exec", args, 1)?;
+
+        let mut env_value = None;
+        let mut mounts_value = None;
+        let mut observer_value = None;
+        let mut writable_value = None;
+
+        for (name, value) in kwargs {
+            match name.as_ref() {
+                "env" => env_value = Some(value.clone()),
+                "mounts" => mounts_value = Some(value.clone()),
+                "observer" => observer_value = Some(value.clone()),
+                "writable" => writable_value = Some(value.clone()),
+                other => {
+                    return Err(self
+                        .type_error(&format!("exec does not accept keyword argument '{other}'")));
+                }
+            }
+        }
+
+        let args_value = self.force_value_shallow(args[0].clone())?;
+        let Value::Array(exec_args_raw) = args_value else {
+            return Err(self.type_error(&format!(
+                "exec expects Array[String | Path] for args, got {}",
+                args_value.type_name()
+            )));
+        };
+
+        let observer =
+            observer_value.ok_or_else(|| self.type_error("exec requires an observer function"))?;
+        let observer = self.force_value(observer)?;
+        match &observer {
+            Value::Function(_) | Value::Builtin(_) => {}
+            other => {
+                return Err(self.type_error(&format!(
+                    "exec observer must be callable, got {}",
+                    other.type_name()
+                )));
+            }
+        }
+
+        let mounts = self.exec_mounts_from_value(mounts_value)?;
+        let writable_roots = self.exec_writable_from_value(writable_value)?;
+        let env = self.exec_env_from_value(env_value, &mounts, &writable_roots)?;
+
+        let sandbox = TempDir::new().map_err(|error| {
+            self.internal_error(&format!("failed to create exec sandbox: {error}"))
+        })?;
+        let sandbox_root = PathValue::new(sandbox.path().to_string_lossy());
+
+        for (mount_path, value) in &mounts {
+            self.materialize_mount_value(&sandbox_root, mount_path, value)?;
+        }
+        for root in &writable_roots {
+            self.ensure_dir(&sandbox_root.join(root.as_str()))?;
+        }
+
+        let rendered_args = exec_args_raw
+            .iter()
+            .map(|value| {
+                self.render_exec_arg(value, &sandbox_root, &mounts, &writable_roots, "exec arg")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if rendered_args.is_empty() {
+            return Err(self.type_error("exec requires at least one program argument"));
+        }
+
+        let mut command = Command::new(&rendered_args[0]);
+        command.args(&rendered_args[1..]);
+        command.current_dir(sandbox.path());
+        for (key, value) in env {
+            command.env(key, value);
+        }
+
+        let output = command.output().map_err(|error| {
+            PoisonError::new(
+                PoisonKind::UserFail,
+                format!("failed to execute {}: {error}", rendered_args[0]),
+                self.current_demand_chain(None),
+            )
+        })?;
+
+        let process = self.exec_process_value(&output);
+        let tree = Value::Tree(TreeValue::FsDir(sandbox_root.clone()));
+        let observed =
+            self.execute_call(observer, Arc::from(vec![process, tree]), Arc::from([]))?;
+
+        self.snapshot_value(observed)
+    }
+
+    fn exec_mounts_from_value(
+        &self,
+        value: Option<Value>,
+    ) -> Result<Vec<(PathValue, Value)>, PoisonError> {
+        let Some(value) = value else {
+            return Ok(Vec::new());
+        };
+        let value = self.force_value_shallow(value)?;
+        let Value::Map(map) = value else {
+            return Err(self.type_error(&format!(
+                "exec mounts must be Map, got {}",
+                value.type_name()
+            )));
+        };
+
+        let mut mounts = Vec::with_capacity(map.entries.len());
+        for (key, value) in map.entries.iter() {
+            let key = self.force_value(key.clone())?;
+            let path = self.expect_relative_path(&key, "exec mount path")?;
+            let value = self.force_value_shallow(value.clone())?;
+            match value {
+                Value::Blob(_) | Value::Tree(_) | Value::Path(_) => mounts.push((path, value)),
+                other => {
+                    return Err(self.type_error(&format!(
+                        "exec mount values must be Blob, Tree, or Path, got {}",
+                        other.type_name()
+                    )));
+                }
+            }
+        }
+        Ok(mounts)
+    }
+
+    fn exec_writable_from_value(
+        &self,
+        value: Option<Value>,
+    ) -> Result<Vec<PathValue>, PoisonError> {
+        let Some(value) = value else {
+            return Ok(Vec::new());
+        };
+        let value = self.force_value_shallow(value)?;
+        let Value::Array(items) = value else {
+            return Err(self.type_error(&format!(
+                "exec writable must be Array[Path], got {}",
+                value.type_name()
+            )));
+        };
+
+        let mut writable = Vec::with_capacity(items.len());
+        for item in items.iter() {
+            let item = self.force_value(item.clone())?;
+            writable.push(self.expect_relative_path(&item, "exec writable path")?);
+        }
+        Ok(writable)
+    }
+
+    fn exec_env_from_value(
+        &self,
+        value: Option<Value>,
+        mounts: &[(PathValue, Value)],
+        writable_roots: &[PathValue],
+    ) -> Result<Vec<(String, String)>, PoisonError> {
+        let Some(value) = value else {
+            return Ok(Vec::new());
+        };
+        let value = self.force_value_shallow(value)?;
+        let Value::Map(map) = value else {
+            return Err(
+                self.type_error(&format!("exec env must be Map, got {}", value.type_name()))
+            );
+        };
+
+        let mut env = Vec::with_capacity(map.entries.len());
+        for (key, value) in map.entries.iter() {
+            let key = self.force_value(key.clone())?;
+            let key = match key {
+                Value::String(key) => key.to_string(),
+                other => {
+                    return Err(self.type_error(&format!(
+                        "exec env keys must be String, got {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            let value = self.render_exec_arg(
+                value,
+                &PathValue::new(""),
+                mounts,
+                writable_roots,
+                "exec env value",
+            )?;
+            env.push((key, value));
+        }
+        Ok(env)
+    }
+
+    fn render_exec_arg(
+        &self,
+        value: &Value,
+        sandbox_root: &PathValue,
+        mounts: &[(PathValue, Value)],
+        writable_roots: &[PathValue],
+        context: &str,
+    ) -> Result<String, PoisonError> {
+        let value = self.force_value(value.clone())?;
+        match value {
+            Value::String(text) => Ok(text.to_string()),
+            Value::Path(path) => {
+                let path = self.expect_relative_path(&Value::Path(path), context)?;
+                if !self.exec_path_is_covered(path.as_str(), mounts, writable_roots) {
+                    return Err(self.type_error(&format!(
+                        "{context} '{}' is not covered by a mount or writable root",
+                        path.as_str()
+                    )));
+                }
+                Ok(sandbox_root.join(path.as_str()).as_str().to_string())
+            }
+            other => Err(self.type_error(&format!(
+                "{context} must be String or Path, got {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn exec_path_is_covered(
+        &self,
+        path: &str,
+        mounts: &[(PathValue, Value)],
+        writable_roots: &[PathValue],
+    ) -> bool {
+        mounts
+            .iter()
+            .any(|(mount_path, _)| self.covers_path(mount_path.as_str(), path))
+            || writable_roots
+                .iter()
+                .any(|root| self.covers_path(root.as_str(), path))
+    }
+
+    fn covers_path(&self, prefix: &str, path: &str) -> bool {
+        prefix.is_empty()
+            || path == prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    }
+
+    fn materialize_mount_value(
+        &self,
+        sandbox_root: &PathValue,
+        mount_path: &PathValue,
+        value: &Value,
+    ) -> Result<(), PoisonError> {
+        let destination = sandbox_root.join(mount_path.as_str());
+        self.materialize_value_to_fs(value, &destination)
+    }
+
+    fn materialize_value_to_fs(
+        &self,
+        value: &Value,
+        destination: &PathValue,
+    ) -> Result<(), PoisonError> {
+        let value = self.force_value_shallow(value.clone())?;
+        match value {
+            Value::Blob(blob) => self.write_blob_to_path(&blob, destination),
+            Value::Tree(tree) => self.write_tree_to_path(&tree, destination),
+            Value::Path(path) => self.copy_host_path(&path, destination),
+            other => Err(self.type_error(&format!(
+                "cannot materialize {} into exec sandbox",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn write_blob_to_path(
+        &self,
+        blob: &BlobValue,
+        destination: &PathValue,
+    ) -> Result<(), PoisonError> {
+        if let Some(parent) = std::path::Path::new(destination.as_str()).parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                self.internal_error(&format!("failed to create {}: {error}", parent.display()))
+            })?;
+        }
+
+        match blob {
+            BlobValue::Inline(bytes) => {
+                fs::write(destination.as_str(), bytes.as_ref()).map_err(|error| {
+                    self.internal_error(&format!(
+                        "failed to write {}: {error}",
+                        destination.as_str()
+                    ))
+                })
+            }
+            BlobValue::FsFile(path) => {
+                fs::copy(path.as_str(), destination.as_str()).map_err(|error| {
+                    self.internal_error(&format!(
+                        "failed to copy {} to {}: {error}",
+                        path.as_str(),
+                        destination.as_str()
+                    ))
+                })?;
+                Ok(())
+            }
+        }
+    }
+
+    fn write_tree_to_path(
+        &self,
+        tree: &TreeValue,
+        destination: &PathValue,
+    ) -> Result<(), PoisonError> {
+        match tree {
+            TreeValue::Inline(entries) => {
+                self.ensure_dir(destination)?;
+                for (name, value) in entries.iter() {
+                    self.materialize_value_to_fs(value, &destination.join(name.as_ref()))?;
+                }
+                Ok(())
+            }
+            TreeValue::FsDir(path) => self.copy_dir_recursive(path, destination),
+        }
+    }
+
+    fn copy_host_path(
+        &self,
+        source: &PathValue,
+        destination: &PathValue,
+    ) -> Result<(), PoisonError> {
+        let metadata = fs::metadata(source.as_str()).map_err(|error| {
+            PoisonError::new(
+                PoisonKind::UserFail,
+                format!("missing path {}: {error}", source.as_str()),
+                self.current_demand_chain(None),
+            )
+        })?;
+
+        if metadata.is_dir() {
+            self.copy_dir_recursive(source, destination)
+        } else {
+            self.write_blob_to_path(&BlobValue::FsFile(source.clone()), destination)
+        }
+    }
+
+    fn copy_dir_recursive(
+        &self,
+        source: &PathValue,
+        destination: &PathValue,
+    ) -> Result<(), PoisonError> {
+        self.ensure_dir(destination)?;
+        let mut entries = fs::read_dir(source.as_str()).map_err(|error| {
+            self.internal_error(&format!("failed to read {}: {error}", source.as_str()))
+        })?;
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next().transpose().map_err(|error| {
+            self.internal_error(&format!("failed to read {}: {error}", source.as_str()))
+        })? {
+            names.push(entry.file_name().to_string_lossy().to_string());
+        }
+        names.sort();
+
+        for name in names {
+            let source_path = source.join(&name);
+            let destination_path = destination.join(&name);
+            let metadata = fs::metadata(source_path.as_str()).map_err(|error| {
+                self.internal_error(&format!("failed to stat {}: {error}", source_path.as_str()))
+            })?;
+            if metadata.is_dir() {
+                self.copy_dir_recursive(&source_path, &destination_path)?;
+            } else {
+                self.write_blob_to_path(&BlobValue::FsFile(source_path), &destination_path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_dir(&self, path: &PathValue) -> Result<(), PoisonError> {
+        fs::create_dir_all(path.as_str()).map_err(|error| {
+            self.internal_error(&format!("failed to create {}: {error}", path.as_str()))
+        })
+    }
+
+    fn exec_process_value(&self, output: &std::process::Output) -> Value {
+        let exit_code = output.status.code().unwrap_or(1).max(0) as u64;
+        Value::Struct(StructValue {
+            type_name: Arc::from("Process"),
+            fields: Arc::from([
+                (Arc::from("exit_code"), Value::U64(exit_code)),
+                (
+                    Arc::from("stdout"),
+                    Value::Blob(BlobValue::Inline(Arc::from(output.stdout.clone()))),
+                ),
+                (
+                    Arc::from("stderr"),
+                    Value::Blob(BlobValue::Inline(Arc::from(output.stderr.clone()))),
+                ),
+            ]),
+        })
+    }
+
+    fn snapshot_value(&self, value: Value) -> Result<Value, PoisonError> {
+        let value = self.force_value_shallow(value)?;
+        match value {
+            Value::Pending(node_id) => {
+                self.snapshot_value(self.force_value(Value::Pending(node_id))?)
+            }
+            Value::Blob(BlobValue::Inline(_))
+            | Value::Path(_)
+            | Value::U64(_)
+            | Value::I64(_)
+            | Value::F64(_)
+            | Value::Bool(_)
+            | Value::String(_)
+            | Value::Unit
+            | Value::Function(_)
+            | Value::Builtin(_) => Ok(value),
+            Value::Blob(BlobValue::FsFile(path)) => {
+                let bytes = fs::read(path.as_str()).map_err(|error| {
+                    self.internal_error(&format!("failed to read {}: {error}", path.as_str()))
+                })?;
+                Ok(Value::Blob(BlobValue::Inline(Arc::from(bytes))))
+            }
+            Value::Tree(TreeValue::Inline(entries)) => {
+                let mut snapshotted = Vec::with_capacity(entries.len());
+                for (name, value) in entries.iter() {
+                    snapshotted.push((name.clone(), self.snapshot_value(value.clone())?));
+                }
+                Ok(Value::Tree(TreeValue::Inline(Arc::from(snapshotted))))
+            }
+            Value::Tree(TreeValue::FsDir(path)) => self.snapshot_fs_tree(&path),
+            Value::Tuple(values) => {
+                let mut snapshotted = Vec::with_capacity(values.len());
+                for value in values.iter() {
+                    snapshotted.push(self.snapshot_value(value.clone())?);
+                }
+                Ok(Value::Tuple(Arc::from(snapshotted)))
+            }
+            Value::Array(values) => {
+                let mut snapshotted = Vec::with_capacity(values.len());
+                for value in values.iter() {
+                    snapshotted.push(self.snapshot_value(value.clone())?);
+                }
+                Ok(Value::Array(Arc::from(snapshotted)))
+            }
+            Value::Map(map) => {
+                let mut snapshotted = Vec::with_capacity(map.entries.len());
+                for (key, value) in map.entries.iter() {
+                    snapshotted.push((
+                        self.snapshot_value(key.clone())?,
+                        self.snapshot_value(value.clone())?,
+                    ));
+                }
+                Ok(Value::Map(MapValue {
+                    entries: Arc::from(snapshotted),
+                }))
+            }
+            Value::Struct(struct_value) => {
+                let mut fields = Vec::with_capacity(struct_value.fields.len());
+                for (name, value) in struct_value.fields.iter() {
+                    fields.push((name.clone(), self.snapshot_value(value.clone())?));
+                }
+                Ok(Value::Struct(StructValue {
+                    type_name: struct_value.type_name,
+                    fields: Arc::from(fields),
+                }))
+            }
+        }
+    }
+
+    fn snapshot_fs_tree(&self, root: &PathValue) -> Result<Value, PoisonError> {
+        let mut read_dir = fs::read_dir(root.as_str()).map_err(|error| {
+            self.internal_error(&format!("failed to read {}: {error}", root.as_str()))
+        })?;
+        let mut names = Vec::new();
+        while let Some(entry) = read_dir.next().transpose().map_err(|error| {
+            self.internal_error(&format!("failed to read {}: {error}", root.as_str()))
+        })? {
+            names.push(entry.file_name().to_string_lossy().to_string());
+        }
+        names.sort();
+
+        let mut entries = Vec::with_capacity(names.len());
+        for name in names {
+            let child = root.join(&name);
+            let metadata = fs::metadata(child.as_str()).map_err(|error| {
+                self.internal_error(&format!("failed to stat {}: {error}", child.as_str()))
+            })?;
+            let value = if metadata.is_dir() {
+                self.snapshot_fs_tree(&child)?
+            } else {
+                let bytes = fs::read(child.as_str()).map_err(|error| {
+                    self.internal_error(&format!("failed to read {}: {error}", child.as_str()))
+                })?;
+                Value::Blob(BlobValue::Inline(Arc::from(bytes)))
+            };
+            entries.push((Arc::from(name), value));
+        }
+
         Ok(Value::Tree(TreeValue::Inline(Arc::from(entries))))
     }
 
@@ -1053,6 +1604,24 @@ impl Engine {
             )));
         }
         Ok(())
+    }
+
+    fn require_no_kwargs(
+        &self,
+        name: &str,
+        kwargs: &[(Arc<str>, Value)],
+    ) -> Result<(), PoisonError> {
+        if kwargs.is_empty() {
+            return Ok(());
+        }
+        let names = kwargs
+            .iter()
+            .map(|(name, _)| name.as_ref())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(self.type_error(&format!(
+            "{name} does not accept keyword arguments ({names})"
+        )))
     }
 
     fn stringify_scalar(&self, value: &Value) -> Result<String, PoisonError> {
@@ -1249,6 +1818,7 @@ fn capture_bindings(bindings: &HashMap<String, Value>) -> Arc<[(Arc<str>, Value)
 
 fn builtin_namespace(name: &str) -> Option<BuiltinValue> {
     match name {
+        "exec" => Some(BuiltinValue::Function(BuiltinFunction::Exec)),
         "Blob" => Some(BuiltinValue::Namespace(BuiltinNamespace::Blob)),
         "Tree" => Some(BuiltinValue::Namespace(BuiltinNamespace::Tree)),
         _ => None,
@@ -1521,7 +2091,7 @@ fn collect_expr_callee_names(
             let mut else_scope = visible_locals.clone();
             collect_block_callee_names(else_branch, &mut else_scope, top_level_names, deps);
         }
-        instr::Expr::Call { func, args } => {
+        instr::Expr::Call { func, args, kwargs } => {
             if let instr::Expr::Var(name) = func.as_ref()
                 && !visible_locals.contains(name)
                 && top_level_names.contains(name)
@@ -1530,6 +2100,9 @@ fn collect_expr_callee_names(
             }
             collect_expr_callee_names(func, visible_locals, top_level_names, deps);
             for arg in args {
+                collect_expr_callee_names(arg, visible_locals, top_level_names, deps);
+            }
+            for (_, arg) in kwargs {
                 collect_expr_callee_names(arg, visible_locals, top_level_names, deps);
             }
         }

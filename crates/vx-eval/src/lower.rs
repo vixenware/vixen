@@ -249,9 +249,15 @@ fn lower_call(call: &CallExpr) -> Option<instr::Expr> {
         .filter_map(|expr| lower_expr(&expr))
         .collect();
 
+    let kwargs: Vec<(String, instr::Expr)> = call
+        .keyword_args()
+        .filter_map(|arg| Some((arg.name()?.text().to_string(), lower_expr(&arg.expr()?)?)))
+        .collect();
+
     Some(instr::Expr::Call {
         func: Box::new(func),
         args,
+        kwargs,
     })
 }
 

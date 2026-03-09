@@ -87,8 +87,12 @@ pub enum Expr {
         else_branch: Block,
     },
 
-    /// Function call: `f(args...)`
-    Call { func: Box<Expr>, args: Vec<Expr> },
+    /// Function call: `f(args...; kw: value, ...)`
+    Call {
+        func: Box<Expr>,
+        args: Vec<Expr>,
+        kwargs: Vec<(String, Expr)>,
+    },
 
     /// Struct literal: `TypeName { field: value, ... }`
     StructLit {

@@ -106,6 +106,11 @@ pub enum BuiltinNamespace {
     Tree,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BuiltinFunction {
+    Exec,
+}
+
 #[derive(Debug, Clone)]
 pub enum BuiltinMethod {
     BlobFromString,
@@ -118,6 +123,7 @@ pub enum BuiltinMethod {
 #[derive(Debug, Clone)]
 pub enum BuiltinValue {
     Namespace(BuiltinNamespace),
+    Function(BuiltinFunction),
     Method(BuiltinMethod),
 }
 
@@ -303,6 +309,7 @@ impl BuiltinValue {
     pub fn is_fully_resolved(&self) -> bool {
         match self {
             BuiltinValue::Namespace(_)
+            | BuiltinValue::Function(BuiltinFunction::Exec)
             | BuiltinValue::Method(BuiltinMethod::BlobFromString)
             | BuiltinValue::Method(BuiltinMethod::TreeOf)
             | BuiltinValue::Method(BuiltinMethod::TreeEmpty) => true,
@@ -317,6 +324,7 @@ impl BuiltinValue {
         match self {
             BuiltinValue::Namespace(BuiltinNamespace::Blob) => Some("builtin:Blob".into()),
             BuiltinValue::Namespace(BuiltinNamespace::Tree) => Some("builtin:Tree".into()),
+            BuiltinValue::Function(BuiltinFunction::Exec) => Some("builtin:exec".into()),
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => {
                 Some("builtin:Blob.from_string".into())
             }
@@ -469,6 +477,7 @@ impl PartialEq for BuiltinValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (BuiltinValue::Namespace(a), BuiltinValue::Namespace(b)) => a == b,
+            (BuiltinValue::Function(a), BuiltinValue::Function(b)) => a == b,
             (BuiltinValue::Method(a), BuiltinValue::Method(b)) => a == b,
             _ => false,
         }
@@ -500,6 +509,7 @@ impl fmt::Display for BuiltinValue {
         match self {
             BuiltinValue::Namespace(BuiltinNamespace::Blob) => write!(f, "Blob"),
             BuiltinValue::Namespace(BuiltinNamespace::Tree) => write!(f, "Tree"),
+            BuiltinValue::Function(BuiltinFunction::Exec) => write!(f, "exec"),
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => write!(f, "Blob.from_string"),
             BuiltinValue::Method(BuiltinMethod::TreeOf) => write!(f, "Tree.of"),
             BuiltinValue::Method(BuiltinMethod::TreeEmpty) => write!(f, "Tree.empty"),

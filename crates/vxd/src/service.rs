@@ -12,15 +12,19 @@ use crate::error::{Result, VxdError};
 use crate::executor::Executor;
 use crate::inputs::*;
 use ::moire::sync::SyncMutex;
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use facet::trace;
 use moire::task::FutureExt;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
+use std::fs;
+use std::io::ErrorKind;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+use vx_eval::{BlobValue, Engine, PathValue, TreeValue, Value, lower_source_file};
 use vx_io::spawn::ServiceHandle;
+use vx_parser::SourceFile;
 use vx_report::{
     BuildReport, GraphTopology, ReportStore, RuleId, RulePlan, RulePlanEdge, RulePlanEdgeKind,
     RulePlanFact, RulePlanFactId, RulePlanNode, RulePlanNodeId, RulePlanNodeKind,
@@ -909,6 +913,224 @@ impl VxdService {
         self.spawn_tracker.lock().kill_all();
     }
 
+    // r[impl eval.entry]
+    async fn build_from_build_vx(
+        &self,
+        request: BuildRequest,
+        build_vx_path: Utf8PathBuf,
+        total_start: std::time::Instant,
+    ) -> Result<BuildResult> {
+        self.report_set_total(1).await;
+        let action_id = self
+            .report_start_action(ActionType::Run("build.vx".to_string()))
+            .await;
+
+        let result = async {
+            let source =
+                fs::read_to_string(&build_vx_path).map_err(|error| VxdError::FileRead {
+                    path: build_vx_path.clone(),
+                    message: error.to_string(),
+                })?;
+
+            let tree = {
+                let parse = vx_parser::parse(&source);
+                if !parse.errors().is_empty() {
+                    let message = parse
+                        .errors()
+                        .iter()
+                        .map(|error| error.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(VxdError::InvalidManifest(format!(
+                        "failed to parse build.vx: {message}"
+                    )));
+                }
+
+                let root = SourceFile::cast_root(parse.syntax());
+                let module = lower_source_file(&root);
+                let engine = Engine::from_module(&module);
+                let output = engine
+                    .call_entry(
+                        "build",
+                        request.project_path.as_str(),
+                        Vec::new(),
+                        Default::default(),
+                    )
+                    .map_err(|error| VxdError::Compilation {
+                        crate_name: "build.vx".to_string(),
+                        message: error.to_string(),
+                    })?;
+
+                match output {
+                    Value::Tree(tree) => tree,
+                    other => {
+                        return Err(VxdError::Compilation {
+                            crate_name: "build.vx".to_string(),
+                            message: format!(
+                                "build entry must return Tree for `vx build`, got {}",
+                                other.type_name()
+                            ),
+                        });
+                    }
+                }
+            };
+
+            if let Err(error) = vx_io::git::ensure_vx_gitignored(&request.project_path).await {
+                warn!(error = %error, "failed to ensure /.vx is gitignored");
+            }
+
+            let output_root = request.project_path.join(".vx/build");
+            self.materialize_build_vx_tree(&output_root, &tree)?;
+
+            let duration = total_start.elapsed();
+            Ok(BuildResult {
+                success: true,
+                message: "build.vx completed".to_string(),
+                cached: false,
+                duration_ms: duration.as_millis() as u64,
+                output_path: None,
+                error: None,
+                total_actions: 1,
+                cache_hits: 0,
+                rebuilt: 1,
+                cancelled: 0,
+            })
+        }
+        .await;
+
+        self.report_complete_action(action_id).await;
+        result
+    }
+
+    fn materialize_build_vx_tree(&self, output_root: &Utf8Path, tree: &TreeValue) -> Result<()> {
+        match fs::remove_dir_all(output_root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(VxdError::WriteOutput {
+                    path: output_root.to_path_buf(),
+                    message: error.to_string(),
+                });
+            }
+        }
+
+        fs::create_dir_all(output_root).map_err(|error| VxdError::CreateDir {
+            path: output_root.to_path_buf(),
+            message: error.to_string(),
+        })?;
+
+        match tree {
+            TreeValue::Inline(entries) => {
+                for (name, value) in entries.iter() {
+                    self.materialize_build_vx_value(&output_root.join(name.as_ref()), value)?;
+                }
+            }
+            TreeValue::FsDir(path) => {
+                self.copy_build_vx_dir(path.as_str(), output_root)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn materialize_build_vx_value(&self, path: &Utf8Path, value: &Value) -> Result<()> {
+        match value {
+            Value::Blob(blob) => self.materialize_build_vx_blob(path, blob),
+            Value::Tree(tree) => {
+                fs::create_dir_all(path).map_err(|error| VxdError::CreateDir {
+                    path: path.to_path_buf(),
+                    message: error.to_string(),
+                })?;
+                match tree {
+                    TreeValue::Inline(entries) => {
+                        for (name, value) in entries.iter() {
+                            self.materialize_build_vx_value(&path.join(name.as_ref()), value)?;
+                        }
+                        Ok(())
+                    }
+                    TreeValue::FsDir(source) => self.copy_build_vx_dir(source.as_str(), path),
+                }
+            }
+            other => Err(VxdError::Compilation {
+                crate_name: "build.vx".to_string(),
+                message: format!(
+                    "build output trees can only contain Blob or Tree entries, got {}",
+                    other.type_name()
+                ),
+            }),
+        }
+    }
+
+    fn materialize_build_vx_blob(&self, path: &Utf8Path, blob: &BlobValue) -> Result<()> {
+        let parent = path.parent().ok_or_else(|| VxdError::WriteOutput {
+            path: path.to_path_buf(),
+            message: "output path has no parent directory".to_string(),
+        })?;
+        fs::create_dir_all(parent).map_err(|error| VxdError::CreateDir {
+            path: parent.to_path_buf(),
+            message: error.to_string(),
+        })?;
+
+        match blob {
+            BlobValue::Inline(bytes) => {
+                fs::write(path, bytes.as_ref()).map_err(|error| VxdError::WriteOutput {
+                    path: path.to_path_buf(),
+                    message: error.to_string(),
+                })
+            }
+            BlobValue::FsFile(source) => {
+                fs::copy(source.as_str(), path).map_err(|error| VxdError::WriteOutput {
+                    path: path.to_path_buf(),
+                    message: error.to_string(),
+                })?;
+                Ok(())
+            }
+        }
+    }
+
+    fn copy_build_vx_dir(&self, source: &str, destination: &Utf8Path) -> Result<()> {
+        fs::create_dir_all(destination).map_err(|error| VxdError::CreateDir {
+            path: destination.to_path_buf(),
+            message: error.to_string(),
+        })?;
+
+        let mut read_dir = fs::read_dir(source).map_err(|error| VxdError::FileRead {
+            path: Utf8PathBuf::from(source),
+            message: error.to_string(),
+        })?;
+        let mut names = Vec::new();
+        while let Some(entry) = read_dir
+            .next()
+            .transpose()
+            .map_err(|error| VxdError::FileRead {
+                path: Utf8PathBuf::from(source),
+                message: error.to_string(),
+            })?
+        {
+            names.push(entry.file_name().to_string_lossy().to_string());
+        }
+        names.sort();
+
+        for name in names {
+            let source_path = Utf8PathBuf::from(source).join(&name);
+            let destination_path = destination.join(&name);
+            let metadata = fs::metadata(&source_path).map_err(|error| VxdError::FileRead {
+                path: source_path.clone(),
+                message: error.to_string(),
+            })?;
+            if metadata.is_dir() {
+                self.copy_build_vx_dir(source_path.as_str(), &destination_path)?;
+            } else {
+                self.materialize_build_vx_blob(
+                    &destination_path,
+                    &BlobValue::FsFile(PathValue::new(source_path.as_str())),
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Build from vx.styx manifest (C, Rust, or mixed projects)
     async fn build_from_vx_styx(
         &self,
@@ -1221,10 +1443,10 @@ impl VxdService {
 
         let build_vx_path = project_path.join("build.vx");
         if build_vx_path.exists() {
-            return Err(VxdError::InvalidManifest(
-                "build.vx evaluation is not wired into vx build yet".to_string(),
-            )
-            .into());
+            info!("Found build.vx, evaluating build entry");
+            return self
+                .build_from_build_vx(request, build_vx_path, total_start)
+                .await;
         }
 
         let cargo_manifest_path = project_path.join("Cargo.toml");

@@ -41,6 +41,8 @@ tokio-test-lite = { workspace = true }
 vx-plan = { workspace = true }
 vx-cache = { workspace = true }
 vx-tarball = { workspace = true }
+vx-parser = { workspace = true }
+vx-eval = { workspace = true }
 
 [features]
 default = []

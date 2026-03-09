@@ -660,3 +660,47 @@ fn call_entry_passes_workspace_as_a_path() {
     };
     assert_eq!(blob, &BlobValue::from_string("/repo/src/main.rs"));
 }
+
+#[test]
+fn exec_runs_a_local_process_with_keyword_args_and_snapshots_outputs() {
+    let tempdir = TempDir::new().unwrap();
+    fs::write(tempdir.path().join("input.txt"), "hello from workspace").unwrap();
+
+    let engine = engine(
+        r#"fn observe(process: Process, tree: Tree) {
+               Tree.of(%{
+                 "stdout.txt" => process.stdout,
+                 "output.txt" => tree.file("out/output.txt"),
+               })
+             }
+
+             fn build(workspace: Path) {
+               exec(
+                 ["/bin/sh", "-c", "cat src/input.txt > out/output.txt; printf done"];
+                 mounts: %{ "src" => workspace },
+                 writable: ["out"],
+                 observer: observe,
+               )
+             }"#,
+    );
+    let value = engine
+        .call(
+            "build",
+            vec![Value::Path(PathValue::new(
+                tempdir.path().to_string_lossy(),
+            ))],
+        )
+        .unwrap();
+
+    let Value::Tree(TreeValue::Inline(entries)) = value else {
+        panic!("expected tree result");
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].0.as_ref(), "stdout.txt");
+    assert_eq!(entries[0].1, Value::Blob(BlobValue::from_string("done")));
+    assert_eq!(entries[1].0.as_ref(), "output.txt");
+    assert_eq!(
+        entries[1].1,
+        Value::Blob(BlobValue::from_string("hello from workspace"))
+    );
+}

@@ -55,6 +55,7 @@ pub enum NodeJob {
     Call {
         function: Value,
         args: Arc<[Value]>,
+        kwargs: Arc<[(Arc<str>, Value)]>,
     },
     Invoke {
         function: FunctionValue,

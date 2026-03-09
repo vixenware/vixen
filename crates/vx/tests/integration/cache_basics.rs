@@ -7,6 +7,7 @@
 //! - Changes to any module in the closure cause cache miss
 
 use crate::harness::{TestEnv, create_hello_world, create_hello_world_at, init_test_tracing};
+use std::fs;
 
 #[test]
 // r[verify exec.writable]
@@ -29,6 +30,43 @@ fn cargo_compat_build_succeeds_without_build_vx() {
     assert!(!env.file_exists("vx.styx"));
 
     env.build().run().assert_success();
+}
+
+#[test]
+fn build_vx_is_evaluated_and_materialized_into_dot_vx_build() {
+    let env = TestEnv::new();
+    env.write_file("input.txt", "hello from build.vx");
+    env.write_file(
+        "build.vx",
+        r#"fn observe(process: Process, tree: Tree) {
+  Tree.of(%{
+    "output.txt" => tree.file("out/output.txt"),
+    "stdout.txt" => process.stdout,
+  })
+}
+
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  exec(
+    ["/bin/sh", "-c", "cat src/input.txt > out/output.txt; printf built"];
+    mounts: %{ "src" => workspace },
+    writable: ["out"],
+    observer: observe,
+  )
+}
+"#,
+    );
+
+    let result = env.build().run();
+    result.assert_not_cached();
+
+    assert_eq!(
+        fs::read_to_string(env.project_path().join(".vx/build/output.txt")).unwrap(),
+        "hello from build.vx"
+    );
+    assert_eq!(
+        fs::read_to_string(env.project_path().join(".vx/build/stdout.txt")).unwrap(),
+        "built"
+    );
 }
 
 #[test]

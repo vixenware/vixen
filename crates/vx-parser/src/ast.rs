@@ -85,6 +85,7 @@ ast_node!(PartialAppExpr, SyntaxKind::PARTIAL_APP_EXPR);
 ast_node!(CallExpr, SyntaxKind::CALL_EXPR);
 ast_node!(ArgList, SyntaxKind::ARG_LIST);
 ast_node!(Arg, SyntaxKind::ARG);
+ast_node!(KeywordArg, SyntaxKind::KEYWORD_ARG);
 ast_node!(IndexExpr, SyntaxKind::INDEX_EXPR);
 ast_node!(IfExpr, SyntaxKind::IF_EXPR);
 ast_node!(ElseClause, SyntaxKind::ELSE_CLAUSE);
@@ -692,11 +693,25 @@ impl CallExpr {
     pub fn args(&self) -> AstChildren<Arg> {
         nested_children(self.syntax(), &[SyntaxKind::ARG_LIST])
     }
+
+    pub fn keyword_args(&self) -> AstChildren<KeywordArg> {
+        nested_children(self.syntax(), &[SyntaxKind::ARG_LIST])
+    }
 }
 
 impl Arg {
     pub fn expr(&self) -> Option<Expr> {
         child(self.syntax())
+    }
+}
+
+impl KeywordArg {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| kind == SyntaxKind::LOWER_IDENT)
+    }
+
+    pub fn expr(&self) -> Option<Expr> {
+        self.syntax().children().filter_map(Expr::cast).last()
     }
 }
 

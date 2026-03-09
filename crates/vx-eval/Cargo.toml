@@ -18,6 +18,6 @@ dashmap = "6"
 parking_lot = "0.12"
 crossbeam-deque = "0.8"
 crossbeam-channel = "0.5"
+tempfile.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true

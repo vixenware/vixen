@@ -114,6 +114,37 @@ fn value(x: F64, p: Point, defaults: Config) -> Point {
 }
 
 #[test]
+fn call_ast_exposes_keyword_arguments() {
+    let input = r#"
+fn build() {
+  exec(["/bin/sh", "-c", "printf ok"]; mounts: %{ "src" => "ignored" }, writable: ["out"])
+}
+"#;
+
+    let parse = parse(input);
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let call = match body.statements().next().expect("call statement") {
+        Stmt::Expr(Expr::Call(node)) => node,
+        stmt => panic!("expected call expr, got {stmt:?}"),
+    };
+
+    assert_eq!(call.args().count(), 1);
+
+    let keyword_args = call.keyword_args().collect::<Vec<_>>();
+    assert_eq!(keyword_args.len(), 2);
+    assert_eq!(keyword_args[0].name().unwrap().text(), "mounts");
+    assert_eq!(keyword_args[1].name().unwrap().text(), "writable");
+    assert!(keyword_args.iter().all(|arg| arg.expr().is_some()));
+}
+
+#[test]
 fn upper_ident_name_refs_expose_their_token() {
     let parse = parse(r#"fn value() { Blob.from_string("hello") }"#);
     assert_eq!(parse.errors(), []);
