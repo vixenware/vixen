@@ -3132,6 +3132,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-parser"
+version = "0.1.0"
+dependencies = [
+ "rowan",
+]
+
+[[package]]
 name = "vx-plan"
 version = "0.1.0"
 dependencies = [
