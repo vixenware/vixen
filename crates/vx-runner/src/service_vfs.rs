@@ -1678,6 +1678,7 @@ impl RunnerService {
         };
 
         let exit_code = output.exit_status.code().unwrap_or(-1);
+        // r[impl exec.errors]
         let observer_value = match request.eval.as_ref() {
             Some(eval) => match evaluate_shipped_observer(
                 self.cas.as_ref(),

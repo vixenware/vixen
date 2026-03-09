@@ -23,6 +23,7 @@ use vx_store_proto::{
 
 type BoundaryFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
 
+// r[impl exec.observer.materialization]
 pub fn commit_value_to_transport<'a>(
     cas: &'a StoreClient,
     value: Value,
@@ -33,6 +34,7 @@ pub fn commit_value_to_transport<'a>(
     })
 }
 
+// r[impl exec.observer.simple]
 pub fn evaluate_shipped_observer<'a>(
     cas: &'a StoreClient,
     eval: &'a RunEvalPayload,
@@ -471,6 +473,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // r[verify exec.observer.simple]
+    // r[verify exec.observer.materialization]
     async fn shipped_observer_results_commit_to_store_backed_transport() {
         let env = StoreTestEnv::new().await;
         let sandbox = TempDir::new().expect("failed to create sandbox tempdir");

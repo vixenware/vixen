@@ -70,6 +70,36 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 }
 
 #[test]
+// r[verify exec.errors]
+fn build_vx_observer_can_interpret_failed_processes() {
+    let env = TestEnv::new();
+    env.write_file(
+        "build.vx",
+        r#"fn observe(process: Process, tree: Tree) {
+  Tree.of(%{
+    "stderr.txt" => process.stderr,
+  })
+}
+
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  exec(
+    ["/bin/sh", "-c", "printf broken >&2; exit 7"];
+    observer: observe,
+  )
+}
+"#,
+    );
+
+    let result = env.build().run();
+    result.assert_not_cached();
+
+    assert_eq!(
+        fs::read_to_string(env.project_path().join(".vx/build/stderr.txt")).unwrap(),
+        "broken"
+    );
+}
+
+#[test]
 fn second_build_is_cache_hit() {
     let env = TestEnv::new();
     create_hello_world(&env);
