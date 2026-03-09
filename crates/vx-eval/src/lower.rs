@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use vx_parser::{
-    AstNode, BinaryExpr, BlockExpr, CallExpr, Expr as AstExpr, FieldExpr, FnDecl, IfExpr, Item,
-    LiteralExpr, Parameter, PrefixExpr, SourceFile, Stmt as AstStmt, StructLiteralExpr,
+    AstNode, BinaryExpr, BlockExpr, CallExpr, Expr as AstExpr, FailExpr, FieldExpr, FnDecl, IfExpr,
+    Item, LiteralExpr, Parameter, PrefixExpr, SourceFile, Stmt as AstStmt, StructLiteralExpr,
     StructLiteralField, SyntaxKind,
 };
 
@@ -101,6 +101,7 @@ fn lower_expr(expr: &AstExpr) -> Option<instr::Expr> {
         AstExpr::If(if_expr) => lower_if(if_expr),
         AstExpr::Call(call) => lower_call(call),
         AstExpr::Field(field) => lower_field(field),
+        AstExpr::Fail(fail) => lower_fail(fail),
         AstExpr::StructLiteral(lit) => lower_struct_literal(lit),
         AstExpr::Closure(_)
         | AstExpr::PartialApp(_)
@@ -261,6 +262,11 @@ fn lower_field(field: &FieldExpr) -> Option<instr::Expr> {
         receiver: Box::new(receiver),
         field: field_name,
     })
+}
+
+fn lower_fail(fail: &FailExpr) -> Option<instr::Expr> {
+    let message = lower_expr(&fail.message()?)?;
+    Some(instr::Expr::Fail(Box::new(message)))
 }
 
 fn lower_struct_literal(lit: &StructLiteralExpr) -> Option<instr::Expr> {

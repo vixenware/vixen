@@ -96,6 +96,7 @@ ast_node!(MapEntry, SyntaxKind::MAP_ENTRY);
 ast_node!(StructLiteralExpr, SyntaxKind::STRUCT_LITERAL_EXPR);
 ast_node!(StructLiteralField, SyntaxKind::STRUCT_LITERAL_FIELD);
 ast_node!(FieldExpr, SyntaxKind::FIELD_EXPR);
+ast_node!(FailExpr, SyntaxKind::FAIL_EXPR);
 ast_node!(PrefixExpr, SyntaxKind::PREFIX_EXPR);
 ast_node!(BinaryExpr, SyntaxKind::BINARY_EXPR);
 ast_node!(RangeExpr, SyntaxKind::RANGE_EXPR);
@@ -182,6 +183,7 @@ pub enum Expr {
     Map(MapExpr),
     StructLiteral(StructLiteralExpr),
     Field(FieldExpr),
+    Fail(FailExpr),
     Prefix(PrefixExpr),
     Binary(BinaryExpr),
     Range(RangeExpr),
@@ -326,6 +328,7 @@ impl AstNode for Expr {
                 | SyntaxKind::MAP_EXPR
                 | SyntaxKind::STRUCT_LITERAL_EXPR
                 | SyntaxKind::FIELD_EXPR
+                | SyntaxKind::FAIL_EXPR
                 | SyntaxKind::PREFIX_EXPR
                 | SyntaxKind::BINARY_EXPR
                 | SyntaxKind::RANGE_EXPR
@@ -353,6 +356,7 @@ impl AstNode for Expr {
                 Some(Self::StructLiteral(StructLiteralExpr::cast(node)?))
             }
             SyntaxKind::FIELD_EXPR => Some(Self::Field(FieldExpr::cast(node)?)),
+            SyntaxKind::FAIL_EXPR => Some(Self::Fail(FailExpr::cast(node)?)),
             SyntaxKind::PREFIX_EXPR => Some(Self::Prefix(PrefixExpr::cast(node)?)),
             SyntaxKind::BINARY_EXPR => Some(Self::Binary(BinaryExpr::cast(node)?)),
             SyntaxKind::RANGE_EXPR => Some(Self::Range(RangeExpr::cast(node)?)),
@@ -381,6 +385,7 @@ impl AstNode for Expr {
             Self::Map(node) => node.syntax(),
             Self::StructLiteral(node) => node.syntax(),
             Self::Field(node) => node.syntax(),
+            Self::Fail(node) => node.syntax(),
             Self::Prefix(node) => node.syntax(),
             Self::Binary(node) => node.syntax(),
             Self::Range(node) => node.syntax(),
@@ -792,6 +797,12 @@ impl FieldExpr {
         last_token(self.syntax(), |kind| {
             matches!(kind, SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT)
         })
+    }
+}
+
+impl FailExpr {
+    pub fn message(&self) -> Option<Expr> {
+        child(self.syntax())
     }
 }
 

@@ -5,9 +5,11 @@
 //! waiters in turn. Independent subgraphs are unaffected.
 
 use std::fmt;
+use std::sync::Arc;
 
 use crate::node::NodeId;
 
+// r[impl error.poison]
 /// The error carried by a poisoned node.
 #[derive(Debug, Clone)]
 pub struct PoisonError {
@@ -16,6 +18,8 @@ pub struct PoisonError {
     /// The chain of demands that led to this poison — who demanded what.
     /// Most recent demand is last.
     pub demand_chain: DemandChain,
+    /// Independent poison causes collected in deterministic input order.
+    pub causes: Arc<[PoisonError]>,
 }
 
 /// What kind of failure caused the poison.
@@ -35,6 +39,8 @@ pub enum PoisonKind {
     VerificationFailure,
     /// Circular dependency detected.
     CircularDependency,
+    /// Multiple independent poisons were collected together.
+    Multiple,
     /// Internal evaluator error (bug).
     Internal,
 }
@@ -66,9 +72,52 @@ impl DemandChain {
     }
 }
 
+impl PoisonError {
+    pub fn new(kind: PoisonKind, message: impl Into<String>, demand_chain: DemandChain) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            demand_chain,
+            causes: Arc::from([]),
+        }
+    }
+
+    pub fn aggregate(
+        message: impl Into<String>,
+        demand_chain: DemandChain,
+        errors: Vec<Self>,
+    ) -> Self {
+        let mut causes = Vec::new();
+        for error in errors {
+            if error.kind == PoisonKind::Multiple && !error.causes.is_empty() {
+                causes.extend(error.causes.iter().cloned());
+            } else {
+                causes.push(error);
+            }
+        }
+
+        if causes.len() == 1 {
+            return causes.pop().expect("checked len above");
+        }
+
+        Self {
+            kind: PoisonKind::Multiple,
+            message: message.into(),
+            demand_chain,
+            causes: Arc::from(causes),
+        }
+    }
+}
+
 impl fmt::Display for PoisonError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}: {}", self.kind, self.message)?;
+        if !self.causes.is_empty() {
+            write!(f, "\n  causes:")?;
+            for cause in self.causes.iter() {
+                write!(f, "\n    - {:?}: {}", cause.kind, cause.message)?;
+            }
+        }
         if !self.demand_chain.entries.is_empty() {
             write!(f, "\n  demand chain:")?;
             for entry in &self.demand_chain.entries {

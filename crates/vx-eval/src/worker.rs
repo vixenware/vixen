@@ -87,11 +87,7 @@ impl Engine {
 
     #[cfg(test)]
     pub(crate) fn poison_value(&self, message: &str) -> Value {
-        let error = PoisonError {
-            kind: PoisonKind::UserFail,
-            message: message.into(),
-            demand_chain: DemandChain::new(),
-        };
+        let error = PoisonError::new(PoisonKind::UserFail, message, DemandChain::new());
         self.pending_value(NodeJob::Poison(error), format!("poison({message})"))
     }
 
@@ -190,39 +186,54 @@ impl Engine {
     }
 
     // r[impl eval.concurrency]
+    // r[impl error.propagation]
     fn force_many(&self, values: Vec<Value>) -> Result<Vec<Value>, PoisonError> {
         if values.len() <= 1 {
-            return values
-                .into_iter()
-                .map(|value| self.force_value(value))
-                .collect();
+            let mut forced = Vec::with_capacity(values.len());
+            let mut errors = Vec::new();
+            for value in values {
+                match self.force_value(value) {
+                    Ok(value) => forced.push(value),
+                    Err(error) => errors.push(error),
+                }
+            }
+            return if errors.is_empty() {
+                Ok(forced)
+            } else {
+                Err(self.aggregate_poison_errors("forcing dependency", errors))
+            };
         }
 
         thread::scope(|scope| {
-            let mut iter = values.into_iter();
-            let first = iter.next().expect("checked length above");
-            let handles = iter
+            let handles = values
+                .into_iter()
                 .map(|value| scope.spawn(move || self.force_value(value)))
                 .collect::<Vec<_>>();
 
-            let mut forced = vec![self.force_value(first)?];
+            let mut forced = Vec::with_capacity(handles.len());
+            let mut errors = Vec::new();
             for handle in handles {
-                let value = handle
-                    .join()
-                    .map_err(|_| self.internal_error("force worker panicked"))??;
-                forced.push(value);
+                match handle.join() {
+                    Ok(Ok(value)) => forced.push(value),
+                    Ok(Err(error)) => errors.push(error),
+                    Err(_) => errors.push(self.internal_error("force worker panicked")),
+                }
             }
-            Ok(forced)
+            if errors.is_empty() {
+                Ok(forced)
+            } else {
+                Err(self.aggregate_poison_errors("forcing dependencies", errors))
+            }
         })
     }
 
     fn force_node(&self, node_id: NodeId) -> Result<Value, PoisonError> {
         if ACTIVE_NODES.with(|stack| stack.borrow().contains(&node_id)) {
-            return Err(PoisonError {
-                kind: PoisonKind::CircularDependency,
-                message: format!("circular dependency while demanding node {}", node_id.0),
-                demand_chain: self.current_demand_chain(Some(node_id)),
-            });
+            return Err(PoisonError::new(
+                PoisonKind::CircularDependency,
+                format!("circular dependency while demanding node {}", node_id.0),
+                self.current_demand_chain(Some(node_id)),
+            ));
         }
 
         let node = self
@@ -294,6 +305,7 @@ impl Engine {
                 let receiver = self.force_value(receiver.clone())?;
                 self.extract_field(&receiver, field)
             }
+            NodeJob::Fail { message } => Err(self.user_fail(message.clone())?),
             #[cfg(test)]
             NodeJob::Poison(error) => Err(error.clone()),
         }
@@ -531,6 +543,14 @@ impl Engine {
                     ))),
                 }
             }
+            // r[impl error.fail]
+            instr::Expr::Fail(message) => {
+                let message = match self.eval_expr(message, bindings) {
+                    BuildResult::Value(value) => value,
+                    other => return other,
+                };
+                BuildResult::Value(self.pending_value(NodeJob::Fail { message }, "fail(..)".into()))
+            }
             instr::Expr::Tuple(elems) => {
                 let mut values = Vec::with_capacity(elems.len());
                 for elem in elems {
@@ -659,43 +679,56 @@ impl Engine {
     }
 
     fn unresolved_name(&self, name: &str) -> PoisonError {
-        PoisonError {
-            kind: PoisonKind::UnresolvedName,
-            message: format!("unresolved name: {name}"),
-            demand_chain: self.current_demand_chain(None),
-        }
+        PoisonError::new(
+            PoisonKind::UnresolvedName,
+            format!("unresolved name: {name}"),
+            self.current_demand_chain(None),
+        )
     }
 
     fn unresolved_function(&self, name: &str) -> PoisonError {
-        PoisonError {
-            kind: PoisonKind::UnresolvedName,
-            message: format!("no function named '{name}'"),
-            demand_chain: self.current_demand_chain(None),
-        }
+        PoisonError::new(
+            PoisonKind::UnresolvedName,
+            format!("no function named '{name}'"),
+            self.current_demand_chain(None),
+        )
     }
 
     fn type_error(&self, message: &str) -> PoisonError {
-        PoisonError {
-            kind: PoisonKind::TypeError,
-            message: message.into(),
-            demand_chain: self.current_demand_chain(None),
-        }
+        PoisonError::new(
+            PoisonKind::TypeError,
+            message,
+            self.current_demand_chain(None),
+        )
     }
 
     fn arithmetic_error(&self, message: &str) -> PoisonError {
-        PoisonError {
-            kind: PoisonKind::ArithmeticError,
-            message: message.into(),
-            demand_chain: self.current_demand_chain(None),
-        }
+        PoisonError::new(
+            PoisonKind::ArithmeticError,
+            message,
+            self.current_demand_chain(None),
+        )
     }
 
     fn internal_error(&self, message: &str) -> PoisonError {
-        PoisonError {
-            kind: PoisonKind::Internal,
-            message: message.into(),
-            demand_chain: self.current_demand_chain(None),
-        }
+        PoisonError::new(
+            PoisonKind::Internal,
+            message,
+            self.current_demand_chain(None),
+        )
+    }
+
+    fn user_fail(&self, message: Value) -> Result<PoisonError, PoisonError> {
+        let message = self.force_value(message)?;
+        Ok(PoisonError::new(
+            PoisonKind::UserFail,
+            message.to_string(),
+            self.current_demand_chain(None),
+        ))
+    }
+
+    fn aggregate_poison_errors(&self, context: &str, errors: Vec<PoisonError>) -> PoisonError {
+        PoisonError::aggregate(context, self.current_demand_chain(None), errors)
     }
 
     fn current_demand_chain(&self, next: Option<NodeId>) -> DemandChain {

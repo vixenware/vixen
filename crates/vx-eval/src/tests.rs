@@ -199,6 +199,7 @@ fn logical_operators() {
 }
 
 #[test]
+// r[verify error.poison]
 fn division_by_zero_poisons() {
     let err = eval("fn main() { 10 / 0 }", "main").unwrap_err();
     assert_eq!(err.kind, PoisonKind::ArithmeticError);
@@ -392,4 +393,41 @@ fn demand_only_reaches_the_taken_if_branch() {
 
     assert!(matches!(call, Value::Pending(_)));
     assert_eq!(engine.force_fully(call).unwrap(), Value::U64(1));
+}
+
+#[test]
+// r[verify error.fail]
+fn fail_poisons_when_forced() {
+    let err = eval(r#"fn main() { fail "boom" }"#, "main").unwrap_err();
+    assert_eq!(err.kind, PoisonKind::UserFail);
+    assert_eq!(err.message, "boom");
+}
+
+#[test]
+// r[verify error.fail]
+// r[verify eval.control-demand]
+fn untaken_fail_branch_is_not_forced() {
+    let value = eval(
+        r#"fn main() { if true { 1 } else { fail "boom" } }"#,
+        "main",
+    )
+    .unwrap();
+    assert_eq!(value, Value::U64(1));
+}
+
+#[test]
+// r[verify error.propagation]
+fn multiple_independent_poisons_are_collected_deterministically() {
+    let engine = engine("fn add(x: U64, y: U64) { x + y }");
+    let err = engine
+        .call(
+            "add",
+            vec![engine.poison_value("left"), engine.poison_value("right")],
+        )
+        .unwrap_err();
+
+    assert_eq!(err.kind, PoisonKind::Multiple);
+    assert_eq!(err.causes.len(), 2);
+    assert_eq!(err.causes[0].message, "left");
+    assert_eq!(err.causes[1].message, "right");
 }

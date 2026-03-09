@@ -64,6 +64,9 @@ pub enum NodeJob {
         receiver: Value,
         field: Arc<str>,
     },
+    Fail {
+        message: Value,
+    },
     #[cfg(test)]
     Poison(PoisonError),
 }

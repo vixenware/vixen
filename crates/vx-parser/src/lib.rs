@@ -4,7 +4,7 @@ mod ast;
 pub use ast::{
     Arg, ArgList, ArrayExpr, ArrayPattern, ArrayRestPattern, AssignStmt, AstChildren, AstNode,
     AtPattern, BinaryExpr, BindingPattern, BlockExpr, CallExpr, ClosureExpr, ClosureParamClause,
-    CompoundUpdateStmt, ElseClause, EnumDecl, Expr, FallibleExpr, FieldAssignStmt,
+    CompoundUpdateStmt, ElseClause, EnumDecl, Expr, FailExpr, FallibleExpr, FieldAssignStmt,
     FieldAssignTarget, FieldDecl, FieldExpr, FnDecl, FunctionType, IfExpr, IndexExpr,
     InterpolatedStringExpr, Item, LetStmt, LiteralExpr, LiteralPattern, MapEntry, MapExpr,
     MatchArm, MatchExpr, NameRefExpr, NewtypeDecl, OptionalType, OrPattern, Parameter,

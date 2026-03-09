@@ -99,6 +99,9 @@ pub enum Expr {
     /// Field access: `expr.field`
     Field { receiver: Box<Expr>, field: String },
 
+    /// `fail expr`
+    Fail(Box<Expr>),
+
     /// Tuple literal: `(a, b, c)`
     Tuple(Vec<Expr>),
 }
