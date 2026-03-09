@@ -3444,6 +3444,7 @@ dependencies = [
  "tempfile",
  "vx-parser",
  "vx-resolve",
+ "vx-store-proto",
  "vx-types",
 ]
 

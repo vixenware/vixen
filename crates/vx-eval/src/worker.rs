@@ -373,6 +373,7 @@ impl Engine {
                     ))))
                 }
                 TreeValue::FsDir(path) => Ok(Value::Tree(TreeValue::FsDir(path))),
+                TreeValue::Store(root) => Ok(Value::Tree(TreeValue::Store(root))),
             },
             Value::Struct(struct_value) => {
                 let names = struct_value
@@ -1367,6 +1368,10 @@ impl Engine {
                 })?;
                 Ok(())
             }
+            BlobValue::Store(blob_ref) => Err(self.internal_error(&format!(
+                "cannot materialize store-backed blob {:?} without an external store resolver",
+                blob_ref
+            ))),
         }
     }
 
@@ -1384,6 +1389,9 @@ impl Engine {
                 Ok(())
             }
             TreeValue::FsDir(path) => self.copy_dir_recursive(path, destination),
+            TreeValue::Store(root) => Err(self.internal_error(&format!(
+                "cannot materialize store-backed tree {root} without an external store resolver"
+            ))),
         }
     }
 
@@ -1470,6 +1478,7 @@ impl Engine {
                 self.snapshot_value(self.force_value(Value::Pending(node_id))?)
             }
             Value::Blob(BlobValue::Inline(_))
+            | Value::Blob(BlobValue::Store(_))
             | Value::Path(_)
             | Value::U64(_)
             | Value::I64(_)
@@ -1493,6 +1502,7 @@ impl Engine {
                 Ok(Value::Tree(TreeValue::Inline(Arc::from(snapshotted))))
             }
             Value::Tree(TreeValue::FsDir(path)) => self.snapshot_fs_tree(&path),
+            Value::Tree(TreeValue::Store(root)) => Ok(Value::Tree(TreeValue::Store(root))),
             Value::Tuple(values) => {
                 let mut snapshotted = Vec::with_capacity(values.len());
                 for value in values.iter() {
@@ -1586,6 +1596,9 @@ impl Engine {
                 }
                 Ok(Value::Blob(BlobValue::FsFile(full_path)))
             }
+            TreeValue::Store(root) => Err(self.internal_error(&format!(
+                "cannot read store-backed tree {root} without an external store resolver"
+            ))),
         }
     }
 
@@ -1649,6 +1662,10 @@ impl Engine {
             }
             Value::Tree(TreeValue::FsDir(root)) => self.tree_file(
                 &TreeValue::FsDir(root),
+                PathValue::new(segments[1..].join("/")),
+            ),
+            Value::Tree(TreeValue::Store(root)) => self.tree_file(
+                &TreeValue::Store(root),
                 PathValue::new(segments[1..].join("/")),
             ),
             Value::Blob(_) => Err(PoisonError::new(

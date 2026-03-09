@@ -1028,6 +1028,14 @@ impl VxdService {
             TreeValue::FsDir(path) => {
                 self.copy_build_vx_dir(path.as_str(), output_root)?;
             }
+            TreeValue::Store(root) => {
+                return Err(VxdError::Compilation {
+                    crate_name: "build.vx".to_string(),
+                    message: format!(
+                        "cannot materialize store-backed tree {root} into .vx/build without an external store resolver"
+                    ),
+                });
+            }
         }
 
         Ok(())
@@ -1049,6 +1057,12 @@ impl VxdService {
                         Ok(())
                     }
                     TreeValue::FsDir(source) => self.copy_build_vx_dir(source.as_str(), path),
+                    TreeValue::Store(root) => Err(VxdError::Compilation {
+                        crate_name: "build.vx".to_string(),
+                        message: format!(
+                            "cannot materialize store-backed tree {root} into .vx/build without an external store resolver"
+                        ),
+                    }),
                 }
             }
             other => Err(VxdError::Compilation {
@@ -1085,6 +1099,13 @@ impl VxdService {
                 })?;
                 Ok(())
             }
+            BlobValue::Store(blob_ref) => Err(VxdError::Compilation {
+                crate_name: "build.vx".to_string(),
+                message: format!(
+                    "cannot materialize store-backed blob {:?} into .vx/build without an external store resolver",
+                    blob_ref
+                ),
+            }),
         }
     }
 

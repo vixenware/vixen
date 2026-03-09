@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use tempfile::TempDir;
 use vx_parser::SourceFile;
+use vx_store_proto::{Blake3Hash, BlobRef, ChunkHash, NodeHash};
 
 use crate::lower::lower_source_file;
 use crate::poison::PoisonKind;
@@ -330,6 +331,22 @@ fn inline_values_round_trip_through_transport() {
         engine.ship_value(value).unwrap(),
         TransportValue::Map(_)
     ));
+}
+
+#[test]
+fn store_backed_values_round_trip_through_transport() {
+    let engine = engine("fn main() { () }");
+    let blob = Value::Blob(BlobValue::Store(BlobRef::Small {
+        chunk: ChunkHash(Blake3Hash([0x11; 32])),
+        size: 3,
+    }));
+    let tree = Value::Tree(TreeValue::Store(NodeHash(Blake3Hash([0x22; 32]))));
+
+    let shipped_blob = engine.ship_value(blob.clone()).unwrap();
+    let shipped_tree = engine.ship_value(tree.clone()).unwrap();
+
+    assert_eq!(Value::try_from(shipped_blob).unwrap(), blob);
+    assert_eq!(Value::try_from(shipped_tree).unwrap(), tree);
 }
 
 #[test]

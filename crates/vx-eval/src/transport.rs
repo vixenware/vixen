@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use facet::Facet;
+use vx_store_proto::{BlobRef, NodeHash};
 
 use crate::instr;
 use crate::value::{
@@ -141,16 +142,18 @@ pub enum TransportValue {
     Builtin(TransportBuiltinValue),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[derive(Debug, Clone, Facet)]
 #[repr(u8)]
 pub enum TransportBlob {
     Inline(Vec<u8>),
+    Store(BlobRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Facet)]
 #[repr(u8)]
 pub enum TransportTree {
     Inline(Vec<(String, TransportValue)>),
+    Store(NodeHash),
 }
 
 #[derive(Debug, Clone, PartialEq, Facet)]
@@ -609,6 +612,7 @@ impl TryFrom<&BlobValue> for TransportBlob {
                 "cannot transport filesystem-backed blob {} yet",
                 path.as_str()
             )),
+            BlobValue::Store(blob_ref) => Ok(Self::Store(blob_ref.clone())),
         }
     }
 }
@@ -617,9 +621,22 @@ impl From<TransportBlob> for BlobValue {
     fn from(blob: TransportBlob) -> Self {
         match blob {
             TransportBlob::Inline(bytes) => Self::Inline(Arc::from(bytes)),
+            TransportBlob::Store(blob_ref) => Self::Store(blob_ref),
         }
     }
 }
+
+impl PartialEq for TransportBlob {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TransportBlob::Inline(a), TransportBlob::Inline(b)) => a == b,
+            (TransportBlob::Store(a), TransportBlob::Store(b)) => blob_ref_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for TransportBlob {}
 
 impl TryFrom<&TreeValue> for TransportTree {
     type Error = String;
@@ -636,6 +653,7 @@ impl TryFrom<&TreeValue> for TransportTree {
                 "cannot transport filesystem-backed tree {} yet",
                 path.as_str()
             )),
+            TreeValue::Store(root) => Ok(Self::Store(*root)),
         }
     }
 }
@@ -651,7 +669,40 @@ impl TryFrom<TransportTree> for TreeValue {
                     .map(|(name, value)| Ok((Arc::<str>::from(name), Value::try_from(value)?)))
                     .collect::<Result<Vec<_>, String>>()?,
             ))),
+            TransportTree::Store(root) => Ok(Self::Store(root)),
         }
+    }
+}
+
+fn blob_ref_eq(left: &BlobRef, right: &BlobRef) -> bool {
+    match (left, right) {
+        (
+            BlobRef::Small {
+                chunk: left_chunk,
+                size: left_size,
+            },
+            BlobRef::Small {
+                chunk: right_chunk,
+                size: right_size,
+            },
+        ) => left_chunk == right_chunk && left_size == right_size,
+        (
+            BlobRef::Large {
+                blob_node: left_blob_node,
+                content_hash: left_content_hash,
+                size: left_size,
+            },
+            BlobRef::Large {
+                blob_node: right_blob_node,
+                content_hash: right_content_hash,
+                size: right_size,
+            },
+        ) => {
+            left_blob_node == right_blob_node
+                && left_content_hash == right_content_hash
+                && left_size == right_size
+        }
+        _ => false,
     }
 }
 

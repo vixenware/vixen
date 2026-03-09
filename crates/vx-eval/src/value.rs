@@ -7,6 +7,8 @@ use std::fmt;
 use std::fs;
 use std::sync::Arc;
 
+use vx_store_proto::{BlobRef, NodeHash};
+
 use crate::instr::FnDef;
 use crate::node::NodeId;
 
@@ -69,10 +71,11 @@ pub struct PathValue {
 }
 
 /// Blob storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum BlobValue {
     Inline(Arc<[u8]>),
     FsFile(PathValue),
+    Store(BlobRef),
 }
 
 /// Tree storage.
@@ -80,6 +83,7 @@ pub enum BlobValue {
 pub enum TreeValue {
     Inline(Arc<[(Arc<str>, Value)]>),
     FsDir(PathValue),
+    Store(NodeHash),
 }
 
 // i[impl impl.persistent]
@@ -247,6 +251,12 @@ impl BlobValue {
             BlobValue::Inline(bytes) => bytes.to_vec(),
             BlobValue::FsFile(path) => fs::read(path.as_str())
                 .map_err(|error| format!("failed to read {}: {error}", path.as_str()))?,
+            BlobValue::Store(blob_ref) => {
+                return Err(format!(
+                    "store-backed blob {} requires an external store resolver",
+                    blob_ref_key(blob_ref)
+                ));
+            }
         };
         let text =
             String::from_utf8(bytes).map_err(|error| format!("blob is not UTF-8: {error}"))?;
@@ -257,6 +267,7 @@ impl BlobValue {
         match self {
             BlobValue::Inline(bytes) => Some(format!("blob:{}", hex_bytes(bytes))),
             BlobValue::FsFile(_) => None,
+            BlobValue::Store(blob_ref) => Some(blob_ref_key(blob_ref)),
         }
     }
 }
@@ -268,6 +279,7 @@ impl TreeValue {
                 entries.iter().all(|(_, value)| value.is_fully_resolved())
             }
             TreeValue::FsDir(_) => true,
+            TreeValue::Store(_) => true,
         }
     }
 
@@ -281,6 +293,7 @@ impl TreeValue {
                 Some(format!("tree:{{{}}}", parts.join(",")))
             }
             TreeValue::FsDir(_) => None,
+            TreeValue::Store(root) => Some(format!("tree:store:{root}")),
         }
     }
 }
@@ -441,11 +454,25 @@ impl PartialEq for MapValue {
 
 impl Eq for MapValue {}
 
+impl PartialEq for BlobValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (BlobValue::Inline(a), BlobValue::Inline(b)) => a == b,
+            (BlobValue::FsFile(a), BlobValue::FsFile(b)) => a == b,
+            (BlobValue::Store(a), BlobValue::Store(b)) => blob_ref_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for BlobValue {}
+
 impl PartialEq for TreeValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (TreeValue::Inline(a), TreeValue::Inline(b)) => a == b,
             (TreeValue::FsDir(a), TreeValue::FsDir(b)) => a == b,
+            (TreeValue::Store(a), TreeValue::Store(b)) => a == b,
             _ => false,
         }
     }
@@ -492,6 +519,7 @@ impl fmt::Display for BlobValue {
         match self {
             BlobValue::Inline(bytes) => write!(f, "<blob {} bytes>", bytes.len()),
             BlobValue::FsFile(path) => write!(f, "<blob {}>", path.as_str()),
+            BlobValue::Store(blob_ref) => write!(f, "<blob {}>", blob_ref_key(blob_ref)),
         }
     }
 }
@@ -501,6 +529,7 @@ impl fmt::Display for TreeValue {
         match self {
             TreeValue::Inline(entries) => write!(f, "<tree {} entries>", entries.len()),
             TreeValue::FsDir(path) => write!(f, "<tree {}>", path.as_str()),
+            TreeValue::Store(root) => write!(f, "<tree {root}>"),
         }
     }
 }
@@ -593,4 +622,47 @@ fn join_paths(base: &str, child: &str) -> String {
 
 fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn blob_ref_key(blob_ref: &BlobRef) -> String {
+    match blob_ref {
+        BlobRef::Small { chunk, size } => format!("blob:store:small:{chunk}:{size}"),
+        BlobRef::Large {
+            blob_node,
+            content_hash,
+            size,
+        } => format!("blob:store:large:{blob_node}:{content_hash}:{size}"),
+    }
+}
+
+fn blob_ref_eq(left: &BlobRef, right: &BlobRef) -> bool {
+    match (left, right) {
+        (
+            BlobRef::Small {
+                chunk: left_chunk,
+                size: left_size,
+            },
+            BlobRef::Small {
+                chunk: right_chunk,
+                size: right_size,
+            },
+        ) => left_chunk == right_chunk && left_size == right_size,
+        (
+            BlobRef::Large {
+                blob_node: left_blob_node,
+                content_hash: left_content_hash,
+                size: left_size,
+            },
+            BlobRef::Large {
+                blob_node: right_blob_node,
+                content_hash: right_content_hash,
+                size: right_size,
+            },
+        ) => {
+            left_blob_node == right_blob_node
+                && left_content_hash == right_content_hash
+                && left_size == right_size
+        }
+        _ => false,
+    }
 }

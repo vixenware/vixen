@@ -14,6 +14,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 facet = { workspace = true }
 vx-parser = { path = "../vx-parser" }
 vx-resolve = { path = "../vx-resolve" }
+vx-store-proto = { workspace = true }
 vx-types = { path = "../vx-types" }
 dashmap = "6"
 parking_lot = "0.12"
