@@ -2,9 +2,12 @@
 
 mod ast;
 pub use ast::{
-    AstChildren, AstNode, BlockExpr, CallExpr, EnumDecl, Expr, FieldDecl, FnDecl, IfExpr,
-    InterpolatedStringExpr, Item, MatchArm, MatchExpr, NameRefExpr, NewtypeDecl, Parameter,
-    SourceFile, StringInterpolation, StringPart, StructDecl, TypeAliasDecl,
+    ArrayExpr, AssignStmt, AstChildren, AstNode, BinaryExpr, BlockExpr, CallExpr,
+    CompoundUpdateStmt, EnumDecl, Expr, FieldAssignStmt, FieldAssignTarget, FieldDecl, FieldExpr,
+    FnDecl, IfExpr, InterpolatedStringExpr, Item, LetStmt, LiteralExpr, MapEntry, MapExpr,
+    MatchArm, MatchExpr, NameRefExpr, NewtypeDecl, Parameter, ReturnStmt, SourceFile, Stmt,
+    StringInterpolation, StringPart, StructDecl, StructLiteralExpr, StructLiteralField,
+    TypeAliasDecl, WithExpr,
 };
 
 mod lexer;

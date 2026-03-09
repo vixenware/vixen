@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{marker::PhantomData, vec::IntoIter};
 
 use rowan::NodeOrToken;
 
@@ -11,7 +11,7 @@ pub trait AstNode: Sized {
 }
 
 pub struct AstChildren<N> {
-    inner: std::vec::IntoIter<SyntaxNode>,
+    inner: IntoIter<SyntaxNode>,
     _marker: PhantomData<N>,
 }
 
@@ -75,9 +75,24 @@ ast_node!(CallExpr, SyntaxKind::CALL_EXPR);
 ast_node!(IfExpr, SyntaxKind::IF_EXPR);
 ast_node!(MatchExpr, SyntaxKind::MATCH_EXPR);
 ast_node!(MatchArm, SyntaxKind::MATCH_ARM);
+ast_node!(ArrayExpr, SyntaxKind::ARRAY_EXPR);
+ast_node!(MapExpr, SyntaxKind::MAP_EXPR);
+ast_node!(MapEntry, SyntaxKind::MAP_ENTRY);
+ast_node!(StructLiteralExpr, SyntaxKind::STRUCT_LITERAL_EXPR);
+ast_node!(StructLiteralField, SyntaxKind::STRUCT_LITERAL_FIELD);
+ast_node!(FieldExpr, SyntaxKind::FIELD_EXPR);
+ast_node!(BinaryExpr, SyntaxKind::BINARY_EXPR);
+ast_node!(WithExpr, SyntaxKind::WITH_EXPR);
 ast_node!(NameRefExpr, SyntaxKind::NAME_REF_EXPR);
+ast_node!(LiteralExpr, SyntaxKind::LITERAL_EXPR);
 ast_node!(InterpolatedStringExpr, SyntaxKind::INTERPOLATED_STRING_EXPR);
 ast_node!(StringInterpolation, SyntaxKind::STRING_INTERPOLATION);
+ast_node!(LetStmt, SyntaxKind::LET_STMT);
+ast_node!(AssignStmt, SyntaxKind::ASSIGN_STMT);
+ast_node!(CompoundUpdateStmt, SyntaxKind::COMPOUND_UPDATE_STMT);
+ast_node!(FieldAssignStmt, SyntaxKind::FIELD_ASSIGN_STMT);
+ast_node!(FieldAssignTarget, SyntaxKind::FIELD_ASSIGN_TARGET);
+ast_node!(ReturnStmt, SyntaxKind::RETURN_STMT);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Item {
@@ -128,7 +143,14 @@ pub enum Expr {
     Call(CallExpr),
     If(IfExpr),
     Match(MatchExpr),
+    Array(ArrayExpr),
+    Map(MapExpr),
+    StructLiteral(StructLiteralExpr),
+    Field(FieldExpr),
+    Binary(BinaryExpr),
+    With(WithExpr),
     NameRef(NameRefExpr),
+    Literal(LiteralExpr),
     InterpolatedString(InterpolatedStringExpr),
 }
 
@@ -140,7 +162,14 @@ impl AstNode for Expr {
                 | SyntaxKind::CALL_EXPR
                 | SyntaxKind::IF_EXPR
                 | SyntaxKind::MATCH_EXPR
+                | SyntaxKind::ARRAY_EXPR
+                | SyntaxKind::MAP_EXPR
+                | SyntaxKind::STRUCT_LITERAL_EXPR
+                | SyntaxKind::FIELD_EXPR
+                | SyntaxKind::BINARY_EXPR
+                | SyntaxKind::WITH_EXPR
                 | SyntaxKind::NAME_REF_EXPR
+                | SyntaxKind::LITERAL_EXPR
                 | SyntaxKind::INTERPOLATED_STRING_EXPR
         )
     }
@@ -151,7 +180,16 @@ impl AstNode for Expr {
             SyntaxKind::CALL_EXPR => Some(Self::Call(CallExpr::cast(node)?)),
             SyntaxKind::IF_EXPR => Some(Self::If(IfExpr::cast(node)?)),
             SyntaxKind::MATCH_EXPR => Some(Self::Match(MatchExpr::cast(node)?)),
+            SyntaxKind::ARRAY_EXPR => Some(Self::Array(ArrayExpr::cast(node)?)),
+            SyntaxKind::MAP_EXPR => Some(Self::Map(MapExpr::cast(node)?)),
+            SyntaxKind::STRUCT_LITERAL_EXPR => {
+                Some(Self::StructLiteral(StructLiteralExpr::cast(node)?))
+            }
+            SyntaxKind::FIELD_EXPR => Some(Self::Field(FieldExpr::cast(node)?)),
+            SyntaxKind::BINARY_EXPR => Some(Self::Binary(BinaryExpr::cast(node)?)),
+            SyntaxKind::WITH_EXPR => Some(Self::With(WithExpr::cast(node)?)),
             SyntaxKind::NAME_REF_EXPR => Some(Self::NameRef(NameRefExpr::cast(node)?)),
+            SyntaxKind::LITERAL_EXPR => Some(Self::Literal(LiteralExpr::cast(node)?)),
             SyntaxKind::INTERPOLATED_STRING_EXPR => Some(Self::InterpolatedString(
                 InterpolatedStringExpr::cast(node)?,
             )),
@@ -165,8 +203,64 @@ impl AstNode for Expr {
             Self::Call(node) => node.syntax(),
             Self::If(node) => node.syntax(),
             Self::Match(node) => node.syntax(),
+            Self::Array(node) => node.syntax(),
+            Self::Map(node) => node.syntax(),
+            Self::StructLiteral(node) => node.syntax(),
+            Self::Field(node) => node.syntax(),
+            Self::Binary(node) => node.syntax(),
+            Self::With(node) => node.syntax(),
             Self::NameRef(node) => node.syntax(),
+            Self::Literal(node) => node.syntax(),
             Self::InterpolatedString(node) => node.syntax(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Stmt {
+    Let(LetStmt),
+    Assign(AssignStmt),
+    CompoundUpdate(CompoundUpdateStmt),
+    FieldAssign(FieldAssignStmt),
+    Return(ReturnStmt),
+    FnDecl(FnDecl),
+    Expr(Expr),
+}
+
+impl AstNode for Stmt {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        LetStmt::can_cast(kind)
+            || AssignStmt::can_cast(kind)
+            || CompoundUpdateStmt::can_cast(kind)
+            || FieldAssignStmt::can_cast(kind)
+            || ReturnStmt::can_cast(kind)
+            || FnDecl::can_cast(kind)
+            || Expr::can_cast(kind)
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        match node.kind() {
+            SyntaxKind::LET_STMT => Some(Self::Let(LetStmt::cast(node)?)),
+            SyntaxKind::ASSIGN_STMT => Some(Self::Assign(AssignStmt::cast(node)?)),
+            SyntaxKind::COMPOUND_UPDATE_STMT => {
+                Some(Self::CompoundUpdate(CompoundUpdateStmt::cast(node)?))
+            }
+            SyntaxKind::FIELD_ASSIGN_STMT => Some(Self::FieldAssign(FieldAssignStmt::cast(node)?)),
+            SyntaxKind::RETURN_STMT => Some(Self::Return(ReturnStmt::cast(node)?)),
+            SyntaxKind::FN_DECL => Some(Self::FnDecl(FnDecl::cast(node)?)),
+            _ => Expr::cast(node).map(Self::Expr),
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        match self {
+            Self::Let(node) => node.syntax(),
+            Self::Assign(node) => node.syntax(),
+            Self::CompoundUpdate(node) => node.syntax(),
+            Self::FieldAssign(node) => node.syntax(),
+            Self::Return(node) => node.syntax(),
+            Self::FnDecl(node) => node.syntax(),
+            Self::Expr(node) => node.syntax(),
         }
     }
 }
@@ -278,7 +372,7 @@ impl VariantDecl {
 
 impl Parameter {
     pub fn name(&self) -> Option<SyntaxToken> {
-        first_token(self.syntax(), |kind| {
+        first_descendant_token(self.syntax(), |kind| {
             matches!(kind, SyntaxKind::LOWER_IDENT | SyntaxKind::UNDERSCORE)
         })
     }
@@ -291,6 +385,10 @@ impl KeywordParameter {
 }
 
 impl BlockExpr {
+    pub fn statements(&self) -> AstChildren<Stmt> {
+        AstChildren::new(self.syntax())
+    }
+
     pub fn exprs(&self) -> AstChildren<Expr> {
         AstChildren::new(self.syntax())
     }
@@ -320,6 +418,76 @@ impl MatchArm {
     }
 }
 
+impl ArrayExpr {
+    pub fn items(&self) -> AstChildren<Expr> {
+        AstChildren::new(self.syntax())
+    }
+}
+
+impl MapExpr {
+    pub fn entries(&self) -> AstChildren<MapEntry> {
+        AstChildren::new(self.syntax())
+    }
+}
+
+impl MapEntry {
+    pub fn key(&self) -> Option<Expr> {
+        nth_expr(self.syntax(), 0)
+    }
+
+    pub fn value(&self) -> Option<Expr> {
+        nth_expr(self.syntax(), 1)
+    }
+}
+
+impl StructLiteralExpr {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| kind == SyntaxKind::UPPER_IDENT)
+    }
+
+    pub fn fields(&self) -> AstChildren<StructLiteralField> {
+        nested_children(self.syntax(), &[SyntaxKind::STRUCT_LITERAL_BODY])
+    }
+}
+
+impl StructLiteralField {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| kind == SyntaxKind::LOWER_IDENT)
+    }
+
+    pub fn expr(&self) -> Option<Expr> {
+        child(self.syntax())
+    }
+}
+
+impl FieldExpr {
+    pub fn receiver(&self) -> Option<Expr> {
+        child(self.syntax())
+    }
+
+    pub fn field_name(&self) -> Option<SyntaxToken> {
+        last_token(self.syntax(), |kind| {
+            matches!(kind, SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT)
+        })
+    }
+}
+
+impl BinaryExpr {
+    pub fn lhs(&self) -> Option<Expr> {
+        nth_expr(self.syntax(), 0)
+    }
+
+    pub fn rhs(&self) -> Option<Expr> {
+        nth_expr(self.syntax(), 1)
+    }
+}
+
+impl WithExpr {
+    pub fn receiver(&self) -> Option<Expr> {
+        nth_expr(self.syntax(), 0)
+    }
+}
+
 impl NameRefExpr {
     pub fn token(&self) -> Option<SyntaxToken> {
         self.syntax()
@@ -331,6 +499,21 @@ impl NameRefExpr {
                     SyntaxKind::LOWER_IDENT | SyntaxKind::DOLLAR_IDENT
                 )
             })
+    }
+}
+
+impl LiteralExpr {
+    pub fn token(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| {
+            matches!(
+                kind,
+                SyntaxKind::INT
+                    | SyntaxKind::FLOAT
+                    | SyntaxKind::STRING
+                    | SyntaxKind::TRUE_KW
+                    | SyntaxKind::FALSE_KW
+            )
+        })
     }
 }
 
@@ -356,8 +539,65 @@ impl StringInterpolation {
     }
 }
 
+impl LetStmt {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        first_descendant_token(self.syntax(), |kind| {
+            matches!(kind, SyntaxKind::LOWER_IDENT | SyntaxKind::UNDERSCORE)
+        })
+    }
+
+    pub fn expr(&self) -> Option<Expr> {
+        self.syntax().children().filter_map(Expr::cast).last()
+    }
+}
+
+impl AssignStmt {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| kind == SyntaxKind::LOWER_IDENT)
+    }
+
+    pub fn expr(&self) -> Option<Expr> {
+        self.syntax().children().filter_map(Expr::cast).last()
+    }
+}
+
+impl CompoundUpdateStmt {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| kind == SyntaxKind::LOWER_IDENT)
+    }
+}
+
+impl FieldAssignStmt {
+    pub fn target(&self) -> Option<FieldAssignTarget> {
+        child(self.syntax())
+    }
+
+    pub fn expr(&self) -> Option<Expr> {
+        self.syntax().children().filter_map(Expr::cast).last()
+    }
+}
+
+impl FieldAssignTarget {
+    pub fn segments(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        self.syntax()
+            .children_with_tokens()
+            .filter_map(|child| child.into_token())
+            .filter(|token| token.kind() == SyntaxKind::LOWER_IDENT)
+    }
+}
+
+impl ReturnStmt {
+    pub fn expr(&self) -> Option<Expr> {
+        child(self.syntax())
+    }
+}
+
 fn child<N: AstNode>(parent: &SyntaxNode) -> Option<N> {
     parent.children().find_map(N::cast)
+}
+
+fn nth_expr(parent: &SyntaxNode, index: usize) -> Option<Expr> {
+    parent.children().filter_map(Expr::cast).nth(index)
 }
 
 fn nested_children<N: AstNode>(parent: &SyntaxNode, path: &[SyntaxKind]) -> AstChildren<N> {
@@ -379,4 +619,25 @@ fn first_token(
         .children_with_tokens()
         .filter_map(|child| child.into_token())
         .find(|token| predicate(token.kind()))
+}
+
+fn first_descendant_token(
+    parent: &SyntaxNode,
+    mut predicate: impl FnMut(SyntaxKind) -> bool,
+) -> Option<SyntaxToken> {
+    parent
+        .descendants_with_tokens()
+        .filter_map(|child| child.into_token())
+        .find(|token| predicate(token.kind()))
+}
+
+fn last_token(
+    parent: &SyntaxNode,
+    mut predicate: impl FnMut(SyntaxKind) -> bool,
+) -> Option<SyntaxToken> {
+    parent
+        .children_with_tokens()
+        .filter_map(|child| child.into_token())
+        .filter(|token| predicate(token.kind()))
+        .last()
 }

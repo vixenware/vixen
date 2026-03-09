@@ -1,5 +1,5 @@
 use crate::{
-    AstNode, Expr, InterpolatedStringExpr, Item, SourceFile, StringPart, SyntaxKind, parse,
+    AstNode, Expr, InterpolatedStringExpr, Item, SourceFile, Stmt, StringPart, SyntaxKind, parse,
 };
 
 #[test]
@@ -526,4 +526,72 @@ fn demo(value: Value) -> String {
         Expr::Call(_) => {}
         expr => panic!("expected call expr, got {expr:?}"),
     }
+}
+
+#[test]
+fn ast_wraps_block_statements_and_common_lowering_nodes() {
+    let input = r#"
+fn demo(input: Config, state: State) -> String {
+  let next = Config { jobs: input.jobs + 1 };
+  state.count = next.jobs;
+  return next.jobs
+}
+"#;
+
+    let parse = parse(input);
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let statements = body.statements().collect::<Vec<_>>();
+    assert_eq!(statements.len(), 3);
+
+    let let_stmt = match &statements[0] {
+        Stmt::Let(node) => node,
+        stmt => panic!("expected let stmt, got {stmt:?}"),
+    };
+    assert_eq!(let_stmt.name().unwrap().text(), "next");
+    let struct_literal = match let_stmt.expr().expect("let value") {
+        Expr::StructLiteral(node) => node,
+        expr => panic!("expected struct literal, got {expr:?}"),
+    };
+    assert_eq!(struct_literal.name().unwrap().text(), "Config");
+    let field = struct_literal
+        .fields()
+        .next()
+        .expect("struct literal field");
+    assert_eq!(field.name().unwrap().text(), "jobs");
+    let binary = match field.expr().expect("field expr") {
+        Expr::Binary(node) => node,
+        expr => panic!("expected binary expr, got {expr:?}"),
+    };
+    assert!(matches!(binary.lhs(), Some(Expr::Field(_))));
+    assert!(matches!(binary.rhs(), Some(Expr::Literal(_))));
+
+    let field_assign = match &statements[1] {
+        Stmt::FieldAssign(node) => node,
+        stmt => panic!("expected field assign stmt, got {stmt:?}"),
+    };
+    let segments = field_assign
+        .target()
+        .expect("field assign target")
+        .segments()
+        .map(|token| token.text().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(segments, vec!["state".to_string(), "count".to_string()]);
+    assert!(matches!(field_assign.expr(), Some(Expr::Field(_))));
+
+    let return_stmt = match &statements[2] {
+        Stmt::Return(node) => node,
+        stmt => panic!("expected return stmt, got {stmt:?}"),
+    };
+    let return_expr = match return_stmt.expr().expect("return expr") {
+        Expr::Field(node) => node,
+        expr => panic!("expected field expr, got {expr:?}"),
+    };
+    assert_eq!(return_expr.field_name().unwrap().text(), "jobs");
 }
