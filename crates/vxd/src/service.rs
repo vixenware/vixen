@@ -19,7 +19,11 @@ use picante::HasRuntime;
 use picante::wal::WalWriter;
 use std::fs;
 use std::io::ErrorKind;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
+use tokio::runtime::Handle;
+use tokio::task::block_in_place;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use vx_eval::{BlobValue, Engine, PathValue, TreeValue, Value, lower_source_file};
@@ -33,8 +37,9 @@ use vx_report::{
 use vx_rs::CrateGraph;
 use vx_runner_proto::RunnerClient;
 use vx_store_proto::{
-    Blake3Hash, ChunkHash, ContentHash, DirEntryKind, EnsureStatus, NodeHash, RustChannel,
-    RustComponent, RustToolchainSpec, ServiceVersion, StoreClient,
+    Blake3Hash, BlobRef, CasNode, ChunkHash, ContentHash, DirEntryKind, DirectoryNode,
+    EnsureStatus, NodeHash, RustChannel, RustComponent, RustToolchainSpec, ServiceVersion,
+    StoreClient,
 };
 use vxd_proto::{
     ActionType, BuildRequest, BuildResult, ProgressListenerClient, UnpublishResult,
@@ -422,6 +427,204 @@ pub(crate) fn sanitize_id_component(input: &str) -> String {
 
 pub(crate) fn legacy_compile_node_id(crate_name: &str, crate_type: &str) -> String {
     format!("compile-{crate_type}:{crate_name}")
+}
+
+pub(crate) fn materialize_store_tree_into_dir(
+    store: &StoreClient,
+    root: NodeHash,
+    destination: &Utf8Path,
+) -> Result<()> {
+    block_in_place(|| {
+        Handle::current().block_on(materialize_store_tree_into_dir_async(
+            store,
+            root,
+            destination,
+        ))
+    })
+}
+
+pub(crate) async fn materialize_store_tree_into_dir_async(
+    store: &StoreClient,
+    root: NodeHash,
+    destination: &Utf8Path,
+) -> Result<()> {
+    fs::create_dir_all(destination).map_err(|error| VxdError::CreateDir {
+        path: destination.to_path_buf(),
+        message: error.to_string(),
+    })?;
+
+    let mut pending = vec![(root, destination.to_path_buf())];
+    while let Some((node_hash, dir_path)) = pending.pop() {
+        fs::create_dir_all(&dir_path).map_err(|error| VxdError::CreateDir {
+            path: dir_path.clone(),
+            message: error.to_string(),
+        })?;
+
+        let directory = load_store_directory(store, node_hash).await?;
+        for entry in directory.entries {
+            let entry_path = dir_path.join(&entry.name);
+            match entry.kind {
+                DirEntryKind::SmallFile {
+                    content_hash,
+                    size,
+                    executable,
+                } => {
+                    let bytes = fetch_store_blob_bytes(
+                        store,
+                        &BlobRef::Small {
+                            chunk: ChunkHash(content_hash.0),
+                            size,
+                        },
+                    )
+                    .await?;
+                    write_materialized_blob(&entry_path, bytes, executable)?;
+                }
+                DirEntryKind::LargeFile {
+                    blob_node,
+                    content_hash,
+                    size,
+                    executable,
+                } => {
+                    let bytes = fetch_store_blob_bytes(
+                        store,
+                        &BlobRef::Large {
+                            blob_node,
+                            content_hash,
+                            size,
+                        },
+                    )
+                    .await?;
+                    write_materialized_blob(&entry_path, bytes, executable)?;
+                }
+                DirEntryKind::Dir { hash, .. } => pending.push((hash, entry_path)),
+                DirEntryKind::Symlink { target } => {
+                    return Err(VxdError::WriteOutput {
+                        path: entry_path,
+                        message: format!(
+                            "build.vx materialization does not support store-backed symlink outputs yet (target: {target})"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn materialize_store_blob_to_path(
+    store: &StoreClient,
+    path: &Utf8Path,
+    blob_ref: &BlobRef,
+    executable: bool,
+) -> Result<()> {
+    let bytes =
+        block_in_place(|| Handle::current().block_on(fetch_store_blob_bytes(store, blob_ref)))?;
+    write_materialized_blob(path, bytes, executable)
+}
+
+fn write_materialized_blob(path: &Utf8Path, bytes: Vec<u8>, executable: bool) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| VxdError::WriteOutput {
+        path: path.to_path_buf(),
+        message: "output path has no parent directory".to_string(),
+    })?;
+    fs::create_dir_all(parent).map_err(|error| VxdError::CreateDir {
+        path: parent.to_path_buf(),
+        message: error.to_string(),
+    })?;
+
+    fs::write(path, bytes).map_err(|error| VxdError::WriteOutput {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    set_executable_if_needed(path, executable)?;
+    Ok(())
+}
+
+async fn fetch_store_blob_bytes(store: &StoreClient, blob_ref: &BlobRef) -> Result<Vec<u8>> {
+    match blob_ref {
+        BlobRef::Small { chunk, .. } => store
+            .get_chunk(*chunk)
+            .await
+            .map_err(|error| VxdError::CasRpc(format!("{error:?}")))?
+            .ok_or_else(|| VxdError::BlobNotFound(format!("chunk {}", chunk.to_hex()))),
+        BlobRef::Large {
+            blob_node,
+            content_hash: _,
+            size: _,
+        } => {
+            let node_bytes = store
+                .get_node(*blob_node)
+                .await
+                .map_err(|error| VxdError::CasRpc(format!("{error:?}")))?
+                .ok_or_else(|| VxdError::BlobNotFound(format!("blob node {blob_node}")))?;
+            let blob_node_data = match CasNode::from_bytes(&node_bytes) {
+                Ok(CasNode::Blob(blob)) => blob,
+                Ok(_) => {
+                    return Err(VxdError::BlobNotFound(format!(
+                        "node {blob_node} is not a BlobNode"
+                    )));
+                }
+                Err(error) => {
+                    return Err(VxdError::CasRpc(format!(
+                        "failed to deserialize blob node {blob_node}: {error}"
+                    )));
+                }
+            };
+
+            let mut result = Vec::with_capacity(blob_node_data.total_size as usize);
+            for chunk_entry in &blob_node_data.chunks {
+                let chunk_data = store
+                    .get_chunk(chunk_entry.hash)
+                    .await
+                    .map_err(|error| VxdError::CasRpc(format!("{error:?}")))?
+                    .ok_or_else(|| {
+                        VxdError::BlobNotFound(format!("chunk {}", chunk_entry.hash.to_hex()))
+                    })?;
+                result.extend_from_slice(&chunk_data);
+            }
+            Ok(result)
+        }
+    }
+}
+
+async fn load_store_directory(store: &StoreClient, root: NodeHash) -> Result<DirectoryNode> {
+    let node_bytes = store
+        .get_node(root)
+        .await
+        .map_err(|error| VxdError::CasRpc(format!("{error:?}")))?
+        .ok_or_else(|| VxdError::BlobNotFound(format!("directory node {root}")))?;
+    match CasNode::from_bytes(&node_bytes) {
+        Ok(CasNode::Directory(directory)) => Ok(directory),
+        Ok(_) => Err(VxdError::BlobNotFound(format!(
+            "node {root} is not a DirectoryNode"
+        ))),
+        Err(error) => Err(VxdError::CasRpc(format!(
+            "failed to deserialize directory node {root}: {error}"
+        ))),
+    }
+}
+
+#[cfg(unix)]
+fn set_executable_if_needed(path: &Utf8Path, executable: bool) -> Result<()> {
+    if !executable {
+        return Ok(());
+    }
+    let metadata = fs::metadata(path).map_err(|error| VxdError::FileRead {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(permissions.mode() | 0o111);
+    fs::set_permissions(path, permissions).map_err(|error| VxdError::WriteOutput {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })
+}
+
+#[cfg(not(unix))]
+fn set_executable_if_needed(_path: &Utf8Path, _executable: bool) -> Result<()> {
+    Ok(())
 }
 
 fn build_rule_plan_from_crate_graph(graph: &CrateGraph) -> RulePlan {
@@ -1029,12 +1232,7 @@ impl VxdService {
                 self.copy_build_vx_dir(path.as_str(), output_root)?;
             }
             TreeValue::Store(root) => {
-                return Err(VxdError::Compilation {
-                    crate_name: "build.vx".to_string(),
-                    message: format!(
-                        "cannot materialize store-backed tree {root} into .vx/build without an external store resolver"
-                    ),
-                });
+                materialize_store_tree_into_dir(self.store.as_ref(), *root, output_root)?;
             }
         }
 
@@ -1057,12 +1255,9 @@ impl VxdService {
                         Ok(())
                     }
                     TreeValue::FsDir(source) => self.copy_build_vx_dir(source.as_str(), path),
-                    TreeValue::Store(root) => Err(VxdError::Compilation {
-                        crate_name: "build.vx".to_string(),
-                        message: format!(
-                            "cannot materialize store-backed tree {root} into .vx/build without an external store resolver"
-                        ),
-                    }),
+                    TreeValue::Store(root) => {
+                        materialize_store_tree_into_dir(self.store.as_ref(), *root, path)
+                    }
                 }
             }
             other => Err(VxdError::Compilation {
@@ -1099,13 +1294,9 @@ impl VxdService {
                 })?;
                 Ok(())
             }
-            BlobValue::Store(blob_ref) => Err(VxdError::Compilation {
-                crate_name: "build.vx".to_string(),
-                message: format!(
-                    "cannot materialize store-backed blob {:?} into .vx/build without an external store resolver",
-                    blob_ref
-                ),
-            }),
+            BlobValue::Store(blob_ref) => {
+                materialize_store_blob_to_path(self.store.as_ref(), path, blob_ref, false)
+            }
         }
     }
 

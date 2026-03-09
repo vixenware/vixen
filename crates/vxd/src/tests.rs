@@ -1,7 +1,13 @@
 use super::*;
+use camino::Utf8Path;
+use std::fs;
+use std::net::TcpListener;
+use tempfile::TempDir;
 use tokio_test_lite::test as vx_test;
+use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_report::{GraphEdge, GraphNode, GraphTopology};
-use vx_store_proto::Blake3Hash;
+use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
+use vx_store_proto::{Blake3Hash, BlobRef, ContentHash, DirEntryKind, StoreClient};
 
 /// Create a fresh database for testing
 fn test_db() -> Database {
@@ -814,4 +820,109 @@ async fn test_discovered_deps_affects_cache_key() {
 
     // Cache keys should be different because discovered deps changed
     assert_ne!(key1, key2);
+}
+
+#[vx_test]
+async fn test_store_backed_build_vx_trees_materialize_from_cas() {
+    let env = StoreTestEnv::new().await;
+
+    let bytes = b"hello from store";
+    let prepared = prepare_blob(bytes);
+    let blob_ref = store_prepared_blob(&env.client, &prepared, bytes)
+        .await
+        .expect("blob should store");
+    let file_kind = dir_entry_kind_from_blob_ref(&blob_ref, false);
+    let (root, _total_size) = crate::cas_tree::build_merkle_tree(
+        &env.client,
+        vec![crate::cas_tree::TreeFile {
+            path: "nested/greeting.txt".to_string(),
+            kind: file_kind,
+        }],
+    )
+    .await
+    .expect("tree should store");
+
+    let output = TempDir::new().expect("failed to create output tempdir");
+    let output_root = Utf8Path::from_path(output.path()).expect("tempdir should be utf-8");
+    crate::service::materialize_store_tree_into_dir_async(&env.client, root, output_root)
+        .await
+        .expect("store-backed tree should materialize");
+
+    let rendered = fs::read_to_string(output.path().join("nested/greeting.txt"))
+        .expect("materialized file should be readable");
+    assert_eq!(rendered, "hello from store");
+}
+
+struct StoreTestEnv {
+    _root: TempDir,
+    _vx_home: TempDir,
+    _service: ServiceHandle,
+    client: StoreClient,
+}
+
+impl StoreTestEnv {
+    async fn new() -> Self {
+        let root = TempDir::new().expect("failed to create store root tempdir");
+        let vx_home = TempDir::new().expect("failed to create vx_home tempdir");
+        let endpoint = free_local_endpoint();
+        let binary_path = resolve_vx_store_binary();
+        let root_str = root.path().to_string_lossy().into_owned();
+
+        let service = ServiceBuilder::new(binary_path, endpoint)
+            .caller_name("vxd-store-materialize-tests")
+            .args(&["--root", &root_str])
+            .env("VX_TEST", "1")
+            .timeout(std::time::Duration::from_secs(10))
+            .connect()
+            .await
+            .expect("failed to spawn/connect vx-store");
+
+        let virtual_handle = service
+            .boot_and_connect()
+            .await
+            .expect("failed to boot/connect vx-store virtual connection");
+
+        Self {
+            _root: root,
+            _vx_home: vx_home,
+            _service: service,
+            client: StoreClient::new(virtual_handle),
+        }
+    }
+}
+
+fn dir_entry_kind_from_blob_ref(blob_ref: &BlobRef, executable: bool) -> DirEntryKind {
+    match blob_ref {
+        BlobRef::Small { chunk, size } => DirEntryKind::SmallFile {
+            content_hash: ContentHash(chunk.0),
+            size: *size,
+            executable,
+        },
+        BlobRef::Large {
+            blob_node,
+            content_hash,
+            size,
+        } => DirEntryKind::LargeFile {
+            blob_node: *blob_node,
+            content_hash: *content_hash,
+            size: *size,
+            executable,
+        },
+    }
+}
+
+fn free_local_endpoint() -> vx_io::net::Endpoint {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind ephemeral port");
+    let addr = listener
+        .local_addr()
+        .expect("failed to read ephemeral port");
+    drop(listener);
+    vx_io::net::Endpoint::parse(&addr.to_string()).expect("failed to parse test endpoint")
+}
+
+fn resolve_vx_store_binary() -> String {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/debug/vx-store")
+        .to_string_lossy()
+        .into_owned()
 }
