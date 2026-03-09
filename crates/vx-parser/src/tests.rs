@@ -80,3 +80,81 @@ fn lexes_nested_block_comments() {
     assert_eq!(tokens.len(), 1);
     assert_eq!(tokens[0].kind, SyntaxKind::BLOCK_COMMENT);
 }
+
+#[test]
+fn parses_calls_struct_literals_and_with_expressions() {
+    let input = r#"
+fn value(x: F64, p: Point, defaults: Config) -> Point {
+  render("page.html"; ..defaults, title: "Home");
+  Point { :x, ..p, y: 3.0 } with { last: "Wilson" }
+}
+"#;
+
+    let parse = parse(input);
+    assert_eq!(parse.errors(), []);
+
+    let kinds = parse
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&SyntaxKind::CALL_EXPR));
+    assert!(kinds.contains(&SyntaxKind::ARG_LIST));
+    assert!(kinds.contains(&SyntaxKind::SPREAD_EXPR));
+    assert!(kinds.contains(&SyntaxKind::STRUCT_LITERAL_EXPR));
+    assert!(kinds.contains(&SyntaxKind::WITH_EXPR));
+    assert!(kinds.contains(&SyntaxKind::UPDATE_BODY));
+}
+
+#[test]
+fn parses_ufcs_and_operator_precedence() {
+    let input = r#"
+fn value(items: Array[U64]) -> Array[U64] {
+  items.map($ + 1).filter($ > 3).to_array()
+}
+"#;
+
+    let parse = parse(input);
+    assert_eq!(parse.errors(), []);
+
+    let kinds = parse
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&SyntaxKind::FIELD_EXPR));
+    assert!(kinds.contains(&SyntaxKind::CALL_EXPR));
+    assert!(kinds.contains(&SyntaxKind::BINARY_EXPR));
+}
+
+#[test]
+fn parses_if_import_fail_and_literals() {
+    let input = r#"
+fn value(flag: Bool) -> String {
+  let xs = [1, 2, 3];
+  let ys = %{ "x" => 1, "y" => 2 };
+  if flag {
+    import("build.vx");
+    fail "boom"
+  } else {
+    ys;
+    xs;
+    "ok"
+  }
+}
+"#;
+
+    let parse = parse(input);
+    assert_eq!(parse.errors(), []);
+
+    let kinds = parse
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&SyntaxKind::ARRAY_EXPR));
+    assert!(kinds.contains(&SyntaxKind::MAP_EXPR));
+    assert!(kinds.contains(&SyntaxKind::IF_EXPR));
+    assert!(kinds.contains(&SyntaxKind::IMPORT_EXPR));
+    assert!(kinds.contains(&SyntaxKind::FAIL_EXPR));
+}

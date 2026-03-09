@@ -734,7 +734,7 @@ fn array_pattern(p: &mut Parser<'_>) {
     marker.complete(p, SyntaxKind::ARRAY_PATTERN);
 }
 
-fn block_expr(p: &mut Parser<'_>) {
+fn block_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.expect(SyntaxKind::L_CURLY);
     while !p.at(SyntaxKind::R_CURLY) && !p.at(SyntaxKind::EOF) {
@@ -744,13 +744,14 @@ fn block_expr(p: &mut Parser<'_>) {
         }
     }
     p.expect(SyntaxKind::R_CURLY);
-    marker.complete(p, SyntaxKind::BLOCK_EXPR);
+    marker.complete(p, SyntaxKind::BLOCK_EXPR)
 }
 
 fn stmt(p: &mut Parser<'_>) {
     match p.current() {
         SyntaxKind::LET_KW => let_stmt(p),
         SyntaxKind::RETURN_KW => return_stmt(p),
+        SyntaxKind::FN_KW => fn_decl_rest(p),
         _ => expr(p),
     }
 }
@@ -777,28 +778,415 @@ fn return_stmt(p: &mut Parser<'_>) {
 }
 
 fn expr(p: &mut Parser<'_>) {
+    with_expr(p);
+}
+
+fn with_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let lhs = logical_or_expr(p);
+    if p.at(SyntaxKind::WITH_KW) {
+        let marker = lhs.precede(p);
+        p.bump();
+        update_body(p);
+        marker.complete(p, SyntaxKind::WITH_EXPR)
+    } else {
+        lhs
+    }
+}
+
+fn logical_or_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let mut lhs = logical_and_expr(p);
+    while p.at(SyntaxKind::PIPE2) {
+        let marker = lhs.precede(p);
+        p.bump();
+        logical_and_expr(p);
+        lhs = marker.complete(p, SyntaxKind::BINARY_EXPR);
+    }
+    lhs
+}
+
+fn logical_and_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let mut lhs = equality_expr(p);
+    while p.at(SyntaxKind::AMP2) {
+        let marker = lhs.precede(p);
+        p.bump();
+        equality_expr(p);
+        lhs = marker.complete(p, SyntaxKind::BINARY_EXPR);
+    }
+    lhs
+}
+
+fn equality_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let mut lhs = comparison_expr(p);
+    while matches!(p.current(), SyntaxKind::EQ2 | SyntaxKind::BANG_EQ) {
+        let marker = lhs.precede(p);
+        p.bump();
+        comparison_expr(p);
+        lhs = marker.complete(p, SyntaxKind::BINARY_EXPR);
+    }
+    lhs
+}
+
+fn comparison_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let mut lhs = additive_expr(p);
+    while matches!(
+        p.current(),
+        SyntaxKind::LT | SyntaxKind::LT_EQ | SyntaxKind::GT | SyntaxKind::GT_EQ
+    ) {
+        let marker = lhs.precede(p);
+        p.bump();
+        additive_expr(p);
+        lhs = marker.complete(p, SyntaxKind::BINARY_EXPR);
+    }
+    lhs
+}
+
+fn additive_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let mut lhs = multiplicative_expr(p);
+    while matches!(p.current(), SyntaxKind::PLUS | SyntaxKind::MINUS) {
+        let marker = lhs.precede(p);
+        p.bump();
+        multiplicative_expr(p);
+        lhs = marker.complete(p, SyntaxKind::BINARY_EXPR);
+    }
+    lhs
+}
+
+fn multiplicative_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let mut lhs = prefix_expr(p);
+    while matches!(
+        p.current(),
+        SyntaxKind::STAR | SyntaxKind::SLASH | SyntaxKind::PERCENT
+    ) {
+        let marker = lhs.precede(p);
+        p.bump();
+        prefix_expr(p);
+        lhs = marker.complete(p, SyntaxKind::BINARY_EXPR);
+    }
+    lhs
+}
+
+fn prefix_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    match p.current() {
+        SyntaxKind::BANG | SyntaxKind::MINUS => {
+            let marker = p.start();
+            p.bump();
+            prefix_expr(p);
+            marker.complete(p, SyntaxKind::PREFIX_EXPR)
+        }
+        SyntaxKind::FAIL_KW => {
+            let marker = p.start();
+            p.bump();
+            prefix_expr(p);
+            marker.complete(p, SyntaxKind::FAIL_EXPR)
+        }
+        _ => postfix_expr(p),
+    }
+}
+
+fn postfix_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let mut lhs = atom_expr(p);
+    loop {
+        if p.at(SyntaxKind::L_PAREN) {
+            let marker = lhs.precede(p);
+            arg_list(p);
+            lhs = marker.complete(p, SyntaxKind::CALL_EXPR);
+        } else if p.at(SyntaxKind::L_BRACKET) {
+            let marker = lhs.precede(p);
+            p.bump();
+            expr(p);
+            p.expect(SyntaxKind::R_BRACKET);
+            lhs = marker.complete(p, SyntaxKind::INDEX_EXPR);
+        } else if p.at(SyntaxKind::DOT) {
+            let marker = lhs.precede(p);
+            p.bump();
+            if matches!(
+                p.current(),
+                SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT
+            ) {
+                p.bump();
+            } else {
+                p.error("expected field name");
+            }
+            lhs = marker.complete(p, SyntaxKind::FIELD_EXPR);
+        } else if p.at(SyntaxKind::QUESTION) {
+            let marker = lhs.precede(p);
+            p.bump();
+            lhs = marker.complete(p, SyntaxKind::FALLIBLE_EXPR);
+        } else {
+            break;
+        }
+    }
+    lhs
+}
+
+fn atom_expr(p: &mut Parser<'_>) -> CompletedMarker {
     match p.current() {
         SyntaxKind::L_CURLY => block_expr(p),
-        SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT => name_expr(p),
+        SyntaxKind::L_PAREN => tuple_or_paren_expr(p),
+        SyntaxKind::L_BRACKET => array_expr(p),
+        SyntaxKind::PERCENT if p.nth(1) == SyntaxKind::L_CURLY => map_expr(p),
+        SyntaxKind::IF_KW => if_expr(p),
+        SyntaxKind::IMPORT_KW => import_expr(p),
+        SyntaxKind::LOWER_IDENT | SyntaxKind::DOLLAR_IDENT => name_expr(p),
+        SyntaxKind::UPPER_IDENT => upper_expr(p),
         SyntaxKind::INT
         | SyntaxKind::FLOAT
         | SyntaxKind::STRING
         | SyntaxKind::TRUE_KW
         | SyntaxKind::FALSE_KW => literal_expr(p),
-        _ => p.error_and_bump("expected expression"),
+        _ => {
+            p.error_and_bump("expected expression");
+            CompletedMarker {
+                pos: p.events.len() - 2,
+            }
+        }
     }
 }
 
-fn name_expr(p: &mut Parser<'_>) {
+fn name_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
-    name(p, true);
-    marker.complete(p, SyntaxKind::NAME_REF_EXPR);
+    match p.current() {
+        SyntaxKind::LOWER_IDENT | SyntaxKind::DOLLAR_IDENT => p.bump(),
+        _ => p.error("expected identifier"),
+    }
+    marker.complete(p, SyntaxKind::NAME_REF_EXPR)
 }
 
-fn literal_expr(p: &mut Parser<'_>) {
+fn upper_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    p.expect(SyntaxKind::UPPER_IDENT);
+    while p.at(SyntaxKind::DOT) && p.nth(1) == SyntaxKind::UPPER_IDENT {
+        p.bump();
+        p.bump();
+    }
+    if p.at(SyntaxKind::L_CURLY) {
+        struct_literal_body(p);
+        marker.complete(p, SyntaxKind::STRUCT_LITERAL_EXPR)
+    } else {
+        marker.complete(p, SyntaxKind::NAME_REF_EXPR)
+    }
+}
+
+fn literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.bump();
-    marker.complete(p, SyntaxKind::LITERAL_EXPR);
+    marker.complete(p, SyntaxKind::LITERAL_EXPR)
+}
+
+fn tuple_or_paren_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    p.expect(SyntaxKind::L_PAREN);
+    if p.eat(SyntaxKind::R_PAREN) {
+        return marker.complete(p, SyntaxKind::TUPLE_EXPR);
+    }
+    expr(p);
+    if p.eat(SyntaxKind::COMMA) {
+        while !p.at(SyntaxKind::R_PAREN) && !p.at(SyntaxKind::EOF) {
+            if p.at(SyntaxKind::DOT2) {
+                spread_expr(p);
+            } else {
+                expr(p);
+            }
+            if !p.eat(SyntaxKind::COMMA) {
+                break;
+            }
+        }
+        p.expect(SyntaxKind::R_PAREN);
+        marker.complete(p, SyntaxKind::TUPLE_EXPR)
+    } else {
+        p.expect(SyntaxKind::R_PAREN);
+        marker.complete(p, SyntaxKind::PAREN_EXPR)
+    }
+}
+
+fn array_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    p.expect(SyntaxKind::L_BRACKET);
+    while !p.at(SyntaxKind::R_BRACKET) && !p.at(SyntaxKind::EOF) {
+        if p.at(SyntaxKind::DOT2) {
+            spread_expr(p);
+        } else {
+            expr(p);
+        }
+        if !p.eat(SyntaxKind::COMMA) {
+            break;
+        }
+    }
+    p.expect(SyntaxKind::R_BRACKET);
+    marker.complete(p, SyntaxKind::ARRAY_EXPR)
+}
+
+fn map_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    p.expect(SyntaxKind::PERCENT);
+    p.expect(SyntaxKind::L_CURLY);
+    while !p.at(SyntaxKind::R_CURLY) && !p.at(SyntaxKind::EOF) {
+        let entry = p.start();
+        expr(p);
+        p.expect(SyntaxKind::FAT_ARROW);
+        expr(p);
+        entry.complete(p, SyntaxKind::MAP_ENTRY);
+        if !p.eat(SyntaxKind::COMMA) {
+            break;
+        }
+    }
+    p.expect(SyntaxKind::R_CURLY);
+    marker.complete(p, SyntaxKind::MAP_EXPR)
+}
+
+fn arg_list(p: &mut Parser<'_>) {
+    let marker = p.start();
+    p.expect(SyntaxKind::L_PAREN);
+    while !matches!(
+        p.current(),
+        SyntaxKind::R_PAREN | SyntaxKind::SEMICOLON | SyntaxKind::EOF
+    ) {
+        let arg = p.start();
+        if p.at(SyntaxKind::DOT2) {
+            spread_expr(p);
+        } else {
+            expr(p);
+        }
+        arg.complete(p, SyntaxKind::ARG);
+        if !p.eat(SyntaxKind::COMMA) {
+            break;
+        }
+    }
+    if p.eat(SyntaxKind::SEMICOLON) {
+        while !p.at(SyntaxKind::R_PAREN) && !p.at(SyntaxKind::EOF) {
+            if p.at(SyntaxKind::DOT2) {
+                spread_expr(p);
+            } else {
+                let arg = p.start();
+                if p.at(SyntaxKind::LOWER_IDENT) {
+                    p.bump();
+                } else {
+                    p.error("expected keyword argument name");
+                }
+                p.expect(SyntaxKind::COLON);
+                expr(p);
+                arg.complete(p, SyntaxKind::KEYWORD_ARG);
+            }
+            if !p.eat(SyntaxKind::COMMA) {
+                break;
+            }
+        }
+    }
+    p.expect(SyntaxKind::R_PAREN);
+    marker.complete(p, SyntaxKind::ARG_LIST);
+}
+
+fn spread_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    p.expect(SyntaxKind::DOT2);
+    expr(p);
+    marker.complete(p, SyntaxKind::SPREAD_EXPR)
+}
+
+fn struct_literal_body(p: &mut Parser<'_>) {
+    let marker = p.start();
+    p.expect(SyntaxKind::L_CURLY);
+    while !p.at(SyntaxKind::R_CURLY) && !p.at(SyntaxKind::EOF) {
+        let field = p.start();
+        if p.at(SyntaxKind::DOT2) {
+            p.bump();
+            expr(p);
+        } else if p.eat(SyntaxKind::COLON) {
+            if p.at(SyntaxKind::LOWER_IDENT) {
+                p.bump();
+            } else {
+                p.error("expected shorthand field name");
+            }
+        } else {
+            if p.at(SyntaxKind::LOWER_IDENT) {
+                p.bump();
+            } else {
+                p.error("expected struct field name");
+            }
+            p.expect(SyntaxKind::COLON);
+            expr(p);
+        }
+        field.complete(p, SyntaxKind::STRUCT_LITERAL_FIELD);
+        if !p.eat(SyntaxKind::COMMA) {
+            break;
+        }
+    }
+    p.expect(SyntaxKind::R_CURLY);
+    marker.complete(p, SyntaxKind::STRUCT_LITERAL_BODY);
+}
+
+fn update_body(p: &mut Parser<'_>) {
+    let marker = p.start();
+    p.expect(SyntaxKind::L_CURLY);
+    while !p.at(SyntaxKind::R_CURLY) && !p.at(SyntaxKind::EOF) {
+        let field = p.start();
+        if p.at(SyntaxKind::DOT2) {
+            p.bump();
+            expr(p);
+        } else if p.eat(SyntaxKind::COLON) {
+            field_path(p);
+            p.expect(SyntaxKind::WITH_KW);
+            update_body(p);
+        } else {
+            field_path(p);
+            p.expect(SyntaxKind::COLON);
+            expr(p);
+        }
+        field.complete(p, SyntaxKind::UPDATE_FIELD);
+        if !p.eat(SyntaxKind::COMMA) {
+            break;
+        }
+    }
+    p.expect(SyntaxKind::R_CURLY);
+    marker.complete(p, SyntaxKind::UPDATE_BODY);
+}
+
+fn field_path(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    if p.at(SyntaxKind::LOWER_IDENT) {
+        p.bump();
+    } else {
+        p.error("expected field path");
+    }
+    while p.at(SyntaxKind::DOT) {
+        p.bump();
+        if p.at(SyntaxKind::LOWER_IDENT) {
+            p.bump();
+        } else {
+            p.error("expected field name");
+            break;
+        }
+    }
+    marker.complete(p, SyntaxKind::FIELD_PATH)
+}
+
+fn if_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    p.expect(SyntaxKind::IF_KW);
+    expr(p);
+    block_expr(p);
+    let else_clause = p.start();
+    p.expect(SyntaxKind::ELSE_KW);
+    if p.at(SyntaxKind::IF_KW) {
+        if_expr(p);
+    } else {
+        block_expr(p);
+    }
+    else_clause.complete(p, SyntaxKind::ELSE_CLAUSE);
+    marker.complete(p, SyntaxKind::IF_EXPR)
+}
+
+fn import_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    p.expect(SyntaxKind::IMPORT_KW);
+    p.expect(SyntaxKind::L_PAREN);
+    if p.at(SyntaxKind::STRING) {
+        p.bump();
+    } else {
+        p.error("expected string literal");
+    }
+    p.expect(SyntaxKind::R_PAREN);
+    marker.complete(p, SyntaxKind::IMPORT_EXPR)
 }
 
 fn name(p: &mut Parser<'_>, allow_upper: bool) {

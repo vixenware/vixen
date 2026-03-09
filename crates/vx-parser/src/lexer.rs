@@ -41,6 +41,7 @@ impl<'a> Lexer<'a> {
                 Some('/') if self.starts_with("//") => self.line_comment(),
                 Some('/') if self.starts_with("/*") => self.block_comment(),
                 Some('"') => self.string(),
+                Some('$') => self.dollar_ident(),
                 Some(ch) if is_ident_start(ch) => self.ident_or_keyword(),
                 Some(ch) if ch.is_ascii_digit() => self.number(),
                 Some('(') => self.bump_one(SyntaxKind::L_PAREN),
@@ -174,6 +175,14 @@ impl<'a> Lexer<'a> {
             }
             _ => SyntaxKind::LOWER_IDENT,
         }
+    }
+
+    fn dollar_ident(&mut self) -> SyntaxKind {
+        self.bump_char();
+        while matches!(self.current_char(), Some(ch) if ch.is_ascii_digit()) {
+            self.bump_char();
+        }
+        SyntaxKind::DOLLAR_IDENT
     }
 
     fn number(&mut self) -> SyntaxKind {
