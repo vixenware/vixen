@@ -401,7 +401,7 @@ fn reap_process_group(_pid: u32) {}
 /// - Base: inherits system.sb for process startup, dyld, system libraries
 /// - Process exec: VFS_ROOT plus system tool directories (`/bin`, `/usr/bin`,
 ///   `/Library/Developer/CommandLineTools`)
-/// - File reads/maps: restricted to VFS_ROOT only
+/// - File reads/maps: restricted to VFS_ROOT plus system tool directories
 /// - File writes: WRITE_DIR (action output) + /private/var/folders (temp files)
 /// - Network: denied entirely — actions must be hermetic.
 ///
@@ -419,6 +419,9 @@ const SEATBELT_PROFILE: &str = r#"(version 1)
 (allow process-exec (subpath "/Library/Developer/CommandLineTools"))
 (allow file-read* (subpath (param "VFS_ROOT")))
 (allow file-read* (subpath (param "VFS_ROOT_ALT")))
+(allow file-read* (subpath "/bin"))
+(allow file-read* (subpath "/usr/bin"))
+(allow file-read* (subpath "/Library/Developer/CommandLineTools"))
 (allow file-read* (subpath "/usr"))
 (allow file-read* (subpath "/System"))
 (allow file-read* (subpath "/Library"))
@@ -532,6 +535,12 @@ mod tests {
     #[test]
     fn seatbelt_allows_bin_execs() {
         assert!(SEATBELT_PROFILE.contains("(allow process-exec (subpath \"/bin\"))"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_allows_bin_reads() {
+        assert!(SEATBELT_PROFILE.contains("(allow file-read* (subpath \"/bin\"))"));
     }
 
     #[cfg(unix)]
