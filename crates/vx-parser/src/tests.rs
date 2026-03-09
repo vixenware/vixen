@@ -8,6 +8,46 @@ use crate::{
 };
 
 #[test]
+fn parser_does_not_panic_on_if_without_else() {
+    // Regression test: if-without-else followed by a struct with Fn type
+    // used to panic in CompletedMarker::precede because error_and_bump
+    // in atom_expr returned a CompletedMarker pointing at a Token event
+    // instead of the Start event.
+    let src = r#"
+fn f() {
+  if x {
+    `hello`
+  }
+}
+struct S { v: Fn() -> () }
+"#;
+    let parsed = parse(src);
+    // Should produce parse errors but never panic
+    let _ = parsed.errors();
+}
+
+#[test]
+fn parser_does_not_panic_on_zoo_build_vx() {
+    // Regression: lines 39-52 from vixen-zoo/lua/build.vx triggered a panic
+    let src = r#"
+fn verify_tool(class: ExecutorClass, tool: DiscoveredTool) {
+  let current = discover_exec(class, ["sha256sum", tool.path]).stdout;
+  if current != tool.hash {
+    fail `tool at ${tool.path} changed since discovery`
+  }
+}
+struct CToolchain {
+  cc: DiscoveredTool,
+  ar: DiscoveredTool,
+  ranlib: DiscoveredTool,
+  verifier: Fn() -> (),
+}
+"#;
+    let parsed = parse(src);
+    let _ = parsed.errors();
+}
+
+#[test]
 fn parses_top_level_declarations_from_corpus() {
     let input = r#"
 @tag("kind", content: "payload")

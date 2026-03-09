@@ -134,13 +134,13 @@ impl<'a> Parser<'a> {
         }));
     }
 
-    fn error_and_bump(&mut self, message: impl Into<String>) {
+    fn error_and_bump(&mut self, message: impl Into<String>) -> CompletedMarker {
         let marker = self.start();
         self.error(message);
         if self.current() != SyntaxKind::EOF {
             self.bump();
         }
-        marker.complete(self, SyntaxKind::ERROR);
+        marker.complete(self, SyntaxKind::ERROR)
     }
 
     fn current_range(&self) -> TextRange {
@@ -574,7 +574,9 @@ fn slot_type(p: &mut Parser<'_>) {
             SyntaxKind::ENUM_KW => enum_decl_rest(p, SyntaxKind::INLINE_ENUM_DECL),
             SyntaxKind::NEWTYPE_KW => newtype_decl_rest(p, SyntaxKind::INLINE_NEWTYPE_DECL),
             SyntaxKind::TYPE_KW => type_alias_decl_rest(p, SyntaxKind::INLINE_TYPE_ALIAS_DECL),
-            _ => p.error_and_bump("expected inline type declaration"),
+            _ => {
+                p.error_and_bump("expected inline type declaration");
+            }
         }
     } else {
         type_expr(p);
@@ -1151,12 +1153,7 @@ fn atom_expr(p: &mut Parser<'_>) -> CompletedMarker {
         | SyntaxKind::STRING
         | SyntaxKind::TRUE_KW
         | SyntaxKind::FALSE_KW => literal_expr(p),
-        _ => {
-            p.error_and_bump("expected expression");
-            CompletedMarker {
-                pos: p.events.len() - 2,
-            }
-        }
+        _ => p.error_and_bump("expected expression"),
     }
 }
 
@@ -1440,14 +1437,16 @@ fn if_expr(p: &mut Parser<'_>) -> CompletedMarker {
     p.expect(SyntaxKind::IF_KW);
     expr(p);
     block_expr(p);
-    let else_clause = p.start();
-    p.expect(SyntaxKind::ELSE_KW);
-    if p.at(SyntaxKind::IF_KW) {
-        if_expr(p);
-    } else {
-        block_expr(p);
+    if p.at(SyntaxKind::ELSE_KW) {
+        let else_clause = p.start();
+        p.bump();
+        if p.at(SyntaxKind::IF_KW) {
+            if_expr(p);
+        } else {
+            block_expr(p);
+        }
+        else_clause.complete(p, SyntaxKind::ELSE_CLAUSE);
     }
-    else_clause.complete(p, SyntaxKind::ELSE_CLAUSE);
     marker.complete(p, SyntaxKind::IF_EXPR)
 }
 
@@ -1534,12 +1533,7 @@ fn pattern_atom(p: &mut Parser<'_>) -> CompletedMarker {
         SyntaxKind::L_PAREN => general_tuple_or_paren_pattern(p), // r[pattern.tuple]
         SyntaxKind::L_CURLY => general_struct_pattern(p), // r[pattern.struct]
         SyntaxKind::L_BRACKET => general_array_pattern(p), // r[pattern.array]
-        _ => {
-            p.error_and_bump("expected pattern");
-            CompletedMarker {
-                pos: p.events.len() - 2,
-            }
-        }
+        _ => p.error_and_bump("expected pattern"),
     }
 }
 

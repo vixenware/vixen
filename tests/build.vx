@@ -1,0 +1,205 @@
+// Lua build — ported from the developer Makefile
+//
+// Builds liblua.a (static library) and lua (interpreter executable).
+// Discovers the C toolchain via stabilize + discover_exec.
+
+// --- Source file lists (mirroring the Makefile) ---
+
+let core_sources = [
+  "lapi.c", "lcode.c", "lctype.c", "ldebug.c", "ldo.c", "ldump.c",
+  "lfunc.c", "lgc.c", "llex.c", "lmem.c", "lobject.c", "lopcodes.c",
+  "lparser.c", "lstate.c", "lstring.c", "ltable.c", "ltm.c",
+  "lundump.c", "lvm.c", "lzio.c", "ltests.c",
+]
+
+let aux_sources = ["lauxlib.c"]
+
+let lib_sources = [
+  "lbaselib.c", "ldblib.c", "liolib.c", "lmathlib.c", "loslib.c",
+  "ltablib.c", "lstrlib.c", "lutf8lib.c", "loadlib.c", "lcorolib.c",
+  "linit.c",
+]
+
+let all_lib_sources = [..core_sources, ..aux_sources, ..lib_sources]
+
+// --- Toolchain discovery ---
+
+struct DiscoveredTool {
+  path: String,
+  hash: Blob,
+}
+
+fn discover_tool(class: ExecutorClass, name: String) -> DiscoveredTool {
+  let which = discover_exec(class, ["which", name]);
+  let path = which.stdout.to_string().trim();
+  let hash = discover_exec(class, ["sha256sum", path]).stdout;
+  DiscoveredTool { path, hash }
+}
+
+fn verify_tool(class: ExecutorClass, tool: DiscoveredTool) {
+  // NOTE: how verifiers read host files is unspecified — see GAPS.md
+  let current = discover_exec(class, ["sha256sum", tool.path]).stdout;
+  if current != tool.hash {
+    fail `tool at ${tool.path} changed since discovery`
+  }
+}
+
+struct CToolchain {
+  cc: DiscoveredTool,
+  ar: DiscoveredTool,
+  ranlib: DiscoveredTool,
+  verifier: Fn() -> (),
+}
+
+fn discover_c_toolchain(class: ExecutorClass) -> CToolchain {
+  stabilize(
+    witness: () => "c-toolchain-v1",
+    resolve: (witness) => {
+      let cc = discover_tool(class, "cc");
+      let ar = discover_tool(class, "ar");
+      let ranlib = discover_tool(class, "ranlib");
+
+      let verifier = () => {
+        verify_tool(class, cc);
+        verify_tool(class, ar);
+        verify_tool(class, ranlib)
+      };
+
+      CToolchain { cc, ar, ranlib, verifier }
+    },
+  )
+}
+
+// --- Helpers ---
+
+fn obj_name(file: String) -> String {
+  file.replace(".c", ".o")
+}
+
+// --- Compilation ---
+
+fn compile_c(
+  file: String;
+  src: Tree,
+  toolchain: CToolchain,
+  cflags: Array[String] = [],
+) -> Blob {
+  let oname = obj_name(file);
+
+  exec[Blob](
+    [toolchain.cc.path, "-c", ..cflags, "-o", @"out" / oname, @"src" / file],
+    mounts: %{ @"src" => src },
+    writable: [@"out"],
+    verifier: toolchain.verifier,
+    observer: (proc, vfs) => {
+      if proc.exit_code != 0 {
+        let stderr_text = proc.stderr.to_array().join("");
+        fail `cc failed for ${file}: ${stderr_text}`
+      };
+      Stream.of(vfs.file(@"out" / oname))
+    },
+  ).to_array()[0]
+}
+
+// --- Archiving ---
+
+fn archive(
+  obj_tree: Tree,
+  obj_names: Array[String],
+  output_name: String,
+  toolchain: CToolchain,
+) -> Blob {
+  let archived = exec[Tree](
+    [toolchain.ar.path, "rc", @"out" / output_name,
+     ..obj_names.map(@"objs" / $)],
+    mounts: %{ @"objs" => obj_tree },
+    writable: [@"out"],
+    verifier: toolchain.verifier,
+    observer: (proc, vfs) => {
+      if proc.exit_code != 0 { fail `ar failed for ${output_name}` };
+      Stream.of(vfs.subtree(@"out"))
+    },
+  ).to_array()[0];
+
+  // ranlib: generate the index
+  exec[Blob](
+    [toolchain.ranlib.path, @"lib" / output_name],
+    mounts: %{ @"lib" => archived },
+    writable: [@"lib"],
+    verifier: toolchain.verifier,
+    observer: (proc, vfs) => {
+      if proc.exit_code != 0 { fail `ranlib failed for ${output_name}` };
+      Stream.of(vfs.file(@"lib" / output_name))
+    },
+  ).to_array()[0]
+}
+
+// --- Linking ---
+
+fn link_executable(
+  obj_tree: Tree,
+  obj_names: Array[String],
+  output_name: String,
+  toolchain: CToolchain;
+  lib_tree: Tree = Tree.empty(),
+  lib_names: Array[String] = [],
+  ldflags: Array[String] = [],
+  libs: Array[String] = [],
+) -> Blob {
+  exec[Blob](
+    [toolchain.cc.path, "-o", @"out" / output_name,
+     ..ldflags,
+     ..obj_names.map(@"objs" / $),
+     ..lib_names.map(@"libs" / $),
+     ..libs],
+    mounts: %{ @"objs" => obj_tree, @"libs" => lib_tree },
+    writable: [@"out"],
+    verifier: toolchain.verifier,
+    observer: (proc, vfs) => {
+      if proc.exit_code != 0 {
+        let stderr_text = proc.stderr.to_array().join("");
+        fail `link failed for ${output_name}: ${stderr_text}`
+      };
+      Stream.of(vfs.file(@"out" / output_name))
+    },
+  ).to_array()[0]
+}
+
+// --- Build entry point ---
+
+fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree {
+  let src_tree = Tree.from_path(ws);
+
+  let class = executor_class("default");
+  let toolchain = discover_c_toolchain(class);
+
+  let cflags = ["-Wall", "-O2", "-std=c99", "-DLUA_USE_LINUX"];
+
+  // Compile all library sources concurrently — produces (obj_name, blob) pairs
+  let lib_obj_map = all_lib_sources.map((file) => {
+    (obj_name(file), compile_c(file; src: src_tree, :toolchain, :cflags))
+  }).to_map();
+  let lib_obj_tree = Tree.of(lib_obj_map);
+  let lib_obj_names = all_lib_sources.map(obj_name($)).to_array();
+
+  // Archive into liblua.a
+  let liblua = archive(lib_obj_tree, lib_obj_names, "liblua.a", toolchain);
+
+  // Compile lua.c (the interpreter main)
+  let lua_blob = compile_c("lua.c"; src: src_tree, :toolchain, :cflags);
+  let lua_obj_tree = Tree.of(%{ "lua.o" => lua_blob });
+
+  // Link the interpreter
+  let lua_exe = link_executable(
+    lua_obj_tree, ["lua.o"], "lua", toolchain;
+    lib_tree: Tree.of(%{ "liblua.a" => liblua }),
+    lib_names: ["liblua.a"],
+    ldflags: ["-Wl,-E"],
+    libs: ["-lm", "-ldl"],
+  );
+
+  Tree.of(%{
+    "bin/lua" => lua_exe,
+    "lib/liblua.a" => liblua,
+  })
+}
