@@ -3713,6 +3713,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-types"
+version = "0.1.0"
+
+[[package]]
 name = "vx-vfs"
 version = "0.1.0"
 dependencies = [
