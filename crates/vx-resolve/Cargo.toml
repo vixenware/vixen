@@ -1,0 +1,18 @@
+[package]
+name = "vx-resolve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+[dependencies]
+vx-parser = { path = "../vx-parser" }
+rowan = "0.16.1"
+
+[dev-dependencies]
+expect-test = "1"

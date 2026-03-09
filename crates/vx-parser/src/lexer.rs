@@ -59,6 +59,7 @@ impl<'a> Lexer<'a> {
 
     fn normal_token(&mut self) -> Option<SyntaxKind> {
         let kind = match self.current_char() {
+            // r[lex.whitespace]
             Some(ch) if ch.is_whitespace() => {
                 self.bump_char();
                 while matches!(self.current_char(), Some(next) if next.is_whitespace()) {
@@ -66,23 +67,26 @@ impl<'a> Lexer<'a> {
                 }
                 SyntaxKind::WHITESPACE
             }
-            Some('/') if self.starts_with("//") => self.line_comment(),
-            Some('/') if self.starts_with("/*") => self.block_comment(),
-            Some('"') => self.string(),
+            Some('/') if self.starts_with("//") => self.line_comment(), // r[lex.comment.line]
+            Some('/') if self.starts_with("/*") => self.block_comment(), // r[lex.comment.block]
+            Some('"') => self.string(),                                 // r[lex.string]
+            // r[lex.interp-string]
             Some('`') => {
                 self.bump_char();
                 self.modes.push(Mode::Template);
                 SyntaxKind::BACKTICK
             }
-            Some('$') => self.dollar_ident(),
-            Some(ch) if is_ident_start(ch) => self.ident_or_keyword(),
-            Some(ch) if ch.is_ascii_digit() => self.number(),
+            Some('$') => self.dollar_ident(), // r[lex.dollar-ident]
+            Some(ch) if is_ident_start(ch) => self.ident_or_keyword(), // r[lex.ident]
+            Some(ch) if ch.is_ascii_digit() => self.number(), // r[lex.numeric]
+            // r[lex.delimiters]
             Some('(') => self.bump_one(SyntaxKind::L_PAREN),
             Some(')') => self.bump_one(SyntaxKind::R_PAREN),
             Some('[') => self.bump_one(SyntaxKind::L_BRACKET),
             Some(']') => self.bump_one(SyntaxKind::R_BRACKET),
             Some('{') => self.bump_one(SyntaxKind::L_CURLY),
             Some('}') => self.bump_one(SyntaxKind::R_CURLY),
+            // r[lex.operators]
             Some(',') => self.bump_one(SyntaxKind::COMMA),
             Some(';') => self.bump_one(SyntaxKind::SEMICOLON),
             Some(':') if self.starts_with("::") => self.bump_two(SyntaxKind::COLON2),
@@ -120,6 +124,7 @@ impl<'a> Lexer<'a> {
         Some(kind)
     }
 
+    // r[lex.interp-string]
     fn template_chunk(&mut self) -> SyntaxKind {
         if self.current_char() == Some('`') {
             self.bump_char();
@@ -148,6 +153,7 @@ impl<'a> Lexer<'a> {
         SyntaxKind::INTERP_TEXT
     }
 
+    // r[lex.interp-string]
     fn template_expr_token(&mut self) -> SyntaxKind {
         if self.current_char() == Some('`') {
             self.bump_char();
@@ -194,6 +200,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    // r[lex.comment.line]
     fn line_comment(&mut self) -> SyntaxKind {
         self.pos += 2;
         while let Some(ch) = self.current_char() {
@@ -205,6 +212,7 @@ impl<'a> Lexer<'a> {
         SyntaxKind::LINE_COMMENT
     }
 
+    // r[lex.comment.block]
     fn block_comment(&mut self) -> SyntaxKind {
         self.pos += 2;
         let mut depth = 1usize;
@@ -222,6 +230,7 @@ impl<'a> Lexer<'a> {
         SyntaxKind::BLOCK_COMMENT
     }
 
+    // r[lex.string]
     fn string(&mut self) -> SyntaxKind {
         self.bump_char();
         while let Some(ch) = self.current_char() {
@@ -242,12 +251,14 @@ impl<'a> Lexer<'a> {
         SyntaxKind::ERROR_TOKEN
     }
 
+    // r[lex.ident]
     fn ident_or_keyword(&mut self) -> SyntaxKind {
         let start = self.pos;
         self.bump_char();
         while matches!(self.current_char(), Some(ch) if is_ident_continue(ch)) {
             self.bump_char();
         }
+        // r[lex.keywords]
         match &self.source[start..self.pos] {
             "fn" => SyntaxKind::FN_KW,
             "let" => SyntaxKind::LET_KW,
@@ -280,6 +291,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    // r[lex.dollar-ident]
     fn dollar_ident(&mut self) -> SyntaxKind {
         self.bump_char();
         while matches!(self.current_char(), Some(ch) if ch.is_ascii_digit()) {
@@ -288,6 +300,7 @@ impl<'a> Lexer<'a> {
         SyntaxKind::DOLLAR_IDENT
     }
 
+    // r[lex.numeric]
     fn number(&mut self) -> SyntaxKind {
         self.bump_char();
         while matches!(self.current_char(), Some(ch) if ch.is_ascii_digit() || ch == '_') {
