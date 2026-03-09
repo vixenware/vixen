@@ -16,8 +16,17 @@ pub use ast::{
 mod lexer;
 pub use lexer::{Token, lex};
 
+mod lsp;
+pub use lsp::{
+    Breadcrumb, DocumentSymbol, FoldingRange, FoldingRangeKind, LineIndex, Position, SymbolKind,
+    document_symbols, enclosing_nodes, folding_ranges,
+};
+
 mod parser;
 pub use parser::{Parse, SyntaxError, parse};
+
+mod parsed;
+pub use parsed::{Parsed, parse_source_file};
 
 mod syntax_kind;
 pub use syntax_kind::{SyntaxKind, SyntaxToken, VxLanguage};

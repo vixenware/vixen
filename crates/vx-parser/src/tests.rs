@@ -1,6 +1,6 @@
 use crate::{
     AstNode, Expr, InterpolatedStringExpr, Item, Pattern, SourceFile, Stmt, StringPart, SyntaxKind,
-    Type, parse,
+    Type, parse, parse_source_file,
 };
 
 #[test]
@@ -730,4 +730,42 @@ fn decode(input: Array[String]?, item: Message, ; loudly: Bool = false) -> Map[S
         pattern => panic!("expected array rest pattern, got {pattern:?}"),
     };
     assert_eq!(rest.name().unwrap().text(), "rest");
+}
+
+#[test]
+fn typed_parse_returns_source_file_tree() {
+    let parsed = parse_source_file(
+        r#"
+struct Config {
+  jobs: U64,
+}
+"#,
+    );
+
+    assert_eq!(parsed.errors(), []);
+
+    let file = parsed.tree();
+    let items = file.items().collect::<Vec<_>>();
+    assert_eq!(items.len(), 1);
+    assert!(matches!(&items[0], Item::StructDecl(_)));
+}
+
+#[test]
+fn typed_parse_preserves_errors_and_tree_access() {
+    let parsed = parse_source_file(
+        r#"
+let bad = 1
+
+fn ok() -> U64 {
+  1
+}
+"#,
+    );
+
+    assert!(!parsed.errors().is_empty());
+
+    let file = parsed.tree();
+    let items = file.items().collect::<Vec<_>>();
+    assert_eq!(items.len(), 1);
+    assert!(matches!(&items[0], Item::FnDecl(_)));
 }
