@@ -85,7 +85,7 @@ insert_anchor_links = "heading"
 > r[lex.attributes]
 >
 > Attributes use `@` followed by a name and optional arguments:
-> `@rename("name")`, `@ttl("5m")`, `@tag("type")`. Attributes attach
+> `@rename("name")`, `@tag("type")`. Attributes attach
 > to the declaration or field that immediately follows them. Multiple
 > attributes can stack:
 >
@@ -138,9 +138,10 @@ insert_anchor_links = "heading"
 >
 > Dot: `.` (field access, UFCS function calls).
 >
-> Other: `?` (fallible suffix), `@` (pattern binding, attributes), `:` (named
-> slots — type annotations and field-value pairs, always after an identifier),
-> `::` (expression-level type ascription, distinct from `as` conversion).
+> Other: `?` (fallible suffix), `@` (pattern binding, attributes), `#` (capability
+> tags on function types), `:` (named slots — type annotations and field-value
+> pairs, always after an identifier), `::` (expression-level type ascription,
+> distinct from `as` conversion).
 
 > r[lex.delimiters]
 >
@@ -1119,10 +1120,12 @@ insert_anchor_links = "heading"
 
 > r[fn.type]
 >
-> Function types use `Fn(Args) -> Ret` syntax. Only functions with
-> positional arguments can have their type named. Functions with keyword
-> arguments cannot be passed as values — use partial application (`@`)
-> to close over keyword arguments and produce a passable `Fn`.
+> Function types use `Fn(Args) -> Ret` syntax. Capability tags appear
+> between the parameter list and the return type arrow: `Fn(Args) #fs -> Ret`.
+> See [cap.model]. Only functions with positional arguments can have their
+> type named. Functions with keyword arguments cannot be passed as values —
+> use partial application (`@`) to close over keyword arguments and produce
+> a passable `Fn`.
 
 > r[fn.identity]
 >
@@ -1827,23 +1830,25 @@ insert_anchor_links = "heading"
 > memo table lookup. A function call is memoized only once all its
 > arguments have resolved.
 
-### Mutable resources
-
-> r[eval.ttl]
->
-> `@ttl("duration")` marks functions that access mutable resources. The
-> runtime caches results provisionally and revalidates according to the
-> policy. If the revalidated result equals the cached result, downstream
-> nodes are not re-evaluated (early cutoff).
-
 ## Demand model
 
 > r[eval.entry]
 >
 > A Vixen build starts with a `build.vixen` file at the repository root.
-> The entry point receives the working directory as a `Tree`, CLI
-> arguments as `Array[String]`, and the environment as
+> The entry point is invoked by the `build` intrinsic, which grants the
+> `#fs` capability. The entry point receives the workspace path as a
+> `Path`, CLI arguments as `Array[String]`, and the environment as
 > `Map[String, String]`, and returns a `Tree`.
+>
+> ```vixen
+> fn build[T](
+>   entry: Fn(Path, Array[String], Map[String, String]) #fs -> T,
+> ) -> T;
+> ```
+>
+> The workspace is not pre-walked into a `Tree` — filesystem access is
+> lazy. Files are read on demand through the `#fs` capability, and those
+> reads are tracked by the runtime's dependency tracking machinery.
 
 > r[eval.entry.cargo-compat]
 >
@@ -1855,15 +1860,13 @@ insert_anchor_links = "heading"
 
 > r[exec.acquire]
 >
-> `acquire(url)` fetches a resource by URL and returns a `Blob`.
->
-> - With a hash — `acquire(url, sha256: hash)` — the result is
->   content-addressed and cached permanently. The hash is verified;
->   a mismatch poisons.
-> - Without a hash — `acquire(url)` — the result is cached according
->   to the `@ttl` policy of the calling function. Calling `acquire`
->   without a hash outside a `@ttl` function is an error (the result
->   would be non-reproducible).
+> `acquire(url, sha256: hash)` fetches a resource by URL and returns a
+> `Blob`. The hash is always required — the result is content-addressed
+> and cached permanently. The hash is verified; a mismatch poisons.
+> Because acquisition is deterministic (same URL + same hash = same
+> content), `acquire` is ambient — it requires no capability and can be
+> called anywhere. Fetching without a known hash is discovery, which
+> goes through `stabilize` (see [stabilize.model]).
 
 > r[exec.acquire.extract]
 >
@@ -1874,3 +1877,188 @@ insert_anchor_links = "heading"
 > `Tree` is pending until extraction completes, and the entire
 > operation (fetch + extract) is a single cached unit keyed by URL and
 > hash.
+
+## Capabilities
+
+> r[cap.model]
+>
+> Every closure and function has a **capability fingerprint** — the set
+> of capabilities it can exercise, inferred by the evaluator from the
+> operations it performs and the authority-bearing values it captures.
+> A function has zero capabilities by default. Capabilities are acquired
+> by capturing authority-bearing values from a scope where a capability
+> is active, or by being invoked through an intrinsic that grants a
+> capability.
+
+> r[cap.tags]
+>
+> Capability tags on `Fn` types use `#name` syntax between the parameter
+> list and the return type arrow:
+>
+> ```vixen
+> Fn() #fs -> W
+> Fn(W) #discover -> T
+> Fn(T) #fs #discover -> U
+> ```
+>
+> Tags are valid only in function type and function signature position.
+> `#` is not an expression operator.
+
+> r[cap.mask]
+>
+> Capability tags on a `Fn` type are an **upper bound** (a mask), not
+> an exact requirement. A closure's inferred capability fingerprint must
+> be a **subset** of the tagged set. A closure with no capabilities
+> satisfies any mask. A closure with `#fs #discover` fails a mask that
+> only allows `#fs`.
+>
+> A `Fn` type with no capability tags accepts only closures with an
+> empty fingerprint — pure functions.
+
+> r[cap.kinds]
+>
+> Two capabilities exist:
+>
+> - **`#fs`** — filesystem access. Reading files, walking directories,
+>   evaluating globs. Operates on local/project state that is cheap to
+>   check between builds.
+> - **`#discover`** — volatile external state. Registry queries,
+>   toolchain channel resolution, latest-version lookups. Operates on
+>   state that may differ between builds and is expensive to verify.
+
+> r[cap.propagation]
+>
+> Capability fingerprints propagate through closures: if a closure
+> captures an authority-bearing value (a handle that can exercise a
+> capability), the closure carries that capability in its fingerprint.
+> Calling a function that requires a capability also propagates that
+> capability to the caller.
+>
+> Propagation is about **authority**, not data provenance. A `String`
+> computed inside a `#discover` context is an ordinary `String` — capturing
+> it does not make another closure carry `#discover`. Only values that
+> can actually exercise authority (perform filesystem operations, issue
+> discovery requests) propagate capabilities.
+
+> r[cap.grant]
+>
+> User code can mention capability tags in function signatures — this
+> restricts what callbacks are accepted (masking). User code **cannot
+> implement** functions that grant capabilities. Only runtime intrinsics
+> can invoke a callback in a capability context the caller did not
+> already have.
+>
+> This means `build` (which grants `#fs`) and `stabilize` (which grants
+> `#discover`) have signatures expressible in Vixen but bodies that only
+> the runtime can provide. The evaluator rejects user code that attempts
+> to implement a capability-granting function.
+
+## Stabilize
+
+> r[stabilize.model]
+>
+> Some operations consult changing external state — resolving a toolchain
+> channel, querying a registry, performing dependency resolution. These
+> are not reproducible by themselves. `stabilize` bridges discovery and
+> reproducible reuse by splitting such computations into two callbacks
+> with different capability masks: a **witness** that captures the
+> dependency frontier, and a **resolve** that performs discovery.
+
+> r[stabilize.signature]
+>
+> ```vixen
+> fn stabilize[W, T](
+>   witness: Fn() #fs -> W,
+>   resolve: Fn(W) #discover -> T,
+> ) -> T;
+> ```
+>
+> The witness callback runs under `#fs` — it can read the filesystem but
+> cannot perform discovery. The resolve callback runs under `#discover` —
+> it can query external state but cannot access the filesystem. All
+> local/project state the resolve callback needs must be summarized in
+> the witness value it receives.
+
+> r[stabilize.witness]
+>
+> The witness callback computes the dependency frontier — the set of
+> local/project state that determines whether a previous resolution is
+> still valid. It reads manifests, walks directories, checks globs,
+> and returns a value that summarizes everything relevant. Its
+> dependencies are tracked by the same holistic machinery as any other
+> Vixen computation: code identity, captures, transitive calls, and all
+> values read. No special tracking rules are introduced for the witness.
+
+> r[stabilize.resolve]
+>
+> The resolve callback performs discovery. It receives the witness value
+> and computes the final result — querying registries, resolving
+> dependency graphs, looking up versions. It cannot access the
+> filesystem; the `#discover` mask excludes `#fs`. This prevents
+> untracked filesystem reads from causing over-caching.
+
+> r[stabilize.reuse]
+>
+> The witness value is the reuse key. If the current witness matches
+> the recorded witness from a previous build, the previous resolve
+> result is reused without running resolve again. If the witness
+> changes, resolve runs again. The witness execution trace — not a
+> user-supplied key — determines reuse.
+
+> r[stabilize.caching-bias]
+>
+> Over-caching — reusing a stale result — must not happen. Under-caching
+> — recomputing when reuse was safe — is acceptable. The capability
+> split ensures correctness: the witness captures everything that
+> determines validity, and the resolve callback cannot introduce
+> untracked inputs.
+
+> r[stabilize.lockfile]
+>
+> Lockfiles are ordinary artifacts. They are outputs of `stabilize` and
+> later inputs to reproducible builds. Evaluation never mutates
+> workspace files in place — a lockfile artifact is written to disk
+> only at the external boundary, like any other output.
+>
+> "Normal build" vs "update lockfile" is not a semantic distinction.
+> The evaluator always computes the correct stabilized result. The
+> difference is whether the resulting artifact gets written back to the
+> repository.
+
+> r[stabilize.compat]
+>
+> Ecosystem lockfiles (e.g. `Cargo.lock`) retain their native format —
+> `stabilize` does not own any particular lockfile syntax. Library code
+> provides package-manager-specific parsing and writing logic. Vixen
+> keeps its own reuse metadata (witness fingerprints, dependency traces)
+> separately.
+
+> r[stabilize.first-build]
+>
+> On first evaluation of an existing project, `stabilize` runs the full
+> witness/resolve cycle and records its own reuse data. Any existing
+> ecosystem lockfile (e.g. a `Cargo.lock` written by `cargo`) may be
+> consumed by the resolve callback as an ordinary input, according to
+> that callback's logic.
+
+> r[stabilize.nested]
+>
+> `stabilize` can appear anywhere in the build graph, including inside
+> a resolve callback. Nesting is safe because each `stabilize` call
+> enforces its own capability masks independently:
+>
+> ```vixen
+> stabilize(
+>   witness: fn() { ... },
+>   resolve: fn(inputs) {
+>     // outer resolve has #discover, not #fs
+>     stabilize(
+>       witness: fn() { ... },
+>       // inner witness: #fs granted by inner stabilize,
+>       // #discover from outer resolve filtered by mask
+>       resolve: fn(inner) { ... },
+>       // inner resolve: #discover granted by inner stabilize
+>     )
+>   },
+> )
+> ```
