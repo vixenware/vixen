@@ -5,6 +5,7 @@
 //!
 //! Cache keys are blake3 hashes of all inputs that affect the build output.
 
+use facet_postcard::to_vec;
 use vx_runner_proto::{CcCompileRequest, CcLinkRequest, RunRequest, RustCompileRequest};
 use vx_store_proto::Blake3Hash;
 
@@ -17,7 +18,8 @@ pub const RUST_CACHE_KEY_VERSION: u32 = 1;
 pub const CC_CACHE_KEY_VERSION: u32 = 2;
 
 /// Current cache key schema version for generic tool execution.
-pub const RUN_CACHE_KEY_VERSION: u32 = 3;
+/// Version 4: Added shipped evaluator payload hashing.
+pub const RUN_CACHE_KEY_VERSION: u32 = 4;
 
 /// Compute a cache key for a Rust compile request.
 ///
@@ -246,6 +248,13 @@ pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
     hasher.update(&[request.clear_env as u8]);
     hasher.update(b"\n");
 
+    if let Some(eval) = &request.eval {
+        let eval_bytes = to_vec(eval).expect("run evaluator payload must serialize");
+        hasher.update(b"eval:");
+        hasher.update(&eval_bytes);
+        hasher.update(b"\n");
+    }
+
     for arg in &request.args {
         hasher.update(b"arg:");
         hasher.update(match arg {
@@ -327,7 +336,10 @@ pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vx_runner_proto::{RunArg, RunRequest, RustDep};
+    use vx_runner_proto::{
+        RunArg, RunEvalPayload, RunRequest, RustDep, TransportBlock, TransportExpr, TransportFnDef,
+        TransportModule, TransportStmt,
+    };
 
     #[test]
     fn test_cache_key_determinism() {
@@ -408,6 +420,7 @@ mod tests {
             cwd: None,
             env: vec![],
             clear_env: true,
+            eval: None,
             macos_commandlinetools_version: None,
         };
         let path_request = RunRequest {
@@ -416,5 +429,63 @@ mod tests {
         };
 
         assert_ne!(run_cache_key(&request), run_cache_key(&path_request));
+    }
+
+    #[test]
+    fn run_cache_key_includes_evaluator_payload() {
+        let request = RunRequest {
+            toolchain_manifest: Blake3Hash([1; 32]),
+            program_rel: "bin/tool".to_string(),
+            args: vec![RunArg::literal("--version")],
+            tree_mounts: vec![],
+            file_mounts: vec![],
+            outputs: vec![],
+            writable_roots: vec!["out".to_string()],
+            cwd: None,
+            env: vec![],
+            clear_env: true,
+            eval: None,
+            macos_commandlinetools_version: None,
+        };
+        let first_eval = RunEvalPayload {
+            module: TransportModule {
+                functions: vec![TransportFnDef {
+                    name: "observe".to_string(),
+                    params: vec![],
+                    body: TransportBlock {
+                        stmts: vec![TransportStmt::Expr(TransportExpr::LitInt(1))],
+                    },
+                }],
+            },
+            observer: None,
+            verifier: None,
+        };
+        let second_eval = RunEvalPayload {
+            module: TransportModule {
+                functions: vec![TransportFnDef {
+                    name: "observe".to_string(),
+                    params: vec![],
+                    body: TransportBlock {
+                        stmts: vec![TransportStmt::Expr(TransportExpr::LitInt(2))],
+                    },
+                }],
+            },
+            observer: None,
+            verifier: None,
+        };
+
+        let first_request = RunRequest {
+            eval: Some(first_eval),
+            ..request.clone()
+        };
+        let second_request = RunRequest {
+            eval: Some(second_eval),
+            ..request
+        };
+
+        assert_ne!(
+            run_cache_key(&first_request),
+            run_cache_key(&second_request)
+        );
     }
 }

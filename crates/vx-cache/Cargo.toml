@@ -10,6 +10,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
 blake3 = { workspace = true }
+facet-postcard = { workspace = true }
 vx-store-proto = { workspace = true }
 vx-runner-proto = { workspace = true }
 

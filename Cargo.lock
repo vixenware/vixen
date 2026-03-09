@@ -3418,6 +3418,7 @@ name = "vx-cache"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "facet-postcard",
  "vx-runner-proto",
  "vx-store-proto",
 ]
@@ -3649,6 +3650,7 @@ version = "0.1.0"
 dependencies = [
  "facet",
  "roam",
+ "vx-eval",
  "vx-store-proto",
 ]
 

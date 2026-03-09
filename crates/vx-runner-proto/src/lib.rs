@@ -1,7 +1,8 @@
 //! Runner service protocol definitions
 //!
 //! The runner service is a remote-capable worker that compiles code.
-//! All inputs and outputs go through CAS - no filesystem paths are shared.
+//! All file inputs and outputs go through CAS/VFS, and shipped evaluator
+//! payloads go over RPC. No filesystem paths are shared between daemon and runner.
 //!
 //! Runner responsibilities:
 //! - Materialize toolchains from CAS (cached locally)
@@ -19,11 +20,16 @@
 //! - Materialize final outputs locally (if needed)
 
 use facet::Facet;
+pub use vx_eval::{
+    ShippedFunction, TransportBinOp, TransportBlob, TransportBlock, TransportBuiltinValue,
+    TransportExpr, TransportFnDef, TransportModule, TransportParam, TransportStmt, TransportStruct,
+    TransportTree, TransportUnaryOp, TransportValue,
+};
 use vx_store_proto::{ManifestHash, ServiceVersion, StoreProgress};
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 5;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 6;
 
 // =============================================================================
 // Rust Compilation
@@ -295,6 +301,17 @@ pub struct RunOutput {
     pub executable: bool,
 }
 
+/// Executor-side evaluator payload shipped with a generic run request.
+#[derive(Debug, Clone, Facet)]
+pub struct RunEvalPayload {
+    /// Lowered module used to resolve global calls from shipped closures.
+    pub module: TransportModule,
+    /// Optional observer closure to run after the process exits.
+    pub observer: Option<ShippedFunction>,
+    /// Optional verifier closure to run after the observer.
+    pub verifier: Option<ShippedFunction>,
+}
+
 /// Request to run a sandboxed toolchain command.
 ///
 /// This is the generic building block that language-specific front-ends can lower into.
@@ -331,6 +348,9 @@ pub struct RunRequest {
 
     /// Whether to clear the environment before setting `env`.
     pub clear_env: bool,
+
+    /// Optional evaluator payload to run on the executor after process completion.
+    pub eval: Option<RunEvalPayload>,
 
     /// Optional macOS CommandLineTools version for cache key stability (best-effort).
     pub macos_commandlinetools_version: Option<String>,

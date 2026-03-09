@@ -12,6 +12,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 facet = { workspace = true }
 roam = { workspace = true }
 
+vx-eval = { workspace = true }
 vx-store-proto = { workspace = true }
 
 [lints]

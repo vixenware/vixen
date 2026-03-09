@@ -1940,6 +1940,7 @@ async fn execute_action(
                 args,
                 cwd,
                 clear_env,
+                eval: None,
                 env,
                 tree_mounts: resolved_tree_mounts,
                 file_mounts: resolved_file_mounts,
