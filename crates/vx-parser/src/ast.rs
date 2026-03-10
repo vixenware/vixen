@@ -590,13 +590,23 @@ impl FnDecl {
     }
 
     pub fn keyword_parameters(&self) -> AstChildren<KeywordParameter> {
-        nested_children(
+        if let Some(list) = nested_node(
             self.syntax(),
             &[
                 SyntaxKind::PARAMETER_CLAUSE,
                 SyntaxKind::KEYWORD_PARAMETER_LIST,
             ],
-        )
+        ) {
+            return AstChildren::new(&list);
+        }
+        if let Some(list) = self
+            .syntax()
+            .children()
+            .find(|child| child.kind() == SyntaxKind::KEYWORD_PARAMETER_LIST)
+        {
+            return AstChildren::new(&list);
+        }
+        AstChildren::from_nodes(Vec::new())
     }
 
     pub fn return_type(&self) -> Option<ReturnType> {
@@ -755,6 +765,17 @@ impl FunctionType {
 
     pub fn capability_list(&self) -> Option<CapabilityList> {
         child(self.syntax())
+    }
+
+    pub fn keyword_parameters(&self) -> AstChildren<KeywordParameter> {
+        if let Some(list) = self
+            .syntax()
+            .children()
+            .find(|child| child.kind() == SyntaxKind::KEYWORD_PARAMETER_LIST)
+        {
+            return AstChildren::new(&list);
+        }
+        AstChildren::from_nodes(Vec::new())
     }
 }
 
@@ -1367,6 +1388,12 @@ fn nested_children<N: AstNode>(parent: &SyntaxNode, path: &[SyntaxKind]) -> AstC
         .flat_map(|node| node.children())
         .collect();
     AstChildren::from_nodes(nodes)
+}
+
+fn nested_node(parent: &SyntaxNode, path: &[SyntaxKind]) -> Option<SyntaxNode> {
+    path.iter().try_fold(parent.clone(), |node, &kind| {
+        node.children().find(|child| child.kind() == kind)
+    })
 }
 
 fn first_token(

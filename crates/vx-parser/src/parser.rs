@@ -394,7 +394,13 @@ fn fn_decl_contents(p: &mut Parser<'_>, allow_upper_name: bool) {
     name(p, allow_upper_name);
     type_param_list(p);
     parameter_clause(p);
+    if p.at(SyntaxKind::WHERE_KW) {
+        keyword_parameter_block(p);
+    }
     capability_list(p);
+    if p.at(SyntaxKind::WHERE_KW) {
+        keyword_parameter_block(p);
+    }
     if p.eat(SyntaxKind::THIN_ARROW) {
         let ret = p.start();
         type_expr(p);
@@ -454,15 +460,7 @@ fn type_alias_decl_contents(p: &mut Parser<'_>, allow_anonymous: bool) {
     }
     type_param_list(p);
     if p.eat(SyntaxKind::EQ) {
-        let first = type_expr(p);
-        // r[type.enum.alias]
-        if p.at(SyntaxKind::PIPE) {
-            let sum = first.precede(p);
-            while p.eat(SyntaxKind::PIPE) {
-                type_expr(p);
-            }
-            sum.complete(p, SyntaxKind::SUM_TYPE);
-        }
+        type_expr(p);
     }
 }
 
@@ -557,12 +555,37 @@ fn namespace_body(p: &mut Parser<'_>) {
             p.eat(SyntaxKind::SEMICOLON);
         } else {
             p.error("expected declaration");
-            recover_block(p);
+            recover_decl_list(p);
             p.eat(SyntaxKind::SEMICOLON);
         }
     }
     p.expect(SyntaxKind::R_CURLY);
     marker.complete(p, SyntaxKind::NAMESPACE_BODY);
+}
+
+fn keyword_parameter_block(p: &mut Parser<'_>) {
+    p.expect(SyntaxKind::WHERE_KW);
+    let params = p.start();
+    p.expect(SyntaxKind::L_CURLY);
+    while !p.at(SyntaxKind::R_CURLY) && !p.at(SyntaxKind::EOF) {
+        let param = p.start();
+        if p.at(SyntaxKind::LOWER_IDENT) {
+            p.bump();
+        } else {
+            p.error("expected keyword parameter name");
+        }
+        p.expect(SyntaxKind::COLON);
+        slot_type(p);
+        if p.eat(SyntaxKind::EQ) {
+            expr(p);
+        }
+        param.complete(p, SyntaxKind::KEYWORD_PARAMETER);
+        if !p.eat(SyntaxKind::COMMA) {
+            break;
+        }
+    }
+    p.expect(SyntaxKind::R_CURLY);
+    params.complete(p, SyntaxKind::KEYWORD_PARAMETER_LIST);
 }
 
 // r[decl.fn.generic]
@@ -670,6 +693,18 @@ fn slot_type(p: &mut Parser<'_>) {
 
 // r[option.type]
 fn type_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let mut lhs = type_sum_term(p);
+    while p.at(SyntaxKind::PIPE) {
+        let marker = lhs.precede(p);
+        while p.eat(SyntaxKind::PIPE) {
+            type_sum_term(p);
+        }
+        lhs = marker.complete(p, SyntaxKind::SUM_TYPE);
+    }
+    lhs
+}
+
+fn type_sum_term(p: &mut Parser<'_>) -> CompletedMarker {
     let mut lhs = match p.current() {
         SyntaxKind::FN_TYPE_KW => function_type(p),
         SyntaxKind::L_PAREN => tuple_or_paren_type(p),
@@ -700,7 +735,13 @@ fn function_type(p: &mut Parser<'_>) -> CompletedMarker {
         }
     }
     p.expect(SyntaxKind::R_PAREN);
+    if p.at(SyntaxKind::WHERE_KW) {
+        keyword_parameter_block(p);
+    }
     capability_list(p);
+    if p.at(SyntaxKind::WHERE_KW) {
+        keyword_parameter_block(p);
+    }
     p.expect(SyntaxKind::THIN_ARROW);
     type_expr(p);
     marker.complete(p, SyntaxKind::FUNCTION_TYPE)
@@ -2035,6 +2076,12 @@ fn recover_block(p: &mut Parser<'_>) {
         !matches!(kind, SyntaxKind::SEMICOLON | SyntaxKind::R_CURLY)
             && !is_stmt_start(kind)
             && !is_item_start(kind)
+    });
+}
+
+fn recover_decl_list(p: &mut Parser<'_>) {
+    p.recover_while(|kind| {
+        !matches!(kind, SyntaxKind::SEMICOLON | SyntaxKind::R_CURLY) && !is_item_start(kind)
     });
 }
 

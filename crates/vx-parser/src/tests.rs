@@ -206,23 +206,57 @@ namespace Blob {
     assert!(matches!(&body_items[1], Item::FnDecl(_)));
 }
 
-#[test]
-fn stdlib_header_files_parse() {
+fn assert_stdlib_header_parses(relative: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../vx-stdlib/std");
+    let path = root.join(relative);
+    let source = fs::read_to_string(&path).unwrap_or_else(|err| {
+        panic!("failed to read {}: {err}", path.display());
+    });
+    let parse = parse(&source);
+    assert!(
+        parse.errors().is_empty(),
+        "{} should parse cleanly, got {:?}",
+        path.display(),
+        parse.errors()
+    );
+}
 
-    for relative in ["core.vx", "build.vx"] {
-        let path = root.join(relative);
-        let source = fs::read_to_string(&path).unwrap_or_else(|err| {
-            panic!("failed to read {}: {err}", path.display());
-        });
-        let parse = parse(&source);
-        assert!(
-            parse.errors().is_empty(),
-            "{} should parse cleanly, got {:?}",
-            path.display(),
-            parse.errors()
-        );
-    }
+#[test]
+fn stdlib_core_header_parses() {
+    assert_stdlib_header_parses("core.vx");
+}
+
+#[test]
+fn stdlib_build_header_parses() {
+    assert_stdlib_header_parses("build.vx");
+}
+
+#[test]
+fn function_declaration_where_blocks_parse() {
+    let parse = parse(
+        r#"
+fn exec[T](args: Array[ExecInput]) where {
+  mounts: Map[Path, Blob | Tree] = {},
+  observer: Fn(Process, Tree) #sandbox -> T,
+} -> T;
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+}
+
+#[test]
+fn invalid_namespace_body_recovers() {
+    let parse = parse(
+        r#"
+namespace Tree {
+  Blob
+}
+"#,
+    );
+    assert!(
+        !parse.errors().is_empty(),
+        "invalid namespace bodies should error instead of hanging",
+    );
 }
 
 #[test]
