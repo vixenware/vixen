@@ -3662,6 +3662,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-stdlib"
+version = "0.1.0"
+
+[[package]]
 name = "vx-store"
 version = "0.1.0"
 dependencies = [

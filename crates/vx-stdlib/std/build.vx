@@ -1,21 +1,38 @@
+/// Construct an executor class selector value.
 fn executor_class(label: String) -> ExecutorClass;
 
+/// Probe a representative executor in the class with host authority.
+///
+/// Values returned from `discover` carry hidden verification obligations
+/// derived from the host observations performed by the probe.
 fn discover[T](
   class: ExecutorClass,
   probe: Fn(Host) #host -> T,
 ) #discover -> T;
 
+/// Run a sandboxed process on an executor and return the observer result.
+///
+/// If the observer returns `Stream[T]`, then `exec` itself returns
+/// `Stream[T]`. Otherwise it returns an ordinary value.
 fn exec[T](
   args: Array[ExecInput]
 ) where {
+  /// Additional environment variables for the sandboxed process.
   env: Map[String, ExecInput] = {},
+  /// Explicit VFS mounts, in addition to implicit mounts from args/env.
   mounts: Map[Path, Blob | Tree] = {},
+  /// Writable directories inside the sandbox.
   writable: Array[Path] = [],
+  /// Executor class on which to run the process.
   executor: ExecutorClass = executor_class "default",
+  /// Executor-side observer evaluated with sandbox authority.
   observer: Fn(Process, Tree) #sandbox -> T,
 } -> T;
 
+/// Persist and reuse a chosen result across builds.
 fn stabilize[W, T](
+  /// Local witness for when the stabilized result should be reconsidered.
   witness: Fn() #fs -> W,
+  /// Discovery/resolve step that computes the stabilized result.
   resolve: Fn(W) #discover -> T,
 ) -> T;

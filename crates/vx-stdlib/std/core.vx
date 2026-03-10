@@ -1,41 +1,66 @@
+/// An interned symbolic name.
 type Symbol;
+/// A normalized VFS/local path value.
 type Path;
+/// Opaque file content.
 type Blob;
+/// Opaque directory content.
 type Tree;
+/// A path-like exec argument carrying implicit mount provenance.
 type ExecPath;
+/// A class of equivalent executor environments.
 type ExecutorClass;
+/// Executor-local host inspection capability.
 type Host;
 
+/// Surface values accepted by `exec` arguments and environment entries.
 type ExecInput = String | Path | Blob | Tree | ExecPath;
 
+/// Process result visible to an `exec` observer.
 struct Process {
+  /// Standard output as a stream of blobs.
   stdout: Stream[Blob],
+  /// Standard error as a stream of blobs.
   stderr: Stream[Blob],
+  /// Exit status once the process finishes.
   exit_code: U64,
 }
 
 namespace Symbol {
+  /// Convert a symbol to its textual spelling.
   fn to_string(self) -> String;
 }
 
 namespace Blob {
+  /// Construct a text blob from a string.
   fn Blob(s: String) -> Self;
+  /// Decode the blob as UTF-8, poisoning on invalid input.
   fn utf8(self) -> String;
+  /// Decode the blob as UTF-8 with replacement on invalid input.
   fn utf8_lossy(self) -> String;
 }
 
 namespace Tree {
+  /// Construct a tree from a path-keyed map of entries.
   fn Tree(entries: Map[Path, Blob | Tree]) -> Self;
+  /// Construct a tree by merging an array of tree/blob values.
   fn Tree(entries: Array[Tree | Blob]) -> Self;
+  /// Create a lazy filesystem-backed tree handle.
   fn Tree(path: Path) #fs -> Self;
 
+  /// Select a blob at a relative path.
   fn file(self, path: Path) -> Blob;
+  /// Select a subtree at a relative path.
   fn subtree(self, path: Path) -> Self;
+  /// Merge another tree into this tree.
   fn merge(self, other: Tree) -> Self;
 }
 
 namespace Host {
+  /// Resolve a tool or executable name on the executor host.
   fn which(self, name: String) -> String;
+  /// Read a host file.
   fn read(self, path: String) -> Blob;
+  /// Hash a host file with Blake3.
   fn hash(self, path: String) -> Blob;
 }
