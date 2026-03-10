@@ -553,9 +553,72 @@ impl LanguageServer for VxLanguageServer {
                 });
             }
 
-            // Fall back to expression type hover
+            // Try method name hover: hovering on `.method_name` in `receiver.method_name(...)`
             let root = state.parsed.tree().syntax().clone();
             let token = root.token_at_offset(offset).left_biased()?;
+
+            if let Some(field_node) = token.parent().and_then(vx::FieldExpr::cast) {
+                if let Some(field_name_tok) = field_node.field_name() {
+                    if field_name_tok.text_range().contains_inclusive(offset) {
+                        // Infer receiver type from type_check
+                        if let Some(receiver_expr) = field_node.receiver() {
+                            let receiver_ty = state
+                                .type_check
+                                .expr_types
+                                .get(&receiver_expr.syntax().text_range());
+                            if let Some(vx_types::Ty::Builtin(builtin)) = receiver_ty {
+                                let method_name = field_name_tok.text();
+                                if let Some(method_sig) =
+                                    vx_resolve::builtins::builtin_method(builtin, method_name)
+                                {
+                                    let params: Vec<String> = method_sig
+                                        .params
+                                        .iter()
+                                        .map(|p| {
+                                            format!(
+                                                "{}: {}",
+                                                p.name,
+                                                p.ty.display_with_env(&state.types.env)
+                                            )
+                                        })
+                                        .collect();
+                                    let ret_display =
+                                        method_sig.ret.display_with_env(&state.types.env);
+                                    let caps_str = if method_sig.capabilities.is_empty() {
+                                        String::new()
+                                    } else {
+                                        let caps: Vec<_> = method_sig
+                                            .capabilities
+                                            .iter()
+                                            .map(|c| format!("#{}", c.name))
+                                            .collect();
+                                        format!(" {}", caps.join(" "))
+                                    };
+                                    let snippet = format!(
+                                        "fn {}({}){} -> {}",
+                                        method_name,
+                                        params.join(", "),
+                                        caps_str,
+                                        ret_display
+                                    );
+                                    let markdown = format!(
+                                        "```vx\n{snippet}\n```\n---\n*method on `{builtin}`*"
+                                    );
+                                    return Some(Hover {
+                                        contents: HoverContents::Markup(MarkupContent {
+                                            kind: MarkupKind::Markdown,
+                                            value: markdown,
+                                        }),
+                                        range: Some(
+                                            state.to_lsp_range(field_name_tok.text_range()),
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             // Walk up from the token to find the smallest expression with a type
             let mut node = token.parent();
@@ -1334,6 +1397,50 @@ impl VxLanguageServer {
                 message,
                 ..Default::default()
             });
+        }
+
+        // Unused binding/parameter warnings
+        {
+            use std::collections::HashSet;
+            // Collect all definition name_ranges that have at least one reference
+            let referenced: HashSet<_> = state
+                .resolution
+                .refs
+                .iter()
+                .filter_map(|r| r.target.as_ref().ok())
+                .map(|def| def.name_range)
+                .collect();
+
+            for def in state.resolution.scopes.all_definitions() {
+                if !matches!(
+                    def.kind,
+                    vx_resolve::DefKind::Binding | vx_resolve::DefKind::Parameter
+                ) {
+                    continue;
+                }
+                // Skip names starting with _ (conventional unused marker)
+                if def.name.starts_with('_') {
+                    continue;
+                }
+                if !referenced.contains(&def.name_range) {
+                    diagnostics.push(Diagnostic {
+                        range: state.to_lsp_range(def.name_range),
+                        severity: Some(DiagnosticSeverity::HINT),
+                        source: Some("vx-lint".to_string()),
+                        message: format!(
+                            "unused {}: `{}`",
+                            if def.kind == vx_resolve::DefKind::Binding {
+                                "binding"
+                            } else {
+                                "parameter"
+                            },
+                            def.name
+                        ),
+                        tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                        ..Default::default()
+                    });
+                }
+            }
         }
 
         // Type checking diagnostics

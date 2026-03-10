@@ -8,10 +8,10 @@ use std::collections::HashMap;
 
 use rowan::TextRange;
 use vx_parser::{
-    ArrayExpr, AstNode, BlockExpr, CallExpr, ClosureExpr, Expr, FieldExpr, IfExpr, LiteralExpr,
-    NameRefExpr, SourceFile, Stmt, SyntaxKind,
+    ArrayExpr, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr, FieldExpr, IfExpr,
+    LiteralExpr, MatchExpr, NameRefExpr, PrefixExpr, SourceFile, Stmt, SyntaxKind,
 };
-use vx_types::{Builtin, FnSig, Ty};
+use vx_types::{FnSig, Ty};
 
 use crate::builtins::{builtin_fn_sig, builtin_method};
 use crate::resolve::NameResolution;
@@ -151,6 +151,9 @@ impl<'a> ExprTyper<'a> {
                 Ty::Scalar(vx_types::Scalar::String)
             }
             Expr::Array(arr) => self.infer_array(arr),
+            Expr::Match(m) => self.infer_match(m),
+            Expr::Binary(bin) => self.infer_binary(bin),
+            Expr::Prefix(pre) => self.infer_prefix(pre),
             _ => {
                 // Recurse into child expressions
                 for child in expr.syntax().children() {
@@ -555,6 +558,96 @@ impl<'a> ExprTyper<'a> {
             self.infer_expr(&body);
         }
         Ty::Poison
+    }
+
+    fn infer_match(&mut self, m: &MatchExpr) -> Ty {
+        // Infer the scrutinee (first child expr)
+        if let Some(scrutinee) = m.syntax().children().find_map(Expr::cast) {
+            self.infer_expr(&scrutinee);
+        }
+
+        // Infer each arm body; the match type is the first arm's body type
+        let mut result_ty = Ty::Poison;
+        for arm in m.arms() {
+            if let Some(body) = arm.expr() {
+                let arm_ty = self.infer_expr(&body);
+                if result_ty.is_poison() && !arm_ty.is_poison() {
+                    result_ty = arm_ty;
+                }
+            }
+        }
+        result_ty
+    }
+
+    fn infer_binary(&mut self, bin: &BinaryExpr) -> Ty {
+        let lhs_ty = bin.lhs().map(|e| self.infer_expr(&e)).unwrap_or(Ty::Poison);
+        let rhs_ty = bin.rhs().map(|e| self.infer_expr(&e)).unwrap_or(Ty::Poison);
+
+        // Find the operator token
+        let op = bin.syntax().children_with_tokens().find_map(|child| {
+            if let rowan::NodeOrToken::Token(t) = child {
+                match t.kind() {
+                    SyntaxKind::PLUS
+                    | SyntaxKind::MINUS
+                    | SyntaxKind::STAR
+                    | SyntaxKind::SLASH
+                    | SyntaxKind::PERCENT
+                    | SyntaxKind::AMP2
+                    | SyntaxKind::PIPE2
+                    | SyntaxKind::EQ2
+                    | SyntaxKind::BANG_EQ
+                    | SyntaxKind::LT
+                    | SyntaxKind::LT_EQ
+                    | SyntaxKind::GT
+                    | SyntaxKind::GT_EQ => Some(t.kind()),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        });
+
+        match op {
+            // Comparison and equality operators always produce Bool
+            Some(
+                SyntaxKind::EQ2
+                | SyntaxKind::BANG_EQ
+                | SyntaxKind::LT
+                | SyntaxKind::LT_EQ
+                | SyntaxKind::GT
+                | SyntaxKind::GT_EQ,
+            ) => Ty::Scalar(vx_types::Scalar::Bool),
+            // Logical operators produce Bool
+            Some(SyntaxKind::AMP2 | SyntaxKind::PIPE2) => Ty::Scalar(vx_types::Scalar::Bool),
+            // Arithmetic operators: result type matches the lhs (or rhs if lhs is Poison)
+            Some(
+                SyntaxKind::PLUS
+                | SyntaxKind::MINUS
+                | SyntaxKind::STAR
+                | SyntaxKind::SLASH
+                | SyntaxKind::PERCENT,
+            ) => {
+                if !lhs_ty.is_poison() {
+                    lhs_ty
+                } else {
+                    rhs_ty
+                }
+            }
+            _ => Ty::Poison,
+        }
+    }
+
+    fn infer_prefix(&mut self, pre: &PrefixExpr) -> Ty {
+        let operand_ty = pre
+            .expr()
+            .map(|e| self.infer_expr(&e))
+            .unwrap_or(Ty::Poison);
+
+        match pre.operator_token().map(|t| t.kind()) {
+            Some(SyntaxKind::BANG) => Ty::Scalar(vx_types::Scalar::Bool),
+            Some(SyntaxKind::MINUS) => operand_ty,
+            _ => Ty::Poison,
+        }
     }
 
     fn infer_array(&mut self, arr: &ArrayExpr) -> Ty {
