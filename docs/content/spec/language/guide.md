@@ -407,7 +407,7 @@ only what happens to its return value.
 ## 12. A build-shaped example
 
 ```vixen
-fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree (
+fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
   let src = Tree.from_path ws;
   let common = { observer };
   let cexec = partial exec where common;

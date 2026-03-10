@@ -25,44 +25,42 @@ let cflags = ["-Wall", "-O2", "-std=c99", "-DLUA_USE_LINUX"];
 let ldflags = ["-Wl,-E"];
 let syslibs = ["-lm", "-ldl"];
 
-struct DiscoveredTool {
+struct Tool {
   path: String,
   hash: Blob,
 }
 
-fn discover_c_toolchain(class: ExecutorClass) -> {
-  cc: DiscoveredTool,
-  ar: DiscoveredTool,
-  ranlib: DiscoveredTool,
-} (
-  stabilize where {
-    witness: () => "c-toolchain-v1",
-    resolve: (_witness) => (
-      discover (class, (host) => (
-        fn tool(name: String) -> DiscoveredTool (
-          let path = host.which name;
-          DiscoveredTool {
-            path,
-            hash: host.hash path,
-          }
-        );
+namespace Tool {
+  fn to_string(self) -> String self.path;
+}
 
-        // The returned tool values carry hidden host obligations derived from
-        // `which` and `hash`. Later `exec` rechecks them automatically on the
-        // concrete executor.
-        {
-          cc: tool "cc",
-          ar: tool "ar",
-          ranlib: tool "ranlib",
-        }
-      ))
-    ),
-  }
-)
+fn discover_c_toolchain(class: ExecutorClass) -> Map[Symbol, Tool] (
+  discover (class, (host) => (
+    fn tool(name: String) -> Tool (
+      let path = host.which name;
+      Tool {
+        path,
+        hash: host.hash path,
+      }
+    );
 
-fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree (
-  let src = Tree.from_path (ws / @zoo/lua-src);
-  let { cc, ar, ranlib } = discover_c_toolchain (executor_class "default");
+    fn named_tool(sym: Symbol) -> (Symbol, Tool) (
+      (sym, tool sym.to_string!)
+    );
+
+    // The returned tool values carry hidden host obligations derived from
+    // `which` and `hash`. Later `exec` rechecks them automatically on the
+    // concrete executor.
+    [:cc, :ar, :ranlib]
+      .map named_tool
+      .to_map!
+  ))
+) 
+
+fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
+  let src_tree = Tree.from_path (ws / @zoo/lua-src);
+  let tools = discover_c_toolchain (executor_class "default");
+  let { cc, ar, ranlib } = tools;
 
   let common = {
     observer: (proc, vfs) => (
@@ -78,39 +76,33 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree (
 
   fn compile(file: Path) -> Tree (
     cexec [
-      cc.path,
+      cc,
       "-c",
       ..cflags,
       "-o",
       @(out/obj/{file}.o),
       @(src/{file}),
     ] where {
-      mounts: { @src: src },
+      mounts: { @src: src_tree },
     }
   );
 
   fn archive(objs: Tree) -> Tree (
-    let archived =
-      objs
-      |> cexec [ar.path, "rc", @out/liblua.a, .._];
+    let archived = cexec [ar, "rc", @out/liblua.a, ..objs];
 
-    cexec [ranlib.path, @out/liblua.a] where {
+    cexec [ranlib, @out/liblua.a] where {
       mounts: { @out: archived },
     }
   );
 
   fn link(objs: Tree) -> Tree (
-    cexec [cc.path, "-o", @out/bin/lua, ..ldflags, ..objs, ..syslibs]
+    cexec [cc, "-o", @out/bin/lua, ..ldflags, ..objs, ..syslibs]
   );
 
-  let liblua =
-    all_lib_sources.map compile
-    |> _.merge!
-    |> archive;
+  let objects = (all_lib_sources.map compile).merge!;
+  let liblua = archive objects;
 
-  let lua_exe =
-    Tree [compile @lua.c, liblua]
-    |> link;
+  let lua_exe = link (Tree [compile @lua.c, liblua]);
 
   Tree {
     @bin/lua: lua_exe,

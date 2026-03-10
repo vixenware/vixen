@@ -501,7 +501,7 @@ fn main() {
     }
 }
 
-// r[exec.discover.observer] — observer that uses discover is rejected
+// r[cap.mask] — observer that uses discover is rejected
 #[test]
 fn observer_using_discover_rejected() {
     let result = check_caps(
@@ -751,7 +751,7 @@ fn find_expr_type(result: &crate::TypeCheckResult, src: &str, needle: &str) -> O
         .map(|(_, ty)| ty.clone())
 }
 
-// r[type.builtin.discover] — discover returns the probe body type
+// r[exec.discover] — discover returns the probe body type
 #[test]
 fn discover_returns_probe_type() {
     let src = r#"
@@ -764,7 +764,7 @@ fn probe() #discover {
     assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::String)));
 }
 
-// r[exec.discover.host] — host.read(...) returns Blob
+// r[exec.verifier.host] — host.read(...) returns Blob
 #[test]
 fn host_read_returns_blob() {
     let src = r#"
@@ -779,7 +779,7 @@ fn main() {
     assert_eq!(ty, Some(Ty::Builtin(Builtin::Blob)));
 }
 
-// r[exec.discover.host] — host.which(...) returns String
+// r[exec.verifier.host] — host.which(...) returns String
 #[test]
 fn host_which_returns_string() {
     let src = r#"
@@ -794,7 +794,7 @@ fn main() {
     assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::String)));
 }
 
-// r[exec.discover.host] — host.which?(...) returns String?
+// r[exec.verifier.host] — host.which?(...) returns String?
 #[test]
 fn host_which_fallible_returns_optional_string() {
     let src = r#"

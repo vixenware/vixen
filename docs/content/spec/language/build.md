@@ -342,8 +342,7 @@ insert_anchor_links = "heading"
 > Some toolchains cannot be acquired through `acquire` — they are
 > non-redistributable (MSVC, Xcode) or must be found on the executor
 > host. `discover` probes an executor by shipping a closure there. It
-> requires the `#discover` capability and must run inside a `stabilize`
-> resolve callback.
+> requires the `#discover` capability.
 >
 > ```vixen
 > fn discover[T](
@@ -368,12 +367,12 @@ insert_anchor_links = "heading"
 
 > r[exec.discover.reuse]
 >
-> Discovery results are cached by executor class through `stabilize`.
-> The witness reads local project state (what toolchain is requested);
-> the resolve calls `discover` to learn what is actually present. The
-> stabilized result — including the hidden obligations attached to the
-> returned values — is reused across builds as long as the witness is
-> unchanged.
+> `discover` and `stabilize` are separate tools. `discover` learns
+> executor-host facts and returns values carrying hidden verification
+> obligations. `stabilize` persists and reuses chosen results across
+> builds. When user code composes them, stabilization preserves the
+> obligations attached to the discovered values; it does not replace or
+> erase them.
 >
 > Per-instance verification happens at every `exec`: the runtime rechecks
 > the relevant obligations on the actual runner that executes the work.
@@ -718,9 +717,10 @@ insert_anchor_links = "heading"
 > can invoke a callback in a capability context the caller did not
 > already have.
 >
-> This means `build` (which grants `#fs`), `stabilize` (which grants
-> `#discover`), `discover` (which grants `#host` to its probe), and
-> `exec` (which grants `#sandbox` to observers) have signatures
+> This means `build` (which grants `#fs #discover`), `stabilize` (which
+> grants `#discover` to its resolve callback), `discover` (which grants
+> `#host` to its probe), and `exec` (which grants `#sandbox` to
+> observers) have signatures
 > expressible in Vixen but bodies that only the runtime can provide. The
 > evaluator rejects user code that attempts to implement a
 > capability-granting function.

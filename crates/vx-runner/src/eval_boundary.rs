@@ -63,7 +63,7 @@ pub fn evaluate_shipped_observer<'a>(
     })
 }
 
-// r[impl exec.verification]
+// r[exec.verifier]
 pub fn evaluate_shipped_verification(eval: &RunEvalPayload) -> Result<(), String> {
     verify_host_obligations(&eval.verification_obligations)
 }
