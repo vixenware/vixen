@@ -49,6 +49,10 @@ insert_anchor_links = "heading"
 > Sub-paths are built with the `/` operator or with interpolated path
 > literals.
 >
+> `Path(s)` parses and normalizes a string into a `Path`. It poisons if
+> the string is not a valid path in normalized slash-delimited form.
+> `path.to_string()` converts a `Path` back to its normalized spelling.
+>
 > In `exec`, Paths in `args` and `env` are resolved to VFS locations
 > directly. The executor rewrites `/` separators as needed for the host
 > platform when launching the process. `Path` is a locator only — reads

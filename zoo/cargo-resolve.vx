@@ -8,13 +8,16 @@
 //
 // Everything else is ordinary Vixen code over those primitives.
 
+type CargoDependencySpec = String | CargoDependency
+
 #[rename_all = "kebab-case"]
 struct CargoManifest {
   package: CargoPackage,
-  dependencies: Map[String, CargoDependency] = {},
-  dev_dependencies: Map[String, CargoDependency] = {},
-  build_dependencies: Map[String, CargoDependency] = {},
+  dependencies: Map[String, CargoDependencySpec] = {},
+  dev_dependencies: Map[String, CargoDependencySpec] = {},
+  build_dependencies: Map[String, CargoDependencySpec] = {},
   features: Map[String, Array[String]] = {},
+  target: Map[String, CargoTargetTable] = {},
 }
 
 struct CargoPackage {
@@ -34,6 +37,13 @@ struct CargoDependency {
   package: String?,
 }
 
+#[rename_all = "kebab-case"]
+struct CargoTargetTable {
+  dependencies: Map[String, CargoDependencySpec] = {},
+  dev_dependencies: Map[String, CargoDependencySpec] = {},
+  build_dependencies: Map[String, CargoDependencySpec] = {},
+}
+
 struct CargoLock {
   package: Array[LockedPackage] = [],
 }
@@ -43,6 +53,24 @@ struct LockedPackage {
   version: String,
   source: String?,
   checksum: String?,
+}
+
+struct DependencyRequest {
+  name: String,
+  version_req: String?,
+  features: Array[String] = [],
+  kind: String = "normal",
+  source: DependencySource = DependencySource.Registry,
+}
+
+enum DependencySource {
+  struct Registry,
+  struct Path {
+    path: String,
+  },
+  struct Git {
+    url: String,
+  },
 }
 
 struct IndexDependency {
@@ -65,16 +93,35 @@ struct IndexEntry {
   deps: Array[IndexDependency] = [],
 }
 
+struct SparseConfig {
+  dl: String,
+}
+
 newtype PackageId of String
 
 struct ResolvedCrate {
   id: PackageId,
   name: String,
   version: String,
-  checksum: String,
-  download_url: String,
+  source: ResolvedSource,
   features: Array[String] = [],
   dependencies: Array[PackageId] = [],
+}
+
+enum ResolvedSource {
+  struct Registry {
+    checksum: String,
+    download_url: String,
+  },
+  struct Path {
+    path: String,
+  },
+  struct Git {
+    url: String,
+    rev: String,
+    checksum: String?,
+    archive_url: String?,
+  },
 }
 
 struct RegistryResolution {
@@ -97,34 +144,242 @@ fn parse_sparse_entries(blob: Blob) -> Array[IndexEntry] (
     .to_array()
 )
 
-fn resolve_manifest(manifest: CargoManifest) where {
-  lock: CargoLock?,
-} #discover -> RegistryResolution (
-  // Sketch only:
-  // - fetch sparse index metadata with `Http.get`
-  // - derive per-crate sparse index URLs with ordinary string logic
-  // - fetch per-crate sparse index files with `Http.get`
-  // - parse each newline-delimited JSON entry
-  // - solve semver constraints
-  // - honor lockfile pins when compatible
-  // - unify features
-  // - produce exact package list + checksums + build order
-  // The important point is that all of this is ordinary code over
-  // Http.get + Json.parse/Toml.parse, not a registry builtin.
-  let _manifest = manifest;
-  let _lock = lock;
-  fail "resolution algorithm omitted from sketch"
+fn sparse_index_url(name: String) -> String (
+  // Cargo's sparse index sharding algorithm is ordinary string logic.
+  // The exact implementation is omitted from the sketch; the important point
+  // is that it is computed in user code, not provided by a registry builtin.
+  fail "sparse index sharding omitted from sketch"
 )
 
-fn crate_source(pkg: ResolvedCrate) -> Tree (
-  acquire(pkg.download_url) where {
-    sha256: pkg.checksum,
-    extract: "tar.gz",
+fn crate_download_url(config: SparseConfig, name: String, version: String) -> String (
+  // Cargo's sparse config can provide a download base/template.
+  // The exact placeholder replacement is ordinary string logic.
+  let _config = config;
+  `https://static.crates.io/crates/{name}/{name}-{version}.crate`
+)
+
+fn manifest_requests(manifest: CargoManifest) -> Array[DependencyRequest] (
+  [
+    ..manifest.dependencies
+      .map((name, dep) => request_from_dep(name, dep, "normal"))
+      .to_array(),
+    ..manifest.dev_dependencies
+      .map((name, dep) => request_from_dep(name, dep, "dev"))
+      .to_array(),
+    ..manifest.build_dependencies
+      .map((name, dep) => request_from_dep(name, dep, "build"))
+      .to_array(),
+    ..manifest.target
+      .map((triple, table) => target_requests(triple, table))
+      .flatten(),
+  ]
+)
+
+fn request_from_dep(name: String, dep: CargoDependencySpec, kind: String) -> DependencyRequest (
+  match dep as? String (
+    Some { value } => DependencyRequest {
+      name,
+      version_req: value,
+      kind,
+    },
+    None => (
+      let detail = dep as CargoDependency;
+      DependencyRequest {
+        name,
+        version_req: detail.version,
+        features: detail.features,
+        kind,
+        source:
+          match detail.path (
+            Some { value } => DependencySource.Path { path: value },
+            None => (
+              match detail.git (
+                Some { value } => DependencySource.Git { url: value },
+                None => DependencySource.Registry,
+              )
+            ),
+          ),
+      }
+    ),
+  )
+)
+
+fn target_requests(triple: String, table: CargoTargetTable) -> Array[DependencyRequest] (
+  // Sketch only:
+  // `triple` here stands in for Cargo target expressions / cfg selectors.
+  // A real implementation would evaluate cfg predicates against the selected
+  // build target and include only matching tables.
+  let _triple = triple;
+  [
+    ..table.dependencies
+      .map((name, dep) => request_from_dep(name, dep, "normal"))
+      .to_array(),
+    ..table.build_dependencies
+      .map((name, dep) => request_from_dep(name, dep, "build"))
+      .to_array(),
+  ]
+)
+
+fn activate_features(manifest: CargoManifest, request: DependencyRequest) -> Array[String] (
+  // Sketch only:
+  // - start with explicitly requested features
+  // - if default_features, add the manifest's `default` feature set
+  // - follow named feature expansions transitively
+  let _manifest = manifest;
+  request.features
+)
+
+fn lock_entry(lock: CargoLock?, name: String) -> LockedPackage? (
+  match lock (
+    Some { value } => value.package.find($.name == name),
+    None => None,
+  )
+)
+
+fn pick_version(entries: Array[IndexEntry], request: DependencyRequest) where {
+  lock: LockedPackage?,
+} -> IndexEntry (
+  // Sketch only:
+  // - prefer the lockfile entry if it still satisfies the request
+  // - otherwise choose the highest non-yanked version satisfying the
+  //   semver requirement
+  // - semver matching and feature expansion are ordinary code, not builtins
+  let _entries = entries;
+  let _request = request;
+  let _lock = lock;
+  fail "version selection omitted from sketch"
+)
+
+fn resolve_request(request: DependencyRequest) where {
+  config: SparseConfig,
+  manifest: CargoManifest,
+  lock: CargoLock?,
+  workspace: Tree,
+} #discover -> ResolvedCrate (
+  let features = activate_features(manifest, request);
+
+  match request.source (
+    DependencySource.Path { path } => (
+      let dep_root = Path(path);
+      let dep_manifest = Toml.parse[CargoManifest](workspace.file(dep_root / @Cargo.toml));
+      ResolvedCrate {
+        id: PackageId(`path:{path}`),
+        name: dep_manifest.package.name,
+        version: dep_manifest.package.version,
+        source: ResolvedSource.Path { path },
+        features,
+        dependencies: [],
+      }
+    ),
+    DependencySource.Git { url } => (
+      // Under the current primitive set, git still wants a real fetch story.
+      // This could become:
+      // - an archive URL convention for known hosts, or
+      // - a future VCS fetch primitive layered over Http.get.
+      let _url = url;
+      fail "git dependency resolution omitted from sketch"
+    ),
+    DependencySource.Registry => (
+  let entries =
+    Http.get(sparse_index_url(request.name))
+      |> parse_sparse_entries(_);
+
+  let chosen = pick_version(entries, request) where {
+    lock: lock_entry(lock, request.name),
+  };
+
+  ResolvedCrate {
+    id: PackageId(`registry:{chosen.name}@{chosen.vers}`),
+    name: chosen.name,
+    version: chosen.vers,
+    source: ResolvedSource.Registry {
+      checksum: chosen.cksum,
+      download_url: crate_download_url(config, chosen.name, chosen.vers),
+    },
+    features,
+    dependencies:
+      chosen.deps
+        .filter($.kind.unwrap_or("normal") == request.kind)
+        .map(PackageId(`registry:{($.package.unwrap_or($.name))}@{$.req}`))
+        .to_array(),
+  }
+    ),
+  )
+)
+
+fn resolve_manifest(manifest: CargoManifest) where {
+  lock: CargoLock?,
+  workspace: Tree,
+} #discover -> RegistryResolution (
+  let config = Json.parse[SparseConfig](Http.get("https://index.crates.io/config.json"));
+  let requests = manifest_requests(manifest);
+  let roots =
+    requests
+      .map((req) => resolve_request(req) where { config, manifest, lock, workspace })
+      .to_array();
+
+  // Sketch only:
+  // - recurse through `roots[*].dependencies`
+  // - fetch/resolve transitive crates the same way
+  // - unify features when the same package is reached through multiple paths
+  // - topologically sort the final graph into `build_order`
+  RegistryResolution {
+    packages: roots,
+    build_order: roots.map($.id).to_array(),
   }
 )
 
-fn vendored_entry(pkg: ResolvedCrate) -> (Path, Tree) (
-  (@(vendor/{pkg.name}-{pkg.version}), crate_source(pkg))
+fn emit_lockfile(resolution: RegistryResolution) -> Blob (
+  Toml.serialize(CargoLock {
+    package:
+      resolution.packages
+        .map((pkg) => LockedPackage {
+          name: pkg.name,
+          version: pkg.version,
+          source:
+            match pkg.source (
+              ResolvedSource.Registry { checksum: _, download_url: _ } =>
+                "registry+https://github.com/rust-lang/crates.io-index",
+              ResolvedSource.Git { url, rev, checksum: _, archive_url: _ } =>
+                `git+${url}#${rev}`,
+              ResolvedSource.Path { path: _ } => None,
+            ),
+          checksum:
+            match pkg.source (
+              ResolvedSource.Registry { checksum, download_url: _ } => checksum,
+              ResolvedSource.Git { url: _, rev: _, checksum, archive_url: _ } => checksum,
+              ResolvedSource.Path { path: _ } => None,
+            ),
+        })
+        .to_array(),
+  })
+)
+
+fn crate_source(pkg: ResolvedCrate) where {
+  workspace_root: Path,
+} -> Tree (
+  match pkg.source (
+    ResolvedSource.Registry { checksum, download_url } => (
+      acquire(download_url) where {
+        sha256: checksum,
+        extract: "tar.gz",
+      }
+    ),
+    ResolvedSource.Path { path } => Tree(workspace_root / Path(path)),
+    ResolvedSource.Git { url, rev, checksum, archive_url } => (
+      let _url = url;
+      let _rev = rev;
+      let _checksum = checksum;
+      let _archive_url = archive_url;
+      fail "git source acquisition omitted from sketch"
+    ),
+  )
+)
+
+fn vendored_entry(pkg: ResolvedCrate) where {
+  workspace_root: Path,
+} -> (Path, Tree) (
+  (@(vendor/{pkg.name}-{pkg.version}), crate_source(pkg) where { workspace_root })
 )
 
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
@@ -132,15 +387,22 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   let manifest = Toml.parse[CargoManifest](workspace.file(@Cargo.toml));
   let lock = parse_lock(workspace);
 
-  let resolution = resolve_manifest(manifest) where { lock };
+  let resolution = resolve_manifest(manifest) where { lock, workspace };
 
   // Resolution discovers exact versions and checksums.
   // Acquisition stays fixed-hash and cacheable.
-  let vendor = Tree(resolution.packages.to_map(vendored_entry));
+  let vendor =
+    Tree(
+      resolution.packages
+        .to_map((pkg) => vendored_entry(pkg) where { workspace_root: ws })
+    );
+  let lock_blob = emit_lockfile(resolution);
 
   // Next layer, not modeled here:
   // - parse vendored Cargo.toml files
   // - compile crates in `build_order`
-  // - write/update a Cargo.lock-shaped artifact with `Toml.serialize`
-  vendor
+  Tree {
+    @vendor: vendor,
+    @Cargo.lock: lock_blob,
+  }
 )

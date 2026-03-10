@@ -39,6 +39,13 @@ namespace Symbol {
   fn to_string(self) -> String;
 }
 
+namespace Path {
+  /// Parse and normalize a path string.
+  fn Path(s: String) -> Self;
+  /// Convert a path back to its normalized textual spelling.
+  fn to_string(self) -> String;
+}
+
 namespace Blob {
   /// Construct a text blob from a string.
   fn Blob(s: String) -> Self;
