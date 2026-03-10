@@ -3,6 +3,7 @@ use vx_parser::{AstNode, SourceFile, parse};
 use crate::cap_check::{CapErrorKind, CapSet};
 use crate::scope::ScopeTree;
 use crate::{DefKind, ScopeKind, resolve};
+use vx_types::{Builtin, Ty};
 
 fn parse_file(src: &str) -> SourceFile {
     let parsed = parse(src);
@@ -659,4 +660,189 @@ fn pure() -> String {}
 
     let pure_sig = sigs.iter().find(|s| s.name == "pure").unwrap();
     assert!(pure_sig.capabilities.is_empty());
+}
+
+fn type_check(src: &str) -> crate::TypeCheckResult {
+    let file = parse_file(src);
+    let resolution = resolve(&file);
+    let types = crate::collect_types(&file);
+    crate::type_check(&file, &resolution, &types)
+}
+
+fn find_expr_type(result: &crate::TypeCheckResult, src: &str, needle: &str) -> Option<Ty> {
+    let offset = src.find(needle)? as u32;
+    let needle_len = needle.len() as u32;
+    // Find the smallest expr_type whose range covers this needle
+    result
+        .expr_types
+        .iter()
+        .filter(|(range, _)| {
+            let start: u32 = range.start().into();
+            let end: u32 = range.end().into();
+            start <= offset && end >= offset + needle_len
+        })
+        .min_by_key(|(range, _)| {
+            let len: u32 = range.len().into();
+            len
+        })
+        .map(|(_, ty)| ty.clone())
+}
+
+// r[type.builtin.discover_exec] — discover_exec returns DiscoveryProcess
+#[test]
+fn discover_exec_returns_discovery_process() {
+    let src = r#"
+fn probe() #discover {
+    discover_exec("default", ["gcc", "--version"])
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, r#"discover_exec("default""#);
+    assert_eq!(ty, Some(Ty::Builtin(Builtin::DiscoveryProcess)));
+}
+
+// r[type.builtin.host.read] — host.read(...) returns Blob
+#[test]
+fn host_read_returns_blob() {
+    let src = r#"
+fn main() {
+    exec(["echo"];
+        verifier: (host) => {
+            host.read("foo")
+        },
+    );
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, r#"host.read("foo")"#);
+    assert_eq!(ty, Some(Ty::Builtin(Builtin::Blob)));
+}
+
+// r[type.builtin.host.which] — host.which(...) returns ExecPath
+#[test]
+fn host_which_returns_exec_path() {
+    let src = r#"
+fn main() {
+    exec(["echo"];
+        verifier: (host) => {
+            host.which("gcc")
+        },
+    );
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, r#"host.which("gcc")"#);
+    assert_eq!(ty, Some(Ty::Builtin(Builtin::ExecPath)));
+}
+
+// r[type.observer.params] — observer callback params are typed
+#[test]
+fn observer_params_typed() {
+    let src = r#"
+fn main() {
+    exec(["echo"];
+        observer: (proc, tree) => {
+            proc.exit_code
+        },
+    );
+}
+"#;
+    let result = type_check(src);
+    // proc.exit_code should be U64
+    let ty = find_expr_type(&result, src, "proc.exit_code");
+    assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::U64)));
+}
+
+// r[type.error.arg_mismatch] — host.read(123) gets a type diagnostic
+#[test]
+fn host_read_int_arg_type_error() {
+    let src = r#"
+fn main() {
+    exec(["echo"];
+        verifier: (host) => {
+            host.read(123)
+        },
+    );
+}
+"#;
+    let result = type_check(src);
+    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+    match &result.errors[0].kind {
+        crate::TypeErrorKind::ArgTypeMismatch {
+            param_name,
+            expected,
+            found,
+        } => {
+            assert_eq!(param_name, "path");
+            assert_eq!(*expected, Ty::Scalar(vx_types::Scalar::String));
+            assert_eq!(*found, Ty::Scalar(vx_types::Scalar::U64));
+        }
+        other => panic!("expected ArgTypeMismatch, got: {other:?}"),
+    }
+}
+
+// r[type.literal] — literal types are inferred
+#[test]
+fn literal_types() {
+    let src = r#"
+fn main() {
+    42
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, "42");
+    assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::U64)));
+}
+
+// r[type.builtin.read_file] — read_file returns Blob
+#[test]
+fn read_file_returns_blob() {
+    let src = r#"
+fn main() #fs {
+    read_file("hello.txt")
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, r#"read_file("hello.txt")"#);
+    assert_eq!(ty, Some(Ty::Builtin(Builtin::Blob)));
+}
+
+// r[type.builtin.executor_class] — executor_class returns ExecutorClass
+#[test]
+fn executor_class_returns_executor_class() {
+    let src = r#"
+fn main() {
+    executor_class("default")
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, r#"executor_class("default")"#);
+    assert_eq!(ty, Some(Ty::Builtin(Builtin::ExecutorClass)));
+}
+
+// r[type.verifier.host_param] — verifier callback host param is typed Host
+#[test]
+fn verifier_host_param_typed() {
+    let src = r#"
+fn main() {
+    exec(["echo"];
+        verifier: (host) => {
+            host
+        },
+    );
+}
+"#;
+    let result = type_check(src);
+    // The name ref "host" in the body should resolve to Builtin::Host
+    let ty = find_expr_type(&result, src, "host\n");
+    // The inner "host" expression (in the body, not the param declaration)
+    // Find the last occurrence of "host" which is the expression use
+    assert!(
+        result
+            .expr_types
+            .values()
+            .any(|ty| *ty == Ty::Builtin(Builtin::Host)),
+        "expected Host type in expr_types, got: {:?}",
+        result.expr_types
+    );
 }

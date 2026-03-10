@@ -20,6 +20,7 @@ struct DocumentState {
     resolution: NameResolution,
     types: vx_resolve::TypeCollection,
     cap_check: vx_resolve::CapCheckResult,
+    type_check: vx_resolve::TypeCheckResult,
 }
 
 impl DocumentState {
@@ -29,6 +30,7 @@ impl DocumentState {
         let resolution = vx_resolve::resolve(&parsed.tree());
         let types = vx_resolve::collect_types(&parsed.tree());
         let cap_check = vx_resolve::check_capabilities(&parsed.tree(), &resolution.scopes, &types);
+        let type_check = vx_resolve::type_check(&parsed.tree(), &resolution, &types);
         Self {
             text,
             parsed,
@@ -36,6 +38,7 @@ impl DocumentState {
             resolution,
             types,
             cap_check,
+            type_check,
         }
     }
 
@@ -406,50 +409,103 @@ impl LanguageServer for VxLanguageServer {
                 col: pos.character,
             })?;
 
-            let def = state.definition_at(offset)?;
-            let kind_label = def_kind_label(def.kind);
-            let snippet = state.declaration_snippet(def);
-            let doc = state.doc_comment_for(def);
+            // First, try definition-based hover (existing behavior)
+            if let Some(def) = state.definition_at(offset) {
+                let kind_label = def_kind_label(def.kind);
+                let snippet = state.declaration_snippet(def);
+                let doc = state.doc_comment_for(def);
 
-            let mut markdown = format!("```vx\n{snippet}\n```\n---\n*{kind_label}*");
+                let mut markdown = format!("```vx\n{snippet}\n```\n---\n*{kind_label}*");
 
-            // Show type signature for functions
-            if let Some(sig) = state.types.range_to_fn_sig.get(&def.name_range) {
-                markdown.push_str(&format!("\n\nReturns `{}`", sig.ret));
-            }
-
-            // Show fields for structs
-            if let Some(&type_id) = state.types.range_to_type.get(&def.name_range) {
-                match &state.types.env[type_id] {
-                    vx_types::TypeDef::Struct(s) if !s.fields.is_empty() => {
-                        markdown.push_str("\n\n**Fields:**\n");
-                        for f in &s.fields {
-                            markdown.push_str(&format!("- `{}`: `{}`\n", f.name, f.ty));
-                        }
-                    }
-                    vx_types::TypeDef::Enum(e) if !e.variants.is_empty() => {
-                        markdown.push_str("\n\n**Variants:**\n");
-                        for &vid in &e.variants {
-                            let vname = state.types.env[vid].name();
-                            markdown.push_str(&format!("- `{vname}`\n"));
-                        }
-                    }
-                    _ => {}
+                // Show type signature for functions
+                if let Some(sig) = state.types.range_to_fn_sig.get(&def.name_range) {
+                    markdown.push_str(&format!("\n\nReturns `{}`", sig.ret));
                 }
+
+                // Show inferred type for parameters and bindings from the type checker
+                if matches!(
+                    def.kind,
+                    vx_resolve::DefKind::Parameter | vx_resolve::DefKind::Binding
+                ) {
+                    // Find any name reference to this def that has an inferred type
+                    for resolved_ref in &state.resolution.refs {
+                        if let Ok(ref target) = resolved_ref.target {
+                            if target.name_range == def.name_range {
+                                if let Some(ty) =
+                                    state.type_check.expr_types.get(&resolved_ref.ref_range)
+                                {
+                                    let display = ty.display_with_env(&state.types.env);
+                                    markdown.push_str(&format!("\n\nType: `{display}`"));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // Also check if the def's own name range has a type (for closure params)
+                    if let Some(ty) = state.type_check.expr_types.get(&def.name_range) {
+                        let display = ty.display_with_env(&state.types.env);
+                        markdown.push_str(&format!("\n\nType: `{display}`"));
+                    }
+                }
+
+                // Show fields for structs
+                if let Some(&type_id) = state.types.range_to_type.get(&def.name_range) {
+                    match &state.types.env[type_id] {
+                        vx_types::TypeDef::Struct(s) if !s.fields.is_empty() => {
+                            markdown.push_str("\n\n**Fields:**\n");
+                            for f in &s.fields {
+                                markdown.push_str(&format!("- `{}`: `{}`\n", f.name, f.ty));
+                            }
+                        }
+                        vx_types::TypeDef::Enum(e) if !e.variants.is_empty() => {
+                            markdown.push_str("\n\n**Variants:**\n");
+                            for &vid in &e.variants {
+                                let vname = state.types.env[vid].name();
+                                markdown.push_str(&format!("- `{vname}`\n"));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if let Some(doc) = doc {
+                    markdown.push_str("\n\n");
+                    markdown.push_str(&doc);
+                }
+
+                return Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: markdown,
+                    }),
+                    range: Some(state.to_lsp_range(def.name_range)),
+                });
             }
 
-            if let Some(doc) = doc {
-                markdown.push_str("\n\n");
-                markdown.push_str(&doc);
+            // Fall back to expression type hover
+            let root = state.parsed.tree().syntax().clone();
+            let token = root.token_at_offset(offset).left_biased()?;
+
+            // Walk up from the token to find the smallest expression with a type
+            let mut node = token.parent();
+            while let Some(n) = node {
+                if let Some(expr) = vx::Expr::cast(n.clone()) {
+                    if let Some(ty) = state.type_check.expr_types.get(&expr.syntax().text_range()) {
+                        let display = ty.display_with_env(&state.types.env);
+                        let markdown = format!("```vx\n{display}\n```");
+                        return Some(Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: markdown,
+                            }),
+                            range: Some(state.to_lsp_range(expr.syntax().text_range())),
+                        });
+                    }
+                }
+                node = n.parent();
             }
 
-            Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: markdown,
-                }),
-                range: Some(state.to_lsp_range(def.name_range)),
-            })
+            None
         });
 
         Ok(result.flatten())
@@ -493,6 +549,9 @@ impl LanguageServer for VxLanguageServer {
                     }
                 })
                 .collect();
+
+            // Add builtin function completions
+            items.extend(builtin_completions(&state.types.env));
 
             // Add keyword snippets
             items.extend(keyword_completions());
@@ -547,30 +606,43 @@ impl LanguageServer for VxLanguageServer {
                     None => continue,
                 };
 
-                // Resolve to definition
+                // Resolve to definition or builtin
                 let callee_range = callee_token.text_range();
+                let callee_name = callee_token.text().to_string();
                 let resolved = state
                     .resolution
                     .refs
                     .iter()
                     .find(|r| r.ref_range == callee_range);
-                let def = match resolved.and_then(|r| r.target.as_ref().ok()) {
-                    Some(d) if d.kind == vx_resolve::DefKind::Function => d,
-                    _ => continue,
-                };
+                let def = resolved.and_then(|r| r.target.as_ref().ok());
 
-                // Find FnDecl at definition site
-                let def_token = match root.token_at_offset(def.full_range.start()).right_biased() {
-                    Some(t) => t,
-                    None => continue,
+                // Collect parameter names — either from user FnDecl or builtin sig
+                let param_names: Vec<String>;
+                if let Some(d) = def
+                    && d.kind == vx_resolve::DefKind::Function
+                {
+                    let def_token = match root.token_at_offset(d.full_range.start()).right_biased()
+                    {
+                        Some(t) => t,
+                        None => continue,
+                    };
+                    let fn_node = match def_token.parent_ancestors().find_map(FnDecl::cast) {
+                        Some(f) => f,
+                        None => continue,
+                    };
+                    param_names = fn_node
+                        .parameters()
+                        .filter_map(|p| p.name().map(|t| t.text().to_string()))
+                        .collect();
+                } else if let Some(sig) = vx_resolve::builtins::builtin_fn_sig(&callee_name) {
+                    param_names = sig
+                        .positional_params
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect();
+                } else {
+                    continue;
                 };
-                let fn_node = match def_token.parent_ancestors().find_map(FnDecl::cast) {
-                    Some(f) => f,
-                    None => continue,
-                };
-
-                let params: Vec<_> = fn_node.parameters().collect();
-                let kw_params: Vec<_> = fn_node.keyword_parameters().collect();
 
                 // Find the ARG_LIST child of this CALL_EXPR
                 let arg_list = match call
@@ -590,13 +662,9 @@ impl LanguageServer for VxLanguageServer {
 
                 // Emit hints for positional args that match named parameters
                 for (i, arg) in args.iter().enumerate() {
-                    let param = match params.get(i) {
-                        Some(p) => p,
+                    let param_name = match param_names.get(i) {
+                        Some(n) => n.clone(),
                         None => break,
-                    };
-                    let param_name = match param.name() {
-                        Some(t) => t.text().to_string(),
-                        None => continue,
                     };
 
                     // Skip if the argument is already a simple name matching the parameter
@@ -618,9 +686,7 @@ impl LanguageServer for VxLanguageServer {
                     });
                 }
 
-                // Emit hints for keyword args (these already have names in the source,
-                // so we skip them — the user already wrote `name: value`)
-                let _ = kw_params;
+                // Keyword args already have names in the source — no hints needed
             }
 
             hints
@@ -685,92 +751,140 @@ impl LanguageServer for VxLanguageServer {
                 _ => return None,
             };
 
-            // Resolve the callee to its definition
+            // Try to resolve the callee to its definition or a builtin
             let callee_range = callee_token.text_range();
+            let callee_name_str = callee_token.text().to_string();
             let resolved = state
                 .resolution
                 .refs
                 .iter()
-                .find(|r| r.ref_range == callee_range)?;
-            let def = resolved.target.as_ref().ok()?;
+                .find(|r| r.ref_range == callee_range);
+            let def = resolved.and_then(|r| r.target.as_ref().ok());
 
-            if def.kind != vx_resolve::DefKind::Function {
-                return None;
-            }
-
-            // Find the FnDecl node at the definition site
-            let def_token = root
-                .token_at_offset(def.full_range.start())
-                .right_biased()?;
-            let fn_node = def_token.parent_ancestors().find_map(FnDecl::cast)?;
-
-            // Build parameter info
+            // Build parameter info — either from user FnDecl or builtin sig
             let mut params = Vec::new();
             let mut label_parts = Vec::new();
+            let mut doc: Option<String> = None;
 
-            let fn_name = fn_node
-                .name()
-                .map(|t| t.text().to_string())
-                .unwrap_or_default();
-            label_parts.push(format!("fn {fn_name}("));
+            if let Some(def) = def
+                && def.kind == vx_resolve::DefKind::Function
+            {
+                // User-declared function — use FnDecl from definition site
+                let def_token = root.token_at_offset(def.full_range.start()).right_biased();
+                let fn_node = def_token.and_then(|t| t.parent_ancestors().find_map(FnDecl::cast));
 
-            let positional: Vec<_> = fn_node.parameters().collect();
-            let keyword: Vec<_> = fn_node.keyword_parameters().collect();
+                if let Some(fn_node) = fn_node {
+                    let fn_name = fn_node
+                        .name()
+                        .map(|t| t.text().to_string())
+                        .unwrap_or_default();
+                    label_parts.push(format!("fn {fn_name}("));
 
-            for (i, param) in positional.iter().enumerate() {
-                if i > 0 {
-                    label_parts.push(", ".to_string());
+                    let positional: Vec<_> = fn_node.parameters().collect();
+                    let keyword: Vec<_> = fn_node.keyword_parameters().collect();
+
+                    for (i, param) in positional.iter().enumerate() {
+                        if i > 0 {
+                            label_parts.push(", ".to_string());
+                        }
+                        let name = param
+                            .name()
+                            .map(|t| t.text().to_string())
+                            .unwrap_or("_".to_string());
+                        let type_str = param
+                            .slot_type()
+                            .map(|st| st.syntax().text().to_string())
+                            .unwrap_or_default();
+                        let param_label = format!("{name}{type_str}");
+                        params.push(ParameterInformation {
+                            label: ParameterLabel::Simple(param_label.clone()),
+                            documentation: None,
+                        });
+                        label_parts.push(param_label);
+                    }
+
+                    if !keyword.is_empty() {
+                        if !positional.is_empty() {
+                            label_parts.push("; ".to_string());
+                        }
+                        for (i, kw) in keyword.iter().enumerate() {
+                            if i > 0 {
+                                label_parts.push(", ".to_string());
+                            }
+                            let name = kw
+                                .name()
+                                .map(|t| t.text().to_string())
+                                .unwrap_or("_".to_string());
+                            let type_str = kw
+                                .slot_type()
+                                .map(|st| st.syntax().text().to_string())
+                                .unwrap_or_default();
+                            let param_label = format!("{name}{type_str}");
+                            params.push(ParameterInformation {
+                                label: ParameterLabel::Simple(param_label.clone()),
+                                documentation: None,
+                            });
+                            label_parts.push(param_label);
+                        }
+                    }
+
+                    label_parts.push(")".to_string());
+
+                    if let Some(ret) = fn_node.return_type() {
+                        let ret_text = ret.syntax().text().to_string();
+                        label_parts.push(format!(" {ret_text}"));
+                    }
+
+                    doc = state.doc_comment_for(def);
+                } else {
+                    return None;
                 }
-                let name = param
-                    .name()
-                    .map(|t| t.text().to_string())
-                    .unwrap_or("_".to_string());
-                let type_str = param
-                    .slot_type()
-                    .map(|st| st.syntax().text().to_string())
-                    .unwrap_or_default();
-                let param_label = format!("{name}{type_str}");
-                params.push(ParameterInformation {
-                    label: ParameterLabel::Simple(param_label.clone()),
-                    documentation: None,
-                });
-                label_parts.push(param_label);
-            }
+            } else if let Some(sig) = vx_resolve::builtins::builtin_fn_sig(&callee_name_str) {
+                // Builtin function — use typed signature
+                label_parts.push(format!("fn {}(", sig.name));
 
-            if !keyword.is_empty() {
-                if !positional.is_empty() {
-                    label_parts.push("; ".to_string());
-                }
-                for (i, kw) in keyword.iter().enumerate() {
+                for (i, p) in sig.positional_params.iter().enumerate() {
                     if i > 0 {
                         label_parts.push(", ".to_string());
                     }
-                    let name = kw
-                        .name()
-                        .map(|t| t.text().to_string())
-                        .unwrap_or("_".to_string());
-                    let type_str = kw
-                        .slot_type()
-                        .map(|st| st.syntax().text().to_string())
-                        .unwrap_or_default();
-                    let param_label = format!("{name}{type_str}");
+                    let param_label =
+                        format!("{}: {}", p.name, p.ty.display_with_env(&state.types.env));
                     params.push(ParameterInformation {
                         label: ParameterLabel::Simple(param_label.clone()),
                         documentation: None,
                     });
                     label_parts.push(param_label);
                 }
-            }
 
-            label_parts.push(")".to_string());
+                if !sig.keyword_params.is_empty() {
+                    if !sig.positional_params.is_empty() {
+                        label_parts.push("; ".to_string());
+                    }
+                    for (i, kp) in sig.keyword_params.iter().enumerate() {
+                        if i > 0 {
+                            label_parts.push(", ".to_string());
+                        }
+                        let param_label =
+                            format!("{}: {}", kp.name, kp.ty.display_with_env(&state.types.env));
+                        params.push(ParameterInformation {
+                            label: ParameterLabel::Simple(param_label.clone()),
+                            documentation: None,
+                        });
+                        label_parts.push(param_label);
+                    }
+                }
 
-            if let Some(ret) = fn_node.return_type() {
-                let ret_text = ret.syntax().text().to_string();
-                label_parts.push(format!(" {ret_text}"));
+                label_parts.push(")".to_string());
+
+                if !sig.ret.is_poison() {
+                    let ret_display = sig.ret.display_with_env(&state.types.env);
+                    label_parts.push(format!(" -> {ret_display}"));
+                }
+            } else {
+                return None;
             }
 
             let label = label_parts.concat();
-            let doc = state.doc_comment_for(def);
 
             // Clamp active_param if past keyword args, stay in bounds
             let _ = in_keyword_section;
@@ -1113,6 +1227,10 @@ impl VxLanguageServer {
         for err in &state.resolution.errors {
             match err {
                 vx_resolve::ResolveError::Unresolved { name, range } => {
+                    // Suppress unresolved name errors for builtin functions
+                    if vx_resolve::builtins::builtin_fn_sig(name).is_some() {
+                        continue;
+                    }
                     diagnostics.push(Diagnostic {
                         range: state.to_lsp_range(*range),
                         severity: Some(DiagnosticSeverity::ERROR),
@@ -1146,6 +1264,34 @@ impl VxLanguageServer {
                 range: state.to_lsp_range(err.range),
                 severity: Some(DiagnosticSeverity::ERROR),
                 source: Some("vx-cap".to_string()),
+                message,
+                ..Default::default()
+            });
+        }
+
+        // Type checking diagnostics
+        for err in &state.type_check.errors {
+            let message = match &err.kind {
+                vx_resolve::TypeErrorKind::ArgTypeMismatch {
+                    param_name,
+                    expected,
+                    found,
+                } => {
+                    format!(
+                        "type mismatch for `{param_name}`: expected `{expected}`, found `{found}`"
+                    )
+                }
+                vx_resolve::TypeErrorKind::NoSuchMethod {
+                    receiver_ty,
+                    method_name,
+                } => {
+                    format!("no method `{method_name}` on type `{receiver_ty}`")
+                }
+            };
+            diagnostics.push(Diagnostic {
+                range: state.to_lsp_range(err.range),
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some("vx-type".to_string()),
                 message,
                 ..Default::default()
             });
@@ -1457,6 +1603,36 @@ fn struct_fields_from_ty(ty: &vx_types::Ty, state: &DocumentState) -> Option<Vec
         vx_types::Ty::Optional(inner) => struct_fields_from_ty(inner, state),
         _ => None,
     }
+}
+
+fn builtin_completions(env: &vx_types::TypeEnv) -> Vec<CompletionItem> {
+    let builtins = [
+        "build",
+        "stabilize",
+        "exec",
+        "executor_class",
+        "discover_exec",
+        "read_file",
+        "read_dir",
+        "glob",
+        "exists",
+        "metadata",
+    ];
+
+    builtins
+        .into_iter()
+        .filter_map(|name| {
+            let sig = vx_resolve::builtins::builtin_fn_sig(name)?;
+            let ret_display = sig.ret.display_with_env(env);
+            let detail = format!("fn {name}(...) -> {ret_display}");
+            Some(CompletionItem {
+                label: name.to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some(detail),
+                ..Default::default()
+            })
+        })
+        .collect()
 }
 
 fn keyword_completions() -> Vec<CompletionItem> {

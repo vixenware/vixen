@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use crate::{Capability, FunctionTy, InferVar, Scalar, TupleTy, Ty, TypeParam};
+use crate::{Builtin, Capability, FunctionTy, InferVar, Scalar, TupleTy, Ty, TypeParam};
 
 impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -34,6 +34,7 @@ impl fmt::Display for Ty {
             Ty::Array(inner) => write!(f, "Array[{inner}]"),
             Ty::Map(k, v) => write!(f, "Map[{k}, {v}]"),
             Ty::Stream(inner) => write!(f, "Stream[{inner}]"),
+            Ty::Builtin(b) => write!(f, "{b}"),
             Ty::Param(p) => write!(f, "{p}"),
             Ty::Infer(v) => write!(f, "{v}"),
             Ty::Poison => write!(f, "<poison>"),
@@ -101,6 +102,21 @@ impl fmt::Display for FunctionTy {
 impl fmt::Display for Capability {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "#{}", self.name)
+    }
+}
+
+impl fmt::Display for Builtin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Builtin::Path => write!(f, "Path"),
+            Builtin::Blob => write!(f, "Blob"),
+            Builtin::Tree => write!(f, "Tree"),
+            Builtin::ExecPath => write!(f, "ExecPath"),
+            Builtin::Process => write!(f, "Process"),
+            Builtin::Host => write!(f, "Host"),
+            Builtin::ExecutorClass => write!(f, "ExecutorClass"),
+            Builtin::DiscoveryProcess => write!(f, "DiscoveryProcess"),
+        }
     }
 }
 

@@ -484,9 +484,14 @@ impl ScopeTreeBuilder {
                 self.visit_expr(scope, &expr);
             } else if let Some(block) = BlockExpr::cast(child.clone()) {
                 self.build_block_scope(scope, &block);
-            } else if child.kind() == SyntaxKind::ELSE_CLAUSE
-                || child.kind() == SyntaxKind::MATCH_ARM
-            {
+            } else if matches!(
+                child.kind(),
+                SyntaxKind::ELSE_CLAUSE
+                    | SyntaxKind::MATCH_ARM
+                    | SyntaxKind::ARG_LIST
+                    | SyntaxKind::ARG
+                    | SyntaxKind::KEYWORD_ARG
+            ) {
                 // Recurse into structural children
                 self.visit_expr_children(scope, &child);
             }
