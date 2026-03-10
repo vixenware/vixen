@@ -79,7 +79,7 @@ insert_anchor_links = "heading"
 > only the observer's produced values back across the boundary.
 >
 > ```vixen
-> exec[T](
+> fn exec[T](
 >   args: Array[ExecInput]
 > ) where {
 >   env: Map[String, ExecInput] = {},
@@ -139,7 +139,7 @@ insert_anchor_links = "heading"
 > Passing a `Tree` directly to `exec` is sugar for:
 >
 > ```vixen
-> InTree { tree: some_tree, suffix: @"" }
+> InTree { tree: some_tree, suffix: /* empty relative path */ }
 > ```
 >
 > `exec` mounts the tree at a synthetic VFS root chosen by the runtime
@@ -303,9 +303,11 @@ insert_anchor_links = "heading"
 > executor's real filesystem rather than to Vixen's VFS namespace.
 >
 > ```vixen
-> fn which(self: Host, name: String) -> String?;
-> fn read(self: Host, path: String) -> Blob;
-> fn hash(self: Host, path: String) -> Blob;
+> namespace Host {
+>   fn which(self, name: String) -> String?;
+>   fn read(self, path: String) -> Blob;
+>   fn hash(self, path: String) -> Blob;
+> }
 > ```
 >
 > These operations are read-only and deterministic with respect to the
@@ -318,11 +320,11 @@ insert_anchor_links = "heading"
 > be checked, compose them into a single closure:
 >
 > ```vixen
-> let verifier = (host) => {
->   check_gcc(host);
->   check_ld(host);
->   check_sdk_version(host);
-> }
+> let verifier = (host) => (
+>   check_gcc host;
+>   check_ld host;
+>   check_sdk_version host;
+> )
 >
 > exec ["gcc", "-c", "main.c"] where { verifier }
 > ```
@@ -509,7 +511,7 @@ insert_anchor_links = "heading"
 >
 > Inside the orchestrator, **nothing forces a pending value**. No
 > language construct waits. `a + b` where `a` is pending produces a
-> pending result. `if cond { x } else { y }` where `cond` is pending
+> pending result. `if cond ( x ) else ( y )` where `cond` is pending
 > produces a pending value. `match`, `is`, indexing, `as`, overload
 > dispatch — all build nodes in the dataflow graph. None of them block.
 > The language never waits.
@@ -823,16 +825,16 @@ insert_anchor_links = "heading"
 >
 > ```vixen
 > stabilize where {
->   witness: () => { ... },
->   resolve: (inputs) => {
+>   witness: () => ( ... ),
+>   resolve: (inputs) => (
 >     // outer resolve has #discover, not #fs
 >     stabilize where {
->       witness: () => { ... },
+>       witness: () => ( ... ),
 >       // inner witness: #fs granted by inner stabilize,
 >       // #discover from outer resolve filtered by mask
->       resolve: (inner) => { ... },
+>       resolve: (inner) => ( ... ),
 >       // inner resolve: #discover granted by inner stabilize
 >     }
->   },
+>   ),
 > }
 > ```
