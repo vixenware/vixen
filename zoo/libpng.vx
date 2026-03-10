@@ -83,7 +83,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
 
   // In a real build this target triple would come from args/env/project data.
   let target = "linux-x86_64";
-  let class = executor_class target;
+  let class = executor_class(target);
 
   let tools =
     discover(class, (host) =>

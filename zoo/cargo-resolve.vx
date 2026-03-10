@@ -1,0 +1,146 @@
+// Cargo-style dependency resolution sketch
+//
+// This is not a Cargo builtin. The only ambient pieces are:
+// - Http.get(url)
+// - Toml.parse[T](blob)
+// - Toml.serialize(value)
+// - Json.parse[T](blob)
+//
+// Everything else is ordinary Vixen code over those primitives.
+
+#[rename_all = "kebab-case"]
+struct CargoManifest {
+  package: CargoPackage,
+  dependencies: Map[String, CargoDependency] = {},
+  dev_dependencies: Map[String, CargoDependency] = {},
+  build_dependencies: Map[String, CargoDependency] = {},
+  features: Map[String, Array[String]] = {},
+}
+
+struct CargoPackage {
+  name: String,
+  version: String,
+  edition: String = "2021",
+}
+
+#[rename_all = "kebab-case"]
+struct CargoDependency {
+  version: String?,
+  features: Array[String] = [],
+  default_features: Bool = true,
+  optional: Bool = false,
+  path: String?,
+  git: String?,
+  package: String?,
+}
+
+struct CargoLock {
+  package: Array[LockedPackage] = [],
+}
+
+struct LockedPackage {
+  name: String,
+  version: String,
+  source: String?,
+  checksum: String?,
+}
+
+struct IndexDependency {
+  name: String,
+  req: String,
+  package: String?,
+  features: Array[String] = [],
+  optional: Bool = false,
+  default_features: Bool = true,
+  target: String?,
+  kind: String?,
+}
+
+struct IndexEntry {
+  name: String,
+  vers: String,
+  cksum: String,
+  features: Map[String, Array[String]] = {},
+  yanked: Bool = false,
+  deps: Array[IndexDependency] = [],
+}
+
+newtype PackageId of String
+
+struct ResolvedCrate {
+  id: PackageId,
+  name: String,
+  version: String,
+  checksum: String,
+  download_url: String,
+  features: Array[String] = [],
+  dependencies: Array[PackageId] = [],
+}
+
+struct RegistryResolution {
+  packages: Array[ResolvedCrate],
+  build_order: Array[PackageId],
+}
+
+fn parse_lock(ws: Tree) -> CargoLock? (
+  match ws.file(@Cargo.lock)? (
+    Some { value } => Toml.parse[CargoLock](value),
+    None => None,
+  )
+)
+
+fn parse_sparse_entries(blob: Blob) -> Array[IndexEntry] (
+  blob.utf8()
+    .lines()
+    .filter(!$.is_empty())
+    .map(Json.parse[IndexEntry](Blob($)))
+    .to_array()
+)
+
+fn resolve_manifest(manifest: CargoManifest) where {
+  lock: CargoLock?,
+} #discover -> RegistryResolution (
+  // Sketch only:
+  // - fetch sparse index metadata with `Http.get`
+  // - derive per-crate sparse index URLs with ordinary string logic
+  // - fetch per-crate sparse index files with `Http.get`
+  // - parse each newline-delimited JSON entry
+  // - solve semver constraints
+  // - honor lockfile pins when compatible
+  // - unify features
+  // - produce exact package list + checksums + build order
+  // The important point is that all of this is ordinary code over
+  // Http.get + Json.parse/Toml.parse, not a registry builtin.
+  let _manifest = manifest;
+  let _lock = lock;
+  fail "resolution algorithm omitted from sketch"
+)
+
+fn crate_source(pkg: ResolvedCrate) -> Tree (
+  acquire(pkg.download_url) where {
+    sha256: pkg.checksum,
+    extract: "tar.gz",
+  }
+)
+
+fn vendored_entry(pkg: ResolvedCrate) -> (Path, Tree) (
+  (@(vendor/{pkg.name}-{pkg.version}), crate_source(pkg))
+)
+
+fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
+  let workspace = Tree(ws);
+  let manifest = Toml.parse[CargoManifest](workspace.file(@Cargo.toml));
+  let lock = parse_lock(workspace);
+
+  let resolution = resolve_manifest(manifest) where { lock };
+
+  // Resolution discovers exact versions and checksums.
+  // Acquisition stays fixed-hash and cacheable.
+  let vendor = Tree(resolution.packages.to_map(vendored_entry));
+
+  // Next layer, not modeled here:
+  // - parse vendored Cargo.toml files
+  // - compile crates in `build_order`
+  // - write/update a Cargo.lock-shaped artifact with `Toml.serialize`
+  vendor
+)

@@ -86,7 +86,7 @@ insert_anchor_links = "heading"
 > ) where {
 >   env: Map[String, ExecInput] = {},
 >   mounts: Map[Path, Blob | Tree] = {},
->   executor: ExecutorClass = executor_class "default",
+>   executor: ExecutorClass = executor_class("default"),
 >   observer: Fn(Process, Tree) #sandbox -> T,
 > } -> T
 > ```
@@ -279,7 +279,7 @@ insert_anchor_links = "heading"
 > handwritten verifier closure.
 >
 > These obligations live on values. If a discovery closure observed
-> `host.which "cc"` and `host.hash cc_path`, then the discovered tool
+> `host.which("cc")` and `host.hash(cc_path)`, then the discovered tool
 > value carries those facts with it. Destructuring or embedding that
 > value does not erase its obligations.
 >
@@ -323,7 +323,7 @@ insert_anchor_links = "heading"
 >
 > `executor_class(label: String) -> ExecutorClass` creates a value
 > representing a class of executor environments (e.g.,
-> `executor_class "ubuntu-22.04"`). The class is the unit of cache
+> `executor_class("ubuntu-22.04")`). The class is the unit of cache
 > reuse for `exec` — cached results are keyed by executor class, not
 > by specific runner instance. Different instances of the same class
 > are expected to be equivalent; automatic verification from recorded
@@ -382,6 +382,16 @@ insert_anchor_links = "heading"
 > witness/resolve cycle to update the cached discovery, then retrying
 > the exec with the new discovered values.
 
+> r[exec.discover.http]
+>
+> `Http.get(url)` performs an ordinary HTTP GET under `#discover` and
+> returns the response body as `Blob`. This is the low-level primitive
+> used for registry index queries, metadata fetches, and other volatile
+> network reads. Vixen does not provide ecosystem-specific registry
+> builtins in the core language model; package-resolution logic is
+> ordinary user code over `Http.get`, structured parsers, and normal
+> control flow.
+
 ## Deserialization
 
 > r[deser.parse]
@@ -401,6 +411,17 @@ insert_anchor_links = "heading"
 >
 > All take a `Blob` and return a value of type `T`. Parsing poisons on
 > malformed input or type mismatches.
+
+> r[deser.serialize]
+>
+> Structured values can also be serialized back out:
+>
+> - `Toml.serialize value` — TOML.
+>
+> This is the primitive used for writing lockfiles such as
+> `Cargo.lock`, generated manifests, and other structured build
+> artifacts. The current core model only guarantees TOML serialization;
+> other formats may be added later.
 
 > r[deser.rename]
 >

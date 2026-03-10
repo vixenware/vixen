@@ -8,6 +8,14 @@ type Blob;
 type Tree;
 /// A path-like exec argument carrying implicit mount provenance.
 type ExecPath;
+/// Marker namespace for TOML parsing.
+type Toml;
+/// Marker namespace for JSON parsing.
+type Json;
+/// Marker namespace for YAML parsing.
+type Yaml;
+/// Marker namespace for HTTP access.
+type Http;
 /// A class of equivalent executor environments.
 type ExecutorClass;
 /// Executor-local host inspection capability.
@@ -38,6 +46,28 @@ namespace Blob {
   fn utf8(self) -> String;
   /// Decode the blob as UTF-8 with replacement on invalid input.
   fn utf8_lossy(self) -> String;
+}
+
+namespace Toml {
+  /// Parse a TOML blob into a value of type `T`.
+  fn parse[T](blob: Blob) -> T;
+  /// Serialize a value to TOML.
+  fn serialize[T](value: T) -> Blob;
+}
+
+namespace Json {
+  /// Parse a JSON blob into a value of type `T`.
+  fn parse[T](blob: Blob) -> T;
+}
+
+namespace Yaml {
+  /// Parse a YAML blob into a value of type `T`.
+  fn parse[T](blob: Blob) -> T;
+}
+
+namespace Http {
+  /// Fetch a URL and return the response body as a blob.
+  fn get(url: String) #discover -> Blob;
 }
 
 namespace Tree {
