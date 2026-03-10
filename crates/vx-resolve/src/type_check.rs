@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use rowan::TextRange;
 use vx_parser::{
     ArrayExpr, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr, FieldExpr, IfExpr,
-    LiteralExpr, MatchExpr, NameRefExpr, PrefixExpr, SourceFile, Stmt, SyntaxKind,
+    LiteralExpr, MapExpr, MatchExpr, NameRefExpr, PrefixExpr, SourceFile, Stmt, StructLiteralExpr,
+    SyntaxKind,
 };
 use vx_types::{FnSig, Ty};
 
@@ -151,6 +152,8 @@ impl<'a> ExprTyper<'a> {
                 Ty::Scalar(vx_types::Scalar::String)
             }
             Expr::Array(arr) => self.infer_array(arr),
+            Expr::Map(map) => self.infer_map(map),
+            Expr::StructLiteral(sl) => self.infer_struct_literal(sl),
             Expr::Match(m) => self.infer_match(m),
             Expr::Binary(bin) => self.infer_binary(bin),
             Expr::Prefix(pre) => self.infer_prefix(pre),
@@ -648,6 +651,55 @@ impl<'a> ExprTyper<'a> {
             Some(SyntaxKind::MINUS) => operand_ty,
             _ => Ty::Poison,
         }
+    }
+
+    fn infer_map(&mut self, map: &MapExpr) -> Ty {
+        let mut key_ty = None;
+        let mut val_ty = None;
+        for entry in map.entries() {
+            if let Some(k) = entry.key() {
+                let ty = self.infer_expr(&k);
+                if !ty.is_poison() && key_ty.is_none() {
+                    key_ty = Some(ty);
+                }
+            }
+            if let Some(v) = entry.value() {
+                let ty = self.infer_expr(&v);
+                if !ty.is_poison() && val_ty.is_none() {
+                    val_ty = Some(ty);
+                }
+            }
+        }
+        Ty::Map(
+            Box::new(key_ty.unwrap_or(Ty::Poison)),
+            Box::new(val_ty.unwrap_or(Ty::Poison)),
+        )
+    }
+
+    fn infer_struct_literal(&mut self, sl: &StructLiteralExpr) -> Ty {
+        // Infer field value expressions
+        for field in sl.fields() {
+            if let Some(expr) = field.expr() {
+                self.infer_expr(&expr);
+            }
+        }
+        // Resolve the struct name to a TypeId
+        let Some(name_tok) = sl.name() else {
+            return Ty::Poison;
+        };
+        let name = name_tok.text();
+        let type_ids = self.types.env.lookup(name);
+        for &id in type_ids {
+            if let vx_types::TypeDef::Struct(ref sdef) = self.types.env[id] {
+                if sdef.parent_enum.is_none() {
+                    return Ty::Struct(vx_types::StructTy {
+                        id,
+                        type_args: vec![],
+                    });
+                }
+            }
+        }
+        Ty::Poison
     }
 
     fn infer_array(&mut self, arr: &ArrayExpr) -> Ty {

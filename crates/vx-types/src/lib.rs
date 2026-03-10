@@ -195,6 +195,8 @@ pub struct FieldDef {
     pub name: String,
     pub ty: Ty,
     pub has_default: bool,
+    /// Text range of the field name token in source (for go-to-definition).
+    pub name_range: rowan::TextRange,
 }
 
 /// An enum definition with its variants and generic parameters.
@@ -600,11 +602,13 @@ mod tests {
                         name: "x".to_owned(),
                         ty: Ty::Scalar(Scalar::F64),
                         has_default: false,
+                        name_range: Default::default(),
                     },
                     FieldDef {
                         name: "y".to_owned(),
                         ty: Ty::Scalar(Scalar::F64),
                         has_default: false,
+                        name_range: Default::default(),
                     },
                 ],
             }),
@@ -670,6 +674,7 @@ mod tests {
                     name: "radius".to_owned(),
                     ty: Ty::Scalar(Scalar::F64),
                     has_default: false,
+                    name_range: Default::default(),
                 }],
             }),
         );
@@ -685,11 +690,13 @@ mod tests {
                         name: "width".to_owned(),
                         ty: Ty::Scalar(Scalar::F64),
                         has_default: false,
+                        name_range: Default::default(),
                     },
                     FieldDef {
                         name: "height".to_owned(),
                         ty: Ty::Scalar(Scalar::F64),
                         has_default: false,
+                        name_range: Default::default(),
                     },
                 ],
             }),

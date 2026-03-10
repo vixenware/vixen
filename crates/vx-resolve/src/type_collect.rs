@@ -147,7 +147,9 @@ pub fn collect_types(file: &SourceFile) -> TypeCollection {
                             let fields: Vec<FieldDef> = variant
                                 .fields()
                                 .filter_map(|f| {
-                                    let name = f.name()?.text().to_string();
+                                    let name_tok = f.name()?;
+                                    let name = name_tok.text().to_string();
+                                    let name_range = name_tok.text_range();
                                     let ty = f
                                         .slot_type()
                                         .and_then(|st| st.ty())
@@ -157,6 +159,7 @@ pub fn collect_types(file: &SourceFile) -> TypeCollection {
                                         name,
                                         ty,
                                         has_default: false,
+                                        name_range,
                                     })
                                 })
                                 .collect();
@@ -255,7 +258,9 @@ fn collect_fields(
 ) -> Vec<FieldDef> {
     decl.fields()
         .filter_map(|f| {
-            let name = f.name()?.text().to_string();
+            let name_tok = f.name()?;
+            let name = name_tok.text().to_string();
+            let name_range = name_tok.text_range();
             let ty = f
                 .slot_type()
                 .and_then(|st| st.ty())
@@ -270,6 +275,7 @@ fn collect_fields(
                 name,
                 ty,
                 has_default,
+                name_range,
             })
         })
         .collect()

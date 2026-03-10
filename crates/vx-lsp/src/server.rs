@@ -175,6 +175,7 @@ impl LanguageServer for VxLanguageServer {
                         },
                     ),
                 ),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 linked_editing_range_provider: Some(LinkedEditingRangeServerCapabilities::Simple(
@@ -296,18 +297,52 @@ impl LanguageServer for VxLanguageServer {
             })?;
 
             // Find a resolved ref whose range contains the cursor
-            let resolved = state
+            if let Some(resolved) = state
                 .resolution
                 .refs
                 .iter()
-                .find(|r| r.ref_range.contains_inclusive(offset))?;
+                .find(|r| r.ref_range.contains_inclusive(offset))
+            {
+                let def = resolved.target.as_ref().ok()?;
+                let range = state.to_lsp_range(def.name_range);
+                return Some(GotoDefinitionResponse::Scalar(Location {
+                    uri: uri.clone(),
+                    range,
+                }));
+            }
 
-            let def = resolved.target.as_ref().ok()?;
-            let range = state.to_lsp_range(def.name_range);
-            Some(GotoDefinitionResponse::Scalar(Location {
-                uri: uri.clone(),
-                range,
-            }))
+            // Try field access: jump to struct field definition
+            let root = state.parsed.tree().syntax().clone();
+            let token = root.token_at_offset(offset).left_biased()?;
+            if let Some(field_node) = token.parent().and_then(vx::FieldExpr::cast) {
+                if let Some(field_name_tok) = field_node.field_name() {
+                    if field_name_tok.text_range().contains_inclusive(offset) {
+                        let field_name = field_name_tok.text();
+                        if let Some(receiver_expr) = field_node.receiver() {
+                            let receiver_ty = state
+                                .type_check
+                                .expr_types
+                                .get(&receiver_expr.syntax().text_range());
+                            if let Some(vx_types::Ty::Struct(struct_ty)) = receiver_ty {
+                                if let vx_types::TypeDef::Struct(sdef) =
+                                    &state.types.env[struct_ty.id]
+                                {
+                                    if let Some(fdef) =
+                                        sdef.fields.iter().find(|f| f.name == field_name)
+                                    {
+                                        return Some(GotoDefinitionResponse::Scalar(Location {
+                                            uri: uri.clone(),
+                                            range: state.to_lsp_range(fdef.name_range),
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            None
         });
 
         Ok(result.flatten())
@@ -662,6 +697,11 @@ impl LanguageServer for VxLanguageServer {
                 return Some(CompletionResponse::Array(items));
             }
 
+            // Check if we're inside a struct literal — suggest remaining fields
+            if let Some(items) = struct_literal_completions(&root, offset, state) {
+                return Some(CompletionResponse::Array(items));
+            }
+
             let mut items: Vec<CompletionItem> = state
                 .resolution
                 .scopes
@@ -878,78 +918,98 @@ impl LanguageServer for VxLanguageServer {
                 }
             }
 
-            // Get callee name via the first child expr of CALL_EXPR
-            let callee_name = call_node.children().find_map(vx::Expr::cast)?;
-            let callee_token = match callee_name {
-                vx::Expr::NameRef(ref nr) => nr.token()?,
-                _ => return None,
-            };
-
-            // Try to resolve the callee to its definition or a builtin
-            let callee_range = callee_token.text_range();
-            let callee_name_str = callee_token.text().to_string();
-            let resolved = state
-                .resolution
-                .refs
-                .iter()
-                .find(|r| r.ref_range == callee_range);
-            let def = resolved.and_then(|r| r.target.as_ref().ok());
+            // Get callee expr via the first child expr of CALL_EXPR
+            let callee_expr = call_node.children().find_map(vx::Expr::cast)?;
 
             // Build parameter info — either from user FnDecl or builtin sig
             let mut params = Vec::new();
             let mut label_parts = Vec::new();
             let mut doc: Option<String> = None;
 
-            if let Some(def) = def
-                && def.kind == vx_resolve::DefKind::Function
-            {
-                // User-declared function — use FnDecl from definition site
-                let def_token = root.token_at_offset(def.full_range.start()).right_biased();
-                let fn_node = def_token.and_then(|t| t.parent_ancestors().find_map(FnDecl::cast));
+            // Try method call: receiver.method(args)
+            if let vx::Expr::Field(ref field_expr) = callee_expr {
+                let receiver_expr = field_expr.receiver()?;
+                let method_name_tok = field_expr.field_name()?;
+                let method_name = method_name_tok.text().to_string();
 
-                if let Some(fn_node) = fn_node {
-                    let fn_name = fn_node
-                        .name()
-                        .map(|t| t.text().to_string())
-                        .unwrap_or_default();
-                    label_parts.push(format!("fn {fn_name}("));
-
-                    let positional: Vec<_> = fn_node.parameters().collect();
-                    let keyword: Vec<_> = fn_node.keyword_parameters().collect();
-
-                    for (i, param) in positional.iter().enumerate() {
-                        if i > 0 {
-                            label_parts.push(", ".to_string());
-                        }
-                        let name = param
-                            .name()
-                            .map(|t| t.text().to_string())
-                            .unwrap_or("_".to_string());
-                        let type_str = param
-                            .slot_type()
-                            .map(|st| st.syntax().text().to_string())
-                            .unwrap_or_default();
-                        let param_label = format!("{name}{type_str}");
-                        params.push(ParameterInformation {
-                            label: ParameterLabel::Simple(param_label.clone()),
-                            documentation: None,
-                        });
-                        label_parts.push(param_label);
-                    }
-
-                    if !keyword.is_empty() {
-                        if !positional.is_empty() {
-                            label_parts.push("; ".to_string());
-                        }
-                        for (i, kw) in keyword.iter().enumerate() {
+                // Get receiver type from type checker
+                let receiver_ty = state
+                    .type_check
+                    .expr_types
+                    .get(&receiver_expr.syntax().text_range());
+                if let Some(vx_types::Ty::Builtin(builtin)) = receiver_ty {
+                    if let Some(method_sig) =
+                        vx_resolve::builtins::builtin_method(builtin, &method_name)
+                    {
+                        label_parts.push(format!("fn {method_name}("));
+                        for (i, p) in method_sig.params.iter().enumerate() {
                             if i > 0 {
                                 label_parts.push(", ".to_string());
                             }
-                            let name = kw
+                            let param_label =
+                                format!("{}: {}", p.name, p.ty.display_with_env(&state.types.env));
+                            params.push(ParameterInformation {
+                                label: ParameterLabel::Simple(param_label.clone()),
+                                documentation: None,
+                            });
+                            label_parts.push(param_label);
+                        }
+                        label_parts.push(")".to_string());
+                        let ret_display = method_sig.ret.display_with_env(&state.types.env);
+                        label_parts.push(format!(" -> {ret_display}"));
+                    }
+                }
+            }
+
+            // Try simple name call: name(args) or builtin(args)
+            if params.is_empty() {
+                let callee_token = match callee_expr {
+                    vx::Expr::NameRef(ref nr) => nr.token()?,
+                    _ if !label_parts.is_empty() => {
+                        // Already handled above (method call)
+                        // Fall through to build the result
+                        // This branch shouldn't actually be reached since params would be populated
+                        return None;
+                    }
+                    _ => return None,
+                };
+
+                let callee_range = callee_token.text_range();
+                let callee_name_str = callee_token.text().to_string();
+                let resolved = state
+                    .resolution
+                    .refs
+                    .iter()
+                    .find(|r| r.ref_range == callee_range);
+                let def = resolved.and_then(|r| r.target.as_ref().ok());
+
+                if let Some(def) = def
+                    && def.kind == vx_resolve::DefKind::Function
+                {
+                    // User-declared function — use FnDecl from definition site
+                    let def_token = root.token_at_offset(def.full_range.start()).right_biased();
+                    let fn_node =
+                        def_token.and_then(|t| t.parent_ancestors().find_map(FnDecl::cast));
+
+                    if let Some(fn_node) = fn_node {
+                        let fn_name = fn_node
+                            .name()
+                            .map(|t| t.text().to_string())
+                            .unwrap_or_default();
+                        label_parts.push(format!("fn {fn_name}("));
+
+                        let positional: Vec<_> = fn_node.parameters().collect();
+                        let keyword: Vec<_> = fn_node.keyword_parameters().collect();
+
+                        for (i, param) in positional.iter().enumerate() {
+                            if i > 0 {
+                                label_parts.push(", ".to_string());
+                            }
+                            let name = param
                                 .name()
                                 .map(|t| t.text().to_string())
                                 .unwrap_or("_".to_string());
-                            let type_str = kw
+                            let type_str = param
                                 .slot_type()
                                 .map(|st| st.syntax().text().to_string())
                                 .unwrap_or_default();
@@ -960,63 +1020,91 @@ impl LanguageServer for VxLanguageServer {
                             });
                             label_parts.push(param_label);
                         }
+
+                        if !keyword.is_empty() {
+                            if !positional.is_empty() {
+                                label_parts.push("; ".to_string());
+                            }
+                            for (i, kw) in keyword.iter().enumerate() {
+                                if i > 0 {
+                                    label_parts.push(", ".to_string());
+                                }
+                                let name = kw
+                                    .name()
+                                    .map(|t| t.text().to_string())
+                                    .unwrap_or("_".to_string());
+                                let type_str = kw
+                                    .slot_type()
+                                    .map(|st| st.syntax().text().to_string())
+                                    .unwrap_or_default();
+                                let param_label = format!("{name}{type_str}");
+                                params.push(ParameterInformation {
+                                    label: ParameterLabel::Simple(param_label.clone()),
+                                    documentation: None,
+                                });
+                                label_parts.push(param_label);
+                            }
+                        }
+
+                        label_parts.push(")".to_string());
+
+                        if let Some(ret) = fn_node.return_type() {
+                            let ret_text = ret.syntax().text().to_string();
+                            label_parts.push(format!(" {ret_text}"));
+                        }
+
+                        doc = state.doc_comment_for(def);
+                    } else {
+                        return None;
                     }
+                } else if let Some(sig) = vx_resolve::builtins::builtin_fn_sig(&callee_name_str) {
+                    // Builtin function — use typed signature
+                    label_parts.push(format!("fn {}(", sig.name));
 
-                    label_parts.push(")".to_string());
-
-                    if let Some(ret) = fn_node.return_type() {
-                        let ret_text = ret.syntax().text().to_string();
-                        label_parts.push(format!(" {ret_text}"));
-                    }
-
-                    doc = state.doc_comment_for(def);
-                } else {
-                    return None;
-                }
-            } else if let Some(sig) = vx_resolve::builtins::builtin_fn_sig(&callee_name_str) {
-                // Builtin function — use typed signature
-                label_parts.push(format!("fn {}(", sig.name));
-
-                for (i, p) in sig.positional_params.iter().enumerate() {
-                    if i > 0 {
-                        label_parts.push(", ".to_string());
-                    }
-                    let param_label =
-                        format!("{}: {}", p.name, p.ty.display_with_env(&state.types.env));
-                    params.push(ParameterInformation {
-                        label: ParameterLabel::Simple(param_label.clone()),
-                        documentation: None,
-                    });
-                    label_parts.push(param_label);
-                }
-
-                if !sig.keyword_params.is_empty() {
-                    if !sig.positional_params.is_empty() {
-                        label_parts.push("; ".to_string());
-                    }
-                    for (i, kp) in sig.keyword_params.iter().enumerate() {
+                    for (i, p) in sig.positional_params.iter().enumerate() {
                         if i > 0 {
                             label_parts.push(", ".to_string());
                         }
                         let param_label =
-                            format!("{}: {}", kp.name, kp.ty.display_with_env(&state.types.env));
+                            format!("{}: {}", p.name, p.ty.display_with_env(&state.types.env));
                         params.push(ParameterInformation {
                             label: ParameterLabel::Simple(param_label.clone()),
                             documentation: None,
                         });
                         label_parts.push(param_label);
                     }
-                }
 
-                label_parts.push(")".to_string());
+                    if !sig.keyword_params.is_empty() {
+                        if !sig.positional_params.is_empty() {
+                            label_parts.push("; ".to_string());
+                        }
+                        for (i, kp) in sig.keyword_params.iter().enumerate() {
+                            if i > 0 {
+                                label_parts.push(", ".to_string());
+                            }
+                            let param_label = format!(
+                                "{}: {}",
+                                kp.name,
+                                kp.ty.display_with_env(&state.types.env)
+                            );
+                            params.push(ParameterInformation {
+                                label: ParameterLabel::Simple(param_label.clone()),
+                                documentation: None,
+                            });
+                            label_parts.push(param_label);
+                        }
+                    }
 
-                if !sig.ret.is_poison() {
-                    let ret_display = sig.ret.display_with_env(&state.types.env);
-                    label_parts.push(format!(" -> {ret_display}"));
+                    label_parts.push(")".to_string());
+
+                    if !sig.ret.is_poison() {
+                        let ret_display = sig.ret.display_with_env(&state.types.env);
+                        label_parts.push(format!(" -> {ret_display}"));
+                    }
+                } else {
+                    return None;
                 }
-            } else {
-                return None;
-            }
+            } // end if params.is_empty()
 
             let label = label_parts.concat();
 
@@ -1043,6 +1131,84 @@ impl LanguageServer for VxLanguageServer {
                 active_signature: Some(0),
                 active_parameter: active_param,
             })
+        });
+
+        Ok(result.flatten())
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = &params.text_document.uri;
+
+        let result = self.with_document(uri, |state| {
+            let mut actions: Vec<CodeActionOrCommand> = Vec::new();
+
+            for diag in &params.context.diagnostics {
+                // "prefix with _" quickfix for unused bindings/parameters
+                if diag.source.as_deref() == Some("vx-lint") && diag.message.starts_with("unused ")
+                {
+                    // Extract the name from the message: `unused binding: \`name\``
+                    if let Some(name) = diag.message.split('`').nth(1) {
+                        let new_name = format!("_{name}");
+                        let edit = TextEdit {
+                            range: diag.range,
+                            new_text: new_name.clone(),
+                        };
+                        let mut changes = std::collections::HashMap::new();
+                        changes.insert(uri.clone(), vec![edit]);
+                        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                            title: format!("Rename to `{new_name}`"),
+                            kind: Some(CodeActionKind::QUICKFIX),
+                            diagnostics: Some(vec![diag.clone()]),
+                            edit: Some(WorkspaceEdit {
+                                changes: Some(changes),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }));
+                    }
+                }
+
+                // "did you mean?" quickfix for unresolved names
+                if diag.source.as_deref() == Some("vx-resolve")
+                    && diag.message.starts_with("unresolved name")
+                {
+                    if let Some(name) = diag.message.split('`').nth(1) {
+                        // Compute offset for the diagnostic start
+                        let offset = state.line_index.offset(vx::Position {
+                            line: diag.range.start.line,
+                            col: diag.range.start.character,
+                        });
+                        if let Some(offset) = offset {
+                            let visible = state.resolution.scopes.visible_at(offset);
+                            // Find closest name by edit distance
+                            if let Some(suggestion) = closest_name(name, &visible) {
+                                let edit = TextEdit {
+                                    range: diag.range,
+                                    new_text: suggestion.clone(),
+                                };
+                                let mut changes = std::collections::HashMap::new();
+                                changes.insert(uri.clone(), vec![edit]);
+                                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                                    title: format!("Did you mean `{suggestion}`?"),
+                                    kind: Some(CodeActionKind::QUICKFIX),
+                                    diagnostics: Some(vec![diag.clone()]),
+                                    edit: Some(WorkspaceEdit {
+                                        changes: Some(changes),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if actions.is_empty() {
+                None
+            } else {
+                Some(actions)
+            }
         });
 
         Ok(result.flatten())
@@ -1657,6 +1823,61 @@ fn def_kind_to_symbol(kind: vx_resolve::DefKind) -> SymbolKind {
     }
 }
 
+/// Provide field completions inside a struct literal (e.g., `Foo { | }`).
+fn struct_literal_completions(
+    root: &vx::SyntaxNode,
+    offset: rowan::TextSize,
+    state: &DocumentState,
+) -> Option<Vec<CompletionItem>> {
+    let token = root.token_at_offset(offset).left_biased()?;
+
+    // Walk up to find enclosing STRUCT_LITERAL_EXPR
+    let mut node = Some(token.parent()?);
+    let mut struct_lit = None;
+    while let Some(n) = node {
+        if n.kind() == SyntaxKind::STRUCT_LITERAL_EXPR {
+            struct_lit = vx::StructLiteralExpr::cast(n);
+            break;
+        }
+        node = n.parent();
+    }
+    let struct_lit = struct_lit?;
+
+    // Get the struct name
+    let name_tok = struct_lit.name()?;
+    let name = name_tok.text().to_string();
+
+    // Resolve the struct type
+    let type_ids = state.types.env.lookup(&name);
+    let struct_def = type_ids.iter().find_map(|&id| match &state.types.env[id] {
+        vx_types::TypeDef::Struct(s) => Some(s),
+        _ => None,
+    })?;
+
+    // Collect already-present field names
+    let present: std::collections::HashSet<String> = struct_lit
+        .fields()
+        .filter_map(|f| f.name().map(|t| t.text().to_string()))
+        .collect();
+
+    // Suggest remaining fields
+    let items: Vec<CompletionItem> = struct_def
+        .fields
+        .iter()
+        .filter(|f| !present.contains(&f.name))
+        .map(|f| CompletionItem {
+            label: f.name.clone(),
+            kind: Some(CompletionItemKind::FIELD),
+            detail: Some(format!("{}", f.ty.display_with_env(&state.types.env))),
+            insert_text: Some(format!("{}: $0", f.name)),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        })
+        .collect();
+
+    if items.is_empty() { None } else { Some(items) }
+}
+
 /// Provide field/variant completions when the cursor is after a `.`.
 fn dot_completions(
     root: &vx::SyntaxNode,
@@ -1913,6 +2134,53 @@ fn keyword_completions() -> Vec<CompletionItem> {
             ..Default::default()
         })
         .collect()
+}
+
+/// Find the closest name to `target` among visible definitions (Levenshtein distance).
+/// Returns None if no name is within distance 2.
+fn closest_name(target: &str, visible: &[&vx_resolve::Definition]) -> Option<String> {
+    let mut best: Option<(usize, String)> = None;
+    for def in visible {
+        let dist = levenshtein(target, &def.name);
+        if dist > 0 && dist <= 2 {
+            if best.as_ref().is_none_or(|(d, _)| dist < *d) {
+                best = Some((dist, def.name.clone()));
+            }
+        }
+    }
+    // Also check builtins
+    for &name in vx_resolve::builtins::all_builtin_fn_names() {
+        let dist = levenshtein(target, name);
+        if dist > 0 && dist <= 2 {
+            if best.as_ref().is_none_or(|(d, _)| dist < *d) {
+                best = Some((dist, name.to_string()));
+            }
+        }
+    }
+    best.map(|(_, name)| name)
+}
+
+/// Simple Levenshtein distance.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (m, n) = (a.len(), b.len());
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in 0..=m {
+        dp[i][0] = i;
+    }
+    for j in 0..=n {
+        dp[0][j] = j;
+    }
+    for i in 1..=m {
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            dp[i][j] = (dp[i - 1][j] + 1)
+                .min(dp[i][j - 1] + 1)
+                .min(dp[i - 1][j - 1] + cost);
+        }
+    }
+    dp[m][n]
 }
 
 /// Check if an ARG node is a simple name reference matching the parameter name.
