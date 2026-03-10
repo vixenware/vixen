@@ -517,6 +517,12 @@ insert_anchor_links = "heading"
 > literal, a spread element must have type `Array[T]`. The type is
 > `Array[T]` where `T` is inferred from the elements.
 
+> r[expr.array.concat]
+>
+> `left ++ right` concatenates two arrays of the same element type and
+> returns a new array. Order is preserved. `++` is array-only; it is not
+> the merge operator for maps, records, trees, or streams.
+
 ### Map expressions
 
 > r[expr.map]

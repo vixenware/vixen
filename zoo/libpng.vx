@@ -142,8 +142,8 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
           "-o",
           @(out/{file}.o),
           "-I", @src,
-          ..includes.map ($ => ["-I", $]).flatten!,
-          ..defines.map ($ => `-D${$}`),
+          ..includes.map ["-I", $].flatten!,
+          ..defines.map `-D${$}`,
           ..common_cflags,
           ..flags,
         ] where {
@@ -212,7 +212,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
       "linux-aarch64" => libpng_arm_sources,
       "linux-x86_64" => libpng_intel_sources,
       "linux-ppc64le" => libpng_powerpc_sources,
-      "linux-mips64el" => [..libpng_mips_msa_sources, ..libpng_mips_mmi_sources],
+      "linux-mips64el" => libpng_mips_msa_sources ++ libpng_mips_mmi_sources,
       "linux-loongarch64" => libpng_loongarch_sources,
       _ => [],
     );
@@ -240,7 +240,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     };
 
   let libpng_objects =
-    compile_objects (libpng_src, [..libpng_core_sources, ..png_arch_sources]) where {
+    compile_objects (libpng_src, libpng_core_sources ++ png_arch_sources) where {
       generated: { @pnglibconf.h: pnglibconf_h },
       mounts: { @deps/zlib: zlib_install },
       includes: [@gen, @src, @deps/zlib/include],
