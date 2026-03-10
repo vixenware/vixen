@@ -411,9 +411,9 @@ insert_anchor_links = "heading"
 >
 > Built-in formats:
 >
-> - `Toml.parse[T](blob)` — TOML.
-> - `Json.parse[T](blob)` — JSON.
-> - `Yaml.parse[T](blob)` — YAML.
+> - `Toml.parse[T] blob` — TOML.
+> - `Json.parse[T] blob` — JSON.
+> - `Yaml.parse[T] blob` — YAML.
 >
 > All take a `Blob` and return a value of type `T`. Parsing poisons on
 > malformed input or type mismatches.
@@ -441,40 +441,44 @@ insert_anchor_links = "heading"
 
 > r[string.test]
 >
-> `.starts_with(s)`, `.ends_with(s)`, `.contains(s)`, `.is_empty()` — all
-> return `Bool`.
+> `s.starts_with prefix`, `s.ends_with suffix`, `s.contains needle`, and
+> `s.is_empty!` all return `Bool`.
 
 > r[string.split]
 >
-> `.split(sep)` returns `Array[String]`. `.split_once(sep)` returns
-> `Option[(String, String)]`. `.join(sep)` on an array joins elements.
-> `.lines()` splits by newline.
+> `s.split sep` returns `Array[String]`. `s.split_once sep` returns
+> `Option[(String, String)]`. `parts.join sep` on an array joins
+> elements. `s.lines!` splits by newline.
 
 > r[string.transform]
 >
-> `.trim()`, `.trim_start()`, `.trim_end()` strip whitespace.
-> `.to_upper()`, `.to_lower()` change case. `.replace(old, new)` replaces
-> all occurrences. `.replace_once(old, new)` replaces the first.
+> `s.trim!`, `s.trim_start!`, and `s.trim_end!` strip whitespace.
+> `s.to_upper!` and `s.to_lower!` change case. `s.replace (old, new)`
+> replaces all occurrences. `s.replace_once (old, new)` replaces the
+> first.
 
 > r[string.slice]
 >
-> `.len()` returns byte length. `.chars()` returns `Array[String]` of
-> Unicode grapheme clusters. `.slice(range)` returns a substring.
+> `s.len!` returns byte length. `s.chars!` returns `Array[String]` of
+> Unicode grapheme clusters. `s.slice range` returns a substring.
 
 > r[string.parse]
 >
-> `.parse_u64()`, `.parse_i64()`, `.parse_f64()` parse strings to numbers.
-> They poison on invalid input. The `?` suffix returns `Option` instead.
+> `s.parse_u64!`, `s.parse_i64!`, and `s.parse_f64!` parse strings to
+> numbers. They poison on invalid input. The fallible forms
+> `s.parse_u64!?`, `s.parse_i64!?`, and `s.parse_f64!?` return `Option`
+> instead.
 
 > r[string.regex]
 >
-> `.matches(pattern)` tests a regex. `.find_all(pattern)` returns all
-> matches. `.captures(pattern)` returns capture groups.
-> `.replace_regex(pattern, replacement)` replaces by regex.
+> `s.matches pattern` tests a regex. `s.find_all pattern` returns all
+> matches. `s.captures pattern` returns capture groups.
+> `s.replace_regex (pattern, replacement)` replaces by regex.
 
 > r[string.path-ops]
 >
-> `.strip_prefix(s)` and `.strip_suffix(s)` return `Option[String]`.
+> `s.strip_prefix prefix` and `s.strip_suffix suffix` return
+> `Option[String]`.
 
 ## Evaluation model
 

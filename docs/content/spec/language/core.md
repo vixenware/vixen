@@ -334,9 +334,9 @@ insert_anchor_links = "heading"
 > r[decl.fn]
 >
 > ```vixen
-> fn add(a: U64, b: U64) -> U64 {
+> fn add(a: U64, b: U64) -> U64 (
 >   a + b
-> }
+> )
 > ```
 >
 > Parameter types are always annotated. The return type may be omitted,
@@ -459,7 +459,7 @@ insert_anchor_links = "heading"
 > `match`, and nested interpolations:
 >
 > ```vixen
-> let msg = `found ${results.len()} results in ${elapsed}s`
+> let msg = `found ${results.len!} results in ${elapsed}s`
 > let label = `status: ${if ok ("pass") else ("fail")}`
 > ```
 >
@@ -494,17 +494,17 @@ insert_anchor_links = "heading"
 
 > r[expr.block]
 >
-> A block `{ stmt; stmt; expr }` is an expression. Statements are
+> A block `( stmt; stmt; expr )` is an expression. Statements are
 > separated by semicolons. The last expression in the block is its value.
 > A block ending with a statement (or empty) evaluates to `()`.
 > Declarations inside a block are scoped to that block.
 >
 > ```vixen
-> let area = {
+> let area = (
 >   let w = rect.width;
 >   let h = rect.height;
 >   w * h
-> }
+> )
 > ```
 
 ### Array expressions
@@ -702,14 +702,14 @@ insert_anchor_links = "heading"
 > In literals and update/spread expressions, when the same field or key
 > is provided more than once, the last occurrence wins. This applies
 > uniformly to struct literals, struct update (`with`) blocks, spread
-> syntax, map literals, and `.to_map()` with duplicate keys.
+> syntax, map literals, and `.to_map!` with duplicate keys.
 
 ### Closure expressions
 
 > r[expr.closure]
 >
 > Closures use arrow syntax only: `(x, y) => expr`. The body may be any
-> expression, including a block: `(x) => { let y = x + 1; y }`.
+> expression, including a block: `(x) => ( let y = x + 1; y )`.
 > `fn` is declaration-only.
 >
 > Parameter types are inferred from context. Closures capture bindings
@@ -722,8 +722,8 @@ insert_anchor_links = "heading"
 > is automatically wrapped in a closure:
 >
 > ```vixen
-> items.map ($ + 1)      // means: items.map((x) => x + 1)
-> files.map ($.utf8!)    // means: files.map((x) => x.utf8!)
+> items.map ($ + 1)      // means: items.map ((x) => x + 1)
+> files.map ($.utf8!)    // means: files.map ((x) => x.utf8!)
 > ```
 
 > r[expr.closure.dollar-numbered]
@@ -732,7 +732,7 @@ insert_anchor_links = "heading"
 > The highest numbered `$N` determines the closure's arity:
 >
 > ```vixen
-> items.reduce ($0 + $1)   // means: items.reduce((a, b) => a + b)
+> items.reduce ($0 + $1)   // means: items.reduce ((a, b) => a + b)
 > ```
 >
 > `$` and `$N` bind to the nearest enclosing function argument position
@@ -1102,8 +1102,9 @@ insert_anchor_links = "heading"
 
 > r[control.if]
 >
-> `if`/`else` works like in Rust — no parentheses around the condition,
-> braces required. `if`/`else` is an expression — it evaluates to a value.
+> `if`/`else` works like in Rust in the condition position — no
+> parentheses around the condition. Branch bodies are expressions,
+> commonly parenthesized blocks. `if`/`else` is itself an expression.
 
 ### match
 
@@ -1135,7 +1136,7 @@ insert_anchor_links = "heading"
 > r[control.match.tuple]
 >
 > `match` works on tuples:
-> `match (status, kind) { (0, "lib") => ..., (code, _) => ... }`.
+> `match (status, kind) ( (0, "lib") => ..., (code, _) => ... )`.
 
 > r[control.match.nested]
 >
@@ -1206,13 +1207,13 @@ insert_anchor_links = "heading"
 > `..name` binds the skipped elements as an `Array`:
 >
 > ```vixen
-> match items {
+> match items (
 >   [] => "empty",
 >   [only] => `just ${only}`,
 >   [first, ..] => `starts with ${first}`,
 >   [first, .., last] => `${first} to ${last}`,
 >   [_, second, ..rest] => use(second, rest),
-> }
+> )
 > ```
 
 > r[pattern.or]
@@ -1327,12 +1328,12 @@ insert_anchor_links = "heading"
 >
 > `$` is shorthand for the first argument of a closure. `$` works
 > anywhere in an expression, including in function arguments:
-> `items.map ($ + 1)` means `items.map((x) => x + 1)`.
+> `items.map ($ + 1)` means `items.map ((x) => x + 1)`.
 
 > r[fn.closure.numbered]
 >
 > `$` is `$0`. For multi-argument closures, use `$0`, `$1`, `$2`, etc.:
-> `items.reduce ($0 + $1)` means `items.reduce((a, b) => a + b)`.
+> `items.reduce ($0 + $1)` means `items.reduce ((a, b) => a + b)`.
 
 ## Methods and pipe
 
@@ -1580,7 +1581,7 @@ insert_anchor_links = "heading"
 > Arrays produced by stream collection operations are canonically
 > ordered using Vixen's universal total ordering. This applies to
 > `.to_array!`, group arrays in `.group_by`, and both arrays
-> returned by `.partition()`.
+> returned by `.partition pred`.
 
 > r[comb.map-combinators]
 >
@@ -1687,4 +1688,4 @@ insert_anchor_links = "heading"
 
 > r[stream.of]
 >
-> `Stream.of(value)` creates a single-element stream.
+> `Stream.of value` creates a single-element stream.

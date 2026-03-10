@@ -218,7 +218,7 @@ exec [cc, "-c", file] where common;
 The second form is possible because records are real values:
 
 ```vixen
-let common = { verifier, observer }
+let common = { verifier, observer };
 ```
 
 Record shorthand:
