@@ -1003,3 +1003,126 @@ fn main() {
         "expected at least 3 builtin refs (build, read_file, glob), got: {builtin_refs:?}"
     );
 }
+
+// --- Function parameter types from declared signatures ---
+
+#[test]
+fn fn_param_type_from_signature() {
+    let result = type_check_src(
+        r#"
+fn process(x: String) {
+    let len = x;
+}
+"#,
+    );
+    // x should have type String from the declared signature
+    assert!(
+        result
+            .expr_types
+            .values()
+            .any(|ty| matches!(ty, Ty::Scalar(vx_types::Scalar::String))),
+        "expected String type for x reference, got: {:?}",
+        result.expr_types
+    );
+}
+
+#[test]
+fn fn_keyword_param_type_from_signature() {
+    let result = type_check_src(
+        r#"
+fn process(; name: String) {
+    let n = name;
+}
+"#,
+    );
+    assert!(
+        result
+            .binding_types
+            .values()
+            .any(|ty| matches!(ty, Ty::Scalar(vx_types::Scalar::String))),
+        "expected String binding type for n, got: {:?}",
+        result.binding_types
+    );
+}
+
+// --- Interpolated string typing ---
+
+#[test]
+fn interpolated_string_is_string() {
+    let result = type_check_src(
+        r#"
+fn main() {
+    let s = `hello ${"world"}`;
+}
+"#,
+    );
+    assert!(
+        result
+            .binding_types
+            .values()
+            .any(|ty| matches!(ty, Ty::Scalar(vx_types::Scalar::String))),
+        "expected String binding type for interpolated string, got: {:?}",
+        result.binding_types
+    );
+}
+
+// --- Array element type inference ---
+
+#[test]
+fn array_infers_element_type() {
+    let result = type_check_src(
+        r#"
+fn main() {
+    let arr = [1, 2, 3];
+}
+"#,
+    );
+    assert!(
+        result
+            .binding_types
+            .values()
+            .any(|ty| matches!(ty, Ty::Array(inner) if matches!(inner.as_ref(), Ty::Scalar(vx_types::Scalar::U64)))),
+        "expected Array[U64] binding type, got: {:?}",
+        result.binding_types
+    );
+}
+
+#[test]
+fn array_of_strings() {
+    let result = type_check_src(
+        r#"
+fn main() {
+    let arr = ["a", "b"];
+}
+"#,
+    );
+    assert!(
+        result
+            .binding_types
+            .values()
+            .any(|ty| matches!(ty, Ty::Array(inner) if matches!(inner.as_ref(), Ty::Scalar(vx_types::Scalar::String)))),
+        "expected Array[String] binding type, got: {:?}",
+        result.binding_types
+    );
+}
+
+#[test]
+fn array_of_builtins() {
+    let result = type_check_src(
+        r#"
+fn main() {
+    build((path, args, env) => {
+        let blobs = [read_file("a"), read_file("b")];
+    });
+}
+"#,
+    );
+    assert!(
+        result
+            .binding_types
+            .values()
+            .any(|ty| matches!(ty, Ty::Array(inner) if matches!(inner.as_ref(), Ty::Builtin(Builtin::Blob)))),
+        "expected Array[Blob] binding type, got: {:?}",
+        result.binding_types
+    );
+}

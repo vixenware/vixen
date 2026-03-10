@@ -167,7 +167,7 @@ impl LanguageServer for VxLanguageServer {
                                     .iter()
                                     .map(|s| SemanticTokenType::new(s))
                                     .collect(),
-                                token_modifiers: vec![],
+                                token_modifiers: vec![SemanticTokenModifier::DEFAULT_LIBRARY],
                             },
                             full: Some(SemanticTokensFullOptions::Bool(true)),
                             range: None,
@@ -260,7 +260,19 @@ impl LanguageServer for VxLanguageServer {
     ) -> Result<Option<SemanticTokensResult>> {
         let data = self.with_document(&params.text_document.uri, |state| {
             let tokens = vx::semantic_tokens(&state.parsed.tree().syntax());
-            encode_semantic_tokens(&tokens, &state.line_index)
+            // Collect ranges of builtin references for modifier tagging
+            let builtin_ranges: std::collections::HashSet<rowan::TextRange> = state
+                .resolution
+                .refs
+                .iter()
+                .filter(|r| {
+                    r.target
+                        .as_ref()
+                        .is_ok_and(|d| d.kind == vx_resolve::DefKind::Builtin)
+                })
+                .map(|r| r.ref_range)
+                .collect();
+            encode_semantic_tokens(&tokens, &state.line_index, &builtin_ranges)
         });
         Ok(data.map(|data| {
             SemanticTokensResult::Tokens(SemanticTokens {
@@ -1467,6 +1479,7 @@ fn build_selection_range(state: &DocumentState, offset: Option<rowan::TextSize>)
 fn encode_semantic_tokens(
     tokens: &[vx::SemanticToken],
     line_index: &vx::LineIndex,
+    builtin_ranges: &std::collections::HashSet<rowan::TextRange>,
 ) -> Vec<tower_lsp::lsp_types::SemanticToken> {
     let mut result = Vec::with_capacity(tokens.len());
     let mut prev_line = 0u32;
@@ -1483,12 +1496,19 @@ fn encode_semantic_tokens(
             start.col
         };
 
+        // Bit 0 = defaultLibrary modifier
+        let modifiers = if builtin_ranges.contains(&token.range) {
+            1
+        } else {
+            0
+        };
+
         result.push(tower_lsp::lsp_types::SemanticToken {
             delta_line,
             delta_start,
             length: len,
             token_type: token.token_type as u32,
-            token_modifiers_bitset: 0,
+            token_modifiers_bitset: modifiers,
         });
 
         prev_line = start.line;

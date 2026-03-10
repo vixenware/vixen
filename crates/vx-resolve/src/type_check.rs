@@ -8,8 +8,8 @@ use std::collections::HashMap;
 
 use rowan::TextRange;
 use vx_parser::{
-    AstNode, BlockExpr, CallExpr, ClosureExpr, Expr, FieldExpr, IfExpr, LiteralExpr, NameRefExpr,
-    SourceFile, Stmt, SyntaxKind,
+    ArrayExpr, AstNode, BlockExpr, CallExpr, ClosureExpr, Expr, FieldExpr, IfExpr, LiteralExpr,
+    NameRefExpr, SourceFile, Stmt, SyntaxKind,
 };
 use vx_types::{Builtin, FnSig, Ty};
 
@@ -141,15 +141,16 @@ impl<'a> ExprTyper<'a> {
             Expr::Block(block) => self.infer_block(block),
             Expr::If(if_expr) => self.infer_if(if_expr),
             Expr::Closure(closure) => self.infer_closure(closure),
-            Expr::Array(arr) => {
-                // Infer element types but return Array[?]
-                for child in arr.syntax().children() {
+            Expr::InterpolatedString(interp) => {
+                // Infer types of interpolated expressions
+                for child in interp.syntax().children() {
                     if let Some(e) = Expr::cast(child) {
                         self.infer_expr(&e);
                     }
                 }
-                Ty::Array(Box::new(Ty::Poison))
+                Ty::Scalar(vx_types::Scalar::String)
             }
+            Expr::Array(arr) => self.infer_array(arr),
             _ => {
                 // Recurse into child expressions
                 for child in expr.syntax().children() {
@@ -243,11 +244,40 @@ impl<'a> ExprTyper<'a> {
         }
     }
 
-    fn find_fn_sig_for_param(&self, _def: &Definition) -> Option<Ty> {
-        // Parameter types from declared functions are in the FnSig.
-        // We'd need to match the parameter definition to its enclosing function,
-        // then look up the FnSig. For now, we rely on closure_param_types for
-        // callback params and FnSig for declared function params.
+    fn find_fn_sig_for_param(&self, def: &Definition) -> Option<Ty> {
+        // Walk up the scope chain from the parameter's scope to find its
+        // enclosing function scope, then look up the FnSig by matching the
+        // function's name range inside the scope's text range.
+        let scope_range = self.resolution.scopes.text_range(def.scope);
+        let scope_kind = self.resolution.scopes.scope_kind(def.scope);
+
+        // Parameters can be in Function or Closure scopes
+        if scope_kind != crate::scope::ScopeKind::Function {
+            return None;
+        }
+
+        // Find the FnSig whose name range is within this function scope's range
+        for (fn_name_range, sig) in &self.types.range_to_fn_sig {
+            if scope_range.contains_range(*fn_name_range) {
+                // Match by position in positional params
+                for (i, param) in sig.positional_params.iter().enumerate() {
+                    if param.name == def.name {
+                        if !param.ty.is_poison() {
+                            return Some(param.ty.clone());
+                        }
+                        // Also try matching by index if names differ
+                        let _ = i;
+                    }
+                }
+                // Match keyword params
+                for param in &sig.keyword_params {
+                    if param.name == def.name && !param.ty.is_poison() {
+                        return Some(param.ty.clone());
+                    }
+                }
+            }
+        }
+
         None
     }
 
@@ -349,59 +379,49 @@ impl<'a> ExprTyper<'a> {
         }
     }
 
-    /// Populate closure parameter types for known callback slots.
+    /// Populate closure parameter types for callback slots.
+    /// Derives parameter types from the FnSig of the callee.
     fn populate_callback_param_types(&mut self, call: &CallExpr, callee_name: &str) {
-        match callee_name {
-            "build" => {
-                // build(entry: (path, args, env) => ...)
-                let first_arg = call.args().next();
-                let first_expr = first_arg.as_ref().and_then(|a| a.expr());
-                if let Some(Expr::Closure(closure)) = first_expr.as_ref() {
-                    let param_types = &[
-                        Ty::Builtin(Builtin::Path),
-                        Ty::Array(Box::new(Ty::Scalar(vx_types::Scalar::String))),
-                        Ty::Map(
-                            Box::new(Ty::Scalar(vx_types::Scalar::String)),
-                            Box::new(Ty::Scalar(vx_types::Scalar::String)),
-                        ),
-                    ];
-                    self.bind_closure_params(closure, param_types);
+        let Some(sig) = builtin_fn_sig(callee_name) else {
+            return;
+        };
+
+        // Check positional args against function-typed parameters
+        for (arg, param) in call.args().zip(sig.positional_params.iter()) {
+            if let vx_types::Ty::Function(fn_ty) = &param.ty {
+                let arg_expr = arg.expr();
+                if let Some(Expr::Closure(closure)) = arg_expr.as_ref() {
+                    self.bind_closure_params(closure, &fn_ty.params);
                 }
             }
-            "exec" => {
-                for kw in call.keyword_args() {
-                    let Some(name) = kw.name() else { continue };
+        }
+
+        // Check keyword args against keyword-typed parameters
+        for kw in call.keyword_args() {
+            let Some(kw_name) = kw.name() else { continue };
+            // Check keyword params
+            let kw_param = sig.keyword_params.iter().find(|p| p.name == kw_name.text());
+            if let Some(kw_param) = kw_param {
+                if let vx_types::Ty::Function(fn_ty) = &kw_param.ty {
                     let kw_expr = kw.expr();
-                    let Some(Expr::Closure(closure)) = kw_expr.as_ref() else {
-                        continue;
-                    };
-                    match name.text() {
-                        "observer" => {
-                            self.bind_closure_params(
-                                closure,
-                                &[Ty::Builtin(Builtin::Process), Ty::Builtin(Builtin::Tree)],
-                            );
-                        }
-                        "verifier" => {
-                            self.bind_closure_params(closure, &[Ty::Builtin(Builtin::Host)]);
-                        }
-                        _ => {}
+                    if let Some(Expr::Closure(closure)) = kw_expr.as_ref() {
+                        self.bind_closure_params(closure, &fn_ty.params);
                     }
                 }
             }
-            "stabilize" => {
-                let args: Vec<_> = call.args().collect();
-                // Second positional arg: resolve callback gets witness result
-                if let Some(resolve_arg) = args.get(1) {
-                    let resolve_expr = resolve_arg.expr();
-                    if let Some(Expr::Closure(closure)) = resolve_expr.as_ref() {
-                        // The resolve callback receives the witness result
-                        // We don't know the witness type, so leave as Poison
-                        self.bind_closure_params(closure, &[Ty::Poison]);
+            // Also check positional params passed by keyword name
+            let pos_param = sig
+                .positional_params
+                .iter()
+                .find(|p| p.name == kw_name.text());
+            if let Some(pos_param) = pos_param {
+                if let vx_types::Ty::Function(fn_ty) = &pos_param.ty {
+                    let kw_expr = kw.expr();
+                    if let Some(Expr::Closure(closure)) = kw_expr.as_ref() {
+                        self.bind_closure_params(closure, &fn_ty.params);
                     }
                 }
             }
-            _ => {}
         }
     }
 
@@ -535,6 +555,19 @@ impl<'a> ExprTyper<'a> {
             self.infer_expr(&body);
         }
         Ty::Poison
+    }
+
+    fn infer_array(&mut self, arr: &ArrayExpr) -> Ty {
+        let mut element_ty = None;
+        for child in arr.syntax().children() {
+            if let Some(e) = Expr::cast(child) {
+                let ty = self.infer_expr(&e);
+                if !ty.is_poison() && element_ty.is_none() {
+                    element_ty = Some(ty);
+                }
+            }
+        }
+        Ty::Array(Box::new(element_ty.unwrap_or(Ty::Poison)))
     }
 }
 
