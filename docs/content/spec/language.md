@@ -26,7 +26,7 @@ insert_anchor_links = "heading"
 > includes closures (compared and hashed by their function identity and
 > captured values) and `F64` (which uses total ordering: `NaN == NaN`,
 > `NaN` sorts last, `-0.0 == +0.0`). All types have a universal total
-> ordering, which is what enables deterministic `.to_array()` on streams.
+> ordering, which is what enables deterministic `.to_array!` on streams.
 
 ## Conventions
 
@@ -103,10 +103,10 @@ insert_anchor_links = "heading"
 > - Function declarations
 >
 > `@` in pattern position (`name @ pattern`) is the binding operator,
-> not an attribute. `@` before a string or interpolated string literal
-> (`@"src"`, `` @`out/${name}` ``) is a path literal, not an attribute.
-> `@` before a call expression (`@f(args, ..)`) is partial application,
-> not an attribute. The parser distinguishes these by syntactic context.
+> not an attribute. `@` before a path literal (`@src/main.c`,
+> `@(out/{name}.o)`) is also distinct from attributes.
+> In patterns, `@name` remains a binding marker. The parser distinguishes
+> these by syntactic context.
 
 ### Semicolons
 
@@ -123,9 +123,8 @@ insert_anchor_links = "heading"
 > declarations, and function declarations; there is no file-level
 > trailing expression value.
 >
-> Semicolons also separate positional from keyword parameters and
-> arguments: `fn build(path: Path; release: Bool = false)` and
-> `build(path; release: true)`.
+> Semicolons do not separate positional from keyword arguments. Keyword
+> application uses `where`, as described in `r[expr.call.where]`.
 
 ### Operators and delimiters
 
@@ -141,19 +140,22 @@ insert_anchor_links = "heading"
 >
 > Range: `..`, `..=`.
 >
-> Arrow: `=>` (match arms, short closures, map entries), `->` (return
+> Arrow: `=>` (match arms, short closures), `->` (return
 > types).
 >
-> Dot: `.` (field access, UFCS function calls).
+> Dot: `.` (field and method navigation).
 >
-> Other: `?` (fallible suffix), `@` (pattern binding, attributes), `#` (capability
-> tags on function types), `:` (named slots — type annotations and field-value
-> pairs, always after an identifier), `::` (expression-level type ascription,
-> distinct from `as` conversion).
+> Pipe: `|>` (free-function / pipeline chaining).
+>
+> Other: `?` (fallible suffix), `!` (postfix zero-arg invocation), `@`
+> (path prefix, pattern binding, attributes), `#` (capability tags on
+> function types), `:` (named slots — type annotations and field-value
+> pairs), `::` (expression-level type ascription, distinct from `as`
+> conversion).
 
 > r[lex.delimiters]
 >
-> Delimiters: `(` `)`, `[` `]`, `{` `}`, `%{` (map literal opener).
+> Delimiters: `(` `)`, `[` `]`, `{` `}`, `%{` (legacy map literal opener).
 
 ### Numeric literals
 
@@ -177,7 +179,8 @@ insert_anchor_links = "heading"
 > r[lex.string.interpolation]
 >
 > Interpolated strings use backticks: `` `Hello ${name}` ``. Arbitrary
-> expressions are allowed inside `${ }`. There is no bare-identifier
+> expressions are allowed inside `${ }`. Each interpolation calls
+> `.to_string()` on the interpolated value. There is no bare-identifier
 > shorthand — `${ }` is the only interpolation syntax.
 
 ### Operator precedence
@@ -188,25 +191,31 @@ insert_anchor_links = "heading"
 >
 > | Precedence | Operators              | Associativity | Description                 |
 > |------------|------------------------|---------------|-----------------------------|
-> | 1          | `with`                 | none          | Struct update               |
-> | 2          | `\|\|`                 | left          | Logical OR                  |
-> | 3          | `&&`                   | left          | Logical AND                 |
-> | 4          | `==` `!=`              | left          | Equality                    |
-> | 5          | `<` `<=` `>` `>=`      | left          | Comparison                  |
-> | 6          | `..` `..=`             | none          | Range                       |
-> | 7          | `+` `-`                | left          | Additive                    |
-> | 8          | `*` `/` `%`            | left          | Multiplicative              |
-> | 9          | unary `-` `!`          | prefix        | Negation, logical NOT       |
-> | 10         | `as` `as?` `is` `::`   | left          | Type cast / test / ascription |
-> | 11         | `?`                    | postfix       | Fallible                    |
-> | 12         | `.`                    | left          | Field access / UFCS         |
-> | 13         | `()` `[]`              | postfix       | Call, index                 |
+> | 1          | `\|>`                  | left          | Pipe                        |
+> | 2          | `with`                 | none          | Struct update               |
+> | 3          | `\|\|`                 | left          | Logical OR                  |
+> | 4          | `&&`                   | left          | Logical AND                 |
+> | 5          | `==` `!=`              | left          | Equality                    |
+> | 6          | `<` `<=` `>` `>=`      | left          | Comparison                  |
+> | 7          | `..` `..=`             | none          | Range                       |
+> | 8          | `+` `-`                | left          | Additive                    |
+> | 9          | `*` `/` `%`            | left          | Multiplicative              |
+> | 10         | unary `-` `!`          | prefix        | Negation, logical NOT       |
+> | 11         | `as` `as?` `is` `::`   | left          | Type cast / test / ascription |
+> | 12         | application            | left          | Unary application           |
+> | 13         | postfix chain          | left          | `.name`, `!`, `?`, `[]`     |
 >
-> Assignment (`=`) is a statement, not an expression. `@` in
-> `@f(args, ..)` is a prefix modifier on call expressions, not a
-> standalone operator — it binds at the call level. `|` is not an
-> expression operator; it appears in type declarations (sum shorthand)
-> and in patterns (or-patterns).
+> Assignment (`=`) is a statement, not an expression. The postfix chain
+> associates left-to-right:
+>
+> ```vixen
+> x.y.z!    // means: (((x).y).z)!
+> x.y!.z!   // means: (((((x).y)!).z)!)
+> f x.y!    // means: f ((((x).y)!))
+> ```
+>
+> `|` is not an expression operator; it appears in type declarations
+> (sum shorthand) and in patterns (or-patterns).
 
 ## Declaration grammar
 
@@ -481,60 +490,78 @@ insert_anchor_links = "heading"
 
 > r[expr.map]
 >
-> Map literals use `%{ }` with `=>` separating keys from values:
+> Map literals use braces with general key expressions:
 >
 > ```vixen
-> let coords = %{ "lat" => 53.156, "lng" => 145.23 }
-> let port_names = %{ 80 => "http", 443 => "https" }
+> let outputs = { @bin/lua: lua_exe, @lib/liblua.a: liblua }
+> let port_names = { 80: "http", 443: "https" }
 > ```
 >
 > Keys and values are arbitrary expressions. Trailing commas are allowed.
-> The type is `Map[K, V]`.
+> The type is `Map[K, V]`. A braced literal whose entries are all bare
+> field labels is a record instead.
 
 ### Function call expressions
 
 > r[expr.call]
 >
-> `f(arg1, arg2)` calls a function with positional arguments. Trailing
-> commas are allowed. Keyword arguments follow positional arguments after
-> `;`:
+> Function application is unary. `f x` applies `f` to `x`. Chained
+> application is left-associative: `f x y` means `(f x) y`, not
+> `f(x, y)`.
+>
+> Tuple, array, and braced payloads are ordinary values, so these are all
+> just unary application:
 >
 > ```vixen
-> greet("Amos"; cheerful: true)
-> acquire(url; sha256: hash)
+> f x
+> f (x, y)
+> f [x, y]
+> f { ... }
 > ```
 >
-> Keyword arguments can appear in any order but must come after all
-> positional arguments.
-
-> r[expr.call.spread]
->
-> Spread syntax `..value` in keyword argument position expands a struct's
-> fields into keyword arguments. Only fields whose names match a keyword
-> parameter are used — extra fields are ignored. Order matters: explicit
-> keyword arguments after the spread override spread values.
+> To access a member on the result of an application, group the
+> application first:
 >
 > ```vixen
-> fn render(template: String; width: U64, height: U64, title: String) { ... }
->
-> let defaults = Config { width: 800, height: 600, title: "untitled", debug: true };
-> render("page.html", ..defaults; title: "Home")
-> // debug is ignored (not a keyword param), title is overridden
+> (discover_tool class).path
 > ```
 
-### Struct literal expressions
-
-> r[expr.struct-literal]
+> r[expr.call.where]
 >
-> `TypeName { field: value, field2: value2 }` constructs a struct. The
-> `:x` shorthand means `x: x` — reuses a binding as the field value.
-> Spread syntax `..other` copies remaining fields from another value.
-> Trailing commas are allowed.
+> Keyword application uses `where expr`, where `expr` evaluates to a
+> record-shaped value:
+>
+> ```vixen
+> exec [cc, "-c", file] where defaults
+> exec [cc, "-c", file] where { mounts: src }
+> ```
+
+> r[expr.call.where.spread]
+>
+> Record spread works inside keyword application. Spreads merge
+> left-to-right before keyword checking:
+>
+> ```vixen
+> exec [cc, "-c", file] where { ..common, mounts: src }
+> ```
+>
+> After merge, keyword matching is closed: unknown fields are an error,
+> and missing required keyword parameters are an error.
+
+### Named-field constructor expressions
+
+> r[expr.named-constructor]
+>
+> `TypeName { field: value, field2: value2 }` applies a named-field
+> constructor surface. For ordinary structs, the constructor is generated
+> from the struct declaration and accepts an anonymous record payload.
+> For enum variants, the constructor is generated from the variant
+> declaration and returns the variant-specific type, which widens to the
+> parent enum in checking contexts. The exact payload kind is part of
+> the constructor's type.
 >
 > ```vixen
 > let p = Point { x: 1.0, y: 2.0 }
-> let p2 = Point { :x, y: 2.0 }
-> let p3 = Point { ..p, y: 3.0 }
 > ```
 
 ### Index expressions
@@ -551,28 +578,36 @@ insert_anchor_links = "heading"
 >
 > `value.field` accesses a struct field by name. `tuple._0`, `tuple._1`
 > access tuple elements by position (underscore prefix avoids ambiguity
-> with float literals).
+> with float literals). When `field` names a zero-arg method,
+> `value.field` is the bound method value and `value.field!` invokes it.
+> `.` and postfix `!` form one left-associative postfix chain, so
+> `x.y.z!` means `(((x).y).z)!` and `x.y!.z!` means `(((((x).y)!).z)!)`.
 
 > r[expr.field.variant]
 >
-> `Enum.Variant` accesses a variant as a type under the enum's namespace.
-> `Shape.Circle` is a type — distinct from `Shape`. This is field access
-> on a type, not on a value. Variant types can be used to construct
-> values (`Shape.Circle { radius: 5.0 }`) or in type position.
+> `Enum.Variant` accesses a variant under the enum's namespace.
+> `Shape.Circle` names both the variant-specific type and the variant's
+> constructor value. `Shape.Circle { radius: 5.0 }` produces a
+> `Shape.Circle`, which widens to `Shape` in checking contexts.
 
-### UFCS expressions
+### Method navigation and pipe expressions
 
-> r[expr.ufcs]
+> r[expr.method]
 >
-> `x.f(args)` where `f` is not a field of `x` desugars to `f(x, args)`.
-> The dot operator tries field access first; if no field matches, it
-> rewrites to a function call with the left-hand side as the first
-> argument:
+> Dot access never falls back to arbitrary free functions. `x.f` means
+> field access or method lookup only. Methods live in `namespace Type {
+> ... }`; extensions live in import-scoped `extend Type { ... }`.
+>
+> Leading-dot forms are method adapters. `.name` yields a bound-method
+> adapter; `.name!` yields an adapter that invokes the zero-arg method.
+
+> r[expr.pipe]
+>
+> `|>` is the chaining form for free functions and pipeline transforms.
+> `_` inside a pipe RHS names the piped value:
 >
 > ```vixen
-> items.map($ + 1).filter($ > 3).to_array()
-> // desugars to:
-> to_array(filter(map(items, $ + 1), $ > 3))
+> cexec [ar, ...] |> cexec [ranlib, _]
 > ```
 
 ### Update expressions
@@ -622,9 +657,8 @@ insert_anchor_links = "heading"
 > is automatically wrapped in a closure:
 >
 > ```vixen
-> items.map($ + 1)          // means: items.map((x) => x + 1)
-> items.map(add($, 1))      // means: items.map((x) => add(x, 1))
-> items.filter($.len() > 3) // means: items.filter((x) => x.len() > 3)
+> items.map ($ + 1)      // means: items.map((x) => x + 1)
+> files.map ($.utf8!)    // means: files.map((x) => x.utf8!)
 > ```
 
 > r[expr.closure.dollar-numbered]
@@ -633,7 +667,7 @@ insert_anchor_links = "heading"
 > The highest numbered `$N` determines the closure's arity:
 >
 > ```vixen
-> items.reduce($0 + $1)   // means: items.reduce((a, b) => a + b)
+> items.reduce ($0 + $1)   // means: items.reduce((a, b) => a + b)
 > ```
 >
 > `$` and `$N` bind to the nearest enclosing function argument position
@@ -642,10 +676,10 @@ insert_anchor_links = "heading"
 >
 > ```vixen
 > // $ belongs to find, not map:
-> items.map(list.find($ == 2))
+> items.map (list.find ($ == 2))
 >
 > // To reference the map element, use a named closure:
-> items.map((item) => list.find($ == item))
+> items.map ((item) => list.find ($ == item))
 > // here $ is find's argument, item is map's argument
 > ```
 
@@ -653,41 +687,32 @@ insert_anchor_links = "heading"
 
 > r[expr.partial]
 >
-> `@f(args, ..)` partially applies a function, producing a new function
-> with some arguments bound. `..` marks where the remaining positional
-> arguments go and appears exactly once:
+> `partial f(...)` partially applies a function, producing a new function
+> with the written arguments bound. Omitted positional arguments remain
+> open, and unspecified keyword arguments remain open:
 >
 > ```vixen
-> let add_two = @add(2, ..)              // Fn(U64) -> U64
-> let double = @multiply(.., 2)          // Fn(U64) -> U64
-> let both = @clamp(0, .., 255)          // Fn(U64) -> U64
+> let add_two = partial add(2)
+> let loud_compile = partial compile where { loudly: true }
 > ```
 
 > r[expr.partial.keyword]
 >
-> Partial application can bind keyword arguments. Once bound, keyword
-> arguments are sealed — they cannot be overridden by the caller:
+> Partial application can bind keyword arguments through `where`. Bound
+> keyword arguments are sealed — they cannot be overridden by the caller:
 >
 > ```vixen
-> fn compile(src: String; optimize: Bool = false, loudly: Bool = false) { ... }
+> fn compile(src: String) where { optimize: Bool = false, loudly: Bool = false } { ... }
 >
-> let loud_compile = @compile(..; loudly: true)  // Fn(String) -> ...
+> let loud_compile = partial compile where { loudly: true }
 > // loudly is sealed at true, optimize uses its default
 > ```
 
 > r[expr.partial.passable]
 >
-> A function with keyword arguments cannot be passed as a value. Partial
-> application with `@` closes over keyword arguments, producing a plain
-> `Fn` that can be passed:
->
-> ```vixen
-> fn greet(name: String; cheerful: Bool = false) -> String { ... }
->
-> items.map(greet)                        // ERROR: greet has keyword args
-> items.map(@greet(..; cheerful: true))   // OK: Fn(String) -> String
-> items.map(@greet(..))                   // OK: cheerful uses default
-> ```
+> Functions with keyword arguments are first-class values. Partial
+> application is only needed to seal some keyword arguments, not to make
+> the function passable.
 
 ### Conditional expressions
 
@@ -769,8 +794,9 @@ insert_anchor_links = "heading"
 >
 > The `?` suffix catches poisoning and returns `Option` instead:
 > success becomes `Some`, failure becomes `None`. It applies to any
-> expression that may poison — function calls (`f(x)?`), UFCS calls
-> (`x.f()?`), and index expressions (`array[i]?`). The `as?` operator
+> expression that may poison — unary application (`(f x)?`), zero-arg
+> invocation (`value.method!?`), and index expressions (`array[i]?`).
+> The `as?` operator
 > follows the same pattern (see `r[type.as-fallible]`).
 
 ### Statements
@@ -988,11 +1014,10 @@ insert_anchor_links = "heading"
 
 > r[type.coerce.stringify]
 >
-> String interpolation (`` `${expr}` ``) calls `stringify(expr)`. The
-> `stringify` function is overloaded — built-in overloads exist for
-> scalar types (`U64`, `I64`, `F64`, `Bool`, `String`). User-defined
-> types must provide their own `fn stringify(x: MyType) -> String`
-> overload or interpolation is a compile error.
+> String interpolation (`` `${expr}` ``) calls `.to_string()` on the
+> interpolated value. Built-in scalar and path-like types provide
+> canonical `to_string()` methods. User-defined types participate by
+> defining `to_string(self) -> String` in their canonical namespace.
 
 > r[type.coerce.unit]
 >
@@ -1116,9 +1141,9 @@ insert_anchor_links = "heading"
 > ```vixen
 > match items {
 >   [] => "empty",
->   [only] => `just ${stringify(only)}`,
->   [first, ..] => `starts with ${stringify(first)}`,
->   [first, .., last] => `${stringify(first)} to ${stringify(last)}`,
+>   [only] => `just ${only}`,
+>   [first, ..] => `starts with ${first}`,
+>   [first, .., last] => `${first} to ${last}`,
 >   [_, second, ..rest] => use(second, rest),
 > }
 > ```
@@ -1155,10 +1180,9 @@ insert_anchor_links = "heading"
 >
 > Function types use `Fn(Args) -> Ret` syntax. Capability tags appear
 > between the parameter list and the return type arrow: `Fn(Args) #fs -> Ret`.
-> See `r[cap.model]`. Only functions with positional arguments can have their
-> type named. Functions with keyword arguments cannot be passed as values —
-> use partial application (`@`) to close over keyword arguments and produce
-> a passable `Fn`.
+> See `r[cap.model]`. Functions with keyword arguments are first-class;
+> keyword-parameter shape is part of the function's call surface rather
+> than a reason the function cannot be passed around.
 
 > r[fn.identity]
 >
@@ -1220,29 +1244,24 @@ insert_anchor_links = "heading"
 >
 > `$` is shorthand for the first argument of a closure. `$` works
 > anywhere in an expression, including in function arguments, enabling
-> partial application: `items.map(add($, 1))` means
+> partial application: `items.map (add($, 1))` means
 > `items.map((x) => add(x, 1))`.
 
 > r[fn.closure.numbered]
 >
 > `$` is `$0`. For multi-argument closures, use `$0`, `$1`, `$2`, etc.:
-> `items.reduce($0 + $1)` means `items.reduce((a, b) => a + b)`.
+> `items.reduce ($0 + $1)` means `items.reduce((a, b) => a + b)`.
 
-## UFCS
+## Methods and pipe
 
-> r[fn.ufcs]
+> r[fn.method]
 >
-> `x.f(args)` where `f` is not a field of `x` desugars to `f(x, args)`.
-> The dot operator tries field access first; if no field matches, it
-> rewrites to a function call with the left-hand side as the first
-> argument. This is the only call chaining mechanism — there is no pipe
-> operator and no methods.
+> Dot navigation is for fields and methods only. Vixen does not use
+> free-function UFCS. Methods live in type namespaces; free functions are
+> chained with `|>`.
 >
-> ```vixen
-> items.map($ + 1).filter($ > 3).to_array()
-> // desugars to:
-> to_array(filter(map(items, $ + 1), $ > 3))
-> ```
+> A leading-dot method adapter such as `.utf8!` or `.next!` denotes a
+> callable adapter value rather than immediate invocation.
 
 ## Function overloading
 
@@ -1265,20 +1284,41 @@ insert_anchor_links = "heading"
 
 > r[fn.constructor]
 >
-> A type name can be overloaded as a constructor function. The evaluator
-> distinguishes struct literal syntax (`Name { ... }`) from function call
-> syntax (`Name(...)`) by the delimiter:
+> A type name can be overloaded as a constructor function. Constructor
+> application uses the ordinary unary call model:
 >
 > ```vixen
-> struct Blob {
->   content: String,
-> }
+> Blob "hello"
+> Blob 42
+> Point { x: 1.0, y: 2.0 }
+> ```
 >
-> fn Blob(s: String) -> Blob { Blob { content: s } }
-> fn Blob(n: U64) -> Blob { Blob { content: n.to_string() } }
+> Named-field constructor surfaces are canonical for structs and
+> record-like enum variants. Struct constructors accept anonymous
+> structural record payloads. Variant constructors return the
+> variant-specific type and widen to the parent enum when needed.
+
+## Records
+
+> r[type.record]
 >
-> let b = Blob("hello")           // function call — constructor
-> let b2 = Blob { content: "x" }  // struct literal — direct construction
+> Anonymous records use braces with field labels:
+>
+> ```vixen
+> let common = { verifier, observer: make_observer() }
+> let pair = { left: 1, right: 2 }
+> ```
+>
+> A bare field name is shorthand for `name: name`. Records are real
+> values with structural types such as `{ left: U64, right: U64 }`.
+
+> r[type.record.spread]
+>
+> Record spread uses `..record` and merges left-to-right. Later explicit
+> fields override earlier spread-provided fields:
+>
+> ```vixen
+> let tuned = { ..defaults, optimize: true }
 > ```
 
 ## Arrays
@@ -1292,21 +1332,24 @@ insert_anchor_links = "heading"
 
 > r[collect.map]
 >
-> Map literals use `%{ }` with `=>` for entries:
+> Map literals also use braces, but with value keys rather than field
+> labels:
 >
 > ```vixen
-> let coords = %{ "lat" => 53.156, "lng" => 145.23 }
-> let port_names = %{ 80 => "http", 443 => "https" }
-> let build_flags = %{ target => flags_for(target) }
+> let outputs = { @bin/lua: lua_exe, @lib/liblua.a: liblua }
+> let port_names = { 80: "http", 443: "https" }
+> let build_flags = { (target): flags_for target }
 > ```
 >
 > The type is `Map[K, V]`. Keys can be any Vixen type — all types are
-> comparable for equality and hashable.
+> comparable for equality and hashable. A braced literal whose entries
+> are all bare field labels is a record; a braced literal with general
+> key expressions is a map.
 
 > r[collect.map.order]
 >
 > Maps are ordered by key using Vixen's universal total ordering.
-> Iterating a map (via combinators or `.keys()` / `.values()`) always
+> Iterating a map (via combinators or `.keys!` / `.values!`) always
 > produces entries in sorted key order. This makes map iteration
 > deterministic.
 
@@ -1323,33 +1366,33 @@ insert_anchor_links = "heading"
 > r[comb.model]
 >
 > There are no `for` loops in Vixen. Iteration is done through
-> combinators. `.map()` and `.filter()` always return `Stream`, whether
-> called on an Array, Map, or Stream. Every element is an independent
-> concurrent computation. Results are produced as they become available,
-> not in input order.
+> combinators. `.map` and `.filter` always return `Stream`, whether
+> called on an `Array`, `Map`, or `Stream`. Every element is an
+> independent concurrent computation. Results are produced as they become
+> available, not in input order.
 
 > r[comb.model.ordering]
 >
-> Because combinators always produce `Stream`, calling `.map(f)` on an
+> Because combinators always produce `Stream`, calling `.map f` on an
 > `Array` loses input order. The elements are processed concurrently
 > and the resulting stream is unordered. To recover a deterministic
-> array, call `.to_array()`, which sorts by universal total ordering —
+> array, call `.to_array!`, which sorts by universal total ordering —
 > not by the original input position. This means
-> `[3, 1, 2].map($ * 2).to_array()` returns `[2, 4, 6]`, not
+> `([3, 1, 2].map ($ * 2)).to_array!` returns `[2, 4, 6]`, not
 > `[6, 2, 4]`. This is a deliberate trade-off: concurrent fan-out and
 > canonical determinism over positional preservation.
 
 > r[comb.map]
 >
-> `.map(f)` applies `f` to each element and returns a `Stream` of results.
+> `.map f` applies `f` to each element and returns a `Stream` of results.
 
 > r[comb.filter]
 >
-> `.filter(pred)` returns a `Stream` of elements where `pred` is true.
+> `.filter pred` returns a `Stream` of elements where `pred` is true.
 
 > r[comb.find]
 >
-> `.find(pred)` returns the first element to resolve for which `pred`
+> `.find pred` returns the first element to resolve for which `pred`
 > is true. The result is `Option[T]`. If at most one element can satisfy
 > `pred`, the result is deterministic. Nondeterminism arises only when
 > multiple elements may satisfy `pred`, because any of them may resolve
@@ -1358,26 +1401,26 @@ insert_anchor_links = "heading"
 
 > r[comb.next]
 >
-> `.next()` returns the first element to resolve from a `Stream[T]`.
+> `.next!` returns the first element to resolve from a `Stream[T]`.
 > It poisons if the stream completes cleanly with no elements. The
-> fallible form `.next()?` returns `Option[T]` instead. If multiple
+> fallible form `.next!?` returns `Option[T]` instead. If multiple
 > elements may resolve, the chosen element is whichever resolves first.
-> Use `.next()` only when that race is semantically intended or when the
+> Use `.next!` only when that race is semantically intended or when the
 > stream is known to contain at most one element.
 
 > r[comb.fold]
 >
-> `.fold(init, f)` reduces all elements to a single value using an
+> `.fold (init, f)` reduces all elements to a single value using an
 > accumulator. Only available on `Array`, not on `Stream` — fold depends
 > on element order, which streams do not have.
 
 > r[comb.any]
 >
-> `.any(pred)` returns `true` if any element satisfies the predicate.
+> `.any pred` returns `true` if any element satisfies the predicate.
 
 > r[comb.all]
 >
-> `.all(pred)` returns `true` if all elements satisfy the predicate.
+> `.all pred` returns `true` if all elements satisfy the predicate.
 
 > r[comb.terminal-race]
 >
@@ -1396,13 +1439,13 @@ insert_anchor_links = "heading"
 
 > r[comb.flat-map]
 >
-> `.flat_map(f)` maps each element to a stream (or array) and flattens
-> the results into a single stream. `.flatten()` flattens a stream of
+> `.flat_map f` maps each element to a stream (or array) and flattens
+> the results into a single stream. `.flatten!` flattens a stream of
 > streams.
 
 > r[comb.merge]
 >
-> `.merge()` on `Stream[Tree]` waits for all trees and produces a single
+> `.merge!` on `Stream[Tree]` waits for all trees and produces a single
 > `Tree` containing all their entries. Relative paths must be disjoint:
 > if the same path appears in more than one input tree, the stream
 > poisons. This makes stream merging deterministic even though streams
@@ -1411,23 +1454,23 @@ insert_anchor_links = "heading"
 
 > r[comb.filter-map]
 >
-> `.filter_map(f)` maps and filters in one step — the function returns
+> `.filter_map f` maps and filters in one step — the function returns
 > `Option[T]`. `Some` values are produced, `None` values are skipped.
 
 > r[comb.reduce]
 >
-> `.reduce(f)` is like `.fold` but uses the first element as the initial
+> `.reduce f` is like `.fold` but uses the first element as the initial
 > accumulator. Only available on `Array`, not on `Stream` — use
-> `.to_array()` first.
+> `.to_array!` first.
 
 > r[comb.group-by]
 >
-> `.group_by(f)` groups elements by key function, returning
+> `.group_by f` groups elements by key function, returning
 > `Map[K, Array[T]]`.
 
 > r[comb.partition]
 >
-> `.partition(pred)` splits elements into two arrays by predicate,
+> `.partition pred` splits elements into two arrays by predicate,
 > returned as a tuple `(matching, non_matching)`.
 
 > r[comb.no-positional]
@@ -1440,9 +1483,9 @@ insert_anchor_links = "heading"
 
 > r[comb.collect]
 >
-> `.to_array()` converts a `Stream` back into an `Array`. It waits for
+> `.to_array!` converts a `Stream` back into an `Array`. It waits for
 > all elements to resolve, then sorts them using Vixen's universal total
-> ordering to produce a deterministic result. `.to_map()` converts a
+> ordering to produce a deterministic result. `.to_map!` converts a
 > stream of `(key, value)` pairs into a `Map`. Both are pending until
 > all elements resolve.
 
@@ -1450,13 +1493,13 @@ insert_anchor_links = "heading"
 >
 > Arrays produced by stream collection operations are canonically
 > ordered using Vixen's universal total ordering. This applies to
-> `.to_array()`, group arrays in `.group_by()`, and both arrays
+> `.to_array!`, group arrays in `.group_by`, and both arrays
 > returned by `.partition()`.
 
 > r[comb.map-combinators]
 >
-> Map combinators pass `(key, value)` pairs to the closure. `.keys()`
-> returns `Array[K]`, `.values()` returns `Array[V]`.
+> Map combinators pass `(key, value)` pairs to the closure. `.keys!`
+> returns `Array[K]`, `.values!` returns `Array[V]`.
 
 ## Option
 
@@ -1471,10 +1514,10 @@ insert_anchor_links = "heading"
 
 > r[option.methods]
 >
-> Option methods: `.unwrap_or(default)` provides a fallback value.
-> `.map(f)` transforms the inner value (`None` stays `None`).
-> `.and_then(f)` flat maps — `f` returns `Option`, the result is
-> flattened. `.is_some()` and `.is_none()` return `Bool`.
+> Option methods: `.unwrap_or default` provides a fallback value.
+> `.map f` transforms the inner value (`None` stays `None`).
+> `.and_then f` flat maps — `f` returns `Option`, the result is
+> flattened. `.is_some!` and `.is_none!` return `Bool`.
 
 ## The `as` operator
 
@@ -1519,7 +1562,8 @@ insert_anchor_links = "heading"
 > r[error.catch]
 >
 > The `?` suffix catches poisoning and returns `Option`. It applies to
-> function calls, UFCS calls, and index expressions. `f(x)?` returns
+> unary application, zero-arg invocation, and index expressions.
+> `(f x)?` returns
 > `None` on failure, `Some(result)` on success. The `?` suffix always
 > means "the fallible version that returns Option instead of poisoning."
 >
@@ -1536,19 +1580,19 @@ insert_anchor_links = "heading"
 > r[stream.unordered]
 >
 > Stream combinators do not impose ordering. Results are produced as they
-> become available, not in input order. `.map(f)` over a stream is
+> become available, not in input order. `.map f` over a stream is
 > concurrent — each application of `f` is an independent computation.
 
 > r[stream.determinism]
 >
 > Streams are nondeterministic in element arrival order. The transition
 > from unordered stream to ordered array is where determinism is
-> restored: `.to_array()` waits for all elements to resolve, then sorts
+> restored: `.to_array!` waits for all elements to resolve, then sorts
 > them using Vixen's universal total ordering (all values are comparable).
 > The result is a stable, deterministic `Array` regardless of which
 > elements resolved first.
 >
-> This means `[3, 2, 1].to_stream().to_array()` returns `[1, 2, 3]`.
+> This means `([3, 2, 1].to_stream!).to_array!` returns `[1, 2, 3]`.
 > For build systems, this is the right default — the collection of
 > artifacts is in a stable order before linking, regardless of which
 > compilation finished first. If a specific semantic order is needed
@@ -1564,13 +1608,14 @@ insert_anchor_links = "heading"
 > r[store.blob]
 >
 > `Blob` is a single file in the content-addressable store (keyed by
-> Blake3 hashes). `Blob.from_string(s)` creates a blob from a text
-> string. Blobs with binary content come from `exec`.
+> Blake3 hashes). `Blob(s)` creates a blob from a text string. Blobs
+> with binary content come from `exec`.
 
-> r[store.blob.to-string]
+> r[store.blob.utf8]
 >
-> `blob.to_string()` returns the blob's content interpreted as a UTF-8
-> string. Poisons if the content is not valid UTF-8.
+> `blob.utf8!` returns the blob's content interpreted as a UTF-8 string.
+> It poisons if the content is not valid UTF-8. `blob.utf8_lossy!`
+> always succeeds and replaces invalid sequences.
 
 > r[store.tree]
 >
@@ -1578,19 +1623,19 @@ insert_anchor_links = "heading"
 > There is no separate "local tree" vs "store tree" type — the runtime
 > handles materialization transparently.
 >
-> `Tree.of(map)` creates a tree from a map of names to entries.
-> `Tree.from_path(path)` creates a lazy tree handle rooted at a local
+> `Tree map` creates a tree from a map of paths to entries.
+> `Tree.from_path path` creates a lazy tree handle rooted at a local
 > filesystem path.
-> `Tree.empty()` is shorthand for `Tree.of(%{})`.
-> `.subtree(path)` selects a subtree. `.glob(pattern)` filters by glob.
-> `.merge(other)` merges two trees (later entries win). These operations
-> are lazy.
+> `Tree {}` is the empty tree.
+> `tree.subtree path` selects a subtree. `tree.glob pattern` filters by
+> glob. `tree.merge other` merges two trees (later entries win). These
+> operations are lazy.
 
 > r[store.tree.file]
 >
-> `tree.file(path)` returns the `Blob` at the given relative path
+> `tree.file path` returns the `Blob` at the given relative path
 > within the tree. Poisons if the path does not exist or points to a
-> directory. The fallible version `tree.file(path)?` returns
+> directory. The fallible version `(tree.file path)?` returns
 > `Option[Blob]`.
 
 > r[store.path]
@@ -1598,7 +1643,7 @@ insert_anchor_links = "heading"
 > `Path` is its own type at the language level, implemented as a
 > normalized slash-delimited path string rather than a plain `String`.
 > Root paths come from the build entry point, from `exec` mount keys,
-> and from path literals such as `@"src"` and `` @`out/${name}.o` ``.
+> and from path literals such as `@src` and `@(out/{name}.o)`.
 > Sub-paths are built with the `/` operator or with interpolated path
 > literals.
 >
@@ -1633,16 +1678,15 @@ insert_anchor_links = "heading"
 >
 > ```vixen
 > exec[T](
->   args: Array[ExecInput],
->   ;
->     env: Map[String, ExecInput] = %{},
->     mounts: Map[Path, Blob | Tree] = %{},
->     writable: Array[Path] = [],
->     executor: ExecutorClass = executor_class("default"),
->     verifier: Fn(Host) #host -> () = (_host) => {},
->     observer: Fn(Process, Tree) #sandbox -> Stream[T],
->   
-> ) -> Stream[T]
+>   args: Array[ExecInput]
+> ) where {
+>   env: Map[String, ExecInput] = {},
+>   mounts: Map[Path, Blob | Tree] = {},
+>   writable: Array[Path] = [],
+>   executor: ExecutorClass = executor_class("default"),
+>   verifier: Fn(Host) #host -> () = (_host) => (),
+>   observer: Fn(Process, Tree) #sandbox -> Stream[T],
+> } -> Stream[T]
 > ```
 
 > r[exec.arg]
@@ -1701,7 +1745,7 @@ insert_anchor_links = "heading"
 > directly is sugar for:
 >
 > ```vixen
-> InBlob { blob: some_blob, leaf: @"blob-<short-hash>" }
+> InBlob { blob: some_blob, leaf: @blob-<short-hash> }
 > ```
 >
 > The blob is mounted as a single-file tree and the process receives the
@@ -1714,8 +1758,8 @@ insert_anchor_links = "heading"
 > Interpolated path literals can preserve mount provenance:
 >
 > ```vixen
-> @`${tree}/include/lua.h`
-> // means: InTree { tree, suffix: @"include/lua.h" }
+> @({tree}/include/lua.h)
+> // means: InTree { tree, suffix: @include/lua.h }
 > ```
 >
 > If all interpolated values are `String` or `Path`, the result is a
@@ -1906,8 +1950,9 @@ insert_anchor_links = "heading"
 > fn discover_exec(
 >   class: ExecutorClass,
 >   args: Array[String],
->   { env: Map[String, String] = %{} },
-> ) -> DiscoveryProcess;
+> ) where {
+>   env: Map[String, String] = {},
+> } -> DiscoveryProcess;
 > ```
 >
 > `DiscoveryProcess` has `stdout: Blob`, `stderr: Blob`, and

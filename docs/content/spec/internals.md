@@ -5,7 +5,9 @@ insert_anchor_links = "heading"
 
 # Vixen Internals Specification
 
-How Vixen implements value semantics without copying everything.
+This chapter is implementation-facing. User-visible type semantics and
+surface APIs live in the language specification; internals only
+specifies runtime representation strategies and boundary mechanics.
 
 ## Persistent data structures
 
@@ -71,31 +73,37 @@ How Vixen implements value semantics without copying everything.
 > captured values are reference-counted handles, same as struct fields.
 > Cloning a closure is shallow.
 
-## Executor-side evaluation
+## Operational notes
 
-Observers and verifiers passed to `exec` are not host callbacks. The
-runtime lowers them into transportable evaluator payloads: code
-identity, lowered function body, and resolved captures.
-
-The orchestrator and executor share the same evaluator semantics. In a
-split-process implementation, that usually means both sides link the
-same evaluator crate. The executor reconstructs the shipped closure,
-binds it to executor-local values like `Process` and the sandbox `Tree`,
-and evaluates it there.
-
-When those executor-local values cross back to the orchestrator, they
-are first committed into the content-addressable store. The boundary
-carries store-backed `Blob` and `Tree` values, not raw executor
-filesystem paths.
-
-## Persistent data structures
-
-> i[impl.persistent]
+> i[impl.persistent.ops]
 >
 > Operations like `append` on arrays and `with` on structs are O(log n),
 > not O(n). They create a new path in the persistent structure, sharing
 > the unchanged parts. This makes idiomatic Vixen code (chains of `with`
 > updates, combinator pipelines) efficient by default.
+
+## Executor-side evaluation
+
+> i[impl.exec.shipped-closures]
+>
+> Observers and verifiers passed to `exec` are not host callbacks. The
+> runtime lowers them into transportable evaluator payloads: code
+> identity, lowered function body, and resolved captures.
+
+> i[impl.exec.shared-evaluator]
+>
+> The orchestrator and executor share the same evaluator semantics. In a
+> split-process implementation, that usually means both sides link the
+> same evaluator crate. The executor reconstructs the shipped closure,
+> binds it to executor-local values like `Process`, `Tree`, and `Host`,
+> and evaluates it there.
+
+> i[impl.exec.materialization]
+>
+> When executor-local `Blob` or `Tree` values cross back to the
+> orchestrator, the runtime first commits them into the
+> content-addressable store. The boundary carries store-backed content,
+> not raw executor filesystem handles.
 
 ## Cycle-free by design
 
