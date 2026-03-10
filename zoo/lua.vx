@@ -1,0 +1,109 @@
+// Lua build sketch
+//
+// This is a design sketch, not a parser-validated fixture. It lives next to
+// a local checkout of the Lua sources under `zoo/lua-src/`, which is ignored
+// by git.
+
+let core_sources = [
+  "lapi.c", "lcode.c", "lctype.c", "ldebug.c", "ldo.c", "ldump.c",
+  "lfunc.c", "lgc.c", "llex.c", "lmem.c", "lobject.c", "lopcodes.c",
+  "lparser.c", "lstate.c", "lstring.c", "ltable.c", "ltm.c",
+  "lundump.c", "lvm.c", "lzio.c", "ltests.c",
+];
+
+let aux_sources = ["lauxlib.c"];
+
+let lib_sources = [
+  "lbaselib.c", "ldblib.c", "liolib.c", "lmathlib.c", "loslib.c",
+  "ltablib.c", "lstrlib.c", "lutf8lib.c", "loadlib.c", "lcorolib.c",
+  "linit.c",
+];
+
+let all_lib_sources = [..core_sources, ..aux_sources, ..lib_sources];
+
+let cflags = ["-Wall", "-O2", "-std=c99", "-DLUA_USE_LINUX"];
+let ldflags = ["-Wl,-E"];
+let syslibs = ["-lm", "-ldl"];
+
+struct DiscoveredTool {
+  path: String,
+  hash: Blob,
+}
+
+fn discover_c_toolchain(class: ExecutorClass) -> {
+  cc: DiscoveredTool,
+  ar: DiscoveredTool,
+  ranlib: DiscoveredTool,
+} (
+  stabilize where {
+    witness: () => "c-toolchain-v1",
+    resolve: (_witness) => (
+      discover (class, (host) => (
+        let tool = (name) => (
+          let path = host.which name;
+          DiscoveredTool {
+            path,
+            hash: host.hash path,
+          }
+        );
+
+        {
+          cc: tool "cc",
+          ar: tool "ar",
+          ranlib: tool "ranlib",
+        }
+      ))
+    ),
+  }
+)
+
+fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree (
+  let src = Tree.from_path (ws / @zoo/lua-src);
+  let toolchain = discover_c_toolchain (executor_class "default");
+  let { cc, ar, ranlib } = toolchain;
+
+  let common = {
+    observer: (proc, vfs) => (
+      if proc.exit_code != 0 (
+        fail `process failed`
+      );
+
+      Stream.of (vfs.subtree @out)
+    ),
+  };
+
+  let cexec = (partial exec where common).then ($.next!);
+
+  fn compile(file: String) -> Tree (
+    cexec [
+      cc.path,
+      "-c",
+      ..cflags,
+      "-o",
+      @(out/obj/{file}.o),
+      @(src/{file}),
+    ] where {
+      mounts: { @src: src },
+    }
+  );
+
+  fn archive(objs: Tree) -> Tree (
+    let archived = cexec [ar.path, "rc", @out/liblua.a, ..objs];
+
+    cexec [ranlib.path, @out/liblua.a] where {
+      mounts: { @out: archived },
+    }
+  );
+
+  fn link(objs: Tree) -> Tree (
+    cexec [cc.path, "-o", @out/bin/lua, ..ldflags, ..objs, ..syslibs]
+  );
+
+  let liblua = archive ((all_lib_sources.map compile).merge!);
+  let lua_exe = link (Tree [compile "lua.c", liblua]);
+
+  Tree {
+    @bin/lua: lua_exe,
+    @lib/liblua.a: liblua,
+  }
+)

@@ -23,3 +23,6 @@ profile.json.gz
 .playwright-mcp
 
 fdprefix*
+
+# local sketch inputs
+zoo/lua-src/
