@@ -33,6 +33,7 @@ thread_local! {
 }
 
 const DEFAULT_MAX_DEMAND_DEPTH: usize = 1_024;
+const IMPLICIT_EXEC_MOUNT_PREFIX: &str = ".vx/implicit";
 
 enum BuildResult {
     Value(Value),
@@ -1164,7 +1165,7 @@ impl Engine {
         let args_value = self.force_value_shallow(args[0].clone())?;
         let Value::Array(exec_args_raw) = args_value else {
             return Err(self.type_error(&format!(
-                "exec expects Array[String | Path] for args, got {}",
+                "exec expects Array[String | Path | Blob | Tree] for args, got {}",
                 args_value.type_name()
             )));
         };
@@ -1195,12 +1196,12 @@ impl Engine {
             })
             .transpose()?;
 
-        let mounts = self.exec_mounts_from_value(mounts_value)?;
+        let mut mounts = self.exec_mounts_from_value(mounts_value)?;
         let writable_roots = self.exec_writable_from_value(writable_value)?;
-        let env = self.exec_env_from_value(env_value, &mounts, &writable_roots)?;
+        let env = self.exec_env_from_value(env_value, &mut mounts, &writable_roots)?;
         let exec_args = exec_args_raw
             .iter()
-            .map(|value| self.parse_exec_arg(value, &mounts, &writable_roots, "exec arg"))
+            .map(|value| self.parse_exec_arg(value, &mut mounts, &writable_roots, "exec arg"))
             .collect::<Result<Vec<_>, _>>()?;
         if exec_args.is_empty() {
             return Err(self.type_error("exec requires at least one program argument"));
@@ -1383,7 +1384,7 @@ impl Engine {
     fn exec_env_from_value(
         &self,
         value: Option<Value>,
-        mounts: &[(PathValue, Value)],
+        mounts: &mut Vec<(PathValue, Value)>,
         writable_roots: &[PathValue],
     ) -> Result<Vec<(String, ExecArgValue)>, PoisonError> {
         let Some(value) = value else {
@@ -1417,7 +1418,7 @@ impl Engine {
     fn parse_exec_arg(
         &self,
         value: &Value,
-        mounts: &[(PathValue, Value)],
+        mounts: &mut Vec<(PathValue, Value)>,
         writable_roots: &[PathValue],
         context: &str,
     ) -> Result<ExecArgValue, PoisonError> {
@@ -1434,11 +1435,108 @@ impl Engine {
                 }
                 Ok(ExecArgValue::Path(path))
             }
+            Value::Blob(blob) => Ok(ExecArgValue::Path(
+                self.ensure_blob_exec_mount(mounts, &blob),
+            )),
+            Value::Tree(tree) => Ok(ExecArgValue::Path(
+                self.ensure_tree_exec_mount(mounts, &tree),
+            )),
             other => Err(self.type_error(&format!(
-                "{context} must be String or Path, got {}",
+                "{context} must be String, Path, Blob, or Tree, got {}",
                 other.type_name()
             ))),
         }
+    }
+
+    // r[impl exec.arg.auto-mount]
+    fn ensure_tree_exec_mount(
+        &self,
+        mounts: &mut Vec<(PathValue, Value)>,
+        tree: &TreeValue,
+    ) -> PathValue {
+        let value = Value::Tree(tree.clone());
+        self.ensure_exec_mount(mounts, value, None)
+    }
+
+    // r[impl exec.arg.auto-mount]
+    fn ensure_blob_exec_mount(
+        &self,
+        mounts: &mut Vec<(PathValue, Value)>,
+        blob: &BlobValue,
+    ) -> PathValue {
+        let value = Value::Blob(blob.clone());
+        let leaf = self.exec_blob_leaf_name(blob);
+        self.ensure_exec_mount(mounts, value, Some(leaf))
+    }
+
+    // r[impl exec.mount]
+    fn ensure_exec_mount(
+        &self,
+        mounts: &mut Vec<(PathValue, Value)>,
+        value: Value,
+        leaf: Option<String>,
+    ) -> PathValue {
+        if let Some((path, _)) = mounts.iter().find(|(_, mounted)| *mounted == value) {
+            return path.clone();
+        }
+
+        let mount_root = self.next_exec_mount_root(mounts);
+        let mount_path = match leaf {
+            Some(leaf) => mount_root.join(&leaf),
+            None => mount_root,
+        };
+        mounts.push((mount_path.clone(), value));
+        mount_path
+    }
+
+    fn next_exec_mount_root(&self, mounts: &[(PathValue, Value)]) -> PathValue {
+        for index in 0usize.. {
+            let candidate = PathValue::new(format!("{IMPLICIT_EXEC_MOUNT_PREFIX}/{index}"));
+            if mounts
+                .iter()
+                .all(|(path, _)| !self.exec_paths_overlap(&candidate, path))
+            {
+                return candidate;
+            }
+        }
+        unreachable!("implicit exec mount path space is infinite")
+    }
+
+    fn exec_paths_overlap(&self, left: &PathValue, right: &PathValue) -> bool {
+        if left == right {
+            return true;
+        }
+        let left = left.as_str();
+        let right = right.as_str();
+        right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+            || left
+                .strip_prefix(right)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    }
+
+    fn exec_blob_leaf_name(&self, blob: &BlobValue) -> String {
+        match blob {
+            BlobValue::FsFile(path) => Path::new(path.as_str())
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| self.synthetic_blob_leaf(blob)),
+            BlobValue::Inline(_) | BlobValue::Store(_) => self.synthetic_blob_leaf(blob),
+        }
+    }
+
+    fn synthetic_blob_leaf(&self, blob: &BlobValue) -> String {
+        let digest = match blob {
+            BlobValue::Inline(bytes) => blake3::hash(bytes.as_ref()).to_hex().to_string(),
+            BlobValue::FsFile(path) => blake3::hash(path.as_str().as_bytes()).to_hex().to_string(),
+            BlobValue::Store(blob_ref) => blake3::hash(format!("{blob_ref:?}").as_bytes())
+                .to_hex()
+                .to_string(),
+        };
+        format!("blob-{}", &digest[..12])
     }
 
     fn render_exec_arg(

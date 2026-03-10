@@ -891,6 +891,107 @@ fn exec_verifiers_receive_host_access_locally() {
 }
 
 #[test]
+// r[verify exec.arg.auto-mount]
+fn exec_implicitly_mounts_blob_args() {
+    let engine = engine(
+        r#"fn observe(process: Process, tree: Tree) {
+               process.stdout.to_string()
+             }
+
+             fn build(input: Blob) {
+               exec(["/bin/cat", input]; observer: observe)
+             }"#,
+    );
+
+    let value = engine
+        .call(
+            "build",
+            vec![Value::Blob(BlobValue::from_string("hello blob"))],
+        )
+        .unwrap();
+
+    assert_eq!(value, Value::String(Arc::from("hello blob")));
+}
+
+#[test]
+// r[verify exec.arg.auto-mount]
+fn exec_implicitly_mounts_tree_args() {
+    let engine = engine(
+        r#"fn observe(process: Process, tree: Tree) {
+               process.stdout.to_string()
+             }
+
+             fn build(input: Tree) {
+               exec(
+                 ["/bin/sh", "-c", "cat \"$1/input.txt\"", "sh", input];
+                 observer: observe,
+               )
+             }"#,
+    );
+    let input = Value::Tree(TreeValue::Inline(Arc::from([(
+        Arc::from("input.txt"),
+        Value::Blob(BlobValue::from_string("hello tree")),
+    )])));
+
+    let value = engine.call("build", vec![input]).unwrap();
+
+    assert_eq!(value, Value::String(Arc::from("hello tree")));
+}
+
+#[test]
+// r[verify exec.arg.auto-mount]
+// r[verify exec.mount]
+fn exec_deduplicates_implicit_blob_mounts_in_host_requests() {
+    let captured = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let engine = engine(
+        r#"fn observe(process: Process, tree: Tree) {
+               process.exit_code
+             }
+
+             fn build(input: Blob) {
+               exec(["tool", input, input]; observer: observe)
+             }"#,
+    )
+    .with_exec_handler(Arc::new(move |request| {
+        *sink.lock().unwrap() = Some(request);
+        Ok(Value::U64(0))
+    }));
+
+    let value = engine
+        .call(
+            "build",
+            vec![Value::Blob(BlobValue::from_string("hello blob"))],
+        )
+        .unwrap();
+    assert_eq!(value, Value::U64(0));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("exec request should be captured");
+    assert_eq!(request.mounts.len(), 1);
+    assert_eq!(
+        request.mounts[0].value,
+        Value::Blob(BlobValue::from_string("hello blob"))
+    );
+
+    let [
+        ExecArgValue::Literal(program),
+        ExecArgValue::Path(first),
+        ExecArgValue::Path(second),
+    ] = request.args.as_slice()
+    else {
+        panic!("expected literal program plus two path args");
+    };
+    assert_eq!(program, "tool");
+    assert_eq!(first, second);
+    assert_eq!(&request.mounts[0].path, first);
+    assert!(first.as_str().starts_with(".vx/implicit/"));
+}
+
+#[test]
 fn exec_can_be_routed_through_a_host_handler() {
     let captured = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&captured);
