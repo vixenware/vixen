@@ -86,7 +86,6 @@ insert_anchor_links = "heading"
 > ) where {
 >   env: Map[String, ExecInput] = {},
 >   mounts: Map[Path, Blob | Tree] = {},
->   writable: Array[Path] = [],
 >   executor: ExecutorClass = executor_class "default",
 >   observer: Fn(Process, Tree) #sandbox -> T,
 > } -> T
@@ -189,26 +188,19 @@ insert_anchor_links = "heading"
 >
 > Explicit mounts map VFS paths (`Path`) to store content (`Blob` or
 > `Tree`). The content is available at the specified path in the sandbox
-> filesystem. All explicit mount paths are relative. Mounts are read-only
-> by default.
+> filesystem. All explicit mount paths are relative.
 >
-> Every plain `Path` that appears in `args` or `env` must be covered by
-> an explicit mount or writable root. `ExecPath` values carry their own
+> The sandbox filesystem is copy-on-write for the lifetime of one `exec`.
+> The process may write anywhere in its VFS namespace, including paths
+> backed by mounted content. Overwriting an input mutates only that
+> exec-local view; it does not mutate the original `Blob` or `Tree`
+> values or any shared cache entry. `ExecPath` values carry their own
 > mount obligations and are satisfied by implicit mounts. Repeated
 > references to the same `Tree` or `Blob` within one `exec` are mounted
 > once and reused. The actual path string seen by the process for an
 > implicit mount is the runtime-assigned synthetic mount root plus the
 > recorded suffix or leaf. If user code needs a stable, user-chosen VFS
 > path, it must use explicit `mounts`.
-
-> r[exec.writable]
->
-> `writable` lists VFS paths (`Path`) where the process is allowed to
-> write. These are empty directories created before the process starts.
-> The process can create files and subdirectories within them. The
-> observer can read written content from the VFS tree after the process
-> runs. Writable paths are scratch space — they have nothing to do
-> with store types.
 
 > r[exec.process]
 >

@@ -44,8 +44,6 @@ fn exec[T](
   env: Map[String, ExecInput] = {},
   /// Explicit VFS mounts, in addition to implicit mounts from args/env.
   mounts: Map[Path, Blob | Tree] = {},
-  /// Writable directories inside the sandbox.
-  writable: Array[Path] = [],
   /// Executor class on which to run the process.
   executor: ExecutorClass = executor_class "default",
   /// Executor-side observer evaluated with sandbox authority.

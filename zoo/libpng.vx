@@ -107,17 +107,21 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     flags: Array[String] = [],
     link: Bool = false,
   } -> Bool (
+    let mode_args =
+      if link (
+        ["-o", @out/probe]
+      ) else (
+        ["-c", "-o", @out/probe.o]
+      );
+
     exec [
       cc,
       "-x", "c",
       @probe.c,
-      if link ( @out/probe ) else ( "-c" ),
-      ..if link ( [] ) else ( ["-o", @out/probe.o] ),
-      ..if link ( ["-o", @out/probe] ) else ( [] ),
+      ..mode_args,
       ..flags,
     ] where {
       mounts: { @probe.c: source },
-      writable: [@out],
       observer: (proc, _vfs) => proc.exit_code == 0,
     }
   );
