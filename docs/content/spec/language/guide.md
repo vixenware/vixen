@@ -19,7 +19,8 @@ If this page and the spec disagree, the spec wins.
 The language is organized around a few core ideas:
 
 - Application is unary: `f x`, not `f(x)`.
-- Chained application is left-associative: `f x y` means `(f x) y`.
+- Chained application is left-associative: `f x y` means `(f x) y`, so
+  it only works when `f x` itself returns a callable.
 - Dot syntax is only for fields and methods, never free-function UFCS.
 - `where expr` is the only keyword-application form.
 - Records and maps both use braces, but they are different value kinds.
@@ -39,9 +40,22 @@ f { left: x, right: y }
 That means:
 
 ```vixen
-add 1 2
-distance (x1, y1) (x2, y2)
+add (1, 2)
+distance ((x1, y1), (x2, y2))
 Tree [compile @lua.c, liblua]
+```
+
+For ordinary declarations, a parameter list with more than one positional
+parameter is tuple-shaped sugar:
+
+```vixen
+fn add(a: U64, b: U64) -> U64
+```
+
+is called as:
+
+```vixen
+add (1, 2)
 ```
 
 To navigate the result of a call, group it first:

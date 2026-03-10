@@ -346,10 +346,25 @@ insert_anchor_links = "heading"
 > early exit. A function body that ends with a statement (including an
 > empty body) implicitly returns `()`.
 >
-> Multiple positional parameters define a curried unary call surface.
-> `fn add(a: U64, b: U64) -> U64` is called as `add 1 2`. A function
-> that takes one tuple payload instead uses an explicit tuple parameter:
-> `fn add_pair(pair: (U64, U64)) -> U64`, called as `add_pair (1, 2)`.
+> Function application is unary. A declaration with multiple positional
+> parameters is sugar for one tuple payload that is destructured by the
+> parameter list. So:
+>
+> ```vixen
+> fn add(a: U64, b: U64) -> U64
+> ```
+>
+> is called as:
+>
+> ```vixen
+> add (1, 2)
+> ```
+>
+> and is equivalent in call shape to:
+>
+> ```vixen
+> fn add_pair((a, b): (U64, U64)) -> U64
+> ```
 
 > r[decl.fn.nested]
 >
@@ -1215,16 +1230,14 @@ insert_anchor_links = "heading"
 > Fn(Path) where { mounts: Tree, loudly: Bool = false } -> Tree
 > ```
 >
-> Multiple positional parameter types describe a curried unary call
-> surface:
+> Multiple positional parameter types describe one tuple payload:
 >
 > ```vixen
 > Fn(U64, U64) -> U64
 > ```
 >
-> behaves like `Fn(U64) -> Fn(U64) -> U64` at application time.
-> By contrast, `Fn((U64, U64)) -> U64` accepts one tuple payload and is
-> called as `f (1, 2)`.
+> is called as `f (1, 2)`. `Fn((U64, U64)) -> U64` is the same call
+> shape, but spells the tuple payload explicitly in the parameter type.
 >
 > Functions with keyword arguments are first-class; keyword-parameter
 > shape is part of the function's call surface rather than a reason the
