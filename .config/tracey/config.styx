@@ -5,7 +5,10 @@
 specs (
     {
         name language
-        include (docs/content/spec/language.md)
+        include (
+            docs/content/spec/language/*.md
+            docs/content/spec/language/**/*.md
+        )
         impls (
             {
                 name rust
