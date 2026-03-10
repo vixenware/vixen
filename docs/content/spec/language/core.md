@@ -160,7 +160,7 @@ insert_anchor_links = "heading"
 
 > r[lex.delimiters]
 >
-> Delimiters: `(` `)`, `[` `]`, `{` `}`, `%{` (legacy map literal opener).
+> Delimiters: `(` `)`, `[` `]`, `{` `}`.
 
 ### Numeric literals
 
@@ -377,13 +377,13 @@ insert_anchor_links = "heading"
 > to the whole pattern:
 >
 > ```vixen
-> fn distance((x1, y1): (F64, F64), (x2, y2): (F64, F64)) -> F64 {
->   ((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1)).sqrt()
-> }
+> fn distance((x1, y1): (F64, F64), (x2, y2): (F64, F64)) -> F64 (
+>   ((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1)).sqrt!
+> )
 >
-> fn greet({ first, last }: Name) -> String {
+> fn greet({ first, last }: Name) -> String (
 >   `Hello ${first} ${last}`
-> }
+> )
 > ```
 
 > r[decl.fn.generic]
@@ -391,9 +391,9 @@ insert_anchor_links = "heading"
 > Generic parameters use square brackets after the function name:
 >
 > ```vixen
-> fn first[T](items: Array[T]) -> T {
+> fn first[T](items: Array[T]) -> T (
 >   items[0]
-> }
+> )
 > ```
 
 > r[decl.fn.keyword-args]
@@ -406,9 +406,9 @@ insert_anchor_links = "heading"
 > ```vixen
 > fn greet(name: String) where {
 >   cheerful: Bool = false,
-> } -> String {
->   if cheerful { `Hey ${name}!!!` } else { `Hello ${name}` }
-> }
+> } -> String (
+>   if cheerful (`Hey ${name}!!!`) else (`Hello ${name}`)
+> )
 >
 > greet "Amos" where { cheerful: true }
 > ```
@@ -460,7 +460,7 @@ insert_anchor_links = "heading"
 >
 > ```vixen
 > let msg = `found ${results.len()} results in ${elapsed}s`
-> let label = `status: ${if ok { "pass" } else { "fail" }}`
+> let label = `status: ${if ok ("pass") else ("fail")}`
 > ```
 >
 > There is no bare-identifier shorthand — `${ }` is the only
@@ -768,7 +768,7 @@ insert_anchor_links = "heading"
 > keyword arguments are sealed — they cannot be overridden by the caller:
 >
 > ```vixen
-> fn compile(src: String) where { optimize: Bool = false, loudly: Bool = false } { ... }
+> fn compile(src: String) where { optimize: Bool = false, loudly: Bool = false } ( ... )
 >
 > let loud_compile = partial compile where { loudly: true }
 > // loudly is sealed at true, optimize uses its default
@@ -784,8 +784,8 @@ insert_anchor_links = "heading"
 
 > r[expr.if]
 >
-> `if condition { then_body } else { else_body }`. No parentheses around
-> the condition, braces required around both branches. `else if` chains
+> `if condition ( then_body ) else ( else_body )`. No parentheses around
+> the condition; parentheses delimit both branches. `else if` chains
 > are allowed. `if` is always an expression, so `else` is always
 > required.
 
@@ -794,23 +794,23 @@ insert_anchor_links = "heading"
 > r[expr.match]
 >
 > ```vixen
-> match value {
+> match value (
 >   pattern => expr,
 >   pattern if guard => expr,
 >   _ => default_expr,
-> }
+> )
 > ```
 >
 > Arms are comma-separated. Each arm is `pattern => expr` with an optional
 > `if guard` between the pattern and the arrow. Arms can use block bodies:
-> `pattern => { stmts; expr }`. `match` must be exhaustive — every
+> `pattern => ( stmts; expr )`. `match` must be exhaustive — every
 > possible value must be covered. A wildcard `_` catches everything else.
 
 ### Import expressions
 
 > r[expr.import]
 >
-> `import("path")` loads a module and makes its exported names available
+> `import "path"` loads a module and makes its exported names available
 > as a namespace. The argument is a string literal — not a general
 > expression. The result supports dot access and destructuring but is
 > not a first-class value.
@@ -849,9 +849,9 @@ insert_anchor_links = "heading"
 > `if` body:
 >
 > ```vixen
-> if config.edition is Some { value: edition } {
->   use_edition(edition)
-> }
+> if config.edition is Some { value: edition } (
+>   use_edition edition
+> )
 > ```
 
 ### Fallible expressions
@@ -885,24 +885,24 @@ insert_anchor_links = "heading"
 
 > r[lang.modules.namespace]
 >
-> Modules are namespaces, not runtime values. `import("path")` makes
+> Modules are namespaces, not runtime values. `import "path"` makes
 > the module's exported names available. There is no first-class
 > `Module` object that can be stored in a binding, passed to a function,
 > or compared for equality.
 
 > r[lang.modules.access]
 >
-> Access module contents with dots: `std.rust.workspace(src, args, env)`.
+> Access module contents with dots: `std.rust.workspace (src, args, env)`.
 > Destructuring binds names from the namespace:
-> `{ rust } = import("std")`.
+> `{ rust } = import "std"`.
 
 > r[lang.modules.sources]
 >
 > Three kinds of module sources:
 >
 > - **Local files** — paths starting with `./` are relative to the current
->   file: `import("./lib/helpers")` loads `./lib/helpers.vx`.
-> - **Standard library** — `import("std")` loads the built-in standard
+>   file: `import "./lib/helpers"` loads `./lib/helpers.vx`.
+> - **Standard library** — `import "std"` loads the built-in standard
 >   library.
 > - **External packages** — resolution of non-local, non-std imports is a
 >   future concern. The mechanism is the same: `import` returns a module
@@ -1151,18 +1151,18 @@ insert_anchor_links = "heading"
 > `is` is an expression that evaluates to `Bool`.
 >
 > ```vixen
-> if config.edition is Some { value: edition } {
->   use_edition(edition)
-> } else {
->   use_default()
-> }
+> if config.edition is Some { value: edition } (
+>   use_edition edition
+> ) else (
+>   use_default!
+> )
 > ```
 
 ### Block expressions
 
 > r[control.block]
 >
-> A block `{ ... }` is an expression. The last expression in the block is
+> A block `( ... )` is an expression. The last expression in the block is
 > its value. Bindings inside a block are scoped to that block. Blocks
 > replace `let`/`in` and `where` clauses from other languages.
 
