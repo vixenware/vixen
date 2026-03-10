@@ -11,9 +11,9 @@ use tokio::task::spawn_blocking;
 use tracing::{debug, info};
 use vx_eval::PathValue;
 use vx_runner_proto::{
-    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RunArg, RunFailureKind,
-    RunFileMount, RunOutput, RunRequest, RunResult, RunTreeMount, RustCompileRequest,
-    RustCompileResult, TransportValue,
+    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, DiscoverRequest,
+    DiscoverResult, RunArg, RunFailureKind, RunFileMount, RunOutput, RunRequest, RunResult,
+    RunTreeMount, RustCompileRequest, RustCompileResult, TransportValue,
 };
 use vx_store_proto::{
     Blake3Hash, CasNode, ChunkHash, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry,
@@ -21,7 +21,9 @@ use vx_store_proto::{
 };
 
 use crate::RunnerService;
-use crate::eval_boundary::{evaluate_shipped_observer, evaluate_shipped_verifier};
+use crate::eval_boundary::{
+    evaluate_shipped_discover, evaluate_shipped_observer, evaluate_shipped_verification,
+};
 use crate::sandbox::{ActionKind, CommandError};
 
 fn is_relative_vfs_path(path: &str) -> bool {
@@ -187,6 +189,11 @@ impl ActionContext {
 }
 
 impl RunnerService {
+    pub async fn discover_vfs(&self, request: DiscoverRequest) -> Result<DiscoverResult, String> {
+        let value = evaluate_shipped_discover(self.cas.as_ref(), &request).await?;
+        Ok(DiscoverResult { value })
+    }
+
     // r[impl exec.arg]
     fn expand_run_arg(arg: &RunArg, toolchain_path: Option<&str>) -> String {
         let expanded = match toolchain_path {
@@ -1646,11 +1653,12 @@ impl RunnerService {
         } else {
             ActionKind::CcLink
         };
-        let verifier_task = request
+        let verification_task = request
             .eval
             .as_ref()
-            .and_then(|eval| eval.verifier.as_ref().map(|_| eval.clone()))
-            .map(|eval| spawn_blocking(move || evaluate_shipped_verifier(&eval)));
+            .filter(|eval| !eval.verification_obligations.is_empty())
+            .cloned()
+            .map(|eval| spawn_blocking(move || evaluate_shipped_verification(&eval)));
 
         let output = match crate::sandbox::run_sandboxed_command(
             cmd,
@@ -1727,7 +1735,7 @@ impl RunnerService {
             None => Ok(None),
         };
 
-        let verifier_error = match verifier_task {
+        let verification_error = match verification_task {
             Some(task) => match task.await {
                 Ok(Ok(())) => None,
                 Ok(Err(error)) => Some(error),
@@ -1738,15 +1746,15 @@ impl RunnerService {
                         exit_code,
                         output.stdout.clone(),
                         output.stderr.clone(),
-                        Some(format!("failed to join shipped verifier task: {error}")),
+                        Some(format!("failed to join exec verification task: {error}")),
                     );
                 }
             },
             None => None,
         };
 
-        if let Some(error) = verifier_error {
-            let mut message = format!("shipped verifier failed: {error}");
+        if let Some(error) = verification_error {
+            let mut message = format!("exec verification failed: {error}");
             if let Err(observer_error) = &observer_result {
                 message.push_str("\nobserver error:\n");
                 message.push_str(observer_error);

@@ -96,8 +96,6 @@ pub enum Builtin {
     Host,
     /// An executor class descriptor.
     ExecutorClass,
-    /// A discovery process result.
-    DiscoveryProcess,
 }
 
 /// Scalar types built into the language.

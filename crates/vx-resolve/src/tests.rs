@@ -452,7 +452,8 @@ fn pure_closure_satisfies_any_mask() {
 fn main() {
     build ((path, args, env) => path);
     stabilize (() => "w") ((w) => "r");
-    exec (["echo"]) where { observer: (proc, tree) => [], verifier: (host) => {} };
+    exec (["echo"]) where { observer: (proc, tree) => [] };
+    discover (executor_class "default") ((host) => ());
 }
 "#,
     );
@@ -500,15 +501,16 @@ fn main() {
     }
 }
 
-// r[exec.discover.verifier] — verifier that uses discover_exec is rejected
+// r[exec.discover.observer] — observer that uses discover is rejected
 #[test]
-fn verifier_using_discover_rejected() {
+fn observer_using_discover_rejected() {
     let result = check_caps(
         r#"
 fn main() {
     exec (["gcc"]) where {
-        verifier: (host) => {
-            discover_exec "default" (["gcc", "--version"]);
+        observer: (proc, tree) => {
+            discover (executor_class "default") ((host) => host.which "gcc");
+            []
         },
     };
 }
@@ -519,7 +521,7 @@ fn main() {
         CapErrorKind::CapabilityViolation {
             slot_name, excess, ..
         } => {
-            assert_eq!(slot_name, "exec verifier");
+            assert_eq!(slot_name, "exec observer");
             assert!(
                 excess.names().contains(&"discover"),
                 "excess should contain #discover: {excess}"
@@ -648,7 +650,7 @@ fn build_entry_cannot_discover() {
         r#"
 fn main() {
     build ((path, args, env) => {
-        discover_exec "default" (["gcc", "--version"]);
+        discover (executor_class "default") ((host) => host.which "gcc");
         path
     });
 }
@@ -749,29 +751,27 @@ fn find_expr_type(result: &crate::TypeCheckResult, src: &str, needle: &str) -> O
         .map(|(_, ty)| ty.clone())
 }
 
-// r[type.builtin.discover_exec] — discover_exec returns DiscoveryProcess
+// r[type.builtin.discover] — discover returns the probe body type
 #[test]
-fn discover_exec_returns_discovery_process() {
+fn discover_returns_probe_type() {
     let src = r#"
 fn probe() #discover {
-    discover_exec "default" (["gcc", "--version"])
+    discover (executor_class "default") ((host) => host.which "gcc")
 }
 "#;
     let result = type_check(src);
-    let ty = find_expr_type(&result, src, r#"discover_exec "default""#);
-    assert_eq!(ty, Some(Ty::Builtin(Builtin::DiscoveryProcess)));
+    let ty = find_expr_type(&result, src, r#"discover (executor_class "default")"#);
+    assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::String)));
 }
 
-// r[exec.verifier.host] — host.read(...) returns Blob
+// r[exec.discover.host] — host.read(...) returns Blob
 #[test]
 fn host_read_returns_blob() {
     let src = r#"
 fn main() {
-    exec (["echo"]) where {
-        verifier: (host) => {
-            host.read "foo"
-        },
-    };
+    discover (executor_class "default") ((host) => {
+        host.read "foo"
+    })
 }
 "#;
     let result = type_check(src);
@@ -779,20 +779,33 @@ fn main() {
     assert_eq!(ty, Some(Ty::Builtin(Builtin::Blob)));
 }
 
-// r[exec.verifier.host] — host.which(...) returns String?
+// r[exec.discover.host] — host.which(...) returns String
 #[test]
-fn host_which_returns_optional_string() {
+fn host_which_returns_string() {
     let src = r#"
 fn main() {
-    exec (["echo"]) where {
-        verifier: (host) => {
-            host.which "gcc"
-        },
-    };
+    discover (executor_class "default") ((host) => {
+        host.which "gcc"
+    })
 }
 "#;
     let result = type_check(src);
     let ty = find_expr_type(&result, src, r#"host.which "gcc""#);
+    assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::String)));
+}
+
+// r[exec.discover.host] — host.which?(...) returns String?
+#[test]
+fn host_which_fallible_returns_optional_string() {
+    let src = r#"
+fn main() {
+    discover (executor_class "default") ((host) => {
+        host.which? "gcc"
+    })
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, r#"host.which? "gcc""#);
     assert_eq!(
         ty,
         Some(Ty::Optional(Box::new(Ty::Scalar(vx_types::Scalar::String))))
@@ -822,11 +835,9 @@ fn main() {
 fn host_read_int_arg_type_error() {
     let src = r#"
 fn main() {
-    exec (["echo"]) where {
-        verifier: (host) => {
-            host.read 123
-        },
-    };
+    discover (executor_class "default") ((host) => {
+        host.read 123
+    })
 }
 "#;
     let result = type_check(src);
@@ -884,14 +895,12 @@ fn main() {
     assert_eq!(ty, Some(Ty::Builtin(Builtin::ExecutorClass)));
 }
 
-// r[type.verifier.host_param] — verifier callback host param is typed Host
+// r[type.discover.host_param] — discover callback host param is typed Host
 #[test]
-fn verifier_host_param_typed() {
+fn discover_probe_host_param_typed() {
     let src = r#"
 fn main() {
-    exec (["echo"]) where {
-        verifier: (host) => host,
-    };
+    discover (executor_class "default") ((host) => host)
 }
 "#;
     let result = type_check(src);
@@ -928,12 +937,12 @@ fn main() {
 
 #[test]
 fn cap_check_derives_discover_from_builtin_sig() {
-    // discover_exec has #discover — should be rejected in a #fs slot
+    // discover has #discover — should be rejected in a #fs slot
     let result = check_caps(
         r#"
 fn main() {
     build ((path, args, env) => {
-        discover_exec "gcc" (["gcc"]);
+        discover (executor_class "gcc") ((host) => host.which "gcc");
     });
 }
 "#,
@@ -955,20 +964,14 @@ fn cap_check_method_caps_from_builtin_method() {
     // host.which has #host capability from MethodSig
     let result = check_caps(
         r#"
-fn main() {
-    exec (["gcc"]) where {
-        observer: (proc, tree) => {
-            proc.exit_code!;
-            []
-        },
-        verifier: (host) => {
+fn probe() #discover {
+    discover (executor_class "default") ((host) => {
             host.which "gcc";
-        },
-    };
+        });
 }
 "#,
     );
-    // verifier allows #host, so this should pass
+    // discover probe allows #host, so this should pass
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 }
 

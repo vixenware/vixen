@@ -1,6 +1,7 @@
 use vx_runner_proto::{
-    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, RUNNER_PROTOCOL_VERSION,
-    RunRequest, RunResult, Runner, RustCompileRequest, RustCompileResult,
+    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, DiscoverRequest,
+    DiscoverResult, RUNNER_PROTOCOL_VERSION, RunRequest, RunResult, Runner, RustCompileRequest,
+    RustCompileResult,
 };
 use vx_store_proto::{ServiceVersion, StoreProgress};
 
@@ -45,6 +46,12 @@ impl RunnerService {
             .named("runner.run_vfs")
             .await
     }
+
+    async fn discover(&self, request: DiscoverRequest) -> Result<DiscoverResult, String> {
+        self.discover_vfs(request)
+            .named("runner.discover_vfs")
+            .await
+    }
 }
 
 impl Runner for RunnerService {
@@ -78,5 +85,9 @@ impl Runner for RunnerService {
 
     async fn run(&self, request: RunRequest, progress: roam::Tx<StoreProgress>) -> RunResult {
         RunnerService::run(self, request, progress).await
+    }
+
+    async fn discover(&self, request: DiscoverRequest) -> Result<DiscoverResult, String> {
+        RunnerService::discover(self, request).await
     }
 }

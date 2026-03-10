@@ -3,7 +3,7 @@
 //! These are the functions and methods that exist in the Vixen runtime
 //! but aren't declared in user source code.
 
-use vx_types::{Builtin, Capability, FnSig, KeywordParamDef, ParamDef, Ty};
+use vx_types::{Builtin, Capability, FnSig, KeywordParamDef, ParamDef, Ty, TypeParam};
 
 use crate::cap_check::CapSet;
 
@@ -43,7 +43,7 @@ pub fn all_builtin_fn_names() -> &'static [&'static str] {
         "stabilize",
         "exec",
         "executor_class",
-        "discover_exec",
+        "discover",
         "read_file",
         "read_dir",
         "glob",
@@ -140,14 +140,8 @@ pub fn builtin_fn_sig(name: &str) -> Option<FnSig> {
                     has_default: true,
                 },
                 KeywordParamDef {
-                    name: "verifier".into(),
-                    ty: Ty::Function(vx_types::FunctionTy {
-                        params: vec![Ty::Builtin(Builtin::Host)],
-                        ret: Box::new(Ty::Unit),
-                        capabilities: vec![Capability {
-                            name: "host".into(),
-                        }],
-                    }),
+                    name: "executor".into(),
+                    ty: Ty::Builtin(Builtin::ExecutorClass),
                     has_default: true,
                 },
             ],
@@ -168,22 +162,34 @@ pub fn builtin_fn_sig(name: &str) -> Option<FnSig> {
             capabilities: vec![],
         }),
 
-        // r[exec.discover] — discover_exec(class: String, probe: Array[String]) -> DiscoveryProcess
-        "discover_exec" => Some(FnSig {
-            name: "discover_exec".into(),
-            type_params: vec![],
+        // r[exec.discover] — discover(class: ExecutorClass, probe: Fn(Host) #host -> T) #discover -> T
+        "discover" => Some(FnSig {
+            name: "discover".into(),
+            type_params: vec!["T".into()],
             positional_params: vec![
                 ParamDef {
                     name: "class".into(),
-                    ty: Ty::Scalar(vx_types::Scalar::String),
+                    ty: Ty::Builtin(Builtin::ExecutorClass),
                 },
                 ParamDef {
                     name: "probe".into(),
-                    ty: Ty::Array(Box::new(Ty::Scalar(vx_types::Scalar::String))),
+                    ty: Ty::Function(vx_types::FunctionTy {
+                        params: vec![Ty::Builtin(Builtin::Host)],
+                        ret: Box::new(Ty::Param(TypeParam {
+                            name: "T".into(),
+                            index: 0,
+                        })),
+                        capabilities: vec![Capability {
+                            name: "host".into(),
+                        }],
+                    }),
                 },
             ],
             keyword_params: vec![],
-            ret: Ty::Builtin(Builtin::DiscoveryProcess),
+            ret: Ty::Param(TypeParam {
+                name: "T".into(),
+                index: 0,
+            }),
             capabilities: vec![Capability {
                 name: "discover".into(),
             }],
@@ -289,7 +295,7 @@ pub fn builtin_method(receiver: &Builtin, method_name: &str) -> Option<MethodSig
                 name: "name".into(),
                 ty: Ty::Scalar(vx_types::Scalar::String),
             }],
-            ret: Ty::Optional(Box::new(Ty::Scalar(vx_types::Scalar::String))),
+            ret: Ty::Scalar(vx_types::Scalar::String),
             capabilities: vec![Capability {
                 name: "host".into(),
             }],

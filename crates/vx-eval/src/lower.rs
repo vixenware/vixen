@@ -148,13 +148,16 @@ fn lower_expr_with_ctx(expr: &AstExpr, ctx: &mut LowerCtx) -> Option<instr::Expr
         AstExpr::Array(array) => lower_array(array, ctx),
         AstExpr::Map(map) => lower_map(map, ctx),
         AstExpr::Closure(closure) => lower_closure(closure, ctx),
+        AstExpr::Fallible(fallible) => Some(instr::Expr::Fallible(Box::new(lower_expr_with_ctx(
+            &fallible.expr()?,
+            ctx,
+        )?))),
         AstExpr::PartialApp(_)
         | AstExpr::Index(_)
         | AstExpr::Match(_)
         | AstExpr::Range(_)
         | AstExpr::TypeOp(_)
-        | AstExpr::With(_)
-        | AstExpr::Fallible(_) => None,
+        | AstExpr::With(_) => None,
     }
 }
 

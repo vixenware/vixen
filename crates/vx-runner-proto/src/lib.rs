@@ -21,15 +21,15 @@
 
 use facet::Facet;
 pub use vx_eval::{
-    ShippedFunction, TransportBinOp, TransportBlob, TransportBlock, TransportBuiltinValue,
-    TransportExpr, TransportFnDef, TransportModule, TransportParam, TransportStmt, TransportStruct,
-    TransportTree, TransportUnaryOp, TransportValue,
+    HostObservation, ShippedFunction, TransportBinOp, TransportBlob, TransportBlock,
+    TransportBuiltinValue, TransportExpr, TransportFnDef, TransportModule, TransportParam,
+    TransportStmt, TransportStruct, TransportTree, TransportUnaryOp, TransportValue,
 };
 use vx_store_proto::{ManifestHash, ServiceVersion, StoreProgress};
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 9;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 10;
 
 // =============================================================================
 // Rust Compilation
@@ -308,8 +308,25 @@ pub struct RunEvalPayload {
     pub module: TransportModule,
     /// Optional observer closure to run after the process exits.
     pub observer: Option<ShippedFunction>,
-    /// Optional verifier closure to run alongside the process.
-    pub verifier: Option<ShippedFunction>,
+    /// Hidden discovery obligations to recheck on the executor.
+    pub verification_obligations: Vec<HostObservation>,
+}
+
+/// Executor-side discovery request shipped to the runner.
+#[derive(Debug, Clone, Facet)]
+pub struct DiscoverRequest {
+    /// Target executor class. Current runners may ignore this if they only expose one class.
+    pub class: String,
+    /// Lowered module used to resolve global calls from the shipped closure.
+    pub module: TransportModule,
+    /// Discovery probe closure to run with Host access.
+    pub probe: ShippedFunction,
+}
+
+/// Result of evaluating a shipped discovery probe on the executor.
+#[derive(Debug, Clone, Facet)]
+pub struct DiscoverResult {
+    pub value: TransportValue,
 }
 
 #[derive(Debug, Clone, Facet, PartialEq, Eq)]
@@ -442,6 +459,9 @@ pub trait Runner {
 
     /// Run a sandboxed command with hermetic inputs/outputs via CAS/VFS.
     async fn run(&self, request: RunRequest, progress: roam::Tx<StoreProgress>) -> RunResult;
+
+    /// Evaluate a shipped discovery probe on the executor host.
+    async fn discover(&self, request: DiscoverRequest) -> Result<DiscoverResult, String>;
 }
 
 #[cfg(test)]

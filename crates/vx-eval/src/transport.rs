@@ -7,8 +7,8 @@ use vx_store_proto::{BlobRef, NodeHash};
 
 use crate::instr;
 use crate::value::{
-    BlobValue, BuiltinFunction, BuiltinMethod, BuiltinNamespace, BuiltinValue, FunctionValue,
-    MapValue, PathValue, StructValue, TreeValue, Value,
+    BlobValue, BuiltinFunction, BuiltinMethod, BuiltinNamespace, BuiltinValue, DiscoveredValue,
+    FunctionValue, HostObservation, MapValue, PathValue, StructValue, TreeValue, Value,
 };
 
 #[derive(Debug, Clone, PartialEq, Facet)]
@@ -104,6 +104,7 @@ pub enum TransportExpr {
         field: String,
     },
     Fail(Box<TransportExpr>),
+    Fallible(Box<TransportExpr>),
     Tuple(Vec<TransportExpr>),
 }
 
@@ -150,6 +151,11 @@ pub enum TransportValue {
     Path(String),
     Blob(TransportBlob),
     Tree(TransportTree),
+    ExecutorClass(String),
+    Discovered {
+        value: Box<TransportValue>,
+        obligations: Vec<HostObservation>,
+    },
     Unit,
     Tuple(Vec<TransportValue>),
     Array(Vec<TransportValue>),
@@ -185,6 +191,8 @@ pub enum TransportBuiltinValue {
     BlobNamespace,
     TreeNamespace,
     ExecFunction,
+    DiscoverFunction,
+    ExecutorClassFunction,
     BlobFromString,
     TreeOf,
     TreeEmpty,
@@ -193,6 +201,7 @@ pub enum TransportBuiltinValue {
     TreeFile { receiver: Box<TransportValue> },
     TreeMerge { receiver: Box<TransportValue> },
     TreeSubtree { receiver: Box<TransportValue> },
+    FallibleCall { receiver: Box<TransportValue> },
 }
 
 impl From<&instr::Module> for TransportModule {
@@ -398,6 +407,9 @@ impl From<&instr::Expr> for TransportExpr {
                 field: field.clone(),
             },
             instr::Expr::Fail(value) => Self::Fail(Box::new(TransportExpr::from(value.as_ref()))),
+            instr::Expr::Fallible(value) => {
+                Self::Fallible(Box::new(TransportExpr::from(value.as_ref())))
+            }
             instr::Expr::Tuple(values) => {
                 Self::Tuple(values.iter().map(TransportExpr::from).collect())
             }
@@ -478,6 +490,7 @@ impl From<TransportExpr> for instr::Expr {
                 field,
             },
             TransportExpr::Fail(value) => Self::Fail(Box::new((*value).into())),
+            TransportExpr::Fallible(value) => Self::Fallible(Box::new((*value).into())),
             TransportExpr::Tuple(values) => {
                 Self::Tuple(values.into_iter().map(Into::into).collect())
             }
@@ -595,7 +608,12 @@ impl TryFrom<&Value> for TransportValue {
             Value::ExecPath(_) => Err("cannot transport ExecPath values".into()),
             Value::Blob(blob) => Ok(Self::Blob(TransportBlob::try_from(blob)?)),
             Value::Tree(tree) => Ok(Self::Tree(TransportTree::try_from(tree)?)),
+            Value::ExecutorClass(label) => Ok(Self::ExecutorClass(label.to_string())),
             Value::Host(_) => Err("cannot transport Host values".into()),
+            Value::Discovered(discovered) => Ok(Self::Discovered {
+                value: Box::new(TransportValue::try_from(discovered.value.as_ref())?),
+                obligations: discovered.obligations.iter().cloned().collect(),
+            }),
             Value::Unit => Ok(Self::Unit),
             Value::Tuple(values) => Ok(Self::Tuple(
                 values
@@ -640,6 +658,13 @@ impl TryFrom<TransportValue> for Value {
             TransportValue::Path(path) => Ok(Self::Path(PathValue::new(path))),
             TransportValue::Blob(blob) => Ok(Self::Blob(blob.into())),
             TransportValue::Tree(tree) => Ok(Self::Tree(tree.try_into()?)),
+            TransportValue::ExecutorClass(label) => Ok(Self::ExecutorClass(Arc::from(label))),
+            TransportValue::Discovered { value, obligations } => {
+                Ok(Self::Discovered(DiscoveredValue {
+                    value: Box::new(Value::try_from(*value)?),
+                    obligations: Arc::from(obligations),
+                }))
+            }
             TransportValue::Unit => Ok(Self::Unit),
             TransportValue::Tuple(values) => Ok(Self::Tuple(Arc::from(
                 values
@@ -812,6 +837,10 @@ impl TryFrom<&BuiltinValue> for TransportBuiltinValue {
             BuiltinValue::Namespace(BuiltinNamespace::Blob) => Ok(Self::BlobNamespace),
             BuiltinValue::Namespace(BuiltinNamespace::Tree) => Ok(Self::TreeNamespace),
             BuiltinValue::Function(BuiltinFunction::Exec) => Ok(Self::ExecFunction),
+            BuiltinValue::Function(BuiltinFunction::Discover) => Ok(Self::DiscoverFunction),
+            BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
+                Ok(Self::ExecutorClassFunction)
+            }
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => Ok(Self::BlobFromString),
             BuiltinValue::Method(BuiltinMethod::TreeOf) => Ok(Self::TreeOf),
             BuiltinValue::Method(BuiltinMethod::TreeEmpty) => Ok(Self::TreeEmpty),
@@ -829,6 +858,11 @@ impl TryFrom<&BuiltinValue> for TransportBuiltinValue {
             }),
             BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver }) => {
                 Ok(Self::TreeSubtree {
+                    receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
+                })
+            }
+            BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver }) => {
+                Ok(Self::FallibleCall {
                     receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
                 })
             }
@@ -850,6 +884,12 @@ impl TryFrom<TransportBuiltinValue> for BuiltinValue {
             TransportBuiltinValue::BlobNamespace => Ok(Self::Namespace(BuiltinNamespace::Blob)),
             TransportBuiltinValue::TreeNamespace => Ok(Self::Namespace(BuiltinNamespace::Tree)),
             TransportBuiltinValue::ExecFunction => Ok(Self::Function(BuiltinFunction::Exec)),
+            TransportBuiltinValue::DiscoverFunction => {
+                Ok(Self::Function(BuiltinFunction::Discover))
+            }
+            TransportBuiltinValue::ExecutorClassFunction => {
+                Ok(Self::Function(BuiltinFunction::ExecutorClass))
+            }
             TransportBuiltinValue::BlobFromString => {
                 Ok(Self::Method(BuiltinMethod::BlobFromString))
             }
@@ -873,6 +913,11 @@ impl TryFrom<TransportBuiltinValue> for BuiltinValue {
             }
             TransportBuiltinValue::TreeSubtree { receiver } => {
                 Ok(Self::Method(BuiltinMethod::TreeSubtree {
+                    receiver: Box::new(Value::try_from(*receiver)?),
+                }))
+            }
+            TransportBuiltinValue::FallibleCall { receiver } => {
+                Ok(Self::Method(BuiltinMethod::FallibleCall {
                     receiver: Box::new(Value::try_from(*receiver)?),
                 }))
             }

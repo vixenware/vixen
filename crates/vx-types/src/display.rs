@@ -115,7 +115,6 @@ impl fmt::Display for Builtin {
             Builtin::Process => write!(f, "Process"),
             Builtin::Host => write!(f, "Host"),
             Builtin::ExecutorClass => write!(f, "ExecutorClass"),
-            Builtin::DiscoveryProcess => write!(f, "DiscoveryProcess"),
         }
     }
 }

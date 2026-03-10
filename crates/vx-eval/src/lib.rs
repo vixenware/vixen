@@ -9,7 +9,10 @@ mod capability;
 pub use capability::CapabilitySet;
 
 mod exec;
-pub use exec::{ExecArgValue, ExecHandler, ExecMount, ExecRequest, SharedExecHandler};
+pub use exec::{
+    DiscoverHandler, DiscoverRequest, ExecArgValue, ExecHandler, ExecMount, ExecRequest,
+    SharedDiscoverHandler, SharedExecHandler,
+};
 
 mod instr;
 pub use instr::{BinOp, Expr, FnDef, Module, Stmt, UnaryOp};
@@ -32,11 +35,12 @@ pub use transport::{
 
 mod value;
 pub use value::{
-    BlobValue, ExecPathValue, HostValue, MapValue, PathValue, StructValue, TreeValue, Value,
+    BlobValue, DiscoveredValue, ExecPathValue, HostObservation, HostValue, MapValue, PathValue,
+    StructValue, TreeValue, Value,
 };
 
 mod worker;
-pub use worker::Engine;
+pub use worker::{Engine, verify_host_obligations};
 
 #[cfg(test)]
 mod tests;

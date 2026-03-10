@@ -8,9 +8,9 @@ use std::collections::HashMap;
 
 use rowan::TextRange;
 use vx_parser::{
-    ArrayExpr, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr, FieldExpr, IfExpr,
-    InvokeExpr, LiteralExpr, MapExpr, MatchExpr, NameRefExpr, Pattern, PrefixExpr, RecordExpr,
-    SourceFile, Stmt, StructLiteralExpr, SyntaxKind, WhereExpr, WithExpr,
+    ArrayExpr, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr, FallibleExpr,
+    FieldExpr, IfExpr, InvokeExpr, LiteralExpr, MapExpr, MatchExpr, NameRefExpr, Pattern,
+    PrefixExpr, RecordExpr, SourceFile, Stmt, StructLiteralExpr, SyntaxKind, WhereExpr, WithExpr,
 };
 use vx_types::{FnSig, Ty};
 
@@ -187,6 +187,7 @@ impl<'a> ExprTyper<'a> {
             Expr::Match(m) => self.infer_match(m),
             Expr::Binary(bin) => self.infer_binary(bin),
             Expr::Prefix(pre) => self.infer_prefix(pre),
+            Expr::Fallible(fallible) => self.infer_fallible(fallible),
             Expr::With(w) => self.infer_with(w),
             _ => {
                 // Recurse into child expressions
@@ -428,6 +429,11 @@ impl<'a> ExprTyper<'a> {
                     self.check_call_args(call, &sig);
                     self.check_keyword_args(call, &sig);
                     self.infer_extra_call_args(call, sig.positional_params.len());
+                    if callee_name == "discover"
+                        && let Some(discovered_ty) = self.infer_discover_call(call)
+                    {
+                        return discovered_ty;
+                    }
                     return sig.ret.clone();
                 }
 
@@ -488,10 +494,24 @@ impl<'a> ExprTyper<'a> {
                 Ty::Poison
             }
             _ => {
-                self.infer_expr(&callee);
+                let callee_ty = self.infer_expr(&callee);
                 self.infer_call_arg_exprs(call);
-                Ty::Poison
+                match callee_ty {
+                    Ty::Function(fn_ty) => (*fn_ty.ret).clone(),
+                    _ => Ty::Poison,
+                }
             }
+        }
+    }
+
+    fn infer_discover_call(&mut self, call: &CallExpr) -> Option<Ty> {
+        let probe = call.args().nth(1)?.expr().map(Self::peel_parens)?;
+        match probe {
+            Expr::Closure(closure) => {
+                let body = closure.body()?;
+                self.expr_types.get(&body.syntax().text_range()).cloned()
+            }
+            _ => None,
         }
     }
 
@@ -1018,6 +1038,25 @@ impl<'a> ExprTyper<'a> {
             Some(SyntaxKind::BANG) => Ty::Scalar(vx_types::Scalar::Bool),
             Some(SyntaxKind::MINUS) => operand_ty,
             _ => Ty::Poison,
+        }
+    }
+
+    fn infer_fallible(&mut self, fallible: &FallibleExpr) -> Ty {
+        let Some(expr) = fallible.expr() else {
+            return Ty::Poison;
+        };
+        let inner_ty = self.infer_expr(&expr);
+        if inner_ty.is_poison() {
+            return Ty::Poison;
+        }
+
+        match inner_ty {
+            Ty::Function(fn_ty) => Ty::Function(vx_types::FunctionTy {
+                params: fn_ty.params,
+                ret: Box::new(Ty::Optional(Box::new((*fn_ty.ret).clone()))),
+                capabilities: fn_ty.capabilities,
+            }),
+            other => Ty::Optional(Box::new(other)),
         }
     }
 

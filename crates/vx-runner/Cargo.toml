@@ -45,6 +45,7 @@ tempfile = { workspace = true }
 find-msvc-tools = "0.1"
 
 [dev-dependencies]
+blake3 = { workspace = true }
 vx-parser = { path = "../vx-parser" }
 
 [lints]

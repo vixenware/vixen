@@ -21,7 +21,9 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use tempfile::TempDir;
 
-use crate::exec::{ExecArgValue, ExecMount, ExecRequest, SharedExecHandler};
+use crate::exec::{
+    DiscoverRequest, ExecArgValue, ExecMount, ExecRequest, SharedDiscoverHandler, SharedExecHandler,
+};
 use crate::instr::{self, BinOp, UnaryOp};
 use crate::node::{
     Node, NodeId, NodeJob, NodeKey, Outcome, TemplateKind, TemplatePartValue, Waiter,
@@ -29,12 +31,14 @@ use crate::node::{
 use crate::poison::{DemandChain, DemandEntry, PoisonError, PoisonKind};
 use crate::transport::{ShippedFunction, TransportModule, TransportValue};
 use crate::value::{
-    BlobValue, BuiltinFunction, BuiltinMethod, BuiltinNamespace, BuiltinValue, ExecPathValue,
-    FunctionValue, HostValue, MapValue, PathValue, StructValue, TreeValue, Value,
+    BlobValue, BuiltinFunction, BuiltinMethod, BuiltinNamespace, BuiltinValue, DiscoveredValue,
+    ExecPathValue, FunctionValue, HostObservation, HostValue, MapValue, PathValue, StructValue,
+    TreeValue, Value,
 };
 
 thread_local! {
     static DEMAND_STACK: RefCell<Vec<NodeId>> = const { RefCell::new(Vec::new()) };
+    static DISCOVERY_OBSERVATIONS: RefCell<Vec<Vec<HostObservation>>> = const { RefCell::new(Vec::new()) };
 }
 
 const DEFAULT_MAX_DEMAND_DEPTH: usize = 1_024;
@@ -53,7 +57,7 @@ struct ParsedExecRequest {
     mounts: Vec<(PathValue, Value)>,
     writable_roots: Vec<PathValue>,
     observer: Value,
-    verifier: Option<Value>,
+    verification_obligations: Vec<HostObservation>,
 }
 
 /// The evaluation engine.
@@ -65,6 +69,7 @@ pub struct Engine {
     function_identities: HashMap<usize, Arc<str>>,
     max_demand_depth: usize,
     exec_handler: Option<SharedExecHandler>,
+    discover_handler: Option<SharedDiscoverHandler>,
 }
 
 impl Engine {
@@ -87,6 +92,7 @@ impl Engine {
             function_identities,
             max_demand_depth: DEFAULT_MAX_DEMAND_DEPTH,
             exec_handler: None,
+            discover_handler: None,
         }
     }
 
@@ -98,6 +104,11 @@ impl Engine {
 
     pub fn with_exec_handler(mut self, exec_handler: SharedExecHandler) -> Self {
         self.exec_handler = Some(exec_handler);
+        self
+    }
+
+    pub fn with_discover_handler(mut self, discover_handler: SharedDiscoverHandler) -> Self {
+        self.discover_handler = Some(discover_handler);
         self
     }
 
@@ -121,7 +132,7 @@ impl Engine {
     pub fn ship_function(&self, value: Value) -> Result<ShippedFunction, PoisonError> {
         let value = self.force_value(value)?;
         let Value::Function(function) = value else {
-            return Err(self.type_error("shipped observers and verifiers must be functions"));
+            return Err(self.type_error("shipped callbacks must be functions"));
         };
         ShippedFunction::try_from(&function).map_err(|message| self.type_error(&message))
     }
@@ -139,6 +150,18 @@ impl Engine {
         let value =
             engine.execute_call(Value::Function(function), Arc::from(args), Arc::from([]))?;
         engine.force_value(value)
+    }
+
+    pub fn invoke_shipped_discover(
+        module: &TransportModule,
+        function: &ShippedFunction,
+    ) -> Result<Value, PoisonError> {
+        let module: instr::Module = module.clone().into();
+        let engine = Self::from_module(&module);
+        let function = function
+            .to_runtime()
+            .map_err(|message| engine.type_error(&message))?;
+        engine.invoke_discover_probe(Value::Function(function))
     }
 
     #[cfg(test)]
@@ -183,6 +206,11 @@ impl Engine {
             .ok_or_else(|| self.internal_error("top-level function key should be resolved"))
     }
 
+    #[cfg(test)]
+    pub(crate) fn function_identity_string(&self, name: &str) -> Result<String, PoisonError> {
+        Ok(self.resolve_module_function(name)?.identity())
+    }
+
     // r[impl eval.entry]
     pub fn call_entry(
         &self,
@@ -220,6 +248,145 @@ impl Engine {
         }
     }
 
+    fn begin_discovery_recording(&self) {
+        DISCOVERY_OBSERVATIONS.with(|stack| stack.borrow_mut().push(Vec::new()));
+    }
+
+    fn finish_discovery_recording(&self) -> Vec<HostObservation> {
+        DISCOVERY_OBSERVATIONS.with(|stack| stack.borrow_mut().pop().unwrap_or_default())
+    }
+
+    fn record_discovery_observation(&self, observation: HostObservation) {
+        DISCOVERY_OBSERVATIONS.with(|stack| {
+            if let Some(current) = stack.borrow_mut().last_mut() {
+                current.push(observation);
+            }
+        });
+    }
+
+    fn invoke_discover_probe(&self, probe: Value) -> Result<Value, PoisonError> {
+        let probe = self.force_value(probe)?;
+        match probe {
+            Value::Function(_) | Value::Builtin(_) => {}
+            other => {
+                return Err(self.type_error(&format!(
+                    "discover probe must be callable, got {}",
+                    other.type_name()
+                )));
+            }
+        }
+
+        self.begin_discovery_recording();
+        let result = (|| {
+            let value =
+                self.execute_call(probe, Arc::from([Value::Host(HostValue)]), Arc::from([]))?;
+            self.force_value(value)
+        })();
+        let observations = self.finish_discovery_recording();
+        result.map(|value| self.attach_obligations(value, observations))
+    }
+
+    fn add_obligations(
+        obligations: &mut BTreeMap<String, HostObservation>,
+        items: impl IntoIterator<Item = HostObservation>,
+    ) {
+        for observation in items {
+            obligations.insert(observation.key(), observation);
+        }
+    }
+
+    fn attach_obligations(
+        &self,
+        value: Value,
+        items: impl IntoIterator<Item = HostObservation>,
+    ) -> Value {
+        let mut obligations = BTreeMap::new();
+        let inner = match value {
+            Value::Discovered(discovered) => {
+                Self::add_obligations(&mut obligations, discovered.obligations.iter().cloned());
+                *discovered.value
+            }
+            other => other,
+        };
+        Self::add_obligations(&mut obligations, items);
+        if obligations.is_empty() {
+            inner
+        } else {
+            Value::Discovered(DiscoveredValue {
+                value: Box::new(inner),
+                obligations: Arc::from(obligations.into_values().collect::<Vec<_>>()),
+            })
+        }
+    }
+
+    fn split_obligations(&self, value: Value) -> (Value, Vec<HostObservation>) {
+        match value {
+            Value::Discovered(discovered) => (*discovered.value, discovered.obligations.to_vec()),
+            other => (other, Vec::new()),
+        }
+    }
+
+    fn split_obligations_ref<'a>(&self, value: &'a Value) -> (&'a Value, &'a [HostObservation]) {
+        match value {
+            Value::Discovered(discovered) => {
+                (discovered.value.as_ref(), discovered.obligations.as_ref())
+            }
+            other => (other, &[]),
+        }
+    }
+
+    fn collect_value_obligations(
+        &self,
+        value: &Value,
+        obligations: &mut BTreeMap<String, HostObservation>,
+    ) {
+        match value {
+            Value::Discovered(discovered) => {
+                Self::add_obligations(obligations, discovered.obligations.iter().cloned());
+                self.collect_value_obligations(discovered.value.as_ref(), obligations);
+            }
+            Value::Tuple(values) | Value::Array(values) => {
+                for value in values.iter() {
+                    self.collect_value_obligations(value, obligations);
+                }
+            }
+            Value::Map(map) => {
+                for (key, value) in map.entries.iter() {
+                    self.collect_value_obligations(key, obligations);
+                    self.collect_value_obligations(value, obligations);
+                }
+            }
+            Value::Struct(struct_value) => {
+                for (_, value) in struct_value.fields.iter() {
+                    self.collect_value_obligations(value, obligations);
+                }
+            }
+            Value::Function(function) => {
+                for (_, capture) in function.captures.iter() {
+                    self.collect_value_obligations(capture, obligations);
+                }
+            }
+            Value::Builtin(BuiltinValue::Method(method)) => match method {
+                BuiltinMethod::BlobToString { receiver }
+                | BuiltinMethod::TreeFile { receiver }
+                | BuiltinMethod::TreeMerge { receiver }
+                | BuiltinMethod::TreeSubtree { receiver }
+                | BuiltinMethod::OptionUnwrapOr { receiver }
+                | BuiltinMethod::FallibleCall { receiver }
+                | BuiltinMethod::HostRead { receiver }
+                | BuiltinMethod::HostHash { receiver }
+                | BuiltinMethod::HostWhich { receiver } => {
+                    self.collect_value_obligations(receiver.as_ref(), obligations);
+                }
+                BuiltinMethod::BlobFromString
+                | BuiltinMethod::TreeOf
+                | BuiltinMethod::TreeEmpty
+                | BuiltinMethod::TreeFromPath => {}
+            },
+            _ => {}
+        }
+    }
+
     fn global_function_value(&self, def: Arc<instr::FnDef>) -> FunctionValue {
         FunctionValue {
             code_identity: self.function_identity(&def),
@@ -234,7 +401,7 @@ impl Engine {
         captures: Arc<[(Arc<str>, Value)]>,
     ) -> FunctionValue {
         FunctionValue {
-            code_identity: Arc::from(stable_fn_repr(&def)),
+            code_identity: self.function_identity(&def),
             def,
             captures,
         }
@@ -340,6 +507,10 @@ impl Engine {
     fn force_value_shallow(&self, value: Value) -> Result<Value, PoisonError> {
         match value {
             Value::Pending(node_id) => self.force_pending_shallow(node_id),
+            Value::Discovered(discovered) => {
+                let inner = self.force_value_shallow(*discovered.value)?;
+                Ok(self.attach_obligations(inner, discovered.obligations.iter().cloned()))
+            }
             other => Ok(other),
         }
     }
@@ -351,6 +522,10 @@ impl Engine {
                 let value = self.force_node(node_id)?;
                 self.force_value(value)
             }),
+            Value::Discovered(discovered) => {
+                let inner = self.force_value(*discovered.value)?;
+                Ok(self.attach_obligations(inner, discovered.obligations.iter().cloned()))
+            }
             Value::Tuple(elems) => {
                 let forced = self.force_many(elems.iter().cloned().collect())?;
                 Ok(Value::Tuple(Arc::from(forced)))
@@ -564,9 +739,13 @@ impl Engine {
         args: Arc<[Value]>,
         kwargs: Arc<[(Arc<str>, Value)]>,
     ) -> Result<Value, PoisonError> {
-        let function = match self.force_value(function)? {
+        let (function, function_obligations) = self.split_obligations(self.force_value(function)?);
+        let function = match function {
             Value::Function(function) => function,
-            Value::Builtin(builtin) => return self.invoke_builtin(&builtin, &args, &kwargs),
+            Value::Builtin(builtin) => {
+                let result = self.invoke_builtin(&builtin, &args, &kwargs)?;
+                return Ok(self.attach_obligations(result, function_obligations));
+            }
             other => {
                 return Err(self.type_error(&format!("cannot call {}", other.type_name())));
             }
@@ -577,12 +756,14 @@ impl Engine {
         }
 
         if function.key().is_some() && args.iter().all(|value| value.key().is_some()) {
-            return self.force_pending_shallow(
+            let result = self.force_pending_shallow(
                 self.memoized_invoke_node(function, args.iter().cloned().collect()),
-            );
+            )?;
+            return Ok(self.attach_obligations(result, function_obligations));
         }
 
-        self.invoke_function(&function, args)
+        let result = self.invoke_function(&function, args)?;
+        Ok(self.attach_obligations(result, function_obligations))
     }
 
     // r[impl eval.enter-functions]
@@ -956,6 +1137,27 @@ impl Engine {
                 };
                 BuildResult::Value(self.pending_value(NodeJob::Fail { message }, "fail(..)".into()))
             }
+            instr::Expr::Fallible(expr) => {
+                match self.eval_expr(expr, bindings, current_code_identity) {
+                    BuildResult::Value(value) => {
+                        let (inner, _) = self.split_obligations_ref(&value);
+                        if matches!(inner, Value::Function(_) | Value::Builtin(_)) {
+                            return BuildResult::Value(Value::Builtin(BuiltinValue::Method(
+                                BuiltinMethod::FallibleCall {
+                                    receiver: Box::new(value),
+                                },
+                            )));
+                        }
+
+                        match self.force_value(value) {
+                            Ok(value) => BuildResult::Value(option_some(value)),
+                            Err(_) => BuildResult::Value(option_none()),
+                        }
+                    }
+                    BuildResult::Poisoned(_) => BuildResult::Value(option_none()),
+                    other => other,
+                }
+            }
             instr::Expr::Tuple(elems) => {
                 let mut values = Vec::with_capacity(elems.len());
                 for elem in elems {
@@ -1040,15 +1242,18 @@ impl Engine {
     // r[expr.literal.interpolation]
     fn interpolate_string_parts(&self, parts: &[TemplatePartValue]) -> Result<Value, PoisonError> {
         let mut value = String::new();
+        let mut obligations = BTreeMap::new();
         for part in parts {
             match part {
                 TemplatePartValue::Text(text) => value.push_str(text),
                 TemplatePartValue::Expr(value_part) => {
+                    let (value_part, value_obligations) = self.split_obligations_ref(value_part);
+                    Self::add_obligations(&mut obligations, value_obligations.iter().cloned());
                     value.push_str(&self.stringify_interpolated_value(value_part)?);
                 }
             }
         }
-        Ok(Value::String(Arc::from(value)))
+        Ok(self.attach_obligations(Value::String(Arc::from(value)), obligations.into_values()))
     }
 
     // r[exec.arg.interpolation]
@@ -1056,66 +1261,74 @@ impl Engine {
         let mut plain = String::new();
         let mut mounted_tree: Option<(TreeValue, String)> = None;
         let mut mounted_blob: Option<(BlobValue, String)> = None;
+        let mut obligations = BTreeMap::new();
 
         for part in parts {
             match part {
                 TemplatePartValue::Text(text) => plain.push_str(text),
-                TemplatePartValue::Expr(value) => match value {
-                    Value::String(text) => plain.push_str(text),
-                    Value::Path(path) => plain.push_str(path.as_str()),
-                    Value::Tree(tree) => {
-                        if mounted_tree.is_some() || mounted_blob.is_some() {
-                            return Err(self.type_error(
-                                "path literal cannot interpolate more than one mount-bearing value",
-                            ));
-                        }
-                        mounted_tree = Some((tree.clone(), plain.clone()));
-                        plain.clear();
-                    }
-                    Value::Blob(blob) => {
-                        if mounted_tree.is_some() || mounted_blob.is_some() {
-                            return Err(self.type_error(
-                                "path literal cannot interpolate more than one mount-bearing value",
-                            ));
-                        }
-                        mounted_blob = Some((blob.clone(), plain.clone()));
-                        plain.clear();
-                    }
-                    Value::ExecPath(exec_path) => match exec_path {
-                        ExecPathValue::InTree { tree, suffix } => {
+                TemplatePartValue::Expr(value) => {
+                    let (value, value_obligations) = self.split_obligations_ref(value);
+                    Self::add_obligations(&mut obligations, value_obligations.iter().cloned());
+                    match value {
+                        Value::String(text) => plain.push_str(text),
+                        Value::Path(path) => plain.push_str(path.as_str()),
+                        Value::Tree(tree) => {
                             if mounted_tree.is_some() || mounted_blob.is_some() {
                                 return Err(self.type_error(
-                                    "path literal cannot interpolate more than one mount-bearing value",
-                                ));
+                                "path literal cannot interpolate more than one mount-bearing value",
+                            ));
                             }
-                            plain.push_str(suffix.as_str());
                             mounted_tree = Some((tree.clone(), plain.clone()));
                             plain.clear();
                         }
-                        ExecPathValue::InBlob { blob, leaf } => {
+                        Value::Blob(blob) => {
                             if mounted_tree.is_some() || mounted_blob.is_some() {
                                 return Err(self.type_error(
-                                    "path literal cannot interpolate more than one mount-bearing value",
-                                ));
+                                "path literal cannot interpolate more than one mount-bearing value",
+                            ));
                             }
-                            plain.push_str(leaf.as_str());
                             mounted_blob = Some((blob.clone(), plain.clone()));
                             plain.clear();
                         }
-                    },
-                    other => {
-                        return Err(self.type_error(&format!(
+                        Value::ExecPath(exec_path) => match exec_path {
+                            ExecPathValue::InTree { tree, suffix } => {
+                                if mounted_tree.is_some() || mounted_blob.is_some() {
+                                    return Err(self.type_error(
+                                    "path literal cannot interpolate more than one mount-bearing value",
+                                ));
+                                }
+                                plain.push_str(suffix.as_str());
+                                mounted_tree = Some((tree.clone(), plain.clone()));
+                                plain.clear();
+                            }
+                            ExecPathValue::InBlob { blob, leaf } => {
+                                if mounted_tree.is_some() || mounted_blob.is_some() {
+                                    return Err(self.type_error(
+                                    "path literal cannot interpolate more than one mount-bearing value",
+                                ));
+                                }
+                                plain.push_str(leaf.as_str());
+                                mounted_blob = Some((blob.clone(), plain.clone()));
+                                plain.clear();
+                            }
+                        },
+                        other => {
+                            return Err(self.type_error(&format!(
                             "path interpolation requires String, Path, Tree, Blob, or ExecPath, got {}",
                             other.type_name()
                         )));
+                        }
                     }
-                },
+                }
             }
         }
 
         if let Some((tree, prefix)) = mounted_tree {
             let suffix = PathValue::new(format!("{prefix}{plain}").trim_start_matches('/'));
-            return Ok(Value::ExecPath(ExecPathValue::InTree { tree, suffix }));
+            return Ok(self.attach_obligations(
+                Value::ExecPath(ExecPathValue::InTree { tree, suffix }),
+                obligations.into_values(),
+            ));
         }
 
         if let Some((blob, leaf)) = mounted_blob {
@@ -1126,13 +1339,19 @@ impl Engine {
                 return Err(self
                     .type_error("path literal cannot append path segments to a blob-backed path"));
             }
-            return Ok(Value::ExecPath(ExecPathValue::InBlob {
-                blob,
-                leaf: normalized,
-            }));
+            return Ok(self.attach_obligations(
+                Value::ExecPath(ExecPathValue::InBlob {
+                    blob,
+                    leaf: normalized,
+                }),
+                obligations.into_values(),
+            ));
         }
 
-        Ok(Value::Path(PathValue::new(plain)))
+        Ok(self.attach_obligations(
+            Value::Path(PathValue::new(plain)),
+            obligations.into_values(),
+        ))
     }
 
     fn stringify_interpolated_value(&self, value: &Value) -> Result<String, PoisonError> {
@@ -1150,7 +1369,8 @@ impl Engine {
     }
 
     fn select_field(&self, receiver: &Value, field: &str) -> Result<Value, PoisonError> {
-        match receiver {
+        let (receiver, obligations) = self.split_obligations_ref(receiver);
+        let result = match receiver {
             Value::Struct(struct_value)
                 if field == "unwrap_or"
                     && matches!(struct_value.type_name.as_ref(), "Some" | "None") =>
@@ -1243,11 +1463,14 @@ impl Engine {
                 field,
                 other.type_name()
             ))),
-        }
+        }?;
+        Ok(self.attach_obligations(result, obligations.iter().cloned()))
     }
 
     fn compute_binary(&self, op: BinOp, left: &Value, right: &Value) -> Result<Value, PoisonError> {
-        match (op, left, right) {
+        let (left, left_obligations) = self.split_obligations_ref(left);
+        let (right, right_obligations) = self.split_obligations_ref(right);
+        let result = match (op, left, right) {
             (BinOp::Add, Value::U64(a), Value::U64(b)) => Ok(Value::U64(a.wrapping_add(*b))),
             (BinOp::Sub, Value::U64(a), Value::U64(b)) => Ok(Value::U64(a.wrapping_sub(*b))),
             (BinOp::Mul, Value::U64(a), Value::U64(b)) => Ok(Value::U64(a.wrapping_mul(*b))),
@@ -1314,16 +1537,25 @@ impl Engine {
                 left.type_name(),
                 right.type_name()
             ))),
-        }
+        }?;
+        Ok(self.attach_obligations(
+            result,
+            left_obligations
+                .iter()
+                .chain(right_obligations.iter())
+                .cloned(),
+        ))
     }
 
     fn compute_unary(&self, op: UnaryOp, value: &Value) -> Result<Value, PoisonError> {
-        match (op, value) {
+        let (value, obligations) = self.split_obligations_ref(value);
+        let result = match (op, value) {
             (UnaryOp::Neg, Value::I64(n)) => Ok(Value::I64(-n)),
             (UnaryOp::Neg, Value::F64(n)) => Ok(Value::F64(-n)),
             (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
             _ => Err(self.type_error(&format!("cannot apply {:?} to {}", op, value.type_name()))),
-        }
+        }?;
+        Ok(self.attach_obligations(result, obligations.iter().cloned()))
     }
 
     fn invoke_builtin(
@@ -1344,7 +1576,8 @@ impl Engine {
                 BuiltinNamespace::Tree => {
                     self.require_no_kwargs("Tree", kwargs)?;
                     self.check_arity("Tree", args, 1)?;
-                    let value = self.force_value_shallow(args[0].clone())?;
+                    let (value, _) =
+                        self.split_obligations(self.force_value_shallow(args[0].clone())?);
                     match value {
                         Value::Map(map) => self.tree_from_map(&map),
                         Value::Path(path) => Ok(Value::Tree(TreeValue::FsDir(path))),
@@ -1359,6 +1592,12 @@ impl Engine {
                 }
             },
             BuiltinValue::Function(BuiltinFunction::Exec) => self.exec_builtin(args, kwargs),
+            BuiltinValue::Function(BuiltinFunction::Discover) => {
+                self.discover_builtin(args, kwargs)
+            }
+            BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
+                self.executor_class_builtin(args, kwargs)
+            }
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => {
                 self.require_no_kwargs("Blob.from_string", kwargs)?;
                 self.check_arity("Blob.from_string", args, 1)?;
@@ -1371,7 +1610,7 @@ impl Engine {
                 self.require_no_kwargs("Tree.of", kwargs)?;
                 self.check_arity("Tree.of", args, 1)?;
                 let value = &args[0];
-                let value = self.force_value_shallow(value.clone())?;
+                let (value, _) = self.split_obligations(self.force_value_shallow(value.clone())?);
                 let Value::Map(map) = value else {
                     return Err(
                         self.type_error(&format!("Tree.of expects Map, got {}", value.type_name()))
@@ -1394,7 +1633,8 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
                 self.require_no_kwargs("blob.to_string", kwargs)?;
                 self.check_arity("blob.to_string", args, 0)?;
-                let receiver = self.force_value(receiver.as_ref().clone())?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.force_value(receiver.as_ref().clone())?);
                 let Value::Blob(blob) = receiver else {
                     return Err(self.type_error("blob.to_string receiver must be Blob"));
                 };
@@ -1405,7 +1645,7 @@ impl Engine {
                         self.current_demand_chain(None),
                     )
                 })?;
-                Ok(Value::String(text))
+                Ok(self.attach_obligations(Value::String(text), obligations))
             }
             BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => {
                 self.require_no_kwargs("tree.file", kwargs)?;
@@ -1413,44 +1653,53 @@ impl Engine {
                 let path = &args[0];
                 let path = self.force_value(path.clone())?;
                 let path = self.expect_relative_path(&path, "tree.file path")?;
-                let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.force_value_shallow(receiver.as_ref().clone())?);
                 let Value::Tree(tree) = receiver else {
                     return Err(self.type_error("tree.file receiver must be Tree"));
                 };
-                self.tree_file(&tree, path)
+                let result = self.tree_file(&tree, path)?;
+                Ok(self.attach_obligations(result, obligations))
             }
             BuiltinValue::Method(BuiltinMethod::TreeMerge { receiver }) => {
                 self.require_no_kwargs("tree.merge", kwargs)?;
                 self.check_arity("tree.merge", args, 1)?;
-                let other = self.force_value_shallow(args[0].clone())?;
+                let (other, other_obligations) =
+                    self.split_obligations(self.force_value_shallow(args[0].clone())?);
                 let Value::Tree(other) = other else {
                     return Err(self.type_error("tree.merge expects Tree"));
                 };
-                let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.force_value_shallow(receiver.as_ref().clone())?);
                 let Value::Tree(receiver) = receiver else {
                     return Err(self.type_error("tree.merge receiver must be Tree"));
                 };
-                self.tree_merge(&receiver, &other)
+                let result = self.tree_merge(&receiver, &other)?;
+                Ok(self
+                    .attach_obligations(result, obligations.into_iter().chain(other_obligations)))
             }
             BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver }) => {
                 self.require_no_kwargs("tree.subtree", kwargs)?;
                 self.check_arity("tree.subtree", args, 1)?;
                 let path = self.force_value(args[0].clone())?;
                 let path = self.expect_relative_path(&path, "tree.subtree path")?;
-                let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.force_value_shallow(receiver.as_ref().clone())?);
                 let Value::Tree(tree) = receiver else {
                     return Err(self.type_error("tree.subtree receiver must be Tree"));
                 };
-                self.tree_subtree(&tree, path)
+                let result = self.tree_subtree(&tree, path)?;
+                Ok(self.attach_obligations(result, obligations))
             }
             BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver }) => {
                 self.require_no_kwargs("option.unwrap_or", kwargs)?;
                 self.check_arity("option.unwrap_or", args, 1)?;
-                let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.force_value_shallow(receiver.as_ref().clone())?);
                 let Value::Struct(option) = receiver else {
                     return Err(self.type_error("option.unwrap_or receiver must be Option"));
                 };
-                match option.type_name.as_ref() {
+                let result = match option.type_name.as_ref() {
                     "Some" => option
                         .fields
                         .iter()
@@ -1459,6 +1708,18 @@ impl Engine {
                         .ok_or_else(|| self.type_error("Some.unwrap_or requires a value field")),
                     "None" => Ok(args[0].clone()),
                     _ => Err(self.type_error("option.unwrap_or receiver must be Option")),
+                }?;
+                Ok(self.attach_obligations(result, obligations))
+            }
+            BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver }) => {
+                self.require_no_kwargs("fallible", kwargs)?;
+                match self.execute_call(
+                    receiver.as_ref().clone(),
+                    Arc::from(args.to_vec()),
+                    Arc::from(kwargs.to_vec()),
+                ) {
+                    Ok(value) => Ok(option_some(value)),
+                    Err(_) => Ok(option_none()),
                 }
             }
             BuiltinValue::Method(BuiltinMethod::HostRead { receiver }) => {
@@ -1492,7 +1753,7 @@ impl Engine {
                 let Value::Host(_) = receiver else {
                     return Err(self.type_error("host.which receiver must be Host"));
                 };
-                Ok(self.host_which(&name))
+                self.host_which(&name)
             }
         }
     }
@@ -1526,6 +1787,41 @@ impl Engine {
         self.exec_builtin_local(request)
     }
 
+    fn discover_builtin(
+        &self,
+        args: &[Value],
+        kwargs: &[(Arc<str>, Value)],
+    ) -> Result<Value, PoisonError> {
+        self.require_no_kwargs("discover", kwargs)?;
+        self.check_arity("discover", args, 2)?;
+        let class = self.force_value(args[0].clone())?;
+        let class = self.expect_executor_class(&class, "discover class")?;
+        let probe = self.force_value(args[1].clone())?;
+
+        if let Some(discover_handler) = &self.discover_handler {
+            let request = DiscoverRequest {
+                class,
+                module: self.transport_module(),
+                probe: self.ship_function(probe)?,
+            };
+            return discover_handler(request);
+        }
+
+        self.invoke_discover_probe(probe)
+    }
+
+    fn executor_class_builtin(
+        &self,
+        args: &[Value],
+        kwargs: &[(Arc<str>, Value)],
+    ) -> Result<Value, PoisonError> {
+        self.require_no_kwargs("executor_class", kwargs)?;
+        self.check_arity("executor_class", args, 1)?;
+        let name = self.force_value(args[0].clone())?;
+        let name = self.expect_host_path(&name, "executor_class name")?;
+        Ok(Value::ExecutorClass(Arc::from(name)))
+    }
+
     fn parse_exec_request(
         &self,
         args: &[Value],
@@ -1536,7 +1832,7 @@ impl Engine {
         let mut env_value = None;
         let mut mounts_value = None;
         let mut observer_value = None;
-        let mut verifier_value = None;
+        let mut executor_value = None;
         let mut writable_value = None;
 
         for (name, value) in kwargs {
@@ -1544,7 +1840,7 @@ impl Engine {
                 "env" => env_value = Some(value.clone()),
                 "mounts" => mounts_value = Some(value.clone()),
                 "observer" => observer_value = Some(value.clone()),
-                "verifier" => verifier_value = Some(value.clone()),
+                "executor" => executor_value = Some(value.clone()),
                 "writable" => writable_value = Some(value.clone()),
                 other => {
                     return Err(self
@@ -1554,6 +1850,7 @@ impl Engine {
         }
 
         let args_value = self.force_value_shallow(args[0].clone())?;
+        let (args_value, top_level_arg_obligations) = self.split_obligations(args_value);
         let Value::Array(exec_args_raw) = args_value else {
             return Err(self.type_error(&format!(
                 "exec expects Array[String | Path | Blob | Tree] for args, got {}",
@@ -1564,7 +1861,7 @@ impl Engine {
         let observer =
             observer_value.ok_or_else(|| self.type_error("exec requires an observer function"))?;
         let observer = self.force_value(observer)?;
-        match &observer {
+        match self.split_obligations_ref(&observer).0 {
             Value::Function(_) | Value::Builtin(_) => {}
             other => {
                 return Err(self.type_error(&format!(
@@ -1574,18 +1871,27 @@ impl Engine {
             }
         }
 
-        let verifier = verifier_value
-            .map(|verifier| {
-                let verifier = self.force_value(verifier)?;
-                match &verifier {
-                    Value::Function(_) | Value::Builtin(_) => Ok(verifier),
-                    other => Err(self.type_error(&format!(
-                        "exec verifier must be callable, got {}",
-                        other.type_name()
-                    ))),
-                }
-            })
-            .transpose()?;
+        if let Some(executor) = executor_value {
+            let executor = self.force_value(executor)?;
+            let _ = self.expect_executor_class(&executor, "exec executor")?;
+        }
+
+        let mut verification_obligations = BTreeMap::new();
+        Self::add_obligations(&mut verification_obligations, top_level_arg_obligations);
+        self.collect_value_obligations(
+            &Value::Array(exec_args_raw.clone()),
+            &mut verification_obligations,
+        );
+        if let Some(env_value) = &env_value {
+            self.collect_value_obligations(env_value, &mut verification_obligations);
+        }
+        if let Some(mounts_value) = &mounts_value {
+            self.collect_value_obligations(mounts_value, &mut verification_obligations);
+        }
+        if let Some(writable_value) = &writable_value {
+            self.collect_value_obligations(writable_value, &mut verification_obligations);
+        }
+        self.collect_value_obligations(&observer, &mut verification_obligations);
 
         let mut mounts = self.exec_mounts_from_value(mounts_value)?;
         let writable_roots = self.exec_writable_from_value(writable_value)?;
@@ -1604,7 +1910,7 @@ impl Engine {
             mounts,
             writable_roots,
             observer,
-            verifier,
+            verification_obligations: verification_obligations.into_values().collect(),
         })
     }
 
@@ -1625,11 +1931,7 @@ impl Engine {
             writable_roots: request.writable_roots.clone(),
             module: self.transport_module(),
             observer: self.ship_function(request.observer.clone())?,
-            verifier: request
-                .verifier
-                .clone()
-                .map(|verifier| self.ship_function(verifier))
-                .transpose()?,
+            verification_obligations: request.verification_obligations.clone(),
         })
     }
 
@@ -1646,19 +1948,14 @@ impl Engine {
             self.ensure_dir(&sandbox_root.join(root.as_str()))?;
         }
 
-        let verifier_task = request
-            .verifier
-            .clone()
-            .map(|verifier| {
-                let module = self.transport_module();
-                let verifier = self.ship_function(verifier)?;
-                // r[impl exec.verifier.host]
-                Ok(thread::spawn(move || {
-                    Engine::invoke_shipped(&module, &verifier, vec![Value::Host(HostValue)])
-                        .map(|_| ())
-                }))
-            })
-            .transpose()?;
+        let verification_task = if request.verification_obligations.is_empty() {
+            None
+        } else {
+            let verification_obligations = request.verification_obligations.clone();
+            Some(thread::spawn(move || {
+                verify_host_obligations(&verification_obligations)
+            }))
+        };
 
         let rendered_args = request
             .args
@@ -1692,20 +1989,20 @@ impl Engine {
             Arc::from([]),
         );
 
-        if let Some(verifier_task) = verifier_task {
-            match verifier_task.join() {
+        if let Some(verification_task) = verification_task {
+            match verification_task.join() {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     return Err(PoisonError::new(
                         PoisonKind::VerificationFailure,
-                        format!("exec verifier failed: {error}"),
+                        format!("exec verification failed: {error}"),
                         self.current_demand_chain(None),
                     ));
                 }
                 Err(_) => {
                     return Err(PoisonError::new(
                         PoisonKind::Internal,
-                        "exec verifier task panicked",
+                        "exec verification task panicked",
                         self.current_demand_chain(None),
                     ));
                 }
@@ -1723,7 +2020,7 @@ impl Engine {
         let Some(value) = value else {
             return Ok(Vec::new());
         };
-        let value = self.force_value_shallow(value)?;
+        let (value, _) = self.split_obligations(self.force_value_shallow(value)?);
         let Value::Map(map) = value else {
             return Err(self.type_error(&format!(
                 "exec mounts must be Map, got {}",
@@ -1735,7 +2032,7 @@ impl Engine {
         for (key, value) in map.entries.iter() {
             let key = self.force_value(key.clone())?;
             let path = self.expect_relative_path(&key, "exec mount path")?;
-            let value = self.force_value_shallow(value.clone())?;
+            let (value, _) = self.split_obligations(self.force_value_shallow(value.clone())?);
             match value {
                 Value::Blob(_) | Value::Tree(_) => mounts.push((path, value)),
                 other => {
@@ -1756,7 +2053,7 @@ impl Engine {
         let Some(value) = value else {
             return Ok(Vec::new());
         };
-        let value = self.force_value_shallow(value)?;
+        let (value, _) = self.split_obligations(self.force_value_shallow(value)?);
         let Value::Array(items) = value else {
             return Err(self.type_error(&format!(
                 "exec writable must be Array[Path], got {}",
@@ -1781,7 +2078,7 @@ impl Engine {
         let Some(value) = value else {
             return Ok(Vec::new());
         };
-        let value = self.force_value_shallow(value)?;
+        let (value, _) = self.split_obligations(self.force_value_shallow(value)?);
         let Value::Map(map) = value else {
             return Err(
                 self.type_error(&format!("exec env must be Map, got {}", value.type_name()))
@@ -1813,7 +2110,7 @@ impl Engine {
         writable_roots: &[PathValue],
         context: &str,
     ) -> Result<ExecArgValue, PoisonError> {
-        let value = self.force_value(value.clone())?;
+        let (value, _) = self.split_obligations(self.force_value(value.clone())?);
         match value {
             Value::String(text) => Ok(ExecArgValue::Literal(text.to_string())),
             Value::Path(path) => {
@@ -1845,13 +2142,23 @@ impl Engine {
         values: &mut Vec<Value>,
         spread_value: Value,
     ) -> Result<(), PoisonError> {
+        let (spread_value, obligations) = self.split_obligations(spread_value);
         match spread_value {
             Value::Array(items) => {
-                values.extend(items.iter().cloned());
+                values.extend(
+                    items
+                        .iter()
+                        .cloned()
+                        .map(|value| self.attach_obligations(value, obligations.clone())),
+                );
                 Ok(())
             }
             Value::Tree(tree) => {
-                values.extend(self.tree_exec_path_values(&tree)?);
+                values.extend(
+                    self.tree_exec_path_values(&tree)?
+                        .into_iter()
+                        .map(|value| self.attach_obligations(value, obligations.clone())),
+                );
                 Ok(())
             }
             other => Err(self.type_error(&format!(
@@ -2221,10 +2528,23 @@ impl Engine {
     }
 
     fn expect_host_path(&self, value: &Value, context: &str) -> Result<String, PoisonError> {
+        let (value, _) = self.split_obligations_ref(value);
         match value {
             Value::String(path) => Ok(path.to_string()),
             other => Err(self.type_error(&format!(
                 "{context} must be String, got {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn expect_executor_class(&self, value: &Value, context: &str) -> Result<String, PoisonError> {
+        let (value, _) = self.split_obligations_ref(value);
+        match value {
+            Value::ExecutorClass(label) => Ok(label.to_string()),
+            Value::String(label) => Ok(label.to_string()),
+            other => Err(self.type_error(&format!(
+                "{context} must be ExecutorClass, got {}",
                 other.type_name()
             ))),
         }
@@ -2245,6 +2565,19 @@ impl Engine {
                 self.current_demand_chain(None),
             ));
         }
+        let content_hash = fs::read(path)
+            .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
+            .map_err(|error| {
+                PoisonError::new(
+                    PoisonKind::UserFail,
+                    format!("failed to read host path {path}: {error}"),
+                    self.current_demand_chain(None),
+                )
+            })?;
+        self.record_discovery_observation(HostObservation::Read {
+            path: path.to_string(),
+            content_hash,
+        });
         Ok(Value::Blob(BlobValue::FsFile(PathValue::new(path))))
     }
 
@@ -2256,26 +2589,54 @@ impl Engine {
                 self.current_demand_chain(None),
             )
         })?;
-        Ok(Value::Blob(BlobValue::from_string(
-            blake3::hash(&bytes).to_hex().to_string(),
-        )))
+        let content_hash = blake3::hash(&bytes).to_hex().to_string();
+        self.record_discovery_observation(HostObservation::Hash {
+            path: path.to_string(),
+            content_hash: content_hash.clone(),
+        });
+        Ok(Value::Blob(BlobValue::from_string(content_hash)))
     }
 
-    fn host_which(&self, name: &str) -> Value {
+    fn host_which(&self, name: &str) -> Result<Value, PoisonError> {
         if host_lookup_candidate(name).is_some_and(host_path_is_executable) {
-            return option_some(Value::String(Arc::from(name)));
+            self.record_discovery_observation(HostObservation::Which {
+                name: name.to_string(),
+                expected_path: Some(name.to_string()),
+            });
+            return Ok(Value::String(Arc::from(name)));
         }
 
         let Some(path) = env::var_os("PATH") else {
-            return option_none();
+            self.record_discovery_observation(HostObservation::Which {
+                name: name.to_string(),
+                expected_path: None,
+            });
+            return Err(PoisonError::new(
+                PoisonKind::UserFail,
+                format!("host.which could not find {name}"),
+                self.current_demand_chain(None),
+            ));
         };
         for dir in env::split_paths(&path) {
             let candidate = dir.join(name);
             if host_path_is_executable(&candidate) {
-                return option_some(Value::String(Arc::from(candidate.to_string_lossy())));
+                let candidate = candidate.to_string_lossy().to_string();
+                self.record_discovery_observation(HostObservation::Which {
+                    name: name.to_string(),
+                    expected_path: Some(candidate.clone()),
+                });
+                return Ok(Value::String(Arc::from(candidate)));
             }
         }
-        option_none()
+        self.record_discovery_observation(HostObservation::Which {
+            name: name.to_string(),
+            expected_path: None,
+        });
+        Err(PoisonError::new(
+            PoisonKind::UserFail,
+            format!("host.which could not find {name}"),
+            self.current_demand_chain(None),
+        ))
     }
 
     fn exec_process_value(&self, output: &std::process::Output) -> Value {
@@ -2306,11 +2667,16 @@ impl Engine {
                 Err(self
                     .internal_error("Host values cannot cross the local exec observer boundary"))
             }
+            Value::Discovered(discovered) => {
+                let value = self.snapshot_value(*discovered.value)?;
+                Ok(self.attach_obligations(value, discovered.obligations.iter().cloned()))
+            }
             Value::ExecPath(_) => Err(self
                 .internal_error("ExecPath values cannot cross the local exec observer boundary")),
             Value::Blob(BlobValue::Inline(_))
             | Value::Blob(BlobValue::Store(_))
             | Value::Path(_)
+            | Value::ExecutorClass(_)
             | Value::U64(_)
             | Value::I64(_)
             | Value::F64(_)
@@ -2740,6 +3106,7 @@ impl Engine {
     }
 
     fn expect_tree_entry_name<'a>(&self, value: &'a Value) -> Result<&'a str, PoisonError> {
+        let (value, _) = self.split_obligations_ref(value);
         match value {
             Value::String(name) => Ok(name.as_ref()),
             Value::Path(path) => {
@@ -2766,6 +3133,7 @@ impl Engine {
     }
 
     fn expect_path_value(&self, value: &Value, context: &str) -> Result<PathValue, PoisonError> {
+        let (value, _) = self.split_obligations_ref(value);
         match value {
             Value::Path(path) => Ok(path.clone()),
             Value::String(path) => Ok(PathValue::new(path.as_ref())),
@@ -2912,6 +3280,8 @@ fn capture_bindings(bindings: &HashMap<String, Value>) -> Arc<[(Arc<str>, Value)
 fn builtin_namespace(name: &str) -> Option<BuiltinValue> {
     match name {
         "exec" => Some(BuiltinValue::Function(BuiltinFunction::Exec)),
+        "discover" => Some(BuiltinValue::Function(BuiltinFunction::Discover)),
+        "executor_class" => Some(BuiltinValue::Function(BuiltinFunction::ExecutorClass)),
         "Blob" => Some(BuiltinValue::Namespace(BuiltinNamespace::Blob)),
         "Tree" => Some(BuiltinValue::Namespace(BuiltinNamespace::Tree)),
         _ => None,
@@ -2940,6 +3310,65 @@ fn option_none() -> Value {
     })
 }
 
+pub fn verify_host_obligations(obligations: &[HostObservation]) -> Result<(), String> {
+    for obligation in obligations {
+        match obligation {
+            HostObservation::Which {
+                name,
+                expected_path,
+            } => {
+                let actual = resolve_host_which(name);
+                match (expected_path.as_deref(), actual.as_deref()) {
+                    (Some(expected), Some(actual)) if expected == actual => {}
+                    (Some(expected), Some(actual)) => {
+                        return Err(format!(
+                            "host.which(\"{name}\") changed: expected {expected}, got {actual}"
+                        ));
+                    }
+                    (Some(expected), None) => {
+                        return Err(format!(
+                            "host.which(\"{name}\") changed: expected {expected}, but it is now missing"
+                        ));
+                    }
+                    (None, Some(actual)) => {
+                        return Err(format!(
+                            "host.which(\"{name}\") changed: expected missing, got {actual}"
+                        ));
+                    }
+                    (None, None) => {}
+                }
+            }
+            HostObservation::Read { path, content_hash } => {
+                let actual = hash_host_file(path).map_err(|error| {
+                    format!("host.read verification failed for {path}: {error}")
+                })?;
+                if actual != *content_hash {
+                    return Err(format!(
+                        "host.read(\"{path}\") changed: expected {content_hash}, got {actual}"
+                    ));
+                }
+            }
+            HostObservation::Hash { path, content_hash } => {
+                let actual = hash_host_file(path).map_err(|error| {
+                    format!("host.hash verification failed for {path}: {error}")
+                })?;
+                if actual != *content_hash {
+                    return Err(format!(
+                        "host.hash(\"{path}\") changed: expected {content_hash}, got {actual}"
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn hash_host_file(path: &str) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
 fn host_lookup_candidate(name: &str) -> Option<&Path> {
     let candidate = Path::new(name);
     if candidate.is_absolute() || name.contains('/') || name.contains(std::path::MAIN_SEPARATOR) {
@@ -2947,6 +3376,22 @@ fn host_lookup_candidate(name: &str) -> Option<&Path> {
     } else {
         None
     }
+}
+
+fn resolve_host_which(name: &str) -> Option<String> {
+    if host_lookup_candidate(name).is_some_and(host_path_is_executable) {
+        return Some(name.to_string());
+    }
+
+    let path = env::var_os("PATH")?;
+    for dir in env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if host_path_is_executable(&candidate) {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+    }
+
+    None
 }
 
 fn host_path_is_executable(path: &Path) -> bool {
@@ -3215,7 +3660,9 @@ fn collect_expr_callee_names(
             collect_expr_callee_names(left, visible_locals, top_level_names, deps);
             collect_expr_callee_names(right, visible_locals, top_level_names, deps);
         }
-        instr::Expr::Unary { operand, .. } | instr::Expr::Fail(operand) => {
+        instr::Expr::Unary { operand, .. }
+        | instr::Expr::Fail(operand)
+        | instr::Expr::Fallible(operand) => {
             collect_expr_callee_names(operand, visible_locals, top_level_names, deps);
         }
         instr::Expr::Block(block) => {

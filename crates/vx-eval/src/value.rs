@@ -7,6 +7,7 @@ use std::fmt;
 use std::fs;
 use std::sync::Arc;
 
+use facet::Facet;
 use vx_store_proto::{BlobRef, NodeHash};
 
 use crate::instr::FnDef;
@@ -42,8 +43,12 @@ pub enum Value {
     // r[impl store.tree]
     /// A directory-like content handle.
     Tree(TreeValue),
+    /// A logical executor class label.
+    ExecutorClass(Arc<str>),
     /// An executor-local verifier handle.
     Host(HostValue),
+    /// A value with hidden discovery verification obligations.
+    Discovered(DiscoveredValue),
     /// Unit `()`
     Unit,
     /// Tuple
@@ -101,6 +106,31 @@ pub enum TreeValue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostValue;
 
+/// Host facts observed during discovery and rechecked during exec.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Facet)]
+#[repr(u8)]
+pub enum HostObservation {
+    Which {
+        name: String,
+        expected_path: Option<String>,
+    },
+    Read {
+        path: String,
+        content_hash: String,
+    },
+    Hash {
+        path: String,
+        content_hash: String,
+    },
+}
+
+/// A runtime wrapper for values produced by discovery.
+#[derive(Debug, Clone)]
+pub struct DiscoveredValue {
+    pub value: Box<Value>,
+    pub obligations: Arc<[HostObservation]>,
+}
+
 // i[impl impl.persistent]
 // i[impl impl.struct]
 /// A struct value: type name + fields.
@@ -129,6 +159,8 @@ pub enum BuiltinNamespace {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltinFunction {
     Exec,
+    Discover,
+    ExecutorClass,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +174,7 @@ pub enum BuiltinMethod {
     TreeMerge { receiver: Box<Value> },
     TreeSubtree { receiver: Box<Value> },
     OptionUnwrapOr { receiver: Box<Value> },
+    FallibleCall { receiver: Box<Value> },
     HostRead { receiver: Box<Value> },
     HostHash { receiver: Box<Value> },
     HostWhich { receiver: Box<Value> },
@@ -167,7 +200,9 @@ impl Value {
             Value::ExecPath(_) => "ExecPath",
             Value::Blob(_) => "Blob",
             Value::Tree(_) => "Tree",
+            Value::ExecutorClass(_) => "ExecutorClass",
             Value::Host(_) => "Host",
+            Value::Discovered(discovered) => discovered.value.type_name(),
             Value::Unit => "()",
             Value::Tuple(_) => "Tuple",
             Value::Array(_) => "Array",
@@ -189,6 +224,7 @@ impl Value {
                 .all(|(key, value)| key.is_fully_resolved() && value.is_fully_resolved()),
             Value::ExecPath(path) => path.is_fully_resolved(),
             Value::Tree(tree) => tree.is_fully_resolved(),
+            Value::Discovered(discovered) => discovered.value.is_fully_resolved(),
             Value::Struct(s) => s.fields.iter().all(|(_, value)| value.is_fully_resolved()),
             Value::Function(f) => f
                 .captures
@@ -211,7 +247,21 @@ impl Value {
             Value::ExecPath(path) => path.key(),
             Value::Blob(blob) => blob.key(),
             Value::Tree(tree) => tree.key(),
+            Value::ExecutorClass(label) => Some(format!("executor_class:{label}")),
             Value::Host(_) => None,
+            Value::Discovered(discovered) => {
+                let obligations = discovered
+                    .obligations
+                    .iter()
+                    .map(HostObservation::key)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                Some(format!(
+                    "discovered:{}:[{}]",
+                    discovered.value.key()?,
+                    obligations
+                ))
+            }
             Value::Unit => Some("unit".into()),
             Value::Tuple(elems) => {
                 let parts = elems.iter().map(Value::key).collect::<Option<Vec<_>>>()?;
@@ -232,6 +282,22 @@ impl Value {
             }
             Value::Function(function) => Some(function.key()?),
             Value::Builtin(builtin) => builtin.key(),
+        }
+    }
+}
+
+impl HostObservation {
+    pub fn key(&self) -> String {
+        match self {
+            Self::Which {
+                name,
+                expected_path,
+            } => match expected_path {
+                Some(path) => format!("which:{name}:{path}"),
+                None => format!("which:{name}:<missing>"),
+            },
+            Self::Read { path, content_hash } => format!("read:{path}:{content_hash}"),
+            Self::Hash { path, content_hash } => format!("hash:{path}:{content_hash}"),
         }
     }
 }
@@ -371,6 +437,8 @@ impl BuiltinValue {
         match self {
             BuiltinValue::Namespace(_)
             | BuiltinValue::Function(BuiltinFunction::Exec)
+            | BuiltinValue::Function(BuiltinFunction::Discover)
+            | BuiltinValue::Function(BuiltinFunction::ExecutorClass)
             | BuiltinValue::Method(BuiltinMethod::BlobFromString)
             | BuiltinValue::Method(BuiltinMethod::TreeOf)
             | BuiltinValue::Method(BuiltinMethod::TreeEmpty)
@@ -380,6 +448,7 @@ impl BuiltinValue {
             | BuiltinValue::Method(BuiltinMethod::TreeMerge { receiver })
             | BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver })
             | BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver })
+            | BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver })
             | BuiltinValue::Method(BuiltinMethod::HostRead { receiver })
             | BuiltinValue::Method(BuiltinMethod::HostHash { receiver })
             | BuiltinValue::Method(BuiltinMethod::HostWhich { receiver }) => {
@@ -393,6 +462,10 @@ impl BuiltinValue {
             BuiltinValue::Namespace(BuiltinNamespace::Blob) => Some("builtin:Blob".into()),
             BuiltinValue::Namespace(BuiltinNamespace::Tree) => Some("builtin:Tree".into()),
             BuiltinValue::Function(BuiltinFunction::Exec) => Some("builtin:exec".into()),
+            BuiltinValue::Function(BuiltinFunction::Discover) => Some("builtin:discover".into()),
+            BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
+                Some("builtin:executor_class".into())
+            }
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => {
                 Some("builtin:Blob.from_string".into())
             }
@@ -415,6 +488,9 @@ impl BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver }) => {
                 Some(format!("builtin:option.unwrap_or({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver }) => {
+                Some(format!("builtin:fallible({})", receiver.key()?))
             }
             BuiltinValue::Method(BuiltinMethod::HostRead { receiver }) => {
                 Some(format!("builtin:host.read({})", receiver.key()?))
@@ -442,7 +518,9 @@ impl fmt::Display for Value {
             Value::ExecPath(path) => write!(f, "{path}"),
             Value::Blob(blob) => write!(f, "{blob}"),
             Value::Tree(tree) => write!(f, "{tree}"),
+            Value::ExecutorClass(label) => write!(f, "{label}"),
             Value::Host(_) => write!(f, "<host>"),
+            Value::Discovered(discovered) => write!(f, "{}", discovered.value),
             Value::Unit => write!(f, "()"),
             Value::Tuple(elems) => {
                 write!(f, "(")?;
@@ -496,6 +574,9 @@ impl fmt::Display for Value {
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (Value::Discovered(a), Value::Discovered(b)) => a.value == b.value,
+            (Value::Discovered(a), other) => a.value.as_ref() == other,
+            (other, Value::Discovered(b)) => other == b.value.as_ref(),
             (Value::Pending(a), Value::Pending(b)) => a == b,
             (Value::U64(a), Value::U64(b)) => a == b,
             (Value::I64(a), Value::I64(b)) => a == b,
@@ -506,6 +587,7 @@ impl PartialEq for Value {
             (Value::ExecPath(a), Value::ExecPath(b)) => a == b,
             (Value::Blob(a), Value::Blob(b)) => a == b,
             (Value::Tree(a), Value::Tree(b)) => a == b,
+            (Value::ExecutorClass(a), Value::ExecutorClass(b)) => a == b,
             (Value::Host(a), Value::Host(b)) => a == b,
             (Value::Unit, Value::Unit) => true,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
@@ -617,6 +699,10 @@ impl PartialEq for BuiltinMethod {
                 BuiltinMethod::OptionUnwrapOr { receiver: right },
             )
             | (
+                BuiltinMethod::FallibleCall { receiver: left },
+                BuiltinMethod::FallibleCall { receiver: right },
+            )
+            | (
                 BuiltinMethod::HostRead { receiver: left },
                 BuiltinMethod::HostRead { receiver: right },
             )
@@ -683,6 +769,10 @@ impl fmt::Display for BuiltinValue {
             BuiltinValue::Namespace(BuiltinNamespace::Blob) => write!(f, "Blob"),
             BuiltinValue::Namespace(BuiltinNamespace::Tree) => write!(f, "Tree"),
             BuiltinValue::Function(BuiltinFunction::Exec) => write!(f, "exec"),
+            BuiltinValue::Function(BuiltinFunction::Discover) => write!(f, "discover"),
+            BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
+                write!(f, "executor_class")
+            }
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => write!(f, "Blob.from_string"),
             BuiltinValue::Method(BuiltinMethod::TreeOf) => write!(f, "Tree.of"),
             BuiltinValue::Method(BuiltinMethod::TreeEmpty) => write!(f, "Tree.empty"),
@@ -701,6 +791,9 @@ impl fmt::Display for BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { .. }) => {
                 write!(f, "<bound option.unwrap_or>")
+            }
+            BuiltinValue::Method(BuiltinMethod::FallibleCall { .. }) => {
+                write!(f, "<bound fallible>")
             }
             BuiltinValue::Method(BuiltinMethod::HostRead { .. }) => {
                 write!(f, "<bound host.read>")

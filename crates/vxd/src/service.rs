@@ -27,8 +27,9 @@ use tokio::task::block_in_place;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use vx_eval::{
-    BlobValue, DemandChain, Engine, ExecArgValue, ExecMount, ExecRequest, PathValue, PoisonError,
-    PoisonKind, TreeValue, Value, lower_source_file,
+    BlobValue, DemandChain, DiscoverRequest as EvalDiscoverRequest, Engine, ExecArgValue,
+    ExecMount, ExecRequest, PathValue, PoisonError, PoisonKind, TreeValue, Value,
+    lower_source_file,
 };
 use vx_io::spawn::ServiceHandle;
 use vx_parser::SourceFile;
@@ -39,7 +40,8 @@ use vx_report::{
 };
 use vx_rs::CrateGraph;
 use vx_runner_proto::{
-    RunArg, RunEvalPayload, RunFailureKind, RunRequest, RunTreeMount, RunnerClient,
+    DiscoverRequest as RunnerDiscoverRequest, RunArg, RunEvalPayload, RunFailureKind, RunRequest,
+    RunTreeMount, RunnerClient,
 };
 use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
 use vx_store_proto::{
@@ -886,7 +888,7 @@ async fn run_build_vx_exec_via_runner(
                 eval: Some(RunEvalPayload {
                     module: request.module,
                     observer: Some(request.observer),
-                    verifier: request.verifier,
+                    verification_obligations: request.verification_obligations,
                 }),
                 macos_commandlinetools_version: None,
             },
@@ -913,6 +915,23 @@ async fn run_build_vx_exec_via_runner(
         )
     })?;
     Value::try_from(observer_value)
+        .map_err(|error| exec_bridge_poison(PoisonKind::UserFail, error.to_string()))
+}
+
+async fn run_build_vx_discover_via_runner(
+    exec: &RunnerClient,
+    request: EvalDiscoverRequest,
+) -> std::result::Result<Value, PoisonError> {
+    let result = exec
+        .discover(RunnerDiscoverRequest {
+            class: request.class,
+            module: request.module,
+            probe: request.probe,
+        })
+        .await
+        .map_err(|error| exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}")))?;
+
+    Value::try_from(result.value)
         .map_err(|error| exec_bridge_poison(PoisonKind::UserFail, error.to_string()))
 }
 
@@ -1447,13 +1466,22 @@ impl VxdService {
                 let store = Arc::clone(&self.store);
                 let exec = Arc::clone(&self.exec);
                 let runtime = Handle::current();
-                let engine =
-                    Engine::from_module(&module).with_exec_handler(Arc::new(move |request| {
+                let discover_exec = Arc::clone(&self.exec);
+                let discover_runtime = runtime.clone();
+                let engine = Engine::from_module(&module)
+                    .with_exec_handler(Arc::new(move |request| {
                         let store = Arc::clone(&store);
                         let exec = Arc::clone(&exec);
                         let runtime = runtime.clone();
                         block_in_place(|| {
                             runtime.block_on(run_build_vx_exec_via_runner(&store, &exec, request))
+                        })
+                    }))
+                    .with_discover_handler(Arc::new(move |request| {
+                        let exec = Arc::clone(&discover_exec);
+                        let runtime = discover_runtime.clone();
+                        block_in_place(|| {
+                            runtime.block_on(run_build_vx_discover_via_runner(&exec, request))
                         })
                     }));
                 let output = engine

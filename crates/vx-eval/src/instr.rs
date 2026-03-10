@@ -132,6 +132,9 @@ pub enum Expr {
     /// `fail expr`
     Fail(Box<Expr>),
 
+    /// `expr?`
+    Fallible(Box<Expr>),
+
     /// Tuple literal: `(a, b, c)`
     Tuple(Vec<Expr>),
 }

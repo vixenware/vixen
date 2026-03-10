@@ -26,7 +26,6 @@ const ALL_BUILTINS: &[Builtin] = &[
     Builtin::Path,
     Builtin::ExecPath,
     Builtin::ExecutorClass,
-    Builtin::DiscoveryProcess,
 ];
 
 /// Derive a CapSet from the capabilities on a function type.

@@ -13,10 +13,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use vx_eval::{
-    BlobValue, Engine, HostValue, MapValue, PathValue, StructValue, TransportValue, TreeValue,
-    Value,
+    BlobValue, DiscoveredValue, Engine, MapValue, PathValue, StructValue, TransportValue,
+    TreeValue, Value, verify_host_obligations,
 };
-use vx_runner_proto::RunEvalPayload;
+use vx_runner_proto::{DiscoverRequest, RunEvalPayload};
 use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
 use vx_store_proto::{
     BlobRef, CasNode, ContentHash, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient,
@@ -63,16 +63,21 @@ pub fn evaluate_shipped_observer<'a>(
     })
 }
 
-// r[impl exec.verifier]
-pub fn evaluate_shipped_verifier(eval: &RunEvalPayload) -> Result<(), String> {
-    let Some(verifier) = &eval.verifier else {
-        return Ok(());
-    };
+// r[impl exec.verification]
+pub fn evaluate_shipped_verification(eval: &RunEvalPayload) -> Result<(), String> {
+    verify_host_obligations(&eval.verification_obligations)
+}
 
-    // r[impl exec.verifier.host]
-    Engine::invoke_shipped(&eval.module, verifier, vec![Value::Host(HostValue)])
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+// r[impl exec.discover]
+pub fn evaluate_shipped_discover<'a>(
+    cas: &'a StoreClient,
+    request: &'a DiscoverRequest,
+) -> BoundaryFuture<'a, TransportValue> {
+    Box::pin(async move {
+        let discovered = Engine::invoke_shipped_discover(&request.module, &request.probe)
+            .map_err(|error| error.to_string())?;
+        commit_value_to_transport(cas, discovered).await
+    })
 }
 
 fn commit_value<'a>(cas: &'a StoreClient, value: Value) -> BoundaryFuture<'a, Value> {
@@ -84,6 +89,13 @@ fn commit_value<'a>(cas: &'a StoreClient, value: Value) -> BoundaryFuture<'a, Va
                 path.as_str()
             )),
             Value::Host(_) => Err("Host values cannot cross the executor boundary".into()),
+            Value::Discovered(discovered) => {
+                let value = commit_value(cas, *discovered.value).await?;
+                Ok(Value::Discovered(DiscoveredValue {
+                    value: Box::new(value),
+                    obligations: discovered.obligations,
+                }))
+            }
             Value::Blob(blob) => Ok(Value::Blob(commit_blob(cas, blob).await?)),
             Value::Tree(tree) => {
                 let (root, _) = commit_tree(cas, tree).await?;
@@ -370,14 +382,18 @@ mod tests {
 
     use tempfile::TempDir;
     use vx_eval::{
-        BlobValue, Engine, PathValue, TransportTree, TreeValue, Value, lower_source_file,
+        BlobValue, Engine, HostObservation, PathValue, TransportTree, TreeValue, Value,
+        lower_source_file,
     };
     use vx_io::spawn::{ServiceBuilder, ServiceHandle};
     use vx_parser::SourceFile;
-    use vx_runner_proto::RunEvalPayload;
+    use vx_runner_proto::{DiscoverRequest, RunEvalPayload};
     use vx_store_proto::{CasNode, ChunkHash, DirectoryNode, StoreClient};
 
-    use super::{commit_value_to_transport, evaluate_shipped_observer, evaluate_shipped_verifier};
+    use super::{
+        commit_value_to_transport, evaluate_shipped_discover, evaluate_shipped_observer,
+        evaluate_shipped_verification,
+    };
 
     struct StoreTestEnv {
         _root: TempDir,
@@ -495,10 +511,10 @@ mod tests {
 
         let engine = shipped_function_engine(
             r#"fn observe(process: Process, tree: Tree) {
-                   Tree.of(%{
-                     "stdout.txt" => process.stdout,
-                     "output.txt" => tree.file("out/output.txt"),
-                   })
+                   Tree {
+                     @stdout.txt: process.stdout,
+                     @output.txt: tree.file "out/output.txt",
+                   }
                  }
 
                  fn make() { observe }"#,
@@ -510,7 +526,7 @@ mod tests {
                     .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
                     .expect("observer should ship"),
             ),
-            verifier: None,
+            verification_obligations: Vec::new(),
         };
 
         let observed = evaluate_shipped_observer(
@@ -552,54 +568,79 @@ mod tests {
     }
 
     #[test]
-    fn shipped_verifiers_can_poison() {
-        let engine = shipped_function_engine(
-            r#"fn verify(host: Host) { fail "toolchain drift" }
-
-               fn make() { verify }"#,
-        );
-        let eval = RunEvalPayload {
-            module: engine.transport_module(),
-            observer: None,
-            verifier: Some(
-                engine
-                    .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
-                    .expect("verifier should ship"),
-            ),
-        };
-
-        let error = evaluate_shipped_verifier(&eval).expect_err("verifier should poison");
-        assert!(error.contains("toolchain drift"));
-    }
-
-    #[test]
-    // r[verify exec.verifier.host]
-    fn shipped_verifiers_receive_host_access() {
+    fn shipped_verification_reports_changed_host_files() {
         let tempdir = TempDir::new().expect("failed to create host tempdir");
         let tool_path = tempdir.path().join("tool.txt");
         fs::write(&tool_path, "toolchain-v1").expect("failed to write host file");
+        let expected_hash = blake3::hash(b"toolchain-v1").to_hex().to_string();
+        let eval = RunEvalPayload {
+            module: shipped_function_engine(r#"fn make() {}"#).transport_module(),
+            observer: None,
+            verification_obligations: vec![HostObservation::Read {
+                path: tool_path.to_string_lossy().to_string(),
+                content_hash: expected_hash,
+            }],
+        };
+
+        fs::write(&tool_path, "toolchain-v2").expect("failed to rewrite host file");
+
+        let error =
+            evaluate_shipped_verification(&eval).expect_err("verification should report drift");
+        assert!(error.contains("host.read"));
+    }
+
+    #[tokio::test]
+    async fn shipped_discover_probes_receive_host_access() {
+        let env = StoreTestEnv::new().await;
+        let tempdir = TempDir::new().expect("failed to create host tempdir");
+        let tool_path = tempdir.path().join("tool.txt");
+        fs::write(&tool_path, "toolchain-v1").expect("failed to write host file");
+        let expected_hash = blake3::hash(b"toolchain-v1").to_hex().to_string();
         let source = format!(
-            r#"fn verify(host: Host) {{
-                   if host.read({path:?}).to_string() != "toolchain-v1" {{
-                     fail "read mismatch"
-                   }}
+            r#"fn probe(host: Host) {{
+                   host.read({path:?});
+                   host.hash({path:?});
+                   host.read({path:?})
                  }}
 
-                 fn make() {{ verify }}"#,
+                 fn make() {{ probe }}"#,
             path = tool_path.to_string_lossy(),
         );
         let engine = shipped_function_engine(&source);
-        let eval = RunEvalPayload {
+        let request = DiscoverRequest {
+            class: "default".to_string(),
             module: engine.transport_module(),
-            observer: None,
-            verifier: Some(
-                engine
-                    .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
-                    .expect("verifier should ship"),
-            ),
+            probe: engine
+                .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
+                .expect("probe should ship"),
         };
 
-        evaluate_shipped_verifier(&eval).expect("verifier should read the host file");
+        let transport = evaluate_shipped_discover(&env.client, &request)
+            .await
+            .expect("discover should evaluate");
+
+        match transport {
+            vx_eval::TransportValue::Discovered { value, obligations } => {
+                assert_eq!(
+                    obligations,
+                    vec![
+                        HostObservation::Hash {
+                            path: tool_path.to_string_lossy().to_string(),
+                            content_hash: expected_hash.clone(),
+                        },
+                        HostObservation::Read {
+                            path: tool_path.to_string_lossy().to_string(),
+                            content_hash: expected_hash,
+                        },
+                    ]
+                );
+                match *value {
+                    vx_eval::TransportValue::Blob(vx_eval::TransportBlob::Store(_)) => {}
+                    other => panic!("expected committed blob, got {other:?}"),
+                }
+            }
+            other => panic!("expected discovered transport value, got {other:?}"),
+        }
     }
 
     fn shipped_function_engine(source: &str) -> Engine {

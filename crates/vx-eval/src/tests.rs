@@ -17,7 +17,9 @@ use crate::exec::ExecArgValue;
 use crate::lower::lower_source_file;
 use crate::poison::PoisonKind;
 use crate::transport::TransportValue;
-use crate::value::{BlobValue, ExecPathValue, PathValue, StructValue, TreeValue, Value};
+use crate::value::{
+    BlobValue, ExecPathValue, HostObservation, PathValue, StructValue, TreeValue, Value,
+};
 use crate::worker::Engine;
 
 fn eval(source: &str, entry: &str) -> Result<Value, crate::poison::PoisonError> {
@@ -101,7 +103,10 @@ fn interpolated_string_literal() {
 
 #[test]
 fn path_literal_normalizes_slashes() {
-    let val = eval(r#"fn main() { @out//./artifact.o }"#, "main").unwrap();
+    let engine = engine(r#"fn main(root: Path) { @({root}/./artifact.o) }"#);
+    let val = engine
+        .call("main", vec![Value::Path(PathValue::new("out//"))])
+        .unwrap();
     assert_eq!(val, Value::Path(PathValue::new("out/artifact.o")));
 }
 
@@ -900,8 +905,8 @@ fn mutually_recursive_functions_share_one_code_identity() {
     let engine = engine(source);
 
     assert_eq!(
-        engine.function_key("even").unwrap(),
-        engine.function_key("odd").unwrap()
+        engine.function_identity_string("even").unwrap(),
+        engine.function_identity_string("odd").unwrap()
     );
 }
 
@@ -1129,25 +1134,35 @@ fn exec_runs_a_local_process_with_keyword_args_and_snapshots_outputs() {
 }
 
 #[test]
-fn exec_verifier_failures_poison_locally() {
-    let engine = engine(
-        r#"fn verify(host: Host) { fail "toolchain drift" }
+fn exec_verification_failures_poison_locally() {
+    let tempdir = TempDir::new().unwrap();
+    let input_path = tempdir.path().join("tool.txt");
+    fs::write(&input_path, "toolchain-v1").unwrap();
+    let source = format!(
+        r#"fn probe() #discover {{
+               discover (executor_class "default") ((host) => host.read {path:?})
+             }}
 
-             fn observe(process: Process, tree: Tree) {
-               Tree.empty!
-             }
+             fn observe(process: Process, tree: Tree) {{
+               process.stdout.to_string!
+             }}
 
-             fn build() {
-               exec ["/bin/sh", "-c", "printf built"] where {
+             fn build(input: Blob) {{
+               exec ["/bin/cat", input] where {{
                  observer: observe,
-                 verifier: verify,
-               }
-             }"#,
+               }}
+             }}"#,
+        path = input_path.to_string_lossy(),
     );
+    let engine = engine(&source);
+    let discovered = engine.call("probe", vec![]).unwrap();
+    assert!(matches!(discovered, Value::Discovered(_)));
 
-    let err = engine.call("build", vec![]).unwrap_err();
+    fs::write(&input_path, "toolchain-v2").unwrap();
+
+    let err = engine.call("build", vec![discovered]).unwrap_err();
     assert_eq!(err.kind, PoisonKind::VerificationFailure);
-    assert!(err.message.contains("toolchain drift"));
+    assert!(err.message.contains("host.read"));
 }
 
 #[test]
@@ -1197,31 +1212,36 @@ fn observer_functions_can_return_tree_results_for_exec() {
 }
 
 #[test]
-fn exec_handler_receives_verifier_from_where_clause() {
+fn exec_handler_receives_verification_obligations_from_discovered_values() {
+    let tempdir = TempDir::new().unwrap();
+    let input_path = tempdir.path().join("tool.txt");
+    fs::write(&input_path, "toolchain-v1").unwrap();
+    let expected_hash = blake3_hash(b"toolchain-v1").to_hex().to_string();
     let captured = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&captured);
-    let engine = engine(
-        r#"fn verify(host: Host) {
-               fail "toolchain drift"
-             }
+    let source = format!(
+        r#"fn probe() #discover {{
+               discover (executor_class "default") ((host) => host.read {path:?})
+             }}
 
-             fn observe(process: Process, tree: Tree) {
+             fn observe(process: Process, tree: Tree) {{
                process.exit_code
-             }
+             }}
 
-             fn build() {
-               exec ["/bin/true"] where {
+             fn build(input: Blob) {{
+               exec ["/bin/true", input] where {{
                  observer: observe,
-                 verifier: verify,
-               }
-             }"#,
-    )
-    .with_exec_handler(Arc::new(move |request| {
+               }}
+             }}"#,
+        path = input_path.to_string_lossy(),
+    );
+    let engine = engine(&source).with_exec_handler(Arc::new(move |request| {
         *sink.lock().unwrap() = Some(request);
         Ok(Value::U64(0))
     }));
 
-    let value = engine.call("build", vec![]).unwrap();
+    let discovered = engine.call("probe", vec![]).unwrap();
+    let value = engine.call("build", vec![discovered]).unwrap();
     assert_eq!(value, Value::U64(0));
 
     let request = captured
@@ -1231,8 +1251,11 @@ fn exec_handler_receives_verifier_from_where_clause() {
         .expect("exec request should be captured");
     assert_eq!(request.observer.def.name, "observe");
     assert_eq!(
-        request.verifier.as_ref().map(|f| f.def.name.as_str()),
-        Some("verify")
+        request.verification_obligations,
+        vec![HostObservation::Read {
+            path: input_path.to_string_lossy().to_string(),
+            content_hash: expected_hash,
+        }]
     );
 }
 
@@ -1269,46 +1292,59 @@ fn exec_rejects_raw_path_mount_values() {
 }
 
 #[test]
-// r[verify exec.verifier.host]
-fn exec_verifiers_receive_host_access_locally() {
+fn discover_records_host_obligations_locally() {
     let tempdir = TempDir::new().unwrap();
-    let tool_path = tempdir.path().join("tool.txt");
-    fs::write(&tool_path, "toolchain-v1").unwrap();
-    let expected_hash = blake3_hash(b"toolchain-v1").to_hex().to_string();
+    let tool_path = tempdir.path().join("tool.sh");
+    let tool_script = "#!/bin/sh\nprintf toolchain-v1\n";
+    fs::write(&tool_path, tool_script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut perms = fs::metadata(&tool_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&tool_path, perms).unwrap();
+    }
+    let expected_hash = blake3_hash(tool_script.as_bytes()).to_hex().to_string();
+    let tool_str = tool_path.to_string_lossy().to_string();
     let source = format!(
-        r#"fn verify(host: Host) {{
-               if (host.read {path:?}).to_string! != "toolchain-v1" {{
-                 fail "read mismatch"
-               }} else {{
-                 ()
-               }};
-               if (host.hash {path:?}).to_string! != {expected_hash:?} {{
-                 fail "hash mismatch"
-               }} else {{
-                 ()
-               }}
-             }}
-
-             fn observe(process: Process, tree: Tree) {{
-               Tree.empty!
-             }}
-
-             fn build() {{
-               exec ["/bin/sh", "-c", "printf built"] where {{
-                 observer: observe,
-                 verifier: verify,
-               }}
+        r#"fn probe() #discover {{
+               discover (executor_class "default") ((host) => {{
+                 host.read {path:?};
+                 host.hash {path:?};
+                 host.which {path:?}
+               }})
              }}"#,
         path = tool_path.to_string_lossy(),
     );
     let engine = engine(&source);
 
-    let value = engine.call("build", vec![]).unwrap();
-    assert_eq!(value, Value::Tree(TreeValue::Inline(Arc::from([]))));
+    let value = engine.call("probe", vec![]).unwrap();
+    let Value::Discovered(discovered) = value else {
+        panic!("expected discovered value");
+    };
+    assert_eq!(*discovered.value, Value::String(Arc::from(tool_str)));
+    assert_eq!(
+        discovered.obligations.as_ref(),
+        &[
+            HostObservation::Hash {
+                path: tool_path.to_string_lossy().to_string(),
+                content_hash: expected_hash.clone(),
+            },
+            HostObservation::Read {
+                path: tool_path.to_string_lossy().to_string(),
+                content_hash: expected_hash,
+            },
+            HostObservation::Which {
+                name: tool_path.to_string_lossy().to_string(),
+                expected_path: Some(tool_path.to_string_lossy().to_string()),
+            },
+        ]
+    );
 }
 
 #[test]
-fn host_which_returns_some_and_none() {
+fn host_which_poisons_by_default_and_fallible_calls_return_options() {
     let tempdir = TempDir::new().unwrap();
     let tool_path = tempdir.path().join("tool.sh");
     let expected_script = "#!/bin/sh\nprintf tool\n";
@@ -1323,44 +1359,53 @@ fn host_which_returns_some_and_none() {
     }
 
     let missing = tempdir.path().join("missing.sh");
-    let missing_again = tempdir.path().join("missing-again.sh");
     let source = format!(
-        r##"fn verify(host: Host) {{
-               let found = host.which {tool_path:?};
-               if (host.read found.value).to_string! != {expected_script:?} {{
-                 fail "wrong tool"
-               }} else {{
-                 ()
-               }};
-
-               let missing_tool = host.which {missing:?};
-               let missing_again = host.which {missing_again:?};
-               if missing_tool != missing_again {{
-                 fail "missing lookups should both return None"
-                }} else {{
-                  ()
-                }}
+        r##"fn found() #discover {{
+               discover (executor_class "default") ((host) => host.which? {tool_path:?})
              }}
 
-             fn observe(process: Process, tree: Tree) {{
-               Tree.empty!
+             fn missing() #discover {{
+               discover (executor_class "default") ((host) => host.which {missing:?})
              }}
 
-             fn build() {{
-               exec ["/bin/sh", "-c", "printf built"] where {{
-                 observer: observe,
-                 verifier: verify,
-               }}
+             fn missing_fallible() #discover {{
+               discover (executor_class "default") ((host) => host.which? {missing:?})
              }}"##,
         tool_path = tool_path.to_string_lossy(),
-        expected_script = expected_script,
         missing = missing.to_string_lossy(),
-        missing_again = missing_again.to_string_lossy(),
     );
     let engine = engine(&source);
 
-    let value = engine.call("build", vec![]).unwrap();
-    assert_eq!(value, Value::Tree(TreeValue::Inline(Arc::from([]))));
+    let found = engine.call("found", vec![]).unwrap();
+    let Value::Discovered(found) = found else {
+        panic!("expected discovered value");
+    };
+    assert_eq!(
+        *found.value,
+        Value::Struct(StructValue {
+            type_name: Arc::from("Some"),
+            fields: Arc::from([(
+                Arc::from("value"),
+                Value::String(Arc::from(tool_path.to_string_lossy().to_string())),
+            )]),
+        })
+    );
+
+    let err = engine.call("missing", vec![]).unwrap_err();
+    assert_eq!(err.kind, PoisonKind::UserFail);
+    assert!(err.message.contains("host.which could not find"));
+
+    let missing = engine.call("missing_fallible", vec![]).unwrap();
+    let Value::Discovered(missing) = missing else {
+        panic!("expected discovered value");
+    };
+    assert_eq!(
+        *missing.value,
+        Value::Struct(StructValue {
+            type_name: Arc::from("None"),
+            fields: Arc::from([]),
+        })
+    );
 }
 
 #[test]
@@ -1749,6 +1794,6 @@ fn exec_can_be_routed_through_a_host_handler() {
     );
     assert_eq!(request.writable_roots, vec![PathValue::new("out")]);
     assert_eq!(request.observer.def.name, "observe");
-    assert!(request.verifier.is_none());
+    assert!(request.verification_obligations.is_empty());
     assert_eq!(request.module.functions.len(), 2);
 }
