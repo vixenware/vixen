@@ -213,6 +213,16 @@ struct RegistryResolution {
   build_order: Array[PackageId],
 }
 
+struct PendingResolution {
+  key: String,
+  request: DependencyRequest,
+}
+
+struct ResolutionState {
+  pending: Array[PendingResolution],
+  resolved: Array[ResolvedCrate] = [],
+}
+
 fn parse_lock(ws: Tree) -> CargoLock? (
   match ws.file(@Cargo.lock)? (
     Some { value } => Toml.parse[CargoLock](value),
@@ -554,6 +564,87 @@ fn apply_feature_requests(deps: Array[DependencyRequest], features: UnifiedFeatu
     .to_array()
 )
 
+fn request_key(req: DependencyRequest) -> String (
+  let source =
+    match req.source (
+      DependencySource.Registry => `registry:{req.package_name.unwrap_or(req.name)}`,
+      DependencySource.Path { path } => `path:{path}`,
+      DependencySource.Git { url } => `git:{url}`,
+    );
+
+  let target =
+    match req.target (
+      Some { value } => `@{value}`,
+      None => "",
+    );
+
+  `{source}:{req.kind}{target}`
+)
+
+fn conjoin_semver(left: SemverReq?, right: SemverReq?) -> SemverReq? (
+  match left (
+    Some { value } => (
+      match right (
+        Some { value: other } => SemverReq {
+          comparators: [..value.comparators, ..other.comparators],
+        },
+        None => value,
+      )
+    ),
+    None => right,
+  )
+)
+
+fn merge_requests(existing: DependencyRequest, incoming: DependencyRequest) -> DependencyRequest (
+  DependencyRequest {
+    ..existing,
+    version_req: conjoin_semver(existing.version_req, incoming.version_req),
+    features: [..existing.features, ..incoming.features],
+    default_features: existing.default_features || incoming.default_features,
+    optional: existing.optional && incoming.optional,
+  }
+)
+
+fn seed_pending(requests: Array[DependencyRequest]) -> Array[PendingResolution] (
+  // Sketch only:
+  // group by `request_key`, then merge requests that target the same package
+  requests
+    .group_by(request_key($))
+    .map((key, group) => PendingResolution {
+      key,
+      request: group.reduce((left, right) => merge_requests(left, right)),
+    })
+    .to_array()
+)
+
+fn resolve_graph(roots: Array[DependencyRequest]) where {
+  config: SparseConfig,
+  manifest: CargoManifest,
+  lock: CargoLock?,
+  target: BuildTarget,
+  workspace: Tree,
+} #discover -> RegistryResolution (
+  let initial = ResolutionState {
+    pending: seed_pending(roots),
+  };
+
+  // Sketch only:
+  // - pop one pending request
+  // - resolve it to a concrete package/version/source
+  // - if the package was already resolved, merge the old and new requests;
+  //   re-resolve if the merged request widens features or constraints
+  // - merge child dependency requests into `pending` by `request_key`
+  // - continue until `pending` is empty
+  // - topologically sort the final resolved package graph
+  let _initial = initial;
+  let _config = config;
+  let _manifest = manifest;
+  let _lock = lock;
+  let _target = target;
+  let _workspace = workspace;
+  fail "transitive graph resolution omitted from sketch"
+)
+
 fn lock_entry(lock: CargoLock?, name: String) -> LockedPackage? (
   match lock (
     Some { value } => value.package.find($.name == name),
@@ -645,20 +736,7 @@ fn resolve_manifest(manifest: CargoManifest) where {
 } #discover -> RegistryResolution (
   let config = Json.parse[SparseConfig](Http.get("https://index.crates.io/config.json"));
   let requests = manifest_requests(manifest) where { target };
-  let roots =
-    requests
-      .map((req) => resolve_request(req) where { config, manifest, lock, target, workspace })
-      .to_array();
-
-  // Sketch only:
-  // - recurse through `roots[*].dependencies`
-  // - fetch/resolve transitive crates the same way
-  // - unify features when the same package is reached through multiple paths
-  // - topologically sort the final graph into `build_order`
-  RegistryResolution {
-    packages: roots,
-    build_order: roots.map($.id).to_array(),
-  }
+  resolve_graph(requests) where { config, manifest, lock, target, workspace }
 )
 
 fn emit_lockfile(resolution: RegistryResolution) -> Blob (
