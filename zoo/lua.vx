@@ -39,7 +39,7 @@ fn discover_c_toolchain(class: ExecutorClass) -> {
     witness: () => "c-toolchain-v1",
     resolve: (_witness) => (
       discover (class, (host) => (
-        let tool = (name) => (
+        fn tool(name: String) -> DiscoveredTool (
           let path = host.which name;
           DiscoveredTool {
             path,
@@ -47,6 +47,9 @@ fn discover_c_toolchain(class: ExecutorClass) -> {
           }
         );
 
+        // The returned tool values carry hidden host obligations derived from
+        // `which` and `hash`. Later `exec` rechecks them automatically on the
+        // concrete executor.
         {
           cc: tool "cc",
           ar: tool "ar",
@@ -59,8 +62,7 @@ fn discover_c_toolchain(class: ExecutorClass) -> {
 
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree (
   let src = Tree.from_path (ws / @zoo/lua-src);
-  let toolchain = discover_c_toolchain (executor_class "default");
-  let { cc, ar, ranlib } = toolchain;
+  let { cc, ar, ranlib } = discover_c_toolchain (executor_class "default");
 
   let common = {
     observer: (proc, vfs) => (
@@ -88,7 +90,9 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree (
   );
 
   fn archive(objs: Tree) -> Tree (
-    let archived = cexec [ar.path, "rc", @out/liblua.a, ..objs];
+    let archived =
+      objs
+      |> cexec [ar.path, "rc", @out/liblua.a, .._];
 
     cexec [ranlib.path, @out/liblua.a] where {
       mounts: { @out: archived },
@@ -99,8 +103,14 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree (
     cexec [cc.path, "-o", @out/bin/lua, ..ldflags, ..objs, ..syslibs]
   );
 
-  let liblua = archive ((all_lib_sources.map compile).merge!);
-  let lua_exe = link (Tree [compile @lua.c, liblua]);
+  let liblua =
+    all_lib_sources.map compile
+    |> _.merge!
+    |> archive;
+
+  let lua_exe =
+    Tree [compile @lua.c, liblua]
+    |> link;
 
   Tree {
     @bin/lua: lua_exe,
