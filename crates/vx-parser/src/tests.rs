@@ -209,6 +209,10 @@ namespace Blob {
 fn assert_stdlib_header_parses(relative: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../vx-stdlib/std");
     let path = root.join(relative);
+    assert_file_parses(&path);
+}
+
+fn assert_file_parses(path: &Path) {
     let source = fs::read_to_string(&path).unwrap_or_else(|err| {
         panic!("failed to read {}: {err}", path.display());
     });
@@ -232,6 +236,12 @@ fn stdlib_build_header_parses() {
 }
 
 #[test]
+fn libpng_sketch_parses() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/libpng.vx");
+    assert_file_parses(&path);
+}
+
+#[test]
 fn function_declaration_where_blocks_parse() {
     let parse = parse(
         r#"
@@ -239,6 +249,91 @@ fn exec[T](args: Array[ExecInput]) where {
   mounts: Map[Path, Blob | Tree] = {},
   observer: Fn(Process, Tree) #sandbox -> T,
 } -> T;
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+}
+
+#[test]
+fn paren_bodied_functions_and_control_flow_parse() {
+    let parse = parse(
+        r#"
+fn build(flag: Bool) -> String (
+  let suffix =
+    if flag (
+      "yes"
+    ) else (
+      "no"
+    );
+
+  match suffix (
+    "yes" => ("y"),
+    _ => ("n"),
+  )
+)
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+}
+
+#[test]
+fn pipe_placeholder_and_concat_parse() {
+    let parse = parse(
+        r#"
+fn demo(value: Blob, cexec: Fn(Array[String]) -> Tree, ranlib: String, y: String) -> Tree (
+  let utf8 = value |> _.utf8!;
+  let paired = value |> pair(y, _);
+  let archive = value |> cexec [ranlib, _];
+  let items = ["a"] ++ ["b"];
+  archive
+)
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+}
+
+#[test]
+fn partial_symbol_literals_and_uppercase_where_keys_parse() {
+    let parse = parse(
+        r#"
+fn demo(exec: Fn(Array[String]) -> Tree) -> Tree (
+  let tools = [:cc, :ar];
+  let common = {
+    TARGET: "linux-x86_64",
+    PNG_DEBUG: false,
+  };
+  let bound = partial exec where common;
+  bound ["cc"]
+)
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+}
+
+#[test]
+fn closure_paren_block_body_and_decls_without_semicolons_parse() {
+    let parse = parse(
+        r#"
+fn demo(flag: Bool) -> String (
+  struct Tool {
+    path: String,
+  }
+
+  namespace Tool {
+    fn to_string(self) -> String self.path;
+  }
+
+  fn observer(tool: Tool) -> String (
+    ((item) => (
+      if flag (
+        fail `bad tool`
+      );
+      item.to_string
+    )) tool
+  )
+
+  observer Tool { path: "cc" }
+)
 "#,
     );
     assert_eq!(parse.errors(), []);
