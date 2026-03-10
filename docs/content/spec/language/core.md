@@ -1404,7 +1404,7 @@ insert_anchor_links = "heading"
 > Anonymous records use braces with field labels:
 >
 > ```vixen
-> let common = { verifier, observer: make_observer() }
+> let common = { observer: make_observer() }
 > let pair = { left: 1, right: 2 }
 > ```
 >
@@ -1646,7 +1646,8 @@ insert_anchor_links = "heading"
 > The kind is used by the runtime and tooling — not by user code — to
 > decide how to report and respond. One distinct kind is **verification
 > failure** (see [exec.verifier]), which signals that an executor's
-> environment drifted from its recorded discovery.
+> environment drifted from host observations previously recorded during
+> discovery.
 
 > r[error.fail]
 >

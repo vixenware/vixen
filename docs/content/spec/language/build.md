@@ -74,8 +74,10 @@ insert_anchor_links = "heading"
 >
 > The orchestrator does not run the process or inspect the sandbox
 > directly. It serializes the full `exec` payload, including the
-> observer and verifier closures, and ships that payload to an executor.
-> The executor runs the process, evaluates those closures, and returns
+> observer closure and any discovery-derived verification obligations
+> referenced by the inputs, and ships that payload to an executor. The
+> executor runs the process, evaluates the observer there, rechecks the
+> relevant host obligations on the concrete runner instance, and returns
 > only the observer's produced values back across the boundary.
 >
 > ```vixen
@@ -86,7 +88,6 @@ insert_anchor_links = "heading"
 >   mounts: Map[Path, Blob | Tree] = {},
 >   writable: Array[Path] = [],
 >   executor: ExecutorClass = executor_class "default",
->   verifier: Fn(Host) #host -> () = (_host) => (),
 >   observer: Fn(Process, Tree) #sandbox -> Stream[T],
 > } -> Stream[T]
 > ```
@@ -277,57 +278,52 @@ insert_anchor_links = "heading"
 
 > r[exec.verifier]
 >
-> The `verifier` parameter is an optional closure that runs on the
-> executor in parallel with the actual process. It checks that the
-> host environment matches what was discovered — hashing binaries,
-> checking paths, verifying versions. If the verifier poisons, the
-> `exec` result poisons with a **verification failure**, a distinct
-> poison kind that signals the executor's environment has drifted from
-> the recorded discovery.
+> `exec` automatically rechecks any discovery-derived host obligations
+> carried by its inputs on the concrete executor instance that is about
+> to run the process. Verification is derived from recorded host
+> observations; the normal user-facing model does not include a
+> handwritten verifier closure.
 >
-> Like the observer, the verifier is serialized as code plus resolved
-> captures and evaluated on the executor with ordinary language
-> semantics. It is not a special host-side callback. The verifier runs
-> under `#host` and receives a `Host` handle representing the concrete
-> executor host instance that is about to run the process.
+> These obligations live on values. If a discovery closure observed
+> `host.which "cc"` and `host.hash cc_path`, then the discovered tool
+> value carries those facts with it. Destructuring or embedding that
+> value does not erase its obligations.
 >
 > Verification does not gate execution. The process runs speculatively
 > while verification proceeds concurrently. If verification fails after
-> the process completes, the result is discarded and the exec poisons.
+> the process completes, the result is discarded and the exec poisons
+> with a **verification failure**, a distinct poison kind that signals
+> the executor's environment has drifted from the recorded discovery.
 
 > r[exec.verifier.host]
 >
 > `Host` is an opaque, executor-local, read-only view of the unsandboxed
-> machine. It exists only inside verifier callbacks. Host paths are
-> ordinary `String` values, not `Path`, because they refer to the
-> executor's real filesystem rather than to Vixen's VFS namespace.
+> machine. It exists inside discovery callbacks and future advanced
+> host-side escape hatches. Host paths are ordinary `String` values, not
+> `Path`, because they refer to the executor's real filesystem rather
+> than to Vixen's VFS namespace.
 >
 > ```vixen
 > namespace Host {
->   fn which(self, name: String) -> String?;
+>   fn which(self, name: String) -> String;
 >   fn read(self, path: String) -> Blob;
 >   fn hash(self, path: String) -> Blob;
 > }
 > ```
 >
 > These operations are read-only and deterministic with respect to the
-> concrete executor instance. They are for re-checking discovered facts,
-> not for general discovery or network access.
+> concrete executor instance. `host.which name` poisons if the tool is
+> missing; callers that want `Option[String]` can use the ordinary
+> fallible form on the call. `host.hash path` uses Blake3 and records the
+> observed host fact. These operations are for discovery and rechecking
+> discovered facts, not for general network access.
 
 > r[exec.verifier.compose]
 >
-> `exec` accepts one verifier. If multiple environment properties must
-> be checked, compose them into a single closure:
->
-> ```vixen
-> let verifier = (host) => (
->   check_gcc host;
->   check_ld host;
->   check_sdk_version host;
-> )
->
-> exec ["gcc", "-c", "main.c"] where { verifier }
-> ```
+> When a discovery closure performs multiple host observations, the
+> returned value carries the union of their obligations. There is no
+> separate user-written composition step — obligation tracking follows
+> the values produced by discovery.
 
 > r[exec.executor-class]
 >
@@ -336,8 +332,8 @@ insert_anchor_links = "heading"
 > `executor_class "ubuntu-22.04"`). The class is the unit of cache
 > reuse for `exec` — cached results are keyed by executor class, not
 > by specific runner instance. Different instances of the same class
-> are expected to be equivalent; the verifier detects when they are
-> not.
+> are expected to be equivalent; automatic verification from recorded
+> discovery observations detects when they are not.
 
 ## Executor discovery
 
@@ -345,50 +341,45 @@ insert_anchor_links = "heading"
 >
 > Some toolchains cannot be acquired through `acquire` — they are
 > non-redistributable (MSVC, Xcode) or must be found on the executor
-> host. `discover_exec` probes an executor without sandboxing. It runs
-> a command directly on the host and returns its output. It requires
-> the `#discover` capability and must run inside a `stabilize` resolve
-> callback.
+> host. `discover` probes an executor by shipping a closure there. It
+> requires the `#discover` capability and must run inside a `stabilize`
+> resolve callback.
 >
 > ```vixen
-> fn discover_exec(
+> fn discover[T](
 >   class: ExecutorClass,
->   args: Array[String],
-> ) where {
->   env: Map[String, String] = {},
-> } -> DiscoveryProcess;
+>   probe: Fn(Host) #host -> T,
+> ) #discover -> T;
 > ```
 >
-> `DiscoveryProcess` has `stdout: Blob`, `stderr: Blob`, and
-> `exit_code: U64`. There is no VFS, no mounts, no observer — the
-> process sees the executor's real host filesystem.
+> The closure runs on a representative executor in the class with a
+> `Host` handle for that executor's unsandboxed environment. It returns
+> an ordinary typed Vixen value, not a command transcript.
 
 > r[exec.discover.verifier]
 >
-> Discovery results are opaque to the build graph. The build does not
-> branch on what version of MSVC was found — it just runs `cl.exe`.
-> What discovery produces is a **verifier**: a closure that re-checks
-> the same facts on the concrete executor instance running each `exec`.
+> Discovery is an observed effect. While the discovery closure runs, the
+> runtime records the host facts it consulted: `host.which`, `host.hash`,
+> `host.read`, and future host-observation primitives.
 >
-> The verifier is constructed from discovery output by library or user
-> code and passed to `exec` via the `verifier` parameter. The runtime
-> does not inspect or synthesize verifiers — they are ordinary closures.
-> A verifier does **not** call `discover_exec`; per-instance host checks
-> go through the `Host` handle supplied to the verifier.
+> Those recorded observations become hidden verification obligations
+> attached to the values returned by `discover`. The runtime, not user
+> code, derives later verification from that observation trace.
 
 > r[exec.discover.reuse]
 >
 > Discovery results are cached by executor class through `stabilize`.
 > The witness reads local project state (what toolchain is requested);
-> the resolve calls `discover_exec` to learn what is actually present.
-> The stabilized result — including the verifier — is reused across
-> builds as long as the witness is unchanged.
+> the resolve calls `discover` to learn what is actually present. The
+> stabilized result — including the hidden obligations attached to the
+> returned values — is reused across builds as long as the witness is
+> unchanged.
 >
-> Per-instance verification happens at every `exec`: the verifier runs
-> on the actual runner that executes the work. If verification fails
-> (the runner drifted from what was discovered), the exec poisons with
-> a verification failure. The cached discovery for that class is
-> invalidated and rediscovery runs on retry.
+> Per-instance verification happens at every `exec`: the runtime rechecks
+> the relevant obligations on the actual runner that executes the work.
+> If verification fails (the runner drifted from what was discovered),
+> the exec poisons with a verification failure. The cached discovery for
+> that class is invalidated and rediscovery runs on retry.
 
 > r[exec.discover.retry]
 >
@@ -396,7 +387,7 @@ insert_anchor_links = "heading"
 > expected, what was observed. This distinguishes it from other poison
 > kinds. The runtime or caller may retry by rerunning the `stabilize`
 > witness/resolve cycle to update the cached discovery, then retrying
-> the exec with the new verifier.
+> the exec with the new discovered values.
 
 ## Deserialization
 
@@ -526,9 +517,9 @@ insert_anchor_links = "heading"
 > environments:
 >
 > 1. **Orchestrator → Executor** — when calling `exec`, the arguments,
->    mounts, and serialized observer/verifier payloads must be fully
->    resolved before they can be shipped to the executor process. This
->    is a serialization boundary.
+>    mounts, serialized observer payload, and any attached discovery
+>    obligations must be fully resolved before they can be shipped to
+>    the executor process. This is a serialization boundary.
 > 2. **Orchestrator → External caller** — the external environment (CLI,
 >    API, or other driver) demands the final result. This is where the
 >    output tree must be fully materialized.
@@ -716,8 +707,8 @@ insert_anchor_links = "heading"
 > can actually exercise authority (perform filesystem operations, issue
 > discovery requests, inspect sandbox state, inspect the executor host)
 > propagate capabilities. In particular, the sandbox `Tree` passed to an
-> `exec` observer and the `Host` handle passed to an `exec` verifier are
-> authority-bearing values.
+> `exec` observer and the `Host` handle passed to a `discover` callback
+> are authority-bearing values.
 
 > r[cap.grant]
 >
@@ -728,10 +719,11 @@ insert_anchor_links = "heading"
 > already have.
 >
 > This means `build` (which grants `#fs`), `stabilize` (which grants
-> `#discover`), and `exec` (which grants `#sandbox` to observers and
-> `#host` to verifiers) have signatures expressible in Vixen but bodies
-> that only the runtime can provide. The evaluator rejects user code
-> that attempts to implement a capability-granting function.
+> `#discover`), `discover` (which grants `#host` to its probe), and
+> `exec` (which grants `#sandbox` to observers) have signatures
+> expressible in Vixen but bodies that only the runtime can provide. The
+> evaluator rejects user code that attempts to implement a
+> capability-granting function.
 
 ## Stabilize
 

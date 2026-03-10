@@ -198,7 +198,6 @@ First, a function can declare keyword parameters with `where`:
 ```vixen
 fn exec[T](args: Array[ExecInput]) where {
   observer: Fn(Process, Tree) #sandbox -> Stream[T],
-  verifier: Fn(Host) #host -> () = (_host) => (),
 } -> Stream[T];
 ```
 
@@ -220,19 +219,19 @@ exec [cc, "-c", file] where common;
 The second form is possible because records are real values:
 
 ```vixen
-let common = { verifier, observer };
+let common = { observer };
 ```
 
 Record shorthand:
 
 ```vixen
-{ verifier, observer }
+{ observer }
 ```
 
 means:
 
 ```vixen
-{ verifier: verifier, observer: observer }
+{ observer: observer }
 ```
 
 Record spread also works inside keyword application:
@@ -410,7 +409,7 @@ only what happens to its return value.
 ```vixen
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree (
   let src = Tree.from_path ws;
-  let common = { verifier, observer };
+  let common = { observer };
   let cexec = partial exec where common;
 
   fn compile(file: Path) -> Tree (
