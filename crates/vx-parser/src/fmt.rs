@@ -146,6 +146,7 @@ impl Formatter {
             SyntaxKind::FALLIBLE_EXPR => self.fmt_inline(node),
             SyntaxKind::PARTIAL_APP_EXPR => self.fmt_inline(node),
             SyntaxKind::SPREAD_EXPR => self.fmt_inline(node),
+            SyntaxKind::ERROR => self.fmt_verbatim(node),
             _ => self.fmt_inline(node),
         }
     }
