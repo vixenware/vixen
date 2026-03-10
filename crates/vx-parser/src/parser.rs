@@ -416,7 +416,7 @@ fn type_alias_decl_rest(p: &mut Parser<'_>, kind: SyntaxKind) {
     type_param_list(p);
     p.expect(SyntaxKind::EQ);
     let first = type_expr(p);
-    // r[type.sum]
+    // r[type.enum.alias]
     if p.at(SyntaxKind::PIPE) {
         let sum = first.precede(p);
         while p.eat(SyntaxKind::PIPE) {
@@ -584,7 +584,7 @@ fn slot_type(p: &mut Parser<'_>) {
     marker.complete(p, SyntaxKind::SLOT_TYPE);
 }
 
-// r[type.optional]
+// r[option.type]
 fn type_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     match p.current() {
@@ -599,7 +599,7 @@ fn type_expr(p: &mut Parser<'_>) -> CompletedMarker {
     marker.complete(p, SyntaxKind::OPTIONAL_TYPE)
 }
 
-// r[type.fn]
+// r[fn.type]
 fn function_type(p: &mut Parser<'_>) {
     let marker = p.start();
     p.expect(SyntaxKind::FN_TYPE_KW);
@@ -643,7 +643,7 @@ fn tuple_or_paren_type(p: &mut Parser<'_>) {
     }
 }
 
-// r[type.path]
+// r[type.generic]
 fn type_path(p: &mut Parser<'_>) {
     let marker = p.start();
     p.expect(SyntaxKind::UPPER_IDENT);
@@ -896,8 +896,8 @@ fn expr(p: &mut Parser<'_>) {
     with_expr(p);
 }
 
-// r[expr.update]
-// r[lex.operators.precedence]
+// r[expr.with]
+// r[lex.precedence]
 fn with_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let lhs = logical_or_expr(p);
     if p.at(SyntaxKind::WITH_KW) {
@@ -1017,7 +1017,7 @@ fn prefix_expr(p: &mut Parser<'_>) -> CompletedMarker {
             prefix_expr(p);
             marker.complete(p, SyntaxKind::PREFIX_EXPR)
         }
-        // r[expr.fail]
+        // r[error.fail]
         SyntaxKind::FAIL_KW => {
             let marker = p.start();
             p.bump();
@@ -1043,7 +1043,7 @@ fn path_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
     marker.complete(p, SyntaxKind::PATH_LITERAL_EXPR)
 }
 
-// r[expr.partial-app]
+// r[expr.partial]
 fn partial_app_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.expect(SyntaxKind::AT);
@@ -1084,7 +1084,7 @@ fn type_op_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let mut lhs = postfix_expr(p);
     loop {
         lhs = match p.current() {
-            // r[expr.cast]
+            // r[expr.as]
             SyntaxKind::AS_KW => {
                 let marker = lhs.precede(p);
                 p.bump();
@@ -1099,7 +1099,7 @@ fn type_op_expr(p: &mut Parser<'_>) -> CompletedMarker {
                 pattern(p);
                 marker.complete(p, SyntaxKind::TYPE_OP_EXPR)
             }
-            // r[expr.ascription]
+            // r[expr.ascribe]
             SyntaxKind::COLON2 => {
                 let marker = lhs.precede(p);
                 p.bump();
@@ -1163,7 +1163,7 @@ fn atom_expr(p: &mut Parser<'_>) -> CompletedMarker {
         SyntaxKind::MATCH_KW => match_expr(p),         // r[expr.match] r[control.match]
         SyntaxKind::IMPORT_KW => import_expr(p),       // r[expr.import]
         SyntaxKind::LOWER_IDENT | SyntaxKind::DOLLAR_IDENT => name_expr(p), // r[expr.ident]
-        SyntaxKind::UPPER_IDENT => upper_expr(p),      // r[expr.struct-literal]
+        SyntaxKind::UPPER_IDENT => upper_expr(p),      // r[expr.named-constructor]
         SyntaxKind::BACKTICK => interpolated_string_expr(p), // r[expr.literal.interpolation]
         // r[expr.literal.int] r[expr.literal.float] r[expr.literal.bool] r[expr.literal.string]
         SyntaxKind::INT
@@ -1185,7 +1185,7 @@ fn name_expr(p: &mut Parser<'_>) -> CompletedMarker {
     marker.complete(p, SyntaxKind::NAME_REF_EXPR)
 }
 
-// r[expr.struct-literal]
+// r[expr.named-constructor]
 fn upper_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.expect(SyntaxKind::UPPER_IDENT);
@@ -1312,7 +1312,7 @@ fn map_expr(p: &mut Parser<'_>) -> CompletedMarker {
     marker.complete(p, SyntaxKind::MAP_EXPR)
 }
 
-// r[expr.call.keyword-args]
+// r[expr.call.where]
 fn arg_list(p: &mut Parser<'_>) {
     let marker = p.start();
     p.expect(SyntaxKind::L_PAREN);

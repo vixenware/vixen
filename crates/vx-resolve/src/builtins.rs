@@ -155,7 +155,7 @@ pub fn builtin_fn_sig(name: &str) -> Option<FnSig> {
             capabilities: vec![],
         }),
 
-        // r[exec.class] — executor_class(name: String) -> ExecutorClass
+        // r[exec.executor-class] — executor_class(name: String) -> ExecutorClass
         "executor_class" => Some(FnSig {
             name: "executor_class".into(),
             type_params: vec![],
@@ -278,7 +278,7 @@ pub fn builtin_method(receiver: &Builtin, method_name: &str) -> Option<MethodSig
                 name: "path".into(),
                 ty: Ty::Scalar(vx_types::Scalar::String),
             }],
-            ret: Ty::Scalar(vx_types::Scalar::String),
+            ret: Ty::Builtin(Builtin::Blob),
             capabilities: vec![Capability {
                 name: "host".into(),
             }],
@@ -289,7 +289,7 @@ pub fn builtin_method(receiver: &Builtin, method_name: &str) -> Option<MethodSig
                 name: "name".into(),
                 ty: Ty::Scalar(vx_types::Scalar::String),
             }],
-            ret: Ty::Builtin(Builtin::ExecPath),
+            ret: Ty::Optional(Box::new(Ty::Scalar(vx_types::Scalar::String))),
             capabilities: vec![Capability {
                 name: "host".into(),
             }],

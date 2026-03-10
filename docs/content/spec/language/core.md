@@ -57,6 +57,12 @@ insert_anchor_links = "heading"
 > digits, and underscores. `_` alone is the wildcard pattern — it is not a
 > valid binding name.
 
+> r[lex.dollar-ident]
+>
+> `$`, `$0`, `$1`, ... are reserved closure-shorthand identifiers. They are
+> lexed distinctly from ordinary identifiers and are only meaningful in
+> closure shorthand positions.
+
 > r[lex.ident.case]
 >
 > UpperCamelCase identifiers denote types. snake_case identifiers denote

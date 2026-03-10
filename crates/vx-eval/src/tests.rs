@@ -787,7 +787,7 @@ fn interpolated_path_literal_with_tree_yields_exec_path() {
 
 #[test]
 // r[verify store.blob]
-// r[verify store.blob.to-string]
+// r[verify store.blob.utf8]
 fn blob_from_string_round_trips_text() {
     let value = eval(
         r#"fn main() { Blob.from_string("hello").to_string() }"#,
@@ -869,7 +869,7 @@ fn tree_merge_combines_directories_recursively() {
 #[test]
 // r[verify store.tree]
 // r[verify store.tree.file]
-// r[verify store.blob.to-string]
+// r[verify store.blob.utf8]
 fn fs_backed_trees_read_files_on_demand() {
     let tempdir = TempDir::new().unwrap();
     let file_path = tempdir.path().join("hello.txt");

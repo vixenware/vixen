@@ -67,10 +67,10 @@ impl<'a> Lexer<'a> {
                 }
                 SyntaxKind::WHITESPACE
             }
-            Some('/') if self.starts_with("//") => self.line_comment(), // r[lex.comment.line]
-            Some('/') if self.starts_with("/*") => self.block_comment(), // r[lex.comment.block]
+            Some('/') if self.starts_with("//") => self.line_comment(), // r[lex.comments]
+            Some('/') if self.starts_with("/*") => self.block_comment(), // r[lex.comments]
             Some('"') => self.string(),                                 // r[lex.string]
-            // r[lex.interp-string]
+            // r[lex.string.interpolation]
             Some('`') => {
                 self.bump_char();
                 self.modes.push(Mode::Template);
@@ -124,7 +124,7 @@ impl<'a> Lexer<'a> {
         Some(kind)
     }
 
-    // r[lex.interp-string]
+    // r[lex.string.interpolation]
     fn template_chunk(&mut self) -> SyntaxKind {
         if self.current_char() == Some('`') {
             self.bump_char();
@@ -153,7 +153,7 @@ impl<'a> Lexer<'a> {
         SyntaxKind::INTERP_TEXT
     }
 
-    // r[lex.interp-string]
+    // r[lex.string.interpolation]
     fn template_expr_token(&mut self) -> SyntaxKind {
         if self.current_char() == Some('`') {
             self.bump_char();
@@ -200,9 +200,9 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    // r[lex.comment.line]
+    // r[lex.comments]
     fn line_comment(&mut self) -> SyntaxKind {
-        // r[lex.comment.doc] — `///` is a doc comment, but `////` is not
+        // r[lex.comments] — `///` is a doc comment, but `////` is not
         let is_doc = self.source[self.pos..].starts_with("///")
             && !self.source[self.pos..].starts_with("////");
         self.pos += 2;
@@ -219,7 +219,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    // r[lex.comment.block]
+    // r[lex.comments]
     fn block_comment(&mut self) -> SyntaxKind {
         self.pos += 2;
         let mut depth = 1usize;

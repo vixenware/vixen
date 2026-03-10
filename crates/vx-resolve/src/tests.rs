@@ -701,7 +701,7 @@ fn probe() #discover {
     assert_eq!(ty, Some(Ty::Builtin(Builtin::DiscoveryProcess)));
 }
 
-// r[type.builtin.host.read] — host.read(...) returns Blob
+// r[exec.verifier.host] — host.read(...) returns Blob
 #[test]
 fn host_read_returns_blob() {
     let src = r#"
@@ -718,9 +718,9 @@ fn main() {
     assert_eq!(ty, Some(Ty::Builtin(Builtin::Blob)));
 }
 
-// r[type.builtin.host.which] — host.which(...) returns ExecPath
+// r[exec.verifier.host] — host.which(...) returns String?
 #[test]
-fn host_which_returns_exec_path() {
+fn host_which_returns_optional_string() {
     let src = r#"
 fn main() {
     exec(["echo"];
@@ -732,10 +732,13 @@ fn main() {
 "#;
     let result = type_check(src);
     let ty = find_expr_type(&result, src, r#"host.which("gcc")"#);
-    assert_eq!(ty, Some(Ty::Builtin(Builtin::ExecPath)));
+    assert_eq!(
+        ty,
+        Some(Ty::Optional(Box::new(Ty::Scalar(vx_types::Scalar::String))))
+    );
 }
 
-// r[type.observer.params] — observer callback params are typed
+// r[exec.observer] — observer callback params are typed
 #[test]
 fn observer_params_typed() {
     let src = r#"
@@ -781,7 +784,7 @@ fn main() {
     }
 }
 
-// r[type.literal] — literal types are inferred
+// r[type.scalar.literals] — literal types are inferred
 #[test]
 fn literal_types() {
     let src = r#"
@@ -834,7 +837,7 @@ fn main() {
 "#;
     let result = type_check(src);
     // The name ref "host" in the body should resolve to Builtin::Host
-    let ty = find_expr_type(&result, src, "host\n");
+    let _ty = find_expr_type(&result, src, "host\n");
     // The inner "host" expression (in the body, not the param declaration)
     // Find the last occurrence of "host" which is the expression use
     assert!(

@@ -292,7 +292,7 @@ impl BlobValue {
         Self::Inline(Arc::from(value.as_ref().as_bytes()))
     }
 
-    // r[impl store.blob.to-string]
+    // r[impl store.blob.utf8]
     pub fn to_utf8_string(&self) -> Result<Arc<str>, String> {
         let bytes = match self {
             BlobValue::Inline(bytes) => bytes.to_vec(),
