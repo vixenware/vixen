@@ -1139,6 +1139,11 @@ impl Engine {
                     receiver: Box::new(receiver.clone()),
                 },
             ))),
+            Value::Tree(_) if field == "merge" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::TreeMerge {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
             Value::Tree(_) if field == "subtree" => Ok(Value::Builtin(BuiltinValue::Method(
                 BuiltinMethod::TreeSubtree {
                     receiver: Box::new(receiver.clone()),
@@ -1339,6 +1344,19 @@ impl Engine {
                     return Err(self.type_error("tree.file receiver must be Tree"));
                 };
                 self.tree_file(&tree, path)
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeMerge { receiver }) => {
+                self.require_no_kwargs("tree.merge", kwargs)?;
+                self.check_arity("tree.merge", args, 1)?;
+                let other = self.force_value_shallow(args[0].clone())?;
+                let Value::Tree(other) = other else {
+                    return Err(self.type_error("tree.merge expects Tree"));
+                };
+                let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
+                let Value::Tree(receiver) = receiver else {
+                    return Err(self.type_error("tree.merge receiver must be Tree"));
+                };
+                self.tree_merge(&receiver, &other)
             }
             BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver }) => {
                 self.require_no_kwargs("tree.subtree", kwargs)?;
@@ -2461,6 +2479,74 @@ impl Engine {
             other => Err(self.type_error(&format!(
                 "tree entry must be Blob or Tree, got {}",
                 other.type_name()
+            ))),
+        }
+    }
+
+    fn tree_merge(&self, left: &TreeValue, right: &TreeValue) -> Result<Value, PoisonError> {
+        let mut merged = BTreeMap::<Arc<str>, Value>::new();
+        for (name, value) in self.tree_entries(left)? {
+            merged.insert(name, value);
+        }
+        for (name, value) in self.tree_entries(right)? {
+            match (merged.get(&name).cloned(), &value) {
+                (Some(Value::Tree(left_tree)), Value::Tree(right_tree)) => {
+                    merged.insert(name, self.tree_merge(&left_tree, right_tree)?);
+                }
+                _ => {
+                    merged.insert(name, value);
+                }
+            }
+        }
+        Ok(Value::Tree(TreeValue::Inline(Arc::from(
+            merged.into_iter().collect::<Vec<_>>(),
+        ))))
+    }
+
+    fn tree_entries(&self, tree: &TreeValue) -> Result<Vec<(Arc<str>, Value)>, PoisonError> {
+        match tree {
+            TreeValue::Inline(entries) => entries
+                .iter()
+                .map(|(name, value)| Ok((name.clone(), self.force_value_shallow(value.clone())?)))
+                .collect(),
+            TreeValue::FsDir(root) => {
+                let mut names = Vec::new();
+                for entry in fs::read_dir(root.as_str()).map_err(|error| {
+                    self.internal_error(&format!(
+                        "failed to list {} for tree merge: {error}",
+                        root.as_str()
+                    ))
+                })? {
+                    let entry = entry.map_err(|error| {
+                        self.internal_error(&format!(
+                            "failed to read {} for tree merge: {error}",
+                            root.as_str()
+                        ))
+                    })?;
+                    names.push(entry.file_name().to_string_lossy().to_string());
+                }
+                names.sort();
+
+                let mut entries = Vec::with_capacity(names.len());
+                for name in names {
+                    let child = root.join(&name);
+                    let metadata = fs::metadata(child.as_str()).map_err(|error| {
+                        self.internal_error(&format!(
+                            "failed to stat {} for tree merge: {error}",
+                            child.as_str()
+                        ))
+                    })?;
+                    let value = if metadata.is_dir() {
+                        Value::Tree(TreeValue::FsDir(child))
+                    } else {
+                        Value::Blob(BlobValue::FsFile(child))
+                    };
+                    entries.push((Arc::from(name), value));
+                }
+                Ok(entries)
+            }
+            TreeValue::Store(root) => Err(self.internal_error(&format!(
+                "cannot read store-backed tree {root} without an external store resolver"
             ))),
         }
     }

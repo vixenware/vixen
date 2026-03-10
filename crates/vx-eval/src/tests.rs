@@ -834,6 +834,39 @@ fn tree_subtree_selects_nested_directories() {
 }
 
 #[test]
+fn tree_merge_combines_directories_recursively() {
+    let value = eval(
+        r#"fn main() {
+               let base = Tree.of(%{
+                 "include" => Tree.of(%{
+                   "lua.h" => Blob.from_string("lua header"),
+                 }),
+                 "liblua.a" => Blob.from_string("old archive"),
+               });
+               let overlay = Tree.of(%{
+                 "include" => Tree.of(%{
+                   "lauxlib.h" => Blob.from_string("aux header"),
+                 }),
+                 "liblua.a" => Blob.from_string("new archive"),
+               });
+               let merged = base.merge(overlay);
+               merged.file("include/lua.h").to_string()
+                 + "|"
+                 + merged.file("include/lauxlib.h").to_string()
+                 + "|"
+                 + merged.file("liblua.a").to_string()
+             }"#,
+        "main",
+    )
+    .unwrap();
+
+    assert_eq!(
+        value,
+        Value::String(Arc::from("lua header|aux header|new archive"))
+    );
+}
+
+#[test]
 // r[verify store.tree]
 // r[verify store.tree.file]
 // r[verify store.blob.to-string]
@@ -1298,6 +1331,71 @@ fn exec_mounts_subtrees_instead_of_the_whole_tree() {
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].0.as_ref(), "a.o");
     assert_eq!(entries[1].0.as_ref(), "b.o");
+}
+
+#[test]
+fn exec_mounts_merged_trees() {
+    let captured = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let engine = engine(
+        r#"fn observe(process: Process, tree: Tree) {
+               process.exit_code
+             }
+
+             fn build(base: Tree, overlay: Tree) {
+               exec(["tool", base.merge(overlay)]; observer: observe)
+             }"#,
+    )
+    .with_exec_handler(Arc::new(move |request| {
+        *sink.lock().unwrap() = Some(request);
+        Ok(Value::U64(0))
+    }));
+    let base = Value::Tree(TreeValue::Inline(Arc::from([
+        (
+            Arc::from("include"),
+            Value::Tree(TreeValue::Inline(Arc::from([(
+                Arc::from("lua.h"),
+                Value::Blob(BlobValue::from_string("lua header")),
+            )]))),
+        ),
+        (
+            Arc::from("liblua.a"),
+            Value::Blob(BlobValue::from_string("old archive")),
+        ),
+    ])));
+    let overlay = Value::Tree(TreeValue::Inline(Arc::from([
+        (
+            Arc::from("include"),
+            Value::Tree(TreeValue::Inline(Arc::from([(
+                Arc::from("lauxlib.h"),
+                Value::Blob(BlobValue::from_string("aux header")),
+            )]))),
+        ),
+        (
+            Arc::from("liblua.a"),
+            Value::Blob(BlobValue::from_string("new archive")),
+        ),
+    ])));
+
+    let value = engine.call("build", vec![base, overlay]).unwrap();
+    assert_eq!(value, Value::U64(0));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("exec request should be captured");
+    assert_eq!(request.mounts.len(), 1);
+    let Value::Tree(TreeValue::Inline(entries)) = &request.mounts[0].value else {
+        panic!("expected merged tree mount");
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].0.as_ref(), "include");
+    assert_eq!(entries[1].0.as_ref(), "liblua.a");
+    assert_eq!(
+        entries[1].1,
+        Value::Blob(BlobValue::from_string("new archive"))
+    );
 }
 
 #[test]

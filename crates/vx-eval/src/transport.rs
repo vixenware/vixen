@@ -190,6 +190,7 @@ pub enum TransportBuiltinValue {
     TreeFromPath,
     BlobToString { receiver: Box<TransportValue> },
     TreeFile { receiver: Box<TransportValue> },
+    TreeMerge { receiver: Box<TransportValue> },
     TreeSubtree { receiver: Box<TransportValue> },
 }
 
@@ -820,6 +821,9 @@ impl TryFrom<&BuiltinValue> for TransportBuiltinValue {
             BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => Ok(Self::TreeFile {
                 receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
             }),
+            BuiltinValue::Method(BuiltinMethod::TreeMerge { receiver }) => Ok(Self::TreeMerge {
+                receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
+            }),
             BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver }) => {
                 Ok(Self::TreeSubtree {
                     receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
@@ -856,6 +860,11 @@ impl TryFrom<TransportBuiltinValue> for BuiltinValue {
             }
             TransportBuiltinValue::TreeFile { receiver } => {
                 Ok(Self::Method(BuiltinMethod::TreeFile {
+                    receiver: Box::new(Value::try_from(*receiver)?),
+                }))
+            }
+            TransportBuiltinValue::TreeMerge { receiver } => {
+                Ok(Self::Method(BuiltinMethod::TreeMerge {
                     receiver: Box::new(Value::try_from(*receiver)?),
                 }))
             }
