@@ -92,6 +92,7 @@ ast_node!(ElseClause, SyntaxKind::ELSE_CLAUSE);
 ast_node!(MatchExpr, SyntaxKind::MATCH_EXPR);
 ast_node!(MatchArm, SyntaxKind::MATCH_ARM);
 ast_node!(ArrayExpr, SyntaxKind::ARRAY_EXPR);
+ast_node!(SpreadExpr, SyntaxKind::SPREAD_EXPR);
 ast_node!(MapExpr, SyntaxKind::MAP_EXPR);
 ast_node!(MapEntry, SyntaxKind::MAP_ENTRY);
 ast_node!(StructLiteralExpr, SyntaxKind::STRUCT_LITERAL_EXPR);
@@ -198,6 +199,12 @@ pub enum Expr {
     Literal(LiteralExpr),
     InterpolatedString(InterpolatedStringExpr),
     PathLiteral(PathLiteralExpr),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ArrayItem {
+    Expr(Expr),
+    Spread(SpreadExpr),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -403,6 +410,26 @@ impl AstNode for Expr {
             Self::Literal(node) => node.syntax(),
             Self::InterpolatedString(node) => node.syntax(),
             Self::PathLiteral(node) => node.syntax(),
+        }
+    }
+}
+
+impl AstNode for ArrayItem {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        Expr::can_cast(kind) || kind == SyntaxKind::SPREAD_EXPR
+    }
+
+    fn cast(node: SyntaxNode) -> Option<Self> {
+        if let Some(expr) = Expr::cast(node.clone()) {
+            return Some(Self::Expr(expr));
+        }
+        Some(Self::Spread(SpreadExpr::cast(node)?))
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        match self {
+            Self::Expr(node) => node.syntax(),
+            Self::Spread(node) => node.syntax(),
         }
     }
 }
@@ -777,8 +804,14 @@ impl MatchArm {
 }
 
 impl ArrayExpr {
-    pub fn items(&self) -> AstChildren<Expr> {
+    pub fn items(&self) -> AstChildren<ArrayItem> {
         AstChildren::new(self.syntax())
+    }
+}
+
+impl SpreadExpr {
+    pub fn expr(&self) -> Option<Expr> {
+        child(self.syntax())
     }
 }
 

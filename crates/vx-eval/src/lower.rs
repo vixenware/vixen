@@ -6,10 +6,10 @@
 use std::sync::Arc;
 
 use vx_parser::{
-    ArrayExpr, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr as AstExpr, FailExpr,
-    FieldExpr, FnDecl, IfExpr, InterpolatedStringExpr, Item, LiteralExpr, MapEntry, MapExpr,
-    Parameter, PathLiteralExpr, PrefixExpr, SourceFile, Stmt as AstStmt, StringPart,
-    StructLiteralExpr, StructLiteralField, SyntaxKind,
+    ArrayExpr, ArrayItem as AstArrayItem, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr,
+    Expr as AstExpr, FailExpr, FieldExpr, FnDecl, IfExpr, InterpolatedStringExpr, Item,
+    LiteralExpr, MapEntry, MapExpr, Parameter, PathLiteralExpr, PrefixExpr, SourceFile,
+    Stmt as AstStmt, StringPart, StructLiteralExpr, StructLiteralField, SyntaxKind,
 };
 
 use crate::instr;
@@ -365,7 +365,15 @@ fn lower_struct_literal(lit: &StructLiteralExpr, ctx: &mut LowerCtx) -> Option<i
 fn lower_array(array: &ArrayExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
     let items = array
         .items()
-        .filter_map(|expr| lower_expr_with_ctx(&expr, ctx))
+        .filter_map(|item| match item {
+            AstArrayItem::Expr(expr) => {
+                Some(instr::ArrayItem::Expr(lower_expr_with_ctx(&expr, ctx)?))
+            }
+            AstArrayItem::Spread(spread) => Some(instr::ArrayItem::Spread(lower_expr_with_ctx(
+                &spread.expr()?,
+                ctx,
+            )?)),
+        })
         .collect();
     Some(instr::Expr::Array(items))
 }

@@ -2,17 +2,18 @@
 
 mod ast;
 pub use ast::{
-    Arg, ArgList, ArrayExpr, ArrayPattern, ArrayRestPattern, AssignStmt, AstChildren, AstNode,
-    AtPattern, BinaryExpr, BindingPattern, BlockExpr, CallExpr, ClosureExpr, ClosureParamClause,
-    CompoundUpdateStmt, ElseClause, EnumDecl, Expr, FailExpr, FallibleExpr, FieldAssignStmt,
-    FieldAssignTarget, FieldDecl, FieldExpr, FnDecl, FunctionType, IfExpr, IndexExpr,
-    InterpolatedStringExpr, Item, KeywordParameter, LetStmt, LiteralExpr, LiteralPattern, MapEntry,
-    MapExpr, MatchArm, MatchExpr, NameRefExpr, NewtypeDecl, OptionalType, OrPattern, Parameter,
-    ParenPattern, ParenType, PartialAppExpr, PathLiteralExpr, Pattern, PrefixExpr, RangeExpr,
-    ReturnStmt, ReturnType, SlotType, SourceFile, Stmt, StringInterpolation, StringPart,
-    StructDecl, StructLiteralExpr, StructLiteralField, StructPattern, StructPatternField, SumType,
-    TuplePattern, TupleType, Type, TypeAliasDecl, TypeArgs, TypeOpExpr, TypePath, UnitPattern,
-    VariantDecl, VariantPattern, WildcardPattern, WithExpr, doc_comment,
+    Arg, ArgList, ArrayExpr, ArrayItem, ArrayPattern, ArrayRestPattern, AssignStmt, AstChildren,
+    AstNode, AtPattern, BinaryExpr, BindingPattern, BlockExpr, CallExpr, ClosureExpr,
+    ClosureParamClause, CompoundUpdateStmt, ElseClause, EnumDecl, Expr, FailExpr, FallibleExpr,
+    FieldAssignStmt, FieldAssignTarget, FieldDecl, FieldExpr, FnDecl, FunctionType, IfExpr,
+    IndexExpr, InterpolatedStringExpr, Item, KeywordParameter, LetStmt, LiteralExpr,
+    LiteralPattern, MapEntry, MapExpr, MatchArm, MatchExpr, NameRefExpr, NewtypeDecl, OptionalType,
+    OrPattern, Parameter, ParenPattern, ParenType, PartialAppExpr, PathLiteralExpr, Pattern,
+    PrefixExpr, RangeExpr, ReturnStmt, ReturnType, SlotType, SourceFile, SpreadExpr, Stmt,
+    StringInterpolation, StringPart, StructDecl, StructLiteralExpr, StructLiteralField,
+    StructPattern, StructPatternField, SumType, TuplePattern, TupleType, Type, TypeAliasDecl,
+    TypeArgs, TypeOpExpr, TypePath, UnitPattern, VariantDecl, VariantPattern, WildcardPattern,
+    WithExpr, doc_comment,
 };
 
 mod fmt;

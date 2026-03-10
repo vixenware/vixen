@@ -121,6 +121,20 @@ fn let_binding() {
 }
 
 #[test]
+fn array_spread_flattens_arrays() {
+    let value = eval(r#"fn main() { [1, ..[2, 3], 4] }"#, "main").unwrap();
+    assert_eq!(
+        value,
+        Value::Array(Arc::from([
+            Value::U64(1),
+            Value::U64(2),
+            Value::U64(3),
+            Value::U64(4),
+        ]))
+    );
+}
+
+#[test]
 fn if_true_branch() {
     let val = eval("fn main() { if true { 1 } else { 2 } }", "main").unwrap();
     assert_eq!(val, Value::U64(1));
@@ -1136,6 +1150,83 @@ fn exec_mounts_tree_paths_mentioned_in_path_literals() {
     let value = engine.call("build", vec![input]).unwrap();
 
     assert_eq!(value, Value::String(Arc::from("hello via execpath")));
+}
+
+#[test]
+// r[verify exec.arg.spread]
+fn exec_spreads_tree_args_in_canonical_path_order() {
+    let captured = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let engine = engine(
+        r#"fn observe(process: Process, tree: Tree) {
+               process.exit_code
+             }
+
+             fn build(input: Tree) {
+               exec(["tool", ..input]; observer: observe)
+             }"#,
+    )
+    .with_exec_handler(Arc::new(move |request| {
+        *sink.lock().unwrap() = Some(request);
+        Ok(Value::U64(0))
+    }));
+    let input = Value::Tree(TreeValue::Inline(Arc::from([
+        (
+            Arc::from("z.o"),
+            Value::Blob(BlobValue::from_string("z object")),
+        ),
+        (
+            Arc::from("dir"),
+            Value::Tree(TreeValue::Inline(Arc::from([
+                (
+                    Arc::from("b.o"),
+                    Value::Blob(BlobValue::from_string("nested b")),
+                ),
+                (
+                    Arc::from("a.o"),
+                    Value::Blob(BlobValue::from_string("nested a")),
+                ),
+            ]))),
+        ),
+        (
+            Arc::from("a.o"),
+            Value::Blob(BlobValue::from_string("a object")),
+        ),
+    ])));
+
+    let value = engine.call("build", vec![input]).unwrap();
+    assert_eq!(value, Value::U64(0));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("exec request should be captured");
+    assert_eq!(request.mounts.len(), 1);
+
+    let mount_root = request.mounts[0].path.clone();
+    let expected_paths = vec![
+        mount_root.join("a.o"),
+        mount_root.join("dir/a.o"),
+        mount_root.join("dir/b.o"),
+        mount_root.join("z.o"),
+    ];
+
+    let [
+        ExecArgValue::Literal(program),
+        ExecArgValue::Path(first),
+        ExecArgValue::Path(second),
+        ExecArgValue::Path(third),
+        ExecArgValue::Path(fourth),
+    ] = request.args.as_slice()
+    else {
+        panic!("expected literal program plus four path args");
+    };
+    assert_eq!(program, "tool");
+    assert_eq!(
+        vec![first.clone(), second.clone(), third.clone(), fourth.clone()],
+        expected_paths
+    );
 }
 
 #[test]

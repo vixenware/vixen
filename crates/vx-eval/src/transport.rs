@@ -35,6 +35,13 @@ pub struct TransportBlock {
 
 #[derive(Debug, Clone, PartialEq, Facet)]
 #[repr(u8)]
+pub enum TransportArrayItem {
+    Expr(TransportExpr),
+    Spread(TransportExpr),
+}
+
+#[derive(Debug, Clone, PartialEq, Facet)]
+#[repr(u8)]
 pub enum TransportStmt {
     Let { name: String, value: TransportExpr },
     Assign { name: String, value: TransportExpr },
@@ -89,7 +96,7 @@ pub enum TransportExpr {
         name: String,
         fields: Vec<(String, TransportExpr)>,
     },
-    Array(Vec<TransportExpr>),
+    Array(Vec<TransportArrayItem>),
     Map(Vec<(TransportExpr, TransportExpr)>),
     Field {
         receiver: Box<TransportExpr>,
@@ -366,9 +373,15 @@ impl From<&instr::Expr> for TransportExpr {
                     .map(|(name, value)| (name.clone(), TransportExpr::from(value)))
                     .collect(),
             },
-            instr::Expr::Array(values) => {
-                Self::Array(values.iter().map(TransportExpr::from).collect())
-            }
+            instr::Expr::Array(values) => Self::Array(
+                values
+                    .iter()
+                    .map(|value| match value {
+                        instr::ArrayItem::Expr(expr) => TransportArrayItem::Expr(expr.into()),
+                        instr::ArrayItem::Spread(expr) => TransportArrayItem::Spread(expr.into()),
+                    })
+                    .collect(),
+            ),
             instr::Expr::Map(entries) => Self::Map(
                 entries
                     .iter()
@@ -440,9 +453,15 @@ impl From<TransportExpr> for instr::Expr {
                     .map(|(field, value)| (field, value.into()))
                     .collect(),
             },
-            TransportExpr::Array(values) => {
-                Self::Array(values.into_iter().map(Into::into).collect())
-            }
+            TransportExpr::Array(values) => Self::Array(
+                values
+                    .into_iter()
+                    .map(|value| match value {
+                        TransportArrayItem::Expr(expr) => instr::ArrayItem::Expr(expr.into()),
+                        TransportArrayItem::Spread(expr) => instr::ArrayItem::Spread(expr.into()),
+                    })
+                    .collect(),
+            ),
             TransportExpr::Map(entries) => Self::Map(
                 entries
                     .into_iter()

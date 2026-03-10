@@ -1,7 +1,7 @@
 use rowan::TextSize;
 
 use crate::{
-    AstNode, Expr, FieldExpr, FoldingRangeKind, InterpolatedStringExpr, Item, LineIndex,
+    ArrayItem, AstNode, Expr, FieldExpr, FoldingRangeKind, InterpolatedStringExpr, Item, LineIndex,
     PathLiteralExpr, Pattern, Position, SemanticTokenType, SourceFile, Stmt, StringPart,
     SymbolKind, SyntaxKind, Type, doc_comment, document_symbols, enclosing_nodes, folding_ranges,
     parse, parse_source_file, semantic_tokens,
@@ -182,6 +182,35 @@ fn build() {
     assert_eq!(keyword_args[0].name().unwrap().text(), "mounts");
     assert_eq!(keyword_args[1].name().unwrap().text(), "writable");
     assert!(keyword_args.iter().all(|arg| arg.expr().is_some()));
+}
+
+#[test]
+fn array_ast_exposes_spread_items() {
+    let parse = parse(
+        r#"
+fn build(xs: Array[U64]) {
+  [1, ..xs, 4]
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let array = match body.statements().next().expect("array statement") {
+        Stmt::Expr(Expr::Array(node)) => node,
+        stmt => panic!("expected array expr, got {stmt:?}"),
+    };
+
+    let items = array.items().collect::<Vec<_>>();
+    assert_eq!(items.len(), 3);
+    assert!(matches!(items[0], ArrayItem::Expr(_)));
+    assert!(matches!(items[1], ArrayItem::Spread(_)));
+    assert!(matches!(items[2], ArrayItem::Expr(_)));
 }
 
 #[test]

@@ -832,9 +832,31 @@ impl Engine {
             instr::Expr::Array(items) => {
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
-                    match self.eval_expr(item, bindings, current_code_identity) {
-                        BuildResult::Value(value) => values.push(value),
-                        other => return other,
+                    match item {
+                        instr::ArrayItem::Expr(item_expr) => {
+                            match self.eval_expr(item_expr, bindings, current_code_identity) {
+                                BuildResult::Value(value) => values.push(value),
+                                other => return other,
+                            }
+                        }
+                        instr::ArrayItem::Spread(spread_expr) => {
+                            let spread_value = match self.eval_expr(
+                                spread_expr,
+                                bindings,
+                                current_code_identity,
+                            ) {
+                                BuildResult::Value(value) => value,
+                                other => return other,
+                            };
+                            let spread_value = match self.force_value_shallow(spread_value) {
+                                Ok(value) => value,
+                                Err(error) => return BuildResult::Poisoned(error),
+                            };
+                            match self.extend_array_with_spread(&mut values, spread_value) {
+                                Ok(()) => {}
+                                Err(error) => return BuildResult::Poisoned(error),
+                            }
+                        }
                     }
                 }
                 BuildResult::Value(Value::Array(Arc::from(values)))
@@ -1710,6 +1732,27 @@ impl Engine {
         }
     }
 
+    fn extend_array_with_spread(
+        &self,
+        values: &mut Vec<Value>,
+        spread_value: Value,
+    ) -> Result<(), PoisonError> {
+        match spread_value {
+            Value::Array(items) => {
+                values.extend(items.iter().cloned());
+                Ok(())
+            }
+            Value::Tree(tree) => {
+                values.extend(self.tree_exec_path_values(&tree)?);
+                Ok(())
+            }
+            other => Err(self.type_error(&format!(
+                "array spread requires Array or Tree, got {}",
+                other.type_name()
+            ))),
+        }
+    }
+
     fn exec_arg_from_exec_path(
         &self,
         mounts: &mut Vec<(PathValue, Value)>,
@@ -1724,6 +1767,98 @@ impl Engine {
                 mounts,
                 Value::Blob(blob.clone()),
                 Some(leaf.as_str().to_string()),
+            ))),
+        }
+    }
+
+    fn tree_exec_path_values(&self, tree: &TreeValue) -> Result<Vec<Value>, PoisonError> {
+        let suffixes = self.tree_leaf_suffixes(tree)?;
+        Ok(suffixes
+            .into_iter()
+            .map(|suffix| {
+                Value::ExecPath(ExecPathValue::InTree {
+                    tree: tree.clone(),
+                    suffix,
+                })
+            })
+            .collect())
+    }
+
+    fn tree_leaf_suffixes(&self, tree: &TreeValue) -> Result<Vec<PathValue>, PoisonError> {
+        let mut suffixes = Vec::new();
+        self.collect_tree_leaf_suffixes(tree, &PathValue::new(""), &mut suffixes)?;
+        Ok(suffixes)
+    }
+
+    fn collect_tree_leaf_suffixes(
+        &self,
+        tree: &TreeValue,
+        prefix: &PathValue,
+        suffixes: &mut Vec<PathValue>,
+    ) -> Result<(), PoisonError> {
+        match tree {
+            TreeValue::Inline(entries) => {
+                let mut sorted = entries.iter().collect::<Vec<_>>();
+                sorted.sort_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
+                for (name, value) in sorted {
+                    let child_path = prefix.join(name.as_ref());
+                    let value = self.force_value_shallow(value.clone())?;
+                    match value {
+                        Value::Blob(_) => suffixes.push(child_path),
+                        Value::Tree(tree) => {
+                            self.collect_tree_leaf_suffixes(&tree, &child_path, suffixes)?
+                        }
+                        other => {
+                            return Err(self.type_error(&format!(
+                                "tree spread entries must be Blob or Tree, got {}",
+                                other.type_name()
+                            )));
+                        }
+                    }
+                }
+                Ok(())
+            }
+            TreeValue::FsDir(root) => {
+                let mut names = Vec::new();
+                for entry in fs::read_dir(root.as_str()).map_err(|error| {
+                    self.internal_error(&format!(
+                        "failed to list {} for tree spread: {error}",
+                        root.as_str()
+                    ))
+                })? {
+                    let entry = entry.map_err(|error| {
+                        self.internal_error(&format!(
+                            "failed to read {} for tree spread: {error}",
+                            root.as_str()
+                        ))
+                    })?;
+                    names.push(entry.file_name().to_string_lossy().to_string());
+                }
+                names.sort();
+
+                for name in names {
+                    let child_root = root.join(&name);
+                    let child_path = prefix.join(&name);
+                    let metadata = fs::metadata(child_root.as_str()).map_err(|error| {
+                        self.internal_error(&format!(
+                            "failed to stat {} for tree spread: {error}",
+                            child_root.as_str()
+                        ))
+                    })?;
+                    if metadata.is_dir() {
+                        self.collect_tree_leaf_suffixes(
+                            &TreeValue::FsDir(child_root),
+                            &child_path,
+                            suffixes,
+                        )?;
+                    } else {
+                        suffixes.push(child_path);
+                    }
+                }
+                Ok(())
+            }
+            TreeValue::Store(root) => Err(self.internal_error(&format!(
+                "cannot spread store-backed tree {root} without an external store resolver"
             ))),
         }
     }
@@ -2858,7 +2993,11 @@ fn collect_expr_callee_names(
         }
         instr::Expr::Array(items) => {
             for item in items {
-                collect_expr_callee_names(item, visible_locals, top_level_names, deps);
+                match item {
+                    instr::ArrayItem::Expr(expr) | instr::ArrayItem::Spread(expr) => {
+                        collect_expr_callee_names(expr, visible_locals, top_level_names, deps);
+                    }
+                }
             }
         }
         instr::Expr::Map(entries) => {

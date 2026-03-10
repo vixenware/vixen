@@ -33,6 +33,12 @@ pub enum TemplatePart {
     Expr(Expr),
 }
 
+#[derive(Debug, Clone)]
+pub enum ArrayItem {
+    Expr(Expr),
+    Spread(Expr),
+}
+
 /// A block: a sequence of statements. The last statement's value is the
 /// block's value. An empty block or a block ending with a non-expression
 /// statement evaluates to Unit.
@@ -114,7 +120,7 @@ pub enum Expr {
     },
 
     /// Array literal: `[a, b, c]`
-    Array(Vec<Expr>),
+    Array(Vec<ArrayItem>),
 
     /// Map literal: `%{ key => value, ... }`
     Map(Vec<(Expr, Expr)>),
