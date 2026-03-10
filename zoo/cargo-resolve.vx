@@ -61,6 +61,7 @@ struct DependencyRequest {
   version_req: SemverReq?,
   features: Array[String] = [],
   default_features: Bool = true,
+  optional: Bool = false,
   kind: String = "normal",
   target: String?,
   source: DependencySource = DependencySource.Registry,
@@ -80,6 +81,17 @@ struct Comparator {
 
 struct SemverReq {
   comparators: Array[Comparator],
+}
+
+struct ActivatedDependencyFeature {
+  dependency: String,
+  feature: String,
+}
+
+struct UnifiedFeatures {
+  local: Array[String] = [],
+  enabled_optional_deps: Array[String] = [],
+  dependency_features: Array[ActivatedDependencyFeature] = [],
 }
 
 enum DependencySource {
@@ -256,6 +268,7 @@ fn request_from_dep(name: String, dep: CargoDependencySpec, kind: String) -> Dep
       package_name: None,
       version_req: parse_semver_req(value),
       kind,
+      optional: false,
       target: None,
     },
     None => (
@@ -270,6 +283,7 @@ fn request_from_dep(name: String, dep: CargoDependencySpec, kind: String) -> Dep
           ),
         features: detail.features,
         default_features: detail.default_features,
+        optional: detail.optional,
         kind,
         target: None,
         source:
@@ -341,19 +355,83 @@ fn request_from_index_dep(dep: IndexDependency) -> DependencyRequest (
     version_req: parse_semver_req(dep.req),
     features: dep.features,
     default_features: dep.default_features,
+    optional: dep.optional,
     kind: dep.kind.unwrap_or("normal"),
     target: dep.target,
   }
 )
 
-fn unify_features(feature_graph: Map[String, Array[String]], request: DependencyRequest) -> Array[String] (
+enum FeatureEdge {
+  struct Local {
+    feature: String,
+  },
+  struct EnableDependency {
+    dependency: String,
+  },
+  struct DependencyFeature {
+    dependency: String,
+    feature: String,
+    weak: Bool = false,
+  },
+}
+
+fn parse_feature_edge(s: String) -> FeatureEdge (
+  if s.starts_with("dep:") (
+    FeatureEdge.EnableDependency {
+      dependency: s.slice(4..),
+    }
+  ) else (
+    match s.split_once("/") (
+      Some { value } => (
+        let (dep, feat) = value;
+        if dep.ends_with("?") (
+          FeatureEdge.DependencyFeature {
+            dependency: dep.slice(0..dep.len() - 1),
+            feature: feat,
+            weak: true,
+          }
+        ) else (
+          FeatureEdge.DependencyFeature {
+            dependency: dep,
+            feature: feat,
+          }
+        )
+      ),
+      None => FeatureEdge.Local { feature: s },
+    )
+  )
+)
+
+fn unify_features(feature_graph: Map[String, Array[String]], request: DependencyRequest) -> UnifiedFeatures (
   // Sketch only:
-  // - start with explicitly requested features
-  // - if `request.default_features`, add the package's `default` feature set
-  // - follow feature expansions transitively until fixpoint
+  // - seeds start with explicit features, plus `default` if enabled
+  // - feature names expand transitively through `feature_graph`
+  // - `dep:name` enables an optional dependency
+  // - `dep/feat` requests `feat` on dependency `dep`
+  // - `dep?/feat` requests `feat` only if `dep` is already enabled
   let _feature_graph = feature_graph;
   let _request = request;
   fail "feature unification omitted from sketch"
+)
+
+fn apply_feature_requests(deps: Array[DependencyRequest], features: UnifiedFeatures) -> Array[DependencyRequest] (
+  deps
+    .filter_map((dep) => (
+      if !dep.optional || features.enabled_optional_deps.any($ == dep.name) (
+        let extra =
+          features.dependency_features
+            .filter($.dependency == dep.name)
+            .map($.feature)
+            .to_array();
+        Some(DependencyRequest {
+          ..dep,
+          features: [..dep.features, ..extra],
+        })
+      ) else (
+        None
+      )
+    ))
+    .to_array()
 )
 
 fn lock_entry(lock: CargoLock?, name: String) -> LockedPackage? (
@@ -395,8 +473,8 @@ fn resolve_request(request: DependencyRequest) where {
         name: dep_manifest.package.name,
         version: dep_manifest.package.version,
         source: ResolvedSource.Path { path },
-        features,
-        dependencies: manifest_requests(dep_manifest),
+        features: features.local,
+        dependencies: apply_feature_requests(manifest_requests(dep_manifest), features),
       }
     ),
     DependencySource.Git { url } => (
@@ -416,6 +494,11 @@ fn resolve_request(request: DependencyRequest) where {
     lock: lock_entry(lock, package_name),
   };
   let features = unify_features(chosen.features, request);
+  let dependencies =
+    chosen.deps
+      .filter($.kind.unwrap_or("normal") == request.kind)
+      .map(request_from_index_dep($))
+      .to_array();
 
   ResolvedCrate {
     id: PackageId(`registry:{chosen.name}@{chosen.vers}`),
@@ -425,12 +508,8 @@ fn resolve_request(request: DependencyRequest) where {
       checksum: chosen.cksum,
       download_url: crate_download_url(config, chosen.name, chosen.vers, chosen.cksum),
     },
-    features,
-    dependencies:
-      chosen.deps
-        .filter($.kind.unwrap_or("normal") == request.kind)
-        .map(request_from_index_dep($))
-        .to_array(),
+    features: features.local,
+    dependencies: apply_feature_requests(dependencies, features),
   }
     ),
   )
