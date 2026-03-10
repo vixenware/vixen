@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use rowan::TextRange;
 use vx_parser::{
     ArrayExpr, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr, FieldExpr, IfExpr,
-    LiteralExpr, MapExpr, MatchExpr, NameRefExpr, PrefixExpr, SourceFile, Stmt, StructLiteralExpr,
-    SyntaxKind,
+    LiteralExpr, MapExpr, MatchExpr, NameRefExpr, Pattern, PrefixExpr, SourceFile, Stmt,
+    StructLiteralExpr, SyntaxKind, WithExpr,
 };
 use vx_types::{FnSig, Ty};
 
@@ -105,13 +105,25 @@ impl<'a> ExprTyper<'a> {
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let(let_stmt) => {
+                // Check for explicit type annotation: let x: Foo = ...
+                let annotation_ty = let_stmt
+                    .slot_type()
+                    .and_then(|st| st.ty())
+                    .map(|t| self.types.resolve_type_annotation(&t))
+                    .filter(|t| !t.is_poison());
+
                 if let Some(expr) = let_stmt.expr() {
-                    let ty = self.infer_expr(&expr);
-                    // Record the binding's type so name references can pick it up
+                    let inferred_ty = self.infer_expr(&expr);
+                    // Prefer the annotation type if present, otherwise use inferred
+                    let ty = annotation_ty.unwrap_or(inferred_ty);
                     if !ty.is_poison() {
                         if let Some(name_tok) = let_stmt.name() {
                             self.binding_types.insert(name_tok.text_range(), ty);
                         }
+                    }
+                } else if let Some(ty) = annotation_ty {
+                    if let Some(name_tok) = let_stmt.name() {
+                        self.binding_types.insert(name_tok.text_range(), ty);
                     }
                 }
             }
@@ -157,6 +169,7 @@ impl<'a> ExprTyper<'a> {
             Expr::Match(m) => self.infer_match(m),
             Expr::Binary(bin) => self.infer_binary(bin),
             Expr::Prefix(pre) => self.infer_prefix(pre),
+            Expr::With(w) => self.infer_with(w),
             _ => {
                 // Recurse into child expressions
                 for child in expr.syntax().children() {
@@ -565,13 +578,21 @@ impl<'a> ExprTyper<'a> {
 
     fn infer_match(&mut self, m: &MatchExpr) -> Ty {
         // Infer the scrutinee (first child expr)
-        if let Some(scrutinee) = m.syntax().children().find_map(Expr::cast) {
-            self.infer_expr(&scrutinee);
-        }
+        let scrutinee_ty = m
+            .syntax()
+            .children()
+            .find_map(Expr::cast)
+            .map(|s| self.infer_expr(&s))
+            .unwrap_or(Ty::Poison);
 
         // Infer each arm body; the match type is the first arm's body type
         let mut result_ty = Ty::Poison;
         for arm in m.arms() {
+            // Type pattern bindings based on the scrutinee type
+            if let Some(pat) = arm.pattern() {
+                self.type_pattern(&pat, &scrutinee_ty);
+            }
+
             if let Some(body) = arm.expr() {
                 let arm_ty = self.infer_expr(&body);
                 if result_ty.is_poison() && !arm_ty.is_poison() {
@@ -580,6 +601,141 @@ impl<'a> ExprTyper<'a> {
             }
         }
         result_ty
+    }
+
+    /// Assign types to bindings introduced by a pattern, given the type of the value being matched.
+    fn type_pattern(&mut self, pat: &Pattern, ty: &Ty) {
+        match pat {
+            Pattern::Binding(bp) => {
+                if let Some(name_tok) = bp.name() {
+                    if !ty.is_poison() {
+                        self.binding_types.insert(name_tok.text_range(), ty.clone());
+                    }
+                }
+            }
+            Pattern::Variant(vp) => {
+                // Resolve the variant to find field types
+                let variant_struct = self.resolve_variant_type(vp, ty);
+                if let Some(struct_pat) = vp.fields() {
+                    if let Some((struct_def_fields, _)) = &variant_struct {
+                        for field in struct_pat.fields() {
+                            if let Some(field_name_tok) = field.name() {
+                                let field_name = field_name_tok.text();
+                                let field_ty = struct_def_fields
+                                    .iter()
+                                    .find(|f| f.name == field_name)
+                                    .map(|f| f.ty.clone())
+                                    .unwrap_or(Ty::Poison);
+                                // If there's a nested pattern (e.g., `Foo { bar: Baz { x } }`), recurse
+                                if let Some(nested_pat) = field.pattern() {
+                                    self.type_pattern(&nested_pat, &field_ty);
+                                } else {
+                                    // Simple field binding: `Foo { bar }` — bar gets the field type
+                                    if !field_ty.is_poison() {
+                                        self.binding_types
+                                            .insert(field_name_tok.text_range(), field_ty);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Pattern::Struct(sp) => {
+                // Direct struct pattern (not under a variant): fields get types from the matched struct
+                if let Ty::Struct(struct_ty) = ty {
+                    if let vx_types::TypeDef::Struct(ref sdef) = self.types.env[struct_ty.id] {
+                        for field in sp.fields() {
+                            if let Some(field_name_tok) = field.name() {
+                                let field_name = field_name_tok.text();
+                                let field_ty = sdef
+                                    .fields
+                                    .iter()
+                                    .find(|f| f.name == field_name)
+                                    .map(|f| f.ty.clone())
+                                    .unwrap_or(Ty::Poison);
+                                if let Some(nested_pat) = field.pattern() {
+                                    self.type_pattern(&nested_pat, &field_ty);
+                                } else if !field_ty.is_poison() {
+                                    self.binding_types
+                                        .insert(field_name_tok.text_range(), field_ty);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Pattern::Tuple(tp) => {
+                if let Ty::Tuple(tuple_ty) = ty {
+                    for (item, elem_ty) in tp.items().zip(tuple_ty.elements.iter()) {
+                        self.type_pattern(&item, elem_ty);
+                    }
+                }
+            }
+            Pattern::At(at) => {
+                // `name @ pattern` — bind name to the whole type, recurse into pattern
+                if let Some(name_tok) = at.binding_name() {
+                    if !ty.is_poison() {
+                        self.binding_types.insert(name_tok.text_range(), ty.clone());
+                    }
+                }
+                if let Some(inner) = at.pattern() {
+                    self.type_pattern(&inner, ty);
+                }
+            }
+            Pattern::Or(or) => {
+                for alt in or.patterns() {
+                    self.type_pattern(&alt, ty);
+                }
+            }
+            Pattern::Paren(p) => {
+                if let Some(inner) = p.inner() {
+                    self.type_pattern(&inner, ty);
+                }
+            }
+            Pattern::Array(arr) => {
+                if let Ty::Array(elem_ty) = ty {
+                    for item in arr.items() {
+                        self.type_pattern(&item, elem_ty);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Resolve a variant pattern to find the struct definition for its fields.
+    fn resolve_variant_type(
+        &self,
+        vp: &vx_parser::VariantPattern,
+        scrutinee_ty: &Ty,
+    ) -> Option<(Vec<vx_types::FieldDef>, vx_types::TypeId)> {
+        let variant_name: String = vp.segments().last()?.text().to_string();
+
+        // If the scrutinee is an enum, find the matching variant
+        if let Ty::Enum(enum_ty) = scrutinee_ty {
+            if let vx_types::TypeDef::Enum(ref edef) = self.types.env[enum_ty.id] {
+                for &variant_id in &edef.variants {
+                    if let vx_types::TypeDef::Struct(ref sdef) = self.types.env[variant_id] {
+                        if sdef.name == variant_name {
+                            return Some((sdef.fields.clone(), variant_id));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also try resolving by name if the scrutinee type is unknown
+        let type_ids = self.types.env.lookup(&variant_name);
+        for &id in type_ids {
+            if let vx_types::TypeDef::Struct(ref sdef) = self.types.env[id] {
+                if sdef.parent_enum.is_some() {
+                    return Some((sdef.fields.clone(), id));
+                }
+            }
+        }
+
+        None
     }
 
     fn infer_binary(&mut self, bin: &BinaryExpr) -> Ty {
@@ -651,6 +807,30 @@ impl<'a> ExprTyper<'a> {
             Some(SyntaxKind::MINUS) => operand_ty,
             _ => Ty::Poison,
         }
+    }
+
+    fn infer_with(&mut self, w: &WithExpr) -> Ty {
+        // The with-expression preserves the type of its receiver:
+        // `foo with { field: value }` has the same type as `foo`
+        let receiver_ty = w
+            .receiver()
+            .map(|r| self.infer_expr(&r))
+            .unwrap_or(Ty::Poison);
+
+        // Infer types of update field values (inside the update body)
+        for child in w.syntax().children() {
+            if child.kind() == SyntaxKind::UPDATE_BODY {
+                for field_node in child.children() {
+                    for expr_child in field_node.children() {
+                        if let Some(e) = Expr::cast(expr_child) {
+                            self.infer_expr(&e);
+                        }
+                    }
+                }
+            }
+        }
+
+        receiver_ty
     }
 
     fn infer_map(&mut self, map: &MapExpr) -> Ty {

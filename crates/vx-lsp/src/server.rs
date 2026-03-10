@@ -863,6 +863,43 @@ impl LanguageServer for VxLanguageServer {
                 // Keyword args already have names in the source — no hints needed
             }
 
+            // Walk all LET_STMT nodes to show inferred binding types
+            for node in root.descendants() {
+                if node.kind() != SyntaxKind::LET_STMT {
+                    continue;
+                }
+                let let_stmt = match vx::LetStmt::cast(node) {
+                    Some(ls) => ls,
+                    None => continue,
+                };
+
+                // Skip if there's already an explicit type annotation
+                if let_stmt.slot_type().is_some() {
+                    continue;
+                }
+
+                let Some(name_tok) = let_stmt.name() else {
+                    continue;
+                };
+
+                // Look up the inferred type for this binding
+                let Some(ty) = state.type_check.binding_types.get(&name_tok.text_range()) else {
+                    continue;
+                };
+
+                let pos = state.line_index.position(name_tok.text_range().end());
+                hints.push(InlayHint {
+                    position: Position::new(pos.line, pos.col),
+                    label: InlayHintLabel::String(format!(": {ty}")),
+                    kind: Some(InlayHintKind::TYPE),
+                    text_edits: None,
+                    tooltip: None,
+                    padding_left: None,
+                    padding_right: None,
+                    data: None,
+                });
+            }
+
             hints
         });
 

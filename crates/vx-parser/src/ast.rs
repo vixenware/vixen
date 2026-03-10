@@ -1003,6 +1003,10 @@ impl LetStmt {
         })
     }
 
+    pub fn slot_type(&self) -> Option<SlotType> {
+        child(self.syntax())
+    }
+
     pub fn expr(&self) -> Option<Expr> {
         self.syntax().children().filter_map(Expr::cast).last()
     }

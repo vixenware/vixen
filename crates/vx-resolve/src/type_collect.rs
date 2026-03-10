@@ -23,6 +23,8 @@ pub struct TypeCollection {
     pub range_to_type: HashMap<TextRange, TypeId>,
     /// Map from definition name ranges to their function signature.
     pub range_to_fn_sig: HashMap<TextRange, FnSig>,
+    /// Map from type names to their TypeId and kind (for resolving type annotations).
+    pub(crate) name_to_id: HashMap<String, (TypeId, TypeKind)>,
 }
 
 /// Collect all type declarations from a source file into a [`TypeEnv`].
@@ -230,6 +232,15 @@ pub fn collect_types(file: &SourceFile) -> TypeCollection {
         env,
         range_to_type,
         range_to_fn_sig,
+        name_to_id,
+    }
+}
+
+impl TypeCollection {
+    /// Resolve a type annotation AST node to a [`Ty`].
+    pub(crate) fn resolve_type_annotation(&self, ty: &vx_parser::Type) -> Ty {
+        let resolver = TypeResolver::new(&self.name_to_id);
+        resolver.resolve_type(ty, &[])
     }
 }
 
@@ -354,7 +365,7 @@ fn collect_capabilities(decl: &FnDecl) -> Vec<vx_types::Capability> {
 }
 
 #[derive(Clone, Copy)]
-enum TypeKind {
+pub(crate) enum TypeKind {
     Struct,
     Enum,
     Newtype,
@@ -362,7 +373,7 @@ enum TypeKind {
 }
 
 /// Resolves AST type annotations to [`Ty`] values.
-struct TypeResolver<'a> {
+pub(crate) struct TypeResolver<'a> {
     name_to_id: &'a HashMap<String, (TypeId, TypeKind)>,
 }
 
