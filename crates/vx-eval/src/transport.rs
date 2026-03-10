@@ -800,7 +800,8 @@ impl TryFrom<&BuiltinValue> for TransportBuiltinValue {
             BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => Ok(Self::TreeFile {
                 receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
             }),
-            BuiltinValue::Method(BuiltinMethod::HostRead { .. })
+            BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { .. })
+            | BuiltinValue::Method(BuiltinMethod::HostRead { .. })
             | BuiltinValue::Method(BuiltinMethod::HostHash { .. })
             | BuiltinValue::Method(BuiltinMethod::HostWhich { .. }) => {
                 Err("cannot transport host builtin methods".into())

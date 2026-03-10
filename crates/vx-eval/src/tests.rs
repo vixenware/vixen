@@ -71,6 +71,28 @@ fn string_literal() {
 }
 
 #[test]
+fn option_unwrap_or_returns_the_inner_value() {
+    let val = eval(r#"fn main() { Some { value: 7 }.unwrap_or(9) }"#, "main").unwrap();
+    assert_eq!(val, Value::U64(7));
+}
+
+#[test]
+fn option_unwrap_or_returns_the_default_for_none() {
+    let val = eval(r#"fn main() { None.unwrap_or(9) }"#, "main").unwrap();
+    assert_eq!(val, Value::U64(9));
+}
+
+#[test]
+fn option_unwrap_or_does_not_force_the_default_when_some() {
+    let val = eval(
+        r#"fn main() { Some { value: 7 }.unwrap_or(fail "should not be forced") }"#,
+        "main",
+    )
+    .unwrap();
+    assert_eq!(val, Value::U64(7));
+}
+
+#[test]
 // r[verify expr.literal.interpolation]
 fn interpolated_string_literal() {
     let val = eval(r#"fn main() { `hello ${"world"}` }"#, "main").unwrap();

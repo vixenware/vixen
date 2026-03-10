@@ -1077,6 +1077,16 @@ impl Engine {
 
     fn select_field(&self, receiver: &Value, field: &str) -> Result<Value, PoisonError> {
         match receiver {
+            Value::Struct(struct_value)
+                if field == "unwrap_or"
+                    && matches!(struct_value.type_name.as_ref(), "Some" | "None") =>
+            {
+                Ok(Value::Builtin(BuiltinValue::Method(
+                    BuiltinMethod::OptionUnwrapOr {
+                        receiver: Box::new(receiver.clone()),
+                    },
+                )))
+            }
             Value::Struct(struct_value) => struct_value
                 .fields
                 .iter()
@@ -1302,6 +1312,24 @@ impl Engine {
                     return Err(self.type_error("tree.file receiver must be Tree"));
                 };
                 self.tree_file(&tree, path)
+            }
+            BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver }) => {
+                self.require_no_kwargs("option.unwrap_or", kwargs)?;
+                self.check_arity("option.unwrap_or", args, 1)?;
+                let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
+                let Value::Struct(option) = receiver else {
+                    return Err(self.type_error("option.unwrap_or receiver must be Option"));
+                };
+                match option.type_name.as_ref() {
+                    "Some" => option
+                        .fields
+                        .iter()
+                        .find(|(name, _)| name.as_ref() == "value")
+                        .map(|(_, value)| value.clone())
+                        .ok_or_else(|| self.type_error("Some.unwrap_or requires a value field")),
+                    "None" => Ok(args[0].clone()),
+                    _ => Err(self.type_error("option.unwrap_or receiver must be Option")),
+                }
             }
             BuiltinValue::Method(BuiltinMethod::HostRead { receiver }) => {
                 self.require_no_kwargs("host.read", kwargs)?;
