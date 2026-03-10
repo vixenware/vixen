@@ -133,6 +133,11 @@ struct Message
 "#,
     );
 
+    assert!(
+        !parse.errors().is_empty(),
+        "old @attribute syntax should produce a parse error",
+    );
+
     let kinds = parse
         .syntax()
         .children()
@@ -252,6 +257,39 @@ fn build(exec_fn: Fn(Array[String]) -> Stream[String], args: Array[String], defa
     assert_eq!(args.len(), 1);
     assert!(matches!(&args[0], Expr::NameRef(_)));
     assert!(matches!(where_expr.keywords(), Some(Expr::NameRef(_))));
+}
+
+#[test]
+fn upper_ident_can_take_map_payload_by_unary_application() {
+    let parse = parse(
+        r#"
+fn build(exe: Blob) {
+  Tree { @bin/lua: exe }
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let call = match body.statements().next().expect("call statement") {
+        Stmt::Expr(Expr::Call(node)) => node,
+        stmt => panic!("expected call expr, got {stmt:?}"),
+    };
+
+    let callee = match call.root_callee().expect("root callee") {
+        Expr::NameRef(node) => node,
+        expr => panic!("expected name ref, got {expr:?}"),
+    };
+    assert_eq!(callee.token().unwrap().text(), "Tree");
+
+    let args = call.positional_args();
+    assert_eq!(args.len(), 1);
+    assert!(matches!(&args[0], Expr::Map(_)));
 }
 
 #[test]

@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use vx_parser::{
     ArrayExpr, ArrayItem as AstArrayItem, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr,
-    Expr as AstExpr, FailExpr, FieldExpr, FnDecl, IfExpr, InterpolatedStringExpr, Item,
-    LiteralExpr, MapEntry, MapExpr, Parameter, PathLiteralExpr, PrefixExpr, SourceFile,
-    Stmt as AstStmt, StringPart, StructLiteralExpr, StructLiteralField, SyntaxKind,
+    Expr as AstExpr, FailExpr, FieldExpr, FnDecl, IfExpr, InterpolatedStringExpr, InvokeExpr,
+    LiteralExpr, MapExpr, Parameter, PathLiteralExpr, PrefixExpr, RecordExpr, SourceFile,
+    Stmt as AstStmt, StringPart, StructLiteralExpr, StructLiteralField, SyntaxKind, WhereExpr,
 };
 
 use crate::instr;
@@ -29,23 +29,29 @@ impl LowerCtx {
 
 /// Lower a parsed source file into a module.
 pub fn lower_source_file(source: &SourceFile) -> instr::Module {
+    let mut ctx = LowerCtx::default();
     let mut functions = Vec::new();
+    let mut top_level = Vec::new();
 
-    for item in source.items() {
-        match item {
-            Item::FnDecl(f) => {
-                if let Some(def) = lower_fn_decl(&f) {
-                    functions.push(Arc::new(def));
-                }
-            }
-            Item::StructDecl(_)
-            | Item::EnumDecl(_)
-            | Item::NewtypeDecl(_)
-            | Item::TypeAliasDecl(_) => {}
+    for stmt in source.statements() {
+        if let AstStmt::FnDecl(f) = &stmt
+            && let Some(def) = lower_fn_decl(f)
+        {
+            let def = Arc::new(def);
+            functions.push(Arc::clone(&def));
+            top_level.push(instr::Stmt::FnDecl(def));
+            continue;
+        }
+
+        if let Some(stmt) = lower_stmt_with_ctx(&stmt, &mut ctx) {
+            top_level.push(stmt);
         }
     }
 
-    instr::Module { functions }
+    instr::Module {
+        functions,
+        top_level: instr::Block { stmts: top_level },
+    }
 }
 
 fn lower_fn_decl(f: &FnDecl) -> Option<instr::FnDef> {
@@ -133,7 +139,9 @@ fn lower_expr_with_ctx(expr: &AstExpr, ctx: &mut LowerCtx) -> Option<instr::Expr
             .expr()
             .and_then(|expr| lower_expr_with_ctx(&expr, ctx)),
         AstExpr::Call(call) => lower_call(call, ctx),
-        AstExpr::Where(_) | AstExpr::Invoke(_) | AstExpr::Record(_) => None,
+        AstExpr::Where(where_expr) => lower_where(where_expr, ctx),
+        AstExpr::Invoke(invoke) => lower_invoke(invoke, ctx),
+        AstExpr::Record(_) => None,
         AstExpr::Field(field) => lower_field(field, ctx),
         AstExpr::Fail(fail) => lower_fail(fail, ctx),
         AstExpr::StructLiteral(lit) => lower_struct_literal(lit, ctx),
@@ -183,6 +191,22 @@ fn lower_interpolated_string(
 }
 
 fn lower_path_literal(expr: &PathLiteralExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
+    let text = expr.syntax().text().to_string();
+    let text = text.trim();
+    if let Some(inner) = text
+        .strip_prefix("@(")
+        .and_then(|inner| inner.strip_suffix(')'))
+    {
+        let parts = lower_path_template(inner, ctx)?;
+        return Some(instr::Expr::PathTemplate(parts));
+    }
+
+    if let Some(inner) = text.strip_prefix('@') {
+        return Some(instr::Expr::PathTemplate(vec![instr::TemplatePart::Text(
+            inner.to_string(),
+        )]));
+    }
+
     if let Some(literal) = expr.literal() {
         let token = literal.token()?;
         if token.kind() != SyntaxKind::STRING {
@@ -216,6 +240,65 @@ fn lower_template_parts(
         }
     }
     Some(lowered)
+}
+
+fn lower_path_template(text: &str, ctx: &mut LowerCtx) -> Option<Vec<instr::TemplatePart>> {
+    let mut parts = Vec::new();
+    let mut cursor = 0usize;
+
+    while let Some(start_offset) = text[cursor..].find('{') {
+        let start = cursor + start_offset;
+        let end = find_matching_brace(text, start)?;
+        if start > cursor {
+            parts.push(instr::TemplatePart::Text(text[cursor..start].to_string()));
+        }
+        let expr_text = text[start + 1..end].trim();
+        parts.push(instr::TemplatePart::Expr(lower_embedded_expr(
+            expr_text, ctx,
+        )?));
+        cursor = end + 1;
+    }
+
+    if cursor < text.len() {
+        parts.push(instr::TemplatePart::Text(text[cursor..].to_string()));
+    }
+
+    if parts.is_empty() {
+        parts.push(instr::TemplatePart::Text(String::new()));
+    }
+
+    Some(parts)
+}
+
+fn find_matching_brace(text: &str, start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, ch) in text[start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(start + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn lower_embedded_expr(text: &str, ctx: &mut LowerCtx) -> Option<instr::Expr> {
+    let source = format!("{text};");
+    let parse = vx_parser::parse(&source);
+    if !parse.errors().is_empty() {
+        return None;
+    }
+    let file = SourceFile::cast_root(parse.syntax());
+    let stmt = file.statements().next()?;
+    let AstStmt::Expr(expr) = stmt else {
+        return None;
+    };
+    lower_expr_with_ctx(&expr, ctx)
 }
 
 fn unescape_string(s: &str) -> String {
@@ -320,26 +403,71 @@ fn lower_call(call: &CallExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
     let callee = call.callee()?;
     let func = lower_expr_with_ctx(&callee, ctx)?;
 
-    let args: Vec<instr::Expr> = call
-        .args()
-        .filter_map(|arg| arg.expr())
-        .filter_map(|expr| lower_expr_with_ctx(&expr, ctx))
-        .collect();
-
-    let kwargs: Vec<(String, instr::Expr)> = call
-        .keyword_args()
-        .filter_map(|arg| {
-            Some((
-                arg.name()?.text().to_string(),
-                lower_expr_with_ctx(&arg.expr()?, ctx)?,
-            ))
-        })
-        .collect();
+    let mut args = Vec::new();
+    for arg in call.args() {
+        args.push(lower_expr_with_ctx(&arg.expr()?, ctx)?);
+    }
 
     Some(instr::Expr::Call {
         func: Box::new(func),
         args,
-        kwargs,
+        kwargs: Vec::new(),
+    })
+}
+
+fn lower_where(where_expr: &WhereExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
+    let kwargs = lower_record_kwargs(&where_expr.keywords()?, ctx)?;
+
+    match where_expr.callee()? {
+        AstExpr::Call(call) => {
+            let func = lower_expr_with_ctx(&call.callee()?, ctx)?;
+            let mut args = Vec::new();
+            for arg in call.args() {
+                args.push(lower_expr_with_ctx(&arg.expr()?, ctx)?);
+            }
+            Some(instr::Expr::Call {
+                func: Box::new(func),
+                args,
+                kwargs,
+            })
+        }
+        callee => {
+            let func = lower_expr_with_ctx(&callee, ctx)?;
+            Some(instr::Expr::Call {
+                func: Box::new(func),
+                args: Vec::new(),
+                kwargs,
+            })
+        }
+    }
+}
+
+fn lower_record_kwargs(expr: &AstExpr, ctx: &mut LowerCtx) -> Option<Vec<(String, instr::Expr)>> {
+    let AstExpr::Record(record) = expr else {
+        return None;
+    };
+    lower_record_literal_kwargs(record, ctx)
+}
+
+fn lower_record_literal_kwargs(
+    record: &RecordExpr,
+    ctx: &mut LowerCtx,
+) -> Option<Vec<(String, instr::Expr)>> {
+    let mut kwargs = Vec::new();
+    for entry in record.fields() {
+        let name = entry.name()?.text().to_string();
+        let value = lower_expr_with_ctx(&entry.value()?, ctx)?;
+        kwargs.push((name, value));
+    }
+    Some(kwargs)
+}
+
+fn lower_invoke(invoke: &InvokeExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
+    let func = lower_expr_with_ctx(&invoke.callee()?, ctx)?;
+    Some(instr::Expr::Call {
+        func: Box::new(func),
+        args: Vec::new(),
+        kwargs: Vec::new(),
     })
 }
 
@@ -372,30 +500,26 @@ fn lower_struct_literal(lit: &StructLiteralExpr, ctx: &mut LowerCtx) -> Option<i
 }
 
 fn lower_array(array: &ArrayExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
-    let items = array
-        .items()
-        .filter_map(|item| match item {
-            AstArrayItem::Expr(expr) => {
-                Some(instr::ArrayItem::Expr(lower_expr_with_ctx(&expr, ctx)?))
+    let mut items = Vec::new();
+    for item in array.items() {
+        let item = match item {
+            AstArrayItem::Expr(expr) => instr::ArrayItem::Expr(lower_expr_with_ctx(&expr, ctx)?),
+            AstArrayItem::Spread(spread) => {
+                instr::ArrayItem::Spread(lower_expr_with_ctx(&spread.expr()?, ctx)?)
             }
-            AstArrayItem::Spread(spread) => Some(instr::ArrayItem::Spread(lower_expr_with_ctx(
-                &spread.expr()?,
-                ctx,
-            )?)),
-        })
-        .collect();
+        };
+        items.push(item);
+    }
     Some(instr::Expr::Array(items))
 }
 
 fn lower_map(map: &MapExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
-    let entries = map
-        .entries()
-        .filter_map(|entry: MapEntry| {
-            let key = lower_expr_with_ctx(&entry.key()?, ctx)?;
-            let value = lower_expr_with_ctx(&entry.value()?, ctx)?;
-            Some((key, value))
-        })
-        .collect();
+    let mut entries = Vec::new();
+    for entry in map.entries() {
+        let key = lower_expr_with_ctx(&entry.key()?, ctx)?;
+        let value = lower_expr_with_ctx(&entry.value()?, ctx)?;
+        entries.push((key, value));
+    }
     Some(instr::Expr::Map(entries))
 }
 

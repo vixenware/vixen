@@ -189,6 +189,67 @@ fn outer() {
 }
 
 #[test]
+fn nested_type_declarations_are_visible_in_block_scope() {
+    let file = parse_file(
+        r#"
+fn main() {
+    struct Inner {
+        value: U64,
+    };
+    enum Choice {
+        struct Some,
+    };
+    newtype Id of U64;
+    type MaybeInner = Inner?;
+    Inner { value: 1 };
+}
+"#,
+    );
+    let tree = ScopeTree::build(&file);
+
+    let inner = tree
+        .all_definitions()
+        .find(|def| def.name == "Inner")
+        .expect("nested struct should be collected");
+    let choice = tree
+        .all_definitions()
+        .find(|def| def.name == "Choice")
+        .expect("nested enum should be collected");
+    let id = tree
+        .all_definitions()
+        .find(|def| def.name == "Id")
+        .expect("nested newtype should be collected");
+    let maybe_inner = tree
+        .all_definitions()
+        .find(|def| def.name == "MaybeInner")
+        .expect("nested type alias should be collected");
+
+    assert_eq!(inner.kind, DefKind::Struct);
+    assert_eq!(choice.kind, DefKind::Enum);
+    assert_eq!(id.kind, DefKind::Newtype);
+    assert_eq!(maybe_inner.kind, DefKind::TypeAlias);
+    assert_eq!(tree.scope_kind(inner.scope), ScopeKind::Block);
+    assert_eq!(inner.scope, choice.scope);
+    assert_eq!(inner.scope, id.scope);
+    assert_eq!(inner.scope, maybe_inner.scope);
+}
+
+#[test]
+fn old_at_attribute_syntax_is_rejected() {
+    let parsed = parse(
+        r#"
+@rename("hello")
+struct Message
+"#,
+    );
+
+    assert!(
+        !parsed.errors().is_empty(),
+        "old @attribute syntax should produce a parse error",
+    );
+}
+
+#[test]
 fn dollar_idents_not_resolved() {
     let file = parse_file(
         r#"

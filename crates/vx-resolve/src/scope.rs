@@ -339,6 +339,17 @@ impl ScopeTreeBuilder {
                 )
             }
         };
+        self.add_named_def(scope, name, kind, name_range, full_range);
+    }
+
+    fn add_named_def(
+        &mut self,
+        scope: ScopeId,
+        name: String,
+        kind: DefKind,
+        name_range: TextRange,
+        full_range: TextRange,
+    ) {
         self.add_def(
             scope,
             Definition {
@@ -432,28 +443,64 @@ impl ScopeTreeBuilder {
             Stmt::FnDecl(fn_decl) => {
                 // Local function — add to current scope
                 if let Some(name_tok) = fn_decl.name() {
-                    self.add_def(
+                    self.add_named_def(
                         scope,
-                        Definition {
-                            name: name_tok.text().to_string(),
-                            kind: DefKind::Function,
-                            name_range: name_tok.text_range(),
-                            full_range: fn_decl.syntax().text_range(),
-                            scope,
-                        },
+                        name_tok.text().to_string(),
+                        DefKind::Function,
+                        name_tok.text_range(),
+                        fn_decl.syntax().text_range(),
                     );
                 }
                 self.build_fn_scope(scope, fn_decl);
             }
+            Stmt::StructDecl(decl) => {
+                if let Some(name_tok) = decl.name() {
+                    self.add_named_def(
+                        scope,
+                        name_tok.text().to_string(),
+                        DefKind::Struct,
+                        name_tok.text_range(),
+                        decl.syntax().text_range(),
+                    );
+                }
+            }
+            Stmt::EnumDecl(decl) => {
+                if let Some(name_tok) = decl.name() {
+                    self.add_named_def(
+                        scope,
+                        name_tok.text().to_string(),
+                        DefKind::Enum,
+                        name_tok.text_range(),
+                        decl.syntax().text_range(),
+                    );
+                }
+            }
+            Stmt::NewtypeDecl(decl) => {
+                if let Some(name_tok) = decl.name() {
+                    self.add_named_def(
+                        scope,
+                        name_tok.text().to_string(),
+                        DefKind::Newtype,
+                        name_tok.text_range(),
+                        decl.syntax().text_range(),
+                    );
+                }
+            }
+            Stmt::TypeAliasDecl(decl) => {
+                if let Some(name_tok) = decl.name() {
+                    self.add_named_def(
+                        scope,
+                        name_tok.text().to_string(),
+                        DefKind::TypeAlias,
+                        name_tok.text_range(),
+                        decl.syntax().text_range(),
+                    );
+                }
+            }
             Stmt::Expr(expr) => {
                 self.visit_expr(scope, expr);
             }
-            Stmt::StructDecl(_)
-            | Stmt::EnumDecl(_)
-            | Stmt::NewtypeDecl(_)
-            | Stmt::TypeAliasDecl(_)
-            | Stmt::CompoundUpdate(_)
-            | Stmt::FieldAssign(_) => {
+            Stmt::CompoundUpdate(_) | Stmt::FieldAssign(_) => {
                 // These reference existing bindings; resolution handles them
             }
         }

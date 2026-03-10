@@ -14,6 +14,7 @@ use crate::value::{
 #[derive(Debug, Clone, PartialEq, Facet)]
 pub struct TransportModule {
     pub functions: Vec<TransportFnDef>,
+    pub top_level: TransportBlock,
 }
 
 #[derive(Debug, Clone, PartialEq, Facet)]
@@ -202,6 +203,7 @@ impl From<&instr::Module> for TransportModule {
                 .iter()
                 .map(|function| TransportFnDef::from(function.as_ref()))
                 .collect(),
+            top_level: TransportBlock::from(&module.top_level),
         }
     }
 }
@@ -214,6 +216,7 @@ impl From<TransportModule> for instr::Module {
                 .into_iter()
                 .map(|function| Arc::new(function.into()))
                 .collect(),
+            top_level: module.top_level.into(),
         }
     }
 }

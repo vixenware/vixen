@@ -962,7 +962,12 @@ impl MapExpr {
 
 impl MapEntry {
     pub fn name(&self) -> Option<SyntaxToken> {
-        first_token(self.syntax(), |kind| kind == SyntaxKind::LOWER_IDENT)
+        let token = self
+            .syntax()
+            .children_with_tokens()
+            .filter_map(|child| child.into_token())
+            .find(|token| !token.kind().is_trivia())?;
+        (token.kind() == SyntaxKind::LOWER_IDENT).then_some(token)
     }
 
     pub fn spread(&self) -> Option<SpreadExpr> {

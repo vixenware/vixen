@@ -107,6 +107,21 @@ impl<'a> Parser<'a> {
         self.nth(0)
     }
 
+    fn has_trivia_gap_before_current(&self) -> bool {
+        if self.pos == 0 {
+            return false;
+        }
+
+        let Some(&current_index) = self.significant.get(self.pos) else {
+            return false;
+        };
+        let Some(&previous_index) = self.significant.get(self.pos - 1) else {
+            return false;
+        };
+
+        self.tokens[previous_index].range.end() < self.tokens[current_index].range.start()
+    }
+
     fn bump(&mut self) {
         if let Some(&token_index) = self.significant.get(self.pos) {
             self.events.push(Event::Token { token_index });
@@ -1062,8 +1077,13 @@ fn path_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
     if p.eat(SyntaxKind::L_PAREN) {
         path_template_contents(p);
         p.expect(SyntaxKind::R_PAREN);
-    } else if !path_bare_contents(p) {
-        p.error("expected bare path or @(...) path literal");
+    } else {
+        let saw_bare = path_bare_contents(p);
+        if !saw_bare {
+            p.error("expected bare path or @(...) path literal");
+        } else if p.at(SyntaxKind::L_PAREN) {
+            p.error("old @attribute syntax is not supported; use #[...]");
+        }
     }
     marker.complete(p, SyntaxKind::PATH_LITERAL_EXPR)
 }
@@ -1113,7 +1133,7 @@ fn application_expr(p: &mut Parser<'_>) -> CompletedMarker {
 
         if starts_application_arg(p) {
             let marker = lhs.precede(p);
-            postfix_expr(p);
+            application_arg_expr(p);
             lhs = marker.complete(p, SyntaxKind::CALL_EXPR);
             continue;
         }
@@ -1123,10 +1143,21 @@ fn application_expr(p: &mut Parser<'_>) -> CompletedMarker {
     lhs
 }
 
+fn application_arg_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    if p.at(SyntaxKind::AT) {
+        prefix_expr(p)
+    } else {
+        postfix_expr(p)
+    }
+}
+
 fn postfix_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let mut lhs = atom_expr(p);
     loop {
         if p.at(SyntaxKind::L_BRACKET) {
+            if p.has_trivia_gap_before_current() {
+                break;
+            }
             let marker = lhs.precede(p);
             p.bump();
             expr(p);
@@ -1201,8 +1232,15 @@ fn upper_expr(p: &mut Parser<'_>) -> CompletedMarker {
         p.bump();
     }
     if p.at(SyntaxKind::L_CURLY) {
-        struct_literal_body(p);
-        marker.complete(p, SyntaxKind::STRUCT_LITERAL_EXPR)
+        if looks_like_struct_literal_body(p) {
+            struct_literal_body(p);
+            marker.complete(p, SyntaxKind::STRUCT_LITERAL_EXPR)
+        } else {
+            let callee = marker.complete(p, SyntaxKind::NAME_REF_EXPR);
+            let call = callee.precede(p);
+            brace_literal_expr(p);
+            call.complete(p, SyntaxKind::CALL_EXPR)
+        }
     } else {
         marker.complete(p, SyntaxKind::NAME_REF_EXPR)
     }
@@ -1749,6 +1787,54 @@ fn looks_like_brace_literal(p: &Parser<'_>) -> bool {
     }
 
     !saw_any || only_bare_labels
+}
+
+fn looks_like_struct_literal_body(p: &Parser<'_>) -> bool {
+    if !p.at(SyntaxKind::L_CURLY) {
+        return false;
+    }
+
+    let mut depth = 0usize;
+    let mut offset = 0usize;
+    let mut expecting_entry_start = false;
+
+    loop {
+        match p.nth(offset) {
+            SyntaxKind::L_CURLY | SyntaxKind::L_PAREN | SyntaxKind::L_BRACKET => {
+                depth += 1;
+                if depth == 1 {
+                    expecting_entry_start = true;
+                }
+            }
+            SyntaxKind::R_CURLY | SyntaxKind::R_PAREN | SyntaxKind::R_BRACKET => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return true;
+                }
+            }
+            SyntaxKind::EOF => return false,
+            SyntaxKind::COMMA if depth == 1 => expecting_entry_start = true,
+            SyntaxKind::DOT2 if depth == 1 && expecting_entry_start => {
+                expecting_entry_start = false;
+            }
+            SyntaxKind::COLON if depth == 1 && expecting_entry_start => {
+                if p.nth(offset + 1) != SyntaxKind::LOWER_IDENT {
+                    return false;
+                }
+                expecting_entry_start = false;
+            }
+            SyntaxKind::LOWER_IDENT if depth == 1 && expecting_entry_start => {
+                if p.nth(offset + 1) != SyntaxKind::COLON {
+                    return false;
+                }
+                expecting_entry_start = false;
+            }
+            _ if depth == 1 && expecting_entry_start => return false,
+            _ => {}
+        }
+
+        offset += 1;
+    }
 }
 
 fn starts_expr(kind: SyntaxKind) -> bool {

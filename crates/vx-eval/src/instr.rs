@@ -11,6 +11,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct Module {
     pub functions: Vec<Arc<FnDef>>,
+    pub top_level: Block,
 }
 
 /// A lowered function definition.

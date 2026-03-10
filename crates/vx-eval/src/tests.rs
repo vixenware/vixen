@@ -72,20 +72,20 @@ fn string_literal() {
 
 #[test]
 fn option_unwrap_or_returns_the_inner_value() {
-    let val = eval(r#"fn main() { Some { value: 7 }.unwrap_or(9) }"#, "main").unwrap();
+    let val = eval(r#"fn main() { (Some { value: 7 }).unwrap_or 9 }"#, "main").unwrap();
     assert_eq!(val, Value::U64(7));
 }
 
 #[test]
 fn option_unwrap_or_returns_the_default_for_none() {
-    let val = eval(r#"fn main() { None.unwrap_or(9) }"#, "main").unwrap();
+    let val = eval(r#"fn main() { None.unwrap_or 9 }"#, "main").unwrap();
     assert_eq!(val, Value::U64(9));
 }
 
 #[test]
 fn option_unwrap_or_does_not_force_the_default_when_some() {
     let val = eval(
-        r#"fn main() { Some { value: 7 }.unwrap_or(fail "should not be forced") }"#,
+        r#"fn main() { (Some { value: 7 }).unwrap_or (fail "should not be forced") }"#,
         "main",
     )
     .unwrap();
@@ -101,17 +101,171 @@ fn interpolated_string_literal() {
 
 #[test]
 fn path_literal_normalizes_slashes() {
-    let val = eval(r#"fn main() { @"out//./artifact.o" }"#, "main").unwrap();
+    let val = eval(r#"fn main() { @out//./artifact.o }"#, "main").unwrap();
     assert_eq!(val, Value::Path(PathValue::new("out/artifact.o")));
 }
 
 #[test]
 fn interpolated_path_literal_builds_plain_paths() {
-    let engine = engine(r#"fn main(name: String) { @`out/${name}.o` }"#);
+    let engine = engine(r#"fn main(name: String) { @(out/{name}.o) }"#);
     let value = engine
         .call("main", vec![Value::String(Arc::from("lua"))])
         .unwrap();
     assert_eq!(value, Value::Path(PathValue::new("out/lua.o")));
+}
+
+#[test]
+fn lowering_keeps_interpolated_path_literals_in_function_bodies() {
+    let parse = vx_parser::parse(r#"fn main(root: Path) { @({root}/src/./lib.rs) }"#);
+    assert_eq!(parse.errors(), []);
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        vx_parser::Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    match body.statements().next().expect("path statement") {
+        vx_parser::Stmt::Expr(vx_parser::Expr::PathLiteral(_)) => {}
+        stmt => panic!("expected parsed path literal, got {stmt:?}"),
+    }
+
+    let module = lower_source_file(&file);
+    let body = &module.functions[0].body;
+
+    match body.stmts.as_slice() {
+        [crate::instr::Stmt::Expr(crate::instr::Expr::PathTemplate(_))] => {}
+        other => panic!("unexpected lowered body: {other:?}"),
+    }
+}
+
+#[test]
+fn lowering_keeps_map_payloads_for_tree_constructor_calls() {
+    let parse = vx_parser::parse(
+        r#"fn main(other: Blob) {
+               Tree {
+                 @a.txt: Blob "alpha",
+                 @b.txt: other,
+               }
+             }"#,
+    );
+    assert_eq!(parse.errors(), []);
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        vx_parser::Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let parsed_call = match body.statements().next().expect("tree statement") {
+        vx_parser::Stmt::Expr(vx_parser::Expr::Call(node)) => node,
+        stmt => panic!("expected parsed call, got {stmt:?}"),
+    };
+    let parsed_args = parsed_call.positional_args();
+    assert_eq!(parsed_args.len(), 1);
+    match &parsed_args[0] {
+        vx_parser::Expr::Map(map) => {
+            let entries = map.entries().collect::<Vec<_>>();
+            assert_eq!(entries.len(), 2);
+            assert!(entries.iter().all(|entry| entry.key().is_some()));
+            assert!(entries.iter().all(|entry| entry.value().is_some()));
+            assert!(matches!(
+                entries[0].key(),
+                Some(vx_parser::Expr::PathLiteral(_))
+            ));
+            assert!(matches!(
+                entries[1].key(),
+                Some(vx_parser::Expr::PathLiteral(_))
+            ));
+        }
+        expr => panic!("expected parsed map payload, got {expr:?}"),
+    }
+
+    let module = lower_source_file(&file);
+    let body = &module.functions[0].body;
+
+    match body.stmts.as_slice() {
+        [crate::instr::Stmt::Expr(crate::instr::Expr::Call { args, .. })] => {
+            assert_eq!(args.len(), 1);
+            match &args[0] {
+                crate::instr::Expr::Map(entries) => assert_eq!(entries.len(), 2),
+                other => panic!("expected map payload, got {other:?}"),
+            }
+        }
+        other => panic!("expected one call expression, got {other:?}"),
+    }
+}
+
+#[test]
+fn lowering_keeps_where_calls_as_final_expression_statements() {
+    let parse = vx_parser::parse(
+        r#"fn observe(process: Process, tree: Tree) {
+               process.exit_code
+             }
+
+             fn build() {
+               exec ["/bin/true"] where {
+                 observer: observe,
+               }
+             }"#,
+    );
+    assert_eq!(parse.errors(), []);
+    let file = SourceFile::cast_root(parse.syntax());
+    let build_fn = match file.items().find(|item| match item {
+        vx_parser::Item::FnDecl(node) => node.name().is_some_and(|name| name.text() == "build"),
+        _ => false,
+    }) {
+        Some(vx_parser::Item::FnDecl(node)) => node,
+        other => panic!("expected build fn, got {other:?}"),
+    };
+    let parsed_body = build_fn.body().expect("build body");
+    match parsed_body.statements().next().expect("where stmt") {
+        vx_parser::Stmt::Expr(vx_parser::Expr::Where(_)) => {}
+        stmt => panic!("expected parsed where expr, got {stmt:?}"),
+    }
+
+    let module = lower_source_file(&file);
+    let build = module
+        .functions
+        .iter()
+        .find(|def| def.name == "build")
+        .expect("build function");
+
+    match build.body.stmts.as_slice() {
+        [crate::instr::Stmt::Expr(crate::instr::Expr::Call { args, kwargs, .. })] => {
+            assert_eq!(args.len(), 1);
+            assert_eq!(kwargs.len(), 1);
+            assert_eq!(kwargs[0].0, "observer");
+        }
+        other => panic!("unexpected lowered body: {other:?}"),
+    }
+}
+
+#[test]
+fn top_level_let_bindings_are_visible_to_exported_functions() {
+    let value = eval(
+        r#"
+let greeting = "hello";
+fn main() { greeting }
+"#,
+        "main",
+    )
+    .unwrap();
+
+    assert_eq!(value, Value::String(Arc::from("hello")));
+}
+
+#[test]
+fn top_level_expression_statements_run_before_entry_calls() {
+    let err = eval(
+        r#"
+fail "boom";
+fn main() { 42 }
+"#,
+        "main",
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind, PoisonKind::UserFail);
+    assert!(err.message.contains("boom"));
 }
 
 #[test]
@@ -160,7 +314,7 @@ fn if_with_condition() {
 fn function_call() {
     let val = eval(
         "fn double(x: U64) { x + x }
-         fn main() { double(21) }",
+         fn main() { double 21 }",
         "main",
     )
     .unwrap();
@@ -171,7 +325,7 @@ fn function_call() {
 fn nested_function_calls() {
     let val = eval(
         "fn add(a: U64, b: U64) { a + b }
-         fn main() { add(add(1, 2), add(3, 4)) }",
+         fn main() { add (add 1 2) (add 3 4) }",
         "main",
     )
     .unwrap();
@@ -182,9 +336,9 @@ fn nested_function_calls() {
 fn recursive_function() {
     let val = eval(
         "fn factorial(n: U64) {
-           if n <= 1 { 1 } else { n * factorial(n - 1) }
+           if n <= 1 { 1 } else { n * factorial (n - 1) }
          }
-         fn main() { factorial(5) }",
+         fn main() { factorial 5 }",
         "main",
     )
     .unwrap();
@@ -294,8 +448,8 @@ fn empty_function_returns_unit() {
 fn function_as_value() {
     let val = eval(
         "fn add(a: U64, b: U64) { a + b }
-         fn apply(f: Fn(U64, U64) -> U64, x: U64, y: U64) { f(x, y) }
-         fn main() { apply(add, 3, 4) }",
+         fn apply(f: Fn(U64, U64) -> U64, x: U64, y: U64) { f x y }
+         fn main() { apply add 3 4 }",
         "main",
     )
     .unwrap();
@@ -307,7 +461,7 @@ fn function_as_value() {
 // r[verify fn.closure]
 fn closures_capture_by_value_and_support_block_bodies() {
     let val = eval(
-        "fn apply(f: Fn(U64) -> U64, x: U64) { f(x) }
+        "fn apply(f: Fn(U64) -> U64, x: U64) { f x }
          fn main() {
            let offset = 40;
            let add = (x) => {
@@ -315,7 +469,7 @@ fn closures_capture_by_value_and_support_block_bodies() {
              y
            };
            let offset = 1;
-           apply(add, 2)
+           apply add 2
          }",
         "main",
     )
@@ -353,7 +507,7 @@ fn shipped_functions_preserve_global_calls_and_captures() {
         "fn helper(x: U64) { x + 1 }
          fn make(offset: U64) {
            let base = 40;
-           (x) => helper(base + offset + x)
+           (x) => helper (base + offset + x)
          }",
     );
 
@@ -370,12 +524,12 @@ fn shipped_functions_preserve_global_calls_and_captures() {
 fn inline_values_round_trip_through_transport() {
     let engine = engine(
         r#"fn pack(root: Path) {
-               %{
-                 "root" => root,
-                 "tree" => Tree.of(%{
-                   "hello.txt" => Blob.from_string("hello"),
-                 }),
-                 "values" => [41, 42],
+               {
+                 "root": root,
+                 "tree": Tree {
+                   @hello.txt: Blob "hello",
+                 },
+                 "values": [41, 42],
                }
              }"#,
     );
@@ -427,7 +581,7 @@ fn shadowing() {
 fn user_bindings_can_shadow_exec() {
     let val = eval(
         "fn exec() { 42 }
-         fn main() { exec() }",
+         fn main() { exec! }",
         "main",
     )
     .unwrap();
@@ -441,7 +595,7 @@ fn early_return() {
            if n > 10 { return 999 } else { () };
            n + 1
          }
-         fn main() { check(20) }",
+         fn main() { check 20 }",
         "main",
     )
     .unwrap();
@@ -452,9 +606,9 @@ fn early_return() {
 fn fibonacci() {
     let val = eval(
         "fn fib(n: U64) {
-           if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
+           if n <= 1 { n } else { fib (n - 1) + fib (n - 2) }
          }
-         fn main() { fib(10) }",
+         fn main() { fib 10 }",
         "main",
     )
     .unwrap();
@@ -577,7 +731,7 @@ fn demand_only_reaches_the_taken_if_branch() {
     let engine = engine(
         "fn choose(flag: Bool, unused: U64) { flag }
          fn branch(flag: Bool, poison: U64) {
-           if choose(flag, poison) { 1 } else { poison }
+           if choose flag poison { 1 } else { poison }
          }",
     );
     let call = engine
@@ -632,8 +786,8 @@ fn multiple_independent_poisons_are_collected_deterministically() {
 // r[verify eval.demand-depth]
 fn circular_recursion_poisons_with_a_circular_dependency() {
     let err = eval(
-        "fn loop_forever(n: U64) { loop_forever(n) }
-         fn main() { loop_forever(1) }",
+        "fn loop_forever(n: U64) { loop_forever n }
+         fn main() { loop_forever 1 }",
         "main",
     )
     .unwrap_err();
@@ -691,8 +845,8 @@ fn independent_children_are_forced_concurrently() {
 // r[verify fn.identity]
 // r[verify eval.memoization]
 fn transitive_callee_changes_update_the_caller_identity() {
-    let source_a = "fn helper() { 1 } fn wrapper() { helper() }";
-    let source_b = "fn helper() { 2 } fn wrapper() { helper() }";
+    let source_a = "fn helper() { 1 } fn wrapper() { helper! }";
+    let source_b = "fn helper() { 2 } fn wrapper() { helper! }";
 
     let key_a = engine(source_a).function_key("wrapper").unwrap();
     let key_b = engine(source_b).function_key("wrapper").unwrap();
@@ -705,10 +859,10 @@ fn transitive_callee_changes_update_the_caller_identity() {
 fn all_visible_overloads_contribute_to_caller_identity() {
     let source_a = "fn helper(x: U64) { 1 }
                     fn helper(x: Bool) { 2 }
-                    fn wrapper() { helper(1) }";
+                    fn wrapper() { helper 1 }";
     let source_b = "fn helper(x: U64) { 1 }
                     fn helper(x: Bool) { 99 }
-                    fn wrapper() { helper(1) }";
+                    fn wrapper() { helper 1 }";
 
     let key_a = engine(source_a).function_key("wrapper").unwrap();
     let key_b = engine(source_b).function_key("wrapper").unwrap();
@@ -719,7 +873,7 @@ fn all_visible_overloads_contribute_to_caller_identity() {
 #[test]
 // r[verify fn.identity.stability]
 fn comments_and_whitespace_do_not_change_function_identity() {
-    let source_a = "fn helper() { 1 }\nfn wrapper() { helper() }";
+    let source_a = "fn helper() { 1 }\nfn wrapper() { helper! }";
     let source_b = r#"
 // wrapper should keep the same identity
 fn helper() {
@@ -728,7 +882,7 @@ fn helper() {
 }
 
 fn wrapper() {
-  helper()
+  helper!
 }
 "#;
 
@@ -741,8 +895,8 @@ fn wrapper() {
 #[test]
 // r[verify fn.identity.scc]
 fn mutually_recursive_functions_share_one_code_identity() {
-    let source = "fn even(n: U64) { if n == 0 { true } else { odd(n - 1) } }
-                  fn odd(n: U64) { if n == 0 { false } else { even(n - 1) } }";
+    let source = "fn even(n: U64) { if n == 0 { true } else { odd (n - 1) } }
+                  fn odd(n: U64) { if n == 0 { false } else { even (n - 1) } }";
     let engine = engine(source);
 
     assert_eq!(
@@ -754,7 +908,7 @@ fn mutually_recursive_functions_share_one_code_identity() {
 #[test]
 // r[verify store.path]
 fn path_values_join_with_normalized_slashes() {
-    let engine = engine(r#"fn main(root: Path) { root / "src" / "./lib.rs" }"#);
+    let engine = engine(r#"fn main(root: Path) { @({root}/src/./lib.rs) }"#);
     let value = engine
         .call("main", vec![Value::Path(PathValue::new("/workspace//"))])
         .unwrap();
@@ -764,7 +918,7 @@ fn path_values_join_with_normalized_slashes() {
 
 #[test]
 fn interpolated_path_literal_with_tree_yields_exec_path() {
-    let engine = engine(r#"fn main(input: Tree) { @`${input}/include/lua.h` }"#);
+    let engine = engine(r#"fn main(input: Tree) { @({input}/include/lua.h) }"#);
     let input = TreeValue::Inline(Arc::from([(
         Arc::from("include"),
         Value::Tree(TreeValue::Inline(Arc::from([(
@@ -789,11 +943,7 @@ fn interpolated_path_literal_with_tree_yields_exec_path() {
 // r[verify store.blob]
 // r[verify store.blob.utf8]
 fn blob_from_string_round_trips_text() {
-    let value = eval(
-        r#"fn main() { Blob.from_string("hello").to_string() }"#,
-        "main",
-    )
-    .unwrap();
+    let value = eval(r#"fn main() { (Blob "hello").to_string! }"#, "main").unwrap();
     assert_eq!(value, Value::String(Arc::from("hello")));
 }
 
@@ -803,10 +953,10 @@ fn blob_from_string_round_trips_text() {
 fn tree_of_and_file_only_force_the_selected_entry() {
     let engine = engine(
         r#"fn main(other: Blob) {
-               Tree.of(%{
-                 "a.txt" => Blob.from_string("alpha"),
-                 "b.txt" => other,
-               }).file("a.txt").to_string()
+               ((Tree {
+                 @a.txt: Blob "alpha",
+                 @b.txt: other,
+               }).file "a.txt").to_string!
              }"#,
     );
     let value = engine
@@ -820,11 +970,11 @@ fn tree_of_and_file_only_force_the_selected_entry() {
 fn tree_subtree_selects_nested_directories() {
     let value = eval(
         r#"fn main() {
-               Tree.of(%{
-                 "include" => Tree.of(%{
-                   "lua.h" => Blob.from_string("header"),
-                 }),
-               }).subtree("include").file("lua.h").to_string()
+               (((Tree {
+                 @include: Tree {
+                   @lua.h: Blob "header",
+                 },
+               }).subtree "include").file "lua.h").to_string!
              }"#,
         "main",
     )
@@ -837,24 +987,24 @@ fn tree_subtree_selects_nested_directories() {
 fn tree_merge_combines_directories_recursively() {
     let value = eval(
         r#"fn main() {
-               let base = Tree.of(%{
-                 "include" => Tree.of(%{
-                   "lua.h" => Blob.from_string("lua header"),
-                 }),
-                 "liblua.a" => Blob.from_string("old archive"),
-               });
-               let overlay = Tree.of(%{
-                 "include" => Tree.of(%{
-                   "lauxlib.h" => Blob.from_string("aux header"),
-                 }),
-                 "liblua.a" => Blob.from_string("new archive"),
-               });
-               let merged = base.merge(overlay);
-               merged.file("include/lua.h").to_string()
+               let base = Tree {
+                 @include: Tree {
+                   @lua.h: Blob "lua header",
+                 },
+                 @liblua.a: Blob "old archive",
+               };
+               let overlay = Tree {
+                 @include: Tree {
+                   @lauxlib.h: Blob "aux header",
+                 },
+                 @liblua.a: Blob "new archive",
+               };
+               let merged = base.merge overlay;
+               (merged.file "include/lua.h").to_string!
                  + "|"
-                 + merged.file("include/lauxlib.h").to_string()
+                 + (merged.file "include/lauxlib.h").to_string!
                  + "|"
-                 + merged.file("liblua.a").to_string()
+                 + (merged.file "liblua.a").to_string!
              }"#,
         "main",
     )
@@ -875,7 +1025,7 @@ fn fs_backed_trees_read_files_on_demand() {
     let file_path = tempdir.path().join("hello.txt");
     fs::write(&file_path, "hello from fs").unwrap();
 
-    let engine = engine(r#"fn main(tree: Tree) { tree.file("hello.txt").to_string() }"#);
+    let engine = engine(r#"fn main(tree: Tree) { (tree.file "hello.txt").to_string! }"#);
     let tree = Value::Tree(TreeValue::FsDir(PathValue::new(
         tempdir.path().to_string_lossy(),
     )));
@@ -891,7 +1041,7 @@ fn tree_from_path_creates_a_lazy_fs_backed_tree() {
     fs::write(&file_path, "hello from from_path").unwrap();
 
     let engine = engine(
-        r#"fn main(workspace: Path) { Tree.from_path(workspace).file("hello.txt").to_string() }"#,
+        r#"fn main(workspace: Path) { ((Tree.from_path workspace).file "hello.txt").to_string! }"#,
     );
     let value = engine
         .call(
@@ -910,9 +1060,9 @@ fn tree_from_path_creates_a_lazy_fs_backed_tree() {
 fn call_entry_passes_workspace_as_a_path() {
     let engine = engine(
         r#"fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
-               Tree.of(%{
-                 "workspace.txt" => Blob.from_string(workspace / "src" / "main.rs"),
-               })
+               Tree {
+                 @workspace.txt: Blob @({workspace}/src/main.rs),
+               }
              }"#,
     );
     let value = engine
@@ -942,19 +1092,18 @@ fn exec_runs_a_local_process_with_keyword_args_and_snapshots_outputs() {
 
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) {
-               Tree.of(%{
-                 "stdout.txt" => process.stdout,
-                 "output.txt" => tree.file("out/output.txt"),
-               })
+               Tree {
+                 @stdout.txt: process.stdout,
+                 @output.txt: tree.file "out/output.txt",
+               }
              }
 
              fn build(workspace: Path) {
-               exec(
-                 ["/bin/sh", "-c", "cat src/input.txt > out/output.txt; printf done"];
-                 mounts: %{ "src" => Tree.from_path(workspace) },
+               exec ["/bin/sh", "-c", "cat src/input.txt > out/output.txt; printf done"] where {
+                 mounts: { "src": Tree.from_path workspace },
                  writable: ["out"],
                  observer: observe,
-               )
+               }
              }"#,
     );
     let value = engine
@@ -985,15 +1134,14 @@ fn exec_verifier_failures_poison_locally() {
         r#"fn verify(host: Host) { fail "toolchain drift" }
 
              fn observe(process: Process, tree: Tree) {
-               Tree.empty()
+               Tree.empty!
              }
 
              fn build() {
-               exec(
-                 ["/bin/sh", "-c", "printf built"];
+               exec ["/bin/sh", "-c", "printf built"] where {
                  observer: observe,
                  verifier: verify,
-               )
+               }
              }"#,
     );
 
@@ -1003,20 +1151,105 @@ fn exec_verifier_failures_poison_locally() {
 }
 
 #[test]
+fn observer_functions_can_return_tree_results_for_exec() {
+    let tempdir = TempDir::new().unwrap();
+    fs::create_dir_all(tempdir.path().join("out")).unwrap();
+    fs::write(
+        tempdir.path().join("out/output.txt"),
+        "hello from workspace",
+    )
+    .unwrap();
+
+    let engine = engine(
+        r#"fn observe(process: Process, tree: Tree) {
+               Tree {
+                 @stdout.txt: process.stdout,
+                 @output.txt: tree.file "out/output.txt",
+               }
+             }"#,
+    );
+
+    let process = Value::Struct(StructValue {
+        type_name: Arc::from("Process"),
+        fields: Arc::from([
+            (Arc::from("exit_code"), Value::U64(0)),
+            (
+                Arc::from("stdout"),
+                Value::Blob(BlobValue::from_string("done")),
+            ),
+            (Arc::from("stderr"), Value::Blob(BlobValue::from_string(""))),
+        ]),
+    });
+    let tree = Value::Tree(TreeValue::FsDir(PathValue::new(
+        tempdir.path().to_string_lossy(),
+    )));
+
+    let value = engine.call("observe", vec![process, tree]).unwrap();
+
+    let Value::Tree(TreeValue::Inline(entries)) = value else {
+        panic!("expected tree result");
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].0.as_ref(), "stdout.txt");
+    assert_eq!(entries[0].1, Value::Blob(BlobValue::from_string("done")));
+    assert_eq!(entries[1].0.as_ref(), "output.txt");
+    assert!(matches!(entries[1].1, Value::Blob(BlobValue::FsFile(_))));
+}
+
+#[test]
+fn exec_handler_receives_verifier_from_where_clause() {
+    let captured = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let engine = engine(
+        r#"fn verify(host: Host) {
+               fail "toolchain drift"
+             }
+
+             fn observe(process: Process, tree: Tree) {
+               process.exit_code
+             }
+
+             fn build() {
+               exec ["/bin/true"] where {
+                 observer: observe,
+                 verifier: verify,
+               }
+             }"#,
+    )
+    .with_exec_handler(Arc::new(move |request| {
+        *sink.lock().unwrap() = Some(request);
+        Ok(Value::U64(0))
+    }));
+
+    let value = engine.call("build", vec![]).unwrap();
+    assert_eq!(value, Value::U64(0));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("exec request should be captured");
+    assert_eq!(request.observer.def.name, "observe");
+    assert_eq!(
+        request.verifier.as_ref().map(|f| f.def.name.as_str()),
+        Some("verify")
+    );
+}
+
+#[test]
 fn exec_rejects_raw_path_mount_values() {
     let tempdir = TempDir::new().unwrap();
     fs::write(tempdir.path().join("input.txt"), "hello from path mount").unwrap();
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) {
-               Tree.empty()
+               Tree.empty!
              }
 
              fn build(workspace: Path) {
-               exec(
-                 ["/bin/true"];
-                 mounts: %{ "src" => workspace },
+               exec ["/bin/true"] where {
+                 mounts: { "src": workspace },
                  observer: observe,
-               )
+               }
              }"#,
     );
 
@@ -1044,12 +1277,12 @@ fn exec_verifiers_receive_host_access_locally() {
     let expected_hash = blake3_hash(b"toolchain-v1").to_hex().to_string();
     let source = format!(
         r#"fn verify(host: Host) {{
-               if host.read({path:?}).to_string() != "toolchain-v1" {{
+               if (host.read {path:?}).to_string! != "toolchain-v1" {{
                  fail "read mismatch"
                }} else {{
                  ()
                }};
-               if host.hash({path:?}).to_string() != {expected_hash:?} {{
+               if (host.hash {path:?}).to_string! != {expected_hash:?} {{
                  fail "hash mismatch"
                }} else {{
                  ()
@@ -1057,15 +1290,14 @@ fn exec_verifiers_receive_host_access_locally() {
              }}
 
              fn observe(process: Process, tree: Tree) {{
-               Tree.empty()
+               Tree.empty!
              }}
 
              fn build() {{
-               exec(
-                 ["/bin/sh", "-c", "printf built"];
+               exec ["/bin/sh", "-c", "printf built"] where {{
                  observer: observe,
                  verifier: verify,
-               )
+               }}
              }}"#,
         path = tool_path.to_string_lossy(),
     );
@@ -1094,15 +1326,15 @@ fn host_which_returns_some_and_none() {
     let missing_again = tempdir.path().join("missing-again.sh");
     let source = format!(
         r##"fn verify(host: Host) {{
-               let found = host.which({tool_path:?});
-               if host.read(found.value).to_string() != {expected_script:?} {{
+               let found = host.which {tool_path:?};
+               if (host.read found.value).to_string! != {expected_script:?} {{
                  fail "wrong tool"
                }} else {{
                  ()
                }};
 
-               let missing_tool = host.which({missing:?});
-               let missing_again = host.which({missing_again:?});
+               let missing_tool = host.which {missing:?};
+               let missing_again = host.which {missing_again:?};
                if missing_tool != missing_again {{
                  fail "missing lookups should both return None"
                 }} else {{
@@ -1111,15 +1343,14 @@ fn host_which_returns_some_and_none() {
              }}
 
              fn observe(process: Process, tree: Tree) {{
-               Tree.empty()
+               Tree.empty!
              }}
 
              fn build() {{
-               exec(
-                 ["/bin/sh", "-c", "printf built"];
+               exec ["/bin/sh", "-c", "printf built"] where {{
                  observer: observe,
                  verifier: verify,
-               )
+               }}
              }}"##,
         tool_path = tool_path.to_string_lossy(),
         expected_script = expected_script,
@@ -1137,11 +1368,11 @@ fn host_which_returns_some_and_none() {
 fn exec_implicitly_mounts_blob_args() {
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) {
-               process.stdout.to_string()
+               process.stdout.to_string!
              }
 
              fn build(input: Blob) {
-               exec(["/bin/cat", input]; observer: observe)
+               exec ["/bin/cat", input] where { observer: observe }
              }"#,
     );
 
@@ -1160,14 +1391,13 @@ fn exec_implicitly_mounts_blob_args() {
 fn exec_implicitly_mounts_tree_args() {
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) {
-               process.stdout.to_string()
+               process.stdout.to_string!
              }
 
              fn build(input: Tree) {
-               exec(
-                 ["/bin/sh", "-c", "cat \"$1/input.txt\"", "sh", input];
+               exec ["/bin/sh", "-c", "cat \"$1/input.txt\"", "sh", input] where {
                  observer: observe,
-               )
+               }
              }"#,
     );
     let input = Value::Tree(TreeValue::Inline(Arc::from([(
@@ -1185,11 +1415,11 @@ fn exec_implicitly_mounts_tree_args() {
 fn exec_mounts_tree_paths_mentioned_in_path_literals() {
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) {
-               process.stdout.to_string()
+               process.stdout.to_string!
              }
 
              fn build(input: Tree) {
-               exec(["/bin/cat", @`${input}/input.txt`]; observer: observe)
+               exec ["/bin/cat", @({input}/input.txt)] where { observer: observe }
              }"#,
     );
     let input = Value::Tree(TreeValue::Inline(Arc::from([(
@@ -1213,7 +1443,7 @@ fn exec_spreads_tree_args_in_canonical_path_order() {
              }
 
              fn build(input: Tree) {
-               exec(["tool", ..input]; observer: observe)
+               exec ["tool", ..input] where { observer: observe }
              }"#,
     )
     .with_exec_handler(Arc::new(move |request| {
@@ -1289,7 +1519,7 @@ fn exec_mounts_subtrees_instead_of_the_whole_tree() {
              }
 
              fn build(input: Tree) {
-               exec(["tool", input.subtree("dir")]; observer: observe)
+               exec ["tool", input.subtree "dir"] where { observer: observe }
              }"#,
     )
     .with_exec_handler(Arc::new(move |request| {
@@ -1343,7 +1573,7 @@ fn exec_mounts_merged_trees() {
              }
 
              fn build(base: Tree, overlay: Tree) {
-               exec(["tool", base.merge(overlay)]; observer: observe)
+               exec ["tool", base.merge overlay] where { observer: observe }
              }"#,
     )
     .with_exec_handler(Arc::new(move |request| {
@@ -1410,7 +1640,7 @@ fn exec_deduplicates_implicit_blob_mounts_in_host_requests() {
              }
 
              fn build(input: Blob) {
-               exec(["tool", input, input]; observer: observe)
+               exec ["tool", input, input] where { observer: observe }
              }"#,
     )
     .with_exec_handler(Arc::new(move |request| {
@@ -1463,13 +1693,12 @@ fn exec_can_be_routed_through_a_host_handler() {
              }
 
              fn build(workspace: Path) {
-               exec(
-                 ["/bin/cp", "src/input.txt", "out/output.txt"];
-                 env: %{ "INPUT" => "src/input.txt" },
-                 mounts: %{ "src" => Tree.from_path(workspace) },
+               exec ["/bin/cp", "src/input.txt", "out/output.txt"] where {
+                 env: { "INPUT": "src/input.txt" },
+                 mounts: { "src": Tree.from_path workspace },
                  writable: ["out"],
                  observer: observe,
-               )
+               }
              }"#,
     )
     .with_exec_handler(Arc::new(move |request| {

@@ -104,7 +104,7 @@ impl Engine {
     // r[impl eval.forcing.boundary]
     /// Evaluate a top-level function by name at the external forcing boundary.
     pub fn call(&self, name: &str, args: Vec<Value>) -> Result<Value, PoisonError> {
-        let function = self.global_function_value(self.resolve_function(name, &args)?);
+        let function = self.resolve_module_function(name)?;
         let value = self.build_call(Value::Function(function), args);
         self.force_value(value)
     }
@@ -143,7 +143,7 @@ impl Engine {
 
     #[cfg(test)]
     pub(crate) fn call_unforced(&self, name: &str, args: Vec<Value>) -> Result<Value, PoisonError> {
-        let function = self.global_function_value(self.resolve_function(name, &args)?);
+        let function = self.resolve_module_function(name)?;
         Ok(self.build_call(Value::Function(function), args))
     }
 
@@ -178,7 +178,7 @@ impl Engine {
 
     #[cfg(test)]
     pub(crate) fn function_key(&self, name: &str) -> Result<String, PoisonError> {
-        self.global_function_value(self.resolve_function(name, &[])?)
+        self.resolve_module_function(name)?
             .key()
             .ok_or_else(|| self.internal_error("top-level function key should be resolved"))
     }
@@ -618,6 +618,55 @@ impl Engine {
         .into_value()
     }
 
+    fn resolve_module_function(&self, name: &str) -> Result<FunctionValue, PoisonError> {
+        let mut bindings = self.eval_module_scope()?;
+        match bindings.remove(name) {
+            Some(Value::Function(function)) => Ok(function),
+            Some(other) => Err(self.type_error(&format!(
+                "top-level name '{name}' is {}, not a function",
+                other.type_name()
+            ))),
+            None => Err(self.unresolved_function(name)),
+        }
+    }
+
+    fn eval_module_scope(&self) -> Result<HashMap<String, Value>, PoisonError> {
+        let mut bindings = HashMap::new();
+
+        for (name, overloads) in &self.functions {
+            bindings.insert(
+                name.clone(),
+                Value::Function(self.global_function_value(overloads[0].clone())),
+            );
+        }
+
+        for stmt in &self.module.top_level.stmts {
+            match stmt {
+                instr::Stmt::Let { name, value } | instr::Stmt::Assign { name, value } => {
+                    let value = self.eval_expr(value, &bindings, "<module>").into_value()?;
+                    bindings.insert(name.clone(), value);
+                }
+                instr::Stmt::Return(_) => {
+                    return Err(self.internal_error("return is not allowed at file scope"));
+                }
+                instr::Stmt::FnDecl(def) => {
+                    bindings.insert(
+                        def.name.clone(),
+                        Value::Function(
+                            self.local_function_value(def.clone(), capture_bindings(&bindings)),
+                        ),
+                    );
+                }
+                instr::Stmt::Expr(expr) => {
+                    let value = self.eval_expr(expr, &bindings, "<module>").into_value()?;
+                    let _ = self.force_value(value)?;
+                }
+            }
+        }
+
+        Ok(bindings)
+    }
+
     fn eval_block(
         &self,
         block: &instr::Block,
@@ -661,6 +710,9 @@ impl Engine {
                         BuildResult::Value(value) => {
                             if is_last {
                                 return BuildResult::Value(value);
+                            }
+                            if let Err(error) = self.force_value(value) {
+                                return BuildResult::Poisoned(error);
                             }
                         }
                         other => return other,
@@ -1281,9 +1333,31 @@ impl Engine {
         kwargs: &[(Arc<str>, Value)],
     ) -> Result<Value, PoisonError> {
         match builtin {
-            BuiltinValue::Namespace(namespace) => {
-                Err(self.type_error(&format!("cannot call builtin namespace {:?}", namespace)))
-            }
+            BuiltinValue::Namespace(namespace) => match namespace {
+                BuiltinNamespace::Blob => {
+                    self.require_no_kwargs("Blob", kwargs)?;
+                    self.check_arity("Blob", args, 1)?;
+                    let value = self.force_value(args[0].clone())?;
+                    let text = self.stringify_scalar(&value)?;
+                    Ok(Value::Blob(BlobValue::from_string(text)))
+                }
+                BuiltinNamespace::Tree => {
+                    self.require_no_kwargs("Tree", kwargs)?;
+                    self.check_arity("Tree", args, 1)?;
+                    let value = self.force_value_shallow(args[0].clone())?;
+                    match value {
+                        Value::Map(map) => self.tree_from_map(&map),
+                        Value::Path(path) => Ok(Value::Tree(TreeValue::FsDir(path))),
+                        Value::String(path) => {
+                            Ok(Value::Tree(TreeValue::FsDir(PathValue::new(path.as_ref()))))
+                        }
+                        other => Err(self.type_error(&format!(
+                            "Tree expects Map or Path/String, got {}",
+                            other.type_name()
+                        ))),
+                    }
+                }
+            },
             BuiltinValue::Function(BuiltinFunction::Exec) => self.exec_builtin(args, kwargs),
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => {
                 self.require_no_kwargs("Blob.from_string", kwargs)?;
@@ -2700,17 +2774,6 @@ impl Engine {
                 other.type_name()
             ))),
         }
-    }
-
-    fn resolve_function(
-        &self,
-        name: &str,
-        _args: &[Value],
-    ) -> Result<Arc<instr::FnDef>, PoisonError> {
-        self.functions
-            .get(name)
-            .and_then(|overloads| overloads.first().cloned())
-            .ok_or_else(|| self.unresolved_function(name))
     }
 
     fn unresolved_name(&self, name: &str) -> PoisonError {
