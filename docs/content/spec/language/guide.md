@@ -211,8 +211,8 @@ where `expr` evaluates to a record.
 So these are both valid:
 
 ```vixen
-exec [cc, "-c", file] where { mounts: src }
-exec [cc, "-c", file] where common
+exec [cc, "-c", file] where { mounts: src };
+exec [cc, "-c", file] where common;
 ```
 
 The second form is possible because records are real values:
@@ -221,7 +221,7 @@ The second form is possible because records are real values:
 let common = { verifier, observer }
 ```
 
-Record shorthand is real sugar:
+Record shorthand:
 
 ```vixen
 { verifier, observer }
@@ -270,6 +270,27 @@ Tree { ... }
 ```
 
 is just `Tree` applied to a map payload.
+
+Named-field constructors take record payloads:
+
+```vixen
+Point { x: 1.0, y: 2.0 }
+Shape.Circle { radius: 5.0 }
+```
+
+`Point { ... }` produces a `Point`. `Shape.Circle { ... }` produces a
+`Shape.Circle`, which widens to `Shape` only when a checking context
+asks for the parent enum.
+
+Opaque declarations do not synthesize constructors:
+
+```vixen
+type Tree;
+```
+
+If an opaque type supports construction, it declares that surface
+explicitly. That is why `Tree [ ... ]` and `Tree { ... }` can exist even
+though `Tree` is not a visible struct.
 
 ## 8. Sugar: pipe
 
@@ -391,7 +412,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree (
 
 These are still active design questions:
 
-- exact constructor visibility rules for structs and enum variants
+- constructor visibility rules are intentionally left unspecified for now
 - the final wording of callable return transformation (`.then(...)` or similar)
 - the exact lexical envelope of bare `@path`
 - how much leading-dot method-adapter shorthand should remain, versus

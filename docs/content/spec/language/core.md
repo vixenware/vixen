@@ -1376,9 +1376,11 @@ insert_anchor_links = "heading"
 > record-like enum variants. Struct constructors accept anonymous
 > structural record payloads. Variant constructors return the
 > variant-specific type and widen to the parent enum when needed.
-> Constructors for opaque builtins may accept other payload kinds, such
-> as maps (`Tree { ... }`) or arrays (`Tree [ ... ]`), without becoming
-> separate syntax classes.
+> Opaque declarations (`type Name;`) do not synthesize a constructor
+> surface by themselves. Constructors for opaque builtins may still be
+> declared explicitly and may accept other payload kinds, such as maps
+> (`Tree { ... }`) or arrays (`Tree [ ... ]`), without becoming separate
+> syntax classes.
 
 ## Records
 
