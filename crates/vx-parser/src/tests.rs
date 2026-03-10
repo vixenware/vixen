@@ -1,9 +1,12 @@
+use std::{fs, path::Path};
+
 use rowan::TextSize;
 
 use crate::{
     AstNode, Breadcrumb, DocumentSymbol, Expr, FoldingRangeKind, Item, LineIndex, MapEntry,
-    PathLiteralExpr, Position, SemanticTokenType, SourceFile, Stmt, SymbolKind, SyntaxKind, Type,
-    document_symbols, enclosing_nodes, folding_ranges, parse, parse_source_file, semantic_tokens,
+    NamespaceDecl, PathLiteralExpr, Position, SemanticTokenType, SourceFile, Stmt, SymbolKind,
+    SyntaxKind, Type, document_symbols, enclosing_nodes, folding_ranges, parse, parse_source_file,
+    semantic_tokens,
 };
 
 #[test]
@@ -122,6 +125,104 @@ fn outer() -> U64 {
     assert!(matches!(&statements[3], Stmt::TypeAliasDecl(_)));
     assert!(matches!(&statements[4], Stmt::FnDecl(_)));
     assert!(matches!(&statements[5], Stmt::Expr(Expr::Literal(_))));
+}
+
+#[test]
+fn header_style_declarations_parse() {
+    let parse = parse(
+        r#"
+type Blob;
+type Stream[T];
+
+fn exec(args: Array[String]) -> Stream[Blob];
+
+namespace Blob {
+  fn from_string(s: String) -> Blob;
+  fn to_string(self) -> String;
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let items = file.items().collect::<Vec<_>>();
+    assert_eq!(items.len(), 3);
+
+    let opaque = match &items[0] {
+        Item::TypeAliasDecl(node) => node,
+        item => panic!("expected opaque type declaration, got {item:?}"),
+    };
+    assert_eq!(
+        opaque.name().map(|t| t.text().to_string()).as_deref(),
+        Some("Blob")
+    );
+    assert!(
+        opaque.aliased_type().is_none(),
+        "opaque type declarations should not have an aliased type"
+    );
+
+    let generic_opaque = match &items[1] {
+        Item::TypeAliasDecl(node) => node,
+        item => panic!("expected opaque type declaration, got {item:?}"),
+    };
+    assert_eq!(
+        generic_opaque
+            .name()
+            .map(|t| t.text().to_string())
+            .as_deref(),
+        Some("Stream")
+    );
+    assert!(
+        generic_opaque.aliased_type().is_none(),
+        "generic opaque type declarations should not have an aliased type"
+    );
+
+    let header_fn = match &items[2] {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function declaration, got {item:?}"),
+    };
+    assert_eq!(
+        header_fn.name().map(|t| t.text().to_string()).as_deref(),
+        Some("exec")
+    );
+    assert!(
+        header_fn.body().is_none(),
+        "declaration-only functions should not have a body"
+    );
+
+    let namespace = file
+        .syntax()
+        .children()
+        .find_map(NamespaceDecl::cast)
+        .expect("namespace declaration should parse");
+    assert_eq!(
+        namespace.name().map(|t| t.text().to_string()).as_deref(),
+        Some("Blob")
+    );
+    let body = namespace.body().expect("namespace should have a body");
+    let body_items = body.items().collect::<Vec<_>>();
+    assert_eq!(body_items.len(), 2);
+    assert!(matches!(&body_items[0], Item::FnDecl(_)));
+    assert!(matches!(&body_items[1], Item::FnDecl(_)));
+}
+
+#[test]
+fn stdlib_header_files_parse() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../vx-stdlib/std");
+
+    for relative in ["core.vx", "build.vx"] {
+        let path = root.join(relative);
+        let source = fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!("failed to read {}: {err}", path.display());
+        });
+        let parse = parse(&source);
+        assert!(
+            parse.errors().is_empty(),
+            "{} should parse cleanly, got {:?}",
+            path.display(),
+            parse.errors()
+        );
+    }
 }
 
 #[test]

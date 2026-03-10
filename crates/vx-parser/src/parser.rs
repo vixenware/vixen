@@ -107,6 +107,14 @@ impl<'a> Parser<'a> {
         self.nth(0)
     }
 
+    fn current_text(&self) -> &str {
+        let Some(&token_index) = self.significant.get(self.pos) else {
+            return "";
+        };
+        let range = self.tokens[token_index].range;
+        &self.source[u32::from(range.start()) as usize..u32::from(range.end()) as usize]
+    }
+
     fn has_trivia_gap_before_current(&self) -> bool {
         if self.pos == 0 {
             return false;
@@ -334,6 +342,10 @@ fn decl_stmt(p: &mut Parser<'_>) {
             type_alias_decl_contents(p, false);
             marker.complete(p, SyntaxKind::TYPE_ALIAS_DECL);
         }
+        SyntaxKind::NAMESPACE_KW => {
+            namespace_decl_contents(p);
+            marker.complete(p, SyntaxKind::NAMESPACE_DECL);
+        }
         _ => {
             p.error("expected declaration");
             p.recover_while(|kind| !is_stmt_start(kind));
@@ -441,16 +453,23 @@ fn type_alias_decl_contents(p: &mut Parser<'_>, allow_anonymous: bool) {
         p.error("expected type name");
     }
     type_param_list(p);
-    p.expect(SyntaxKind::EQ);
-    let first = type_expr(p);
-    // r[type.enum.alias]
-    if p.at(SyntaxKind::PIPE) {
-        let sum = first.precede(p);
-        while p.eat(SyntaxKind::PIPE) {
-            type_expr(p);
+    if p.eat(SyntaxKind::EQ) {
+        let first = type_expr(p);
+        // r[type.enum.alias]
+        if p.at(SyntaxKind::PIPE) {
+            let sum = first.precede(p);
+            while p.eat(SyntaxKind::PIPE) {
+                type_expr(p);
+            }
+            sum.complete(p, SyntaxKind::SUM_TYPE);
         }
-        sum.complete(p, SyntaxKind::SUM_TYPE);
     }
+}
+
+fn namespace_decl_contents(p: &mut Parser<'_>) {
+    p.expect(SyntaxKind::NAMESPACE_KW);
+    type_path(p);
+    namespace_body(p);
 }
 
 fn inline_type_decl(p: &mut Parser<'_>) {
@@ -529,6 +548,23 @@ fn enum_body(p: &mut Parser<'_>) {
     marker.complete(p, SyntaxKind::ENUM_BODY);
 }
 
+fn namespace_body(p: &mut Parser<'_>) {
+    let marker = p.start();
+    p.expect(SyntaxKind::L_CURLY);
+    while !p.at(SyntaxKind::R_CURLY) && !p.at(SyntaxKind::EOF) {
+        if decl_stmt_start(p) {
+            decl_stmt(p);
+            p.eat(SyntaxKind::SEMICOLON);
+        } else {
+            p.error("expected declaration");
+            recover_block(p);
+            p.eat(SyntaxKind::SEMICOLON);
+        }
+    }
+    p.expect(SyntaxKind::R_CURLY);
+    marker.complete(p, SyntaxKind::NAMESPACE_BODY);
+}
+
 // r[decl.fn.generic]
 fn type_param_list(p: &mut Parser<'_>) {
     if !p.at(SyntaxKind::L_BRACKET) {
@@ -559,9 +595,13 @@ fn parameter_clause(p: &mut Parser<'_>) {
         let params = p.start();
         loop {
             let param = p.start();
+            let shorthand_self = p.at(SyntaxKind::LOWER_IDENT) && p.current_text() == "self";
             binding_pattern(p);
-            p.expect(SyntaxKind::COLON);
-            slot_type(p);
+            if p.eat(SyntaxKind::COLON) {
+                slot_type(p);
+            } else if !shorthand_self {
+                p.error("expected COLON");
+            }
             param.complete(p, SyntaxKind::PARAMETER);
             if !p.eat(SyntaxKind::COMMA) || p.at(SyntaxKind::SEMICOLON) || p.at(SyntaxKind::R_PAREN)
             {
@@ -1915,6 +1955,7 @@ fn attribute_followed_by_decl(p: &Parser<'_>) -> bool {
             | SyntaxKind::ENUM_KW
             | SyntaxKind::NEWTYPE_KW
             | SyntaxKind::TYPE_KW
+            | SyntaxKind::NAMESPACE_KW
     )
 }
 
@@ -1926,6 +1967,7 @@ fn decl_stmt_start(p: &Parser<'_>) -> bool {
             | SyntaxKind::ENUM_KW
             | SyntaxKind::NEWTYPE_KW
             | SyntaxKind::TYPE_KW
+            | SyntaxKind::NAMESPACE_KW
     ) || attribute_followed_by_decl(p)
 }
 
@@ -1951,6 +1993,7 @@ fn is_item_start(kind: SyntaxKind) -> bool {
             | SyntaxKind::ENUM_KW
             | SyntaxKind::NEWTYPE_KW
             | SyntaxKind::TYPE_KW
+            | SyntaxKind::NAMESPACE_KW
     )
 }
 
@@ -1964,6 +2007,7 @@ fn is_stmt_start(kind: SyntaxKind) -> bool {
             | SyntaxKind::ENUM_KW
             | SyntaxKind::NEWTYPE_KW
             | SyntaxKind::TYPE_KW
+            | SyntaxKind::NAMESPACE_KW
             | SyntaxKind::HASH
             | SyntaxKind::LOWER_IDENT
     ) || starts_expr(kind)

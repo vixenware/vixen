@@ -91,6 +91,8 @@ ast_node!(StructDecl, SyntaxKind::STRUCT_DECL);
 ast_node!(EnumDecl, SyntaxKind::ENUM_DECL);
 ast_node!(NewtypeDecl, SyntaxKind::NEWTYPE_DECL);
 ast_node!(TypeAliasDecl, SyntaxKind::TYPE_ALIAS_DECL);
+ast_node!(NamespaceDecl, SyntaxKind::NAMESPACE_DECL);
+ast_node!(NamespaceBody, SyntaxKind::NAMESPACE_BODY);
 ast_node!(FieldDecl, SyntaxKind::FIELD_DECL);
 ast_node!(VariantDecl, SyntaxKind::VARIANT_DECL);
 ast_node!(Parameter, SyntaxKind::PARAMETER);
@@ -647,6 +649,26 @@ impl TypeAliasDecl {
 
     pub fn aliased_type(&self) -> Option<Type> {
         self.syntax().children().find_map(Type::cast)
+    }
+}
+
+impl NamespaceDecl {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        first_descendant_token(self.syntax(), |kind| kind == SyntaxKind::UPPER_IDENT)
+    }
+
+    pub fn target(&self) -> Option<TypePath> {
+        child(self.syntax())
+    }
+
+    pub fn body(&self) -> Option<NamespaceBody> {
+        child(self.syntax())
+    }
+}
+
+impl NamespaceBody {
+    pub fn items(&self) -> AstChildren<Item> {
+        AstChildren::new(self.syntax())
     }
 }
 

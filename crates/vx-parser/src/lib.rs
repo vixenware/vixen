@@ -8,12 +8,13 @@ pub use ast::{
     Expr, FailExpr, FallibleExpr, FieldAssignStmt, FieldAssignTarget, FieldDecl, FieldExpr, FnDecl,
     FunctionType, IfExpr, IndexExpr, InterpolatedStringExpr, InvokeExpr, Item, KeywordParameter,
     LetStmt, LiteralExpr, LiteralPattern, MapEntry, MapExpr, MatchArm, MatchExpr, NameRefExpr,
-    NewtypeDecl, OptionalType, OrPattern, Parameter, ParenPattern, ParenType, PartialAppExpr,
-    PathLiteralExpr, Pattern, PrefixExpr, RangeExpr, RecordExpr, ReturnStmt, ReturnType, SlotType,
-    SourceFile, SpreadExpr, Stmt, StringInterpolation, StringPart, StructDecl, StructLiteralExpr,
-    StructLiteralField, StructPattern, StructPatternField, SumType, TuplePattern, TupleType, Type,
-    TypeAliasDecl, TypeArgs, TypeOpExpr, TypePath, UnitPattern, VariantDecl, VariantPattern,
-    WhereExpr, WildcardPattern, WithExpr, doc_comment,
+    NamespaceBody, NamespaceDecl, NewtypeDecl, OptionalType, OrPattern, Parameter, ParenPattern,
+    ParenType, PartialAppExpr, PathLiteralExpr, Pattern, PrefixExpr, RangeExpr, RecordExpr,
+    ReturnStmt, ReturnType, SlotType, SourceFile, SpreadExpr, Stmt, StringInterpolation,
+    StringPart, StructDecl, StructLiteralExpr, StructLiteralField, StructPattern,
+    StructPatternField, SumType, TuplePattern, TupleType, Type, TypeAliasDecl, TypeArgs,
+    TypeOpExpr, TypePath, UnitPattern, VariantDecl, VariantPattern, WhereExpr, WildcardPattern,
+    WithExpr, doc_comment,
 };
 
 mod fmt;

@@ -270,6 +270,7 @@ impl<'a> Lexer<'a> {
             "fn" => SyntaxKind::FN_KW,
             "let" => SyntaxKind::LET_KW,
             "type" => SyntaxKind::TYPE_KW,
+            "namespace" => SyntaxKind::NAMESPACE_KW,
             "struct" => SyntaxKind::STRUCT_KW,
             "enum" => SyntaxKind::ENUM_KW,
             "newtype" => SyntaxKind::NEWTYPE_KW,
