@@ -39,6 +39,37 @@ namespace Symbol {
   fn to_string(self) -> String;
 }
 
+namespace String {
+  /// Test whether the string starts with `prefix`.
+  fn starts_with(self, prefix: String) -> Bool;
+  /// Test whether the string ends with `suffix`.
+  fn ends_with(self, suffix: String) -> Bool;
+  /// Test whether the string contains `needle`.
+  fn contains(self, needle: String) -> Bool;
+  /// Test whether the string is empty.
+  fn is_empty(self) -> Bool;
+  /// Split the string by `sep`.
+  fn split(self, sep: String) -> Array[String];
+  /// Split the string once by `sep`.
+  fn split_once(self, sep: String) -> Option[(String, String)];
+  /// Split the string into lines.
+  fn lines(self) -> Array[String];
+  /// Trim leading and trailing whitespace.
+  fn trim(self) -> String;
+  /// Convert the string to uppercase.
+  fn to_upper(self) -> String;
+  /// Convert the string to lowercase.
+  fn to_lower(self) -> String;
+  /// Replace all occurrences of `old` with `new`.
+  fn replace(self, old: String, new: String) -> String;
+  /// Return the byte length of the string.
+  fn len(self) -> U64;
+  /// Return the string's grapheme clusters.
+  fn chars(self) -> Array[String];
+  /// Return a substring described by `range`.
+  fn slice(self, range: Range) -> String;
+}
+
 namespace Path {
   /// Parse and normalize a path string.
   fn Path(s: String) -> Self;

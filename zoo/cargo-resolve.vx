@@ -57,6 +57,7 @@ struct LockedPackage {
 
 struct DependencyRequest {
   name: String,
+  package_name: String?,
   version_req: SemverReq?,
   features: Array[String] = [],
   default_features: Bool = true,
@@ -162,17 +163,72 @@ fn parse_sparse_entries(blob: Blob) -> Array[IndexEntry] (
 )
 
 fn sparse_index_url(name: String) -> String (
-  // Cargo's sparse index sharding algorithm is ordinary string logic.
-  // The exact implementation is omitted from the sketch; the important point
-  // is that it is computed in user code, not provided by a registry builtin.
-  fail "sparse index sharding omitted from sketch"
+  // crates.io sparse index sharding is ordinary string logic:
+  // - 1 char: `1/x`
+  // - 2 chars: `2/xy`
+  // - 3 chars: `3/x/xyz`
+  // - 4+ chars: `ab/cd/abcdef`
+  let lower = name.to_lower();
+  let len = lower.len();
+
+  let rel =
+    if len == 1 (
+      `1/{lower}`
+    ) else (
+      if len == 2 (
+        `2/{lower}`
+      ) else (
+        if len == 3 (
+          `3/{lower.slice(0..1)}/{lower}`
+        ) else (
+          `{lower.slice(0..2)}/{lower.slice(2..4)}/{lower}`
+        )
+      )
+    );
+
+  `https://index.crates.io/{rel}`
 )
 
-fn crate_download_url(config: SparseConfig, name: String, version: String) -> String (
-  // Cargo's sparse config can provide a download base/template.
-  // The exact placeholder replacement is ordinary string logic.
-  let _config = config;
-  `https://static.crates.io/crates/{name}/{name}-{version}.crate`
+fn sparse_prefix(name: String) -> String (
+  let len = name.len();
+  if len == 1 (
+    "1"
+  ) else (
+    if len == 2 (
+      "2"
+    ) else (
+      if len == 3 (
+        `3/{name.slice(0..1)}`
+      ) else (
+        `{name.slice(0..2)}/{name.slice(2..4)}`
+      )
+    )
+  )
+)
+
+fn crate_download_url(config: SparseConfig, name: String, version: String, checksum: String) -> String (
+  // Cargo's sparse config can provide a download template. If it contains
+  // no placeholders, Cargo appends `/{crate}/{version}/download`.
+  let prefix = sparse_prefix(name);
+  let lowerprefix = sparse_prefix(name.to_lower());
+  let template = config.dl;
+
+  if (
+    template.contains("{crate}") ||
+    template.contains("{version}") ||
+    template.contains("{prefix}") ||
+    template.contains("{lowerprefix}") ||
+    template.contains("{sha256-checksum}")
+  ) (
+    template
+      .replace("{crate}", name)
+      .replace("{version}", version)
+      .replace("{prefix}", prefix)
+      .replace("{lowerprefix}", lowerprefix)
+      .replace("{sha256-checksum}", checksum)
+  ) else (
+    `{template}/{name}/{version}/download`
+  )
 )
 
 fn manifest_requests(manifest: CargoManifest) -> Array[DependencyRequest] (
@@ -196,6 +252,7 @@ fn request_from_dep(name: String, dep: CargoDependencySpec, kind: String) -> Dep
   match dep as? String (
     Some { value } => DependencyRequest {
       name,
+      package_name: None,
       version_req: parse_semver_req(value),
       kind,
     },
@@ -203,6 +260,7 @@ fn request_from_dep(name: String, dep: CargoDependencySpec, kind: String) -> Dep
       let detail = dep as CargoDependency;
       DependencyRequest {
         name,
+        package_name: detail.package,
         version_req:
           match detail.version (
             Some { value } => parse_semver_req(value),
@@ -305,6 +363,8 @@ fn resolve_request(request: DependencyRequest) where {
   lock: CargoLock?,
   workspace: Tree,
 } #discover -> ResolvedCrate (
+  let package_name = request.package_name.unwrap_or(request.name);
+
   match request.source (
     DependencySource.Path { path } => (
       let dep_root = Path(path);
@@ -329,11 +389,11 @@ fn resolve_request(request: DependencyRequest) where {
     ),
     DependencySource.Registry => (
   let entries =
-    Http.get(sparse_index_url(request.name))
+    Http.get(sparse_index_url(package_name))
       |> parse_sparse_entries(_);
 
   let chosen = pick_version(entries, request) where {
-    lock: lock_entry(lock, request.name),
+    lock: lock_entry(lock, package_name),
   };
   let features = unify_features(chosen.features, request);
 
@@ -343,7 +403,7 @@ fn resolve_request(request: DependencyRequest) where {
     version: chosen.vers,
     source: ResolvedSource.Registry {
       checksum: chosen.cksum,
-      download_url: crate_download_url(config, chosen.name, chosen.vers),
+      download_url: crate_download_url(config, chosen.name, chosen.vers, chosen.cksum),
     },
     features,
     dependencies:
