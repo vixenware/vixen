@@ -48,7 +48,7 @@ fn build_vx_is_evaluated_and_materialized_into_dot_vx_build() {
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
   exec(
     ["/bin/sh", "-c", "cat src/input.txt > out/output.txt; printf built"];
-    mounts: %{ "src" => workspace },
+    mounts: %{ "src" => Tree.from_path(workspace) },
     writable: ["out"],
     observer: observe,
   )

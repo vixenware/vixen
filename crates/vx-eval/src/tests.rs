@@ -799,6 +799,27 @@ fn fs_backed_trees_read_files_on_demand() {
 }
 
 #[test]
+fn tree_from_path_creates_a_lazy_fs_backed_tree() {
+    let tempdir = TempDir::new().unwrap();
+    let file_path = tempdir.path().join("hello.txt");
+    fs::write(&file_path, "hello from from_path").unwrap();
+
+    let engine = engine(
+        r#"fn main(workspace: Path) { Tree.from_path(workspace).file("hello.txt").to_string() }"#,
+    );
+    let value = engine
+        .call(
+            "main",
+            vec![Value::Path(PathValue::new(
+                tempdir.path().to_string_lossy(),
+            ))],
+        )
+        .unwrap();
+
+    assert_eq!(value, Value::String(Arc::from("hello from from_path")));
+}
+
+#[test]
 // r[verify eval.entry]
 fn call_entry_passes_workspace_as_a_path() {
     let engine = engine(
@@ -844,7 +865,7 @@ fn exec_runs_a_local_process_with_keyword_args_and_snapshots_outputs() {
              fn build(workspace: Path) {
                exec(
                  ["/bin/sh", "-c", "cat src/input.txt > out/output.txt; printf done"];
-                 mounts: %{ "src" => workspace },
+                 mounts: %{ "src" => Tree.from_path(workspace) },
                  writable: ["out"],
                  observer: observe,
                )
@@ -1060,6 +1081,8 @@ fn exec_deduplicates_implicit_blob_mounts_in_host_requests() {
 
 #[test]
 fn exec_can_be_routed_through_a_host_handler() {
+    let tempdir = TempDir::new().unwrap();
+    fs::write(tempdir.path().join("input.txt"), "hello from handler").unwrap();
     let captured = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&captured);
     let engine = engine(
@@ -1071,7 +1094,7 @@ fn exec_can_be_routed_through_a_host_handler() {
                exec(
                  ["/bin/cp", "src/input.txt", "out/output.txt"];
                  env: %{ "INPUT" => "src/input.txt" },
-                 mounts: %{ "src" => workspace },
+                 mounts: %{ "src" => Tree.from_path(workspace) },
                  writable: ["out"],
                  observer: observe,
                )
@@ -1083,7 +1106,12 @@ fn exec_can_be_routed_through_a_host_handler() {
     }));
 
     let value = engine
-        .call("build", vec![Value::Path(PathValue::new("/workspace"))])
+        .call(
+            "build",
+            vec![Value::Path(PathValue::new(
+                tempdir.path().to_string_lossy(),
+            ))],
+        )
         .unwrap();
     assert_eq!(value, Value::U64(7));
 
@@ -1109,9 +1137,14 @@ fn exec_can_be_routed_through_a_host_handler() {
     );
     assert_eq!(request.mounts.len(), 1);
     assert_eq!(request.mounts[0].path, PathValue::new("src"));
+    let Value::Tree(TreeValue::Inline(entries)) = &request.mounts[0].value else {
+        panic!("expected shipped workspace tree");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0.as_ref(), "input.txt");
     assert_eq!(
-        request.mounts[0].value,
-        Value::Path(PathValue::new("/workspace"))
+        entries[0].1,
+        Value::Blob(BlobValue::from_string("hello from handler"))
     );
     assert_eq!(request.writable_roots, vec![PathValue::new("out")]);
     assert_eq!(request.observer.def.name, "observe");

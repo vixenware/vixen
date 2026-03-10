@@ -1579,6 +1579,8 @@ insert_anchor_links = "heading"
 > handles materialization transparently.
 >
 > `Tree.of(map)` creates a tree from a map of names to entries.
+> `Tree.from_path(path)` creates a lazy tree handle rooted at a local
+> filesystem path.
 > `Tree.empty()` is shorthand for `Tree.of(%{})`.
 > `.subtree(path)` selects a subtree. `.glob(pattern)` filters by glob.
 > `.merge(other)` merges two trees (later entries win). These operations

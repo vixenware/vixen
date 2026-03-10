@@ -1127,6 +1127,13 @@ impl Engine {
                     BuiltinMethod::TreeEmpty,
                 )))
             }
+            Value::Builtin(BuiltinValue::Namespace(BuiltinNamespace::Tree))
+                if field == "from_path" =>
+            {
+                Ok(Value::Builtin(BuiltinValue::Method(
+                    BuiltinMethod::TreeFromPath,
+                )))
+            }
             other => Err(self.type_error(&format!(
                 "cannot access field '{}' on {}",
                 field,
@@ -1250,6 +1257,13 @@ impl Engine {
                 self.require_no_kwargs("Tree.empty", kwargs)?;
                 self.check_arity("Tree.empty", args, 0)?;
                 Ok(Value::Tree(TreeValue::Inline(Arc::from([]))))
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeFromPath) => {
+                self.require_no_kwargs("Tree.from_path", kwargs)?;
+                self.check_arity("Tree.from_path", args, 1)?;
+                let path = self.force_value(args[0].clone())?;
+                let path = self.expect_path_value(&path, "Tree.from_path path")?;
+                Ok(Value::Tree(TreeValue::FsDir(path)))
             }
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
                 self.require_no_kwargs("blob.to_string", kwargs)?;
@@ -2284,20 +2298,22 @@ impl Engine {
     }
 
     fn expect_relative_path(&self, value: &Value, context: &str) -> Result<PathValue, PoisonError> {
-        let path = match value {
-            Value::Path(path) => path.clone(),
-            Value::String(path) => PathValue::new(path.as_ref()),
-            other => {
-                return Err(self.type_error(&format!(
-                    "{context} must be Path or String, got {}",
-                    other.type_name()
-                )));
-            }
-        };
+        let path = self.expect_path_value(value, context)?;
         if path.as_str().starts_with('/') {
             return Err(self.type_error(&format!("{context} must be relative")));
         }
         Ok(path)
+    }
+
+    fn expect_path_value(&self, value: &Value, context: &str) -> Result<PathValue, PoisonError> {
+        match value {
+            Value::Path(path) => Ok(path.clone()),
+            Value::String(path) => Ok(PathValue::new(path.as_ref())),
+            other => Err(self.type_error(&format!(
+                "{context} must be Path or String, got {}",
+                other.type_name()
+            ))),
+        }
     }
 
     fn resolve_function(

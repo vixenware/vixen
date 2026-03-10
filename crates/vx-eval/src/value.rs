@@ -136,6 +136,7 @@ pub enum BuiltinMethod {
     BlobFromString,
     TreeOf,
     TreeEmpty,
+    TreeFromPath,
     BlobToString { receiver: Box<Value> },
     TreeFile { receiver: Box<Value> },
     HostRead { receiver: Box<Value> },
@@ -368,7 +369,8 @@ impl BuiltinValue {
             | BuiltinValue::Function(BuiltinFunction::Exec)
             | BuiltinValue::Method(BuiltinMethod::BlobFromString)
             | BuiltinValue::Method(BuiltinMethod::TreeOf)
-            | BuiltinValue::Method(BuiltinMethod::TreeEmpty) => true,
+            | BuiltinValue::Method(BuiltinMethod::TreeEmpty)
+            | BuiltinValue::Method(BuiltinMethod::TreeFromPath) => true,
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver })
             | BuiltinValue::Method(BuiltinMethod::TreeFile { receiver })
             | BuiltinValue::Method(BuiltinMethod::HostRead { receiver })
@@ -388,6 +390,9 @@ impl BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::TreeOf) => Some("builtin:Tree.of".into()),
             BuiltinValue::Method(BuiltinMethod::TreeEmpty) => Some("builtin:Tree.empty".into()),
+            BuiltinValue::Method(BuiltinMethod::TreeFromPath) => {
+                Some("builtin:Tree.from_path".into())
+            }
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
                 Some(format!("builtin:blob.to_string({})", receiver.key()?))
             }
@@ -569,7 +574,8 @@ impl PartialEq for BuiltinMethod {
         match (self, other) {
             (BuiltinMethod::BlobFromString, BuiltinMethod::BlobFromString)
             | (BuiltinMethod::TreeOf, BuiltinMethod::TreeOf)
-            | (BuiltinMethod::TreeEmpty, BuiltinMethod::TreeEmpty) => true,
+            | (BuiltinMethod::TreeEmpty, BuiltinMethod::TreeEmpty)
+            | (BuiltinMethod::TreeFromPath, BuiltinMethod::TreeFromPath) => true,
             (
                 BuiltinMethod::BlobToString { receiver: left },
                 BuiltinMethod::BlobToString { receiver: right },
@@ -644,6 +650,7 @@ impl fmt::Display for BuiltinValue {
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => write!(f, "Blob.from_string"),
             BuiltinValue::Method(BuiltinMethod::TreeOf) => write!(f, "Tree.of"),
             BuiltinValue::Method(BuiltinMethod::TreeEmpty) => write!(f, "Tree.empty"),
+            BuiltinValue::Method(BuiltinMethod::TreeFromPath) => write!(f, "Tree.from_path"),
             BuiltinValue::Method(BuiltinMethod::BlobToString { .. }) => {
                 write!(f, "<bound blob.to_string>")
             }
