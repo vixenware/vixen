@@ -1,0 +1,267 @@
+// libpng + zlib direct-build sketch
+//
+// This is the kind of sketch we actually want:
+// - acquire upstream source trees
+// - discover a toolchain on an executor
+// - probe compiler / linker features directly
+// - generate config headers directly
+// - compile and archive sources directly
+// - package install trees directly
+//
+// Mapping from upstream CMake concerns to Vixen:
+// - source selection => arrays, globs, `match`, ordinary control flow
+// - compiler / linker probes => `exec` returning `Bool`
+// - optional tests / tools / shared / static outputs => args/env/conditionals
+// - install layout => `Tree { ... }`
+// - generated config headers / scripts => `render ...`
+//
+// The one obvious primitive this sketch needs beyond what Vixen already has is
+// template-driven file generation (`render ...`).
+
+let zlib_url = "https://zlib.net/zlib-1.3.1.tar.xz";
+let zlib_sha256 = "<sha256>";
+
+let libpng_url = "https://download.sourceforge.net/libpng/libpng-1.6.43.tar.xz";
+let libpng_sha256 = "<sha256>";
+
+let zlib_sources = [
+  @adler32.c, @compress.c, @crc32.c, @deflate.c,
+  @gzclose.c, @gzlib.c, @gzread.c, @gzwrite.c,
+  @inflate.c, @infback.c, @inftrees.c, @inffast.c,
+  @trees.c, @uncompr.c, @zutil.c,
+];
+
+let libpng_core_sources = [
+  @png.c, @pngerror.c, @pngget.c, @pngmem.c, @pngpread.c,
+  @pngread.c, @pngrio.c, @pngrtran.c, @pngrutil.c, @pngset.c,
+  @pngtrans.c, @pngwio.c, @pngwrite.c, @pngwtran.c, @pngwutil.c,
+];
+
+let libpng_arm_sources = [
+  @arm/arm_init.c,
+  @arm/filter_neon_intrinsics.c,
+  @arm/palette_neon_intrinsics.c,
+  @arm/filter_neon.S,
+];
+
+let libpng_intel_sources = [
+  @intel/intel_init.c,
+  @intel/filter_sse2_intrinsics.c,
+];
+
+let libpng_powerpc_sources = [
+  @powerpc/powerpc_init.c,
+  @powerpc/filter_vsx_intrinsics.c,
+];
+
+let libpng_mips_msa_sources = [
+  @mips/mips_init.c,
+  @mips/filter_msa_intrinsics.c,
+];
+
+let libpng_mips_mmi_sources = [
+  @mips/mips_init.c,
+  @mips/filter_mmi_inline_assembly.c,
+];
+
+let libpng_loongarch_sources = [
+  @loongarch/loongarch_lsx_init.c,
+  @loongarch/filter_lsx_intrinsics.c,
+];
+
+let common_cflags = ["-O2", "-fPIC"];
+
+fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
+  struct Tool {
+    path: String,
+    hash: Blob,
+  }
+
+  namespace Tool {
+    fn to_string(self) -> String self.path;
+  }
+
+  // In a real build this target triple would come from args/env/project data.
+  let target = "linux-x86_64";
+  let class = executor_class target;
+
+  let tools =
+    discover (class, (host) =>
+      [:cc, :ar]
+        |> _.to_map host.which
+        |> _.map_values ((path) => Tool { path, hash: host.hash path })
+    );
+
+  let { cc, ar } = tools;
+
+  let cexec = partial exec where {
+    observer: (proc, vfs) => (
+      if proc.exit_code != 0 (
+        fail `process failed`
+      );
+      vfs.subtree @out
+    ),
+  };
+
+  fn cc_probe(source: Blob) where {
+    flags: Array[String] = [],
+    link: Bool = false,
+  } -> Bool (
+    exec [
+      cc,
+      "-x", "c",
+      @probe.c,
+      if link ( @out/probe ) else ( "-c" ),
+      ..if link ( [] ) else ( ["-o", @out/probe.o] ),
+      ..if link ( ["-o", @out/probe] ) else ( [] ),
+      ..flags,
+    ] where {
+      mounts: { @probe.c: source },
+      writable: [@out],
+      observer: (proc, _vfs) => proc.exit_code == 0,
+    }
+  );
+
+  fn compile_objects(src: Tree, sources: Array[Path]) where {
+    generated: Map[Path, Blob] = {},
+    mounts: Map[Path, Blob | Tree] = {},
+    includes: Array[Path] = [],
+    defines: Array[String] = [],
+    flags: Array[String] = [],
+  } -> Tree (
+    sources
+      .map ((file) =>
+        cexec [
+          cc,
+          "-c",
+          @(src/{file}),
+          "-o",
+          @(out/{file}.o),
+          "-I", @src,
+          ..includes.map ($ => ["-I", $]).flatten!,
+          ..defines.map ($ => `-D${$}`),
+          ..common_cflags,
+          ..flags,
+        ] where {
+          mounts: { @src: src, @gen: Tree generated, ..mounts },
+        }
+      )
+      .merge!
+  );
+
+  fn static_archive(name: Path, objects: Tree) -> Tree (
+    cexec [ar, "rcs", @(out/{name}), ..objects]
+  );
+
+  fn shared_library(name: Path, objects: Tree) where {
+    link_flags: Array[String] = [],
+  } -> Tree (
+    cexec [cc, "-shared", "-o", @(out/{name}), ..objects, ..link_flags]
+  );
+
+  let zlib_src = acquire zlib_url where {
+    sha256: zlib_sha256,
+    extract: "tar.xz",
+  };
+
+  let z_have_unistd_h = cc_probe (Blob "#include <unistd.h>\nint main(void) { return 0; }\n");
+  let have_fseeko = cc_probe (Blob "#include <stdio.h>\nint main(void) { return (void*)fseeko ? 0 : 0; }\n");
+  let have_off64_t = cc_probe (Blob "#include <sys/types.h>\noff64_t x; int main(void) { return 0; }\n");
+
+  // This is the real missing primitive: template-driven file generation.
+  let zconf_h =
+    render @zoo/templates/zconf.h where {
+      Z_HAVE_UNISTD_H: z_have_unistd_h,
+      HAVE_FSEEKO: have_fseeko,
+      HAVE_OFF64_T: have_off64_t,
+    };
+
+  let zlib_objects =
+    compile_objects (zlib_src, zlib_sources) where {
+      generated: { @zconf.h: zconf_h },
+      includes: [@gen],
+    };
+
+  let zlib_static = static_archive (@lib/libz.a, zlib_objects);
+  let zlib_shared = shared_library (@lib/libz.so, zlib_objects);
+
+  let zlib_install = Tree {
+    @include/zlib.h: zlib_src.file @zlib.h,
+    @include/zconf.h: zconf_h,
+    @lib/libz.a: zlib_static.file @lib/libz.a,
+    @lib/libz.so: zlib_shared.file @lib/libz.so,
+  };
+
+  let libpng_src = acquire libpng_url where {
+    sha256: libpng_sha256,
+    extract: "tar.xz",
+  };
+
+  let has_ld_version_script =
+    cc_probe (Blob "void sym1(void) {} void sym2(void) {} int main(void) { return 0; }\n") where {
+      link: true,
+      flags: ["-Wl,--version-script=@conftest.map"],
+    };
+
+  let png_arch_sources =
+    match target (
+      "linux-aarch64" => libpng_arm_sources,
+      "linux-x86_64" => libpng_intel_sources,
+      "linux-ppc64le" => libpng_powerpc_sources,
+      "linux-mips64el" => [..libpng_mips_msa_sources, ..libpng_mips_mmi_sources],
+      "linux-loongarch64" => libpng_loongarch_sources,
+      _ => [],
+    );
+
+  let png_arch_defines =
+    match target (
+      "linux-aarch64" => ["PNG_ARM_NEON_OPT=2"],
+      "linux-x86_64" => ["PNG_INTEL_SSE_OPT=1"],
+      "linux-ppc64le" => ["PNG_POWERPC_VSX_OPT=2"],
+      "linux-mips64el" => ["PNG_MIPS_MSA_OPT=2", "PNG_MIPS_MMI_OPT=1"],
+      "linux-loongarch64" => ["PNG_LOONGARCH_LSX_OPT=1"],
+      _ => [],
+    );
+
+  let pnglibconf_h =
+    render @zoo/templates/pnglibconf.h where {
+      TARGET: target,
+      PNG_DEBUG: false,
+      PNG_SHARED: true,
+      PNG_STATIC: true,
+      PNG_TESTS: false,
+      PNG_TOOLS: false,
+      PNG_HARDWARE_OPTIMIZATIONS: true,
+      PNG_ARCH_DEFINES: png_arch_defines,
+    };
+
+  let libpng_objects =
+    compile_objects (libpng_src, [..libpng_core_sources, ..png_arch_sources]) where {
+      generated: { @pnglibconf.h: pnglibconf_h },
+      mounts: { @deps/zlib: zlib_install },
+      includes: [@gen, @src, @deps/zlib/include],
+      defines: png_arch_defines,
+    };
+
+  let libpng_static = static_archive (@lib/libpng16.a, libpng_objects);
+  let libpng_shared =
+    shared_library (@lib/libpng16.so, libpng_objects) where {
+      link_flags: [
+        ..if has_ld_version_script (["-Wl,--version-script=@src/libpng.vers"]) else ([]),
+        @deps/zlib/lib/libz.so,
+      ],
+    };
+
+  let libpng_install = Tree {
+    @include/png.h: libpng_src.file @png.h,
+    @include/pngconf.h: libpng_src.file @pngconf.h,
+    @include/pnglibconf.h: pnglibconf_h,
+    @lib/libpng16.a: libpng_static.file @lib/libpng16.a,
+    @lib/libpng16.so: libpng_shared.file @lib/libpng16.so,
+  };
+
+  Tree {
+    @zlib: zlib_install,
+    @libpng: libpng_install,
+  }
+)

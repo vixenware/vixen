@@ -26,3 +26,5 @@ fdprefix*
 
 # local sketch inputs
 zoo/lua-src/
+zoo/zlib-src/
+zoo/libpng-src/

@@ -620,23 +620,44 @@ insert_anchor_links = "heading"
 
 > r[exec.acquire]
 >
-> `acquire(url, sha256: hash)` fetches a resource by URL and returns a
-> `Blob`. The hash is always required — the result is content-addressed
+> `acquire url where { sha256: digest }` fetches a resource by URL and
+> returns a `Blob`. The digest is currently written as a hex `String`.
+> The hash is always required — the result is content-addressed
 > and cached permanently. The hash is verified; a mismatch poisons.
 > Because acquisition is deterministic (same URL + same hash = same
 > content), `acquire` is ambient — it requires no capability and can be
-> called anywhere. Fetching without a known hash is discovery, which
-> goes through `stabilize` (see [stabilize.model]).
+> called anywhere. Fetching without a known hash is discovery and must
+> go through `discover`, not `acquire`.
 
 > r[exec.acquire.extract]
 >
-> `acquire(url, sha256: hash, extract: format)` fetches a URL and
-> extracts the archive in one streaming step, returning a `Tree`.
+> `acquire url where { sha256: digest, extract: format }` fetches a URL
+> and extracts the archive in one streaming step, returning a `Tree`.
 > Supported formats: `"tar.gz"`, `"tar.xz"`, `"tar.zst"`, `"zip"`.
 > Extraction streams directly to the content-addressable store — the
 > `Tree` is pending until extraction completes, and the entire
 > operation (fetch + extract) is a single cached unit keyed by URL and
 > hash.
+
+> r[exec.render]
+>
+> `render template where { bindings: value }` renders a text template
+> into a `Blob`. This is the primitive used for generated config
+> headers, pkg-config files, generated helper scripts, and similar
+> small build artifacts.
+>
+> The template is addressed by `Path` and usually comes from the local
+> workspace or an acquired source tree. `bindings` is any structured
+> value whose fields are visible to the template renderer. The exact
+> template language is intentionally left unspecified here; the build
+> model only requires deterministic rendering from template plus
+> bindings to `Blob`.
+>
+> This is the main primitive needed for direct translations of
+> build-system generated headers such as `zconf.h` and `pnglibconf.h`.
+> Source selection, compiler/linker probes, optional outputs, and
+> install-tree assembly map directly to ordinary Vixen control flow,
+> discovery, and `exec`.
 
 ## Capabilities
 

@@ -10,6 +10,29 @@ fn discover[T](
   probe: Fn(Host) #host -> T,
 ) #discover -> T;
 
+/// Fetch a fixed-hash resource and return its content as a blob.
+fn acquire(url: String) where {
+  /// Expected SHA-256 digest of the fetched payload, encoded as hex.
+  sha256: String,
+} -> Blob;
+
+/// Fetch and extract a fixed-hash archive in one cached step.
+fn acquire(url: String) where {
+  /// Expected SHA-256 digest of the fetched archive, encoded as hex.
+  sha256: String,
+  /// Archive format, e.g. `"tar.gz"` or `"tar.xz"`.
+  extract: String,
+} -> Tree;
+
+/// Render a text template into a blob.
+///
+/// The template may interpolate values from the bindings record. This is the
+/// primitive used for generated config headers, pkg-config files, and small
+/// generated scripts in builds.
+fn render[T](template: Path) where {
+  bindings: T,
+} -> Blob;
+
 /// Run a sandboxed process on an executor and return the observer result.
 ///
 /// If the observer returns `Stream[T]`, then `exec` itself returns
