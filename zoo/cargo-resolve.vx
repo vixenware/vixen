@@ -104,6 +104,49 @@ struct UnifiedFeatures {
   dependency_features: Array[ActivatedDependencyFeature] = [],
 }
 
+struct BuildTarget {
+  triple: String,
+  cfg: Array[CfgFact] = [],
+}
+
+enum CfgFact {
+  struct Name {
+    name: String,
+  },
+  struct KeyValue {
+    key: String,
+    value: String,
+  },
+}
+
+enum CfgExpr {
+  struct Name {
+    name: String,
+  },
+  struct KeyValue {
+    key: String,
+    value: String,
+  },
+  struct Not {
+    expr: CfgExpr,
+  },
+  struct Any {
+    exprs: Array[CfgExpr],
+  },
+  struct All {
+    exprs: Array[CfgExpr],
+  },
+}
+
+enum TargetSelector {
+  struct Triple {
+    triple: String,
+  },
+  struct Cfg {
+    expr: CfgExpr,
+  },
+}
+
 enum DependencySource {
   struct Registry,
   struct Path {
@@ -254,7 +297,9 @@ fn crate_download_url(config: SparseConfig, name: String, version: String, check
   )
 )
 
-fn manifest_requests(manifest: CargoManifest) -> Array[DependencyRequest] (
+fn manifest_requests(manifest: CargoManifest) where {
+  target: BuildTarget,
+} -> Array[DependencyRequest] (
   [
     ..manifest.dependencies
       .map((name, dep) => request_from_dep(name, dep, "normal"))
@@ -266,7 +311,7 @@ fn manifest_requests(manifest: CargoManifest) -> Array[DependencyRequest] (
       .map((name, dep) => request_from_dep(name, dep, "build"))
       .to_array(),
     ..manifest.target
-      .map((triple, table) => target_requests(triple, table))
+      .map((selector, table) => target_requests(selector, table) where { target })
       .flatten(),
   ]
 )
@@ -363,25 +408,64 @@ fn highest_version(entries: Array[IndexEntry]) -> IndexEntry (
   fail "highest-version selection omitted from sketch"
 )
 
-fn target_requests(triple: String, table: CargoTargetTable) -> Array[DependencyRequest] (
+fn parse_cfg_expr(s: String) -> CfgExpr (
   // Sketch only:
-  // `triple` here stands in for Cargo target expressions / cfg selectors.
-  // A real implementation would evaluate cfg predicates against the selected
-  // build target and include only matching tables.
-  [
-    ..table.dependencies
-      .map((name, dep) => (
-        let req = request_from_dep(name, dep, "normal");
-        DependencyRequest { ..req, target: triple }
-      ))
-      .to_array(),
-    ..table.build_dependencies
-      .map((name, dep) => (
-        let req = request_from_dep(name, dep, "build");
-        DependencyRequest { ..req, target: triple }
-      ))
-      .to_array(),
-  ]
+  // parse Cargo cfg selectors such as:
+  // - `unix`
+  // - `target_os = "linux"`
+  // - `all(unix, target_env = "gnu")`
+  // - `any(windows, target_os = "macos")`
+  // - `not(target_arch = "wasm32")`
+  let _s = s;
+  fail "cfg parser omitted from sketch"
+)
+
+fn parse_target_selector(s: String) -> TargetSelector (
+  if s.starts_with("cfg(") (
+    TargetSelector.Cfg {
+      expr: parse_cfg_expr(s.slice(4..s.len() - 1)),
+    }
+  ) else (
+    TargetSelector.Triple { triple: s }
+  )
+)
+
+fn cfg_matches(target: BuildTarget, expr: CfgExpr) -> Bool (
+  // Sketch only:
+  // evaluate `expr` against `target.cfg`
+  let _target = target;
+  let _expr = expr;
+  fail "cfg evaluation omitted from sketch"
+)
+
+fn selector_matches(target: BuildTarget, selector: TargetSelector) -> Bool (
+  match selector (
+    TargetSelector.Triple { triple } => target.triple == triple,
+    TargetSelector.Cfg { expr } => cfg_matches(target, expr),
+  )
+)
+
+fn target_requests(selector: String, table: CargoTargetTable) where {
+  target: BuildTarget,
+} -> Array[DependencyRequest] (
+  if selector_matches(target, parse_target_selector(selector)) (
+    [
+      ..table.dependencies
+        .map((name, dep) => (
+          let req = request_from_dep(name, dep, "normal");
+          DependencyRequest { ..req, target: selector }
+        ))
+        .to_array(),
+      ..table.build_dependencies
+        .map((name, dep) => (
+          let req = request_from_dep(name, dep, "build");
+          DependencyRequest { ..req, target: selector }
+        ))
+        .to_array(),
+    ]
+  ) else (
+    []
+  )
 )
 
 fn request_from_index_dep(dep: IndexDependency) -> DependencyRequest (
@@ -497,6 +581,7 @@ fn resolve_request(request: DependencyRequest) where {
   config: SparseConfig,
   manifest: CargoManifest,
   lock: CargoLock?,
+  target: BuildTarget,
   workspace: Tree,
 } #discover -> ResolvedCrate (
   let package_name = request.package_name.unwrap_or(request.name);
@@ -512,7 +597,7 @@ fn resolve_request(request: DependencyRequest) where {
         version: dep_manifest.package.version,
         source: ResolvedSource.Path { path },
         features: features.local,
-        dependencies: apply_feature_requests(manifest_requests(dep_manifest), features),
+        dependencies: apply_feature_requests(manifest_requests(dep_manifest) where { target }, features),
       }
     ),
     DependencySource.Git { url } => (
@@ -555,13 +640,14 @@ fn resolve_request(request: DependencyRequest) where {
 
 fn resolve_manifest(manifest: CargoManifest) where {
   lock: CargoLock?,
+  target: BuildTarget,
   workspace: Tree,
 } #discover -> RegistryResolution (
   let config = Json.parse[SparseConfig](Http.get("https://index.crates.io/config.json"));
-  let requests = manifest_requests(manifest);
+  let requests = manifest_requests(manifest) where { target };
   let roots =
     requests
-      .map((req) => resolve_request(req) where { config, manifest, lock, workspace })
+      .map((req) => resolve_request(req) where { config, manifest, lock, target, workspace })
       .to_array();
 
   // Sketch only:
@@ -632,8 +718,14 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   let workspace = Tree(ws);
   let manifest = Toml.parse[CargoManifest](workspace.file(@Cargo.toml));
   let lock = parse_lock(workspace);
+  let target = BuildTarget {
+    // Sketch only:
+    // a real implementation would derive this from the selected build target,
+    // executor class, or explicit CLI/config inputs.
+    triple: "x86_64-unknown-linux-gnu",
+  };
 
-  let resolution = resolve_manifest(manifest) where { lock, workspace };
+  let resolution = resolve_manifest(manifest) where { lock, target, workspace };
 
   // Resolution discovers exact versions and checksums.
   // Acquisition stays fixed-hash and cacheable.
