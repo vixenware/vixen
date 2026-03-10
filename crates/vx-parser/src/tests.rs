@@ -242,6 +242,48 @@ fn libpng_sketch_parses() {
 }
 
 #[test]
+fn match_arm_variant_struct_pattern_currently_fails() {
+    let parse = parse(
+        r#"
+fn parse_lock(ws: Tree) -> CargoLock? (
+  match ws.file(@Cargo.lock)? (
+    Some { value } => value,
+    None => None,
+  )
+)
+"#,
+    );
+
+    assert!(
+        !parse.errors().is_empty(),
+        "variant struct patterns in match arms should currently fail"
+    );
+}
+
+#[test]
+fn boolean_or_in_if_condition_currently_fails() {
+    let parse = parse(
+        r#"
+fn download_url(template: String) -> String (
+  if (
+    template.contains("{crate}") ||
+    template.contains("{version}")
+  ) (
+    template
+  ) else (
+    "fallback"
+  )
+)
+"#,
+    );
+
+    assert!(
+        !parse.errors().is_empty(),
+        "|| in paren-bodied if conditions should currently fail"
+    );
+}
+
+#[test]
 fn function_declaration_where_blocks_parse() {
     let parse = parse(
         r#"
