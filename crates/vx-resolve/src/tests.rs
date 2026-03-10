@@ -1002,7 +1002,7 @@ fn let_binding_propagates_type() {
 fn main() {
     build((path, args, env) => {
         let b = read_file("foo");
-        b.to_string();
+        b.utf8();
     });
 }
 "#,
@@ -1030,7 +1030,7 @@ fn let_binding_chain_propagates() {
 fn main() {
     build((path, args, env) => {
         let b = read_file("foo");
-        let s = b.to_string();
+        let s = b.utf8();
     });
 }
 "#,

@@ -460,7 +460,6 @@ fn builtin_from_name(name: &str) -> Option<Builtin> {
 fn fallback_builtin_fn_names() -> &'static [&'static str] {
     &[
         "build",
-        "exec",
         "read_file",
         "read_dir",
         "glob",
@@ -472,7 +471,6 @@ fn fallback_builtin_fn_names() -> &'static [&'static str] {
 fn fallback_builtin_method_names(receiver: &Builtin) -> &'static [&'static str] {
     match receiver {
         Builtin::Process => &["exit_code", "stdout", "stderr"],
-        Builtin::Blob => &["to_string"],
         _ => &[],
     }
 }
@@ -523,34 +521,6 @@ fn fallback_builtin_fn_sig(name: &str) -> Option<FnSig> {
             keyword_params: vec![],
             ret: Ty::Builtin(Builtin::Blob),
             capabilities: vec![Capability { name: "fs".into() }],
-        }),
-        "exec" => Some(FnSig {
-            name: "exec".into(),
-            type_params: vec![],
-            positional_params: vec![ParamDef {
-                name: "command".into(),
-                ty: Ty::Array(Box::new(Ty::Scalar(Scalar::String))),
-            }],
-            keyword_params: vec![
-                KeywordParamDef {
-                    name: "observer".into(),
-                    ty: Ty::Function(FunctionTy {
-                        params: vec![Ty::Builtin(Builtin::Process), Ty::Builtin(Builtin::Tree)],
-                        ret: Box::new(Ty::Stream(Box::new(Ty::Unit))),
-                        capabilities: vec![Capability {
-                            name: "sandbox".into(),
-                        }],
-                    }),
-                    has_default: true,
-                },
-                KeywordParamDef {
-                    name: "executor".into(),
-                    ty: Ty::Builtin(Builtin::ExecutorClass),
-                    has_default: true,
-                },
-            ],
-            ret: Ty::Unit,
-            capabilities: vec![],
         }),
         "read_dir" => Some(FnSig {
             name: "read_dir".into(),
@@ -621,12 +591,6 @@ fn fallback_builtin_method(receiver: &Builtin, method_name: &str) -> Option<Meth
             name: "stderr".into(),
             params: vec![],
             ret: Ty::Builtin(Builtin::Blob),
-            capabilities: vec![],
-        }),
-        (Builtin::Blob, "to_string") => Some(MethodSig {
-            name: "to_string".into(),
-            params: vec![],
-            ret: Ty::Scalar(Scalar::String),
             capabilities: vec![],
         }),
         _ => None,
