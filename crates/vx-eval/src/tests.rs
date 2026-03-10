@@ -817,6 +817,23 @@ fn tree_of_and_file_only_force_the_selected_entry() {
 }
 
 #[test]
+fn tree_subtree_selects_nested_directories() {
+    let value = eval(
+        r#"fn main() {
+               Tree.of(%{
+                 "include" => Tree.of(%{
+                   "lua.h" => Blob.from_string("header"),
+                 }),
+               }).subtree("include").file("lua.h").to_string()
+             }"#,
+        "main",
+    )
+    .unwrap();
+
+    assert_eq!(value, Value::String(Arc::from("header")));
+}
+
+#[test]
 // r[verify store.tree]
 // r[verify store.tree.file]
 // r[verify store.blob.to-string]
@@ -1227,6 +1244,60 @@ fn exec_spreads_tree_args_in_canonical_path_order() {
         vec![first.clone(), second.clone(), third.clone(), fourth.clone()],
         expected_paths
     );
+}
+
+#[test]
+fn exec_mounts_subtrees_instead_of_the_whole_tree() {
+    let captured = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let engine = engine(
+        r#"fn observe(process: Process, tree: Tree) {
+               process.exit_code
+             }
+
+             fn build(input: Tree) {
+               exec(["tool", input.subtree("dir")]; observer: observe)
+             }"#,
+    )
+    .with_exec_handler(Arc::new(move |request| {
+        *sink.lock().unwrap() = Some(request);
+        Ok(Value::U64(0))
+    }));
+    let input = Value::Tree(TreeValue::Inline(Arc::from([
+        (
+            Arc::from("dir"),
+            Value::Tree(TreeValue::Inline(Arc::from([
+                (
+                    Arc::from("a.o"),
+                    Value::Blob(BlobValue::from_string("nested a")),
+                ),
+                (
+                    Arc::from("b.o"),
+                    Value::Blob(BlobValue::from_string("nested b")),
+                ),
+            ]))),
+        ),
+        (
+            Arc::from("top.o"),
+            Value::Blob(BlobValue::from_string("top object")),
+        ),
+    ])));
+
+    let value = engine.call("build", vec![input]).unwrap();
+    assert_eq!(value, Value::U64(0));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("exec request should be captured");
+    assert_eq!(request.mounts.len(), 1);
+    let Value::Tree(TreeValue::Inline(entries)) = &request.mounts[0].value else {
+        panic!("expected subtree mount");
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].0.as_ref(), "a.o");
+    assert_eq!(entries[1].0.as_ref(), "b.o");
 }
 
 #[test]

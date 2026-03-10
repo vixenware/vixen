@@ -1139,6 +1139,11 @@ impl Engine {
                     receiver: Box::new(receiver.clone()),
                 },
             ))),
+            Value::Tree(_) if field == "subtree" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::TreeSubtree {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
             Value::Host(_) if field == "read" => Ok(Value::Builtin(BuiltinValue::Method(
                 BuiltinMethod::HostRead {
                     receiver: Box::new(receiver.clone()),
@@ -1334,6 +1339,17 @@ impl Engine {
                     return Err(self.type_error("tree.file receiver must be Tree"));
                 };
                 self.tree_file(&tree, path)
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver }) => {
+                self.require_no_kwargs("tree.subtree", kwargs)?;
+                self.check_arity("tree.subtree", args, 1)?;
+                let path = self.force_value(args[0].clone())?;
+                let path = self.expect_relative_path(&path, "tree.subtree path")?;
+                let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
+                let Value::Tree(tree) = receiver else {
+                    return Err(self.type_error("tree.subtree receiver must be Tree"));
+                };
+                self.tree_subtree(&tree, path)
             }
             BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver }) => {
                 self.require_no_kwargs("option.unwrap_or", kwargs)?;
@@ -2343,6 +2359,110 @@ impl Engine {
             ));
         }
         self.tree_file_inline_segments(entries, &segments, path)
+    }
+
+    fn tree_subtree(&self, tree: &TreeValue, path: PathValue) -> Result<Value, PoisonError> {
+        match tree {
+            TreeValue::Inline(entries) => self.tree_subtree_inline(entries, &path),
+            TreeValue::FsDir(root) => {
+                if path.as_str().is_empty() {
+                    return Ok(Value::Tree(TreeValue::FsDir(root.clone())));
+                }
+                let full_path = root.join(path.as_str());
+                let metadata = fs::metadata(full_path.as_str()).map_err(|error| {
+                    PoisonError::new(
+                        PoisonKind::UserFail,
+                        format!("missing subtree {}: {error}", full_path.as_str()),
+                        self.current_demand_chain(None),
+                    )
+                })?;
+                if !metadata.is_dir() {
+                    return Err(PoisonError::new(
+                        PoisonKind::UserFail,
+                        format!("{} is not a directory", full_path.as_str()),
+                        self.current_demand_chain(None),
+                    ));
+                }
+                Ok(Value::Tree(TreeValue::FsDir(full_path)))
+            }
+            TreeValue::Store(root) => Err(self.internal_error(&format!(
+                "cannot read store-backed tree {root} without an external store resolver"
+            ))),
+        }
+    }
+
+    fn tree_subtree_inline(
+        &self,
+        entries: &[(Arc<str>, Value)],
+        path: &PathValue,
+    ) -> Result<Value, PoisonError> {
+        let segments = path
+            .as_str()
+            .split('/')
+            .filter(|segment| !segment.is_empty() && *segment != ".")
+            .collect::<Vec<_>>();
+        if segments.is_empty() {
+            return Ok(Value::Tree(TreeValue::Inline(Arc::from(entries.to_vec()))));
+        }
+        self.tree_subtree_inline_segments(entries, &segments, path)
+    }
+
+    fn tree_subtree_inline_segments(
+        &self,
+        entries: &[(Arc<str>, Value)],
+        segments: &[&str],
+        original_path: &PathValue,
+    ) -> Result<Value, PoisonError> {
+        let segment = segments[0];
+        let (_, value) = entries
+            .iter()
+            .find(|(name, _)| name.as_ref() == segment)
+            .ok_or_else(|| {
+                PoisonError::new(
+                    PoisonKind::UserFail,
+                    format!("missing subtree {}", original_path.as_str()),
+                    self.current_demand_chain(None),
+                )
+            })?;
+        let value = self.force_value_shallow(value.clone())?;
+
+        if segments.len() == 1 {
+            return match value {
+                Value::Tree(tree) => Ok(Value::Tree(tree)),
+                Value::Blob(_) => Err(PoisonError::new(
+                    PoisonKind::UserFail,
+                    format!("{} is not a directory", original_path.as_str()),
+                    self.current_demand_chain(None),
+                )),
+                other => Err(self.type_error(&format!(
+                    "tree entry must be Blob or Tree, got {}",
+                    other.type_name()
+                ))),
+            };
+        }
+
+        match value {
+            Value::Tree(TreeValue::Inline(entries)) => {
+                self.tree_subtree_inline_segments(entries.as_ref(), &segments[1..], original_path)
+            }
+            Value::Tree(TreeValue::FsDir(root)) => self.tree_subtree(
+                &TreeValue::FsDir(root),
+                PathValue::new(segments[1..].join("/")),
+            ),
+            Value::Tree(TreeValue::Store(root)) => self.tree_subtree(
+                &TreeValue::Store(root),
+                PathValue::new(segments[1..].join("/")),
+            ),
+            Value::Blob(_) => Err(PoisonError::new(
+                PoisonKind::UserFail,
+                format!("{} points inside a file", original_path.as_str()),
+                self.current_demand_chain(None),
+            )),
+            other => Err(self.type_error(&format!(
+                "tree entry must be Blob or Tree, got {}",
+                other.type_name()
+            ))),
+        }
     }
 
     fn tree_file_inline_segments(

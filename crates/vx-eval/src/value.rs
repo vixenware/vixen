@@ -139,6 +139,7 @@ pub enum BuiltinMethod {
     TreeFromPath,
     BlobToString { receiver: Box<Value> },
     TreeFile { receiver: Box<Value> },
+    TreeSubtree { receiver: Box<Value> },
     OptionUnwrapOr { receiver: Box<Value> },
     HostRead { receiver: Box<Value> },
     HostHash { receiver: Box<Value> },
@@ -375,6 +376,7 @@ impl BuiltinValue {
             | BuiltinValue::Method(BuiltinMethod::TreeFromPath) => true,
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver })
             | BuiltinValue::Method(BuiltinMethod::TreeFile { receiver })
+            | BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver })
             | BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver })
             | BuiltinValue::Method(BuiltinMethod::HostRead { receiver })
             | BuiltinValue::Method(BuiltinMethod::HostHash { receiver })
@@ -402,6 +404,9 @@ impl BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => {
                 Some(format!("builtin:tree.file({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver }) => {
+                Some(format!("builtin:tree.subtree({})", receiver.key()?))
             }
             BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver }) => {
                 Some(format!("builtin:option.unwrap_or({})", receiver.key()?))
@@ -595,6 +600,10 @@ impl PartialEq for BuiltinMethod {
                 BuiltinMethod::TreeFile { receiver: right },
             )
             | (
+                BuiltinMethod::TreeSubtree { receiver: left },
+                BuiltinMethod::TreeSubtree { receiver: right },
+            )
+            | (
                 BuiltinMethod::OptionUnwrapOr { receiver: left },
                 BuiltinMethod::OptionUnwrapOr { receiver: right },
             )
@@ -674,6 +683,9 @@ impl fmt::Display for BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::TreeFile { .. }) => {
                 write!(f, "<bound tree.file>")
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeSubtree { .. }) => {
+                write!(f, "<bound tree.subtree>")
             }
             BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { .. }) => {
                 write!(f, "<bound option.unwrap_or>")
