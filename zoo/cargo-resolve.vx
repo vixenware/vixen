@@ -57,10 +57,27 @@ struct LockedPackage {
 
 struct DependencyRequest {
   name: String,
-  version_req: String?,
+  version_req: SemverReq?,
   features: Array[String] = [],
+  default_features: Bool = true,
   kind: String = "normal",
   source: DependencySource = DependencySource.Registry,
+}
+
+struct SemverVersion {
+  major: U64,
+  minor: U64,
+  patch: U64,
+  pre: String?,
+}
+
+struct Comparator {
+  op: String,
+  version: SemverVersion,
+}
+
+struct SemverReq {
+  comparators: Array[Comparator],
 }
 
 enum DependencySource {
@@ -179,15 +196,20 @@ fn request_from_dep(name: String, dep: CargoDependencySpec, kind: String) -> Dep
   match dep as? String (
     Some { value } => DependencyRequest {
       name,
-      version_req: value,
+      version_req: parse_semver_req(value),
       kind,
     },
     None => (
       let detail = dep as CargoDependency;
       DependencyRequest {
         name,
-        version_req: detail.version,
+        version_req:
+          match detail.version (
+            Some { value } => parse_semver_req(value),
+            None => None,
+          ),
         features: detail.features,
+        default_features: detail.default_features,
         kind,
         source:
           match detail.path (
@@ -202,6 +224,32 @@ fn request_from_dep(name: String, dep: CargoDependencySpec, kind: String) -> Dep
       }
     ),
   )
+)
+
+fn parse_semver_version(s: String) -> SemverVersion (
+  // Sketch only:
+  // - split `major.minor.patch[-pre]`
+  // - parse numeric fields
+  // - preserve prerelease text
+  let _s = s;
+  fail "semver version parser omitted from sketch"
+)
+
+fn parse_semver_req(s: String) -> SemverReq (
+  // Sketch only:
+  // - parse Cargo's semver requirement syntax (`^1`, `~1.2`, `>=1,<2`, ...)
+  // - lower it to explicit comparators
+  let _s = s;
+  fail "semver requirement parser omitted from sketch"
+)
+
+fn matches_semver(req: SemverReq?, version: SemverVersion) -> Bool (
+  // Sketch only:
+  // - empty requirement means "any version"
+  // - otherwise all comparators must match
+  let _req = req;
+  let _version = version;
+  fail "semver matching omitted from sketch"
 )
 
 fn target_requests(triple: String, table: CargoTargetTable) -> Array[DependencyRequest] (
@@ -220,13 +268,14 @@ fn target_requests(triple: String, table: CargoTargetTable) -> Array[DependencyR
   ]
 )
 
-fn activate_features(manifest: CargoManifest, request: DependencyRequest) -> Array[String] (
+fn unify_features(feature_graph: Map[String, Array[String]], request: DependencyRequest) -> Array[String] (
   // Sketch only:
   // - start with explicitly requested features
-  // - if default_features, add the manifest's `default` feature set
-  // - follow named feature expansions transitively
-  let _manifest = manifest;
-  request.features
+  // - if `request.default_features`, add the package's `default` feature set
+  // - follow feature expansions transitively until fixpoint
+  let _feature_graph = feature_graph;
+  let _request = request;
+  fail "feature unification omitted from sketch"
 )
 
 fn lock_entry(lock: CargoLock?, name: String) -> LockedPackage? (
@@ -243,7 +292,7 @@ fn pick_version(entries: Array[IndexEntry], request: DependencyRequest) where {
   // - prefer the lockfile entry if it still satisfies the request
   // - otherwise choose the highest non-yanked version satisfying the
   //   semver requirement
-  // - semver matching and feature expansion are ordinary code, not builtins
+  // - semver parsing/matching are ordinary code, not builtins
   let _entries = entries;
   let _request = request;
   let _lock = lock;
@@ -256,12 +305,11 @@ fn resolve_request(request: DependencyRequest) where {
   lock: CargoLock?,
   workspace: Tree,
 } #discover -> ResolvedCrate (
-  let features = activate_features(manifest, request);
-
   match request.source (
     DependencySource.Path { path } => (
       let dep_root = Path(path);
       let dep_manifest = Toml.parse[CargoManifest](workspace.file(dep_root / @Cargo.toml));
+      let features = unify_features(dep_manifest.features, request);
       ResolvedCrate {
         id: PackageId(`path:{path}`),
         name: dep_manifest.package.name,
@@ -287,6 +335,7 @@ fn resolve_request(request: DependencyRequest) where {
   let chosen = pick_version(entries, request) where {
     lock: lock_entry(lock, request.name),
   };
+  let features = unify_features(chosen.features, request);
 
   ResolvedCrate {
     id: PackageId(`registry:{chosen.name}@{chosen.vers}`),
