@@ -917,6 +917,39 @@ fn exec_verifier_failures_poison_locally() {
 }
 
 #[test]
+fn exec_rejects_raw_path_mount_values() {
+    let tempdir = TempDir::new().unwrap();
+    fs::write(tempdir.path().join("input.txt"), "hello from path mount").unwrap();
+    let engine = engine(
+        r#"fn observe(process: Process, tree: Tree) {
+               Tree.empty()
+             }
+
+             fn build(workspace: Path) {
+               exec(
+                 ["/bin/true"];
+                 mounts: %{ "src" => workspace },
+                 observer: observe,
+               )
+             }"#,
+    );
+
+    let err = engine
+        .call(
+            "build",
+            vec![Value::Path(PathValue::new(
+                tempdir.path().to_string_lossy(),
+            ))],
+        )
+        .unwrap_err();
+    assert_eq!(err.kind, PoisonKind::TypeError);
+    assert!(
+        err.message
+            .contains("exec mount values must be Blob or Tree, got Path")
+    );
+}
+
+#[test]
 // r[verify exec.verifier.host]
 fn exec_verifiers_receive_host_access_locally() {
     let tempdir = TempDir::new().unwrap();
@@ -949,6 +982,63 @@ fn exec_verifiers_receive_host_access_locally() {
                )
              }}"#,
         path = tool_path.to_string_lossy(),
+    );
+    let engine = engine(&source);
+
+    let value = engine.call("build", vec![]).unwrap();
+    assert_eq!(value, Value::Tree(TreeValue::Inline(Arc::from([]))));
+}
+
+#[test]
+fn host_which_returns_some_and_none() {
+    let tempdir = TempDir::new().unwrap();
+    let tool_path = tempdir.path().join("tool.sh");
+    let expected_script = "#!/bin/sh\nprintf tool\n";
+    fs::write(&tool_path, expected_script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut perms = fs::metadata(&tool_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&tool_path, perms).unwrap();
+    }
+
+    let missing = tempdir.path().join("missing.sh");
+    let missing_again = tempdir.path().join("missing-again.sh");
+    let source = format!(
+        r##"fn verify(host: Host) {{
+               let found = host.which({tool_path:?});
+               if host.read(found.value).to_string() != {expected_script:?} {{
+                 fail "wrong tool"
+               }} else {{
+                 ()
+               }};
+
+               let missing_tool = host.which({missing:?});
+               let missing_again = host.which({missing_again:?});
+               if missing_tool != missing_again {{
+                 fail "missing lookups should both return None"
+                }} else {{
+                  ()
+                }}
+             }}
+
+             fn observe(process: Process, tree: Tree) {{
+               Tree.empty()
+             }}
+
+             fn build() {{
+               exec(
+                 ["/bin/sh", "-c", "printf built"];
+                 observer: observe,
+                 verifier: verify,
+               )
+             }}"##,
+        tool_path = tool_path.to_string_lossy(),
+        expected_script = expected_script,
+        missing = missing.to_string_lossy(),
+        missing_again = missing_again.to_string_lossy(),
     );
     let engine = engine(&source);
 

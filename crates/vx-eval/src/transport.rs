@@ -801,7 +801,8 @@ impl TryFrom<&BuiltinValue> for TransportBuiltinValue {
                 receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
             }),
             BuiltinValue::Method(BuiltinMethod::HostRead { .. })
-            | BuiltinValue::Method(BuiltinMethod::HostHash { .. }) => {
+            | BuiltinValue::Method(BuiltinMethod::HostHash { .. })
+            | BuiltinValue::Method(BuiltinMethod::HostWhich { .. }) => {
                 Err("cannot transport host builtin methods".into())
             }
         }

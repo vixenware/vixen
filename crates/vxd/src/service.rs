@@ -740,10 +740,9 @@ async fn store_exec_mounts(
                 Value::Tree(TreeValue::FsDir(dir)) => {
                     pending.push(PendingMount::HostPath(path, dir))
                 }
-                Value::Path(host_path) => pending.push(PendingMount::HostPath(path, host_path)),
                 other => {
                     return Err(format!(
-                        "exec mount values must be Blob, Tree, or Path, got {}",
+                        "exec mount values must be Blob or Tree, got {}",
                         other.type_name()
                     ));
                 }

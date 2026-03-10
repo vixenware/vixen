@@ -6,7 +6,10 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::env;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -694,6 +697,8 @@ impl Engine {
             instr::Expr::Var(name) => {
                 if let Some(value) = bindings.get(name) {
                     BuildResult::Value(value.clone())
+                } else if name == "None" {
+                    BuildResult::Value(option_none())
                 } else if let Some(overloads) = self.functions.get(name) {
                     BuildResult::Value(Value::Function(
                         self.global_function_value(overloads[0].clone()),
@@ -1112,6 +1117,11 @@ impl Engine {
                     receiver: Box::new(receiver.clone()),
                 },
             ))),
+            Value::Host(_) if field == "which" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::HostWhich {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
             Value::Builtin(BuiltinValue::Namespace(BuiltinNamespace::Blob))
                 if field == "from_string" =>
             {
@@ -1314,6 +1324,17 @@ impl Engine {
                     return Err(self.type_error("host.hash receiver must be Host"));
                 };
                 self.host_hash(&path)
+            }
+            BuiltinValue::Method(BuiltinMethod::HostWhich { receiver }) => {
+                self.require_no_kwargs("host.which", kwargs)?;
+                self.check_arity("host.which", args, 1)?;
+                let name = self.force_value(args[0].clone())?;
+                let name = self.expect_host_path(&name, "host.which name")?;
+                let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
+                let Value::Host(_) = receiver else {
+                    return Err(self.type_error("host.which receiver must be Host"));
+                };
+                Ok(self.host_which(&name))
             }
         }
     }
@@ -1558,10 +1579,10 @@ impl Engine {
             let path = self.expect_relative_path(&key, "exec mount path")?;
             let value = self.force_value_shallow(value.clone())?;
             match value {
-                Value::Blob(_) | Value::Tree(_) | Value::Path(_) => mounts.push((path, value)),
+                Value::Blob(_) | Value::Tree(_) => mounts.push((path, value)),
                 other => {
                     return Err(self.type_error(&format!(
-                        "exec mount values must be Blob, Tree, or Path, got {}",
+                        "exec mount values must be Blob or Tree, got {}",
                         other.type_name()
                     )));
                 }
@@ -1823,7 +1844,6 @@ impl Engine {
         match value {
             Value::Blob(blob) => self.write_blob_to_path(&blob, destination),
             Value::Tree(tree) => self.write_tree_to_path(&tree, destination),
-            Value::Path(path) => self.copy_host_path(&path, destination),
             Value::ExecPath(_) => {
                 Err(self.type_error("cannot materialize ExecPath into exec sandbox"))
             }
@@ -1888,26 +1908,6 @@ impl Engine {
             TreeValue::Store(root) => Err(self.internal_error(&format!(
                 "cannot materialize store-backed tree {root} without an external store resolver"
             ))),
-        }
-    }
-
-    fn copy_host_path(
-        &self,
-        source: &PathValue,
-        destination: &PathValue,
-    ) -> Result<(), PoisonError> {
-        let metadata = fs::metadata(source.as_str()).map_err(|error| {
-            PoisonError::new(
-                PoisonKind::UserFail,
-                format!("missing path {}: {error}", source.as_str()),
-                self.current_demand_chain(None),
-            )
-        })?;
-
-        if metadata.is_dir() {
-            self.copy_dir_recursive(source, destination)
-        } else {
-            self.write_blob_to_path(&BlobValue::FsFile(source.clone()), destination)
         }
     }
 
@@ -1988,6 +1988,23 @@ impl Engine {
         Ok(Value::Blob(BlobValue::from_string(
             blake3::hash(&bytes).to_hex().to_string(),
         )))
+    }
+
+    fn host_which(&self, name: &str) -> Value {
+        if host_lookup_candidate(name).is_some_and(host_path_is_executable) {
+            return option_some(Value::String(Arc::from(name)));
+        }
+
+        let Some(path) = env::var_os("PATH") else {
+            return option_none();
+        };
+        for dir in env::split_paths(&path) {
+            let candidate = dir.join(name);
+            if host_path_is_executable(&candidate) {
+                return option_some(Value::String(Arc::from(candidate.to_string_lossy())));
+            }
+        }
+        option_none()
     }
 
     fn exec_process_value(&self, output: &std::process::Output) -> Value {
@@ -2475,6 +2492,48 @@ fn fn_ptr(def: &Arc<instr::FnDef>) -> usize {
 
 fn stable_fn_repr(def: &instr::FnDef) -> String {
     format!("{def:?}")
+}
+
+fn option_some(value: Value) -> Value {
+    Value::Struct(StructValue {
+        type_name: Arc::from("Some"),
+        fields: Arc::from([(Arc::from("value"), value)]),
+    })
+}
+
+fn option_none() -> Value {
+    Value::Struct(StructValue {
+        type_name: Arc::from("None"),
+        fields: Arc::from([]),
+    })
+}
+
+fn host_lookup_candidate(name: &str) -> Option<&Path> {
+    let candidate = Path::new(name);
+    if candidate.is_absolute() || name.contains('/') || name.contains(std::path::MAIN_SEPARATOR) {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn host_path_is_executable(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 // r[impl fn.identity]

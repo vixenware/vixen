@@ -141,6 +141,7 @@ pub enum BuiltinMethod {
     TreeFile { receiver: Box<Value> },
     HostRead { receiver: Box<Value> },
     HostHash { receiver: Box<Value> },
+    HostWhich { receiver: Box<Value> },
 }
 
 #[derive(Debug, Clone)]
@@ -374,7 +375,8 @@ impl BuiltinValue {
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver })
             | BuiltinValue::Method(BuiltinMethod::TreeFile { receiver })
             | BuiltinValue::Method(BuiltinMethod::HostRead { receiver })
-            | BuiltinValue::Method(BuiltinMethod::HostHash { receiver }) => {
+            | BuiltinValue::Method(BuiltinMethod::HostHash { receiver })
+            | BuiltinValue::Method(BuiltinMethod::HostWhich { receiver }) => {
                 receiver.is_fully_resolved()
             }
         }
@@ -404,6 +406,9 @@ impl BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::HostHash { receiver }) => {
                 Some(format!("builtin:host.hash({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::HostWhich { receiver }) => {
+                Some(format!("builtin:host.which({})", receiver.key()?))
             }
         }
     }
@@ -591,6 +596,10 @@ impl PartialEq for BuiltinMethod {
             | (
                 BuiltinMethod::HostHash { receiver: left },
                 BuiltinMethod::HostHash { receiver: right },
+            )
+            | (
+                BuiltinMethod::HostWhich { receiver: left },
+                BuiltinMethod::HostWhich { receiver: right },
             ) => left == right,
             _ => false,
         }
@@ -662,6 +671,9 @@ impl fmt::Display for BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::HostHash { .. }) => {
                 write!(f, "<bound host.hash>")
+            }
+            BuiltinValue::Method(BuiltinMethod::HostWhich { .. }) => {
+                write!(f, "<bound host.which>")
             }
         }
     }
