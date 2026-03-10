@@ -62,6 +62,8 @@ Use:
 - `@( ... )` when interpolation is needed
 
 Bare paths do not interpolate.
+Their lexical envelope is the simple ASCII set
+`[A-Za-z0-9_./-]+`.
 Inside `@( ... )`, `{expr}` interpolates and `{{` / `}}` produce
 literal braces.
 
@@ -306,10 +308,11 @@ means:
 f x
 ```
 
-Selectors can be stages too:
+Use `_` when the piped value does not go in the default position, or
+when the stage needs to navigate from the current value:
 
 ```vixen
-get_blob my_blob |> .utf8
+get_blob my_blob |> _.utf8!
 ```
 
 means:
@@ -318,7 +321,7 @@ means:
 (get_blob my_blob).utf8!
 ```
 
-If the payload does not go in the default position, use `_`:
+Likewise:
 
 ```vixen
 x |> pair(y, _)
@@ -330,12 +333,13 @@ means:
 pair(y, x)
 ```
 
-For multiline pipelines, prefer full leading `|>` alignment:
+For multiline pipelines, just write an ordinary multiline binary chain:
 
 ```vixen
-|> objs
-|> cexec [ar, "rc", @out/liblua.a, .._]
-|> cexec [ranlib, _]
+let liblua =
+  objs
+  |> cexec [ar, "rc", @out/liblua.a, .._]
+  |> cexec [ranlib, _];
 ```
 
 Use `_` only in pipes.
@@ -384,7 +388,24 @@ That means:
 - written keyword arguments are bound
 - unspecified keyword arguments stay open
 
-## 11. A build-shaped example
+## 11. Sugar: callable return transformation
+
+This:
+
+```vixen
+(args) => (exec args where common).next!
+```
+
+can be written as:
+
+```vixen
+(partial exec where common).then ($.next!)
+```
+
+`.then` keeps the callable's positional and keyword surface and changes
+only what happens to its return value.
+
+## 12. A build-shaped example
 
 ```vixen
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree (
@@ -408,12 +429,8 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree (
 )
 ```
 
-## Current open edges
+## Intentionally unspecified for now
 
-These are still active design questions:
+These are intentionally postponed details:
 
-- constructor visibility rules are intentionally left unspecified for now
-- the final wording of callable return transformation (`.then(...)` or similar)
-- the exact lexical envelope of bare `@path`
-- how much leading-dot method-adapter shorthand should remain, versus
-  using `$` closures explicitly
+- constructor visibility rules are not specified yet

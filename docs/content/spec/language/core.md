@@ -645,9 +645,9 @@ insert_anchor_links = "heading"
 
 > r[expr.pipe]
 >
-> `|>` is the chaining form for pipeline stages. A stage may be a free
-> function application, a selector stage such as `.utf8`, or any
-> other pipe-compatible transform.
+> `|>` is the chaining form for pipeline stages. A stage may be a plain
+> callable stage or any expression that uses `_` as the pipe
+> placeholder.
 >
 > Without `_`, a plain stage receives the piped value as its payload:
 >
@@ -655,25 +655,39 @@ insert_anchor_links = "heading"
 > x |> f        // means: f x
 > ```
 >
-> A selector stage navigates from the piped value:
->
-> ```vixen
-> x |> .field    // means: x.field
-> x |> .utf8     // means: x.utf8!
-> ```
->
 > With `_`, the piped value is substituted where `_` appears:
 >
 > ```vixen
+> x |> _.utf8!       // means: x.utf8!
 > x |> pair(y, _)   // means: pair(y, x)
 > ```
 >
 > `_` inside a pipe RHS names the piped value:
 >
 > ```vixen
-> get_blob my_blob |> .utf8
+> get_blob my_blob |> _.utf8!
 > value |> cexec [ranlib, _]
 > ```
+
+> r[expr.then]
+>
+> `.then` transforms the return value of a callable while preserving its
+> full call surface:
+>
+> ```vixen
+> f.then g
+> ```
+>
+> means: call `f` normally, then pass its result to `g`. Positional
+> payload shape and keyword parameter shape are preserved. For example:
+>
+> ```vixen
+> let cexec = (partial exec where common).then ($.next!)
+> ```
+>
+> produces a callable with the same arguments and keywords as `exec
+> where common`, but whose result is the first element of the returned
+> stream.
 
 ### Update expressions
 
