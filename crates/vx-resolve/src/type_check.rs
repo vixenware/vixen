@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use rowan::TextRange;
 use vx_parser::{
     ArrayExpr, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr, FieldExpr, IfExpr,
-    LiteralExpr, MapExpr, MatchExpr, NameRefExpr, Pattern, PrefixExpr, SourceFile, Stmt,
-    StructLiteralExpr, SyntaxKind, WithExpr,
+    InvokeExpr, LiteralExpr, MapExpr, MatchExpr, NameRefExpr, Pattern, PrefixExpr, RecordExpr,
+    SourceFile, Stmt, StructLiteralExpr, SyntaxKind, WhereExpr, WithExpr,
 };
 use vx_types::{FnSig, Ty};
 
@@ -96,6 +96,17 @@ struct ExprTyper<'a> {
 }
 
 impl<'a> ExprTyper<'a> {
+    fn peel_parens(expr: Expr) -> Expr {
+        let mut current = expr;
+        while let Expr::Paren(ref paren) = current {
+            let Some(inner) = paren.expr() else {
+                break;
+            };
+            current = inner;
+        }
+        current
+    }
+
     fn check_block(&mut self, block: &BlockExpr) {
         for stmt in block.statements() {
             self.check_stmt(&stmt);
@@ -149,7 +160,13 @@ impl<'a> ExprTyper<'a> {
         let ty = match expr {
             Expr::Literal(lit) => self.infer_literal(lit),
             Expr::NameRef(name_ref) => self.infer_name_ref(name_ref),
+            Expr::Paren(paren) => paren
+                .expr()
+                .map(|expr| self.infer_expr(&expr))
+                .unwrap_or(Ty::Poison),
             Expr::Call(call) => self.infer_call(call),
+            Expr::Where(where_expr) => self.infer_where(where_expr),
+            Expr::Invoke(invoke) => self.infer_invoke(invoke),
             Expr::Field(field) => self.infer_field(field),
             Expr::Block(block) => self.infer_block(block),
             Expr::If(if_expr) => self.infer_if(if_expr),
@@ -164,6 +181,7 @@ impl<'a> ExprTyper<'a> {
                 Ty::Scalar(vx_types::Scalar::String)
             }
             Expr::Array(arr) => self.infer_array(arr),
+            Expr::Record(record) => self.infer_record(record),
             Expr::Map(map) => self.infer_map(map),
             Expr::StructLiteral(sl) => self.infer_struct_literal(sl),
             Expr::Match(m) => self.infer_match(m),
@@ -300,6 +318,95 @@ impl<'a> ExprTyper<'a> {
         None
     }
 
+    fn sig_for_name_ref(&self, name_ref: &NameRefExpr) -> Option<FnSig> {
+        let token = name_ref.token()?;
+        if let Some(sig) = builtin_fn_sig(token.text()) {
+            return Some(sig);
+        }
+
+        let resolved = self
+            .resolution
+            .refs
+            .iter()
+            .find(|r| r.ref_range == token.text_range())?;
+        let def = resolved.target.as_ref().ok()?;
+        if def.kind != DefKind::Function {
+            return None;
+        }
+
+        self.types.range_to_fn_sig.get(&def.name_range).cloned()
+    }
+
+    fn check_record_keyword_args(&mut self, record: &RecordExpr, sig: &FnSig) {
+        for field in record.fields() {
+            let Some(name) = field.name().map(|token| token.text().to_string()) else {
+                continue;
+            };
+            let Some(arg_expr) = field.value() else {
+                continue;
+            };
+            let param = sig
+                .keyword_params
+                .iter()
+                .find(|param| param.name == name)
+                .map(|param| &param.ty)
+                .or_else(|| {
+                    sig.positional_params
+                        .iter()
+                        .find(|param| param.name == name)
+                        .map(|param| &param.ty)
+                });
+            let Some(param_ty) = param else {
+                self.infer_expr(&arg_expr);
+                continue;
+            };
+            let arg_ty = self.infer_expr(&arg_expr);
+            if !arg_ty.is_poison() && !param_ty.is_poison() && !types_compatible(&arg_ty, param_ty)
+            {
+                self.errors.push(TypeError {
+                    range: arg_expr.syntax().text_range(),
+                    kind: TypeErrorKind::ArgTypeMismatch {
+                        param_name: name,
+                        expected: param_ty.clone(),
+                        found: arg_ty,
+                    },
+                });
+            }
+        }
+    }
+
+    fn populate_record_callback_param_types(&mut self, record: &RecordExpr, sig: &FnSig) {
+        for field in record.fields() {
+            let Some(name) = field.name().map(|token| token.text().to_string()) else {
+                continue;
+            };
+            let Some(arg_expr) = field.value().map(Self::peel_parens) else {
+                continue;
+            };
+            let Expr::Closure(closure) = arg_expr else {
+                continue;
+            };
+
+            let kw_param = sig.keyword_params.iter().find(|param| param.name == name);
+            if let Some(param) = kw_param
+                && let vx_types::Ty::Function(fn_ty) = &param.ty
+            {
+                self.bind_closure_params(&closure, &fn_ty.params);
+                continue;
+            }
+
+            let pos_param = sig
+                .positional_params
+                .iter()
+                .find(|param| param.name == name);
+            if let Some(param) = pos_param
+                && let vx_types::Ty::Function(fn_ty) = &param.ty
+            {
+                self.bind_closure_params(&closure, &fn_ty.params);
+            }
+        }
+    }
+
     fn infer_call(&mut self, call: &CallExpr) -> Ty {
         let Some(callee) = call.callee() else {
             return Ty::Poison;
@@ -319,8 +426,8 @@ impl<'a> ExprTyper<'a> {
                 if let Some(sig) = builtin_fn_sig(&callee_name) {
                     // Type-check positional arguments
                     self.check_call_args(call, &sig);
-                    // Infer all argument expressions
-                    self.infer_call_arg_exprs(call);
+                    self.check_keyword_args(call, &sig);
+                    self.infer_extra_call_args(call, sig.positional_params.len());
                     return sig.ret.clone();
                 }
 
@@ -337,7 +444,9 @@ impl<'a> ExprTyper<'a> {
                         && def.kind == DefKind::Function
                     {
                         if let Some(sig) = self.types.range_to_fn_sig.get(&def.name_range) {
-                            self.infer_call_arg_exprs(call);
+                            self.check_call_args(call, sig);
+                            self.check_keyword_args(call, sig);
+                            self.infer_extra_call_args(call, sig.positional_params.len());
                             return sig.ret.clone();
                         }
                     }
@@ -361,7 +470,8 @@ impl<'a> ExprTyper<'a> {
                     if let Some(method_sig) = builtin_method(builtin, &method_name) {
                         // Type-check method arguments
                         self.check_method_args(call, &method_sig.params, &method_name);
-                        self.infer_call_arg_exprs(call);
+                        self.infer_extra_call_args(call, method_sig.params.len());
+                        self.infer_all_keyword_arg_exprs(call);
                         return method_sig.ret.clone();
                     }
 
@@ -391,6 +501,18 @@ impl<'a> ExprTyper<'a> {
                 self.infer_expr(&arg_expr);
             }
         }
+        self.infer_all_keyword_arg_exprs(call);
+    }
+
+    fn infer_extra_call_args(&mut self, call: &CallExpr, checked_positional: usize) {
+        for arg in call.args().skip(checked_positional) {
+            if let Some(arg_expr) = arg.expr() {
+                self.infer_expr(&arg_expr);
+            }
+        }
+    }
+
+    fn infer_all_keyword_arg_exprs(&mut self, call: &CallExpr) {
         for kw_arg in call.keyword_args() {
             if let Some(arg_expr) = kw_arg.expr() {
                 self.infer_expr(&arg_expr);
@@ -408,9 +530,9 @@ impl<'a> ExprTyper<'a> {
         // Check positional args against function-typed parameters
         for (arg, param) in call.args().zip(sig.positional_params.iter()) {
             if let vx_types::Ty::Function(fn_ty) = &param.ty {
-                let arg_expr = arg.expr();
-                if let Some(Expr::Closure(closure)) = arg_expr.as_ref() {
-                    self.bind_closure_params(closure, &fn_ty.params);
+                let arg_expr = arg.expr().map(Self::peel_parens);
+                if let Some(Expr::Closure(closure)) = arg_expr {
+                    self.bind_closure_params(&closure, &fn_ty.params);
                 }
             }
         }
@@ -422,9 +544,9 @@ impl<'a> ExprTyper<'a> {
             let kw_param = sig.keyword_params.iter().find(|p| p.name == kw_name.text());
             if let Some(kw_param) = kw_param {
                 if let vx_types::Ty::Function(fn_ty) = &kw_param.ty {
-                    let kw_expr = kw.expr();
-                    if let Some(Expr::Closure(closure)) = kw_expr.as_ref() {
-                        self.bind_closure_params(closure, &fn_ty.params);
+                    let kw_expr = kw.expr().map(Self::peel_parens);
+                    if let Some(Expr::Closure(closure)) = kw_expr {
+                        self.bind_closure_params(&closure, &fn_ty.params);
                     }
                 }
             }
@@ -435,9 +557,9 @@ impl<'a> ExprTyper<'a> {
                 .find(|p| p.name == kw_name.text());
             if let Some(pos_param) = pos_param {
                 if let vx_types::Ty::Function(fn_ty) = &pos_param.ty {
-                    let kw_expr = kw.expr();
-                    if let Some(Expr::Closure(closure)) = kw_expr.as_ref() {
-                        self.bind_closure_params(closure, &fn_ty.params);
+                    let kw_expr = kw.expr().map(Self::peel_parens);
+                    if let Some(Expr::Closure(closure)) = kw_expr {
+                        self.bind_closure_params(&closure, &fn_ty.params);
                     }
                 }
             }
@@ -469,6 +591,33 @@ impl<'a> ExprTyper<'a> {
                         });
                     }
                 }
+            }
+        }
+    }
+
+    fn check_keyword_args(&mut self, call: &CallExpr, sig: &FnSig) {
+        for kw in call.keyword_args() {
+            let Some(name) = kw.name().map(|token| token.text().to_string()) else {
+                continue;
+            };
+            let Some(arg_expr) = kw.expr() else {
+                continue;
+            };
+            let Some(param) = sig.keyword_params.iter().find(|param| param.name == name) else {
+                self.infer_expr(&arg_expr);
+                continue;
+            };
+            let arg_ty = self.infer_expr(&arg_expr);
+            if !arg_ty.is_poison() && !param.ty.is_poison() && !types_compatible(&arg_ty, &param.ty)
+            {
+                self.errors.push(TypeError {
+                    range: arg_expr.syntax().text_range(),
+                    kind: TypeErrorKind::ArgTypeMismatch {
+                        param_name: param.name.clone(),
+                        expected: param.ty.clone(),
+                        found: arg_ty,
+                    },
+                });
             }
         }
     }
@@ -512,12 +661,15 @@ impl<'a> ExprTyper<'a> {
         // Check builtin type methods/fields (property access without call)
         if let Ty::Builtin(ref builtin) = receiver_ty {
             if let Some(method_sig) = builtin_method(builtin, field_name) {
-                if method_sig.params.is_empty() {
-                    // Property-style access (no args needed)
-                    return method_sig.ret.clone();
-                }
-                // It's a method — return a function type (will be called)
-                return Ty::Poison;
+                return Ty::Function(vx_types::FunctionTy {
+                    params: method_sig
+                        .params
+                        .into_iter()
+                        .map(|param| param.ty)
+                        .collect(),
+                    ret: Box::new(method_sig.ret),
+                    capabilities: method_sig.capabilities,
+                });
             }
         }
 
@@ -574,6 +726,66 @@ impl<'a> ExprTyper<'a> {
             self.infer_expr(&body);
         }
         Ty::Poison
+    }
+
+    fn infer_where(&mut self, where_expr: &WhereExpr) -> Ty {
+        let Some(callee) = where_expr.callee() else {
+            return Ty::Poison;
+        };
+
+        if !matches!(callee, Expr::Call(_))
+            && let Some(Expr::Record(record)) = where_expr.keywords()
+        {
+            let sig = match &callee {
+                Expr::NameRef(name_ref) => self.sig_for_name_ref(name_ref),
+                _ => None,
+            };
+            if let Some(sig) = sig {
+                self.populate_record_callback_param_types(&record, &sig);
+                self.check_record_keyword_args(&record, &sig);
+                return sig.ret.clone();
+            }
+        }
+
+        let callee_ty = self.infer_expr(&callee);
+        if !matches!(callee, Expr::Call(_))
+            && let Some(keywords) = where_expr.keywords()
+        {
+            self.infer_expr(&keywords);
+        }
+        callee_ty
+    }
+
+    fn infer_invoke(&mut self, invoke: &InvokeExpr) -> Ty {
+        let Some(callee) = invoke.callee() else {
+            return Ty::Poison;
+        };
+
+        match &callee {
+            Expr::Field(field) => {
+                let receiver_ty = field
+                    .receiver()
+                    .map(|expr| self.infer_expr(&expr))
+                    .unwrap_or(Ty::Poison);
+                let Some(method_name) = field.field_name().map(|token| token.text().to_string())
+                else {
+                    return Ty::Poison;
+                };
+
+                if let Ty::Builtin(ref builtin) = receiver_ty
+                    && let Some(method_sig) = builtin_method(builtin, &method_name)
+                    && method_sig.params.is_empty()
+                {
+                    return method_sig.ret;
+                }
+
+                Ty::Poison
+            }
+            _ => match self.infer_expr(&callee) {
+                Ty::Function(fn_ty) if fn_ty.params.is_empty() => (*fn_ty.ret).clone(),
+                _ => Ty::Poison,
+            },
+        }
     }
 
     fn infer_match(&mut self, m: &MatchExpr) -> Ty {
@@ -854,6 +1066,19 @@ impl<'a> ExprTyper<'a> {
             Box::new(key_ty.unwrap_or(Ty::Poison)),
             Box::new(val_ty.unwrap_or(Ty::Poison)),
         )
+    }
+
+    fn infer_record(&mut self, record: &RecordExpr) -> Ty {
+        for field in record.fields() {
+            if let Some(spread) = field.spread() {
+                if let Some(expr) = spread.expr() {
+                    self.infer_expr(&expr);
+                }
+            } else if let Some(expr) = field.value() {
+                self.infer_expr(&expr);
+            }
+        }
+        Ty::Poison
     }
 
     fn infer_struct_literal(&mut self, sl: &StructLiteralExpr) -> Ty {

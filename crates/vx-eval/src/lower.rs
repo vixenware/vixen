@@ -124,7 +124,11 @@ fn lower_expr_with_ctx(expr: &AstExpr, ctx: &mut LowerCtx) -> Option<instr::Expr
         AstExpr::Prefix(pre) => lower_prefix(pre, ctx),
         AstExpr::Block(block) => Some(instr::Expr::Block(lower_block_with_ctx(block, ctx))),
         AstExpr::If(if_expr) => lower_if(if_expr, ctx),
+        AstExpr::Paren(paren) => paren
+            .expr()
+            .and_then(|expr| lower_expr_with_ctx(&expr, ctx)),
         AstExpr::Call(call) => lower_call(call, ctx),
+        AstExpr::Where(_) | AstExpr::Invoke(_) | AstExpr::Record(_) => None,
         AstExpr::Field(field) => lower_field(field, ctx),
         AstExpr::Fail(fail) => lower_fail(fail, ctx),
         AstExpr::StructLiteral(lit) => lower_struct_literal(lit, ctx),

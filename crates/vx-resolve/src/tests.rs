@@ -389,9 +389,9 @@ fn pure_closure_satisfies_any_mask() {
     let result = check_caps(
         r#"
 fn main() {
-    build((path, args, env) => path);
-    stabilize(() => "w", (w) => "r");
-    exec(["echo"]; observer: (proc, tree) => [], verifier: (host) => {});
+    build ((path, args, env) => path);
+    stabilize (() => "w") ((w) => "r");
+    exec (["echo"]) where { observer: (proc, tree) => [], verifier: (host) => {} };
 }
 "#,
     );
@@ -402,18 +402,20 @@ fn main() {
     );
 }
 
-// r[cap.mask] — observer that uses #host-only APIs is rejected
+// r[cap.mask] — observer that uses #host authority is rejected
 #[test]
 fn observer_using_host_api_rejected() {
     let result = check_caps(
         r#"
+fn probe() #host {}
+
 fn main() {
-    exec(["gcc", "main.c"];
+    exec (["gcc"]) where {
         observer: (proc, tree) => {
-            let path = which("gcc");
+            probe!;
             []
         },
-    );
+    };
 }
 "#,
     );
@@ -443,11 +445,11 @@ fn verifier_using_discover_rejected() {
     let result = check_caps(
         r#"
 fn main() {
-    exec(["gcc", "main.c"];
+    exec (["gcc"]) where {
         verifier: (host) => {
-            discover_exec("default", ["gcc", "--version"]);
+            discover_exec "default" (["gcc", "--version"]);
         },
-    );
+    };
 }
 "#,
     );
@@ -474,7 +476,7 @@ fn stabilize_witness_cannot_discover() {
 fn probe() #discover {}
 
 fn main() {
-    stabilize(() => { probe() }, (w) => w);
+    stabilize (() => { probe! }) ((w) => w);
 }
 "#,
     );
@@ -499,7 +501,7 @@ fn stabilize_resolve_cannot_fs() {
     let result = check_caps(
         r#"
 fn main() {
-    stabilize(() => "w", (w) => { read_file("foo") });
+    stabilize (() => "w") ((w) => { read_file "foo" });
 }
 "#,
     );
@@ -537,15 +539,13 @@ fn foo() #network {}
 fn cap_propagation_through_call() {
     let result = check_caps(
         r#"
-fn read_config() #fs {}
-
 fn main() {
-    exec(["echo"];
+    exec (["echo"]) where {
         observer: (proc, tree) => {
-            read_config();
+            read_file "vixen.toml";
             []
         },
-    );
+    };
 }
 "#,
     );
@@ -586,8 +586,8 @@ fn build_entry_cannot_discover() {
     let result = check_caps(
         r#"
 fn main() {
-    build((path, args, env) => {
-        discover_exec("default", ["gcc", "--version"]);
+    build ((path, args, env) => {
+        discover_exec "default" (["gcc", "--version"]);
         path
     });
 }
@@ -611,12 +611,12 @@ fn observer_method_call_host_rejected() {
     let result = check_caps(
         r#"
 fn main() {
-    exec(["gcc", "main.c"];
+    exec (["gcc"]) where {
         observer: (proc, tree) => {
-            host.which("gcc");
+            host.which "gcc";
             []
         },
-    );
+    };
 }
 "#,
     );
@@ -693,11 +693,11 @@ fn find_expr_type(result: &crate::TypeCheckResult, src: &str, needle: &str) -> O
 fn discover_exec_returns_discovery_process() {
     let src = r#"
 fn probe() #discover {
-    discover_exec("default", ["gcc", "--version"])
+    discover_exec "default" (["gcc", "--version"])
 }
 "#;
     let result = type_check(src);
-    let ty = find_expr_type(&result, src, r#"discover_exec("default""#);
+    let ty = find_expr_type(&result, src, r#"discover_exec "default""#);
     assert_eq!(ty, Some(Ty::Builtin(Builtin::DiscoveryProcess)));
 }
 
@@ -706,15 +706,15 @@ fn probe() #discover {
 fn host_read_returns_blob() {
     let src = r#"
 fn main() {
-    exec(["echo"];
+    exec (["echo"]) where {
         verifier: (host) => {
-            host.read("foo")
+            host.read "foo"
         },
-    );
+    };
 }
 "#;
     let result = type_check(src);
-    let ty = find_expr_type(&result, src, r#"host.read("foo")"#);
+    let ty = find_expr_type(&result, src, r#"host.read "foo""#);
     assert_eq!(ty, Some(Ty::Builtin(Builtin::Blob)));
 }
 
@@ -723,15 +723,15 @@ fn main() {
 fn host_which_returns_optional_string() {
     let src = r#"
 fn main() {
-    exec(["echo"];
+    exec (["echo"]) where {
         verifier: (host) => {
-            host.which("gcc")
+            host.which "gcc"
         },
-    );
+    };
 }
 "#;
     let result = type_check(src);
-    let ty = find_expr_type(&result, src, r#"host.which("gcc")"#);
+    let ty = find_expr_type(&result, src, r#"host.which "gcc""#);
     assert_eq!(
         ty,
         Some(Ty::Optional(Box::new(Ty::Scalar(vx_types::Scalar::String))))
@@ -743,16 +743,16 @@ fn main() {
 fn observer_params_typed() {
     let src = r#"
 fn main() {
-    exec(["echo"];
+    exec (["echo"]) where {
         observer: (proc, tree) => {
-            proc.exit_code
+            proc.exit_code!
         },
-    );
+    };
 }
 "#;
     let result = type_check(src);
-    // proc.exit_code should be U64
-    let ty = find_expr_type(&result, src, "proc.exit_code");
+    // proc.exit_code! should be U64
+    let ty = find_expr_type(&result, src, "proc.exit_code!");
     assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::U64)));
 }
 
@@ -761,11 +761,11 @@ fn main() {
 fn host_read_int_arg_type_error() {
     let src = r#"
 fn main() {
-    exec(["echo"];
+    exec (["echo"]) where {
         verifier: (host) => {
-            host.read(123)
+            host.read 123
         },
-    );
+    };
 }
 "#;
     let result = type_check(src);
@@ -802,11 +802,11 @@ fn main() {
 fn read_file_returns_blob() {
     let src = r#"
 fn main() #fs {
-    read_file("hello.txt")
+    read_file "hello.txt"
 }
 "#;
     let result = type_check(src);
-    let ty = find_expr_type(&result, src, r#"read_file("hello.txt")"#);
+    let ty = find_expr_type(&result, src, r#"read_file "hello.txt""#);
     assert_eq!(ty, Some(Ty::Builtin(Builtin::Blob)));
 }
 
@@ -815,11 +815,11 @@ fn main() #fs {
 fn executor_class_returns_executor_class() {
     let src = r#"
 fn main() {
-    executor_class("default")
+    executor_class "default"
 }
 "#;
     let result = type_check(src);
-    let ty = find_expr_type(&result, src, r#"executor_class("default")"#);
+    let ty = find_expr_type(&result, src, r#"executor_class "default""#);
     assert_eq!(ty, Some(Ty::Builtin(Builtin::ExecutorClass)));
 }
 
@@ -828,11 +828,9 @@ fn main() {
 fn verifier_host_param_typed() {
     let src = r#"
 fn main() {
-    exec(["echo"];
-        verifier: (host) => {
-            host
-        },
-    );
+    exec (["echo"]) where {
+        verifier: (host) => host,
+    };
 }
 "#;
     let result = type_check(src);
@@ -858,8 +856,8 @@ fn cap_check_derives_fs_from_builtin_sig() {
     let result = check_caps(
         r#"
 fn main() {
-    build((path, args, env) => {
-        read_file("foo");
+    build ((path, args, env) => {
+        read_file "foo";
     });
 }
 "#,
@@ -873,8 +871,8 @@ fn cap_check_derives_discover_from_builtin_sig() {
     let result = check_caps(
         r#"
 fn main() {
-    build((path, args, env) => {
-        discover_exec("gcc", ["gcc"]);
+    build ((path, args, env) => {
+        discover_exec "gcc" (["gcc"]);
     });
 }
 "#,
@@ -897,15 +895,15 @@ fn cap_check_method_caps_from_builtin_method() {
     let result = check_caps(
         r#"
 fn main() {
-    exec(["gcc", "main.c"];
+    exec (["gcc"]) where {
         observer: (proc, tree) => {
-            proc.exit_code();
+            proc.exit_code!;
             []
         },
         verifier: (host) => {
-            host.which("gcc");
+            host.which "gcc";
         },
-    );
+    };
 }
 "#,
     );
@@ -927,14 +925,14 @@ fn let_binding_propagates_type() {
     let result = type_check_src(
         r#"
 fn main() {
-    build((path, args, env) => {
-        let b = read_file("foo");
-        b.to_string();
+    build ((path, args, env) => {
+        let b = read_file "foo";
+        b.to_string!;
     });
 }
 "#,
     );
-    // b should have type Blob, so b.to_string() should not produce a NoSuchMethod error
+    // b should have type Blob, so b.to_string! should not produce a NoSuchMethod error
     assert!(
         result.errors.is_empty(),
         "expected no type errors, got: {:?}",
@@ -956,9 +954,9 @@ fn let_binding_chain_propagates() {
     let result = type_check_src(
         r#"
 fn main() {
-    build((path, args, env) => {
-        let b = read_file("foo");
-        let s = b.to_string();
+    build ((path, args, env) => {
+        let b = read_file "foo";
+        let s = b.to_string!;
     });
 }
 "#,
@@ -981,9 +979,9 @@ fn builtin_names_resolve_without_error() {
     let file = parse_file(
         r#"
 fn main() {
-    build((path, args, env) => {
-        read_file("foo");
-        glob("*.rs");
+    build ((path, args, env) => {
+        read_file "foo";
+        glob "*.rs";
     });
 }
 "#,
@@ -1114,8 +1112,8 @@ fn array_of_builtins() {
     let result = type_check_src(
         r#"
 fn main() {
-    build((path, args, env) => {
-        let blobs = [read_file("a"), read_file("b")];
+    build ((path, args, env) => {
+        let blobs = [read_file "a", read_file "b"];
     });
 }
 "#,

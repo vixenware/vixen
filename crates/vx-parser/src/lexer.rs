@@ -282,6 +282,7 @@ impl<'a> Lexer<'a> {
                 SyntaxKind::WITH_EQ
             }
             "with" => SyntaxKind::WITH_KW,
+            "where" => SyntaxKind::WHERE_KW,
             "is" => SyntaxKind::IS_KW,
             "as" => SyntaxKind::AS_KW,
             "import" => SyntaxKind::IMPORT_KW,

@@ -492,6 +492,7 @@ impl ScopeTreeBuilder {
                     | SyntaxKind::MATCH_ARM
                     | SyntaxKind::ARG_LIST
                     | SyntaxKind::ARG
+                    | SyntaxKind::MAP_ENTRY
                     | SyntaxKind::KEYWORD_ARG
             ) {
                 // Recurse into structural children

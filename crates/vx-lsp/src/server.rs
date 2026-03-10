@@ -140,9 +140,9 @@ impl LanguageServer for VxLanguageServer {
                 }),
                 signature_help_provider: Some(SignatureHelpOptions {
                     trigger_characters: Some(vec![
-                        "(".to_string(),
-                        ",".to_string(),
-                        ";".to_string(),
+                        " ".to_string(),
+                        "{".to_string(),
+                        ":".to_string(),
                     ]),
                     retrigger_characters: None,
                     work_done_progress_options: Default::default(),
@@ -769,6 +769,13 @@ impl LanguageServer for VxLanguageServer {
                     Some(c) => c,
                     None => continue,
                 };
+                if call
+                    .syntax()
+                    .parent()
+                    .is_some_and(|parent| parent.kind() == SyntaxKind::CALL_EXPR)
+                {
+                    continue;
+                }
 
                 // Get callee — must be a simple name reference
                 let callee = match call.callee() {
@@ -818,21 +825,7 @@ impl LanguageServer for VxLanguageServer {
                     continue;
                 };
 
-                // Find the ARG_LIST child of this CALL_EXPR
-                let arg_list = match call
-                    .syntax()
-                    .children()
-                    .find(|c| c.kind() == SyntaxKind::ARG_LIST)
-                {
-                    Some(al) => al,
-                    None => continue,
-                };
-
-                // Collect positional ARG nodes
-                let args: Vec<_> = arg_list
-                    .children()
-                    .filter(|c| c.kind() == SyntaxKind::ARG)
-                    .collect();
+                let args = call.positional_args();
 
                 // Emit hints for positional args that match named parameters
                 for (i, arg) in args.iter().enumerate() {
@@ -847,7 +840,7 @@ impl LanguageServer for VxLanguageServer {
                         continue;
                     }
 
-                    let pos = state.line_index.position(arg.text_range().start());
+                    let pos = state.line_index.position(arg.syntax().text_range().start());
                     hints.push(InlayHint {
                         position: Position::new(pos.line, pos.col),
                         label: InlayHintLabel::String(format!("{param_name}:")),
@@ -919,44 +912,11 @@ impl LanguageServer for VxLanguageServer {
             let root = state.parsed.tree().syntax().clone();
             let token = root.token_at_offset(offset).left_biased()?;
 
-            // Walk up to find enclosing ARG_LIST inside a CALL_EXPR
-            let mut node = token.parent();
-            let mut arg_list_node = None;
-            while let Some(n) = node {
-                if n.kind() == SyntaxKind::ARG_LIST {
-                    arg_list_node = Some(n.clone());
-                    break;
-                }
-                node = n.parent();
-            }
-            let arg_list_node = arg_list_node?;
-            let call_node = arg_list_node.parent()?;
-            if call_node.kind() != SyntaxKind::CALL_EXPR {
-                return None;
-            }
-
-            // Determine active parameter: count commas and semicolons before cursor
-            let mut active_param = 0u32;
-            let mut in_keyword_section = false;
-            for child in arg_list_node.children_with_tokens() {
-                let child_end = child.text_range().end();
-                if child_end > offset {
-                    break;
-                }
-                match child {
-                    rowan::NodeOrToken::Token(ref t) if t.kind() == SyntaxKind::COMMA => {
-                        active_param += 1;
-                    }
-                    rowan::NodeOrToken::Token(ref t) if t.kind() == SyntaxKind::SEMICOLON => {
-                        in_keyword_section = true;
-                        active_param += 1;
-                    }
-                    _ => {}
-                }
-            }
-
-            // Get callee expr via the first child expr of CALL_EXPR
-            let callee_expr = call_node.children().find_map(vx::Expr::cast)?;
+            let (call_expr, where_expr) = enclosing_call_context(&token)?;
+            let (callee_expr, positional_args) = match &call_expr {
+                vx::Expr::Call(call) => (call.callee()?, call.positional_args()),
+                expr => (expr.clone(), Vec::new()),
+            };
 
             // Build parameter info — either from user FnDecl or builtin sig
             let mut params = Vec::new();
@@ -1146,11 +1106,10 @@ impl LanguageServer for VxLanguageServer {
             let label = label_parts.concat();
 
             // Clamp active_param if past keyword args, stay in bounds
-            let _ = in_keyword_section;
             let active_param = if params.is_empty() {
                 None
             } else {
-                Some(active_param.min(params.len() as u32 - 1))
+                active_call_param(&positional_args, where_expr.as_ref(), offset, &params)
             };
 
             Some(SignatureHelp {
@@ -1359,12 +1318,9 @@ impl LanguageServer for VxLanguageServer {
                         .is_some_and(|d| d.name_range == target_def.name_range)
                 })
                 .filter(|r| {
-                    // Only include refs that are callees of a CALL_EXPR
+                    // Only include refs that are the root callee of an application chain.
                     let token = root.token_at_offset(r.ref_range.start()).right_biased();
-                    token.is_some_and(|t| {
-                        t.parent()
-                            .is_some_and(|p| p.kind() == SyntaxKind::CALL_EXPR)
-                    })
+                    token.is_some_and(|t| is_root_callee_ref(&t))
                 })
                 .collect();
 
@@ -1433,6 +1389,13 @@ impl LanguageServer for VxLanguageServer {
                     continue;
                 }
                 let call = vx::CallExpr::cast(node)?;
+                if call
+                    .syntax()
+                    .parent()
+                    .is_some_and(|parent| parent.kind() == SyntaxKind::CALL_EXPR)
+                {
+                    continue;
+                }
                 let callee = match call.callee() {
                     Some(vx::Expr::NameRef(nr)) => nr,
                     _ => continue,
@@ -2220,14 +2183,85 @@ fn levenshtein(a: &str, b: &str) -> usize {
     dp[m][n]
 }
 
-/// Check if an ARG node is a simple name reference matching the parameter name.
-/// If so, the inlay hint would be redundant (e.g., `foo(x)` where param is `x`).
-fn is_same_name_as_param(arg: &vx::SyntaxNode, param_name: &str) -> bool {
-    // An ARG node wraps an expression. Check if it's a NAME_REF_EXPR
-    // with the same name as the parameter.
-    let expr = arg.children().find_map(vx::Expr::cast);
-    match expr {
-        Some(vx::Expr::NameRef(nr)) => nr.token().is_some_and(|t| t.text() == param_name),
+fn enclosing_call_context(token: &vx::SyntaxToken) -> Option<(vx::Expr, Option<vx::WhereExpr>)> {
+    for node in token.parent_ancestors() {
+        if let Some(where_expr) = vx::WhereExpr::cast(node.clone())
+            && let Some(callee) = where_expr.callee()
+        {
+            return Some((callee, Some(where_expr)));
+        }
+        if let Some(call) = vx::CallExpr::cast(node) {
+            return Some((vx::Expr::Call(call), None));
+        }
+    }
+    None
+}
+
+fn active_call_param(
+    positional_args: &[vx::Expr],
+    where_expr: Option<&vx::WhereExpr>,
+    offset: rowan::TextSize,
+    params: &[ParameterInformation],
+) -> Option<u32> {
+    for (index, arg) in positional_args.iter().enumerate() {
+        if arg.syntax().text_range().contains_inclusive(offset) {
+            return Some(index as u32);
+        }
+    }
+
+    if let Some(where_expr) = where_expr
+        && let Some(vx::Expr::Record(record)) = where_expr.keywords()
+    {
+        let positional_count = positional_args.len() as u32;
+        let keyword_fields = record
+            .fields()
+            .filter_map(|field| {
+                Some((
+                    field.name()?.text().to_string(),
+                    field.syntax().text_range(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        for (index, (_, range)) in keyword_fields.iter().enumerate() {
+            if range.contains_inclusive(offset) {
+                return Some(positional_count + index as u32);
+            }
+        }
+        if where_expr.syntax().text_range().contains_inclusive(offset) && !keyword_fields.is_empty()
+        {
+            return Some(positional_count);
+        }
+    }
+
+    if positional_args.is_empty() || params.is_empty() {
+        None
+    } else {
+        Some((positional_args.len() as u32 - 1).min(params.len() as u32 - 1))
+    }
+}
+
+fn is_root_callee_ref(token: &vx::SyntaxToken) -> bool {
+    let Some(name_ref) = token.parent().and_then(vx::NameRefExpr::cast) else {
+        return false;
+    };
+    for ancestor in name_ref.syntax().ancestors() {
+        if let Some(call) = vx::CallExpr::cast(ancestor.clone()) {
+            return call
+                .callee()
+                .is_some_and(|expr| expr.syntax() == name_ref.syntax());
+        }
+        if vx::WhereExpr::cast(ancestor).is_some() {
+            continue;
+        }
+    }
+    false
+}
+
+/// Check if an argument expression is a simple name reference matching the parameter name.
+/// If so, the inlay hint would be redundant (e.g., `foo x` where param is `x`).
+fn is_same_name_as_param(arg: &vx::Expr, param_name: &str) -> bool {
+    match arg {
+        vx::Expr::NameRef(nr) => nr.token().is_some_and(|t| t.text() == param_name),
         _ => false,
     }
 }

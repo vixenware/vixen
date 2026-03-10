@@ -380,6 +380,7 @@ fn classify_token(token: &SyntaxToken) -> Option<SemanticTokenType> {
         | SyntaxKind::IF_KW
         | SyntaxKind::ELSE_KW
         | SyntaxKind::WITH_KW
+        | SyntaxKind::WHERE_KW
         | SyntaxKind::IS_KW
         | SyntaxKind::AS_KW
         | SyntaxKind::IMPORT_KW
@@ -449,17 +450,15 @@ fn classify_lower_ident(token: &SyntaxToken) -> Option<SemanticTokenType> {
         // Field declarations and access
         SyntaxKind::FIELD_DECL
         | SyntaxKind::FIELD_EXPR
+        | SyntaxKind::MAP_ENTRY
         | SyntaxKind::STRUCT_LITERAL_FIELD
         | SyntaxKind::STRUCT_PATTERN_FIELD
         | SyntaxKind::FIELD_ASSIGN_TARGET
         | SyntaxKind::UPDATE_FIELD
         | SyntaxKind::KEYWORD_ARG => Some(SemanticTokenType::Property),
 
-        // Call expressions — the callee identifier is a function
-        SyntaxKind::CALL_EXPR | SyntaxKind::PARTIAL_APP_EXPR => Some(SemanticTokenType::Function),
-
-        // Name references — could be variable or function, default to variable
-        SyntaxKind::NAME_REF_EXPR => Some(SemanticTokenType::Variable),
+        // Name references are functions when they are the root callee of an application chain.
+        SyntaxKind::NAME_REF_EXPR => classify_name_ref_context(&parent),
 
         // Capability tags
         SyntaxKind::CAPABILITY_TAG => Some(SemanticTokenType::Type),
@@ -473,6 +472,28 @@ fn classify_lower_ident(token: &SyntaxToken) -> Option<SemanticTokenType> {
         // Binding patterns — check if inside a parameter or a let binding
         SyntaxKind::BINDING_PATTERN | SyntaxKind::AT_PATTERN => classify_binding_context(&parent),
 
+        _ => Some(SemanticTokenType::Variable),
+    }
+}
+
+fn classify_name_ref_context(name_ref: &SyntaxNode) -> Option<SemanticTokenType> {
+    let Some(parent) = name_ref.parent() else {
+        return Some(SemanticTokenType::Variable);
+    };
+
+    match parent.kind() {
+        SyntaxKind::CALL_EXPR | SyntaxKind::WHERE_EXPR | SyntaxKind::INVOKE_EXPR => {
+            if parent
+                .children()
+                .filter_map(crate::Expr::cast)
+                .next()
+                .is_some_and(|expr| expr.syntax() == name_ref)
+            {
+                Some(SemanticTokenType::Function)
+            } else {
+                Some(SemanticTokenType::Variable)
+            }
+        }
         _ => Some(SemanticTokenType::Variable),
     }
 }

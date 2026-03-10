@@ -36,6 +36,32 @@ impl<N: AstNode> Iterator for AstChildren<N> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CallArgExpr {
+    expr: Expr,
+}
+
+impl CallArgExpr {
+    pub fn expr(&self) -> Option<Expr> {
+        Some(self.expr.clone())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CallKeywordArg {
+    entry: MapEntry,
+}
+
+impl CallKeywordArg {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        self.entry.name()
+    }
+
+    pub fn expr(&self) -> Option<Expr> {
+        self.entry.value()
+    }
+}
+
 macro_rules! ast_node {
     ($name:ident, $kind:path) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -81,8 +107,11 @@ ast_node!(TypePath, SyntaxKind::TYPE_PATH);
 ast_node!(BlockExpr, SyntaxKind::BLOCK_EXPR);
 ast_node!(ClosureExpr, SyntaxKind::CLOSURE_EXPR);
 ast_node!(ClosureParamClause, SyntaxKind::CLOSURE_PARAM_CLAUSE);
+ast_node!(ParenExpr, SyntaxKind::PAREN_EXPR);
 ast_node!(PartialAppExpr, SyntaxKind::PARTIAL_APP_EXPR);
 ast_node!(CallExpr, SyntaxKind::CALL_EXPR);
+ast_node!(WhereExpr, SyntaxKind::WHERE_EXPR);
+ast_node!(InvokeExpr, SyntaxKind::INVOKE_EXPR);
 ast_node!(ArgList, SyntaxKind::ARG_LIST);
 ast_node!(Arg, SyntaxKind::ARG);
 ast_node!(KeywordArg, SyntaxKind::KEYWORD_ARG);
@@ -93,6 +122,7 @@ ast_node!(MatchExpr, SyntaxKind::MATCH_EXPR);
 ast_node!(MatchArm, SyntaxKind::MATCH_ARM);
 ast_node!(ArrayExpr, SyntaxKind::ARRAY_EXPR);
 ast_node!(SpreadExpr, SyntaxKind::SPREAD_EXPR);
+ast_node!(RecordExpr, SyntaxKind::RECORD_EXPR);
 ast_node!(MapExpr, SyntaxKind::MAP_EXPR);
 ast_node!(MapEntry, SyntaxKind::MAP_ENTRY);
 ast_node!(StructLiteralExpr, SyntaxKind::STRUCT_LITERAL_EXPR);
@@ -179,12 +209,16 @@ impl AstNode for Item {
 pub enum Expr {
     Block(BlockExpr),
     Closure(ClosureExpr),
+    Paren(ParenExpr),
     PartialApp(PartialAppExpr),
     Call(CallExpr),
+    Where(WhereExpr),
+    Invoke(InvokeExpr),
     Index(IndexExpr),
     If(IfExpr),
     Match(MatchExpr),
     Array(ArrayExpr),
+    Record(RecordExpr),
     Map(MapExpr),
     StructLiteral(StructLiteralExpr),
     Field(FieldExpr),
@@ -331,12 +365,16 @@ impl AstNode for Expr {
             kind,
             SyntaxKind::BLOCK_EXPR
                 | SyntaxKind::CLOSURE_EXPR
+                | SyntaxKind::PAREN_EXPR
                 | SyntaxKind::PARTIAL_APP_EXPR
                 | SyntaxKind::CALL_EXPR
+                | SyntaxKind::WHERE_EXPR
+                | SyntaxKind::INVOKE_EXPR
                 | SyntaxKind::INDEX_EXPR
                 | SyntaxKind::IF_EXPR
                 | SyntaxKind::MATCH_EXPR
                 | SyntaxKind::ARRAY_EXPR
+                | SyntaxKind::RECORD_EXPR
                 | SyntaxKind::MAP_EXPR
                 | SyntaxKind::STRUCT_LITERAL_EXPR
                 | SyntaxKind::FIELD_EXPR
@@ -358,12 +396,16 @@ impl AstNode for Expr {
         match node.kind() {
             SyntaxKind::BLOCK_EXPR => Some(Self::Block(BlockExpr::cast(node)?)),
             SyntaxKind::CLOSURE_EXPR => Some(Self::Closure(ClosureExpr::cast(node)?)),
+            SyntaxKind::PAREN_EXPR => Some(Self::Paren(ParenExpr::cast(node)?)),
             SyntaxKind::PARTIAL_APP_EXPR => Some(Self::PartialApp(PartialAppExpr::cast(node)?)),
             SyntaxKind::CALL_EXPR => Some(Self::Call(CallExpr::cast(node)?)),
+            SyntaxKind::WHERE_EXPR => Some(Self::Where(WhereExpr::cast(node)?)),
+            SyntaxKind::INVOKE_EXPR => Some(Self::Invoke(InvokeExpr::cast(node)?)),
             SyntaxKind::INDEX_EXPR => Some(Self::Index(IndexExpr::cast(node)?)),
             SyntaxKind::IF_EXPR => Some(Self::If(IfExpr::cast(node)?)),
             SyntaxKind::MATCH_EXPR => Some(Self::Match(MatchExpr::cast(node)?)),
             SyntaxKind::ARRAY_EXPR => Some(Self::Array(ArrayExpr::cast(node)?)),
+            SyntaxKind::RECORD_EXPR => Some(Self::Record(RecordExpr::cast(node)?)),
             SyntaxKind::MAP_EXPR => Some(Self::Map(MapExpr::cast(node)?)),
             SyntaxKind::STRUCT_LITERAL_EXPR => {
                 Some(Self::StructLiteral(StructLiteralExpr::cast(node)?))
@@ -390,12 +432,16 @@ impl AstNode for Expr {
         match self {
             Self::Block(node) => node.syntax(),
             Self::Closure(node) => node.syntax(),
+            Self::Paren(node) => node.syntax(),
             Self::PartialApp(node) => node.syntax(),
             Self::Call(node) => node.syntax(),
+            Self::Where(node) => node.syntax(),
+            Self::Invoke(node) => node.syntax(),
             Self::Index(node) => node.syntax(),
             Self::If(node) => node.syntax(),
             Self::Match(node) => node.syntax(),
             Self::Array(node) => node.syntax(),
+            Self::Record(node) => node.syntax(),
             Self::Map(node) => node.syntax(),
             Self::StructLiteral(node) => node.syntax(),
             Self::Field(node) => node.syntax(),
@@ -721,6 +767,12 @@ impl ClosureExpr {
     }
 }
 
+impl ParenExpr {
+    pub fn expr(&self) -> Option<Expr> {
+        child(self.syntax())
+    }
+}
+
 impl PartialAppExpr {
     pub fn callee(&self) -> Option<Expr> {
         child(self.syntax())
@@ -729,15 +781,60 @@ impl PartialAppExpr {
 
 impl CallExpr {
     pub fn callee(&self) -> Option<Expr> {
-        self.syntax().children().find_map(Expr::cast)
+        self.root_callee()
     }
 
-    pub fn args(&self) -> AstChildren<Arg> {
-        nested_children(self.syntax(), &[SyntaxKind::ARG_LIST])
+    pub fn immediate_callee(&self) -> Option<Expr> {
+        nth_expr(self.syntax(), 0)
     }
 
-    pub fn keyword_args(&self) -> AstChildren<KeywordArg> {
-        nested_children(self.syntax(), &[SyntaxKind::ARG_LIST])
+    pub fn arg(&self) -> Option<Expr> {
+        nth_expr(self.syntax(), 1)
+    }
+
+    pub fn root_callee(&self) -> Option<Expr> {
+        let mut current = self.clone();
+        loop {
+            match current.immediate_callee()? {
+                Expr::Call(call) => current = call,
+                expr => return Some(expr),
+            }
+        }
+    }
+
+    pub fn positional_args(&self) -> Vec<Expr> {
+        let mut args = Vec::new();
+        collect_call_args(self, &mut args);
+        args
+    }
+
+    pub fn args(&self) -> IntoIter<CallArgExpr> {
+        self.positional_args()
+            .into_iter()
+            .map(|expr| CallArgExpr { expr })
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    pub fn keyword_args(&self) -> IntoIter<CallKeywordArg> {
+        self.keyword_record()
+            .map(|record| {
+                record
+                    .fields()
+                    .filter(|entry| entry.name().is_some())
+                    .map(|entry| CallKeywordArg { entry })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+            .into_iter()
+    }
+
+    fn keyword_record(&self) -> Option<RecordExpr> {
+        let where_expr = WhereExpr::cast(self.syntax().parent()?)?;
+        match where_expr.keywords()? {
+            Expr::Record(record) => Some(record),
+            _ => None,
+        }
     }
 }
 
@@ -754,6 +851,22 @@ impl KeywordArg {
 
     pub fn expr(&self) -> Option<Expr> {
         self.syntax().children().filter_map(Expr::cast).last()
+    }
+}
+
+impl WhereExpr {
+    pub fn callee(&self) -> Option<Expr> {
+        nth_expr(self.syntax(), 0)
+    }
+
+    pub fn keywords(&self) -> Option<Expr> {
+        nth_expr(self.syntax(), 1)
+    }
+}
+
+impl InvokeExpr {
+    pub fn callee(&self) -> Option<Expr> {
+        child(self.syntax())
     }
 }
 
@@ -815,6 +928,12 @@ impl SpreadExpr {
     }
 }
 
+impl RecordExpr {
+    pub fn fields(&self) -> AstChildren<MapEntry> {
+        AstChildren::new(self.syntax())
+    }
+}
+
 impl MapExpr {
     pub fn entries(&self) -> AstChildren<MapEntry> {
         AstChildren::new(self.syntax())
@@ -822,12 +941,30 @@ impl MapExpr {
 }
 
 impl MapEntry {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| kind == SyntaxKind::LOWER_IDENT)
+    }
+
+    pub fn spread(&self) -> Option<SpreadExpr> {
+        child(self.syntax())
+    }
+
     pub fn key(&self) -> Option<Expr> {
-        nth_expr(self.syntax(), 0)
+        if self.name().is_some() {
+            None
+        } else {
+            nth_expr(self.syntax(), 0)
+        }
     }
 
     pub fn value(&self) -> Option<Expr> {
-        nth_expr(self.syntax(), 1)
+        if self.spread().is_some() {
+            None
+        } else if self.name().is_some() {
+            nth_expr(self.syntax(), 0)
+        } else {
+            nth_expr(self.syntax(), 1)
+        }
     }
 }
 
@@ -1159,6 +1296,15 @@ impl CapabilityTag {
 
 fn child<N: AstNode>(parent: &SyntaxNode) -> Option<N> {
     parent.children().find_map(N::cast)
+}
+
+fn collect_call_args(call: &CallExpr, out: &mut Vec<Expr>) {
+    if let Some(Expr::Call(inner)) = call.immediate_callee() {
+        collect_call_args(&inner, out);
+    }
+    if let Some(arg) = call.arg() {
+        out.push(arg);
+    }
 }
 
 fn nth_expr(parent: &SyntaxNode, index: usize) -> Option<Expr> {

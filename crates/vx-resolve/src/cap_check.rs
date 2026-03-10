@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use rowan::TextRange;
-use vx_parser::{AstNode, CallExpr, ClosureExpr, Expr, FnDecl, Item, SourceFile, Stmt};
+use vx_parser::{AstNode, CallExpr, ClosureExpr, Expr, FnDecl, Item, SourceFile, Stmt, SyntaxKind};
 
 use vx_types::{Builtin, Capability};
 
@@ -40,19 +40,9 @@ fn caps_from_fn_ty_capabilities(caps: &[Capability]) -> CapSet {
     result
 }
 
-/// Get the capability requirements for a name, checking both builtin free
-/// functions and builtin methods (for bare calls like `which("gcc")`).
+/// Get the capability requirements for a bare function name.
 fn caps_for_name(name: &str) -> Option<CapSet> {
-    if let Some(caps) = builtins::builtin_fn_caps(name) {
-        return Some(caps);
-    }
-    // Check if this name matches a builtin method on any type
-    for receiver in ALL_BUILTINS {
-        if let Some(caps) = builtins::builtin_method_caps(receiver, name) {
-            return Some(caps);
-        }
-    }
-    None
+    builtins::builtin_fn_caps(name)
 }
 
 /// A set of capabilities, represented as a bitset.
@@ -223,6 +213,16 @@ struct CapChecker<'a> {
 }
 
 impl<'a> CapChecker<'a> {
+    fn sig_for_name(&self, name: &str) -> Option<vx_types::FnSig> {
+        builtins::builtin_fn_sig(name).or_else(|| {
+            self.types
+                .range_to_fn_sig
+                .values()
+                .find(|sig| sig.name == name)
+                .cloned()
+        })
+    }
+
     fn check_stmts_for_callbacks(&mut self, block: &vx_parser::BlockExpr) {
         for stmt in block.statements() {
             self.check_stmt_for_callbacks(&stmt);
@@ -256,7 +256,13 @@ impl<'a> CapChecker<'a> {
     fn check_expr_for_callbacks(&mut self, expr: &Expr) {
         match expr {
             Expr::Call(call) => {
-                self.check_call_callbacks(call);
+                if !call
+                    .syntax()
+                    .parent()
+                    .is_some_and(|parent| parent.kind() == SyntaxKind::WHERE_EXPR)
+                {
+                    self.check_call_callbacks(call);
+                }
                 // Also recurse into the call's sub-expressions
                 if let Some(callee) = call.callee() {
                     self.check_expr_for_callbacks(&callee);
@@ -270,6 +276,15 @@ impl<'a> CapChecker<'a> {
                     if let Some(arg_expr) = kw_arg.expr() {
                         self.check_expr_for_callbacks(&arg_expr);
                     }
+                }
+            }
+            Expr::Where(where_expr) => {
+                self.check_where_callbacks(where_expr);
+                if let Some(callee) = where_expr.callee() {
+                    self.check_expr_for_callbacks(&callee);
+                }
+                if let Some(keywords) = where_expr.keywords() {
+                    self.check_expr_for_callbacks(&keywords);
                 }
             }
             Expr::Block(block) => {
@@ -377,6 +392,85 @@ impl<'a> CapChecker<'a> {
         }
     }
 
+    fn check_where_callbacks(&mut self, where_expr: &vx_parser::WhereExpr) {
+        let (callee_name, positional_args) = match where_expr.callee() {
+            Some(Expr::Call(call)) => {
+                let callee_name = match call.callee() {
+                    Some(Expr::NameRef(name_ref)) => name_ref.token().map(|t| t.text().to_string()),
+                    _ => None,
+                };
+                (callee_name, Some(call.args().collect::<Vec<_>>()))
+            }
+            Some(Expr::NameRef(name_ref)) => (name_ref.token().map(|t| t.text().to_string()), None),
+            _ => (None, None),
+        };
+        let Some(callee_name) = callee_name else {
+            return;
+        };
+        let Some(sig) = self.sig_for_name(&callee_name) else {
+            return;
+        };
+
+        if let Some(positional_args) = positional_args {
+            for (arg, param) in positional_args.iter().zip(sig.positional_params.iter()) {
+                if let vx_types::Ty::Function(fn_ty) = &param.ty
+                    && let Some(arg_expr) = arg.expr()
+                {
+                    let mask = caps_from_fn_ty_capabilities(&fn_ty.capabilities);
+                    self.check_closure_mask(
+                        &arg_expr,
+                        mask,
+                        &format!("{} {}", callee_name, param.name),
+                    );
+                }
+            }
+        }
+
+        let Some(Expr::Record(record)) = where_expr.keywords() else {
+            return;
+        };
+
+        for field in record.fields() {
+            let Some(field_name) = field.name().map(|token| token.text().to_string()) else {
+                continue;
+            };
+            let Some(arg_expr) = field.value() else {
+                continue;
+            };
+
+            let kw_param = sig
+                .keyword_params
+                .iter()
+                .find(|param| param.name == field_name);
+            if let Some(kw_param) = kw_param
+                && let vx_types::Ty::Function(fn_ty) = &kw_param.ty
+            {
+                let mask = caps_from_fn_ty_capabilities(&fn_ty.capabilities);
+                self.check_closure_mask(
+                    &arg_expr,
+                    mask,
+                    &format!("{} {}", callee_name, kw_param.name),
+                );
+                continue;
+            }
+
+            let pos_param = sig
+                .positional_params
+                .iter()
+                .find(|param| param.name == field_name);
+            if let Some(pos_param) = pos_param
+                && let vx_types::Ty::Function(fn_ty) = &pos_param.ty
+            {
+                let mask = caps_from_fn_ty_capabilities(&fn_ty.capabilities);
+                self.check_closure_mask(
+                    &arg_expr,
+                    mask,
+                    &format!("{} {}", callee_name, pos_param.name),
+                );
+            }
+        }
+    }
+
     /// Check that a closure expression's inferred capabilities satisfy a mask.
     fn check_closure_mask(&mut self, expr: &Expr, mask: CapSet, slot_name: &str) {
         let inferred = self.infer_expr_caps(expr);
@@ -398,6 +492,10 @@ impl<'a> CapChecker<'a> {
     fn infer_expr_caps(&self, expr: &Expr) -> CapSet {
         match expr {
             Expr::Closure(closure) => self.infer_closure_caps(closure),
+            Expr::Paren(paren) => paren
+                .expr()
+                .map(|expr| self.infer_expr_caps(&expr))
+                .unwrap_or(CapSet::EMPTY),
             Expr::NameRef(name_ref) => {
                 // If this references a function with declared caps, propagate them
                 if let Some(tok) = name_ref.token() {
@@ -433,7 +531,30 @@ impl<'a> CapChecker<'a> {
                 }
                 caps
             }
+            Expr::Paren(paren) => paren
+                .expr()
+                .map(|expr| self.infer_body_caps(&expr))
+                .unwrap_or(CapSet::EMPTY),
             Expr::Call(call) => self.infer_call_caps(call),
+            Expr::Invoke(invoke) => {
+                let mut caps = CapSet::EMPTY;
+                if let Some(callee) = invoke.callee() {
+                    caps = caps.union(self.infer_body_caps(&callee));
+                    if let Expr::Field(field_expr) = callee
+                        && let Some(field_name) = field_expr.field_name()
+                    {
+                        for receiver in ALL_BUILTINS {
+                            if let Some(method_caps) =
+                                builtins::builtin_method_caps(receiver, field_name.text())
+                            {
+                                caps = caps.union(method_caps);
+                                break;
+                            }
+                        }
+                    }
+                }
+                caps
+            }
             Expr::If(if_expr) => {
                 let mut caps = CapSet::EMPTY;
                 if let Some(cond) = if_expr.condition() {

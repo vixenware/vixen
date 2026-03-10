@@ -4,7 +4,7 @@
 
 use rowan::NodeOrToken;
 
-use crate::{SyntaxKind, SyntaxNode, SyntaxToken};
+use crate::{AstNode, SyntaxKind, SyntaxNode, SyntaxToken};
 
 /// Format a Vixen source file from its syntax tree.
 pub fn format(root: &SyntaxNode) -> String {
@@ -118,6 +118,8 @@ impl Formatter {
             SyntaxKind::MATCH_EXPR => self.fmt_match_expr(node),
             SyntaxKind::MATCH_ARM => self.fmt_match_arm(node),
             SyntaxKind::CALL_EXPR => self.fmt_call_expr(node),
+            SyntaxKind::WHERE_EXPR => self.fmt_where_expr(node),
+            SyntaxKind::INVOKE_EXPR => self.fmt_invoke_expr(node),
             SyntaxKind::ARG_LIST => self.fmt_arg_list(node),
             SyntaxKind::BINARY_EXPR => self.fmt_binary_expr(node),
             SyntaxKind::PREFIX_EXPR => self.fmt_prefix_expr(node),
@@ -125,6 +127,7 @@ impl Formatter {
             SyntaxKind::INDEX_EXPR => self.fmt_index_expr(node),
             SyntaxKind::CLOSURE_EXPR => self.fmt_closure_expr(node),
             SyntaxKind::WITH_EXPR => self.fmt_with_expr(node),
+            SyntaxKind::RECORD_EXPR => self.fmt_brace_literal(node),
             SyntaxKind::STRUCT_LITERAL_EXPR => self.fmt_struct_literal_expr(node),
             SyntaxKind::STRUCT_LITERAL_BODY => self.fmt_struct_literal_body(node),
             SyntaxKind::STRUCT_LITERAL_FIELD => self.fmt_inline(node),
@@ -144,6 +147,7 @@ impl Formatter {
             SyntaxKind::TYPE_OP_EXPR => self.fmt_inline(node),
             SyntaxKind::RANGE_EXPR => self.fmt_inline(node),
             SyntaxKind::FALLIBLE_EXPR => self.fmt_inline(node),
+            SyntaxKind::PATH_LITERAL_EXPR => self.fmt_verbatim(node),
             SyntaxKind::PARTIAL_APP_EXPR => self.fmt_inline(node),
             SyntaxKind::SPREAD_EXPR => self.fmt_inline(node),
             SyntaxKind::ERROR => self.fmt_verbatim(node),
@@ -759,11 +763,33 @@ impl Formatter {
     }
 
     fn fmt_call_expr(&mut self, node: &SyntaxNode) {
-        // callee(args)
+        let parts = collect_call_parts(node);
+        for (index, part) in parts.iter().enumerate() {
+            if index > 0 {
+                self.space();
+            }
+            self.fmt_node(part);
+        }
+    }
+
+    fn fmt_where_expr(&mut self, node: &SyntaxNode) {
+        let mut children = node.children().filter_map(|child| crate::Expr::cast(child));
+        if let Some(base) = children.next() {
+            self.fmt_node(base.syntax());
+        }
+        self.space();
+        self.write("where");
+        if let Some(keywords) = children.next() {
+            self.space();
+            self.fmt_node(keywords.syntax());
+        }
+    }
+
+    fn fmt_invoke_expr(&mut self, node: &SyntaxNode) {
         for child in node.children_with_tokens() {
             match &child {
                 NodeOrToken::Token(t) if t.kind() == SyntaxKind::WHITESPACE => {}
-                NodeOrToken::Token(t) => self.fmt_token(t),
+                NodeOrToken::Token(t) => self.write(t.text()),
                 NodeOrToken::Node(n) => self.fmt_node(n),
             }
         }
@@ -960,6 +986,15 @@ impl Formatter {
         }
     }
 
+    fn fmt_brace_literal(&mut self, node: &SyntaxNode) {
+        let field_count = node.children().count();
+        if field_count <= 1 {
+            self.fmt_braces_inline(node);
+        } else {
+            self.fmt_braces_multiline(node);
+        }
+    }
+
     fn fmt_braces_inline(&mut self, node: &SyntaxNode) {
         self.write("{");
         let mut needs_space = false;
@@ -1021,62 +1056,7 @@ impl Formatter {
     }
 
     fn fmt_map_expr(&mut self, node: &SyntaxNode) {
-        // %{ key => value, ... }
-        let entry_count = node
-            .children()
-            .filter(|n| n.kind() == SyntaxKind::MAP_ENTRY)
-            .count();
-
-        if entry_count <= 1 {
-            // inline: %{ key => value }
-            for child in node.children_with_tokens() {
-                match &child {
-                    NodeOrToken::Token(t) => match t.kind() {
-                        SyntaxKind::WHITESPACE => {}
-                        SyntaxKind::R_CURLY => {
-                            self.space();
-                            self.write("}");
-                        }
-                        SyntaxKind::COMMA => {
-                            self.write(",");
-                            self.space();
-                        }
-                        _ => self.write(t.text()),
-                    },
-                    NodeOrToken::Node(n) => {
-                        self.space();
-                        self.fmt_inline(n);
-                    }
-                }
-            }
-        } else {
-            // multi-line
-            for child in node.children_with_tokens() {
-                match &child {
-                    NodeOrToken::Token(t) => match t.kind() {
-                        SyntaxKind::WHITESPACE | SyntaxKind::R_CURLY | SyntaxKind::COMMA => {}
-                        SyntaxKind::PERCENT => self.write("%"),
-                        SyntaxKind::L_CURLY => {
-                            self.write("{");
-                            self.inc_indent();
-                        }
-                        SyntaxKind::LINE_COMMENT | SyntaxKind::DOC_COMMENT => {
-                            self.newline();
-                            self.write(t.text().trim_end());
-                        }
-                        _ => self.write(t.text()),
-                    },
-                    NodeOrToken::Node(n) => {
-                        self.newline();
-                        self.fmt_inline(n);
-                        self.write(",");
-                    }
-                }
-            }
-            self.dec_indent();
-            self.newline();
-            self.write("}");
-        }
+        self.fmt_brace_literal(node);
     }
 
     fn fmt_bracket_list(&mut self, node: &SyntaxNode) {
@@ -1310,4 +1290,26 @@ fn is_binary_op(kind: SyntaxKind) -> bool {
             | SyntaxKind::AMP2
             | SyntaxKind::PIPE2
     )
+}
+
+fn collect_call_parts(node: &SyntaxNode) -> Vec<SyntaxNode> {
+    fn walk(node: &SyntaxNode, out: &mut Vec<SyntaxNode>) {
+        if node.kind() == SyntaxKind::CALL_EXPR {
+            let mut expr_children = node
+                .children()
+                .filter(|child| crate::Expr::can_cast(child.kind()));
+            if let Some(callee) = expr_children.next() {
+                walk(&callee, out);
+            }
+            if let Some(arg) = expr_children.next() {
+                out.push(arg);
+            }
+        } else {
+            out.push(node.clone());
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(node, &mut out);
+    out
 }
