@@ -86,10 +86,10 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   let class = executor_class target;
 
   let tools =
-    discover (class, (host) =>
+    discover(class, (host) =>
       [:cc, :ar]
-        |> _.to_map host.which
-        |> _.map_values ((path) => Tool { path, hash: host.hash path })
+        |> _.to_map(host.which)
+        |> _.map_values((path) => Tool { path, hash: host.hash(path) })
     );
 
   let { cc, ar } = tools;
@@ -134,7 +134,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     flags: Array[String] = [],
   } -> Tree (
     sources
-      .map ((file) =>
+      .map((file) =>
         cexec [
           cc,
           "-c",
@@ -142,15 +142,15 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
           "-o",
           @(out/{file}.o),
           "-I", @src,
-          ..includes.map ["-I", $].flatten!,
+          ..includes.map ["-I", $].flatten(),
           ..defines.map `-D${$}`,
           ..common_cflags,
           ..flags,
         ] where {
-          mounts: { @src: src, @gen: Tree generated, ..mounts },
+          mounts: { @src: src, @gen: Tree(generated), ..mounts },
         }
       )
-      .merge!
+      .merge()
   );
 
   fn static_archive(name: Path, objects: Tree) -> Tree (
@@ -168,9 +168,9 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     extract: "tar.xz",
   };
 
-  let z_have_unistd_h = cc_probe (Blob "#include <unistd.h>\nint main(void) { return 0; }\n");
-  let have_fseeko = cc_probe (Blob "#include <stdio.h>\nint main(void) { return (void*)fseeko ? 0 : 0; }\n");
-  let have_off64_t = cc_probe (Blob "#include <sys/types.h>\noff64_t x; int main(void) { return 0; }\n");
+  let z_have_unistd_h = cc_probe(Blob("#include <unistd.h>\nint main(void) { return 0; }\n"));
+  let have_fseeko = cc_probe(Blob("#include <stdio.h>\nint main(void) { return (void*)fseeko ? 0 : 0; }\n"));
+  let have_off64_t = cc_probe(Blob("#include <sys/types.h>\noff64_t x; int main(void) { return 0; }\n"));
 
   // This is the real missing primitive: template-driven file generation.
   let zconf_h =
@@ -181,13 +181,13 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     };
 
   let zlib_objects =
-    compile_objects (zlib_src, zlib_sources) where {
+    compile_objects(zlib_src, zlib_sources) where {
       generated: { @zconf.h: zconf_h },
       includes: [@gen],
     };
 
-  let zlib_static = static_archive (@lib/libz.a, zlib_objects);
-  let zlib_shared = shared_library (@lib/libz.so, zlib_objects);
+  let zlib_static = static_archive(@lib/libz.a, zlib_objects);
+  let zlib_shared = shared_library(@lib/libz.so, zlib_objects);
 
   let zlib_install = Tree {
     @include/zlib.h: zlib_src.file @zlib.h,
@@ -202,7 +202,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   };
 
   let has_ld_version_script =
-    cc_probe (Blob "void sym1(void) {} void sym2(void) {} int main(void) { return 0; }\n") where {
+    cc_probe(Blob("void sym1(void) {} void sym2(void) {} int main(void) { return 0; }\n")) where {
       link: true,
       flags: ["-Wl,--version-script=@conftest.map"],
     };
@@ -240,16 +240,16 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     };
 
   let libpng_objects =
-    compile_objects (libpng_src, libpng_core_sources ++ png_arch_sources) where {
+    compile_objects(libpng_src, libpng_core_sources ++ png_arch_sources) where {
       generated: { @pnglibconf.h: pnglibconf_h },
       mounts: { @deps/zlib: zlib_install },
       includes: [@gen, @src, @deps/zlib/include],
       defines: png_arch_defines,
     };
 
-  let libpng_static = static_archive (@lib/libpng16.a, libpng_objects);
+  let libpng_static = static_archive(@lib/libpng16.a, libpng_objects);
   let libpng_shared =
-    shared_library (@lib/libpng16.so, libpng_objects) where {
+    shared_library(@lib/libpng16.so, libpng_objects) where {
       link_flags: [
         ..if has_ld_version_script (["-Wl,--version-script=@src/libpng.vers"]) else ([]),
         @deps/zlib/lib/libz.so,

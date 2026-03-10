@@ -15,8 +15,8 @@ insert_anchor_links = "heading"
 
 > r[store.blob.utf8]
 >
-> `blob.utf8!` returns the blob's content interpreted as a UTF-8 string.
-> It poisons if the content is not valid UTF-8. `blob.utf8_lossy!`
+> `blob.utf8()` returns the blob's content interpreted as a UTF-8 string.
+> It poisons if the content is not valid UTF-8. `blob.utf8_lossy()`
 > always succeeds and replaces invalid sequences.
 
 > r[store.tree]
@@ -25,19 +25,19 @@ insert_anchor_links = "heading"
 > There is no separate "local tree" vs "store tree" type — the runtime
 > handles materialization transparently.
 >
-> `Tree map` creates a tree from a map of paths to entries.
-> `Tree path` creates a lazy tree handle rooted at a local
+> `Tree(map)` creates a tree from a map of paths to entries.
+> `Tree(path)` creates a lazy tree handle rooted at a local
 > filesystem path.
 > `Tree {}` is the empty tree.
-> `tree.subtree path` selects a subtree. `tree.glob pattern` filters by
-> glob. `tree.merge other` merges two trees (later entries win). These
+> `tree.subtree(path)` selects a subtree. `tree.glob(pattern)` filters by
+> glob. `tree.merge(other)` merges two trees (later entries win). These
 > operations are lazy.
 
 > r[store.tree.file]
 >
-> `tree.file path` returns the `Blob` at the given relative path
+> `tree.file(path)` returns the `Blob` at the given relative path
 > within the tree. Poisons if the path does not exist or points to a
-> directory. The fallible version `(tree.file path)?` returns
+> directory. The fallible version `tree.file(path)?` returns
 > `Option[Blob]`.
 
 > r[store.path]
@@ -306,9 +306,9 @@ insert_anchor_links = "heading"
 > ```
 >
 > These operations are read-only and deterministic with respect to the
-> concrete executor instance. `host.which name` poisons if the tool is
+> concrete executor instance. `host.which(name)` poisons if the tool is
 > missing; callers that want `Option[String]` can use the ordinary
-> fallible form on the call. `host.hash path` uses Blake3 and records the
+> fallible form on the call. `host.hash(path)` uses Blake3 and records the
 > observed host fact. These operations are for discovery and rechecking
 > discovered facts, not for general network access.
 
@@ -425,43 +425,43 @@ insert_anchor_links = "heading"
 
 > r[string.test]
 >
-> `s.starts_with prefix`, `s.ends_with suffix`, `s.contains needle`, and
-> `s.is_empty!` all return `Bool`.
+> `s.starts_with(prefix)`, `s.ends_with(suffix)`, `s.contains(needle)`, and
+> `s.is_empty()` all return `Bool`.
 
 > r[string.split]
 >
-> `s.split sep` returns `Array[String]`. `s.split_once sep` returns
-> `Option[(String, String)]`. `parts.join sep` on an array joins
-> elements. `s.lines!` splits by newline.
+> `s.split(sep)` returns `Array[String]`. `s.split_once(sep)` returns
+> `Option[(String, String)]`. `parts.join(sep)` on an array joins
+> elements. `s.lines()` splits by newline.
 
 > r[string.transform]
 >
-> `s.trim!`, `s.trim_start!`, and `s.trim_end!` strip whitespace.
-> `s.to_upper!` and `s.to_lower!` change case. `s.replace (old, new)`
-> replaces all occurrences. `s.replace_once (old, new)` replaces the
+> `s.trim()`, `s.trim_start()`, and `s.trim_end()` strip whitespace.
+> `s.to_upper()` and `s.to_lower()` change case. `s.replace(old, new)`
+> replaces all occurrences. `s.replace_once(old, new)` replaces the
 > first.
 
 > r[string.slice]
 >
-> `s.len!` returns byte length. `s.chars!` returns `Array[String]` of
-> Unicode grapheme clusters. `s.slice range` returns a substring.
+> `s.len()` returns byte length. `s.chars()` returns `Array[String]` of
+> Unicode grapheme clusters. `s.slice(range)` returns a substring.
 
 > r[string.parse]
 >
-> `s.parse_u64!`, `s.parse_i64!`, and `s.parse_f64!` parse strings to
+> `s.parse_u64()`, `s.parse_i64()`, and `s.parse_f64()` parse strings to
 > numbers. They poison on invalid input. The fallible forms
-> `s.parse_u64!?`, `s.parse_i64!?`, and `s.parse_f64!?` return `Option`
+> `s.parse_u64()?`, `s.parse_i64()?`, and `s.parse_f64()?` return `Option`
 > instead.
 
 > r[string.regex]
 >
-> `s.matches pattern` tests a regex. `s.find_all pattern` returns all
-> matches. `s.captures pattern` returns capture groups.
+> `s.matches(pattern)` tests a regex. `s.find_all(pattern)` returns all
+> matches. `s.captures(pattern)` returns capture groups.
 > `s.replace_regex (pattern, replacement)` replaces by regex.
 
 > r[string.path-ops]
 >
-> `s.strip_prefix prefix` and `s.strip_suffix suffix` return
+> `s.strip_prefix(prefix)` and `s.strip_suffix(suffix)` return
 > `Option[String]`.
 
 ## Evaluation model

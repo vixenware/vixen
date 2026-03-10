@@ -72,41 +72,56 @@ literal braces.
 The base call form is:
 
 ```vixen
-f x
+f(x)
 ```
 
-That one payload can itself be a tuple, array, record, map, path, or
-block:
+Vixen application is unary. A call always passes one payload value.
+That payload can itself be a tuple, array, record, map, path, or block:
 
 ```vixen
-f (x, y);
-f [x, y];
-f { left: x, right: y };
-f {
+f((x, y));
+f([x, y]);
+f({ left: x, right: y });
+f({
   @bin/lua: lua_exe,
   @lib/liblua.a: liblua,
-};
-f (
+});
+f((
   let tmp = build_input;
   tmp
-);
+));
+```
+
+When the payload is self-delimiting, you can use the shorter juxtaposed
+form instead:
+
+```vixen
+f [x, y];
+f { left: x, right: y };
+f @out/bin/lua;
+f @(out/obj/{file}.o);
+```
+
+Use parentheses for ordinary expressions and identifiers:
+
+```vixen
+host.hash(tool.path);
+files.map(compile);
 ```
 
 Chained application is left-associative:
 
 ```vixen
-f x y    // means: (f x) y
+f(x)(y);    // means: (f(x))(y)
 ```
-
-So `f x y` is only valid when `f x` itself returns a callable.
 
 To navigate the result of an application, group it first:
 
 ```vixen
-(discover_tool class).path
+(discover_tool(class)).path
 ```
 
-## 3. Fields, methods, and `!`
+## 3. Fields and methods
 
 Dot syntax is only for fields and methods.
 
@@ -115,31 +130,18 @@ x.y;
 x.y.z;
 ```
 
-Zero-arg invocation uses postfix `!`:
+Zero-arg invocation uses ordinary `()`:
 
 ```vixen
-blob.utf8!;
-get_config!;
-get_config!.database.port;
+blob.utf8();
+get_config();
+get_config().database.port;
 ```
-
-The raw form is:
-
-```vixen
-(blob.utf8)!
-```
-
-So `!` means only:
-
-- invoke a zero-arg free function
-- invoke a zero-arg bound method
-
-It does **not** mean “force now” in the demand-driven evaluator.
 
 Postfix chains are left-associative:
 
 ```vixen
-blob.utf8!.trim!
+blob.utf8().trim()
 ```
 
 ## 4. Methods and namespaces
@@ -170,7 +172,7 @@ is sugar for a function whose one payload is a tuple.
 So the call site is:
 
 ```vixen
-add (1, 2)
+add(1, 2)
 ```
 
 not:
@@ -188,7 +190,7 @@ fn distance(p1: (F64, F64), p2: (F64, F64)) -> F64
 is called as:
 
 ```vixen
-distance ((x1, y1), (x2, y2))
+distance((x1, y1), (x2, y2))
 ```
 
 ## 6. Records and keyword application
@@ -247,7 +249,7 @@ Constructors are ordinary unary callables.
 These are ordinary calls:
 
 ```vixen
-Blob "hello"
+Blob("hello")
 Point { x: 1.0, y: 2.0 }
 Tree [compile @lua.c, liblua]
 Tree {
@@ -304,20 +306,20 @@ x |> f
 means:
 
 ```vixen
-f x
+f(x)
 ```
 
 Use `_` when the piped value does not go in the default position, or
 when the stage needs to navigate from the current value:
 
 ```vixen
-get_blob my_blob |> _.utf8!
+get_blob(my_blob) |> _.utf8()
 ```
 
 means:
 
 ```vixen
-(get_blob my_blob).utf8!
+(get_blob(my_blob)).utf8()
 ```
 
 Likewise:
@@ -354,14 +356,14 @@ This:
 can be written as:
 
 ```vixen
-verify_tool (host, $)
+verify_tool(host, $)
 ```
 
 More examples:
 
 ```vixen
-files.map ($.utf8!);
-items.reduce ($0 + $1);
+files.map($.utf8());
+items.reduce($0 + $1);
 ```
 
 Use `$` only for closures.
@@ -371,7 +373,7 @@ Use `$` only for closures.
 This:
 
 ```vixen
-(args) => exec args where common
+(args) => exec(args) where common
 ```
 
 can be written as:
@@ -392,13 +394,13 @@ That means:
 This:
 
 ```vixen
-(args) => parse (load args)
+(args) => parse(load(args))
 ```
 
 can be written as:
 
 ```vixen
-load.then parse
+load.then(parse)
 ```
 
 `.then` keeps the callable's positional and keyword surface and changes
@@ -408,7 +410,7 @@ only what happens to its return value.
 
 ```vixen
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
-  let src = Tree ws;
+  let src = Tree(ws);
   let common = { observer };
   let cexec = partial exec where common;
 
@@ -417,9 +419,9 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   );
 
   let liblua =
-    all_lib_sources.map compile
-    |> _.merge!;
-  let lua_exe = link Tree [compile @lua.c, liblua];
+    all_lib_sources.map(compile)
+    |> _.merge();
+  let lua_exe = link(Tree [compile @lua.c, liblua]);
 
   Tree {
     @bin/lua: lua_exe,

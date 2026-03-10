@@ -26,7 +26,7 @@ insert_anchor_links = "heading"
 > includes closures (compared and hashed by their function identity and
 > captured values) and `F64` (which uses total ordering: `NaN == NaN`,
 > `NaN` sorts last, `-0.0 == +0.0`). All types have a universal total
-> ordering, which is what enables deterministic `.to_array!` on streams.
+> ordering, which is what enables deterministic `.to_array()` on streams.
 
 ## Conventions
 
@@ -152,7 +152,7 @@ insert_anchor_links = "heading"
 >
 > Pipe: `|>` (free-function / pipeline chaining).
 >
-> Other: `?` (fallible suffix), `!` (postfix zero-arg invocation), `@`
+> Other: `?` (fallible suffix), `@`
 > (path prefix, pattern binding), `#` (capability tags on function
 > types, attribute opener in `#[...]`), `:` (named slots — type
 > annotations and field-value pairs), `::` (expression-level type
@@ -208,15 +208,14 @@ insert_anchor_links = "heading"
 > | 10         | unary `-` `!`          | prefix        | Negation, logical NOT       |
 > | 11         | `as` `as?` `is` `::`   | left          | Type cast / test / ascription |
 > | 12         | application            | left          | Unary application           |
-> | 13         | postfix chain          | left          | `.name`, `!`, `?`, `[]`     |
+> | 13         | postfix chain          | left          | `.name`, `?`                |
 >
 > Assignment (`=`) is a statement, not an expression. The postfix chain
 > associates left-to-right:
 >
 > ```vixen
-> x.y.z!    // means: (((x).y).z)!
-> x.y!.z!   // means: (((((x).y)!).z)!)
-> f x.y!    // means: f ((((x).y)!))
+> x.y.z?    // means: (((x).y).z)?
+> f(x).y    // group the application result before navigating it
 > ```
 >
 > `|` is not an expression operator; it appears in type declarations
@@ -356,7 +355,7 @@ insert_anchor_links = "heading"
 > is called as:
 >
 > ```vixen
-> add (1, 2)
+> add(1, 2)
 > ```
 >
 > and is equivalent in call shape to:
@@ -378,7 +377,7 @@ insert_anchor_links = "heading"
 >
 > ```vixen
 > fn distance((x1, y1): (F64, F64), (x2, y2): (F64, F64)) -> F64 (
->   ((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1)).sqrt!
+>   ((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1)).sqrt()
 > )
 >
 > fn greet({ first, last }: Name) -> String (
@@ -392,7 +391,7 @@ insert_anchor_links = "heading"
 >
 > ```vixen
 > fn first[T](items: Array[T]) -> T (
->   items[0]
+>   items.first()
 > )
 > ```
 
@@ -410,7 +409,7 @@ insert_anchor_links = "heading"
 >   if cheerful (`Hey ${name}!!!`) else (`Hello ${name}`)
 > )
 >
-> greet "Amos" where { cheerful: true }
+> greet("Amos") where { cheerful: true }
 > ```
 
 ### Scope
@@ -459,7 +458,7 @@ insert_anchor_links = "heading"
 > `match`, and nested interpolations:
 >
 > ```vixen
-> let msg = `found ${results.len!} results in ${elapsed}s`
+> let msg = `found ${results.len()} results in ${elapsed}s`
 > let label = `status: ${if ok ("pass") else ("fail")}`
 > ```
 >
@@ -542,29 +541,66 @@ insert_anchor_links = "heading"
 
 > r[expr.call]
 >
-> Function application is unary. `f x` applies `f` to `x`. Chained
-> application is left-associative: `f x y` means `(f x) y`, not
-> `f(x, y)`.
->
-> Tuple, array, and braced payloads are ordinary values, so these are all
-> just unary application:
+> Function application is unary. Parenthesized payloads are the
+> ordinary call form:
 >
 > ```vixen
-> f x
-> f (x, y)
+> f(x)
+> ```
+>
+> Array, braced, and path payloads can also be applied directly:
+>
+> ```vixen
 > f [x, y]
-> f { ... }
+> f { left: x, right: y }
+> f @out/bin/lua
+> ```
+>
+> Canonical formatting has no space before `(`, and a separating space
+> before `[` or `{`.
+>
+> A function receives one payload value. If you want to pass what would
+> traditionally be “multiple positional arguments”, package them into a
+> tuple and pass the tuple as the one payload:
+>
+> ```vixen
+> add(1, 2)
+> distance((x1, y1), (x2, y2))
+> ```
+>
+> Juxtaposition application is only allowed when the payload is
+> self-delimiting: `(...)`, `[...]`, `{...}`, or a path literal. Bare
+> identifiers and most other expressions must use parentheses.
+>
+> Chained application is left-associative:
+>
+> ```vixen
+> f(x)(y)            // means: (f(x))(y)
+> f [x, y] { z: 1 }  // means: (f [x, y]) { z: 1 }
 > ```
 >
 > `f { ... }` is ordinary unary application to a braced payload. It is
 > never keyword application. `where` is the only keyword-application
 > form.
 >
+> A self-delimiting payload closes the application before any following
+> postfix chain. So:
+>
+> ```vixen
+> includes.map ["-I", $].flatten()
+> ```
+>
+> means:
+>
+> ```vixen
+> (includes.map ["-I", $]).flatten()
+> ```
+>
 > To access a member on the result of an application, group the
 > application first:
 >
 > ```vixen
-> (discover_tool class).path
+> (discover_tool(class)).path
 > ```
 
 > r[expr.call.where]
@@ -613,26 +649,15 @@ insert_anchor_links = "heading"
 > `Tree { @bin/lua: exe }` is `Tree` applied to a map payload, not a
 > record payload.
 
-### Index expressions
-
-> r[expr.index]
->
-> `array[i]` accesses an element by index. `map[key]` accesses a value by
-> key. Out-of-bounds or missing keys poison the result. The fallible
-> version `array[i]?` returns `Option` instead.
-
 ### Field access expressions
 
 > r[expr.field]
 >
 > `value.field` accesses a struct field by name. `tuple._0`, `tuple._1`
 > access tuple elements by position (underscore prefix avoids ambiguity
-> with float literals). When `field` names a zero-arg method,
-> `value.field` is the bound method value and `value.field!` invokes it.
-> `.` and postfix `!` form one left-associative postfix chain, so
-> `x.y.z!` means `(((x).y).z)!` and `x.y!.z!` means `(((((x).y)!).z)!)`.
-> `!` is zero-arg invocation only; it does not imply eagerness or
-> forcing.
+> with float literals). Zero-arg method calls use ordinary `()`, so
+> `value.field` is the bound method value and `value.field()` invokes it.
+> `.` and postfix `?` form one left-associative postfix chain.
 
 > r[expr.field.variant]
 >
@@ -658,20 +683,20 @@ insert_anchor_links = "heading"
 > Without `_`, a plain stage receives the piped value as its payload:
 >
 > ```vixen
-> x |> f        // means: f x
+> x |> f        // means: f(x)
 > ```
 >
 > With `_`, the piped value is substituted where `_` appears:
 >
 > ```vixen
-> x |> _.utf8!       // means: x.utf8!
+> x |> _.utf8()      // means: x.utf8()
 > x |> pair(y, _)   // means: pair(y, x)
 > ```
 >
 > `_` inside a pipe RHS names the piped value:
 >
 > ```vixen
-> get_blob my_blob |> _.utf8!
+> get_blob(my_blob) |> _.utf8()
 > value |> cexec [ranlib, _]
 > ```
 
@@ -681,7 +706,7 @@ insert_anchor_links = "heading"
 > full call surface:
 >
 > ```vixen
-> f.then g
+> f.then(g)
 > ```
 >
 > means: call `f` normally, then pass its result to `g`. Positional
@@ -714,7 +739,7 @@ insert_anchor_links = "heading"
 > In literals and update/spread expressions, when the same field or key
 > is provided more than once, the last occurrence wins. This applies
 > uniformly to struct literals, struct update (`with`) blocks, spread
-> syntax, map literals, and `.to_map!` with duplicate keys.
+> syntax, map literals, and `.to_map()` with duplicate keys.
 
 ### Closure expressions
 
@@ -734,8 +759,8 @@ insert_anchor_links = "heading"
 > is automatically wrapped in a closure:
 >
 > ```vixen
-> items.map ($ + 1)      // means: items.map ((x) => x + 1)
-> files.map ($.utf8!)    // means: files.map ((x) => x.utf8!)
+> items.map($ + 1)       // means: items.map((x) => x + 1)
+> files.map($.utf8())    // means: items.map((x) => x.utf8())
 > ```
 
 > r[expr.closure.dollar-numbered]
@@ -744,7 +769,7 @@ insert_anchor_links = "heading"
 > The highest numbered `$N` determines the closure's arity:
 >
 > ```vixen
-> items.reduce ($0 + $1)   // means: items.reduce ((a, b) => a + b)
+> items.reduce($0 + $1)    // means: items.reduce((a, b) => a + b)
 > ```
 >
 > `$` and `$N` bind to the nearest enclosing function argument position
@@ -753,10 +778,10 @@ insert_anchor_links = "heading"
 >
 > ```vixen
 > // $ belongs to find, not map:
-> items.map (list.find ($ == 2))
+> items.map(list.find($ == 2))
 >
 > // To reference the map element, use a named closure:
-> items.map ((item) => list.find ($ == item))
+> items.map((item) => list.find($ == item))
 > // here $ is find's argument, item is map's argument
 > ```
 
@@ -862,7 +887,7 @@ insert_anchor_links = "heading"
 >
 > ```vixen
 > if config.edition is Some { value: edition } (
->   use_edition edition
+>   use_edition(edition)
 > )
 > ```
 
@@ -872,8 +897,8 @@ insert_anchor_links = "heading"
 >
 > The `?` suffix catches poisoning and returns `Option` instead:
 > success becomes `Some`, failure becomes `None`. It applies to any
-> expression that may poison — unary application (`(f x)?`), zero-arg
-> invocation (`value.method!?`), and index expressions (`array[i]?`).
+> expression that may poison — unary application (`f(x)?`) and zero-arg
+> invocation (`value.method()?`).
 > The `as?` operator
 > follows the same pattern (see `r[type.as-fallible]`).
 
@@ -1172,9 +1197,9 @@ insert_anchor_links = "heading"
 >
 > ```vixen
 > if config.edition is Some { value: edition } (
->   use_edition edition
+>   use_edition(edition)
 > ) else (
->   use_default!
+>   use_default()
 > )
 > ```
 
@@ -1347,12 +1372,12 @@ insert_anchor_links = "heading"
 >
 > `$` is shorthand for the first argument of a closure. `$` works
 > anywhere in an expression, including in function arguments:
-> `items.map ($ + 1)` means `items.map ((x) => x + 1)`.
+> `items.map($ + 1)` means `items.map((x) => x + 1)`.
 
 > r[fn.closure.numbered]
 >
 > `$` is `$0`. For multi-argument closures, use `$0`, `$1`, `$2`, etc.:
-> `items.reduce ($0 + $1)` means `items.reduce ((a, b) => a + b)`.
+> `items.reduce($0 + $1)` means `items.reduce((a, b) => a + b)`.
 
 ## Methods and pipe
 
@@ -1387,8 +1412,8 @@ insert_anchor_links = "heading"
 > application uses the ordinary unary call model:
 >
 > ```vixen
-> Blob "hello"
-> Blob 42
+> Blob("hello")
+> Blob(42)
 > Point { x: 1.0, y: 2.0 }
 > ```
 >
@@ -1455,7 +1480,7 @@ insert_anchor_links = "heading"
 > r[collect.map.order]
 >
 > Maps are ordered by key using Vixen's universal total ordering.
-> Iterating a map (via combinators or `.keys!` / `.values!`) always
+> Iterating a map (via combinators or `.keys()` / `.values()`) always
 > produces entries in sorted key order. This makes map iteration
 > deterministic.
 
@@ -1464,8 +1489,8 @@ insert_anchor_links = "heading"
 > r[collect.range]
 >
 > Range literals: `0..10` (exclusive), `0..=10` (inclusive), `..10`
-> (to), `0..` (from), `..` (full). Ranges can be used for slicing
-> arrays.
+> (to), `0..` (from), `..` (full). Ranges can be passed to collection
+> methods such as `slice(range)`.
 
 ## Combinators
 
@@ -1482,9 +1507,9 @@ insert_anchor_links = "heading"
 > Because combinators always produce `Stream`, calling `.map f` on an
 > `Array` loses input order. The elements are processed concurrently
 > and the resulting stream is unordered. To recover a deterministic
-> array, call `.to_array!`, which sorts by universal total ordering —
+> array, call `.to_array()`, which sorts by universal total ordering —
 > not by the original input position. This means
-> `([3, 1, 2].map ($ * 2)).to_array!` returns `[2, 4, 6]`, not
+> `([3, 1, 2].map($ * 2)).to_array()` returns `[2, 4, 6]`, not
 > `[6, 2, 4]`. This is a deliberate trade-off: concurrent fan-out and
 > canonical determinism over positional preservation.
 
@@ -1507,11 +1532,11 @@ insert_anchor_links = "heading"
 
 > r[comb.next]
 >
-> `.next!` returns the first element to resolve from a `Stream[T]`.
+> `.next()` returns the first element to resolve from a `Stream[T]`.
 > It poisons if the stream completes cleanly with no elements. The
-> fallible form `.next!?` returns `Option[T]` instead. If multiple
+> fallible form `.next()?` returns `Option[T]` instead. If multiple
 > elements may resolve, the chosen element is whichever resolves first.
-> Use `.next!` only when that race is semantically intended or when the
+> Use `.next()` only when that race is semantically intended or when the
 > stream is known to contain at most one element.
 
 > r[comb.fold]
@@ -1546,12 +1571,12 @@ insert_anchor_links = "heading"
 > r[comb.flat-map]
 >
 > `.flat_map f` maps each element to a stream (or array) and flattens
-> the results into a single stream. `.flatten!` flattens a stream of
+> the results into a single stream. `.flatten()` flattens a stream of
 > streams.
 
 > r[comb.merge]
 >
-> `.merge!` on `Stream[Tree]` waits for all trees and produces a single
+> `.merge()` on `Stream[Tree]` waits for all trees and produces a single
 > `Tree` containing all their entries. Relative paths must be disjoint:
 > if the same path appears in more than one input tree, the stream
 > poisons. This makes stream merging deterministic even though streams
@@ -1567,7 +1592,7 @@ insert_anchor_links = "heading"
 >
 > `.reduce f` is like `.fold` but uses the first element as the initial
 > accumulator. Only available on `Array`, not on `Stream` — use
-> `.to_array!` first.
+> `.to_array()` first.
 
 > r[comb.group-by]
 >
@@ -1589,9 +1614,9 @@ insert_anchor_links = "heading"
 
 > r[comb.collect]
 >
-> `.to_array!` converts a `Stream` back into an `Array`. It waits for
+> `.to_array()` converts a `Stream` back into an `Array`. It waits for
 > all elements to resolve, then sorts them using Vixen's universal total
-> ordering to produce a deterministic result. `.to_map!` converts a
+> ordering to produce a deterministic result. `.to_map()` converts a
 > stream of `(key, value)` pairs into a `Map`. Both are pending until
 > all elements resolve.
 
@@ -1599,13 +1624,13 @@ insert_anchor_links = "heading"
 >
 > Arrays produced by stream collection operations are canonically
 > ordered using Vixen's universal total ordering. This applies to
-> `.to_array!`, group arrays in `.group_by`, and both arrays
+> `.to_array()`, group arrays in `.group_by`, and both arrays
 > returned by `.partition pred`.
 
 > r[comb.map-combinators]
 >
-> Map combinators pass `(key, value)` pairs to the closure. `.keys!`
-> returns `Array[K]`, `.values!` returns `Array[V]`.
+> Map combinators pass `(key, value)` pairs to the closure. `.keys()`
+> returns `Array[K]`, `.values()` returns `Array[V]`.
 
 ## Option
 
@@ -1623,7 +1648,7 @@ insert_anchor_links = "heading"
 > Option methods: `.unwrap_or default` provides a fallback value.
 > `.map f` transforms the inner value (`None` stays `None`).
 > `.and_then f` flat maps — `f` returns `Option`, the result is
-> flattened. `.is_some!` and `.is_none!` return `Bool`.
+> flattened. `.is_some()` and `.is_none()` return `Bool`.
 
 ## The `as` operator
 
@@ -1669,8 +1694,7 @@ insert_anchor_links = "heading"
 > r[error.catch]
 >
 > The `?` suffix catches poisoning and returns `Option`. It applies to
-> unary application, zero-arg invocation, and index expressions.
-> `(f x)?` returns
+> unary application and zero-arg invocation. `f(x)?` returns
 > `None` on failure, `Some(result)` on success. The `?` suffix always
 > means "the fallible version that returns Option instead of poisoning."
 >
@@ -1694,12 +1718,12 @@ insert_anchor_links = "heading"
 >
 > Streams are nondeterministic in element arrival order. The transition
 > from unordered stream to ordered array is where determinism is
-> restored: `.to_array!` waits for all elements to resolve, then sorts
+> restored: `.to_array()` waits for all elements to resolve, then sorts
 > them using Vixen's universal total ordering (all values are comparable).
 > The result is a stable, deterministic `Array` regardless of which
 > elements resolved first.
 >
-> This means `([3, 2, 1].to_stream!).to_array!` returns `[1, 2, 3]`.
+> This means `([3, 2, 1].to_stream()).to_array()` returns `[1, 2, 3]`.
 > For build systems, this is the right default — the collection of
 > artifacts is in a stable order before linking, regardless of which
 > compilation finished first. If a specific semantic order is needed
