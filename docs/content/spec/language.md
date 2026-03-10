@@ -1637,8 +1637,8 @@ insert_anchor_links = "heading"
 >     mounts: Map[Path, Blob | Tree] = %{},
 >     writable: Array[Path] = [],
 >     executor: ExecutorClass = executor_class("default"),
->     verifier: Fn() -> () = () => {},
->     observer: Fn(Process, Tree) -> Stream[T],
+>     verifier: Fn(Host) #host -> () = (_host) => {},
+>     observer: Fn(Process, Tree) #sandbox -> Stream[T],
 >   
 > ) -> Stream[T]
 > ```
@@ -1783,6 +1783,12 @@ insert_anchor_links = "heading"
 > and resolved captures. The executor evaluates that payload with the
 > same language semantics as the orchestrator. The observer receives a
 > `Process` and the VFS root as a `Tree`, and returns `Stream[T]`.
+>
+> The observer runs under `#sandbox`. It may inspect the process result
+> and sandbox contents exposed through those arguments, but it has no
+> ambient executor-host authority. In particular, an observer cannot
+> inspect the unsandboxed host environment unless such data was already
+> captured into ordinary values before shipping.
 
 > r[exec.observer.materialization]
 >
@@ -1833,11 +1839,30 @@ insert_anchor_links = "heading"
 >
 > Like the observer, the verifier is serialized as code plus resolved
 > captures and evaluated on the executor with ordinary language
-> semantics. It is not a special host-side callback.
+> semantics. It is not a special host-side callback. The verifier runs
+> under `#host` and receives a `Host` handle representing the concrete
+> executor host instance that is about to run the process.
 >
 > Verification does not gate execution. The process runs speculatively
 > while verification proceeds concurrently. If verification fails after
 > the process completes, the result is discarded and the exec poisons.
+
+> r[exec.verifier.host]
+>
+> `Host` is an opaque, executor-local, read-only view of the unsandboxed
+> machine. It exists only inside verifier callbacks. Host paths are
+> ordinary `String` values, not `Path`, because they refer to the
+> executor's real filesystem rather than to Vixen's VFS namespace.
+>
+> ```vixen
+> fn which(self: Host, name: String) -> String?;
+> fn read(self: Host, path: String) -> Blob;
+> fn hash(self: Host, path: String) -> Blob;
+> ```
+>
+> These operations are read-only and deterministic with respect to the
+> concrete executor instance. They are for re-checking discovered facts,
+> not for general discovery or network access.
 
 > r[exec.verifier.compose]
 >
@@ -1845,10 +1870,10 @@ insert_anchor_links = "heading"
 > be checked, compose them into a single closure:
 >
 > ```vixen
-> let verifier = () => {
->   check_gcc();
->   check_ld();
->   check_sdk_version();
+> let verifier = (host) => {
+>   check_gcc(host);
+>   check_ld(host);
+>   check_sdk_version(host);
 > }
 >
 > exec(["gcc", "-c", "main.c"]; verifier: verifier, ...)
@@ -1897,6 +1922,8 @@ insert_anchor_links = "heading"
 > The verifier is constructed from discovery output by library or user
 > code and passed to `exec` via the `verifier` parameter. The runtime
 > does not inspect or synthesize verifiers — they are ordinary closures.
+> A verifier does **not** call `discover_exec`; per-instance host checks
+> go through the `Host` handle supplied to the verifier.
 
 > r[exec.discover.reuse]
 >
@@ -2183,7 +2210,8 @@ insert_anchor_links = "heading"
 > ```vixen
 > Fn() #fs -> W
 > Fn(W) #discover -> T
-> Fn(T) #fs #discover -> U
+> Fn(Process, Tree) #sandbox -> U
+> Fn(Host) #host -> ()
 > ```
 >
 > Tags are valid only in function type and function signature position.
@@ -2202,14 +2230,21 @@ insert_anchor_links = "heading"
 
 > r[cap.kinds]
 >
-> Two capabilities exist:
+> Four capabilities exist:
 >
 > - **`#fs`** — filesystem access. Reading files, walking directories,
->   evaluating globs. Operates on local/project state that is cheap to
->   check between builds.
+>   evaluating globs. Operates on local/project state on the
+>   orchestrator or build host, and is cheap to check between builds.
 > - **`#discover`** — volatile external state. Registry queries,
 >   toolchain channel resolution, latest-version lookups. Operates on
 >   state that may differ between builds and is expensive to verify.
+> - **`#sandbox`** — executor sandbox access. Reading process outputs
+>   and VFS-backed `Blob`/`Tree` values produced by a running `exec`.
+>   This authority is confined to the sandbox namespace for that exec.
+> - **`#host`** — executor host introspection outside the sandbox.
+>   Checking installed tools, reading host files, hashing binaries,
+>   resolving executables on the concrete runner instance. `#host` is
+>   read-only and does not imply `#discover`.
 
 > r[cap.propagation]
 >
@@ -2223,7 +2258,10 @@ insert_anchor_links = "heading"
 > computed inside a `#discover` context is an ordinary `String` — capturing
 > it does not make another closure carry `#discover`. Only values that
 > can actually exercise authority (perform filesystem operations, issue
-> discovery requests) propagate capabilities.
+> discovery requests, inspect sandbox state, inspect the executor host)
+> propagate capabilities. In particular, the sandbox `Tree` passed to an
+> `exec` observer and the `Host` handle passed to an `exec` verifier are
+> authority-bearing values.
 
 > r[cap.grant]
 >
@@ -2233,10 +2271,11 @@ insert_anchor_links = "heading"
 > can invoke a callback in a capability context the caller did not
 > already have.
 >
-> This means `build` (which grants `#fs`) and `stabilize` (which grants
-> `#discover`) have signatures expressible in Vixen but bodies that only
-> the runtime can provide. The evaluator rejects user code that attempts
-> to implement a capability-granting function.
+> This means `build` (which grants `#fs`), `stabilize` (which grants
+> `#discover`), and `exec` (which grants `#sandbox` to observers and
+> `#host` to verifiers) have signatures expressible in Vixen but bodies
+> that only the runtime can provide. The evaluator rejects user code
+> that attempts to implement a capability-granting function.
 
 ## Stabilize
 
