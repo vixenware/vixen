@@ -107,7 +107,12 @@ fn lower_stmt_with_ctx(stmt: &AstStmt, ctx: &mut LowerCtx) -> Option<instr::Stmt
             let expr = lower_expr_with_ctx(e, ctx)?;
             Some(instr::Stmt::Expr(expr))
         }
-        AstStmt::CompoundUpdate(_) | AstStmt::FieldAssign(_) => None,
+        AstStmt::StructDecl(_)
+        | AstStmt::EnumDecl(_)
+        | AstStmt::NewtypeDecl(_)
+        | AstStmt::TypeAliasDecl(_)
+        | AstStmt::CompoundUpdate(_)
+        | AstStmt::FieldAssign(_) => None,
     }
 }
 

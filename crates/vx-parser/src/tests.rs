@@ -24,9 +24,9 @@ struct S { v: Fn() -> () }
 #[test]
 fn parses_top_level_declarations_from_corpus() {
     let input = r#"
-@tag("kind", content: "payload")
+#[tag = "kind", content = "payload"]
 enum Message[T] {
-  @rename("hello")
+  #[rename = "hello"]
   struct Hello {
     body: T,
   },
@@ -55,13 +55,132 @@ fn build[T](input: BuildInput) #fs -> T {
     let kinds = root
         .children()
         .map(|child| child.kind())
-        .filter(|kind| *kind != SyntaxKind::ATTRIBUTE_LIST)
         .collect::<Vec<_>>();
     assert!(kinds.contains(&SyntaxKind::ENUM_DECL));
     assert!(kinds.contains(&SyntaxKind::NEWTYPE_DECL));
     assert!(kinds.contains(&SyntaxKind::TYPE_ALIAS_DECL));
     assert!(kinds.contains(&SyntaxKind::STRUCT_DECL));
     assert!(kinds.contains(&SyntaxKind::FN_DECL));
+}
+
+#[test]
+fn top_level_is_a_statement_list() {
+    let parse = parse(
+        r#"
+let seed = 1;
+seed;
+fn helper(x: U64) -> U64 {
+  x
+}
+helper seed;
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let statements = file.statements().collect::<Vec<_>>();
+    assert_eq!(statements.len(), 4);
+    assert!(matches!(&statements[0], Stmt::Let(_)));
+    assert!(matches!(&statements[1], Stmt::Expr(Expr::NameRef(_))));
+    assert!(matches!(&statements[2], Stmt::FnDecl(_)));
+    assert!(matches!(&statements[3], Stmt::Expr(Expr::Call(_))));
+}
+
+#[test]
+fn nested_type_declarations_parse_in_statement_position() {
+    let parse = parse(
+        r#"
+fn outer() -> U64 {
+  struct Inner {
+    value: U64,
+  };
+  enum Choice {
+    struct Some,
+  };
+  newtype Id of U64;
+  type MaybeInner = Inner?;
+  fn helper(item: Inner) -> U64 {
+    item.value
+  };
+  0
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let statements = body.statements().collect::<Vec<_>>();
+
+    assert!(matches!(&statements[0], Stmt::StructDecl(_)));
+    assert!(matches!(&statements[1], Stmt::EnumDecl(_)));
+    assert!(matches!(&statements[2], Stmt::NewtypeDecl(_)));
+    assert!(matches!(&statements[3], Stmt::TypeAliasDecl(_)));
+    assert!(matches!(&statements[4], Stmt::FnDecl(_)));
+    assert!(matches!(&statements[5], Stmt::Expr(Expr::Literal(_))));
+}
+
+#[test]
+fn old_at_attributes_no_longer_parse() {
+    let parse = parse(
+        r#"
+@rename("hello")
+struct Message
+"#,
+    );
+
+    let kinds = parse
+        .syntax()
+        .children()
+        .map(|child| child.kind())
+        .collect::<Vec<_>>();
+
+    assert!(!kinds.contains(&SyntaxKind::ATTRIBUTE_LIST));
+    assert!(kinds.contains(&SyntaxKind::STRUCT_DECL));
+}
+
+#[test]
+fn type_contexts_stay_in_type_grammar() {
+    let parse = parse(
+        r#"
+type LayoutMap = Map[String, Dashboard.Layout?]
+
+fn decode(items: Array[U64], layout: Dashboard.Layout?) -> Map[String, U64] {
+  items
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let items = file.items().collect::<Vec<_>>();
+    let alias = match &items[0] {
+        Item::TypeAliasDecl(node) => node,
+        item => panic!("expected type alias, got {item:?}"),
+    };
+    assert!(matches!(alias.aliased_type(), Some(Type::Path(_))));
+
+    let function = match &items[1] {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let params = function.parameters().collect::<Vec<_>>();
+    assert!(matches!(
+        params[0].slot_type().and_then(|ty| ty.ty()),
+        Some(Type::Path(_))
+    ));
+    assert!(matches!(
+        params[1].slot_type().and_then(|ty| ty.ty()),
+        Some(Type::Optional(_))
+    ));
+    assert!(matches!(
+        function.return_type().and_then(|ret| ret.ty()),
+        Some(Type::Path(_))
+    ));
 }
 
 #[test]

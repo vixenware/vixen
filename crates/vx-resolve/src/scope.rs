@@ -448,7 +448,12 @@ impl ScopeTreeBuilder {
             Stmt::Expr(expr) => {
                 self.visit_expr(scope, expr);
             }
-            Stmt::CompoundUpdate(_) | Stmt::FieldAssign(_) => {
+            Stmt::StructDecl(_)
+            | Stmt::EnumDecl(_)
+            | Stmt::NewtypeDecl(_)
+            | Stmt::TypeAliasDecl(_)
+            | Stmt::CompoundUpdate(_)
+            | Stmt::FieldAssign(_) => {
                 // These reference existing bindings; resolution handles them
             }
         }

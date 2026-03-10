@@ -488,6 +488,10 @@ pub enum Stmt {
     FieldAssign(FieldAssignStmt),
     Return(ReturnStmt),
     FnDecl(FnDecl),
+    StructDecl(StructDecl),
+    EnumDecl(EnumDecl),
+    NewtypeDecl(NewtypeDecl),
+    TypeAliasDecl(TypeAliasDecl),
     Expr(Expr),
 }
 
@@ -499,6 +503,10 @@ impl AstNode for Stmt {
             || FieldAssignStmt::can_cast(kind)
             || ReturnStmt::can_cast(kind)
             || FnDecl::can_cast(kind)
+            || StructDecl::can_cast(kind)
+            || EnumDecl::can_cast(kind)
+            || NewtypeDecl::can_cast(kind)
+            || TypeAliasDecl::can_cast(kind)
             || Expr::can_cast(kind)
     }
 
@@ -512,6 +520,10 @@ impl AstNode for Stmt {
             SyntaxKind::FIELD_ASSIGN_STMT => Some(Self::FieldAssign(FieldAssignStmt::cast(node)?)),
             SyntaxKind::RETURN_STMT => Some(Self::Return(ReturnStmt::cast(node)?)),
             SyntaxKind::FN_DECL => Some(Self::FnDecl(FnDecl::cast(node)?)),
+            SyntaxKind::STRUCT_DECL => Some(Self::StructDecl(StructDecl::cast(node)?)),
+            SyntaxKind::ENUM_DECL => Some(Self::EnumDecl(EnumDecl::cast(node)?)),
+            SyntaxKind::NEWTYPE_DECL => Some(Self::NewtypeDecl(NewtypeDecl::cast(node)?)),
+            SyntaxKind::TYPE_ALIAS_DECL => Some(Self::TypeAliasDecl(TypeAliasDecl::cast(node)?)),
             _ => Expr::cast(node).map(Self::Expr),
         }
     }
@@ -524,6 +536,10 @@ impl AstNode for Stmt {
             Self::FieldAssign(node) => node.syntax(),
             Self::Return(node) => node.syntax(),
             Self::FnDecl(node) => node.syntax(),
+            Self::StructDecl(node) => node.syntax(),
+            Self::EnumDecl(node) => node.syntax(),
+            Self::NewtypeDecl(node) => node.syntax(),
+            Self::TypeAliasDecl(node) => node.syntax(),
             Self::Expr(node) => node.syntax(),
         }
     }
@@ -538,6 +554,10 @@ pub enum StringPart {
 impl SourceFile {
     pub fn cast_root(root: SyntaxNode) -> Self {
         Self::cast(root).expect("root should be a source file")
+    }
+
+    pub fn statements(&self) -> AstChildren<Stmt> {
+        AstChildren::new(self.syntax())
     }
 
     pub fn items(&self) -> AstChildren<Item> {

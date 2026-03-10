@@ -289,26 +289,39 @@ impl<'a> Sink<'a> {
 fn source_file(p: &mut Parser<'_>) {
     let marker = p.start();
     while p.current() != SyntaxKind::EOF {
-        item(p);
+        stmt(p);
+        p.eat(SyntaxKind::SEMICOLON);
     }
     marker.complete(p, SyntaxKind::SOURCE_FILE);
 }
 
-fn item(p: &mut Parser<'_>) {
+fn decl_stmt(p: &mut Parser<'_>) {
+    let marker = p.start();
     attributes(p);
     match p.current() {
-        SyntaxKind::FN_KW => fn_decl_rest(p),
-        SyntaxKind::STRUCT_KW => struct_decl_rest(p, SyntaxKind::STRUCT_DECL),
-        SyntaxKind::ENUM_KW => enum_decl_rest(p, SyntaxKind::ENUM_DECL),
-        SyntaxKind::NEWTYPE_KW => newtype_decl_rest(p, SyntaxKind::NEWTYPE_DECL),
-        SyntaxKind::TYPE_KW => type_alias_decl_rest(p, SyntaxKind::TYPE_ALIAS_DECL),
+        SyntaxKind::FN_KW => {
+            fn_decl_contents(p, true);
+            marker.complete(p, SyntaxKind::FN_DECL);
+        }
+        SyntaxKind::STRUCT_KW => {
+            struct_decl_contents(p, false);
+            marker.complete(p, SyntaxKind::STRUCT_DECL);
+        }
+        SyntaxKind::ENUM_KW => {
+            enum_decl_contents(p, false);
+            marker.complete(p, SyntaxKind::ENUM_DECL);
+        }
+        SyntaxKind::NEWTYPE_KW => {
+            newtype_decl_contents(p, false);
+            marker.complete(p, SyntaxKind::NEWTYPE_DECL);
+        }
+        SyntaxKind::TYPE_KW => {
+            type_alias_decl_contents(p, false);
+            marker.complete(p, SyntaxKind::TYPE_ALIAS_DECL);
+        }
         _ => {
-            let marker = p.start();
-            p.error("expected top-level declaration");
-            p.recover_while(|kind| !is_item_start(kind));
-            if p.current_range().is_empty() {
-                p.error_and_bump("expected top-level declaration");
-            }
+            p.error("expected declaration");
+            p.recover_while(|kind| !is_stmt_start(kind));
             marker.complete(p, SyntaxKind::ERROR);
         }
     }
@@ -316,45 +329,42 @@ fn item(p: &mut Parser<'_>) {
 
 // r[lex.attributes]
 fn attributes(p: &mut Parser<'_>) {
-    if !p.at(SyntaxKind::AT) {
+    if !at_attribute(p) {
         return;
     }
     let marker = p.start();
-    while p.at(SyntaxKind::AT) {
+    while at_attribute(p) {
         let attr = p.start();
-        p.bump();
-        name(p, false);
-        if p.eat(SyntaxKind::L_PAREN) {
-            let args = p.start();
-            if !p.at(SyntaxKind::R_PAREN) {
-                loop {
-                    if p.at(SyntaxKind::LOWER_IDENT) && p.nth(1) == SyntaxKind::COLON {
-                        let kw = p.start();
-                        p.bump();
-                        p.bump();
-                        expr(p);
-                        kw.complete(p, SyntaxKind::KEYWORD_ATTRIBUTE_ARGUMENT);
-                    } else {
-                        expr(p);
-                    }
-                    if !p.eat(SyntaxKind::COMMA) || p.at(SyntaxKind::R_PAREN) {
-                        break;
-                    }
+        p.expect(SyntaxKind::HASH);
+        p.expect(SyntaxKind::L_BRACKET);
+        if !p.at(SyntaxKind::R_BRACKET) {
+            loop {
+                let entry = p.start();
+                if p.at(SyntaxKind::LOWER_IDENT) {
+                    p.bump();
+                } else {
+                    p.error("expected attribute key");
+                }
+                if p.eat(SyntaxKind::EQ) {
+                    expr(p);
+                }
+                entry.complete(p, SyntaxKind::ATTRIBUTE_ENTRY);
+                if !p.eat(SyntaxKind::COMMA) || p.at(SyntaxKind::R_BRACKET) {
+                    break;
                 }
             }
-            p.expect(SyntaxKind::R_PAREN);
-            args.complete(p, SyntaxKind::ATTRIBUTE_ARGUMENTS);
+            p.eat(SyntaxKind::COMMA);
         }
+        p.expect(SyntaxKind::R_BRACKET);
         attr.complete(p, SyntaxKind::ATTRIBUTE);
     }
     marker.complete(p, SyntaxKind::ATTRIBUTE_LIST);
 }
 
 // r[decl.fn]
-fn fn_decl_rest(p: &mut Parser<'_>) {
-    let marker = p.start();
+fn fn_decl_contents(p: &mut Parser<'_>, allow_upper_name: bool) {
     p.expect(SyntaxKind::FN_KW);
-    name(p, true);
+    name(p, allow_upper_name);
     type_param_list(p);
     parameter_clause(p);
     capability_list(p);
@@ -366,61 +376,53 @@ fn fn_decl_rest(p: &mut Parser<'_>) {
     if p.at(SyntaxKind::L_CURLY) {
         block_expr(p);
     }
-    marker.complete(p, SyntaxKind::FN_DECL);
 }
 
 // r[decl.struct]
-fn struct_decl_rest(p: &mut Parser<'_>, kind: SyntaxKind) {
-    let marker = p.start();
+fn struct_decl_contents(p: &mut Parser<'_>, allow_anonymous: bool) {
     p.expect(SyntaxKind::STRUCT_KW);
     if p.at(SyntaxKind::UPPER_IDENT) {
         p.bump();
-    } else {
+    } else if !allow_anonymous {
         p.error("expected type name");
     }
     type_param_list(p);
     if p.at(SyntaxKind::L_CURLY) {
         struct_body(p);
     }
-    marker.complete(p, kind);
 }
 
 // r[decl.enum]
-fn enum_decl_rest(p: &mut Parser<'_>, kind: SyntaxKind) {
-    let marker = p.start();
+fn enum_decl_contents(p: &mut Parser<'_>, allow_anonymous: bool) {
     p.expect(SyntaxKind::ENUM_KW);
     if p.at(SyntaxKind::UPPER_IDENT) {
         p.bump();
-    } else {
+    } else if !allow_anonymous {
         p.error("expected type name");
     }
     type_param_list(p);
     enum_body(p);
-    marker.complete(p, kind);
 }
 
 // r[decl.newtype]
-fn newtype_decl_rest(p: &mut Parser<'_>, kind: SyntaxKind) {
-    let marker = p.start();
+fn newtype_decl_contents(p: &mut Parser<'_>, allow_anonymous: bool) {
     p.expect(SyntaxKind::NEWTYPE_KW);
     if p.at(SyntaxKind::UPPER_IDENT) {
         p.bump();
-    } else {
+    } else if !allow_anonymous {
         p.error("expected type name");
     }
     type_param_list(p);
     p.expect(SyntaxKind::OF_KW);
     type_expr(p);
-    marker.complete(p, kind);
 }
 
 // r[decl.type]
-fn type_alias_decl_rest(p: &mut Parser<'_>, kind: SyntaxKind) {
-    let marker = p.start();
+fn type_alias_decl_contents(p: &mut Parser<'_>, allow_anonymous: bool) {
     p.expect(SyntaxKind::TYPE_KW);
     if p.at(SyntaxKind::UPPER_IDENT) {
         p.bump();
-    } else {
+    } else if !allow_anonymous {
         p.error("expected type name");
     }
     type_param_list(p);
@@ -434,7 +436,33 @@ fn type_alias_decl_rest(p: &mut Parser<'_>, kind: SyntaxKind) {
         }
         sum.complete(p, SyntaxKind::SUM_TYPE);
     }
-    marker.complete(p, kind);
+}
+
+fn inline_type_decl(p: &mut Parser<'_>) {
+    let marker = p.start();
+    attributes(p);
+    match p.current() {
+        SyntaxKind::STRUCT_KW => {
+            struct_decl_contents(p, true);
+            marker.complete(p, SyntaxKind::INLINE_STRUCT_DECL);
+        }
+        SyntaxKind::ENUM_KW => {
+            enum_decl_contents(p, true);
+            marker.complete(p, SyntaxKind::INLINE_ENUM_DECL);
+        }
+        SyntaxKind::NEWTYPE_KW => {
+            newtype_decl_contents(p, true);
+            marker.complete(p, SyntaxKind::INLINE_NEWTYPE_DECL);
+        }
+        SyntaxKind::TYPE_KW => {
+            type_alias_decl_contents(p, true);
+            marker.complete(p, SyntaxKind::INLINE_TYPE_ALIAS_DECL);
+        }
+        _ => {
+            p.error("expected inline type declaration");
+            marker.complete(p, SyntaxKind::ERROR);
+        }
+    }
 }
 
 fn struct_body(p: &mut Parser<'_>) {
@@ -569,7 +597,7 @@ fn capability_list(p: &mut Parser<'_>) {
 // r[decl.struct.nested]
 fn slot_type(p: &mut Parser<'_>) {
     let marker = p.start();
-    if p.at(SyntaxKind::AT)
+    if at_attribute(p)
         || matches!(
             p.current(),
             SyntaxKind::STRUCT_KW
@@ -578,16 +606,7 @@ fn slot_type(p: &mut Parser<'_>) {
                 | SyntaxKind::TYPE_KW
         )
     {
-        attributes(p);
-        match p.current() {
-            SyntaxKind::STRUCT_KW => struct_decl_rest(p, SyntaxKind::INLINE_STRUCT_DECL),
-            SyntaxKind::ENUM_KW => enum_decl_rest(p, SyntaxKind::INLINE_ENUM_DECL),
-            SyntaxKind::NEWTYPE_KW => newtype_decl_rest(p, SyntaxKind::INLINE_NEWTYPE_DECL),
-            SyntaxKind::TYPE_KW => type_alias_decl_rest(p, SyntaxKind::INLINE_TYPE_ALIAS_DECL),
-            _ => {
-                p.error_and_bump("expected inline type declaration");
-            }
-        }
+        inline_type_decl(p);
     } else {
         type_expr(p);
     }
@@ -596,21 +615,24 @@ fn slot_type(p: &mut Parser<'_>) {
 
 // r[option.type]
 fn type_expr(p: &mut Parser<'_>) -> CompletedMarker {
-    let marker = p.start();
-    match p.current() {
+    let mut lhs = match p.current() {
         SyntaxKind::FN_TYPE_KW => function_type(p),
         SyntaxKind::L_PAREN => tuple_or_paren_type(p),
         SyntaxKind::UPPER_IDENT => type_path(p),
-        _ => {
-            p.error_and_bump("expected type");
-        }
+        _ => return p.error_and_bump("expected type"),
+    };
+
+    if p.at(SyntaxKind::QUESTION) {
+        let marker = lhs.precede(p);
+        while p.eat(SyntaxKind::QUESTION) {}
+        lhs = marker.complete(p, SyntaxKind::OPTIONAL_TYPE);
     }
-    while p.eat(SyntaxKind::QUESTION) {}
-    marker.complete(p, SyntaxKind::OPTIONAL_TYPE)
+
+    lhs
 }
 
 // r[fn.type]
-fn function_type(p: &mut Parser<'_>) {
+fn function_type(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.expect(SyntaxKind::FN_TYPE_KW);
     p.expect(SyntaxKind::L_PAREN);
@@ -626,16 +648,15 @@ fn function_type(p: &mut Parser<'_>) {
     capability_list(p);
     p.expect(SyntaxKind::THIN_ARROW);
     type_expr(p);
-    marker.complete(p, SyntaxKind::FUNCTION_TYPE);
+    marker.complete(p, SyntaxKind::FUNCTION_TYPE)
 }
 
 // r[type.tuple]
-fn tuple_or_paren_type(p: &mut Parser<'_>) {
+fn tuple_or_paren_type(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.expect(SyntaxKind::L_PAREN);
     if p.eat(SyntaxKind::R_PAREN) {
-        marker.complete(p, SyntaxKind::TUPLE_TYPE);
-        return;
+        return marker.complete(p, SyntaxKind::TUPLE_TYPE);
     }
     type_expr(p);
     if p.eat(SyntaxKind::COMMA) {
@@ -646,15 +667,15 @@ fn tuple_or_paren_type(p: &mut Parser<'_>) {
             }
         }
         p.expect(SyntaxKind::R_PAREN);
-        marker.complete(p, SyntaxKind::TUPLE_TYPE);
+        marker.complete(p, SyntaxKind::TUPLE_TYPE)
     } else {
         p.expect(SyntaxKind::R_PAREN);
-        marker.complete(p, SyntaxKind::PAREN_TYPE);
+        marker.complete(p, SyntaxKind::PAREN_TYPE)
     }
 }
 
 // r[type.generic]
-fn type_path(p: &mut Parser<'_>) {
+fn type_path(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.expect(SyntaxKind::UPPER_IDENT);
     while p.eat(SyntaxKind::DOT) {
@@ -676,7 +697,7 @@ fn type_path(p: &mut Parser<'_>) {
         p.expect(SyntaxKind::R_BRACKET);
         args.complete(p, SyntaxKind::TYPE_ARGS);
     }
-    marker.complete(p, SyntaxKind::TYPE_PATH);
+    marker.complete(p, SyntaxKind::TYPE_PATH)
 }
 
 fn binding_pattern(p: &mut Parser<'_>) {
@@ -827,8 +848,8 @@ fn stmt(p: &mut Parser<'_>) -> StmtKind {
             return_stmt(p);
             StmtKind::Delimited
         }
-        SyntaxKind::FN_KW => {
-            fn_decl_rest(p);
+        _ if decl_stmt_start(p) => {
+            decl_stmt(p);
             StmtKind::Delimited
         }
         SyntaxKind::LOWER_IDENT if p.nth(1) == SyntaxKind::WITH_EQ => {
@@ -1777,6 +1798,51 @@ fn starts_application_arg(p: &Parser<'_>) -> bool {
     ) || (kind == SyntaxKind::L_CURLY && !p.disallow_block_application)
 }
 
+fn at_attribute(p: &Parser<'_>) -> bool {
+    p.at(SyntaxKind::HASH) && p.nth(1) == SyntaxKind::L_BRACKET
+}
+
+fn attribute_followed_by_decl(p: &Parser<'_>) -> bool {
+    let mut offset = 0usize;
+    if p.nth(offset) != SyntaxKind::HASH || p.nth(offset + 1) != SyntaxKind::L_BRACKET {
+        return false;
+    }
+
+    while p.nth(offset) == SyntaxKind::HASH && p.nth(offset + 1) == SyntaxKind::L_BRACKET {
+        offset += 2;
+        let mut bracket_depth = 1usize;
+        while bracket_depth > 0 {
+            match p.nth(offset) {
+                SyntaxKind::L_BRACKET => bracket_depth += 1,
+                SyntaxKind::R_BRACKET => bracket_depth -= 1,
+                SyntaxKind::EOF => return false,
+                _ => {}
+            }
+            offset += 1;
+        }
+    }
+
+    matches!(
+        p.nth(offset),
+        SyntaxKind::FN_KW
+            | SyntaxKind::STRUCT_KW
+            | SyntaxKind::ENUM_KW
+            | SyntaxKind::NEWTYPE_KW
+            | SyntaxKind::TYPE_KW
+    )
+}
+
+fn decl_stmt_start(p: &Parser<'_>) -> bool {
+    matches!(
+        p.current(),
+        SyntaxKind::FN_KW
+            | SyntaxKind::STRUCT_KW
+            | SyntaxKind::ENUM_KW
+            | SyntaxKind::NEWTYPE_KW
+            | SyntaxKind::TYPE_KW
+    ) || attribute_followed_by_decl(p)
+}
+
 fn is_path_literal_token(kind: SyntaxKind) -> bool {
     matches!(
         kind,
@@ -1793,7 +1859,7 @@ fn is_path_literal_token(kind: SyntaxKind) -> bool {
 fn is_item_start(kind: SyntaxKind) -> bool {
     matches!(
         kind,
-        SyntaxKind::AT
+        SyntaxKind::HASH
             | SyntaxKind::FN_KW
             | SyntaxKind::STRUCT_KW
             | SyntaxKind::ENUM_KW
@@ -1805,7 +1871,15 @@ fn is_item_start(kind: SyntaxKind) -> bool {
 fn is_stmt_start(kind: SyntaxKind) -> bool {
     matches!(
         kind,
-        SyntaxKind::LET_KW | SyntaxKind::RETURN_KW | SyntaxKind::FN_KW | SyntaxKind::LOWER_IDENT
+        SyntaxKind::LET_KW
+            | SyntaxKind::RETURN_KW
+            | SyntaxKind::FN_KW
+            | SyntaxKind::STRUCT_KW
+            | SyntaxKind::ENUM_KW
+            | SyntaxKind::NEWTYPE_KW
+            | SyntaxKind::TYPE_KW
+            | SyntaxKind::HASH
+            | SyntaxKind::LOWER_IDENT
     ) || starts_expr(kind)
 }
 
