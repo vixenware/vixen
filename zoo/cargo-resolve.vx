@@ -209,18 +209,8 @@ enum ResolvedSource {
 }
 
 struct RegistryResolution {
+  roots: Array[PackageId],
   packages: Array[ResolvedCrate],
-  build_order: Array[PackageId],
-}
-
-struct PendingResolution {
-  key: String,
-  request: DependencyRequest,
-}
-
-struct ResolutionState {
-  pending: Array[PendingResolution],
-  resolved: Array[ResolvedCrate] = [],
 }
 
 fn parse_lock(ws: Tree) -> CargoLock? (
@@ -605,40 +595,33 @@ fn merge_requests(existing: DependencyRequest, incoming: DependencyRequest) -> D
   }
 )
 
-fn seed_pending(requests: Array[DependencyRequest]) -> Array[PendingResolution] (
+fn canonical_requests(requests: Array[DependencyRequest]) -> Array[DependencyRequest] (
   // Sketch only:
   // group by `request_key`, then merge requests that target the same package
   requests
     .group_by(request_key($))
-    .map((key, group) => PendingResolution {
-      key,
-      request: group.reduce((left, right) => merge_requests(left, right)),
-    })
+    .map((key, group) => group.reduce((left, right) => merge_requests(left, right)))
     .to_array()
 )
 
 fn resolve_graph(roots: Array[DependencyRequest]) where {
   config: SparseConfig,
-  manifest: CargoManifest,
   lock: CargoLock?,
   target: BuildTarget,
   workspace: Tree,
 } #discover -> RegistryResolution (
-  let initial = ResolutionState {
-    pending: seed_pending(roots),
-  };
+  let demanded = canonical_requests(roots);
 
   // Sketch only:
-  // - pop one pending request
-  // - resolve it to a concrete package/version/source
-  // - if the package was already resolved, merge the old and new requests;
-  //   re-resolve if the merged request widens features or constraints
-  // - merge child dependency requests into `pending` by `request_key`
-  // - continue until `pending` is empty
-  // - topologically sort the final resolved package graph
-  let _initial = initial;
+  // - treat `demanded` as the root package requests
+  // - resolve each request into a canonical package node
+  // - each resolved package contributes more dependency requests
+  // - merge those requests by `request_key`
+  // - repeat to a least fixpoint
+  // - the semantic result is the resolved graph itself; any ordering is a
+  //   later projection for lockfiles, diagnostics, or export
+  let _demanded = demanded;
   let _config = config;
-  let _manifest = manifest;
   let _lock = lock;
   let _target = target;
   let _workspace = workspace;
@@ -670,7 +653,6 @@ fn pick_version(entries: Array[IndexEntry], request: DependencyRequest) where {
 
 fn resolve_request(request: DependencyRequest) where {
   config: SparseConfig,
-  manifest: CargoManifest,
   lock: CargoLock?,
   target: BuildTarget,
   workspace: Tree,
@@ -736,7 +718,7 @@ fn resolve_manifest(manifest: CargoManifest) where {
 } #discover -> RegistryResolution (
   let config = Json.parse[SparseConfig](Http.get("https://index.crates.io/config.json"));
   let requests = manifest_requests(manifest) where { target };
-  resolve_graph(requests) where { config, manifest, lock, target, workspace }
+  resolve_graph(requests) where { config, lock, target, workspace }
 )
 
 fn emit_lockfile(resolution: RegistryResolution) -> Blob (
@@ -816,7 +798,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
 
   // Next layer, not modeled here:
   // - parse vendored Cargo.toml files
-  // - compile crates in `build_order`
+  // - compile the resolved crate graph by demanding root packages
   Tree {
     @vendor: vendor,
     @Cargo.lock: lock_blob,
