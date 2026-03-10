@@ -12,3 +12,7 @@ jump to real definitions instead of synthetic builtin tables.
 
 This first cut is intentionally narrow and declaration-only. Runtime
 behavior still lives in Rust.
+
+Longer-term, the language spec should quote these declarations by symbol
+identity instead of hand-copying their signatures into markdown. See
+issue #251.

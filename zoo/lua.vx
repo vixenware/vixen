@@ -36,7 +36,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   }
 
   let class = executor_class "default";
-  let src_tree = Tree.from_path (ws / @zoo/lua-src);
+  let src_tree = Tree (ws / @zoo/lua-src);
   let toolchain =
     discover (class, (host) =>
       // The map stays demand-driven: each discovered tool can become

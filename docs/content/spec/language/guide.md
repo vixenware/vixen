@@ -197,8 +197,8 @@ First, a function can declare keyword parameters with `where`:
 
 ```vixen
 fn exec[T](args: Array[ExecInput]) where {
-  observer: Fn(Process, Tree) #sandbox -> Stream[T],
-} -> Stream[T];
+  observer: Fn(Process, Tree) #sandbox -> T,
+} -> T;
 ```
 
 Then the call site uses:
@@ -408,7 +408,7 @@ only what happens to its return value.
 
 ```vixen
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover -> Tree (
-  let src = Tree.from_path ws;
+  let src = Tree ws;
   let common = { observer };
   let cexec = partial exec where common;
 

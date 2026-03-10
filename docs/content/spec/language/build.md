@@ -26,7 +26,7 @@ insert_anchor_links = "heading"
 > handles materialization transparently.
 >
 > `Tree map` creates a tree from a map of paths to entries.
-> `Tree.from_path path` creates a lazy tree handle rooted at a local
+> `Tree path` creates a lazy tree handle rooted at a local
 > filesystem path.
 > `Tree {}` is the empty tree.
 > `tree.subtree path` selects a subtree. `tree.glob pattern` filters by
