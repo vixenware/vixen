@@ -74,8 +74,18 @@ struct SemverVersion {
   pre: String?,
 }
 
+enum ComparatorOp {
+  struct Exact,
+  struct Greater,
+  struct GreaterEq,
+  struct Less,
+  struct LessEq,
+  struct Caret,
+  struct Tilde,
+}
+
 struct Comparator {
-  op: String,
+  op: ComparatorOp,
   version: SemverVersion,
 }
 
@@ -327,6 +337,32 @@ fn matches_semver(req: SemverReq?, version: SemverVersion) -> Bool (
   fail "semver matching omitted from sketch"
 )
 
+fn compare_semver(a: SemverVersion, b: SemverVersion) -> I64 (
+  // Sketch only:
+  // - compare major/minor/patch numerically
+  // - stable releases sort after prereleases of the same base version
+  // - prerelease ordering follows Cargo/semver rules
+  let _a = a;
+  let _b = b;
+  fail "semver comparison omitted from sketch"
+)
+
+fn candidate_entries(entries: Array[IndexEntry], request: DependencyRequest) -> Array[IndexEntry] (
+  entries
+    .filter((entry) =>
+      !entry.yanked &&
+      matches_semver(request.version_req, parse_semver_version(entry.vers))
+    )
+    .to_array()
+)
+
+fn highest_version(entries: Array[IndexEntry]) -> IndexEntry (
+  // Sketch only:
+  // choose the entry whose parsed version wins under `compare_semver`
+  let _entries = entries;
+  fail "highest-version selection omitted from sketch"
+)
+
 fn target_requests(triple: String, table: CargoTargetTable) -> Array[DependencyRequest] (
   // Sketch only:
   // `triple` here stands in for Cargo target expressions / cfg selectors.
@@ -444,15 +480,17 @@ fn lock_entry(lock: CargoLock?, name: String) -> LockedPackage? (
 fn pick_version(entries: Array[IndexEntry], request: DependencyRequest) where {
   lock: LockedPackage?,
 } -> IndexEntry (
-  // Sketch only:
-  // - prefer the lockfile entry if it still satisfies the request
-  // - otherwise choose the highest non-yanked version satisfying the
-  //   semver requirement
-  // - semver parsing/matching are ordinary code, not builtins
-  let _entries = entries;
-  let _request = request;
-  let _lock = lock;
-  fail "version selection omitted from sketch"
+  let candidates = candidate_entries(entries, request);
+
+  match lock (
+    Some { value } => (
+      match candidates.find($.vers == value.version) (
+        Some { value } => value,
+        None => highest_version(candidates),
+      )
+    ),
+    None => highest_version(candidates),
+  )
 )
 
 fn resolve_request(request: DependencyRequest) where {
