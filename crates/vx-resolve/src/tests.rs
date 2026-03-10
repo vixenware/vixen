@@ -770,6 +770,21 @@ fn main() {
     assert_eq!(ty, Some(Ty::Builtin(Builtin::Blob)));
 }
 
+// r[exec.verifier.host] — host.hash(...) returns Blob
+#[test]
+fn host_hash_returns_blob() {
+    let src = r#"
+fn main() {
+    discover(executor_class("default"), (host) => {
+        host.hash("foo")
+    })
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, r#"host.hash("foo")"#);
+    assert_eq!(ty, Some(Ty::Builtin(Builtin::Blob)));
+}
+
 // r[exec.verifier.host] — host.which(...) returns String
 #[test]
 fn host_which_returns_string() {
@@ -801,6 +816,21 @@ fn main() {
         ty,
         Some(Ty::Optional(Box::new(Ty::Scalar(vx_types::Scalar::String))))
     );
+}
+
+// r[type.builtin.blob] — blob.utf8() returns String
+#[test]
+fn blob_utf8_returns_string() {
+    let src = r#"
+fn main() {
+    build((path, args, env) => {
+        read_file("hello.txt").utf8()
+    });
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, r#"read_file("hello.txt").utf8()"#);
+    assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::String)));
 }
 
 // r[exec.observer] — observer callback params are typed

@@ -2015,7 +2015,7 @@ fn completions_for_type(ty: &vx_types::Ty, state: &DocumentState) -> Option<Vec<
             }
             let items: Vec<CompletionItem> = method_names
                 .iter()
-                .filter_map(|&name| {
+                .filter_map(|name| {
                     let sig = vx_resolve::builtins::builtin_method(builtin, name)?;
                     let detail = if sig.params.is_empty() {
                         format!("{}", sig.ret)
@@ -2065,27 +2065,14 @@ fn struct_fields_from_ty(ty: &vx_types::Ty, state: &DocumentState) -> Option<Vec
 }
 
 fn builtin_completions(env: &vx_types::TypeEnv) -> Vec<CompletionItem> {
-    let builtins = [
-        "build",
-        "stabilize",
-        "exec",
-        "executor_class",
-        "discover_exec",
-        "read_file",
-        "read_dir",
-        "glob",
-        "exists",
-        "metadata",
-    ];
-
-    builtins
+    vx_resolve::builtins::all_builtin_fn_names()
         .into_iter()
         .filter_map(|name| {
-            let sig = vx_resolve::builtins::builtin_fn_sig(name)?;
+            let sig = vx_resolve::builtins::builtin_fn_sig(&name)?;
             let ret_display = sig.ret.display_with_env(env);
             let detail = format!("fn {name}(...) -> {ret_display}");
             Some(CompletionItem {
-                label: name.to_string(),
+                label: name,
                 kind: Some(CompletionItemKind::FUNCTION),
                 detail: Some(detail),
                 ..Default::default()
@@ -2149,11 +2136,11 @@ fn closest_name(target: &str, visible: &[&vx_resolve::Definition]) -> Option<Str
         }
     }
     // Also check builtins
-    for &name in vx_resolve::builtins::all_builtin_fn_names() {
-        let dist = levenshtein(target, name);
+    for name in vx_resolve::builtins::all_builtin_fn_names() {
+        let dist = levenshtein(target, &name);
         if dist > 0 && dist <= 2 {
             if best.as_ref().is_none_or(|(d, _)| dist < *d) {
-                best = Some((dist, name.to_string()));
+                best = Some((dist, name));
             }
         }
     }
