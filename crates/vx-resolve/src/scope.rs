@@ -61,6 +61,8 @@ pub enum DefKind {
     Variant,
     /// Struct field
     Field,
+    /// A builtin runtime function (not declared in source)
+    Builtin,
 }
 
 /// A name definition in a scope.

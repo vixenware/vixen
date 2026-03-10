@@ -3,7 +3,8 @@
 use rowan::TextRange;
 use vx_parser::{AstNode, NameRefExpr, SourceFile, SyntaxKind, SyntaxNode};
 
-use crate::scope::{Definition, ScopeTree};
+use crate::builtins;
+use crate::scope::{DefKind, Definition, ScopeId, ScopeTree};
 
 /// A resolved name reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,12 +89,23 @@ impl<'a> RefCollector<'a> {
         let target = match self.scopes.lookup_at(&name, scope, ref_range.start()) {
             Some(def) => Ok(def.clone()),
             None => {
-                let err = ResolveError::Unresolved {
-                    name: name.clone(),
-                    range: ref_range,
-                };
-                self.errors.push(err.clone());
-                Err(err)
+                // Check if this is a builtin function name
+                if builtins::builtin_fn_sig(&name).is_some() {
+                    Ok(Definition {
+                        name: name.clone(),
+                        kind: DefKind::Builtin,
+                        name_range: ref_range,
+                        full_range: ref_range,
+                        scope: ScopeId::ROOT,
+                    })
+                } else {
+                    let err = ResolveError::Unresolved {
+                        name: name.clone(),
+                        range: ref_range,
+                    };
+                    self.errors.push(err.clone());
+                    Err(err)
+                }
             }
         };
 

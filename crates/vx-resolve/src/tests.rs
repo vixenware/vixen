@@ -846,3 +846,160 @@ fn main() {
         result.expr_types
     );
 }
+
+// --- Step 1: cap_check derives from builtins.rs ---
+
+#[test]
+fn cap_check_derives_fs_from_builtin_sig() {
+    // read_file has #fs in its FnSig — cap_check should derive FS from it
+    let result = check_caps(
+        r#"
+fn main() {
+    build((path, args, env) => {
+        read_file("foo");
+    });
+}
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn cap_check_derives_discover_from_builtin_sig() {
+    // discover_exec has #discover — should be rejected in a #fs slot
+    let result = check_caps(
+        r#"
+fn main() {
+    build((path, args, env) => {
+        discover_exec("gcc", ["gcc"]);
+    });
+}
+"#,
+    );
+    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+    match &result.errors[0].kind {
+        CapErrorKind::CapabilityViolation { excess, .. } => {
+            assert!(
+                excess.names().contains(&"discover"),
+                "excess should contain #discover: {excess}"
+            );
+        }
+        other => panic!("expected CapabilityViolation, got: {other:?}"),
+    }
+}
+
+#[test]
+fn cap_check_method_caps_from_builtin_method() {
+    // host.which has #host capability from MethodSig
+    let result = check_caps(
+        r#"
+fn main() {
+    exec(["gcc", "main.c"];
+        observer: (proc, tree) => {
+            proc.exit_code();
+            []
+        },
+        verifier: (host) => {
+            host.which("gcc");
+        },
+    );
+}
+"#,
+    );
+    // verifier allows #host, so this should pass
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+// --- Step 2: let-binding type propagation ---
+
+fn type_check_src(src: &str) -> crate::TypeCheckResult {
+    let file = parse_file(src);
+    let resolution = resolve(&file);
+    let types = crate::collect_types(&file);
+    crate::type_check(&file, &resolution, &types)
+}
+
+#[test]
+fn let_binding_propagates_type() {
+    let result = type_check_src(
+        r#"
+fn main() {
+    build((path, args, env) => {
+        let b = read_file("foo");
+        b.to_string();
+    });
+}
+"#,
+    );
+    // b should have type Blob, so b.to_string() should not produce a NoSuchMethod error
+    assert!(
+        result.errors.is_empty(),
+        "expected no type errors, got: {:?}",
+        result.errors
+    );
+    // Check that binding_types has an entry for b
+    assert!(
+        result
+            .binding_types
+            .values()
+            .any(|ty| *ty == Ty::Builtin(Builtin::Blob)),
+        "expected Blob binding type, got: {:?}",
+        result.binding_types
+    );
+}
+
+#[test]
+fn let_binding_chain_propagates() {
+    let result = type_check_src(
+        r#"
+fn main() {
+    build((path, args, env) => {
+        let b = read_file("foo");
+        let s = b.to_string();
+    });
+}
+"#,
+    );
+    // s should have type String
+    assert!(
+        result
+            .binding_types
+            .values()
+            .any(|ty| matches!(ty, Ty::Scalar(vx_types::Scalar::String))),
+        "expected String binding type, got: {:?}",
+        result.binding_types
+    );
+}
+
+// --- Step 4: builtins resolve properly ---
+
+#[test]
+fn builtin_names_resolve_without_error() {
+    let file = parse_file(
+        r#"
+fn main() {
+    build((path, args, env) => {
+        read_file("foo");
+        glob("*.rs");
+    });
+}
+"#,
+    );
+    let resolution = resolve(&file);
+    // No unresolved errors for read_file, glob, or build
+    assert!(
+        resolution.errors.is_empty(),
+        "expected no resolve errors, got: {:?}",
+        resolution.errors
+    );
+    // Verify builtins resolve with DefKind::Builtin
+    let builtin_refs: Vec<_> = resolution
+        .refs
+        .iter()
+        .filter(|r| r.target.as_ref().is_ok_and(|d| d.kind == DefKind::Builtin))
+        .collect();
+    assert!(
+        builtin_refs.len() >= 3,
+        "expected at least 3 builtin refs (build, read_file, glob), got: {builtin_refs:?}"
+    );
+}

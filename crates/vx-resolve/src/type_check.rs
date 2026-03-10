@@ -46,6 +46,8 @@ pub enum TypeErrorKind {
 pub struct TypeCheckResult {
     /// Map from expression text ranges to their inferred types.
     pub expr_types: HashMap<TextRange, Ty>,
+    /// Map from binding name ranges to their inferred types.
+    pub binding_types: HashMap<TextRange, Ty>,
     /// Type errors found during checking.
     pub errors: Vec<TypeError>,
 }
@@ -62,6 +64,7 @@ pub fn type_check(
         expr_types: HashMap::new(),
         errors: Vec::new(),
         closure_param_types: HashMap::new(),
+        binding_types: HashMap::new(),
     };
 
     for item in file.items() {
@@ -74,6 +77,7 @@ pub fn type_check(
 
     TypeCheckResult {
         expr_types: checker.expr_types,
+        binding_types: checker.binding_types,
         errors: checker.errors,
     }
 }
@@ -86,6 +90,8 @@ struct ExprTyper<'a> {
     /// Types for closure parameters, populated when we see a closure in a
     /// known callback slot (e.g., exec observer's proc and tree params).
     closure_param_types: HashMap<TextRange, Ty>,
+    /// Types for let bindings, keyed by the binding's name_range.
+    binding_types: HashMap<TextRange, Ty>,
 }
 
 impl<'a> ExprTyper<'a> {
@@ -99,7 +105,13 @@ impl<'a> ExprTyper<'a> {
         match stmt {
             Stmt::Let(let_stmt) => {
                 if let Some(expr) = let_stmt.expr() {
-                    self.infer_expr(&expr);
+                    let ty = self.infer_expr(&expr);
+                    // Record the binding's type so name references can pick it up
+                    if !ty.is_poison() {
+                        if let Some(name_tok) = let_stmt.name() {
+                            self.binding_types.insert(name_tok.text_range(), ty);
+                        }
+                    }
                 }
             }
             Stmt::Expr(expr) => {
@@ -221,8 +233,10 @@ impl<'a> ExprTyper<'a> {
                 Ty::Poison
             }
             DefKind::Binding => {
-                // For let bindings, we'd need to look at the initializer type.
-                // This is tracked in expr_types if the init was already typed.
+                // Look up the type recorded when the let initializer was typed
+                if let Some(ty) = self.binding_types.get(&def.name_range) {
+                    return ty.clone();
+                }
                 Ty::Poison
             }
             _ => Ty::Poison,

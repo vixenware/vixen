@@ -5,11 +5,62 @@
 
 use vx_types::{Builtin, Capability, FnSig, KeywordParamDef, ParamDef, Ty};
 
+use crate::cap_check::CapSet;
+
 /// A method signature on a builtin type.
 pub struct MethodSig {
     pub name: &'static str,
     pub params: Vec<ParamDef>,
     pub ret: Ty,
+    pub capabilities: Vec<Capability>,
+}
+
+/// Derive a CapSet from a list of Capability values.
+fn caps_from_capabilities(caps: &[Capability]) -> CapSet {
+    let mut result = CapSet::EMPTY;
+    for cap in caps {
+        if let Some(c) = CapSet::from_name(&cap.name) {
+            result = result.union(c);
+        }
+    }
+    result
+}
+
+/// Get the capability requirements for a builtin free function.
+pub fn builtin_fn_caps(name: &str) -> Option<CapSet> {
+    builtin_fn_sig(name).map(|sig| caps_from_capabilities(&sig.capabilities))
+}
+
+/// Get the capability requirements for a builtin method.
+pub fn builtin_method_caps(receiver: &Builtin, method_name: &str) -> Option<CapSet> {
+    builtin_method(receiver, method_name).map(|sig| caps_from_capabilities(&sig.capabilities))
+}
+
+/// List all builtin free function names.
+pub fn all_builtin_fn_names() -> &'static [&'static str] {
+    &[
+        "build",
+        "stabilize",
+        "exec",
+        "executor_class",
+        "discover_exec",
+        "read_file",
+        "read_dir",
+        "glob",
+        "exists",
+        "metadata",
+    ]
+}
+
+/// List all method names on a given builtin type.
+pub fn builtin_methods_for(receiver: &Builtin) -> &'static [&'static str] {
+    match receiver {
+        Builtin::Host => &["read", "hash", "which"],
+        Builtin::Process => &["exit_code", "stdout", "stderr"],
+        Builtin::Blob => &["to_string"],
+        Builtin::Tree => &["file"],
+        _ => &[],
+    }
 }
 
 /// Look up a builtin free function signature by name.
@@ -217,6 +268,9 @@ pub fn builtin_method(receiver: &Builtin, method_name: &str) -> Option<MethodSig
                 ty: Ty::Scalar(vx_types::Scalar::String),
             }],
             ret: Ty::Builtin(Builtin::Blob),
+            capabilities: vec![Capability {
+                name: "host".into(),
+            }],
         }),
         (Builtin::Host, "hash") => Some(MethodSig {
             name: "hash",
@@ -225,6 +279,9 @@ pub fn builtin_method(receiver: &Builtin, method_name: &str) -> Option<MethodSig
                 ty: Ty::Scalar(vx_types::Scalar::String),
             }],
             ret: Ty::Scalar(vx_types::Scalar::String),
+            capabilities: vec![Capability {
+                name: "host".into(),
+            }],
         }),
         (Builtin::Host, "which") => Some(MethodSig {
             name: "which",
@@ -233,6 +290,9 @@ pub fn builtin_method(receiver: &Builtin, method_name: &str) -> Option<MethodSig
                 ty: Ty::Scalar(vx_types::Scalar::String),
             }],
             ret: Ty::Builtin(Builtin::ExecPath),
+            capabilities: vec![Capability {
+                name: "host".into(),
+            }],
         }),
 
         // Process methods
@@ -240,16 +300,19 @@ pub fn builtin_method(receiver: &Builtin, method_name: &str) -> Option<MethodSig
             name: "exit_code",
             params: vec![],
             ret: Ty::Scalar(vx_types::Scalar::U64),
+            capabilities: vec![],
         }),
         (Builtin::Process, "stdout") => Some(MethodSig {
             name: "stdout",
             params: vec![],
             ret: Ty::Builtin(Builtin::Blob),
+            capabilities: vec![],
         }),
         (Builtin::Process, "stderr") => Some(MethodSig {
             name: "stderr",
             params: vec![],
             ret: Ty::Builtin(Builtin::Blob),
+            capabilities: vec![],
         }),
 
         // Blob methods
@@ -257,6 +320,7 @@ pub fn builtin_method(receiver: &Builtin, method_name: &str) -> Option<MethodSig
             name: "to_string",
             params: vec![],
             ret: Ty::Scalar(vx_types::Scalar::String),
+            capabilities: vec![],
         }),
 
         // Tree methods
@@ -267,6 +331,7 @@ pub fn builtin_method(receiver: &Builtin, method_name: &str) -> Option<MethodSig
                 ty: Ty::Scalar(vx_types::Scalar::String),
             }],
             ret: Ty::Builtin(Builtin::Blob),
+            capabilities: vec![],
         }),
 
         _ => None,

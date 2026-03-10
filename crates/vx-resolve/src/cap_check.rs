@@ -11,8 +11,49 @@ use std::collections::HashMap;
 use rowan::TextRange;
 use vx_parser::{AstNode, CallExpr, ClosureExpr, Expr, FnDecl, Item, SourceFile, Stmt};
 
+use vx_types::{Builtin, Capability};
+
+use crate::builtins;
 use crate::scope::ScopeTree;
 use crate::type_collect::TypeCollection;
+
+/// All builtin runtime types, for iterating when we don't know the receiver type.
+const ALL_BUILTINS: &[Builtin] = &[
+    Builtin::Host,
+    Builtin::Process,
+    Builtin::Blob,
+    Builtin::Tree,
+    Builtin::Path,
+    Builtin::ExecPath,
+    Builtin::ExecutorClass,
+    Builtin::DiscoveryProcess,
+];
+
+/// Derive a CapSet from the capabilities on a function type.
+fn caps_from_fn_ty_capabilities(caps: &[Capability]) -> CapSet {
+    let mut result = CapSet::EMPTY;
+    for cap in caps {
+        if let Some(c) = CapSet::from_name(&cap.name) {
+            result = result.union(c);
+        }
+    }
+    result
+}
+
+/// Get the capability requirements for a name, checking both builtin free
+/// functions and builtin methods (for bare calls like `which("gcc")`).
+fn caps_for_name(name: &str) -> Option<CapSet> {
+    if let Some(caps) = builtins::builtin_fn_caps(name) {
+        return Some(caps);
+    }
+    // Check if this name matches a builtin method on any type
+    for receiver in ALL_BUILTINS {
+        if let Some(caps) = builtins::builtin_method_caps(receiver, name) {
+            return Some(caps);
+        }
+    }
+    None
+}
 
 /// A set of capabilities, represented as a bitset.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -109,19 +150,6 @@ pub enum CapErrorKind {
 #[derive(Debug)]
 pub struct CapCheckResult {
     pub errors: Vec<CapError>,
-}
-
-/// Known builtin functions and their required capabilities.
-fn builtin_caps(name: &str) -> Option<CapSet> {
-    match name {
-        // r[cap.kinds] — fs operations
-        "read_file" | "read_dir" | "glob" | "exists" | "metadata" => Some(CapSet::FS),
-        // r[exec.discover] — discovery operations
-        "discover_exec" => Some(CapSet::DISCOVER),
-        // r[exec.verifier.host] — host introspection
-        "which" | "hash" => Some(CapSet::HOST),
-        _ => None,
-    }
 }
 
 /// Run capability checking on a parsed source file.
@@ -282,6 +310,7 @@ impl<'a> CapChecker<'a> {
     }
 
     /// Check a call expression for known callback-accepting builtins.
+    /// Derives callback slot masks from the FnSig in builtins.rs.
     fn check_call_callbacks(&mut self, call: &CallExpr) {
         let callee_name = match call.callee() {
             Some(Expr::NameRef(name_ref)) => name_ref.token().map(|t| t.text().to_string()),
@@ -292,72 +321,59 @@ impl<'a> CapChecker<'a> {
             return;
         };
 
-        match callee_name.as_str() {
-            // r[eval.entry] — build(entry: Fn(...) #fs -> T)
-            "build" => {
-                // First positional arg is the entry closure
-                if let Some(first_arg) = call.args().next()
-                    && let Some(arg_expr) = first_arg.expr()
-                {
-                    self.check_closure_mask(&arg_expr, CapSet::FS, "build entry");
-                }
+        let Some(sig) = builtins::builtin_fn_sig(&callee_name) else {
+            return;
+        };
+
+        // Check positional args against function-typed parameters
+        for (arg, param) in call.args().zip(sig.positional_params.iter()) {
+            if let vx_types::Ty::Function(fn_ty) = &param.ty
+                && let Some(arg_expr) = arg.expr()
+            {
+                let mask = caps_from_fn_ty_capabilities(&fn_ty.capabilities);
+                self.check_closure_mask(
+                    &arg_expr,
+                    mask,
+                    &format!("{} {}", callee_name, param.name),
+                );
             }
-            // r[stabilize.signature] — stabilize(witness: Fn() #fs -> W, resolve: Fn(W) #discover -> T)
-            "stabilize" => {
-                let args: Vec<_> = call.args().collect();
-                if let Some(witness_arg) = args.first()
-                    && let Some(arg_expr) = witness_arg.expr()
-                {
-                    self.check_closure_mask(&arg_expr, CapSet::FS, "stabilize witness");
-                }
-                if let Some(resolve_arg) = args.get(1)
-                    && let Some(arg_expr) = resolve_arg.expr()
-                {
-                    self.check_closure_mask(&arg_expr, CapSet::DISCOVER, "stabilize resolve");
-                }
-                // Also check keyword args
-                for kw in call.keyword_args() {
-                    if let Some(name) = kw.name() {
-                        let mask = match name.text() {
-                            "witness" => Some(CapSet::FS),
-                            "resolve" => Some(CapSet::DISCOVER),
-                            _ => None,
-                        };
-                        if let Some(mask) = mask
-                            && let Some(arg_expr) = kw.expr()
-                        {
-                            self.check_closure_mask(
-                                &arg_expr,
-                                mask,
-                                &format!("stabilize {}", name.text()),
-                            );
-                        }
-                    }
-                }
+        }
+
+        // Check keyword args against keyword-typed parameters
+        for kw in call.keyword_args() {
+            let Some(kw_name) = kw.name() else { continue };
+            let kw_param = sig.keyword_params.iter().find(|p| p.name == kw_name.text());
+            if let Some(kw_param) = kw_param
+                && let vx_types::Ty::Function(fn_ty) = &kw_param.ty
+                && let Some(arg_expr) = kw.expr()
+            {
+                let mask = caps_from_fn_ty_capabilities(&fn_ty.capabilities);
+                self.check_closure_mask(
+                    &arg_expr,
+                    mask,
+                    &format!("{} {}", callee_name, kw_param.name),
+                );
             }
-            // r[exec.signature] — exec(...; observer: Fn(Process, Tree) #sandbox -> Stream[T],
-            //                              verifier: Fn(Host) #host -> ())
-            "exec" => {
-                for kw in call.keyword_args() {
-                    if let Some(name) = kw.name() {
-                        let mask = match name.text() {
-                            "observer" => Some(CapSet::SANDBOX),
-                            "verifier" => Some(CapSet::HOST),
-                            _ => None,
-                        };
-                        if let Some(mask) = mask
-                            && let Some(arg_expr) = kw.expr()
-                        {
-                            self.check_closure_mask(
-                                &arg_expr,
-                                mask,
-                                &format!("exec {}", name.text()),
-                            );
-                        }
-                    }
-                }
+        }
+
+        // Also check positional args passed via keyword name
+        for kw in call.keyword_args() {
+            let Some(kw_name) = kw.name() else { continue };
+            let pos_param = sig
+                .positional_params
+                .iter()
+                .find(|p| p.name == kw_name.text());
+            if let Some(pos_param) = pos_param
+                && let vx_types::Ty::Function(fn_ty) = &pos_param.ty
+                && let Some(arg_expr) = kw.expr()
+            {
+                let mask = caps_from_fn_ty_capabilities(&fn_ty.capabilities);
+                self.check_closure_mask(
+                    &arg_expr,
+                    mask,
+                    &format!("{} {}", callee_name, pos_param.name),
+                );
             }
-            _ => {}
         }
     }
 
@@ -389,7 +405,7 @@ impl<'a> CapChecker<'a> {
                     if let Some(&caps) = self.fn_caps.get(name) {
                         return caps;
                     }
-                    if let Some(caps) = builtin_caps(name) {
+                    if let Some(caps) = caps_for_name(name) {
                         return caps;
                     }
                 }
@@ -450,7 +466,7 @@ impl<'a> CapChecker<'a> {
                     if let Some(&caps) = self.fn_caps.get(name) {
                         return caps;
                     }
-                    if let Some(caps) = builtin_caps(name) {
+                    if let Some(caps) = caps_for_name(name) {
                         return caps;
                     }
                 }
@@ -498,7 +514,7 @@ impl<'a> CapChecker<'a> {
                 Expr::NameRef(name_ref) => {
                     if let Some(tok) = name_ref.token() {
                         let name = tok.text();
-                        if let Some(builtin) = builtin_caps(name) {
+                        if let Some(builtin) = caps_for_name(name) {
                             caps = caps.union(builtin);
                         }
                         if let Some(&fn_caps) = self.fn_caps.get(name) {
@@ -507,11 +523,18 @@ impl<'a> CapChecker<'a> {
                     }
                 }
                 Expr::Field(field_expr) => {
-                    // Method calls like host.which(...) — check method name
-                    if let Some(field_name) = field_expr.field_name()
-                        && let Some(builtin) = builtin_caps(field_name.text())
-                    {
-                        caps = caps.union(builtin);
+                    // Method calls like host.which(...) — check all builtin
+                    // receiver types for the method name
+                    if let Some(field_name) = field_expr.field_name() {
+                        let method_name = field_name.text();
+                        for receiver in ALL_BUILTINS {
+                            if let Some(method_caps) =
+                                builtins::builtin_method_caps(receiver, method_name)
+                            {
+                                caps = caps.union(method_caps);
+                                break;
+                            }
+                        }
                     }
                 }
                 _ => {}

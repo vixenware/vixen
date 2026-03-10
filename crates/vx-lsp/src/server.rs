@@ -411,6 +411,50 @@ impl LanguageServer for VxLanguageServer {
 
             // First, try definition-based hover (existing behavior)
             if let Some(def) = state.definition_at(offset) {
+                // Special handling for builtin functions
+                if def.kind == vx_resolve::DefKind::Builtin {
+                    if let Some(sig) = vx_resolve::builtins::builtin_fn_sig(&def.name) {
+                        let ret_display = sig.ret.display_with_env(&state.types.env);
+                        let params: Vec<String> = sig
+                            .positional_params
+                            .iter()
+                            .map(|p| format!("{}: {}", p.name, p.ty))
+                            .chain(sig.keyword_params.iter().map(|p| {
+                                if p.has_default {
+                                    format!("{}: {} = ...", p.name, p.ty)
+                                } else {
+                                    format!("{}: {}", p.name, p.ty)
+                                }
+                            }))
+                            .collect();
+                        let caps_str = if sig.capabilities.is_empty() {
+                            String::new()
+                        } else {
+                            let caps: Vec<_> = sig
+                                .capabilities
+                                .iter()
+                                .map(|c| format!("#{}", c.name))
+                                .collect();
+                            format!(" {}", caps.join(" "))
+                        };
+                        let snippet = format!(
+                            "fn {}({}){} -> {}",
+                            def.name,
+                            params.join(", "),
+                            caps_str,
+                            ret_display
+                        );
+                        let markdown = format!("```vx\n{snippet}\n```\n---\n*builtin function*");
+                        return Some(Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: markdown,
+                            }),
+                            range: Some(state.to_lsp_range(def.name_range)),
+                        });
+                    }
+                }
+
                 let kind_label = def_kind_label(def.kind);
                 let snippet = state.declaration_snippet(def);
                 let doc = state.doc_comment_for(def);
@@ -427,24 +471,39 @@ impl LanguageServer for VxLanguageServer {
                     def.kind,
                     vx_resolve::DefKind::Parameter | vx_resolve::DefKind::Binding
                 ) {
-                    // Find any name reference to this def that has an inferred type
-                    for resolved_ref in &state.resolution.refs {
-                        if let Ok(ref target) = resolved_ref.target {
-                            if target.name_range == def.name_range {
-                                if let Some(ty) =
-                                    state.type_check.expr_types.get(&resolved_ref.ref_range)
-                                {
-                                    let display = ty.display_with_env(&state.types.env);
-                                    markdown.push_str(&format!("\n\nType: `{display}`"));
-                                    break;
+                    let mut found_type = false;
+
+                    // Check binding_types first (for let bindings)
+                    if let Some(ty) = state.type_check.binding_types.get(&def.name_range) {
+                        let display = ty.display_with_env(&state.types.env);
+                        markdown.push_str(&format!("\n\nType: `{display}`"));
+                        found_type = true;
+                    }
+
+                    if !found_type {
+                        // Find any name reference to this def that has an inferred type
+                        for resolved_ref in &state.resolution.refs {
+                            if let Ok(ref target) = resolved_ref.target {
+                                if target.name_range == def.name_range {
+                                    if let Some(ty) =
+                                        state.type_check.expr_types.get(&resolved_ref.ref_range)
+                                    {
+                                        let display = ty.display_with_env(&state.types.env);
+                                        markdown.push_str(&format!("\n\nType: `{display}`"));
+                                        found_type = true;
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
+
                     // Also check if the def's own name range has a type (for closure params)
-                    if let Some(ty) = state.type_check.expr_types.get(&def.name_range) {
-                        let display = ty.display_with_env(&state.types.env);
-                        markdown.push_str(&format!("\n\nType: `{display}`"));
+                    if !found_type {
+                        if let Some(ty) = state.type_check.expr_types.get(&def.name_range) {
+                            let display = ty.display_with_env(&state.types.env);
+                            markdown.push_str(&format!("\n\nType: `{display}`"));
+                        }
                     }
                 }
 
@@ -1227,10 +1286,6 @@ impl VxLanguageServer {
         for err in &state.resolution.errors {
             match err {
                 vx_resolve::ResolveError::Unresolved { name, range } => {
-                    // Suppress unresolved name errors for builtin functions
-                    if vx_resolve::builtins::builtin_fn_sig(name).is_some() {
-                        continue;
-                    }
                     diagnostics.push(Diagnostic {
                         range: state.to_lsp_range(*range),
                         severity: Some(DiagnosticSeverity::ERROR),
@@ -1343,6 +1398,7 @@ fn def_kind_label(kind: vx_resolve::DefKind) -> &'static str {
         vx_resolve::DefKind::Parameter => "parameter",
         vx_resolve::DefKind::Variant => "variant",
         vx_resolve::DefKind::Field => "field",
+        vx_resolve::DefKind::Builtin => "builtin",
     }
 }
 
@@ -1357,6 +1413,7 @@ fn def_kind_to_completion(kind: vx_resolve::DefKind) -> CompletionItemKind {
         vx_resolve::DefKind::Parameter => CompletionItemKind::VARIABLE,
         vx_resolve::DefKind::Variant => CompletionItemKind::ENUM_MEMBER,
         vx_resolve::DefKind::Field => CompletionItemKind::FIELD,
+        vx_resolve::DefKind::Builtin => CompletionItemKind::FUNCTION,
     }
 }
 
@@ -1469,6 +1526,7 @@ fn def_kind_to_symbol(kind: vx_resolve::DefKind) -> SymbolKind {
         vx_resolve::DefKind::Parameter => SymbolKind::VARIABLE,
         vx_resolve::DefKind::Variant => SymbolKind::ENUM_MEMBER,
         vx_resolve::DefKind::Field => SymbolKind::FIELD,
+        vx_resolve::DefKind::Builtin => SymbolKind::FUNCTION,
     }
 }
 
@@ -1531,29 +1589,48 @@ fn dot_completions(
                 }
             }
 
-            // If it's a struct-typed binding, offer fields
+            // If it's a binding or parameter, offer completions based on inferred type
             if matches!(
                 def.kind,
                 vx_resolve::DefKind::Binding | vx_resolve::DefKind::Parameter
             ) {
-                // Try to find the type of this binding via function signature
+                // Check binding_types from the type checker first
+                if let Some(ty) = state.type_check.binding_types.get(&def.name_range) {
+                    if let Some(items) = completions_for_type(ty, state) {
+                        return Some(items);
+                    }
+                }
+                // Check closure_param_types via expr_types
+                if let Some(ty) = state.type_check.expr_types.get(&name_range) {
+                    if let Some(items) = completions_for_type(ty, state) {
+                        return Some(items);
+                    }
+                }
+                // Fall back to function signature matching
                 if let Some(fields) = resolve_binding_fields(def, state) {
                     return Some(fields);
                 }
             }
 
-            // If it's a function, offer fields of the return type
+            // If it's a function, offer completions on the return type
             if def.kind == vx_resolve::DefKind::Function {
                 if let Some(sig) = state.types.range_to_fn_sig.get(&def.name_range) {
-                    if let Some(fields) = struct_fields_from_ty(&sig.ret, state) {
-                        return Some(fields);
+                    if let Some(items) = completions_for_type(&sig.ret, state) {
+                        return Some(items);
                     }
                 }
             }
 
             None
         }
-        _ => None,
+        _ => {
+            // For any other expression, try the type checker's expr_types
+            let expr_range = receiver_expr.syntax().text_range();
+            if let Some(ty) = state.type_check.expr_types.get(&expr_range) {
+                return completions_for_type(ty, state);
+            }
+            None
+        }
     }
 }
 
@@ -1578,6 +1655,40 @@ fn resolve_binding_fields(
         }
     }
     None
+}
+
+/// Given a Ty, return completions for dot access — struct fields or builtin methods.
+fn completions_for_type(ty: &vx_types::Ty, state: &DocumentState) -> Option<Vec<CompletionItem>> {
+    match ty {
+        vx_types::Ty::Builtin(builtin) => {
+            let method_names = vx_resolve::builtins::builtin_methods_for(builtin);
+            if method_names.is_empty() {
+                return None;
+            }
+            let items: Vec<CompletionItem> = method_names
+                .iter()
+                .filter_map(|&name| {
+                    let sig = vx_resolve::builtins::builtin_method(builtin, name)?;
+                    let detail = if sig.params.is_empty() {
+                        format!("{}", sig.ret)
+                    } else {
+                        let params: Vec<_> =
+                            sig.params.iter().map(|p| format!("{}", p.ty)).collect();
+                        format!("({}) -> {}", params.join(", "), sig.ret)
+                    };
+                    Some(CompletionItem {
+                        label: name.to_string(),
+                        kind: Some(CompletionItemKind::METHOD),
+                        detail: Some(detail),
+                        ..Default::default()
+                    })
+                })
+                .collect();
+            if items.is_empty() { None } else { Some(items) }
+        }
+        vx_types::Ty::Optional(inner) => completions_for_type(inner, state),
+        _ => struct_fields_from_ty(ty, state),
+    }
 }
 
 /// Given a Ty, if it's a struct, return field completions.
