@@ -1,0 +1,21 @@
+fn executor_class(label: String) -> ExecutorClass;
+
+fn discover[T](
+  class: ExecutorClass,
+  probe: Fn(Host) #host -> T,
+) #discover -> T;
+
+fn exec[T](
+  args: Array[ExecInput]
+) where {
+  env: Map[String, ExecInput] = {},
+  mounts: Map[Path, Blob | Tree] = {},
+  writable: Array[Path] = [],
+  executor: ExecutorClass = executor_class "default",
+  observer: Fn(Process, Tree) #sandbox -> T,
+} -> T;
+
+fn stabilize[W, T](
+  witness: Fn() #fs -> W,
+  resolve: Fn(W) #discover -> T,
+) -> T;

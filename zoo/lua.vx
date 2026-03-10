@@ -38,17 +38,14 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   let class = executor_class "default";
   let src_tree = Tree.from_path (ws / @zoo/lua-src);
   let toolchain =
-    discover (class, (host) => (
-      // The returned tool values carry hidden host obligations derived from
-      // `which` and `hash`. Later `exec` rechecks them automatically on the
-      // concrete executor.
+    discover (class, (host) =>
+      // The map stays demand-driven: each discovered tool can become
+      // available independently, and later `exec` only rechecks the
+      // obligations attached to the tool values it actually consumes.
       [:cc, :ar, :ranlib]
-        .map ((name) => (
-          let path = host.which name.to_string!;
-          (name, Tool { path, hash: host.hash path })
-        ))
-        .to_map!
-    ));
+        |> _.to_map host.which
+        |> _.map_values ((path) => Tool { path, hash: host.hash path })
+    );
 
   let { cc, ar, ranlib } = toolchain;
 
@@ -58,11 +55,11 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
         fail `process failed`
       );
 
-      Stream.of (vfs.subtree @out)
+      vfs.subtree @out
     ),
   };
 
-  let cexec = (partial exec where common).then ($.next!);
+  let cexec = partial exec where common;
 
   fn compile(file: Path) -> Tree (
     cexec [

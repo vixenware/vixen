@@ -679,15 +679,7 @@ insert_anchor_links = "heading"
 > ```
 >
 > means: call `f` normally, then pass its result to `g`. Positional
-> payload shape and keyword parameter shape are preserved. For example:
->
-> ```vixen
-> let cexec = (partial exec where common).then ($.next!)
-> ```
->
-> produces a callable with the same arguments and keywords as `exec
-> where common`, but whose result is the first element of the returned
-> stream.
+> payload shape and keyword parameter shape are preserved.
 
 ### Update expressions
 
@@ -1099,6 +1091,13 @@ insert_anchor_links = "heading"
 > interpolated value. Built-in scalar and path-like types provide
 > canonical `to_string()` methods. User-defined types participate by
 > defining `to_string(self) -> String` in their canonical namespace.
+
+> r[type.coerce.symbol]
+>
+> `Symbol` may implicitly coerce to `String` in checking contexts. This
+> supports APIs that accept textual names while still letting user code
+> traffic in symbol values. The reverse coercion does not exist: turning
+> a `String` into a `Symbol` is always explicit.
 
 > r[type.coerce.unit]
 >

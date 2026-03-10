@@ -392,13 +392,13 @@ That means:
 This:
 
 ```vixen
-(args) => (exec args where common).next!
+(args) => parse (load args)
 ```
 
 can be written as:
 
 ```vixen
-(partial exec where common).then ($.next!)
+load.then parse
 ```
 
 `.then` keeps the callable's positional and keyword surface and changes

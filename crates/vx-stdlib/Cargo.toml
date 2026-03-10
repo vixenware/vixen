@@ -1,0 +1,17 @@
+[package]
+name = "vx-stdlib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[package.metadata]
+
+[package.metadata."docs.rs"]
+rustdoc-args = ["--html-in-header", "arborium-header.html"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]

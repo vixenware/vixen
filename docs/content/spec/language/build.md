@@ -88,8 +88,8 @@ insert_anchor_links = "heading"
 >   mounts: Map[Path, Blob | Tree] = {},
 >   writable: Array[Path] = [],
 >   executor: ExecutorClass = executor_class "default",
->   observer: Fn(Process, Tree) #sandbox -> Stream[T],
-> } -> Stream[T]
+>   observer: Fn(Process, Tree) #sandbox -> T,
+> } -> T
 > ```
 
 > r[exec.arg]
@@ -231,7 +231,7 @@ insert_anchor_links = "heading"
 > Serialization preserves the observer's code identity, lowered body,
 > and resolved captures. The executor evaluates that payload with the
 > same language semantics as the orchestrator. The observer receives a
-> `Process` and the VFS root as a `Tree`, and returns `Stream[T]`.
+> `Process` and the VFS root as a `Tree`, and returns `T`.
 >
 > The observer runs under `#sandbox`. It may inspect the process result
 > and sandbox contents exposed through those arguments, but it has no
@@ -252,10 +252,11 @@ insert_anchor_links = "heading"
 
 > r[exec.observer.streaming]
 >
-> Streaming observers parse process output incrementally and produce
-> events as artifacts become available. Downstream dependents can start
-> work early — e.g., compiling a dependent crate as soon as metadata is
-> emitted, without waiting for code generation.
+> If the observer returns `Stream[T]`, `exec` itself returns
+> `Stream[T]`. Streaming observers parse process output incrementally
+> and produce events as artifacts become available. Downstream
+> dependents can start work early — e.g., compiling a dependent crate
+> as soon as metadata is emitted, without waiting for code generation.
 
 > r[exec.observer.simple]
 >
@@ -267,8 +268,9 @@ insert_anchor_links = "heading"
 >
 > If the executor cannot start the process, loses the process entirely,
 > or otherwise fails before it can hand `Process` and `Tree` to the
-> observer, the stream terminates and pending values derived from that
-> stream become poisoned.
+> observer, `exec` poisons. If the observer's result type is
+> `Stream[T]`, that stream terminates and pending values derived from it
+> become poisoned.
 >
 > By contrast, ordinary process failure is observer-visible data. A
 > process that exits nonzero, is terminated by the OS, or writes error

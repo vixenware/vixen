@@ -1,0 +1,41 @@
+type Symbol;
+type Path;
+type Blob;
+type Tree;
+type ExecPath;
+type ExecutorClass;
+type Host;
+
+type ExecInput = String | Path | Blob | Tree | ExecPath;
+
+struct Process {
+  stdout: Stream[Blob],
+  stderr: Stream[Blob],
+  exit_code: U64,
+}
+
+namespace Symbol {
+  fn to_string(self) -> String;
+}
+
+namespace Blob {
+  fn Blob(s: String) -> Self;
+  fn utf8(self) -> String;
+  fn utf8_lossy(self) -> String;
+}
+
+namespace Tree {
+  fn Tree(entries: Map[Path, Blob | Tree]) -> Self;
+  fn Tree(entries: Array[Tree | Blob]) -> Self;
+  fn Tree(path: Path) #fs -> Self;
+
+  fn file(self, path: Path) -> Blob;
+  fn subtree(self, path: Path) -> Self;
+  fn merge(self, other: Tree) -> Self;
+}
+
+namespace Host {
+  fn which(self, name: String) -> String;
+  fn read(self, path: String) -> Blob;
+  fn hash(self, path: String) -> Blob;
+}
