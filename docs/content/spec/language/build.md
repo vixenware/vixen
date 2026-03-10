@@ -418,21 +418,22 @@ insert_anchor_links = "heading"
 
 > r[deser.rename]
 >
-> `@rename("name")` renames a single field or variant.
-> `@rename_all("kebab-case")` renames all fields or variants in a
+> `#[rename = "name"]` renames a single field or variant.
+> `#[rename_all = "kebab-case"]` renames all fields or variants in a
 > container. Supported conventions: `"snake_case"`, `"camelCase"`,
 > `"PascalCase"`, `"kebab-case"`, `"SCREAMING_SNAKE_CASE"`.
 
 > r[deser.flatten]
 >
-> `@flatten` merges a nested struct's fields into the parent during
+> `#[flatten]` merges a nested struct's fields into the parent during
 > serialization/deserialization.
 
 > r[deser.tag]
 >
-> Enum tagging modes: externally tagged (default), `@tag("field")` for
-> internally tagged, `@tag("field", content: "data")` for adjacently
-> tagged, `@untagged` for untagged (tries each variant in order).
+> Enum tagging modes: externally tagged (default), `#[tag = "field"]`
+> for internally tagged, `#[tag = "field", content = "data"]` for
+> adjacently tagged, `#[untagged]` for untagged (tries each variant in
+> order).
 
 ## String methods
 

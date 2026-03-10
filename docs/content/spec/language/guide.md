@@ -5,158 +5,134 @@ insert_anchor_links = "heading"
 
 # Vixen Syntax Guide
 
-This page is a guide-level summary of the current language direction.
-It is intentionally shorter and more example-driven than the normative
-spec pages:
+This page is a guide-level overview of the current syntax direction.
+It teaches the raw expression forms first, then the real sugar on top of
+them.
+
+If this page and the normative spec disagree, the spec wins:
 
 - [Core Language](core.md)
 - [Build and Evaluation](build.md)
 
-If this page and the spec disagree, the spec wins.
+## 1. What counts as one value
 
-## Mental model
+Vixen application is unary, so the first thing to learn is what can act
+as a single payload.
 
-The language is organized around a few core ideas:
+### Parentheses
 
-- Application is unary: `f x`, not `f(x)`.
-- Chained application is left-associative: `f x y` means `(f x) y`, so
-  it only works when `f x` itself returns a callable.
-- Dot syntax is only for fields and methods, never free-function UFCS.
-- `where expr` is the only keyword-application form.
-- Records and maps both use braces, but they are different value kinds.
-- `!` means zero-arg invocation, not eagerness or forcing.
+```vixen
+(expr);          // grouping
+(left, right);   // tuple
+(
+  let x = 1;
+  x + 1
+);               // block expression
+```
 
-## Calls
+### Brackets
 
-The common forms are:
+```vixen
+[a, b, c];       // array
+```
+
+### Braces
+
+```vixen
+{ x: 1, y: 2 };                       // record
+{ 80: "http", 443: "https" };         // map
+{ @bin/lua: lua_exe, @lib/lib.a: a }; // map with Path keys
+```
+
+Use braces for both records and maps:
+
+- field-name keys give you a record
+- general expression keys give you a map
+
+### Paths
+
+```vixen
+@out/bin/lua;
+@(out/obj/{file}.o);
+```
+
+Use:
+
+- bare `@path` for the simple case
+- `@( ... )` when interpolation is needed
+
+Bare paths do not interpolate.
+Inside `@( ... )`, `{expr}` interpolates and `{{` / `}}` produce
+literal braces.
+
+## 2. Unary application
+
+The base call form is:
 
 ```vixen
 f x
-f (x, y)
-f [x, y]
-f { left: x, right: y }
 ```
 
-That means:
+That one payload can itself be a tuple, array, record, map, path, or
+block:
 
 ```vixen
-add (1, 2)
-distance ((x1, y1), (x2, y2))
-Tree [compile @lua.c, liblua]
+f (x, y);
+f [x, y];
+f { left: x, right: y };
+f {
+  @bin/lua: lua_exe,
+  @lib/liblua.a: liblua,
+};
+f (
+  let tmp = build_input;
+  tmp
+);
 ```
 
-For ordinary declarations, a parameter list with more than one positional
-parameter is tuple-shaped sugar:
+Chained application is left-associative:
 
 ```vixen
-fn add(a: U64, b: U64) -> U64
+f x y    // means: (f x) y
 ```
 
-is called as:
+So `f x y` is only valid when `f x` itself returns a callable.
 
-```vixen
-add (1, 2)
-```
-
-To navigate the result of a call, group it first:
+To navigate the result of an application, group it first:
 
 ```vixen
 (discover_tool class).path
 ```
 
-## Keyword arguments
+## 3. Fields, methods, and `!`
 
-Keyword application uses `where`:
-
-```vixen
-exec [cc, "-c", file] where { mounts: src }
-exec [cc, "-c", file] where common
-```
-
-Inline records and record values are interchangeable here:
+Dot syntax is only for fields and methods.
 
 ```vixen
-let common = { verifier, observer }
-let cexec = partial exec where common
+x.y;
+x.y.z;
 ```
 
-Required and optional keywords are both part of the function's declared
-call surface:
+Zero-arg invocation uses postfix `!`:
 
 ```vixen
-fn exec[T](args: Array[ExecInput]) where {
-  observer: Fn(Process, Tree) #sandbox -> Stream[T],
-  verifier: Fn(Host) #host -> () = (_host) => (),
-} -> Stream[T];
+blob.utf8!;
+get_config!;
+get_config!.database.port;
 ```
 
-## Records and maps
-
-Records use field labels:
+The raw form is:
 
 ```vixen
-let common = { verifier, observer }
-let point = { x: 1, y: 2 }
+(blob.utf8)!
 ```
 
-Maps use general key expressions:
+So `!` means only:
 
-```vixen
-let ports = { 80: "http", 443: "https" }
-let outputs = { @bin/lua: lua_exe, @lib/liblua.a: liblua }
-```
+- invoke a zero-arg free function
+- invoke a zero-arg bound method
 
-Use this rule of thumb:
-
-- `name: value` with field labels gives you a record
-- general keys give you a map
-
-Record spread works left-to-right:
-
-```vixen
-let tuned = { ..defaults, optimize: true }
-cexec [cc, "-c", file] where { ..common, mounts: src }
-```
-
-## Constructors
-
-Type names are constructor values in term position.
-
-Examples:
-
-```vixen
-Blob "hello"
-Point { x: 1.0, y: 2.0 }
-Tree { @bin/lua: lua_exe, @lib/liblua.a: liblua }
-```
-
-That gives a few useful patterns:
-
-- struct construction via record payloads
-- enum variant construction via record payloads
-- builtin construction via other payload kinds such as arrays or maps
-
-So `Tree [ ... ]` is not special syntax. It is just `Tree` called with
-an array literal.
-
-## Fields, methods, and `!`
-
-Dot navigation never falls back to free functions.
-
-```vixen
-config.package.name
-tool.path
-```
-
-When the selected member is a zero-arg method:
-
-```vixen
-blob.utf8    // bound method value
-blob.utf8!   // invoke it
-```
-
-`!` is only zero-arg invocation. It does not mean "force" in the
-demand-driven evaluator.
+It does **not** mean “force now” in the demand-driven evaluator.
 
 Postfix chains are left-associative:
 
@@ -164,16 +140,9 @@ Postfix chains are left-associative:
 blob.utf8!.trim!
 ```
 
-To call a zero-arg free function, use the same operator:
+## 4. Methods and namespaces
 
-```vixen
-get_config!
-get_config!.database.port
-```
-
-## Methods vs free functions
-
-Methods live in namespaces:
+Methods live in type namespaces:
 
 ```vixen
 namespace Blob {
@@ -183,70 +152,218 @@ namespace Blob {
 }
 ```
 
-Free functions chain with `|>`:
+Dot never falls back to free-function UFCS. If you want to chain free
+functions, use `|>`.
+
+## 5. Sugar: multi-parameter declarations
+
+This declaration:
 
 ```vixen
-cexec [ar, "rc", @out/liblua.a, ..objs]
-  |> cexec [ranlib, _]
+fn add(a: U64, b: U64) -> U64
 ```
 
-`_` is only the pipe placeholder.
+is sugar for a function whose one payload is a tuple.
 
-## Closures and shorthand
+So the call site is:
 
-Arrow closures are the explicit form:
+```vixen
+add (1, 2)
+```
+
+not:
+
+```vixen
+add 1 2
+```
+
+Likewise:
+
+```vixen
+fn distance(p1: (F64, F64), p2: (F64, F64)) -> F64
+```
+
+is called as:
+
+```vixen
+distance ((x1, y1), (x2, y2))
+```
+
+## 6. Records and keyword application
+
+First, a function can declare keyword parameters with `where`:
+
+```vixen
+fn exec[T](args: Array[ExecInput]) where {
+  observer: Fn(Process, Tree) #sandbox -> Stream[T],
+  verifier: Fn(Host) #host -> () = (_host) => (),
+} -> Stream[T];
+```
+
+Then the call site uses:
+
+```vixen
+where expr
+```
+
+where `expr` evaluates to a record.
+
+So these are both valid:
+
+```vixen
+exec [cc, "-c", file] where { mounts: src }
+exec [cc, "-c", file] where common
+```
+
+The second form is possible because records are real values:
+
+```vixen
+let common = { verifier, observer }
+```
+
+Record shorthand is real sugar:
+
+```vixen
+{ verifier, observer }
+```
+
+means:
+
+```vixen
+{ verifier: verifier, observer: observer }
+```
+
+Record spread also works inside keyword application:
+
+```vixen
+exec [cc, "-c", file] where { ..common, mounts: src }
+```
+
+## 7. Constructors
+
+Constructors are ordinary unary callables.
+
+These are ordinary calls:
+
+```vixen
+Blob "hello"
+Point { x: 1.0, y: 2.0 }
+Tree [compile @lua.c, liblua]
+Tree {
+  @bin/lua: lua_exe,
+  @lib/liblua.a: liblua,
+}
+```
+
+So:
+
+```vixen
+Tree [ ... ]
+```
+
+is not a special form. It is just `Tree` applied to an array payload.
+
+And:
+
+```vixen
+Tree { ... }
+```
+
+is just `Tree` applied to a map payload.
+
+## 8. Sugar: pipe
+
+Pipe is sugar for threading a value into the next stage.
+
+```vixen
+x |> f
+```
+
+means:
+
+```vixen
+f x
+```
+
+Selectors can be stages too:
+
+```vixen
+get_blob my_blob |> .utf8
+```
+
+means:
+
+```vixen
+(get_blob my_blob).utf8!
+```
+
+If the payload does not go in the default position, use `_`:
+
+```vixen
+x |> pair(y, _)
+```
+
+means:
+
+```vixen
+pair(y, x)
+```
+
+For multiline pipelines, prefer full leading `|>` alignment:
+
+```vixen
+|> objs
+|> cexec [ar, "rc", @out/liblua.a, .._]
+|> cexec [ranlib, _]
+```
+
+Use `_` only in pipes.
+
+## 9. Sugar: closure shorthand
+
+This:
 
 ```vixen
 (tool) => verify_tool(host, tool)
 ```
 
-`$` is closure shorthand:
+can be written as:
 
 ```vixen
-files.map ($.utf8!)
-items.reduce ($0 + $1)
-tools.values!.each (verify_tool host $)
+verify_tool (host, $)
 ```
 
-Use this split:
-
-- `_` for pipes
-- `$` for closures
-- `partial` when you are freezing part of a callable surface
-
-## Partial application
-
-`partial` freezes only what you write:
+More examples:
 
 ```vixen
-let add_two = partial add 2
-let cexec = partial exec where common
+files.map ($.utf8!);
+items.reduce ($0 + $1);
+```
+
+Use `$` only for closures.
+
+## 10. Sugar: partial application
+
+This:
+
+```vixen
+(args) => exec args where common
+```
+
+can be written as:
+
+```vixen
+partial exec where common
 ```
 
 That means:
 
-- written positional arguments are bound
-- omitted positional arguments stay open
+- written positional applications are bound
+- omitted positional applications stay open
 - written keyword arguments are bound
 - unspecified keyword arguments stay open
 
-## Paths
-
-Two path forms are in play:
-
-```vixen
-@out/bin/lua
-@(out/obj/{file}.o)
-```
-
-Use:
-
-- bare `@path` for the common simple case
-- `@( ... )` when interpolation is needed
-
-Bare paths do not interpolate.
-
-## A build-shaped example
+## 11. A build-shaped example
 
 ```vixen
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree (
@@ -258,7 +375,9 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs -> Tree (
     cexec [cc, "-c", "-o", @(out/obj/{file}.o), file] where { mounts: src }
   );
 
-  let liblua = all_lib_sources.map compile |> _.merge!;
+  let liblua =
+    all_lib_sources.map compile
+    |> _.merge!;
   let lua_exe = link Tree [compile @lua.c, liblua];
 
   Tree {

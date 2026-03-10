@@ -90,14 +90,14 @@ insert_anchor_links = "heading"
 
 > r[lex.attributes]
 >
-> Attributes use `@` followed by a name and optional arguments:
-> `@rename("name")`, `@tag("type")`. Attributes attach
+> Attributes use `#[ ... ]` with comma-separated key/value entries:
+> `#[rename = "name"]`, `#[tag = "type"]`. Attributes attach
 > to the declaration or field that immediately follows them. Multiple
 > attributes can stack:
 >
 > ```vixen
-> @tag("type")
-> @rename_all("kebab-case")
+> #[tag = "type"]
+> #[rename_all = "kebab-case"]
 > enum Shape { ... }
 > ```
 >
@@ -108,11 +108,9 @@ insert_anchor_links = "heading"
 > - Enum variants
 > - Function declarations
 >
-> `@` in pattern position (`name @ pattern`) is the binding operator,
-> not an attribute. `@` before a path literal (`@src/main.c`,
-> `@(out/{name}.o)`) is also distinct from attributes.
-> In patterns, `@name` remains a binding marker. The parser distinguishes
-> these by syntactic context.
+> `@` in pattern position (`name @ pattern`) is the binding operator.
+> `@` before a path literal (`@src/main.c`, `@(out/{name}.o)`) is path
+> syntax. Attributes no longer use `@`, so these forms do not conflict.
 
 ### Semicolons
 
@@ -124,10 +122,11 @@ insert_anchor_links = "heading"
 > trailing semicolon turns it into a statement and the block evaluates
 > to `()`.
 >
-> At file scope, Vixen has **top-level items**, not statements. A source
-> file is a sequence of top-level immutable `let` bindings, type
-> declarations, and function declarations; there is no file-level
-> trailing expression value.
+> At file scope, Vixen uses the same statement-list shape as a block,
+> except a source file has no resulting value. Top-level `let`
+> bindings and declarations contribute exported names. Top-level
+> expression statements are allowed, but their values are discarded and
+> they do not export names. `return` remains function-only.
 >
 > Semicolons do not separate positional from keyword arguments. Keyword
 > application uses `where`, as described in `r[expr.call.where]`.
@@ -154,10 +153,10 @@ insert_anchor_links = "heading"
 > Pipe: `|>` (free-function / pipeline chaining).
 >
 > Other: `?` (fallible suffix), `!` (postfix zero-arg invocation), `@`
-> (path prefix, pattern binding, attributes), `#` (capability tags on
-> function types), `:` (named slots — type annotations and field-value
-> pairs), `::` (expression-level type ascription, distinct from `as`
-> conversion).
+> (path prefix, pattern binding), `#` (capability tags on function
+> types, attribute opener in `#[...]`), `:` (named slots — type
+> annotations and field-value pairs), `::` (expression-level type
+> ascription, distinct from `as` conversion).
 
 > r[lex.delimiters]
 >
@@ -249,7 +248,7 @@ insert_anchor_links = "heading"
 
 > r[decl.type]
 >
-> Top-level type declarations are keyword-led:
+> Type declarations are keyword-led:
 > `struct Name { ... }`, `enum Name { ... }`, `newtype Name of T`.
 > The `type` keyword is reserved for aliases:
 > `type Name = Foo | Bar`.
@@ -418,13 +417,14 @@ insert_anchor_links = "heading"
 
 > r[decl.scope]
 >
-> Top-level items are type declarations (`struct`, `enum`, `newtype`,
-> `type`) and function declarations. Bindings do not appear at top
-> level.
+> A source file is a statement list with module export semantics.
+> Blocks are statement lists with expression semantics. In both places,
+> declarations and bindings may appear alongside expression statements.
 >
-> Inside blocks, bindings and local functions are allowed. Top-level type
-> declarations are not allowed in statement position; nested type
-> declarations appear only in slot type position, immediately after `:`.
+> Nested type declarations are allowed in statement position. They are
+> scoped to the enclosing block, and when nested inside a named
+> declaration they are additionally reachable through that declaration's
+> namespace path.
 
 ## Expression grammar
 
@@ -645,11 +645,34 @@ insert_anchor_links = "heading"
 
 > r[expr.pipe]
 >
-> `|>` is the chaining form for free functions and pipeline transforms.
+> `|>` is the chaining form for pipeline stages. A stage may be a free
+> function application, a selector stage such as `.utf8`, or any
+> other pipe-compatible transform.
+>
+> Without `_`, a plain stage receives the piped value as its payload:
+>
+> ```vixen
+> x |> f        // means: f x
+> ```
+>
+> A selector stage navigates from the piped value:
+>
+> ```vixen
+> x |> .field    // means: x.field
+> x |> .utf8     // means: x.utf8!
+> ```
+>
+> With `_`, the piped value is substituted where `_` appears:
+>
+> ```vixen
+> x |> pair(y, _)   // means: pair(y, x)
+> ```
+>
 > `_` inside a pipe RHS names the piped value:
 >
 > ```vixen
-> cexec [ar, ...] |> cexec [ranlib, _]
+> get_blob my_blob |> .utf8
+> value |> cexec [ranlib, _]
 > ```
 
 ### Update expressions
@@ -735,7 +758,7 @@ insert_anchor_links = "heading"
 > arguments remain open:
 >
 > ```vixen
-> let add_two = partial add 2
+> let cexec = partial exec where common
 > let loud_compile = partial compile where { loudly: true }
 > ```
 
@@ -848,16 +871,17 @@ insert_anchor_links = "heading"
 >
 > Assignment (`name = expr`, `name: Type = expr`) and compound update
 > (`name with= { ... }`) are statements, not expressions. Declarations
-> (`fn`, `struct`, `enum`, `newtype`) are also statements.
+> (`fn`, `struct`, `enum`, `newtype`, `type`) are also statements.
 
 ## Modules
 
 > r[lang.modules]
 >
-> A `.vx` file is a module. Its top-level bindings (including immutable
-> `let` bindings, functions, and types) are the module's exports. There
-> is no visibility modifier — everything at the top level is visible to
-> importers.
+> A `.vx` file is a module. Its top-level statement list may contain
+> bindings, declarations, and expression statements. Top-level bindings
+> and declarations are the module's exports. Top-level expression
+> statements evaluate for their effects and exported dependencies but do
+> not introduce names.
 
 > r[lang.modules.namespace]
 >
@@ -1302,9 +1326,8 @@ insert_anchor_links = "heading"
 > r[fn.closure.dollar]
 >
 > `$` is shorthand for the first argument of a closure. `$` works
-> anywhere in an expression, including in function arguments, enabling
-> partial application: `items.map (add $ 1)` means
-> `items.map((x) => (add x) 1)`.
+> anywhere in an expression, including in function arguments:
+> `items.map ($ + 1)` means `items.map((x) => x + 1)`.
 
 > r[fn.closure.numbered]
 >
