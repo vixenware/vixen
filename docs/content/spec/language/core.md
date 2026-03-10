@@ -345,6 +345,11 @@ insert_anchor_links = "heading"
 > expression in the body is the return value. `return` can be used for
 > early exit. A function body that ends with a statement (including an
 > empty body) implicitly returns `()`.
+>
+> Multiple positional parameters define a curried unary call surface.
+> `fn add(a: U64, b: U64) -> U64` is called as `add 1 2`. A function
+> that takes one tuple payload instead uses an explicit tuple parameter:
+> `fn add_pair(pair: (U64, U64)) -> U64`, called as `add_pair (1, 2)`.
 
 > r[decl.fn.nested]
 >
@@ -379,14 +384,19 @@ insert_anchor_links = "heading"
 
 > r[decl.fn.keyword-args]
 >
-> Keyword parameters and arguments follow positional ones after `;`:
+> Keyword parameters live in a separate `where { ... }` block after the
+> positional parameter list. Keyword-ness and default-ness are separate:
+> a keyword parameter may be required (no default) or optional (with a
+> default).
 >
 > ```vixen
-> fn greet(name: String; cheerful: Bool = false) -> String {
+> fn greet(name: String) where {
+>   cheerful: Bool = false,
+> } -> String {
 >   if cheerful { `Hey ${name}!!!` } else { `Hello ${name}` }
 > }
 >
-> greet("Amos"; cheerful: true)
+> greet "Amos" where { cheerful: true }
 > ```
 
 ### Scope
@@ -525,6 +535,10 @@ insert_anchor_links = "heading"
 > f { ... }
 > ```
 >
+> `f { ... }` is ordinary unary application to a braced payload. It is
+> never keyword application. `where` is the only keyword-application
+> form.
+>
 > To access a member on the result of an application, group the
 > application first:
 >
@@ -541,6 +555,10 @@ insert_anchor_links = "heading"
 > exec [cc, "-c", file] where defaults
 > exec [cc, "-c", file] where { mounts: src }
 > ```
+>
+> `where expr` does not introduce a second positional argument. It
+> applies the record value in keyword position against the callee's
+> declared keyword parameter set.
 
 > r[expr.call.where.spread]
 >
@@ -569,6 +587,10 @@ insert_anchor_links = "heading"
 > ```vixen
 > let p = Point { x: 1.0, y: 2.0 }
 > ```
+>
+> The same unary application model applies to non-record constructors:
+> `Tree { @bin/lua: exe }` is `Tree` applied to a map payload, not a
+> record payload.
 
 ### Index expressions
 
@@ -588,6 +610,8 @@ insert_anchor_links = "heading"
 > `value.field` is the bound method value and `value.field!` invokes it.
 > `.` and postfix `!` form one left-associative postfix chain, so
 > `x.y.z!` means `(((x).y).z)!` and `x.y!.z!` means `(((((x).y)!).z)!)`.
+> `!` is zero-arg invocation only; it does not imply eagerness or
+> forcing.
 
 > r[expr.field.variant]
 >
@@ -603,9 +627,6 @@ insert_anchor_links = "heading"
 > Dot access never falls back to arbitrary free functions. `x.f` means
 > field access or method lookup only. Methods live in `namespace Type {
 > ... }`; extensions live in import-scoped `extend Type { ... }`.
->
-> Leading-dot forms are method adapters. `.name` yields a bound-method
-> adapter; `.name!` yields an adapter that invokes the zero-arg method.
 
 > r[expr.pipe]
 >
@@ -693,12 +714,13 @@ insert_anchor_links = "heading"
 
 > r[expr.partial]
 >
-> `partial f(...)` partially applies a function, producing a new function
-> with the written arguments bound. Omitted positional arguments remain
-> open, and unspecified keyword arguments remain open:
+> `partial` freezes the application surface written to its right,
+> producing a new callable value. Bound positional arguments are fixed,
+> omitted positional arguments remain open, and unspecified keyword
+> arguments remain open:
 >
 > ```vixen
-> let add_two = partial add(2)
+> let add_two = partial add 2
 > let loud_compile = partial compile where { loudly: true }
 > ```
 
@@ -1185,10 +1207,28 @@ insert_anchor_links = "heading"
 > r[fn.type]
 >
 > Function types use `Fn(Args) -> Ret` syntax. Capability tags appear
-> between the parameter list and the return type arrow: `Fn(Args) #fs -> Ret`.
-> See `r[cap.model]`. Functions with keyword arguments are first-class;
-> keyword-parameter shape is part of the function's call surface rather
-> than a reason the function cannot be passed around.
+> between the parameter list and the return type arrow:
+> `Fn(Args) #fs -> Ret`. Keyword parameters use a trailing `where`
+> block:
+>
+> ```vixen
+> Fn(Path) where { mounts: Tree, loudly: Bool = false } -> Tree
+> ```
+>
+> Multiple positional parameter types describe a curried unary call
+> surface:
+>
+> ```vixen
+> Fn(U64, U64) -> U64
+> ```
+>
+> behaves like `Fn(U64) -> Fn(U64) -> U64` at application time.
+> By contrast, `Fn((U64, U64)) -> U64` accepts one tuple payload and is
+> called as `f (1, 2)`.
+>
+> Functions with keyword arguments are first-class; keyword-parameter
+> shape is part of the function's call surface rather than a reason the
+> function cannot be passed around.
 
 > r[fn.identity]
 >
@@ -1250,8 +1290,8 @@ insert_anchor_links = "heading"
 >
 > `$` is shorthand for the first argument of a closure. `$` works
 > anywhere in an expression, including in function arguments, enabling
-> partial application: `items.map (add($, 1))` means
-> `items.map((x) => add(x, 1))`.
+> partial application: `items.map (add $ 1)` means
+> `items.map((x) => (add x) 1)`.
 
 > r[fn.closure.numbered]
 >
@@ -1262,12 +1302,9 @@ insert_anchor_links = "heading"
 
 > r[fn.method]
 >
-> Dot navigation is for fields and methods only. Vixen does not use
-> free-function UFCS. Methods live in type namespaces; free functions are
-> chained with `|>`.
->
-> A leading-dot method adapter such as `.utf8!` or `.next!` denotes a
-> callable adapter value rather than immediate invocation.
+> Methods live in type namespaces; see `r[expr.field]` and
+> `r[expr.method]` for the call surface. Vixen does not use free-function
+> UFCS. Free functions chain through `r[expr.pipe]`.
 
 ## Function overloading
 
@@ -1303,6 +1340,9 @@ insert_anchor_links = "heading"
 > record-like enum variants. Struct constructors accept anonymous
 > structural record payloads. Variant constructors return the
 > variant-specific type and widen to the parent enum when needed.
+> Constructors for opaque builtins may accept other payload kinds, such
+> as maps (`Tree { ... }`) or arrays (`Tree [ ... ]`), without becoming
+> separate syntax classes.
 
 ## Records
 
@@ -1317,6 +1357,7 @@ insert_anchor_links = "heading"
 >
 > A bare field name is shorthand for `name: name`. Records are real
 > values with structural types such as `{ left: U64, right: U64 }`.
+> Record field labels are names, not general expressions.
 
 > r[type.record.spread]
 >
@@ -1349,8 +1390,9 @@ insert_anchor_links = "heading"
 >
 > The type is `Map[K, V]`. Keys can be any Vixen type — all types are
 > comparable for equality and hashable. A braced literal whose entries
-> are all bare field labels is a record; a braced literal with general
-> key expressions is a map.
+> are all field labels is a record; a braced literal whose entries use
+> general key expressions is a map. Mixing record fields and general map
+> keys in one literal is an error.
 
 > r[collect.map.order]
 >

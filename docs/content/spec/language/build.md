@@ -85,7 +85,7 @@ insert_anchor_links = "heading"
 >   env: Map[String, ExecInput] = {},
 >   mounts: Map[Path, Blob | Tree] = {},
 >   writable: Array[Path] = [],
->   executor: ExecutorClass = executor_class("default"),
+>   executor: ExecutorClass = executor_class "default",
 >   verifier: Fn(Host) #host -> () = (_host) => (),
 >   observer: Fn(Process, Tree) #sandbox -> Stream[T],
 > } -> Stream[T]
@@ -324,14 +324,14 @@ insert_anchor_links = "heading"
 >   check_sdk_version(host);
 > }
 >
-> exec(["gcc", "-c", "main.c"]; verifier: verifier, ...)
+> exec ["gcc", "-c", "main.c"] where { verifier }
 > ```
 
 > r[exec.executor-class]
 >
 > `executor_class(label: String) -> ExecutorClass` creates a value
 > representing a class of executor environments (e.g.,
-> `executor_class("ubuntu-22.04")`). The class is the unit of cache
+> `executor_class "ubuntu-22.04"`). The class is the unit of cache
 > reuse for `exec` — cached results are keyed by executor class, not
 > by specific runner instance. Different instances of the same class
 > are expected to be equivalent; the verifier detects when they are
@@ -821,17 +821,17 @@ insert_anchor_links = "heading"
 > enforces its own capability masks independently:
 >
 > ```vixen
-> stabilize(
+> stabilize where {
 >   witness: () => { ... },
 >   resolve: (inputs) => {
 >     // outer resolve has #discover, not #fs
->     stabilize(
+>     stabilize where {
 >       witness: () => { ... },
 >       // inner witness: #fs granted by inner stabilize,
 >       // #discover from outer resolve filtered by mask
 >       resolve: (inner) => { ... },
 >       // inner resolve: #discover granted by inner stabilize
->     )
+>     }
 >   },
-> )
+> }
 > ```
