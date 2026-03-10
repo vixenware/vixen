@@ -1,5 +1,6 @@
 use vx_parser::{AstNode, SourceFile, parse};
 
+use crate::cap_check::{CapErrorKind, CapSet};
 use crate::scope::ScopeTree;
 use crate::{DefKind, ScopeKind, resolve};
 
@@ -372,4 +373,290 @@ type Name = String
         }
         _ => panic!("expected alias"),
     }
+}
+
+fn check_caps(src: &str) -> crate::CapCheckResult {
+    let file = parse_file(src);
+    let resolution = resolve(&file);
+    let types = crate::collect_types(&file);
+    crate::check_capabilities(&file, &resolution.scopes, &types)
+}
+
+// r[cap.mask] — pure closure satisfies any callback mask
+#[test]
+fn pure_closure_satisfies_any_mask() {
+    let result = check_caps(
+        r#"
+fn main() {
+    build((path, args, env) => path);
+    stabilize(() => "w", (w) => "r");
+    exec(["echo"]; observer: (proc, tree) => [], verifier: (host) => {});
+}
+"#,
+    );
+    assert!(
+        result.errors.is_empty(),
+        "pure closures should satisfy any mask: {:?}",
+        result.errors
+    );
+}
+
+// r[cap.mask] — observer that uses #host-only APIs is rejected
+#[test]
+fn observer_using_host_api_rejected() {
+    let result = check_caps(
+        r#"
+fn main() {
+    exec(["gcc", "main.c"];
+        observer: (proc, tree) => {
+            let path = which("gcc");
+            []
+        },
+    );
+}
+"#,
+    );
+    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+    match &result.errors[0].kind {
+        CapErrorKind::CapabilityViolation {
+            slot_name,
+            allowed,
+            excess,
+            ..
+        } => {
+            assert_eq!(slot_name, "exec observer");
+            assert_eq!(*allowed, CapSet::SANDBOX);
+            assert!(!excess.is_empty());
+            assert!(
+                excess.names().contains(&"host"),
+                "excess should contain #host: {excess}"
+            );
+        }
+        other => panic!("expected CapabilityViolation, got: {other:?}"),
+    }
+}
+
+// r[exec.discover.verifier] — verifier that uses discover_exec is rejected
+#[test]
+fn verifier_using_discover_rejected() {
+    let result = check_caps(
+        r#"
+fn main() {
+    exec(["gcc", "main.c"];
+        verifier: (host) => {
+            discover_exec("default", ["gcc", "--version"]);
+        },
+    );
+}
+"#,
+    );
+    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+    match &result.errors[0].kind {
+        CapErrorKind::CapabilityViolation {
+            slot_name, excess, ..
+        } => {
+            assert_eq!(slot_name, "exec verifier");
+            assert!(
+                excess.names().contains(&"discover"),
+                "excess should contain #discover: {excess}"
+            );
+        }
+        other => panic!("expected CapabilityViolation, got: {other:?}"),
+    }
+}
+
+// r[cap.propagation] — calling a #discover function from a stabilize witness is rejected
+#[test]
+fn stabilize_witness_cannot_discover() {
+    let result = check_caps(
+        r#"
+fn probe() #discover {}
+
+fn main() {
+    stabilize(() => { probe() }, (w) => w);
+}
+"#,
+    );
+    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+    match &result.errors[0].kind {
+        CapErrorKind::CapabilityViolation {
+            slot_name, excess, ..
+        } => {
+            assert_eq!(slot_name, "stabilize witness");
+            assert!(
+                excess.names().contains(&"discover"),
+                "excess should contain #discover: {excess}"
+            );
+        }
+        other => panic!("expected CapabilityViolation, got: {other:?}"),
+    }
+}
+
+// r[cap.mask] — stabilize resolve with #fs is rejected (resolve only allows #discover)
+#[test]
+fn stabilize_resolve_cannot_fs() {
+    let result = check_caps(
+        r#"
+fn main() {
+    stabilize(() => "w", (w) => { read_file("foo") });
+}
+"#,
+    );
+    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+    match &result.errors[0].kind {
+        CapErrorKind::CapabilityViolation {
+            slot_name, excess, ..
+        } => {
+            assert_eq!(slot_name, "stabilize resolve");
+            assert!(excess.names().contains(&"fs"), "excess: {excess}");
+        }
+        other => panic!("expected CapabilityViolation, got: {other:?}"),
+    }
+}
+
+// r[cap.tags] — unknown capability tag produces error
+#[test]
+fn unknown_capability_tag() {
+    let result = check_caps(
+        r#"
+fn foo() #network {}
+"#,
+    );
+    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+    match &result.errors[0].kind {
+        CapErrorKind::UnknownCapability { name } => {
+            assert_eq!(name, "network");
+        }
+        other => panic!("expected UnknownCapability, got: {other:?}"),
+    }
+}
+
+// r[cap.propagation] — calling a function with capabilities propagates to closure
+#[test]
+fn cap_propagation_through_call() {
+    let result = check_caps(
+        r#"
+fn read_config() #fs {}
+
+fn main() {
+    exec(["echo"];
+        observer: (proc, tree) => {
+            read_config();
+            []
+        },
+    );
+}
+"#,
+    );
+    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+    match &result.errors[0].kind {
+        CapErrorKind::CapabilityViolation {
+            slot_name, excess, ..
+        } => {
+            assert_eq!(slot_name, "exec observer");
+            assert!(excess.names().contains(&"fs"), "excess: {excess}");
+        }
+        other => panic!("expected CapabilityViolation, got: {other:?}"),
+    }
+}
+
+// r[cap.kinds] — valid capability tags are accepted
+#[test]
+fn valid_capability_tags() {
+    let result = check_caps(
+        r#"
+fn read_stuff() #fs {}
+fn probe() #discover {}
+fn observe() #sandbox {}
+fn verify() #host {}
+fn multi() #fs #discover {}
+"#,
+    );
+    assert!(
+        result.errors.is_empty(),
+        "valid caps should be accepted: {:?}",
+        result.errors
+    );
+}
+
+// r[cap.mask] — build entry with #discover is rejected (only #fs allowed)
+#[test]
+fn build_entry_cannot_discover() {
+    let result = check_caps(
+        r#"
+fn main() {
+    build((path, args, env) => {
+        discover_exec("default", ["gcc", "--version"]);
+        path
+    });
+}
+"#,
+    );
+    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+    match &result.errors[0].kind {
+        CapErrorKind::CapabilityViolation {
+            slot_name, excess, ..
+        } => {
+            assert_eq!(slot_name, "build entry");
+            assert!(excess.names().contains(&"discover"), "excess: {excess}");
+        }
+        other => panic!("expected CapabilityViolation, got: {other:?}"),
+    }
+}
+
+// Method-style host calls in observer are rejected
+#[test]
+fn observer_method_call_host_rejected() {
+    let result = check_caps(
+        r#"
+fn main() {
+    exec(["gcc", "main.c"];
+        observer: (proc, tree) => {
+            host.which("gcc");
+            []
+        },
+    );
+}
+"#,
+    );
+    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+    match &result.errors[0].kind {
+        CapErrorKind::CapabilityViolation {
+            slot_name, excess, ..
+        } => {
+            assert_eq!(slot_name, "exec observer");
+            assert!(excess.names().contains(&"host"), "excess: {excess}");
+        }
+        other => panic!("expected CapabilityViolation, got: {other:?}"),
+    }
+}
+
+// FnSig collects capabilities from declarations
+#[test]
+fn fn_sig_collects_capabilities() {
+    let file = parse_file(
+        r#"
+fn read_stuff() #fs -> String {}
+fn probe() #discover -> String {}
+fn both() #fs #discover -> String {}
+fn pure() -> String {}
+"#,
+    );
+    let tc = crate::collect_types(&file);
+
+    let sigs: Vec<_> = tc.range_to_fn_sig.values().collect();
+
+    let read_sig = sigs.iter().find(|s| s.name == "read_stuff").unwrap();
+    assert_eq!(read_sig.capabilities.len(), 1);
+    assert_eq!(read_sig.capabilities[0].name, "fs");
+
+    let probe_sig = sigs.iter().find(|s| s.name == "probe").unwrap();
+    assert_eq!(probe_sig.capabilities.len(), 1);
+    assert_eq!(probe_sig.capabilities[0].name, "discover");
+
+    let both_sig = sigs.iter().find(|s| s.name == "both").unwrap();
+    assert_eq!(both_sig.capabilities.len(), 2);
+
+    let pure_sig = sigs.iter().find(|s| s.name == "pure").unwrap();
+    assert!(pure_sig.capabilities.is_empty());
 }

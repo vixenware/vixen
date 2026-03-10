@@ -19,6 +19,7 @@ struct DocumentState {
     line_index: vx::LineIndex,
     resolution: NameResolution,
     types: vx_resolve::TypeCollection,
+    cap_check: vx_resolve::CapCheckResult,
 }
 
 impl DocumentState {
@@ -27,12 +28,14 @@ impl DocumentState {
         let line_index = vx::LineIndex::new(&text);
         let resolution = vx_resolve::resolve(&parsed.tree());
         let types = vx_resolve::collect_types(&parsed.tree());
+        let cap_check = vx_resolve::check_capabilities(&parsed.tree(), &resolution.scopes, &types);
         Self {
             text,
             parsed,
             line_index,
             resolution,
             types,
+            cap_check,
         }
     }
 
@@ -1119,6 +1122,33 @@ impl VxLanguageServer {
                     });
                 }
             }
+        }
+
+        // Capability checking diagnostics
+        for err in &state.cap_check.errors {
+            let message = match &err.kind {
+                vx_resolve::CapErrorKind::CapabilityViolation {
+                    slot_name,
+                    allowed,
+                    excess,
+                    ..
+                } => {
+                    format!(
+                        "capability violation in `{slot_name}`: requires {excess} \
+                         but slot only allows {allowed}"
+                    )
+                }
+                vx_resolve::CapErrorKind::UnknownCapability { name } => {
+                    format!("unknown capability `#{name}`")
+                }
+            };
+            diagnostics.push(Diagnostic {
+                range: state.to_lsp_range(err.range),
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some("vx-cap".to_string()),
+                message,
+                ..Default::default()
+            });
         }
 
         self.client

@@ -127,6 +127,8 @@ ast_node!(UnitPattern, SyntaxKind::UNIT_PATTERN);
 ast_node!(VariantPattern, SyntaxKind::VARIANT_PATTERN);
 ast_node!(AtPattern, SyntaxKind::AT_PATTERN);
 ast_node!(OrPattern, SyntaxKind::OR_PATTERN);
+ast_node!(CapabilityList, SyntaxKind::CAPABILITY_LIST);
+ast_node!(CapabilityTag, SyntaxKind::CAPABILITY_TAG);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Item {
@@ -504,6 +506,10 @@ impl FnDecl {
     pub fn body(&self) -> Option<BlockExpr> {
         child(self.syntax())
     }
+
+    pub fn capability_list(&self) -> Option<CapabilityList> {
+        child(self.syntax())
+    }
 }
 
 impl StructDecl {
@@ -625,6 +631,10 @@ impl FunctionType {
 
     pub fn return_type(&self) -> Option<Type> {
         self.syntax().children().filter_map(Type::cast).last()
+    }
+
+    pub fn capability_list(&self) -> Option<CapabilityList> {
+        child(self.syntax())
     }
 }
 
@@ -1080,6 +1090,18 @@ impl AtPattern {
 impl OrPattern {
     pub fn patterns(&self) -> AstChildren<Pattern> {
         AstChildren::new(self.syntax())
+    }
+}
+
+impl CapabilityList {
+    pub fn tags(&self) -> AstChildren<CapabilityTag> {
+        AstChildren::new(self.syntax())
+    }
+}
+
+impl CapabilityTag {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        first_token(self.syntax(), |kind| kind == SyntaxKind::LOWER_IDENT)
     }
 }
 
