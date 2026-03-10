@@ -9,7 +9,8 @@ use vx_parser::{
     ArrayExpr, ArrayItem as AstArrayItem, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr,
     Expr as AstExpr, FailExpr, FieldExpr, FnDecl, IfExpr, InterpolatedStringExpr, InvokeExpr,
     LiteralExpr, MapExpr, Parameter, PathLiteralExpr, PrefixExpr, RecordExpr, SourceFile,
-    Stmt as AstStmt, StringPart, StructLiteralExpr, StructLiteralField, SyntaxKind, WhereExpr,
+    Stmt as AstStmt, StringPart, StructLiteralExpr, StructLiteralField, SyntaxKind, TupleExpr,
+    WhereExpr,
 };
 
 use crate::instr;
@@ -135,6 +136,7 @@ fn lower_expr_with_ctx(expr: &AstExpr, ctx: &mut LowerCtx) -> Option<instr::Expr
         AstExpr::Prefix(pre) => lower_prefix(pre, ctx),
         AstExpr::Block(block) => Some(instr::Expr::Block(lower_block_with_ctx(block, ctx))),
         AstExpr::If(if_expr) => lower_if(if_expr, ctx),
+        AstExpr::Tuple(tuple) => lower_tuple(tuple, ctx),
         AstExpr::Paren(paren) => paren
             .expr()
             .and_then(|expr| lower_expr_with_ctx(&expr, ctx)),
@@ -159,6 +161,18 @@ fn lower_expr_with_ctx(expr: &AstExpr, ctx: &mut LowerCtx) -> Option<instr::Expr
         | AstExpr::TypeOp(_)
         | AstExpr::With(_) => None,
     }
+}
+
+fn lower_tuple(tuple: &TupleExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
+    let items = tuple.items().collect::<Vec<_>>();
+    if items.is_empty() {
+        return Some(instr::Expr::Unit);
+    }
+
+    for item in items {
+        let _ = lower_expr_with_ctx(&item, ctx)?;
+    }
+    None
 }
 
 fn lower_literal(lit: &LiteralExpr) -> Option<instr::Expr> {

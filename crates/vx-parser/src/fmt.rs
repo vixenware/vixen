@@ -764,7 +764,8 @@ impl Formatter {
     fn fmt_call_expr(&mut self, node: &SyntaxNode) {
         let parts = collect_call_parts(node);
         for (index, part) in parts.iter().enumerate() {
-            if index > 0 {
+            if index > 0 && !matches!(part.kind(), SyntaxKind::PAREN_EXPR | SyntaxKind::TUPLE_EXPR)
+            {
                 self.space();
             }
             self.fmt_node(part);

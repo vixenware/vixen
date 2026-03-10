@@ -109,6 +109,7 @@ ast_node!(TypePath, SyntaxKind::TYPE_PATH);
 ast_node!(BlockExpr, SyntaxKind::BLOCK_EXPR);
 ast_node!(ClosureExpr, SyntaxKind::CLOSURE_EXPR);
 ast_node!(ClosureParamClause, SyntaxKind::CLOSURE_PARAM_CLAUSE);
+ast_node!(TupleExpr, SyntaxKind::TUPLE_EXPR);
 ast_node!(ParenExpr, SyntaxKind::PAREN_EXPR);
 ast_node!(PartialAppExpr, SyntaxKind::PARTIAL_APP_EXPR);
 ast_node!(CallExpr, SyntaxKind::CALL_EXPR);
@@ -116,7 +117,6 @@ ast_node!(WhereExpr, SyntaxKind::WHERE_EXPR);
 ast_node!(InvokeExpr, SyntaxKind::INVOKE_EXPR);
 ast_node!(ArgList, SyntaxKind::ARG_LIST);
 ast_node!(Arg, SyntaxKind::ARG);
-ast_node!(KeywordArg, SyntaxKind::KEYWORD_ARG);
 ast_node!(IndexExpr, SyntaxKind::INDEX_EXPR);
 ast_node!(IfExpr, SyntaxKind::IF_EXPR);
 ast_node!(ElseClause, SyntaxKind::ELSE_CLAUSE);
@@ -211,6 +211,7 @@ impl AstNode for Item {
 pub enum Expr {
     Block(BlockExpr),
     Closure(ClosureExpr),
+    Tuple(TupleExpr),
     Paren(ParenExpr),
     PartialApp(PartialAppExpr),
     Call(CallExpr),
@@ -367,6 +368,7 @@ impl AstNode for Expr {
             kind,
             SyntaxKind::BLOCK_EXPR
                 | SyntaxKind::CLOSURE_EXPR
+                | SyntaxKind::TUPLE_EXPR
                 | SyntaxKind::PAREN_EXPR
                 | SyntaxKind::PARTIAL_APP_EXPR
                 | SyntaxKind::CALL_EXPR
@@ -398,6 +400,7 @@ impl AstNode for Expr {
         match node.kind() {
             SyntaxKind::BLOCK_EXPR => Some(Self::Block(BlockExpr::cast(node)?)),
             SyntaxKind::CLOSURE_EXPR => Some(Self::Closure(ClosureExpr::cast(node)?)),
+            SyntaxKind::TUPLE_EXPR => Some(Self::Tuple(TupleExpr::cast(node)?)),
             SyntaxKind::PAREN_EXPR => Some(Self::Paren(ParenExpr::cast(node)?)),
             SyntaxKind::PARTIAL_APP_EXPR => Some(Self::PartialApp(PartialAppExpr::cast(node)?)),
             SyntaxKind::CALL_EXPR => Some(Self::Call(CallExpr::cast(node)?)),
@@ -434,6 +437,7 @@ impl AstNode for Expr {
         match self {
             Self::Block(node) => node.syntax(),
             Self::Closure(node) => node.syntax(),
+            Self::Tuple(node) => node.syntax(),
             Self::Paren(node) => node.syntax(),
             Self::PartialApp(node) => node.syntax(),
             Self::Call(node) => node.syntax(),
@@ -830,6 +834,16 @@ impl ClosureExpr {
     }
 }
 
+impl TupleExpr {
+    pub fn items(&self) -> IntoIter<Expr> {
+        self.syntax()
+            .children()
+            .filter_map(Expr::cast)
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+}
+
 impl ParenExpr {
     pub fn expr(&self) -> Option<Expr> {
         child(self.syntax())
@@ -904,16 +918,6 @@ impl CallExpr {
 impl Arg {
     pub fn expr(&self) -> Option<Expr> {
         child(self.syntax())
-    }
-}
-
-impl KeywordArg {
-    pub fn name(&self) -> Option<SyntaxToken> {
-        first_token(self.syntax(), |kind| kind == SyntaxKind::LOWER_IDENT)
-    }
-
-    pub fn expr(&self) -> Option<Expr> {
-        self.syntax().children().filter_map(Expr::cast).last()
     }
 }
 
@@ -1371,7 +1375,10 @@ fn collect_call_args(call: &CallExpr, out: &mut Vec<Expr>) {
         collect_call_args(&inner, out);
     }
     if let Some(arg) = call.arg() {
-        out.push(arg);
+        match arg {
+            Expr::Tuple(tuple) => out.extend(tuple.items()),
+            expr => out.push(expr),
+        }
     }
 }
 

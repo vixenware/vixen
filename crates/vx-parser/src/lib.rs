@@ -12,7 +12,7 @@ pub use ast::{
     ParenType, PartialAppExpr, PathLiteralExpr, Pattern, PrefixExpr, RangeExpr, RecordExpr,
     ReturnStmt, ReturnType, SlotType, SourceFile, SpreadExpr, Stmt, StringInterpolation,
     StringPart, StructDecl, StructLiteralExpr, StructLiteralField, StructPattern,
-    StructPatternField, SumType, TuplePattern, TupleType, Type, TypeAliasDecl, TypeArgs,
+    StructPatternField, SumType, TupleExpr, TuplePattern, TupleType, Type, TypeAliasDecl, TypeArgs,
     TypeOpExpr, TypePath, UnitPattern, VariantDecl, VariantPattern, WhereExpr, WildcardPattern,
     WithExpr, doc_comment,
 };

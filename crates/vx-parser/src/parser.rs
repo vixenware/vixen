@@ -117,21 +117,6 @@ impl<'a> Parser<'a> {
         &self.source[u32::from(range.start()) as usize..u32::from(range.end()) as usize]
     }
 
-    fn has_trivia_gap_before_current(&self) -> bool {
-        if self.pos == 0 {
-            return false;
-        }
-
-        let Some(&current_index) = self.significant.get(self.pos) else {
-            return false;
-        };
-        let Some(&previous_index) = self.significant.get(self.pos - 1) else {
-            return false;
-        };
-
-        self.tokens[previous_index].range.end() < self.tokens[current_index].range.start()
-    }
-
     fn bump(&mut self) {
         if let Some(&token_index) = self.significant.get(self.pos) {
             self.events.push(Event::Token { token_index });
@@ -1256,8 +1241,23 @@ fn type_op_expr(p: &mut Parser<'_>) -> CompletedMarker {
 }
 
 fn application_expr(p: &mut Parser<'_>) -> CompletedMarker {
-    let mut lhs = postfix_expr(p);
+    let mut lhs = atom_expr(p);
     loop {
+        if p.at(SyntaxKind::DOT) {
+            let marker = lhs.precede(p);
+            p.bump();
+            if matches!(
+                p.current(),
+                SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT | SyntaxKind::OF_KW
+            ) {
+                p.bump();
+            } else {
+                p.error("expected field name");
+            }
+            lhs = marker.complete(p, SyntaxKind::FIELD_EXPR);
+            continue;
+        }
+
         if p.at(SyntaxKind::WHERE_KW) {
             let marker = lhs.precede(p);
             p.bump();
@@ -1273,6 +1273,13 @@ fn application_expr(p: &mut Parser<'_>) -> CompletedMarker {
             continue;
         }
 
+        if p.at(SyntaxKind::QUESTION) {
+            let marker = lhs.precede(p);
+            p.bump();
+            lhs = marker.complete(p, SyntaxKind::FALLIBLE_EXPR);
+            continue;
+        }
+
         break;
     }
     lhs
@@ -1282,47 +1289,8 @@ fn application_arg_expr(p: &mut Parser<'_>) -> CompletedMarker {
     if p.at(SyntaxKind::AT) {
         prefix_expr(p)
     } else {
-        postfix_expr(p)
+        atom_expr(p)
     }
-}
-
-fn postfix_expr(p: &mut Parser<'_>) -> CompletedMarker {
-    let mut lhs = atom_expr(p);
-    loop {
-        if p.at(SyntaxKind::L_BRACKET) {
-            if p.has_trivia_gap_before_current() {
-                break;
-            }
-            let marker = lhs.precede(p);
-            p.bump();
-            expr(p);
-            p.expect(SyntaxKind::R_BRACKET);
-            lhs = marker.complete(p, SyntaxKind::INDEX_EXPR);
-        } else if p.at(SyntaxKind::DOT) {
-            let marker = lhs.precede(p);
-            p.bump();
-            if matches!(
-                p.current(),
-                SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT | SyntaxKind::OF_KW
-            ) {
-                p.bump();
-            } else {
-                p.error("expected field name");
-            }
-            lhs = marker.complete(p, SyntaxKind::FIELD_EXPR);
-        } else if p.at(SyntaxKind::BANG) {
-            let marker = lhs.precede(p);
-            p.bump();
-            lhs = marker.complete(p, SyntaxKind::INVOKE_EXPR);
-        } else if p.at(SyntaxKind::QUESTION) {
-            let marker = lhs.precede(p);
-            p.bump();
-            lhs = marker.complete(p, SyntaxKind::FALLIBLE_EXPR);
-        } else {
-            break;
-        }
-    }
-    lhs
 }
 
 fn atom_expr(p: &mut Parser<'_>) -> CompletedMarker {

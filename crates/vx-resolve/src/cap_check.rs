@@ -212,6 +212,16 @@ struct CapChecker<'a> {
 }
 
 impl<'a> CapChecker<'a> {
+    fn is_closure_expr(expr: &Expr) -> bool {
+        match expr {
+            Expr::Closure(_) => true,
+            Expr::Paren(paren) => paren
+                .expr()
+                .is_some_and(|inner| Self::is_closure_expr(&inner)),
+            _ => false,
+        }
+    }
+
     fn sig_for_name(&self, name: &str) -> Option<vx_types::FnSig> {
         builtins::builtin_fn_sig(name).or_else(|| {
             self.types
@@ -664,11 +674,17 @@ impl<'a> CapChecker<'a> {
         // Capabilities from arguments
         for arg in call.args() {
             if let Some(arg_expr) = arg.expr() {
+                if Self::is_closure_expr(&arg_expr) {
+                    continue;
+                }
                 caps = caps.union(self.infer_body_caps(&arg_expr));
             }
         }
         for kw_arg in call.keyword_args() {
             if let Some(arg_expr) = kw_arg.expr() {
+                if Self::is_closure_expr(&arg_expr) {
+                    continue;
+                }
                 caps = caps.union(self.infer_body_caps(&arg_expr));
             }
         }

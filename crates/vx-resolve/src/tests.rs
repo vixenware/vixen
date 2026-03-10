@@ -450,10 +450,10 @@ fn pure_closure_satisfies_any_mask() {
     let result = check_caps(
         r#"
 fn main() {
-    build ((path, args, env) => path);
-    stabilize (() => "w") ((w) => "r");
-    exec (["echo"]) where { observer: (proc, tree) => [] };
-    discover (executor_class "default") ((host) => ());
+    build((path, args, env) => path);
+    stabilize(() => "w", (w) => "r");
+    exec(["echo"]) where { observer: (proc, tree) => [] };
+    discover(executor_class("default"), (host) => ());
 }
 "#,
     );
@@ -472,9 +472,9 @@ fn observer_using_host_api_rejected() {
 fn probe() #host {}
 
 fn main() {
-    exec (["gcc"]) where {
+    exec(["gcc"]) where {
         observer: (proc, tree) => {
-            probe!;
+            probe();
             []
         },
     };
@@ -507,9 +507,9 @@ fn observer_using_discover_rejected() {
     let result = check_caps(
         r#"
 fn main() {
-    exec (["gcc"]) where {
+    exec(["gcc"]) where {
         observer: (proc, tree) => {
-            discover (executor_class "default") ((host) => host.which "gcc");
+            discover(executor_class("default"), (host) => host.which("gcc"));
             []
         },
     };
@@ -539,7 +539,7 @@ fn stabilize_witness_cannot_discover() {
 fn probe() #discover {}
 
 fn main() {
-    stabilize (() => { probe! }) ((w) => w);
+    stabilize(() => probe(), (w) => w);
 }
 "#,
     );
@@ -564,7 +564,7 @@ fn stabilize_resolve_cannot_fs() {
     let result = check_caps(
         r#"
 fn main() {
-    stabilize (() => "w") ((w) => { read_file "foo" });
+    stabilize(() => "w", (w) => read_file("foo"));
 }
 "#,
     );
@@ -603,9 +603,9 @@ fn cap_propagation_through_call() {
     let result = check_caps(
         r#"
 fn main() {
-    exec (["echo"]) where {
+    exec(["echo"]) where {
         observer: (proc, tree) => {
-            read_file "vixen.toml";
+            read_file("vixen.toml");
             []
         },
     };
@@ -643,29 +643,20 @@ fn multi() #fs #discover {}
     );
 }
 
-// r[cap.mask] — build entry with #discover is rejected (only #fs allowed)
+// r[cap.mask] — build entry allows #discover alongside #fs
 #[test]
-fn build_entry_cannot_discover() {
+fn build_entry_can_discover() {
     let result = check_caps(
         r#"
 fn main() {
-    build ((path, args, env) => {
-        discover (executor_class "default") ((host) => host.which "gcc");
+    build((path, args, env) => {
+        discover(executor_class("default"), (host) => host.which("gcc"));
         path
     });
 }
 "#,
     );
-    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
-    match &result.errors[0].kind {
-        CapErrorKind::CapabilityViolation {
-            slot_name, excess, ..
-        } => {
-            assert_eq!(slot_name, "build entry");
-            assert!(excess.names().contains(&"discover"), "excess: {excess}");
-        }
-        other => panic!("expected CapabilityViolation, got: {other:?}"),
-    }
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 }
 
 // Method-style host calls in observer are rejected
@@ -674,9 +665,9 @@ fn observer_method_call_host_rejected() {
     let result = check_caps(
         r#"
 fn main() {
-    exec (["gcc"]) where {
+    exec(["gcc"]) where {
         observer: (proc, tree) => {
-            host.which "gcc";
+            host.which("gcc");
             []
         },
     };
@@ -756,11 +747,11 @@ fn find_expr_type(result: &crate::TypeCheckResult, src: &str, needle: &str) -> O
 fn discover_returns_probe_type() {
     let src = r#"
 fn probe() #discover {
-    discover (executor_class "default") ((host) => host.which "gcc")
+    discover(executor_class("default"), (host) => host.which("gcc"))
 }
 "#;
     let result = type_check(src);
-    let ty = find_expr_type(&result, src, r#"discover (executor_class "default")"#);
+    let ty = find_expr_type(&result, src, r#"discover(executor_class("default"),"#);
     assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::String)));
 }
 
@@ -769,13 +760,13 @@ fn probe() #discover {
 fn host_read_returns_blob() {
     let src = r#"
 fn main() {
-    discover (executor_class "default") ((host) => {
-        host.read "foo"
+    discover(executor_class("default"), (host) => {
+        host.read("foo")
     })
 }
 "#;
     let result = type_check(src);
-    let ty = find_expr_type(&result, src, r#"host.read "foo""#);
+    let ty = find_expr_type(&result, src, r#"host.read("foo")"#);
     assert_eq!(ty, Some(Ty::Builtin(Builtin::Blob)));
 }
 
@@ -784,28 +775,28 @@ fn main() {
 fn host_which_returns_string() {
     let src = r#"
 fn main() {
-    discover (executor_class "default") ((host) => {
-        host.which "gcc"
+    discover(executor_class("default"), (host) => {
+        host.which("gcc")
     })
 }
 "#;
     let result = type_check(src);
-    let ty = find_expr_type(&result, src, r#"host.which "gcc""#);
+    let ty = find_expr_type(&result, src, r#"host.which("gcc")"#);
     assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::String)));
 }
 
-// r[exec.verifier.host] — host.which?(...) returns String?
+// r[exec.verifier.host] — host.which(...)? returns String?
 #[test]
-fn host_which_fallible_returns_optional_string() {
+fn host_which_call_site_fallible_returns_optional_string() {
     let src = r#"
 fn main() {
-    discover (executor_class "default") ((host) => {
-        host.which? "gcc"
+    discover(executor_class("default"), (host) => {
+        host.which("gcc")?
     })
 }
 "#;
     let result = type_check(src);
-    let ty = find_expr_type(&result, src, r#"host.which? "gcc""#);
+    let ty = find_expr_type(&result, src, r#"host.which("gcc")?"#);
     assert_eq!(
         ty,
         Some(Ty::Optional(Box::new(Ty::Scalar(vx_types::Scalar::String))))
@@ -817,16 +808,15 @@ fn main() {
 fn observer_params_typed() {
     let src = r#"
 fn main() {
-    exec (["echo"]) where {
+    exec(["echo"]) where {
         observer: (proc, tree) => {
-            proc.exit_code!
+            proc.exit_code()
         },
     };
 }
 "#;
     let result = type_check(src);
-    // proc.exit_code! should be U64
-    let ty = find_expr_type(&result, src, "proc.exit_code!");
+    let ty = find_expr_type(&result, src, "proc.exit_code()");
     assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::U64)));
 }
 
@@ -835,8 +825,8 @@ fn main() {
 fn host_read_int_arg_type_error() {
     let src = r#"
 fn main() {
-    discover (executor_class "default") ((host) => {
-        host.read 123
+    discover(executor_class("default"), (host) => {
+        host.read(123)
     })
 }
 "#;
@@ -874,11 +864,11 @@ fn main() {
 fn read_file_returns_blob() {
     let src = r#"
 fn main() #fs {
-    read_file "hello.txt"
+    read_file("hello.txt")
 }
 "#;
     let result = type_check(src);
-    let ty = find_expr_type(&result, src, r#"read_file "hello.txt""#);
+    let ty = find_expr_type(&result, src, r#"read_file("hello.txt")"#);
     assert_eq!(ty, Some(Ty::Builtin(Builtin::Blob)));
 }
 
@@ -887,11 +877,11 @@ fn main() #fs {
 fn executor_class_returns_executor_class() {
     let src = r#"
 fn main() {
-    executor_class "default"
+    executor_class("default")
 }
 "#;
     let result = type_check(src);
-    let ty = find_expr_type(&result, src, r#"executor_class "default""#);
+    let ty = find_expr_type(&result, src, r#"executor_class("default")"#);
     assert_eq!(ty, Some(Ty::Builtin(Builtin::ExecutorClass)));
 }
 
@@ -900,7 +890,7 @@ fn main() {
 fn discover_probe_host_param_typed() {
     let src = r#"
 fn main() {
-    discover (executor_class "default") ((host) => host)
+    discover(executor_class("default"), (host) => host)
 }
 "#;
     let result = type_check(src);
@@ -926,8 +916,8 @@ fn cap_check_derives_fs_from_builtin_sig() {
     let result = check_caps(
         r#"
 fn main() {
-    build ((path, args, env) => {
-        read_file "foo";
+    build((path, args, env) => {
+        read_file("foo");
     });
 }
 "#,
@@ -937,26 +927,17 @@ fn main() {
 
 #[test]
 fn cap_check_derives_discover_from_builtin_sig() {
-    // discover has #discover — should be rejected in a #fs slot
+    // build's entry slot now allows #discover as well as #fs
     let result = check_caps(
         r#"
 fn main() {
-    build ((path, args, env) => {
-        discover (executor_class "gcc") ((host) => host.which "gcc");
+    build((path, args, env) => {
+        discover(executor_class("gcc"), (host) => host.which("gcc"));
     });
 }
 "#,
     );
-    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
-    match &result.errors[0].kind {
-        CapErrorKind::CapabilityViolation { excess, .. } => {
-            assert!(
-                excess.names().contains(&"discover"),
-                "excess should contain #discover: {excess}"
-            );
-        }
-        other => panic!("expected CapabilityViolation, got: {other:?}"),
-    }
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 }
 
 #[test]
@@ -965,8 +946,8 @@ fn cap_check_method_caps_from_builtin_method() {
     let result = check_caps(
         r#"
 fn probe() #discover {
-    discover (executor_class "default") ((host) => {
-            host.which "gcc";
+    discover(executor_class("default"), (host) => {
+            host.which("gcc");
         });
 }
 "#,
@@ -989,14 +970,13 @@ fn let_binding_propagates_type() {
     let result = type_check_src(
         r#"
 fn main() {
-    build ((path, args, env) => {
-        let b = read_file "foo";
-        b.to_string!;
+    build((path, args, env) => {
+        let b = read_file("foo");
+        b.to_string();
     });
 }
 "#,
     );
-    // b should have type Blob, so b.to_string! should not produce a NoSuchMethod error
     assert!(
         result.errors.is_empty(),
         "expected no type errors, got: {:?}",
@@ -1018,9 +998,9 @@ fn let_binding_chain_propagates() {
     let result = type_check_src(
         r#"
 fn main() {
-    build ((path, args, env) => {
-        let b = read_file "foo";
-        let s = b.to_string!;
+    build((path, args, env) => {
+        let b = read_file("foo");
+        let s = b.to_string();
     });
 }
 "#,
@@ -1043,9 +1023,9 @@ fn builtin_names_resolve_without_error() {
     let file = parse_file(
         r#"
 fn main() {
-    build ((path, args, env) => {
-        read_file "foo";
-        glob "*.rs";
+    build((path, args, env) => {
+        read_file("foo");
+        glob("*.rs");
     });
 }
 "#,
@@ -1176,8 +1156,8 @@ fn array_of_builtins() {
     let result = type_check_src(
         r#"
 fn main() {
-    build ((path, args, env) => {
-        let blobs = [read_file "a", read_file "b"];
+    build((path, args, env) => {
+        let blobs = [read_file("a"), read_file("b")];
     });
 }
 "#,

@@ -66,7 +66,7 @@ pub fn builtin_methods_for(receiver: &Builtin) -> &'static [&'static str] {
 /// Look up a builtin free function signature by name.
 pub fn builtin_fn_sig(name: &str) -> Option<FnSig> {
     match name {
-        // r[eval.entry] — build(entry: Fn(Path, Array[String], Map[String, String]) #fs -> T) -> T
+        // r[eval.entry] — build(entry: Fn(Path, Array[String], Map[String, String]) #fs #discover -> T) -> T
         "build" => Some(FnSig {
             name: "build".into(),
             type_params: vec![],
@@ -82,7 +82,12 @@ pub fn builtin_fn_sig(name: &str) -> Option<FnSig> {
                         ),
                     ],
                     ret: Box::new(Ty::Unit),
-                    capabilities: vec![Capability { name: "fs".into() }],
+                    capabilities: vec![
+                        Capability { name: "fs".into() },
+                        Capability {
+                            name: "discover".into(),
+                        },
+                    ],
                 }),
             }],
             keyword_params: vec![],

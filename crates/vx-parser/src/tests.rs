@@ -75,7 +75,7 @@ seed;
 fn helper(x: U64) -> U64 {
   x
 }
-helper seed;
+helper(seed);
 "#,
     );
     assert_eq!(parse.errors(), []);
@@ -281,7 +281,7 @@ fn pipe_placeholder_and_concat_parse() {
     let parse = parse(
         r#"
 fn demo(value: Blob, cexec: Fn(Array[String]) -> Tree, ranlib: String, y: String) -> Tree (
-  let utf8 = value |> _.utf8!;
+  let utf8 = value |> _.utf8();
   let paired = value |> pair(y, _);
   let archive = value |> cexec [ranlib, _];
   let items = ["a"] ++ ["b"];
@@ -419,17 +419,26 @@ fn decode(items: Array[U64], layout: Dashboard.Layout?) -> Map[String, U64] {
 }
 
 #[test]
-fn parses_unary_application_where_and_postfix_chains() {
+fn parses_current_call_forms_and_post_call_fallibility() {
     let input = r#"
 fn build(
-  exec_fn: Fn(Array[String]) -> Stream[String],
+  exec_fn: Fn(Array[String], Config) -> Stream[String],
   args: Array[String],
   defaults: Config,
-  files: Array[Blob],
-  process: Process
+  blob: Blob,
+  stream: Stream[Blob],
+  items: Stream[Blob],
+  class: ExecutorClass,
+  host: Host,
+  name: String,
+  path: String
 ) -> String {
-  exec_fn args where { ..defaults, mounts: { @bin/lua: files[0]? } };
-  process.stdout!.trim!
+  exec_fn(args, defaults) where { ..defaults, mounts: { @bin/lua: blob } };
+  blob.utf8();
+  stream.next()?;
+  items.map($.utf8());
+  discover(class, (host) => host.which(name));
+  host.hash(path)
 }
 "#;
 
@@ -445,18 +454,22 @@ fn build(
     assert!(kinds.contains(&SyntaxKind::WHERE_EXPR));
     assert!(kinds.contains(&SyntaxKind::RECORD_EXPR));
     assert!(kinds.contains(&SyntaxKind::MAP_EXPR));
-    assert!(kinds.contains(&SyntaxKind::INDEX_EXPR));
     assert!(kinds.contains(&SyntaxKind::FALLIBLE_EXPR));
-    assert!(kinds.contains(&SyntaxKind::INVOKE_EXPR));
     assert!(kinds.contains(&SyntaxKind::FIELD_EXPR));
+    assert!(!kinds.contains(&SyntaxKind::INDEX_EXPR));
+    assert!(!kinds.contains(&SyntaxKind::INVOKE_EXPR));
 }
 
 #[test]
-fn call_ast_flattens_application_chains() {
+fn call_ast_flattens_parenthesized_payloads_and_tuple_args() {
     let parse = parse(
         r#"
-fn build(exec_fn: Fn(Array[String]) -> Stream[String], args: Array[String], defaults: Config) {
-  exec_fn args where defaults
+fn build(
+  exec_fn: Fn(Array[String], Config) -> Stream[String],
+  args: Array[String],
+  defaults: Config
+) {
+  exec_fn(args, defaults) where defaults
 }
 "#,
     );
@@ -484,13 +497,49 @@ fn build(exec_fn: Fn(Array[String]) -> Stream[String], args: Array[String], defa
     assert_eq!(root.token().unwrap().text(), "exec_fn");
 
     let args = call.positional_args();
-    assert_eq!(args.len(), 1);
+    assert_eq!(args.len(), 2);
     assert!(matches!(&args[0], Expr::NameRef(_)));
+    assert!(matches!(&args[1], Expr::NameRef(_)));
     assert!(matches!(where_expr.keywords(), Some(Expr::NameRef(_))));
 }
 
 #[test]
-fn upper_ident_can_take_map_payload_by_unary_application() {
+fn self_delimiting_brackets_parse_as_calls_not_indexing() {
+    let parse = parse(
+        r#"
+fn build(items: Stream[Blob], exe: Blob) {
+  items[0];
+  Tree { @bin/lua: exe };
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let statements = body.statements().collect::<Vec<_>>();
+
+    let call = match &statements[0] {
+        Stmt::Expr(Expr::Call(node)) => node,
+        stmt => panic!("expected call expr, got {stmt:?}"),
+    };
+    let args = call.positional_args();
+    assert_eq!(args.len(), 1);
+    assert!(matches!(&args[0], Expr::Array(_)));
+    assert!(
+        !parse
+            .syntax()
+            .descendants()
+            .any(|node| node.kind() == SyntaxKind::INDEX_EXPR)
+    );
+}
+
+#[test]
+fn upper_ident_can_take_map_payload_by_juxtaposition() {
     let parse = parse(
         r#"
 fn build(exe: Blob) {
@@ -527,7 +576,7 @@ fn record_and_map_literals_have_distinct_ast_nodes() {
     let parse = parse(
         r#"
 fn demo(verifier: Verifier, value: U64) {
-  { verifier, observer: make_observer! };
+  { verifier, observer: make_observer() };
   { @bin/lua: value, 80: value };
 }
 "#,
@@ -551,7 +600,7 @@ fn demo(verifier: Verifier, value: U64) {
     assert_eq!(fields[0].name().unwrap().text(), "verifier");
     assert!(fields[0].value().is_none());
     assert_eq!(fields[1].name().unwrap().text(), "observer");
-    assert!(matches!(fields[1].value(), Some(Expr::Invoke(_))));
+    assert!(matches!(fields[1].value(), Some(Expr::Call(_))));
 
     let map = match &statements[1] {
         Stmt::Expr(Expr::Map(node)) => node,
@@ -599,20 +648,20 @@ fn build(name: String) {
 }
 
 #[test]
-fn formatter_preserves_unary_application_spacing() {
+fn formatter_preserves_current_call_spacing() {
     let input = r#"
 fn build(process: Process, args: Array[String], defaults: Config) {
-  exec_fn   args   where   { mounts: { @bin/lua: process.stdout! } };
-  process . stdout ! . trim !
+  exec_fn  (args)  where  { mounts: { @bin/lua: process.stdout() } };
+  process . stdout ( ) . trim ( )
 }
 "#;
 
     let parsed = parse_source_file(input);
     let formatted = crate::format(&parsed.tree().syntax());
 
-    assert!(formatted.contains("exec_fn args where"));
-    assert!(formatted.contains("@bin/lua: process.stdout!"));
-    assert!(formatted.contains("process.stdout!.trim!"));
+    assert!(formatted.contains("exec_fn(args) where"));
+    assert!(formatted.contains("@bin/lua: process.stdout()"));
+    assert!(formatted.contains("process.stdout().trim()"));
 }
 
 #[test]
@@ -769,7 +818,7 @@ fn build(flag: Bool) -> U64 {
 fn semantic_tokens_classify_functions_keywords_and_properties() {
     let input = r#"
 fn build(process: Process, args: Array[String], defaults: Config) -> String {
-  exec args where { mounts: { @bin/lua: process.stdout! } }
+  exec(args) where { mounts: { @bin/lua: process.stdout() } }
 }
 "#;
 
