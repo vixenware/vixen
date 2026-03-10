@@ -3437,6 +3437,7 @@ dependencies = [
 name = "vx-eval"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "crossbeam-channel",
  "crossbeam-deque",
  "dashmap 6.1.0",

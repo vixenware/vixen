@@ -13,7 +13,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use vx_eval::{
-    BlobValue, Engine, MapValue, PathValue, StructValue, TransportValue, TreeValue, Value,
+    BlobValue, Engine, HostValue, MapValue, PathValue, StructValue, TransportValue, TreeValue,
+    Value,
 };
 use vx_runner_proto::RunEvalPayload;
 use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
@@ -68,7 +69,8 @@ pub fn evaluate_shipped_verifier(eval: &RunEvalPayload) -> Result<(), String> {
         return Ok(());
     };
 
-    Engine::invoke_shipped(&eval.module, verifier, vec![])
+    // r[impl exec.verifier.host]
+    Engine::invoke_shipped(&eval.module, verifier, vec![Value::Host(HostValue)])
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
@@ -81,6 +83,7 @@ fn commit_value<'a>(cas: &'a StoreClient, value: Value) -> BoundaryFuture<'a, Va
                 "Path values cannot cross the executor boundary: {}",
                 path.as_str()
             )),
+            Value::Host(_) => Err("Host values cannot cross the executor boundary".into()),
             Value::Blob(blob) => Ok(Value::Blob(commit_blob(cas, blob).await?)),
             Value::Tree(tree) => {
                 let (root, _) = commit_tree(cas, tree).await?;
@@ -551,7 +554,7 @@ mod tests {
     #[test]
     fn shipped_verifiers_can_poison() {
         let engine = shipped_function_engine(
-            r#"fn verify() { fail "toolchain drift" }
+            r#"fn verify(host: Host) { fail "toolchain drift" }
 
                fn make() { verify }"#,
         );
@@ -567,6 +570,36 @@ mod tests {
 
         let error = evaluate_shipped_verifier(&eval).expect_err("verifier should poison");
         assert!(error.contains("toolchain drift"));
+    }
+
+    #[test]
+    // r[verify exec.verifier.host]
+    fn shipped_verifiers_receive_host_access() {
+        let tempdir = TempDir::new().expect("failed to create host tempdir");
+        let tool_path = tempdir.path().join("tool.txt");
+        fs::write(&tool_path, "toolchain-v1").expect("failed to write host file");
+        let source = format!(
+            r#"fn verify(host: Host) {{
+                   if host.read({path:?}).to_string() != "toolchain-v1" {{
+                     fail "read mismatch"
+                   }}
+                 }}
+
+                 fn make() {{ verify }}"#,
+            path = tool_path.to_string_lossy(),
+        );
+        let engine = shipped_function_engine(&source);
+        let eval = RunEvalPayload {
+            module: engine.transport_module(),
+            observer: None,
+            verifier: Some(
+                engine
+                    .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
+                    .expect("verifier should ship"),
+            ),
+        };
+
+        evaluate_shipped_verifier(&eval).expect("verifier should read the host file");
     }
 
     fn shipped_function_engine(source: &str) -> Engine {

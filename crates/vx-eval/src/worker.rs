@@ -7,6 +7,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::thread;
@@ -24,7 +25,7 @@ use crate::poison::{DemandChain, DemandEntry, PoisonError, PoisonKind};
 use crate::transport::{ShippedFunction, TransportModule, TransportValue};
 use crate::value::{
     BlobValue, BuiltinFunction, BuiltinMethod, BuiltinNamespace, BuiltinValue, FunctionValue,
-    MapValue, PathValue, StructValue, TreeValue, Value,
+    HostValue, MapValue, PathValue, StructValue, TreeValue, Value,
 };
 
 thread_local! {
@@ -902,6 +903,16 @@ impl Engine {
                     receiver: Box::new(receiver.clone()),
                 },
             ))),
+            Value::Host(_) if field == "read" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::HostRead {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::Host(_) if field == "hash" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::HostHash {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
             Value::Builtin(BuiltinValue::Namespace(BuiltinNamespace::Blob))
                 if field == "from_string" =>
             {
@@ -1069,6 +1080,28 @@ impl Engine {
                 };
                 self.tree_file(&tree, path)
             }
+            BuiltinValue::Method(BuiltinMethod::HostRead { receiver }) => {
+                self.require_no_kwargs("host.read", kwargs)?;
+                self.check_arity("host.read", args, 1)?;
+                let path = self.force_value(args[0].clone())?;
+                let path = self.expect_host_path(&path, "host.read path")?;
+                let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
+                let Value::Host(_) = receiver else {
+                    return Err(self.type_error("host.read receiver must be Host"));
+                };
+                self.host_read(&path)
+            }
+            BuiltinValue::Method(BuiltinMethod::HostHash { receiver }) => {
+                self.require_no_kwargs("host.hash", kwargs)?;
+                self.check_arity("host.hash", args, 1)?;
+                let path = self.force_value(args[0].clone())?;
+                let path = self.expect_host_path(&path, "host.hash path")?;
+                let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
+                let Value::Host(_) = receiver else {
+                    return Err(self.type_error("host.hash receiver must be Host"));
+                };
+                self.host_hash(&path)
+            }
         }
     }
 
@@ -1227,8 +1260,10 @@ impl Engine {
             .map(|verifier| {
                 let module = self.transport_module();
                 let verifier = self.ship_function(verifier)?;
+                // r[impl exec.verifier.host]
                 Ok(thread::spawn(move || {
-                    Engine::invoke_shipped(&module, &verifier, vec![]).map(|_| ())
+                    Engine::invoke_shipped(&module, &verifier, vec![Value::Host(HostValue)])
+                        .map(|_| ())
                 }))
             })
             .transpose()?;
@@ -1472,7 +1507,7 @@ impl Engine {
         blob: &BlobValue,
         destination: &PathValue,
     ) -> Result<(), PoisonError> {
-        if let Some(parent) = std::path::Path::new(destination.as_str()).parent() {
+        if let Some(parent) = Path::new(destination.as_str()).parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 self.internal_error(&format!("failed to create {}: {error}", parent.display()))
             })?;
@@ -1582,6 +1617,47 @@ impl Engine {
         })
     }
 
+    fn expect_host_path(&self, value: &Value, context: &str) -> Result<String, PoisonError> {
+        match value {
+            Value::String(path) => Ok(path.to_string()),
+            other => Err(self.type_error(&format!(
+                "{context} must be String, got {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn host_read(&self, path: &str) -> Result<Value, PoisonError> {
+        let metadata = fs::metadata(path).map_err(|error| {
+            PoisonError::new(
+                PoisonKind::UserFail,
+                format!("failed to read host path {path}: {error}"),
+                self.current_demand_chain(None),
+            )
+        })?;
+        if metadata.is_dir() {
+            return Err(PoisonError::new(
+                PoisonKind::UserFail,
+                format!("host.read expects a file, got directory {path}"),
+                self.current_demand_chain(None),
+            ));
+        }
+        Ok(Value::Blob(BlobValue::FsFile(PathValue::new(path))))
+    }
+
+    fn host_hash(&self, path: &str) -> Result<Value, PoisonError> {
+        let bytes = fs::read(path).map_err(|error| {
+            PoisonError::new(
+                PoisonKind::UserFail,
+                format!("failed to hash host path {path}: {error}"),
+                self.current_demand_chain(None),
+            )
+        })?;
+        Ok(Value::Blob(BlobValue::from_string(
+            blake3::hash(&bytes).to_hex().to_string(),
+        )))
+    }
+
     fn exec_process_value(&self, output: &std::process::Output) -> Value {
         let exit_code = output.status.code().unwrap_or(1).max(0) as u64;
         Value::Struct(StructValue {
@@ -1605,6 +1681,10 @@ impl Engine {
         match value {
             Value::Pending(node_id) => {
                 self.snapshot_value(self.force_value(Value::Pending(node_id))?)
+            }
+            Value::Host(_) => {
+                Err(self
+                    .internal_error("Host values cannot cross the local exec observer boundary"))
             }
             Value::Blob(BlobValue::Inline(_))
             | Value::Blob(BlobValue::Store(_))

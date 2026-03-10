@@ -31,7 +31,7 @@ pub use transport::{
 };
 
 mod value;
-pub use value::{BlobValue, MapValue, PathValue, StructValue, TreeValue, Value};
+pub use value::{BlobValue, HostValue, MapValue, PathValue, StructValue, TreeValue, Value};
 
 mod worker;
 pub use worker::Engine;

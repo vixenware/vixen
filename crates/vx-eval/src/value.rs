@@ -40,6 +40,8 @@ pub enum Value {
     // r[impl store.tree]
     /// A directory-like content handle.
     Tree(TreeValue),
+    /// An executor-local verifier handle.
+    Host(HostValue),
     /// Unit `()`
     Unit,
     /// Tuple
@@ -86,6 +88,10 @@ pub enum TreeValue {
     Store(NodeHash),
 }
 
+/// An opaque verifier-only view of the executor host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostValue;
+
 // i[impl impl.persistent]
 // i[impl impl.struct]
 /// A struct value: type name + fields.
@@ -123,6 +129,8 @@ pub enum BuiltinMethod {
     TreeEmpty,
     BlobToString { receiver: Box<Value> },
     TreeFile { receiver: Box<Value> },
+    HostRead { receiver: Box<Value> },
+    HostHash { receiver: Box<Value> },
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +152,7 @@ impl Value {
             Value::Path(_) => "Path",
             Value::Blob(_) => "Blob",
             Value::Tree(_) => "Tree",
+            Value::Host(_) => "Host",
             Value::Unit => "()",
             Value::Tuple(_) => "Tuple",
             Value::Array(_) => "Array",
@@ -185,6 +194,7 @@ impl Value {
             Value::Path(path) => Some(path.key()),
             Value::Blob(blob) => blob.key(),
             Value::Tree(tree) => tree.key(),
+            Value::Host(_) => None,
             Value::Unit => Some("unit".into()),
             Value::Tuple(elems) => {
                 let parts = elems.iter().map(Value::key).collect::<Option<Vec<_>>>()?;
@@ -328,7 +338,9 @@ impl BuiltinValue {
             | BuiltinValue::Method(BuiltinMethod::TreeOf)
             | BuiltinValue::Method(BuiltinMethod::TreeEmpty) => true,
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver })
-            | BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => {
+            | BuiltinValue::Method(BuiltinMethod::TreeFile { receiver })
+            | BuiltinValue::Method(BuiltinMethod::HostRead { receiver })
+            | BuiltinValue::Method(BuiltinMethod::HostHash { receiver }) => {
                 receiver.is_fully_resolved()
             }
         }
@@ -350,6 +362,12 @@ impl BuiltinValue {
             BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => {
                 Some(format!("builtin:tree.file({})", receiver.key()?))
             }
+            BuiltinValue::Method(BuiltinMethod::HostRead { receiver }) => {
+                Some(format!("builtin:host.read({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::HostHash { receiver }) => {
+                Some(format!("builtin:host.hash({})", receiver.key()?))
+            }
         }
     }
 }
@@ -366,6 +384,7 @@ impl fmt::Display for Value {
             Value::Path(path) => write!(f, "{}", path.as_str()),
             Value::Blob(blob) => write!(f, "{blob}"),
             Value::Tree(tree) => write!(f, "{tree}"),
+            Value::Host(_) => write!(f, "<host>"),
             Value::Unit => write!(f, "()"),
             Value::Tuple(elems) => {
                 write!(f, "(")?;
@@ -428,6 +447,7 @@ impl PartialEq for Value {
             (Value::Path(a), Value::Path(b)) => a == b,
             (Value::Blob(a), Value::Blob(b)) => a == b,
             (Value::Tree(a), Value::Tree(b)) => a == b,
+            (Value::Host(a), Value::Host(b)) => a == b,
             (Value::Unit, Value::Unit) => true,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
@@ -493,6 +513,14 @@ impl PartialEq for BuiltinMethod {
             | (
                 BuiltinMethod::TreeFile { receiver: left },
                 BuiltinMethod::TreeFile { receiver: right },
+            )
+            | (
+                BuiltinMethod::HostRead { receiver: left },
+                BuiltinMethod::HostRead { receiver: right },
+            )
+            | (
+                BuiltinMethod::HostHash { receiver: left },
+                BuiltinMethod::HostHash { receiver: right },
             ) => left == right,
             _ => false,
         }
@@ -548,6 +576,12 @@ impl fmt::Display for BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::TreeFile { .. }) => {
                 write!(f, "<bound tree.file>")
+            }
+            BuiltinValue::Method(BuiltinMethod::HostRead { .. }) => {
+                write!(f, "<bound host.read>")
+            }
+            BuiltinValue::Method(BuiltinMethod::HostHash { .. }) => {
+                write!(f, "<bound host.hash>")
             }
         }
     }

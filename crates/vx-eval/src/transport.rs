@@ -530,6 +530,7 @@ impl TryFrom<&Value> for TransportValue {
             Value::Path(path) => Ok(Self::Path(path.as_str().to_string())),
             Value::Blob(blob) => Ok(Self::Blob(TransportBlob::try_from(blob)?)),
             Value::Tree(tree) => Ok(Self::Tree(TransportTree::try_from(tree)?)),
+            Value::Host(_) => Err("cannot transport Host values".into()),
             Value::Unit => Ok(Self::Unit),
             Value::Tuple(values) => Ok(Self::Tuple(
                 values
@@ -757,6 +758,10 @@ impl TryFrom<&BuiltinValue> for TransportBuiltinValue {
             BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => Ok(Self::TreeFile {
                 receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
             }),
+            BuiltinValue::Method(BuiltinMethod::HostRead { .. })
+            | BuiltinValue::Method(BuiltinMethod::HostHash { .. }) => {
+                Err("cannot transport host builtin methods".into())
+            }
         }
     }
 }

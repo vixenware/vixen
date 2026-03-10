@@ -11,6 +11,7 @@ repository.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
+blake3 = { workspace = true }
 facet = { workspace = true }
 vx-parser = { path = "../vx-parser" }
 vx-resolve = { path = "../vx-resolve" }

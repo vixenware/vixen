@@ -8,6 +8,7 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use blake3::hash as blake3_hash;
 use tempfile::TempDir;
 use vx_parser::SourceFile;
 use vx_store_proto::{Blake3Hash, BlobRef, ChunkHash, NodeHash};
@@ -829,7 +830,7 @@ fn exec_runs_a_local_process_with_keyword_args_and_snapshots_outputs() {
 #[test]
 fn exec_verifier_failures_poison_locally() {
     let engine = engine(
-        r#"fn verify() { fail "toolchain drift" }
+        r#"fn verify(host: Host) { fail "toolchain drift" }
 
              fn observe(process: Process, tree: Tree) {
                Tree.empty()
@@ -847,6 +848,46 @@ fn exec_verifier_failures_poison_locally() {
     let err = engine.call("build", vec![]).unwrap_err();
     assert_eq!(err.kind, PoisonKind::VerificationFailure);
     assert!(err.message.contains("toolchain drift"));
+}
+
+#[test]
+// r[verify exec.verifier.host]
+fn exec_verifiers_receive_host_access_locally() {
+    let tempdir = TempDir::new().unwrap();
+    let tool_path = tempdir.path().join("tool.txt");
+    fs::write(&tool_path, "toolchain-v1").unwrap();
+    let expected_hash = blake3_hash(b"toolchain-v1").to_hex().to_string();
+    let source = format!(
+        r#"fn verify(host: Host) {{
+               if host.read({path:?}).to_string() != "toolchain-v1" {{
+                 fail "read mismatch"
+               }} else {{
+                 ()
+               }};
+               if host.hash({path:?}).to_string() != {expected_hash:?} {{
+                 fail "hash mismatch"
+               }} else {{
+                 ()
+               }}
+             }}
+
+             fn observe(process: Process, tree: Tree) {{
+               Tree.empty()
+             }}
+
+             fn build() {{
+               exec(
+                 ["/bin/sh", "-c", "printf built"];
+                 observer: observe,
+                 verifier: verify,
+               )
+             }}"#,
+        path = tool_path.to_string_lossy(),
+    );
+    let engine = engine(&source);
+
+    let value = engine.call("build", vec![]).unwrap();
+    assert_eq!(value, Value::Tree(TreeValue::Inline(Arc::from([]))));
 }
 
 #[test]
