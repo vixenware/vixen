@@ -103,9 +103,10 @@ insert_anchor_links = "heading"
 > - Function declarations
 >
 > `@` in pattern position (`name @ pattern`) is the binding operator,
-> not an attribute. `@` in expression position (`@f(args, ..)`) is
-> partial application, not an attribute. The parser distinguishes these
-> by syntactic context.
+> not an attribute. `@` before a string or interpolated string literal
+> (`@"src"`, `` @`out/${name}` ``) is a path literal, not an attribute.
+> `@` before a call expression (`@f(args, ..)`) is partial application,
+> not an attribute. The parser distinguishes these by syntactic context.
 
 ### Semicolons
 
@@ -118,8 +119,9 @@ insert_anchor_links = "heading"
 > to `()`.
 >
 > At file scope, Vixen has **top-level items**, not statements. A source
-> file is a sequence of top-level type and function declarations; there
-> is no file-level trailing expression value.
+> file is a sequence of top-level immutable `let` bindings, type
+> declarations, and function declarations; there is no file-level
+> trailing expression value.
 >
 > Semicolons also separate positional from keyword parameters and
 > arguments: `fn build(path: Path; release: Bool = false)` and
@@ -215,6 +217,12 @@ insert_anchor_links = "heading"
 > A binding associates a pattern with a value:
 > `let name = expr`. An optional type annotation can be added:
 > `let name: Type = expr`. Bindings are always introduced with `let`.
+
+> r[decl.binding.top-level]
+>
+> Bindings may appear at file scope as well as inside blocks. A top-level
+> `let` creates an immutable module binding and is exported like any
+> other top-level name.
 
 > r[decl.binding.destructure]
 >
@@ -322,6 +330,12 @@ insert_anchor_links = "heading"
 > expression in the body is the return value. `return` can be used for
 > early exit. A function body that ends with a statement (including an
 > empty body) implicitly returns `()`.
+
+> r[decl.fn.nested]
+>
+> Function declarations may appear inside blocks as well as at file
+> scope. A nested `fn` closes over its enclosing bindings by value, just
+> like a closure. The name is bound in the enclosing block scope.
 
 > r[decl.fn.destructure]
 >
@@ -458,8 +472,10 @@ insert_anchor_links = "heading"
 > r[expr.array]
 >
 > Array literals use square brackets: `[1, 2, 3]`. Elements are
-> comma-separated. Trailing commas are allowed. The type is `Array[T]`
-> where `T` is inferred from the elements.
+> comma-separated. Trailing commas are allowed. Spread syntax inserts
+> elements from another array: `[1, ..more, 4]`. In an ordinary array
+> literal, a spread element must have type `Array[T]`. The type is
+> `Array[T]` where `T` is inferred from the elements.
 
 ### Map expressions
 
@@ -769,9 +785,10 @@ insert_anchor_links = "heading"
 
 > r[lang.modules]
 >
-> A `.vx` file is a module. Its top-level bindings (including types)
-> are the module's exports. There is no visibility modifier — everything
-> at the top level is visible to importers.
+> A `.vx` file is a module. Its top-level bindings (including immutable
+> `let` bindings, functions, and types) are the module's exports. There
+> is no visibility modifier — everything at the top level is visible to
+> importers.
 
 > r[lang.modules.namespace]
 >
@@ -1339,6 +1356,15 @@ insert_anchor_links = "heading"
 > first. `None` is returned only if the stream completes with no
 > matching element.
 
+> r[comb.next]
+>
+> `.next()` returns the first element to resolve from a `Stream[T]`.
+> It poisons if the stream completes cleanly with no elements. The
+> fallible form `.next()?` returns `Option[T]` instead. If multiple
+> elements may resolve, the chosen element is whichever resolves first.
+> Use `.next()` only when that race is semantically intended or when the
+> stream is known to contain at most one element.
+
 > r[comb.fold]
 >
 > `.fold(init, f)` reduces all elements to a single value using an
@@ -1373,6 +1399,15 @@ insert_anchor_links = "heading"
 > `.flat_map(f)` maps each element to a stream (or array) and flattens
 > the results into a single stream. `.flatten()` flattens a stream of
 > streams.
+
+> r[comb.merge]
+>
+> `.merge()` on `Stream[Tree]` waits for all trees and produces a single
+> `Tree` containing all their entries. Relative paths must be disjoint:
+> if the same path appears in more than one input tree, the stream
+> poisons. This makes stream merging deterministic even though streams
+> are unordered. For ordered overwrite semantics, collect or construct
+> an `Array[Tree]` and call `Tree.merge` explicitly.
 
 > r[comb.filter-map]
 >
@@ -1560,8 +1595,10 @@ insert_anchor_links = "heading"
 >
 > `Path` is its own type at the language level, implemented as a
 > normalized slash-delimited path string rather than a plain `String`.
-> Root paths come from the build entry point and from `exec` mount keys.
-> Sub-paths are built with the `/` operator.
+> Root paths come from the build entry point, from `exec` mount keys,
+> and from path literals such as `@"src"` and `` @`out/${name}.o` ``.
+> Sub-paths are built with the `/` operator or with interpolated path
+> literals.
 >
 > In `exec`, Paths in `args` and `env` are resolved to VFS locations
 > directly. The executor rewrites `/` separators as needed for the host
@@ -1571,8 +1608,10 @@ insert_anchor_links = "heading"
 > identity and are not themselves cross-boundary content. See
 > [exec.mount].
 >
-> String interpolation with a `Path` produces an `ExecArg` (not a plain
-> `String`) so path values remain paths when passed to `exec`.
+> Interpolated path literals produce a plain `Path` when every
+> interpolated value is `String` or `Path`. If an interpolated path
+> literal mentions a `Tree`, `Blob`, or `ExecPath`, the result is an
+> `ExecPath` instead; see [exec.arg.interpolation].
 
 ## Exec
 
@@ -1592,9 +1631,9 @@ insert_anchor_links = "heading"
 >
 > ```vixen
 > exec[T](
->   args: Array[ExecArg],
+>   args: Array[ExecInput],
 >   ;
->     env: Map[String, ExecArg] = %{},
+>     env: Map[String, ExecInput] = %{},
 >     mounts: Map[Path, Blob | Tree] = %{},
 >     writable: Array[Path] = [],
 >     executor: ExecutorClass = executor_class("default"),
@@ -1606,25 +1645,112 @@ insert_anchor_links = "heading"
 
 > r[exec.arg]
 >
-> `ExecArg = String | Path`. A plain `String` is a literal argument. A
-> `Path` names a VFS location. The runtime preserves it as a path and
-> rewrites separators for the host platform at process launch. It does
-> not implicitly materialize content — the referenced path must be
-> supplied by `mounts` or `writable`.
+> `ExecInput` is the surface type accepted by `exec`:
+>
+> ```vixen
+> type ExecInput = String | Path | Blob | Tree | ExecPath
+> ```
+>
+> `exec` normalizes each input into an `ExecArg` plus an implicit mount
+> set:
+>
+> ```vixen
+> type ExecArg = String | Path | ExecPath
+> ```
+>
+> A plain `String` is a literal argument. A plain `Path` names a VFS
+> location directly. `Blob`, `Tree`, and `ExecPath` carry implicit mount
+> obligations.
+
+> r[exec.arg.path]
+>
+> `ExecPath` is a provenance-bearing path used only by `exec`-facing
+> APIs. Ordinary path operations use `Path`; `ExecPath` exists to carry
+> hidden "mount this content first" information across normalization:
+>
+> ```vixen
+> enum ExecPath {
+>   struct InTree {
+>     tree: Tree,
+>     suffix: Path,
+>   },
+>
+>   struct InBlob {
+>     blob: Blob,
+>     leaf: Path,
+>   },
+> }
+> ```
+>
+> These variants are explanatory. User code usually creates them by
+> passing a `Tree` or `Blob` directly to `exec`, or by using an
+> interpolated path literal that mentions mounted content.
+
+> r[exec.arg.auto-mount]
+>
+> Passing a `Tree` directly to `exec` is sugar for:
+>
+> ```vixen
+> InTree { tree: some_tree, suffix: @"" }
+> ```
+>
+> `exec` mounts the tree at a synthetic VFS root chosen by the runtime
+> and passes that mount root path to the process. Passing a `Blob`
+> directly is sugar for:
+>
+> ```vixen
+> InBlob { blob: some_blob, leaf: @"blob-<short-hash>" }
+> ```
+>
+> The blob is mounted as a single-file tree and the process receives the
+> path to that file. If a blob originated from a named tree entry, that
+> leaf name is reused; otherwise the runtime synthesizes a deterministic
+> leaf name from the blob's content hash.
+
+> r[exec.arg.interpolation]
+>
+> Interpolated path literals can preserve mount provenance:
+>
+> ```vixen
+> @`${tree}/include/lua.h`
+> // means: InTree { tree, suffix: @"include/lua.h" }
+> ```
+>
+> If all interpolated values are `String` or `Path`, the result is a
+> plain `Path`. If exactly one interpolated value is `Tree`, `Blob`, or
+> `ExecPath`, the result is an `ExecPath` rooted in that mounted content.
+> Interpolating more than one mount-bearing value into the same path is
+> a type error. Appending further path segments to a blob-backed path is
+> also a type error — blobs are files, not directories.
+
+> r[exec.arg.spread]
+>
+> In an `exec` argument array, spreading a `Tree` with `..tree`
+> expands to one argument per leaf blob in that tree, recursively, in
+> canonical path order. Directories do not become arguments. All
+> expanded arguments share the same implicit tree mount. Ordinary array
+> spread rules still apply for `..array`.
 
 > r[exec.mount]
 >
-> Mounts map VFS paths (`Path`) to store content (`Blob` or `Tree`).
-> The content is available at the specified path in the sandbox
-> filesystem. All mount paths are relative. Mounts are read-only by
-> default.
+> The sandbox mount set is the union of:
 >
-> Every `Path` that appears in `args` or `env` must be covered by a
-> mount or writable root. Paths refer to VFS locations directly; the
-> runtime does not reverse-map them through content identity. If no
-> mount or writable root covers a referenced `Path`, the evaluator
-> reports an error. This makes the VFS layout explicit — nothing is
-> silently materialized.
+> - explicit `mounts`, whose VFS locations are chosen by the caller
+> - implicit mounts induced by `Blob`, `Tree`, and `ExecPath` inputs
+>
+> Explicit mounts map VFS paths (`Path`) to store content (`Blob` or
+> `Tree`). The content is available at the specified path in the sandbox
+> filesystem. All explicit mount paths are relative. Mounts are read-only
+> by default.
+>
+> Every plain `Path` that appears in `args` or `env` must be covered by
+> an explicit mount or writable root. `ExecPath` values carry their own
+> mount obligations and are satisfied by implicit mounts. Repeated
+> references to the same `Tree` or `Blob` within one `exec` are mounted
+> once and reused. The actual path string seen by the process for an
+> implicit mount is the runtime-assigned synthetic mount root plus the
+> recorded suffix or leaf. If user code needs a stable, user-chosen VFS
+> path, it must use explicit `mounts`.
 
 > r[exec.writable]
 >
