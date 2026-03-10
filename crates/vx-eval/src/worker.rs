@@ -20,12 +20,14 @@ use tempfile::TempDir;
 
 use crate::exec::{ExecArgValue, ExecMount, ExecRequest, SharedExecHandler};
 use crate::instr::{self, BinOp, UnaryOp};
-use crate::node::{Node, NodeId, NodeJob, NodeKey, Outcome, Waiter};
+use crate::node::{
+    Node, NodeId, NodeJob, NodeKey, Outcome, TemplateKind, TemplatePartValue, Waiter,
+};
 use crate::poison::{DemandChain, DemandEntry, PoisonError, PoisonKind};
 use crate::transport::{ShippedFunction, TransportModule, TransportValue};
 use crate::value::{
-    BlobValue, BuiltinFunction, BuiltinMethod, BuiltinNamespace, BuiltinValue, FunctionValue,
-    HostValue, MapValue, PathValue, StructValue, TreeValue, Value,
+    BlobValue, BuiltinFunction, BuiltinMethod, BuiltinNamespace, BuiltinValue, ExecPathValue,
+    FunctionValue, HostValue, MapValue, PathValue, StructValue, TreeValue, Value,
 };
 
 thread_local! {
@@ -503,6 +505,13 @@ impl Engine {
                 let operand = self.force_value(operand.clone())?;
                 self.compute_unary(*op, &operand)
             }
+            NodeJob::Template { kind, parts } => {
+                let values = self.force_template_parts(parts)?;
+                match kind {
+                    TemplateKind::String => self.interpolate_string_parts(&values),
+                    TemplateKind::Path => self.interpolate_path_parts(&values),
+                }
+            }
             NodeJob::If {
                 cond,
                 then_branch,
@@ -672,6 +681,15 @@ impl Engine {
             instr::Expr::LitFloat(n) => BuildResult::Value(Value::F64(*n)),
             instr::Expr::LitBool(b) => BuildResult::Value(Value::Bool(*b)),
             instr::Expr::LitString(s) => BuildResult::Value(Value::String(Arc::from(s.as_str()))),
+            instr::Expr::StringTemplate(parts) => self.eval_template_expr(
+                TemplateKind::String,
+                parts,
+                bindings,
+                current_code_identity,
+            ),
+            instr::Expr::PathTemplate(parts) => {
+                self.eval_template_expr(TemplateKind::Path, parts, bindings, current_code_identity)
+            }
             instr::Expr::Unit => BuildResult::Value(Value::Unit),
             instr::Expr::Var(name) => {
                 if let Some(value) = bindings.get(name) {
@@ -869,6 +887,186 @@ impl Engine {
                 }
                 BuildResult::Value(Value::Tuple(Arc::from(values)))
             }
+        }
+    }
+
+    fn eval_template_expr(
+        &self,
+        kind: TemplateKind,
+        parts: &[instr::TemplatePart],
+        bindings: &HashMap<String, Value>,
+        current_code_identity: &str,
+    ) -> BuildResult {
+        let mut values = Vec::with_capacity(parts.len());
+        for part in parts {
+            match part {
+                instr::TemplatePart::Text(text) => {
+                    values.push(TemplatePartValue::Text(Arc::from(text.as_str())));
+                }
+                instr::TemplatePart::Expr(expr) => {
+                    let value = match self.eval_expr(expr, bindings, current_code_identity) {
+                        BuildResult::Value(value) => value,
+                        other => return other,
+                    };
+                    values.push(TemplatePartValue::Expr(value));
+                }
+            }
+        }
+
+        let needs_node = values.iter().any(|part| match part {
+            TemplatePartValue::Text(_) => false,
+            TemplatePartValue::Expr(value) => value.key().is_none(),
+        });
+        if needs_node {
+            return BuildResult::Value(self.pending_value(
+                NodeJob::Template {
+                    kind,
+                    parts: Arc::from(values),
+                },
+                format!("template({kind:?})"),
+            ));
+        }
+
+        let result = match kind {
+            TemplateKind::String => self.interpolate_string_parts(&values),
+            TemplateKind::Path => self.interpolate_path_parts(&values),
+        };
+        BuildResult::from_result(result)
+    }
+
+    fn force_template_parts(
+        &self,
+        parts: &[TemplatePartValue],
+    ) -> Result<Vec<TemplatePartValue>, PoisonError> {
+        let values = parts
+            .iter()
+            .filter_map(|part| match part {
+                TemplatePartValue::Text(_) => None,
+                TemplatePartValue::Expr(value) => Some(value.clone()),
+            })
+            .collect::<Vec<_>>();
+        let forced = self.force_many(values)?;
+        let mut forced_iter = forced.into_iter();
+        Ok(parts
+            .iter()
+            .map(|part| match part {
+                TemplatePartValue::Text(text) => TemplatePartValue::Text(text.clone()),
+                TemplatePartValue::Expr(_) => {
+                    TemplatePartValue::Expr(forced_iter.next().expect("forced value for template"))
+                }
+            })
+            .collect())
+    }
+
+    // r[expr.literal.interpolation]
+    fn interpolate_string_parts(&self, parts: &[TemplatePartValue]) -> Result<Value, PoisonError> {
+        let mut value = String::new();
+        for part in parts {
+            match part {
+                TemplatePartValue::Text(text) => value.push_str(text),
+                TemplatePartValue::Expr(value_part) => {
+                    value.push_str(&self.stringify_interpolated_value(value_part)?);
+                }
+            }
+        }
+        Ok(Value::String(Arc::from(value)))
+    }
+
+    // r[exec.arg.interpolation]
+    fn interpolate_path_parts(&self, parts: &[TemplatePartValue]) -> Result<Value, PoisonError> {
+        let mut plain = String::new();
+        let mut mounted_tree: Option<(TreeValue, String)> = None;
+        let mut mounted_blob: Option<(BlobValue, String)> = None;
+
+        for part in parts {
+            match part {
+                TemplatePartValue::Text(text) => plain.push_str(text),
+                TemplatePartValue::Expr(value) => match value {
+                    Value::String(text) => plain.push_str(text),
+                    Value::Path(path) => plain.push_str(path.as_str()),
+                    Value::Tree(tree) => {
+                        if mounted_tree.is_some() || mounted_blob.is_some() {
+                            return Err(self.type_error(
+                                "path literal cannot interpolate more than one mount-bearing value",
+                            ));
+                        }
+                        mounted_tree = Some((tree.clone(), plain.clone()));
+                        plain.clear();
+                    }
+                    Value::Blob(blob) => {
+                        if mounted_tree.is_some() || mounted_blob.is_some() {
+                            return Err(self.type_error(
+                                "path literal cannot interpolate more than one mount-bearing value",
+                            ));
+                        }
+                        mounted_blob = Some((blob.clone(), plain.clone()));
+                        plain.clear();
+                    }
+                    Value::ExecPath(exec_path) => match exec_path {
+                        ExecPathValue::InTree { tree, suffix } => {
+                            if mounted_tree.is_some() || mounted_blob.is_some() {
+                                return Err(self.type_error(
+                                    "path literal cannot interpolate more than one mount-bearing value",
+                                ));
+                            }
+                            plain.push_str(suffix.as_str());
+                            mounted_tree = Some((tree.clone(), plain.clone()));
+                            plain.clear();
+                        }
+                        ExecPathValue::InBlob { blob, leaf } => {
+                            if mounted_tree.is_some() || mounted_blob.is_some() {
+                                return Err(self.type_error(
+                                    "path literal cannot interpolate more than one mount-bearing value",
+                                ));
+                            }
+                            plain.push_str(leaf.as_str());
+                            mounted_blob = Some((blob.clone(), plain.clone()));
+                            plain.clear();
+                        }
+                    },
+                    other => {
+                        return Err(self.type_error(&format!(
+                            "path interpolation requires String, Path, Tree, Blob, or ExecPath, got {}",
+                            other.type_name()
+                        )));
+                    }
+                },
+            }
+        }
+
+        if let Some((tree, prefix)) = mounted_tree {
+            let suffix = PathValue::new(format!("{prefix}{plain}").trim_start_matches('/'));
+            return Ok(Value::ExecPath(ExecPathValue::InTree { tree, suffix }));
+        }
+
+        if let Some((blob, leaf)) = mounted_blob {
+            let leaf = format!("{leaf}{plain}");
+            let leaf = leaf.trim_start_matches('/').to_string();
+            let normalized = PathValue::new(&leaf);
+            if normalized.as_str().contains('/') {
+                return Err(self
+                    .type_error("path literal cannot append path segments to a blob-backed path"));
+            }
+            return Ok(Value::ExecPath(ExecPathValue::InBlob {
+                blob,
+                leaf: normalized,
+            }));
+        }
+
+        Ok(Value::Path(PathValue::new(plain)))
+    }
+
+    fn stringify_interpolated_value(&self, value: &Value) -> Result<String, PoisonError> {
+        match value {
+            Value::String(text) => Ok(text.to_string()),
+            Value::Path(path) => Ok(path.as_str().to_string()),
+            Value::Bool(_) | Value::U64(_) | Value::I64(_) | Value::F64(_) | Value::Unit => {
+                Ok(value.to_string())
+            }
+            other => Err(self.type_error(&format!(
+                "cannot interpolate {} into String",
+                other.type_name()
+            ))),
         }
     }
 
@@ -1435,6 +1633,7 @@ impl Engine {
                 }
                 Ok(ExecArgValue::Path(path))
             }
+            Value::ExecPath(path) => self.exec_arg_from_exec_path(mounts, &path),
             Value::Blob(blob) => Ok(ExecArgValue::Path(
                 self.ensure_blob_exec_mount(mounts, &blob),
             )),
@@ -1442,8 +1641,26 @@ impl Engine {
                 self.ensure_tree_exec_mount(mounts, &tree),
             )),
             other => Err(self.type_error(&format!(
-                "{context} must be String, Path, Blob, or Tree, got {}",
+                "{context} must be String, Path, Blob, Tree, or ExecPath, got {}",
                 other.type_name()
+            ))),
+        }
+    }
+
+    fn exec_arg_from_exec_path(
+        &self,
+        mounts: &mut Vec<(PathValue, Value)>,
+        path: &ExecPathValue,
+    ) -> Result<ExecArgValue, PoisonError> {
+        match path {
+            ExecPathValue::InTree { tree, suffix } => Ok(ExecArgValue::Path(
+                self.ensure_tree_exec_mount(mounts, tree)
+                    .join(suffix.as_str()),
+            )),
+            ExecPathValue::InBlob { blob, leaf } => Ok(ExecArgValue::Path(self.ensure_exec_mount(
+                mounts,
+                Value::Blob(blob.clone()),
+                Some(leaf.as_str().to_string()),
             ))),
         }
     }
@@ -1593,6 +1810,9 @@ impl Engine {
             Value::Blob(blob) => self.write_blob_to_path(&blob, destination),
             Value::Tree(tree) => self.write_tree_to_path(&tree, destination),
             Value::Path(path) => self.copy_host_path(&path, destination),
+            Value::ExecPath(_) => {
+                Err(self.type_error("cannot materialize ExecPath into exec sandbox"))
+            }
             other => Err(self.type_error(&format!(
                 "cannot materialize {} into exec sandbox",
                 other.type_name()
@@ -1784,6 +2004,8 @@ impl Engine {
                 Err(self
                     .internal_error("Host values cannot cross the local exec observer boundary"))
             }
+            Value::ExecPath(_) => Err(self
+                .internal_error("ExecPath values cannot cross the local exec observer boundary")),
             Value::Blob(BlobValue::Inline(_))
             | Value::Blob(BlobValue::Store(_))
             | Value::Path(_)
@@ -2475,6 +2697,13 @@ fn collect_expr_callee_names(
         | instr::Expr::LitString(_)
         | instr::Expr::Unit
         | instr::Expr::Var(_) => {}
+        instr::Expr::StringTemplate(parts) | instr::Expr::PathTemplate(parts) => {
+            for part in parts {
+                if let instr::TemplatePart::Expr(expr) = part {
+                    collect_expr_callee_names(expr, visible_locals, top_level_names, deps);
+                }
+            }
+        }
         instr::Expr::Binary { left, right, .. } => {
             collect_expr_callee_names(left, visible_locals, top_level_names, deps);
             collect_expr_callee_names(right, visible_locals, top_level_names, deps);

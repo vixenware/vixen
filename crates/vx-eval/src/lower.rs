@@ -7,8 +7,9 @@ use std::sync::Arc;
 
 use vx_parser::{
     ArrayExpr, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr as AstExpr, FailExpr,
-    FieldExpr, FnDecl, IfExpr, Item, LiteralExpr, MapEntry, MapExpr, Parameter, PrefixExpr,
-    SourceFile, Stmt as AstStmt, StructLiteralExpr, StructLiteralField, SyntaxKind,
+    FieldExpr, FnDecl, IfExpr, InterpolatedStringExpr, Item, LiteralExpr, MapEntry, MapExpr,
+    Parameter, PathLiteralExpr, PrefixExpr, SourceFile, Stmt as AstStmt, StringPart,
+    StructLiteralExpr, StructLiteralField, SyntaxKind,
 };
 
 use crate::instr;
@@ -113,6 +114,8 @@ fn lower_stmt_with_ctx(stmt: &AstStmt, ctx: &mut LowerCtx) -> Option<instr::Stmt
 fn lower_expr_with_ctx(expr: &AstExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
     match expr {
         AstExpr::Literal(lit) => lower_literal(lit),
+        AstExpr::InterpolatedString(string) => lower_interpolated_string(string, ctx),
+        AstExpr::PathLiteral(path) => lower_path_literal(path, ctx),
         AstExpr::NameRef(name_ref) => {
             let name = name_ref.token()?.text().to_string();
             Some(instr::Expr::Var(name))
@@ -134,8 +137,7 @@ fn lower_expr_with_ctx(expr: &AstExpr, ctx: &mut LowerCtx) -> Option<instr::Expr
         | AstExpr::Range(_)
         | AstExpr::TypeOp(_)
         | AstExpr::With(_)
-        | AstExpr::Fallible(_)
-        | AstExpr::InterpolatedString(_) => None,
+        | AstExpr::Fallible(_) => None,
     }
 }
 
@@ -161,6 +163,50 @@ fn lower_literal(lit: &LiteralExpr) -> Option<instr::Expr> {
         }
         _ => None,
     }
+}
+
+fn lower_interpolated_string(
+    expr: &InterpolatedStringExpr,
+    ctx: &mut LowerCtx,
+) -> Option<instr::Expr> {
+    let parts = lower_template_parts(expr.parts(), ctx)?;
+    Some(instr::Expr::StringTemplate(parts))
+}
+
+fn lower_path_literal(expr: &PathLiteralExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
+    if let Some(literal) = expr.literal() {
+        let token = literal.token()?;
+        if token.kind() != SyntaxKind::STRING {
+            return None;
+        }
+        let text = token.text();
+        let inner = &text[1..text.len() - 1];
+        return Some(instr::Expr::PathTemplate(vec![instr::TemplatePart::Text(
+            unescape_string(inner),
+        )]));
+    }
+
+    let interpolated = expr.interpolated()?;
+    let parts = lower_template_parts(interpolated.parts(), ctx)?;
+    Some(instr::Expr::PathTemplate(parts))
+}
+
+fn lower_template_parts(
+    parts: impl Iterator<Item = StringPart>,
+    ctx: &mut LowerCtx,
+) -> Option<Vec<instr::TemplatePart>> {
+    let mut lowered = Vec::new();
+    for part in parts {
+        match part {
+            StringPart::Text(token) => {
+                lowered.push(instr::TemplatePart::Text(unescape_string(token.text())))
+            }
+            StringPart::Interpolation(interpolation) => lowered.push(instr::TemplatePart::Expr(
+                lower_expr_with_ctx(&interpolation.expr()?, ctx)?,
+            )),
+        }
+    }
+    Some(lowered)
 }
 
 fn unescape_string(s: &str) -> String {

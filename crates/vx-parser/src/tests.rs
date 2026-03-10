@@ -1,10 +1,10 @@
 use rowan::TextSize;
 
 use crate::{
-    AstNode, Expr, FieldExpr, FoldingRangeKind, InterpolatedStringExpr, Item, LineIndex, Pattern,
-    Position, SemanticTokenType, SourceFile, Stmt, StringPart, SymbolKind, SyntaxKind, Type,
-    doc_comment, document_symbols, enclosing_nodes, folding_ranges, parse, parse_source_file,
-    semantic_tokens,
+    AstNode, Expr, FieldExpr, FoldingRangeKind, InterpolatedStringExpr, Item, LineIndex,
+    PathLiteralExpr, Pattern, Position, SemanticTokenType, SourceFile, Stmt, StringPart,
+    SymbolKind, SyntaxKind, Type, doc_comment, document_symbols, enclosing_nodes, folding_ranges,
+    parse, parse_source_file, semantic_tokens,
 };
 
 #[test]
@@ -445,6 +445,61 @@ fn label(ok: Bool) -> String {
     assert!(kinds.contains(&SyntaxKind::INTERPOLATED_STRING_EXPR));
     assert!(kinds.contains(&SyntaxKind::STRING_INTERPOLATION));
     assert!(kinds.contains(&SyntaxKind::IF_EXPR));
+}
+
+#[test]
+fn parses_path_literals_without_confusing_partial_application() {
+    let input = r#"
+fn build(name: String) {
+  let output = @`out/${name}.o`;
+  let include = @"include/lua.h";
+  @tool("--flag", ..)
+}
+"#;
+
+    let parse = parse(input);
+    assert_eq!(parse.errors(), []);
+
+    let kinds = parse
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&SyntaxKind::PATH_LITERAL_EXPR));
+    assert!(kinds.contains(&SyntaxKind::PARTIAL_APP_EXPR));
+}
+
+#[test]
+fn path_literal_ast_exposes_literal_and_interpolated_forms() {
+    let parse = parse(
+        r#"
+fn build(name: String) {
+  @"include/lua.h";
+  @`out/${name}.o`;
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let exprs = body
+        .statements()
+        .filter_map(|stmt| match stmt {
+            Stmt::Expr(Expr::PathLiteral(expr)) => Some(expr),
+            _ => None,
+        })
+        .collect::<Vec<PathLiteralExpr>>();
+
+    assert_eq!(exprs.len(), 2);
+    assert!(exprs[0].literal().is_some());
+    assert!(exprs[0].interpolated().is_none());
+    assert!(exprs[1].literal().is_none());
+    assert!(exprs[1].interpolated().is_some());
 }
 
 #[test]

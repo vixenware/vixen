@@ -34,6 +34,8 @@ pub enum Value {
     // r[impl store.path]
     /// A normalized slash-delimited path.
     Path(PathValue),
+    /// An exec-only path carrying implicit mount provenance.
+    ExecPath(ExecPathValue),
     // r[impl store.blob]
     /// A file-like content handle.
     Blob(BlobValue),
@@ -70,6 +72,13 @@ pub struct MapValue {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PathValue {
     raw: Arc<str>,
+}
+
+/// A provenance-bearing exec path.
+#[derive(Debug, Clone)]
+pub enum ExecPathValue {
+    InTree { tree: TreeValue, suffix: PathValue },
+    InBlob { blob: BlobValue, leaf: PathValue },
 }
 
 /// Blob storage.
@@ -150,6 +159,7 @@ impl Value {
             Value::Bool(_) => "Bool",
             Value::String(_) => "String",
             Value::Path(_) => "Path",
+            Value::ExecPath(_) => "ExecPath",
             Value::Blob(_) => "Blob",
             Value::Tree(_) => "Tree",
             Value::Host(_) => "Host",
@@ -172,6 +182,7 @@ impl Value {
                 .entries
                 .iter()
                 .all(|(key, value)| key.is_fully_resolved() && value.is_fully_resolved()),
+            Value::ExecPath(path) => path.is_fully_resolved(),
             Value::Tree(tree) => tree.is_fully_resolved(),
             Value::Struct(s) => s.fields.iter().all(|(_, value)| value.is_fully_resolved()),
             Value::Function(f) => f
@@ -192,6 +203,7 @@ impl Value {
             Value::Bool(b) => Some(format!("bool:{b}")),
             Value::String(s) => Some(format!("string:{s:?}")),
             Value::Path(path) => Some(path.key()),
+            Value::ExecPath(path) => path.key(),
             Value::Blob(blob) => blob.key(),
             Value::Tree(tree) => tree.key(),
             Value::Host(_) => None,
@@ -247,6 +259,26 @@ impl PathValue {
 
     pub fn key(&self) -> String {
         format!("path:{}", self.as_str())
+    }
+}
+
+impl ExecPathValue {
+    pub fn is_fully_resolved(&self) -> bool {
+        match self {
+            ExecPathValue::InTree { tree, .. } => tree.is_fully_resolved(),
+            ExecPathValue::InBlob { .. } => true,
+        }
+    }
+
+    pub fn key(&self) -> Option<String> {
+        match self {
+            ExecPathValue::InTree { tree, suffix } => {
+                Some(format!("execpath:tree:{}:{}", tree.key()?, suffix.as_str()))
+            }
+            ExecPathValue::InBlob { blob, leaf } => {
+                Some(format!("execpath:blob:{}:{}", blob.key()?, leaf.as_str()))
+            }
+        }
     }
 }
 
@@ -382,6 +414,7 @@ impl fmt::Display for Value {
             Value::Bool(b) => write!(f, "{b}"),
             Value::String(s) => write!(f, "{s}"),
             Value::Path(path) => write!(f, "{}", path.as_str()),
+            Value::ExecPath(path) => write!(f, "{path}"),
             Value::Blob(blob) => write!(f, "{blob}"),
             Value::Tree(tree) => write!(f, "{tree}"),
             Value::Host(_) => write!(f, "<host>"),
@@ -445,6 +478,7 @@ impl PartialEq for Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Path(a), Value::Path(b)) => a == b,
+            (Value::ExecPath(a), Value::ExecPath(b)) => a == b,
             (Value::Blob(a), Value::Blob(b)) => a == b,
             (Value::Tree(a), Value::Tree(b)) => a == b,
             (Value::Host(a), Value::Host(b)) => a == b,
@@ -465,6 +499,36 @@ impl PartialEq for Value {
 }
 
 impl Eq for Value {}
+
+impl PartialEq for ExecPathValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                ExecPathValue::InTree {
+                    tree: left_tree,
+                    suffix: left_suffix,
+                },
+                ExecPathValue::InTree {
+                    tree: right_tree,
+                    suffix: right_suffix,
+                },
+            ) => left_tree == right_tree && left_suffix == right_suffix,
+            (
+                ExecPathValue::InBlob {
+                    blob: left_blob,
+                    leaf: left_leaf,
+                },
+                ExecPathValue::InBlob {
+                    blob: right_blob,
+                    leaf: right_leaf,
+                },
+            ) => left_blob == right_blob && left_leaf == right_leaf,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ExecPathValue {}
 
 impl PartialEq for MapValue {
     fn eq(&self, other: &Self) -> bool {
@@ -558,6 +622,15 @@ impl fmt::Display for TreeValue {
             TreeValue::Inline(entries) => write!(f, "<tree {} entries>", entries.len()),
             TreeValue::FsDir(path) => write!(f, "<tree {}>", path.as_str()),
             TreeValue::Store(root) => write!(f, "<tree {root}>"),
+        }
+    }
+}
+
+impl fmt::Display for ExecPathValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExecPathValue::InTree { suffix, .. } => write!(f, "{}", suffix.as_str()),
+            ExecPathValue::InBlob { leaf, .. } => write!(f, "{}", leaf.as_str()),
         }
     }
 }

@@ -27,6 +27,12 @@ pub struct Param {
     pub name: String,
 }
 
+#[derive(Debug, Clone)]
+pub enum TemplatePart {
+    Text(String),
+    Expr(Expr),
+}
+
 /// A block: a sequence of statements. The last statement's value is the
 /// block's value. An empty block or a block ending with a non-expression
 /// statement evaluates to Unit.
@@ -61,6 +67,10 @@ pub enum Expr {
     LitBool(bool),
     /// String literal
     LitString(String),
+    /// Interpolated string literal
+    StringTemplate(Vec<TemplatePart>),
+    /// Path literal, possibly interpolated
+    PathTemplate(Vec<TemplatePart>),
     /// Unit `()`
     Unit,
 

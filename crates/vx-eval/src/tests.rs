@@ -17,7 +17,7 @@ use crate::exec::ExecArgValue;
 use crate::lower::lower_source_file;
 use crate::poison::PoisonKind;
 use crate::transport::TransportValue;
-use crate::value::{BlobValue, PathValue, StructValue, TreeValue, Value};
+use crate::value::{BlobValue, ExecPathValue, PathValue, StructValue, TreeValue, Value};
 use crate::worker::Engine;
 
 fn eval(source: &str, entry: &str) -> Result<Value, crate::poison::PoisonError> {
@@ -68,6 +68,28 @@ fn boolean_literal() {
 fn string_literal() {
     let val = eval(r#"fn main() { "hello" }"#, "main").unwrap();
     assert_eq!(val, Value::String(Arc::from("hello")));
+}
+
+#[test]
+// r[verify expr.literal.interpolation]
+fn interpolated_string_literal() {
+    let val = eval(r#"fn main() { `hello ${"world"}` }"#, "main").unwrap();
+    assert_eq!(val, Value::String(Arc::from("hello world")));
+}
+
+#[test]
+fn path_literal_normalizes_slashes() {
+    let val = eval(r#"fn main() { @"out//./artifact.o" }"#, "main").unwrap();
+    assert_eq!(val, Value::Path(PathValue::new("out/artifact.o")));
+}
+
+#[test]
+fn interpolated_path_literal_builds_plain_paths() {
+    let engine = engine(r#"fn main(name: String) { @`out/${name}.o` }"#);
+    let value = engine
+        .call("main", vec![Value::String(Arc::from("lua"))])
+        .unwrap();
+    assert_eq!(value, Value::Path(PathValue::new("out/lua.o")));
 }
 
 #[test]
@@ -705,6 +727,29 @@ fn path_values_join_with_normalized_slashes() {
 }
 
 #[test]
+fn interpolated_path_literal_with_tree_yields_exec_path() {
+    let engine = engine(r#"fn main(input: Tree) { @`${input}/include/lua.h` }"#);
+    let input = TreeValue::Inline(Arc::from([(
+        Arc::from("include"),
+        Value::Tree(TreeValue::Inline(Arc::from([(
+            Arc::from("lua.h"),
+            Value::Blob(BlobValue::from_string("header")),
+        )]))),
+    )]));
+    let value = engine
+        .call("main", vec![Value::Tree(input.clone())])
+        .unwrap();
+
+    assert_eq!(
+        value,
+        Value::ExecPath(ExecPathValue::InTree {
+            tree: input,
+            suffix: PathValue::new("include/lua.h"),
+        })
+    );
+}
+
+#[test]
 // r[verify store.blob]
 // r[verify store.blob.to-string]
 fn blob_from_string_round_trips_text() {
@@ -936,6 +981,28 @@ fn exec_implicitly_mounts_tree_args() {
     let value = engine.call("build", vec![input]).unwrap();
 
     assert_eq!(value, Value::String(Arc::from("hello tree")));
+}
+
+#[test]
+// r[verify exec.arg.interpolation]
+fn exec_mounts_tree_paths_mentioned_in_path_literals() {
+    let engine = engine(
+        r#"fn observe(process: Process, tree: Tree) {
+               process.stdout.to_string()
+             }
+
+             fn build(input: Tree) {
+               exec(["/bin/cat", @`${input}/input.txt`]; observer: observe)
+             }"#,
+    );
+    let input = Value::Tree(TreeValue::Inline(Arc::from([(
+        Arc::from("input.txt"),
+        Value::Blob(BlobValue::from_string("hello via execpath")),
+    )])));
+
+    let value = engine.call("build", vec![input]).unwrap();
+
+    assert_eq!(value, Value::String(Arc::from("hello via execpath")));
 }
 
 #[test]

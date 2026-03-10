@@ -14,6 +14,18 @@ use crate::instr::{self, BinOp, UnaryOp};
 use crate::poison::PoisonError;
 use crate::value::{FunctionValue, Value};
 
+#[derive(Debug, Clone, Copy)]
+pub enum TemplateKind {
+    String,
+    Path,
+}
+
+#[derive(Debug, Clone)]
+pub enum TemplatePartValue {
+    Text(Arc<str>),
+    Expr(Value),
+}
+
 /// A unique identifier for a node in the dataflow graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(pub u64);
@@ -45,6 +57,10 @@ pub enum NodeJob {
     Unary {
         op: UnaryOp,
         operand: Value,
+    },
+    Template {
+        kind: TemplateKind,
+        parts: Arc<[TemplatePartValue]>,
     },
     If {
         cond: Value,

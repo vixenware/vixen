@@ -107,6 +107,7 @@ ast_node!(FallibleExpr, SyntaxKind::FALLIBLE_EXPR);
 ast_node!(NameRefExpr, SyntaxKind::NAME_REF_EXPR);
 ast_node!(LiteralExpr, SyntaxKind::LITERAL_EXPR);
 ast_node!(InterpolatedStringExpr, SyntaxKind::INTERPOLATED_STRING_EXPR);
+ast_node!(PathLiteralExpr, SyntaxKind::PATH_LITERAL_EXPR);
 ast_node!(StringInterpolation, SyntaxKind::STRING_INTERPOLATION);
 ast_node!(LetStmt, SyntaxKind::LET_STMT);
 ast_node!(AssignStmt, SyntaxKind::ASSIGN_STMT);
@@ -196,6 +197,7 @@ pub enum Expr {
     NameRef(NameRefExpr),
     Literal(LiteralExpr),
     InterpolatedString(InterpolatedStringExpr),
+    PathLiteral(PathLiteralExpr),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -341,6 +343,7 @@ impl AstNode for Expr {
                 | SyntaxKind::NAME_REF_EXPR
                 | SyntaxKind::LITERAL_EXPR
                 | SyntaxKind::INTERPOLATED_STRING_EXPR
+                | SyntaxKind::PATH_LITERAL_EXPR
         )
     }
 
@@ -371,6 +374,7 @@ impl AstNode for Expr {
             SyntaxKind::INTERPOLATED_STRING_EXPR => Some(Self::InterpolatedString(
                 InterpolatedStringExpr::cast(node)?,
             )),
+            SyntaxKind::PATH_LITERAL_EXPR => Some(Self::PathLiteral(PathLiteralExpr::cast(node)?)),
             _ => None,
         }
     }
@@ -398,6 +402,7 @@ impl AstNode for Expr {
             Self::NameRef(node) => node.syntax(),
             Self::Literal(node) => node.syntax(),
             Self::InterpolatedString(node) => node.syntax(),
+            Self::PathLiteral(node) => node.syntax(),
         }
     }
 }
@@ -939,6 +944,16 @@ impl InterpolatedStringExpr {
                 }
                 _ => None,
             })
+    }
+}
+
+impl PathLiteralExpr {
+    pub fn literal(&self) -> Option<LiteralExpr> {
+        child(self.syntax())
+    }
+
+    pub fn interpolated(&self) -> Option<InterpolatedStringExpr> {
+        child(self.syntax())
     }
 }
 

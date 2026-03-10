@@ -45,11 +45,20 @@ pub enum TransportStmt {
 
 #[derive(Debug, Clone, PartialEq, Facet)]
 #[repr(u8)]
+pub enum TransportTemplatePart {
+    Text(String),
+    Expr(Box<TransportExpr>),
+}
+
+#[derive(Debug, Clone, PartialEq, Facet)]
+#[repr(u8)]
 pub enum TransportExpr {
     LitInt(u64),
     LitFloat(f64),
     LitBool(bool),
     LitString(String),
+    StringTemplate(Vec<TransportTemplatePart>),
+    PathTemplate(Vec<TransportTemplatePart>),
     Unit,
     Var(String),
     Binary {
@@ -285,6 +294,24 @@ impl From<TransportStmt> for instr::Stmt {
     }
 }
 
+impl From<&instr::TemplatePart> for TransportTemplatePart {
+    fn from(part: &instr::TemplatePart) -> Self {
+        match part {
+            instr::TemplatePart::Text(text) => Self::Text(text.clone()),
+            instr::TemplatePart::Expr(expr) => Self::Expr(Box::new(TransportExpr::from(expr))),
+        }
+    }
+}
+
+impl From<TransportTemplatePart> for instr::TemplatePart {
+    fn from(part: TransportTemplatePart) -> Self {
+        match part {
+            TransportTemplatePart::Text(text) => Self::Text(text),
+            TransportTemplatePart::Expr(expr) => Self::Expr((*expr).into()),
+        }
+    }
+}
+
 impl From<&instr::Expr> for TransportExpr {
     fn from(expr: &instr::Expr) -> Self {
         match expr {
@@ -292,6 +319,12 @@ impl From<&instr::Expr> for TransportExpr {
             instr::Expr::LitFloat(value) => Self::LitFloat(*value),
             instr::Expr::LitBool(value) => Self::LitBool(*value),
             instr::Expr::LitString(value) => Self::LitString(value.clone()),
+            instr::Expr::StringTemplate(parts) => {
+                Self::StringTemplate(parts.iter().map(TransportTemplatePart::from).collect())
+            }
+            instr::Expr::PathTemplate(parts) => {
+                Self::PathTemplate(parts.iter().map(TransportTemplatePart::from).collect())
+            }
             instr::Expr::Unit => Self::Unit,
             instr::Expr::Var(name) => Self::Var(name.clone()),
             instr::Expr::Binary { op, left, right } => Self::Binary {
@@ -360,6 +393,12 @@ impl From<TransportExpr> for instr::Expr {
             TransportExpr::LitFloat(value) => Self::LitFloat(value),
             TransportExpr::LitBool(value) => Self::LitBool(value),
             TransportExpr::LitString(value) => Self::LitString(value),
+            TransportExpr::StringTemplate(parts) => {
+                Self::StringTemplate(parts.into_iter().map(Into::into).collect())
+            }
+            TransportExpr::PathTemplate(parts) => {
+                Self::PathTemplate(parts.into_iter().map(Into::into).collect())
+            }
             TransportExpr::Unit => Self::Unit,
             TransportExpr::Var(name) => Self::Var(name),
             TransportExpr::Binary { op, left, right } => Self::Binary {
@@ -528,6 +567,7 @@ impl TryFrom<&Value> for TransportValue {
             Value::Bool(value) => Ok(Self::Bool(*value)),
             Value::String(value) => Ok(Self::String(value.to_string())),
             Value::Path(path) => Ok(Self::Path(path.as_str().to_string())),
+            Value::ExecPath(_) => Err("cannot transport ExecPath values".into()),
             Value::Blob(blob) => Ok(Self::Blob(TransportBlob::try_from(blob)?)),
             Value::Tree(tree) => Ok(Self::Tree(TransportTree::try_from(tree)?)),
             Value::Host(_) => Err("cannot transport Host values".into()),

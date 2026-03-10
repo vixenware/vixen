@@ -1007,6 +1007,9 @@ fn multiplicative_expr(p: &mut Parser<'_>) -> CompletedMarker {
 
 fn prefix_expr(p: &mut Parser<'_>) -> CompletedMarker {
     match p.current() {
+        SyntaxKind::AT if matches!(p.nth(1), SyntaxKind::STRING | SyntaxKind::BACKTICK) => {
+            path_literal_expr(p)
+        }
         SyntaxKind::AT => partial_app_expr(p),
         SyntaxKind::BANG | SyntaxKind::MINUS => {
             let marker = p.start();
@@ -1023,6 +1026,21 @@ fn prefix_expr(p: &mut Parser<'_>) -> CompletedMarker {
         }
         _ => type_op_expr(p),
     }
+}
+
+fn path_literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    p.expect(SyntaxKind::AT);
+    match p.current() {
+        SyntaxKind::STRING => {
+            literal_expr(p);
+        }
+        SyntaxKind::BACKTICK => {
+            interpolated_string_expr(p);
+        }
+        _ => p.error("expected string or interpolated string after @"),
+    }
+    marker.complete(p, SyntaxKind::PATH_LITERAL_EXPR)
 }
 
 // r[expr.partial-app]
@@ -1146,7 +1164,7 @@ fn atom_expr(p: &mut Parser<'_>) -> CompletedMarker {
         SyntaxKind::IMPORT_KW => import_expr(p),       // r[expr.import]
         SyntaxKind::LOWER_IDENT | SyntaxKind::DOLLAR_IDENT => name_expr(p), // r[expr.ident]
         SyntaxKind::UPPER_IDENT => upper_expr(p),      // r[expr.struct-literal]
-        SyntaxKind::BACKTICK => interpolated_string_expr(p), // r[expr.interp-string]
+        SyntaxKind::BACKTICK => interpolated_string_expr(p), // r[expr.literal.interpolation]
         // r[expr.literal.int] r[expr.literal.float] r[expr.literal.bool] r[expr.literal.string]
         SyntaxKind::INT
         | SyntaxKind::FLOAT
@@ -1190,7 +1208,7 @@ fn literal_expr(p: &mut Parser<'_>) -> CompletedMarker {
     marker.complete(p, SyntaxKind::LITERAL_EXPR)
 }
 
-// r[expr.interp-string]
+// r[expr.literal.interpolation]
 fn interpolated_string_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.expect(SyntaxKind::BACKTICK);
