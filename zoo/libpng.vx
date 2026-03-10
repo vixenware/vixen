@@ -143,7 +143,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
           @(out/{file}.o),
           "-I", @src,
           ..includes.map ["-I", $].flatten(),
-          ..defines.map `-D${$}`,
+          ..defines.map(`-D${$}`),
           ..common_cflags,
           ..flags,
         ] where {
@@ -163,7 +163,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     cexec [cc, "-shared", "-o", @(out/{name}), ..objects, ..link_flags]
   );
 
-  let zlib_src = acquire zlib_url where {
+  let zlib_src = acquire(zlib_url) where {
     sha256: zlib_sha256,
     extract: "tar.xz",
   };
@@ -196,7 +196,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     @lib/libz.so: zlib_shared.file @lib/libz.so,
   };
 
-  let libpng_src = acquire libpng_url where {
+  let libpng_src = acquire(libpng_url) where {
     sha256: libpng_sha256,
     extract: "tar.xz",
   };

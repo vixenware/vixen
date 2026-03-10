@@ -242,7 +242,13 @@ fn libpng_sketch_parses() {
 }
 
 #[test]
-fn match_arm_variant_struct_pattern_currently_fails() {
+fn cargo_resolve_sketch_parses() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx");
+    assert_file_parses(&path);
+}
+
+#[test]
+fn match_arm_variant_struct_pattern_parses() {
     let parse = parse(
         r#"
 fn parse_lock(ws: Tree) -> CargoLock? (
@@ -254,14 +260,11 @@ fn parse_lock(ws: Tree) -> CargoLock? (
 "#,
     );
 
-    assert!(
-        !parse.errors().is_empty(),
-        "variant struct patterns in match arms should currently fail"
-    );
+    assert_eq!(parse.errors(), []);
 }
 
 #[test]
-fn boolean_or_in_if_condition_currently_fails() {
+fn boolean_or_in_if_condition_parses() {
     let parse = parse(
         r#"
 fn download_url(template: String) -> String (
@@ -277,10 +280,7 @@ fn download_url(template: String) -> String (
 "#,
     );
 
-    assert!(
-        !parse.errors().is_empty(),
-        "|| in paren-bodied if conditions should currently fail"
-    );
+    assert_eq!(parse.errors(), []);
 }
 
 #[test]
@@ -371,10 +371,10 @@ fn demo(flag: Bool) -> String (
         fail `bad tool`
       );
       item.to_string
-    )) tool
+    ))(tool)
   )
 
-  observer Tool { path: "cc" }
+  observer(Tool { path: "cc" })
 )
 "#,
     );
@@ -503,6 +503,36 @@ fn build(
 }
 
 #[test]
+fn typed_calls_parse_and_expose_type_args() {
+    let parse = parse(
+        r#"
+fn parse(blob: Blob) {
+  Json.parse[IndexEntry](Blob($))
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let call = match body.statements().next().expect("call statement") {
+        Stmt::Expr(Expr::Call(node)) => node,
+        stmt => panic!("expected call expr, got {stmt:?}"),
+    };
+
+    let type_args = call
+        .type_args()
+        .expect("typed call should expose type args");
+    let collected = type_args.types().collect::<Vec<_>>();
+    assert_eq!(collected.len(), 1);
+    assert!(matches!(&collected[0], Type::Path(_)));
+}
+
+#[test]
 fn call_ast_flattens_parenthesized_payloads_and_tuple_args() {
     let parse = parse(
         r#"
@@ -546,12 +576,26 @@ fn build(
 }
 
 #[test]
-fn self_delimiting_brackets_parse_as_calls_not_indexing() {
+fn tight_brackets_do_not_parse_as_calls() {
     let parse = parse(
         r#"
-fn build(items: Stream[Blob], exe: Blob) {
+fn build(items: Stream[Blob]) {
   items[0];
-  Tree { @bin/lua: exe };
+}
+"#,
+    );
+    assert!(
+        !parse.errors().is_empty(),
+        "tight brackets should not be treated as a call payload"
+    );
+}
+
+#[test]
+fn spaced_brackets_parse_as_juxtaposed_calls() {
+    let parse = parse(
+        r#"
+fn build(run: Fn(Array[String]) -> Tree) {
+  run ["cc"];
 }
 "#,
     );
@@ -563,21 +607,14 @@ fn build(items: Stream[Blob], exe: Blob) {
         item => panic!("expected function decl, got {item:?}"),
     };
     let body = function.body().expect("function body");
-    let statements = body.statements().collect::<Vec<_>>();
-
-    let call = match &statements[0] {
+    let call = match body.statements().next().expect("call statement") {
         Stmt::Expr(Expr::Call(node)) => node,
         stmt => panic!("expected call expr, got {stmt:?}"),
     };
+
     let args = call.positional_args();
     assert_eq!(args.len(), 1);
     assert!(matches!(&args[0], Expr::Array(_)));
-    assert!(
-        !parse
-            .syntax()
-            .descendants()
-            .any(|node| node.kind() == SyntaxKind::INDEX_EXPR)
-    );
 }
 
 #[test]
@@ -693,8 +730,8 @@ fn build(name: String) {
 fn formatter_preserves_current_call_spacing() {
     let input = r#"
 fn build(process: Process, args: Array[String], defaults: Config) {
-  exec_fn  (args)  where  { mounts: { @bin/lua: process.stdout() } };
-  process . stdout ( ) . trim ( )
+  exec_fn(args)  where  { mounts: { @bin/lua: process.stdout() } };
+  process . stdout().trim()
 }
 "#;
 

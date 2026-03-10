@@ -68,7 +68,6 @@ struct Parser<'a> {
     pos: usize,
     events: Vec<Event>,
     disallow_block_application: bool,
-    disallow_paren_application: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -80,7 +79,6 @@ impl<'a> Parser<'a> {
             pos: 0,
             events: Vec::new(),
             disallow_block_application: false,
-            disallow_paren_application: false,
         }
     }
 
@@ -166,6 +164,17 @@ impl<'a> Parser<'a> {
             })
     }
 
+    fn has_significant_gap_before_current(&self) -> bool {
+        let Some(&current_token_index) = self.significant.get(self.pos) else {
+            return false;
+        };
+        let Some(prev_pos) = self.pos.checked_sub(1) else {
+            return false;
+        };
+        let prev_token_index = self.significant[prev_pos];
+        self.tokens[prev_token_index].range.end() != self.tokens[current_token_index].range.start()
+    }
+
     fn recover_while(&mut self, mut keep_going: impl FnMut(SyntaxKind) -> bool) {
         while self.current() != SyntaxKind::EOF && keep_going(self.current()) {
             self.bump();
@@ -177,14 +186,6 @@ impl<'a> Parser<'a> {
         self.disallow_block_application = true;
         let result = f(self);
         self.disallow_block_application = prev;
-        result
-    }
-
-    fn with_paren_application_disallowed<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-        let prev = self.disallow_paren_application;
-        self.disallow_paren_application = true;
-        let result = f(self);
-        self.disallow_paren_application = prev;
         result
     }
 }
@@ -1258,6 +1259,14 @@ fn application_expr(p: &mut Parser<'_>) -> CompletedMarker {
             continue;
         }
 
+        if starts_tight_type_arg_call(p) {
+            let marker = lhs.precede(p);
+            value_type_args(p);
+            application_arg_expr(p);
+            lhs = marker.complete(p, SyntaxKind::CALL_EXPR);
+            continue;
+        }
+
         if p.at(SyntaxKind::WHERE_KW) {
             let marker = lhs.precede(p);
             p.bump();
@@ -1598,7 +1607,7 @@ fn field_path(p: &mut Parser<'_>) -> CompletedMarker {
 fn if_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.expect(SyntaxKind::IF_KW);
-    p.with_paren_application_disallowed(|p| p.with_block_application_disallowed(expr));
+    p.with_block_application_disallowed(expr);
     if p.at(SyntaxKind::L_PAREN) {
         paren_block_expr(p);
     } else {
@@ -1624,7 +1633,7 @@ fn if_expr(p: &mut Parser<'_>) -> CompletedMarker {
 fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.expect(SyntaxKind::MATCH_KW);
-    p.with_paren_application_disallowed(|p| p.with_block_application_disallowed(expr));
+    p.with_block_application_disallowed(expr);
     let close = if p.at(SyntaxKind::L_PAREN) {
         p.bump();
         SyntaxKind::R_PAREN
@@ -2045,26 +2054,64 @@ fn starts_expr(kind: SyntaxKind) -> bool {
 
 fn starts_application_arg(p: &Parser<'_>) -> bool {
     let kind = p.current();
-    matches!(
-        kind,
-        SyntaxKind::PARTIAL_KW
-            | SyntaxKind::IF_KW
-            | SyntaxKind::MATCH_KW
-            | SyntaxKind::IMPORT_KW
-            | SyntaxKind::UNDERSCORE
-            | SyntaxKind::LOWER_IDENT
-            | SyntaxKind::UPPER_IDENT
-            | SyntaxKind::DOLLAR_IDENT
-            | SyntaxKind::L_BRACKET
-            | SyntaxKind::AT
-            | SyntaxKind::BACKTICK
-            | SyntaxKind::INT
-            | SyntaxKind::FLOAT
-            | SyntaxKind::STRING
-            | SyntaxKind::TRUE_KW
-            | SyntaxKind::FALSE_KW
-    ) || (kind == SyntaxKind::L_PAREN && !p.disallow_paren_application)
-        || (kind == SyntaxKind::L_CURLY && !p.disallow_block_application)
+    matches!(kind, SyntaxKind::L_BRACKET | SyntaxKind::AT) && p.has_significant_gap_before_current()
+        || (kind == SyntaxKind::L_PAREN && !p.has_significant_gap_before_current())
+        || (kind == SyntaxKind::L_CURLY
+            && !p.disallow_block_application
+            && p.has_significant_gap_before_current())
+}
+
+fn starts_tight_type_arg_call(p: &Parser<'_>) -> bool {
+    if p.current() != SyntaxKind::L_BRACKET || p.has_significant_gap_before_current() {
+        return false;
+    }
+
+    let Some(close_pos) =
+        find_matching_significant_token(p, SyntaxKind::L_BRACKET, SyntaxKind::R_BRACKET)
+    else {
+        return false;
+    };
+    let Some(&next_token_index) = p.significant.get(close_pos + 1) else {
+        return false;
+    };
+    let close_token_index = p.significant[close_pos];
+    p.tokens[next_token_index].kind == SyntaxKind::L_PAREN
+        && p.tokens[close_token_index].range.end() == p.tokens[next_token_index].range.start()
+}
+
+fn find_matching_significant_token(
+    p: &Parser<'_>,
+    open: SyntaxKind,
+    close: SyntaxKind,
+) -> Option<usize> {
+    let mut depth = 0usize;
+    for pos in p.pos..p.significant.len() {
+        match p.tokens[p.significant[pos]].kind {
+            kind if kind == open => depth += 1,
+            kind if kind == close => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(pos);
+                }
+            }
+            SyntaxKind::EOF => break,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn value_type_args(p: &mut Parser<'_>) -> CompletedMarker {
+    let marker = p.start();
+    p.expect(SyntaxKind::L_BRACKET);
+    while !p.at(SyntaxKind::R_BRACKET) && !p.at(SyntaxKind::EOF) {
+        type_expr(p);
+        if !p.eat(SyntaxKind::COMMA) {
+            break;
+        }
+    }
+    p.expect(SyntaxKind::R_BRACKET);
+    marker.complete(p, SyntaxKind::TYPE_ARGS)
 }
 
 fn at_attribute(p: &Parser<'_>) -> bool {

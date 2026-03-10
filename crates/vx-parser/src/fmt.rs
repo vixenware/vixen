@@ -764,7 +764,11 @@ impl Formatter {
     fn fmt_call_expr(&mut self, node: &SyntaxNode) {
         let parts = collect_call_parts(node);
         for (index, part) in parts.iter().enumerate() {
-            if index > 0 && !matches!(part.kind(), SyntaxKind::PAREN_EXPR | SyntaxKind::TUPLE_EXPR)
+            if index > 0
+                && !matches!(
+                    part.kind(),
+                    SyntaxKind::PAREN_EXPR | SyntaxKind::TUPLE_EXPR | SyntaxKind::TYPE_ARGS
+                )
             {
                 self.space();
             }
@@ -1300,6 +1304,12 @@ fn collect_call_parts(node: &SyntaxNode) -> Vec<SyntaxNode> {
                 .filter(|child| crate::Expr::can_cast(child.kind()));
             if let Some(callee) = expr_children.next() {
                 walk(&callee, out);
+            }
+            if let Some(type_args) = node
+                .children()
+                .find(|child| child.kind() == SyntaxKind::TYPE_ARGS)
+            {
+                out.push(type_args);
             }
             if let Some(arg) = expr_children.next() {
                 out.push(arg);

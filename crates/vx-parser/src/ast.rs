@@ -861,6 +861,10 @@ impl CallExpr {
         self.root_callee()
     }
 
+    pub fn type_args(&self) -> Option<TypeArgs> {
+        child(self.syntax())
+    }
+
     pub fn immediate_callee(&self) -> Option<Expr> {
         nth_expr(self.syntax(), 0)
     }

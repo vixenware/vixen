@@ -45,7 +45,7 @@ fn exec[T](
   /// Explicit VFS mounts, in addition to implicit mounts from args/env.
   mounts: Map[Path, Blob | Tree] = {},
   /// Executor class on which to run the process.
-  executor: ExecutorClass = executor_class "default",
+  executor: ExecutorClass = executor_class("default"),
   /// Executor-side observer evaluated with sandbox authority.
   observer: Fn(Process, Tree) #sandbox -> T,
 } -> T;
