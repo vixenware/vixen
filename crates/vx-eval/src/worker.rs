@@ -393,6 +393,12 @@ impl Engine {
                 | BuiltinMethod::ArrayMerge { receiver }
                 | BuiltinMethod::MapMapValues { receiver }
                 | BuiltinMethod::BlobToString { receiver }
+                | BuiltinMethod::BlobUtf8 { receiver }
+                | BuiltinMethod::BlobUtf8Lossy { receiver }
+                | BuiltinMethod::BytesUtf8 { receiver }
+                | BuiltinMethod::BytesUtf8Lossy { receiver }
+                | BuiltinMethod::BytesBlob { receiver }
+                | BuiltinMethod::StreamCollect { receiver }
                 | BuiltinMethod::TreeFile { receiver }
                 | BuiltinMethod::TreeMerge { receiver }
                 | BuiltinMethod::TreeSubtree { receiver }
@@ -404,6 +410,7 @@ impl Engine {
                     self.collect_value_obligations(receiver.as_ref(), obligations);
                 }
                 BuiltinMethod::BlobFromString
+                | BuiltinMethod::BytesFromString
                 | BuiltinMethod::TreeOf
                 | BuiltinMethod::TreeEmpty
                 | BuiltinMethod::TreeFromPath => {}
@@ -1640,6 +1647,36 @@ impl Engine {
                     receiver: Box::new(receiver.clone()),
                 },
             ))),
+            Value::Blob(_) if field == "utf8" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::BlobUtf8 {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::Blob(_) if field == "utf8_lossy" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::BlobUtf8Lossy {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::Bytes(_) if field == "collect" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::StreamCollect {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::Bytes(_) if field == "utf8" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::BytesUtf8 {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::Bytes(_) if field == "utf8_lossy" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::BytesUtf8Lossy {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::Bytes(_) if field == "blob" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::BytesBlob {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
             Value::Tree(_) if field == "file" => Ok(Value::Builtin(BuiltinValue::Method(
                 BuiltinMethod::TreeFile {
                     receiver: Box::new(receiver.clone()),
@@ -1677,6 +1714,9 @@ impl Engine {
                     BuiltinMethod::BlobFromString,
                 )))
             }
+            Value::Builtin(BuiltinValue::Namespace(BuiltinNamespace::Bytes)) => Ok(Value::Builtin(
+                BuiltinValue::Method(BuiltinMethod::BytesFromString),
+            )),
             Value::Builtin(BuiltinValue::Namespace(BuiltinNamespace::Tree)) if field == "of" => {
                 Ok(Value::Builtin(BuiltinValue::Method(BuiltinMethod::TreeOf)))
             }
@@ -1820,6 +1860,13 @@ impl Engine {
                     let text = self.stringify_scalar(&value)?;
                     Ok(Value::Blob(BlobValue::from_string(text)))
                 }
+                BuiltinNamespace::Bytes => {
+                    self.require_no_kwargs("Bytes", kwargs)?;
+                    self.check_arity("Bytes", args, 1)?;
+                    let value = self.force_value(args[0].clone())?;
+                    let text = self.stringify_scalar(&value)?;
+                    Ok(Value::Bytes(Arc::from(text.as_bytes().to_vec())))
+                }
                 BuiltinNamespace::Tree => {
                     self.require_no_kwargs("Tree", kwargs)?;
                     self.check_arity("Tree", args, 1)?;
@@ -1888,6 +1935,13 @@ impl Engine {
                 let text = self.stringify_scalar(&value)?;
                 Ok(Value::Blob(BlobValue::from_string(text)))
             }
+            BuiltinValue::Method(BuiltinMethod::BytesFromString) => {
+                self.require_no_kwargs("Bytes", kwargs)?;
+                self.check_arity("Bytes", args, 1)?;
+                let value = self.force_value(args[0].clone())?;
+                let text = self.stringify_scalar(&value)?;
+                Ok(Value::Bytes(Arc::from(text.as_bytes().to_vec())))
+            }
             BuiltinValue::Method(BuiltinMethod::TreeOf) => {
                 self.require_no_kwargs("Tree.of", kwargs)?;
                 self.check_arity("Tree.of", args, 1)?;
@@ -1953,6 +2007,93 @@ impl Engine {
                     )
                 })?;
                 Ok(self.attach_obligations(Value::String(text), obligations))
+            }
+            BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver }) => {
+                self.require_no_kwargs("blob.utf8", kwargs)?;
+                self.check_arity("blob.utf8", args, 0)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.force_value(receiver.as_ref().clone())?);
+                let Value::Blob(blob) = receiver else {
+                    return Err(self.type_error("blob.utf8 receiver must be Blob"));
+                };
+                let text = blob.to_utf8_string().map_err(|message| {
+                    PoisonError::new(
+                        PoisonKind::TypeError,
+                        message,
+                        self.current_demand_chain(None),
+                    )
+                })?;
+                Ok(self.attach_obligations(Value::String(text), obligations))
+            }
+            BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy { receiver }) => {
+                self.require_no_kwargs("blob.utf8_lossy", kwargs)?;
+                self.check_arity("blob.utf8_lossy", args, 0)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.force_value(receiver.as_ref().clone())?);
+                let Value::Blob(blob) = receiver else {
+                    return Err(self.type_error("blob.utf8_lossy receiver must be Blob"));
+                };
+                let text = match blob {
+                    BlobValue::Inline(bytes) => {
+                        String::from_utf8_lossy(bytes.as_ref()).into_owned()
+                    }
+                    BlobValue::FsFile(path) => {
+                        let bytes = std::fs::read(path.as_str()).map_err(|error| {
+                            self.type_error(&format!("failed to read {}: {error}", path.as_str()))
+                        })?;
+                        String::from_utf8_lossy(&bytes).into_owned()
+                    }
+                    BlobValue::Store(blob_ref) => {
+                        return Err(self.type_error(&format!(
+                            "store-backed blob {:?} requires an external store resolver",
+                            blob_ref
+                        )));
+                    }
+                };
+                Ok(self.attach_obligations(Value::String(Arc::from(text)), obligations))
+            }
+            BuiltinValue::Method(BuiltinMethod::BytesUtf8 { receiver }) => {
+                self.require_no_kwargs("bytes.utf8", kwargs)?;
+                self.check_arity("bytes.utf8", args, 0)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.force_value(receiver.as_ref().clone())?);
+                let Value::Bytes(bytes) = receiver else {
+                    return Err(self.type_error("bytes.utf8 receiver must be Bytes"));
+                };
+                let text = String::from_utf8(bytes.as_ref().to_vec()).map_err(|error| {
+                    PoisonError::new(
+                        PoisonKind::TypeError,
+                        format!("bytes are not UTF-8: {error}"),
+                        self.current_demand_chain(None),
+                    )
+                })?;
+                Ok(self.attach_obligations(Value::String(Arc::from(text)), obligations))
+            }
+            BuiltinValue::Method(BuiltinMethod::BytesUtf8Lossy { receiver }) => {
+                self.require_no_kwargs("bytes.utf8_lossy", kwargs)?;
+                self.check_arity("bytes.utf8_lossy", args, 0)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.force_value(receiver.as_ref().clone())?);
+                let Value::Bytes(bytes) = receiver else {
+                    return Err(self.type_error("bytes.utf8_lossy receiver must be Bytes"));
+                };
+                let text = String::from_utf8_lossy(bytes.as_ref()).into_owned();
+                Ok(self.attach_obligations(Value::String(Arc::from(text)), obligations))
+            }
+            BuiltinValue::Method(BuiltinMethod::BytesBlob { receiver }) => {
+                self.require_no_kwargs("bytes.blob", kwargs)?;
+                self.check_arity("bytes.blob", args, 0)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.force_value(receiver.as_ref().clone())?);
+                let Value::Bytes(bytes) = receiver else {
+                    return Err(self.type_error("bytes.blob receiver must be Bytes"));
+                };
+                Ok(self.attach_obligations(Value::Blob(BlobValue::Inline(bytes)), obligations))
+            }
+            BuiltinValue::Method(BuiltinMethod::StreamCollect { receiver }) => {
+                self.require_no_kwargs("stream.collect", kwargs)?;
+                self.check_arity("stream.collect", args, 0)?;
+                self.force_value(receiver.as_ref().clone())
             }
             BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => {
                 self.require_no_kwargs("tree.file", kwargs)?;
@@ -3323,11 +3464,11 @@ impl Engine {
                 (Arc::from("exit_code"), Value::U64(exit_code)),
                 (
                     Arc::from("stdout"),
-                    Value::Blob(BlobValue::Inline(Arc::from(output.stdout.clone()))),
+                    Value::Bytes(Arc::from(output.stdout.clone())),
                 ),
                 (
                     Arc::from("stderr"),
-                    Value::Blob(BlobValue::Inline(Arc::from(output.stderr.clone()))),
+                    Value::Bytes(Arc::from(output.stderr.clone())),
                 ),
             ]),
         })
@@ -3351,6 +3492,7 @@ impl Engine {
                 .internal_error("ExecPath values cannot cross the local exec observer boundary")),
             Value::Blob(BlobValue::Inline(_))
             | Value::Blob(BlobValue::Store(_))
+            | Value::Bytes(_)
             | Value::Path(_)
             | Value::ExecutorClass(_)
             | Value::U64(_)
@@ -4110,6 +4252,7 @@ fn builtin_namespace(name: &str) -> Option<BuiltinValue> {
         "discover" => Some(BuiltinValue::Function(BuiltinFunction::Discover)),
         "executor_class" => Some(BuiltinValue::Function(BuiltinFunction::ExecutorClass)),
         "Blob" => Some(BuiltinValue::Namespace(BuiltinNamespace::Blob)),
+        "Bytes" => Some(BuiltinValue::Namespace(BuiltinNamespace::Bytes)),
         "Tree" => Some(BuiltinValue::Namespace(BuiltinNamespace::Tree)),
         _ => None,
     }

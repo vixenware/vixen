@@ -2441,15 +2441,14 @@ fn exec_runs_a_local_process_with_keyword_args_and_snapshots_outputs() {
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) {
                Tree {
-                 @stdout.txt: process.stdout,
-                 @output.txt: tree.file "out/output.txt",
+                 @stdout.txt: process.stdout.collect().blob(),
+                 @output.txt: tree.file("out/output.txt"),
                }
              }
 
              fn build(workspace: Path) {
-               exec ["/bin/sh", "-c", "cat src/input.txt > out/output.txt; printf done"] where {
-                 mounts: { "src": Tree.from_path workspace },
-                 writable: ["out"],
+               exec ["/bin/sh", "-c", "mkdir -p out && cat src/input.txt > out/output.txt; printf done"] where {
+                 mounts: { "src": Tree(workspace) },
                  observer: observe,
                }
              }"#,
@@ -2467,12 +2466,19 @@ fn exec_runs_a_local_process_with_keyword_args_and_snapshots_outputs() {
         panic!("expected tree result");
     };
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].0.as_ref(), "stdout.txt");
-    assert_eq!(entries[0].1, Value::Blob(BlobValue::from_string("done")));
-    assert_eq!(entries[1].0.as_ref(), "output.txt");
+    let by_name = entries
+        .iter()
+        .map(|(name, value)| (name.as_ref(), value))
+        .collect::<BTreeMap<_, _>>();
     assert_eq!(
-        entries[1].1,
-        Value::Blob(BlobValue::from_string("hello from workspace"))
+        by_name.get("stdout.txt"),
+        Some(&&Value::Blob(BlobValue::from_string("done")))
+    );
+    assert_eq!(
+        by_name.get("output.txt"),
+        Some(&&Value::Blob(BlobValue::from_string(
+            "hello from workspace"
+        )))
     );
 }
 
@@ -2487,7 +2493,7 @@ fn exec_verification_failures_poison_locally() {
              }}
 
              fn observe(process: Process, tree: Tree) {{
-               process.stdout.to_string!
+               process.stdout.collect().utf8()
              }}
 
              fn build(input: Blob) {{
@@ -2521,8 +2527,8 @@ fn observer_functions_can_return_tree_results_for_exec() {
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) {
                Tree {
-                 @stdout.txt: process.stdout,
-                 @output.txt: tree.file "out/output.txt",
+                 @stdout.txt: process.stdout.collect().blob(),
+                 @output.txt: tree.file("out/output.txt"),
                }
              }"#,
     );
@@ -2533,9 +2539,9 @@ fn observer_functions_can_return_tree_results_for_exec() {
             (Arc::from("exit_code"), Value::U64(0)),
             (
                 Arc::from("stdout"),
-                Value::Blob(BlobValue::from_string("done")),
+                Value::Bytes(Arc::from(b"done".as_slice())),
             ),
-            (Arc::from("stderr"), Value::Blob(BlobValue::from_string(""))),
+            (Arc::from("stderr"), Value::Bytes(Arc::from(b"".as_slice()))),
         ]),
     });
     let tree = Value::Tree(TreeValue::FsDir(PathValue::new(
@@ -2548,10 +2554,18 @@ fn observer_functions_can_return_tree_results_for_exec() {
         panic!("expected tree result");
     };
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].0.as_ref(), "stdout.txt");
-    assert_eq!(entries[0].1, Value::Blob(BlobValue::from_string("done")));
-    assert_eq!(entries[1].0.as_ref(), "output.txt");
-    assert!(matches!(entries[1].1, Value::Blob(BlobValue::FsFile(_))));
+    let by_name = entries
+        .iter()
+        .map(|(name, value)| (name.as_ref(), value))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        by_name.get("stdout.txt"),
+        Some(&&Value::Blob(BlobValue::from_string("done")))
+    );
+    assert!(matches!(
+        by_name.get("output.txt"),
+        Some(&Value::Blob(BlobValue::FsFile(_)))
+    ));
 }
 
 #[test]
@@ -2756,7 +2770,7 @@ fn host_which_poisons_by_default_and_fallible_calls_return_options() {
 fn exec_implicitly_mounts_blob_args() {
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) {
-               process.stdout.to_string!
+               process.stdout.collect().utf8()
              }
 
              fn build(input: Blob) {
@@ -2779,7 +2793,7 @@ fn exec_implicitly_mounts_blob_args() {
 fn exec_implicitly_mounts_tree_args() {
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) {
-               process.stdout.to_string!
+               process.stdout.collect().utf8()
              }
 
              fn build(input: Tree) {
@@ -2803,7 +2817,7 @@ fn exec_implicitly_mounts_tree_args() {
 fn exec_mounts_tree_paths_mentioned_in_path_literals() {
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) {
-               process.stdout.to_string!
+               process.stdout.collect().utf8()
              }
 
              fn build(input: Tree) {

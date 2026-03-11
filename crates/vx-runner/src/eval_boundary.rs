@@ -149,11 +149,11 @@ fn process_value(exit_code: i32, stdout: &str, stderr: &str) -> Value {
             (Arc::from("exit_code"), Value::U64(exit_code.max(0) as u64)),
             (
                 Arc::from("stdout"),
-                Value::Blob(BlobValue::Inline(Arc::from(stdout.as_bytes()))),
+                Value::Bytes(Arc::from(stdout.as_bytes())),
             ),
             (
                 Arc::from("stderr"),
-                Value::Blob(BlobValue::Inline(Arc::from(stderr.as_bytes()))),
+                Value::Bytes(Arc::from(stderr.as_bytes())),
             ),
         ]),
     })

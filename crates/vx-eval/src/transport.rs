@@ -182,6 +182,7 @@ pub enum TransportValue {
     String(String),
     Path(String),
     Blob(TransportBlob),
+    Bytes(Vec<u8>),
     Tree(TransportTree),
     ExecutorClass(String),
     Discovered {
@@ -221,6 +222,7 @@ pub struct TransportStruct {
 #[repr(u8)]
 pub enum TransportBuiltinValue {
     BlobNamespace,
+    BytesNamespace,
     TreeNamespace,
     ExecFunction,
     DiscoverFunction,
@@ -230,10 +232,29 @@ pub enum TransportBuiltinValue {
         fields: Vec<String>,
     },
     BlobFromString,
+    BytesFromString,
     TreeOf,
     TreeEmpty,
     TreeFromPath,
     BlobToString {
+        receiver: Box<TransportValue>,
+    },
+    BlobUtf8 {
+        receiver: Box<TransportValue>,
+    },
+    BlobUtf8Lossy {
+        receiver: Box<TransportValue>,
+    },
+    BytesUtf8 {
+        receiver: Box<TransportValue>,
+    },
+    BytesUtf8Lossy {
+        receiver: Box<TransportValue>,
+    },
+    BytesBlob {
+        receiver: Box<TransportValue>,
+    },
+    StreamCollect {
         receiver: Box<TransportValue>,
     },
     TreeFile {
@@ -766,6 +787,7 @@ impl TryFrom<&Value> for TransportValue {
             Value::Path(path) => Ok(Self::Path(path.as_str().to_string())),
             Value::ExecPath(_) => Err("cannot transport ExecPath values".into()),
             Value::Blob(blob) => Ok(Self::Blob(TransportBlob::try_from(blob)?)),
+            Value::Bytes(bytes) => Ok(Self::Bytes(bytes.as_ref().to_vec())),
             Value::Tree(tree) => Ok(Self::Tree(TransportTree::try_from(tree)?)),
             Value::ExecutorClass(label) => Ok(Self::ExecutorClass(label.to_string())),
             Value::Host(_) => Err("cannot transport Host values".into()),
@@ -817,6 +839,7 @@ impl TryFrom<TransportValue> for Value {
             TransportValue::String(value) => Ok(Self::String(Arc::from(value))),
             TransportValue::Path(path) => Ok(Self::Path(PathValue::new(path))),
             TransportValue::Blob(blob) => Ok(Self::Blob(blob.into())),
+            TransportValue::Bytes(bytes) => Ok(Self::Bytes(Arc::from(bytes))),
             TransportValue::Tree(tree) => Ok(Self::Tree(tree.try_into()?)),
             TransportValue::ExecutorClass(label) => Ok(Self::ExecutorClass(Arc::from(label))),
             TransportValue::Discovered { value, obligations } => {
@@ -995,6 +1018,7 @@ impl TryFrom<&BuiltinValue> for TransportBuiltinValue {
     fn try_from(value: &BuiltinValue) -> Result<Self, Self::Error> {
         match value {
             BuiltinValue::Namespace(BuiltinNamespace::Blob) => Ok(Self::BlobNamespace),
+            BuiltinValue::Namespace(BuiltinNamespace::Bytes) => Ok(Self::BytesNamespace),
             BuiltinValue::Namespace(BuiltinNamespace::Tree) => Ok(Self::TreeNamespace),
             BuiltinValue::Function(BuiltinFunction::Exec) => Ok(Self::ExecFunction),
             BuiltinValue::Function(BuiltinFunction::Discover) => Ok(Self::DiscoverFunction),
@@ -1008,11 +1032,36 @@ impl TryFrom<&BuiltinValue> for TransportBuiltinValue {
                 })
             }
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => Ok(Self::BlobFromString),
+            BuiltinValue::Method(BuiltinMethod::BytesFromString) => Ok(Self::BytesFromString),
             BuiltinValue::Method(BuiltinMethod::TreeOf) => Ok(Self::TreeOf),
             BuiltinValue::Method(BuiltinMethod::TreeEmpty) => Ok(Self::TreeEmpty),
             BuiltinValue::Method(BuiltinMethod::TreeFromPath) => Ok(Self::TreeFromPath),
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
                 Ok(Self::BlobToString {
+                    receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
+                })
+            }
+            BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver }) => Ok(Self::BlobUtf8 {
+                receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
+            }),
+            BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy { receiver }) => {
+                Ok(Self::BlobUtf8Lossy {
+                    receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
+                })
+            }
+            BuiltinValue::Method(BuiltinMethod::BytesUtf8 { receiver }) => Ok(Self::BytesUtf8 {
+                receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
+            }),
+            BuiltinValue::Method(BuiltinMethod::BytesUtf8Lossy { receiver }) => {
+                Ok(Self::BytesUtf8Lossy {
+                    receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
+                })
+            }
+            BuiltinValue::Method(BuiltinMethod::BytesBlob { receiver }) => Ok(Self::BytesBlob {
+                receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
+            }),
+            BuiltinValue::Method(BuiltinMethod::StreamCollect { receiver }) => {
+                Ok(Self::StreamCollect {
                     receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
                 })
             }
@@ -1053,6 +1102,7 @@ impl TryFrom<TransportBuiltinValue> for BuiltinValue {
     fn try_from(value: TransportBuiltinValue) -> Result<Self, Self::Error> {
         match value {
             TransportBuiltinValue::BlobNamespace => Ok(Self::Namespace(BuiltinNamespace::Blob)),
+            TransportBuiltinValue::BytesNamespace => Ok(Self::Namespace(BuiltinNamespace::Bytes)),
             TransportBuiltinValue::TreeNamespace => Ok(Self::Namespace(BuiltinNamespace::Tree)),
             TransportBuiltinValue::ExecFunction => Ok(Self::Function(BuiltinFunction::Exec)),
             TransportBuiltinValue::DiscoverFunction => {
@@ -1075,11 +1125,44 @@ impl TryFrom<TransportBuiltinValue> for BuiltinValue {
             TransportBuiltinValue::BlobFromString => {
                 Ok(Self::Method(BuiltinMethod::BlobFromString))
             }
+            TransportBuiltinValue::BytesFromString => {
+                Ok(Self::Method(BuiltinMethod::BytesFromString))
+            }
             TransportBuiltinValue::TreeOf => Ok(Self::Method(BuiltinMethod::TreeOf)),
             TransportBuiltinValue::TreeEmpty => Ok(Self::Method(BuiltinMethod::TreeEmpty)),
             TransportBuiltinValue::TreeFromPath => Ok(Self::Method(BuiltinMethod::TreeFromPath)),
             TransportBuiltinValue::BlobToString { receiver } => {
                 Ok(Self::Method(BuiltinMethod::BlobToString {
+                    receiver: Box::new(Value::try_from(*receiver)?),
+                }))
+            }
+            TransportBuiltinValue::BlobUtf8 { receiver } => {
+                Ok(Self::Method(BuiltinMethod::BlobUtf8 {
+                    receiver: Box::new(Value::try_from(*receiver)?),
+                }))
+            }
+            TransportBuiltinValue::BlobUtf8Lossy { receiver } => {
+                Ok(Self::Method(BuiltinMethod::BlobUtf8Lossy {
+                    receiver: Box::new(Value::try_from(*receiver)?),
+                }))
+            }
+            TransportBuiltinValue::BytesUtf8 { receiver } => {
+                Ok(Self::Method(BuiltinMethod::BytesUtf8 {
+                    receiver: Box::new(Value::try_from(*receiver)?),
+                }))
+            }
+            TransportBuiltinValue::BytesUtf8Lossy { receiver } => {
+                Ok(Self::Method(BuiltinMethod::BytesUtf8Lossy {
+                    receiver: Box::new(Value::try_from(*receiver)?),
+                }))
+            }
+            TransportBuiltinValue::BytesBlob { receiver } => {
+                Ok(Self::Method(BuiltinMethod::BytesBlob {
+                    receiver: Box::new(Value::try_from(*receiver)?),
+                }))
+            }
+            TransportBuiltinValue::StreamCollect { receiver } => {
+                Ok(Self::Method(BuiltinMethod::StreamCollect {
                     receiver: Box::new(Value::try_from(*receiver)?),
                 }))
             }

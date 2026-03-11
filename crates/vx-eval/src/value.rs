@@ -40,6 +40,8 @@ pub enum Value {
     // r[impl store.blob]
     /// A file-like content handle.
     Blob(BlobValue),
+    /// Raw in-memory bytes.
+    Bytes(Arc<[u8]>),
     // r[impl store.tree]
     /// A directory-like content handle.
     Tree(TreeValue),
@@ -163,6 +165,7 @@ pub struct PartialValue {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltinNamespace {
     Blob,
+    Bytes,
     Tree,
 }
 
@@ -180,6 +183,7 @@ pub enum BuiltinFunction {
 #[derive(Debug, Clone)]
 pub enum BuiltinMethod {
     BlobFromString,
+    BytesFromString,
     TreeOf,
     TreeEmpty,
     TreeFromPath,
@@ -189,6 +193,12 @@ pub enum BuiltinMethod {
     ArrayMerge { receiver: Box<Value> },
     MapMapValues { receiver: Box<Value> },
     BlobToString { receiver: Box<Value> },
+    BlobUtf8 { receiver: Box<Value> },
+    BlobUtf8Lossy { receiver: Box<Value> },
+    BytesUtf8 { receiver: Box<Value> },
+    BytesUtf8Lossy { receiver: Box<Value> },
+    BytesBlob { receiver: Box<Value> },
+    StreamCollect { receiver: Box<Value> },
     TreeFile { receiver: Box<Value> },
     TreeMerge { receiver: Box<Value> },
     TreeSubtree { receiver: Box<Value> },
@@ -218,6 +228,7 @@ impl Value {
             Value::Path(_) => "Path",
             Value::ExecPath(_) => "ExecPath",
             Value::Blob(_) => "Blob",
+            Value::Bytes(_) => "Bytes",
             Value::Tree(_) => "Tree",
             Value::ExecutorClass(_) => "ExecutorClass",
             Value::Host(_) => "Host",
@@ -278,6 +289,7 @@ impl Value {
             Value::Path(path) => Some(path.key()),
             Value::ExecPath(path) => path.key(),
             Value::Blob(blob) => blob.key(),
+            Value::Bytes(bytes) => Some(format!("bytes:{}", hex_bytes(bytes))),
             Value::Tree(tree) => tree.key(),
             Value::ExecutorClass(label) => Some(format!("executor_class:{label}")),
             Value::Host(_) => None,
@@ -474,6 +486,7 @@ impl BuiltinValue {
             | BuiltinValue::Function(BuiltinFunction::ExecutorClass)
             | BuiltinValue::Function(BuiltinFunction::StructConstructor { .. })
             | BuiltinValue::Method(BuiltinMethod::BlobFromString)
+            | BuiltinValue::Method(BuiltinMethod::BytesFromString)
             | BuiltinValue::Method(BuiltinMethod::TreeOf)
             | BuiltinValue::Method(BuiltinMethod::TreeEmpty)
             | BuiltinValue::Method(BuiltinMethod::TreeFromPath) => true,
@@ -483,6 +496,12 @@ impl BuiltinValue {
             | BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver })
             | BuiltinValue::Method(BuiltinMethod::MapMapValues { receiver })
             | BuiltinValue::Method(BuiltinMethod::BlobToString { receiver })
+            | BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver })
+            | BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy { receiver })
+            | BuiltinValue::Method(BuiltinMethod::BytesUtf8 { receiver })
+            | BuiltinValue::Method(BuiltinMethod::BytesUtf8Lossy { receiver })
+            | BuiltinValue::Method(BuiltinMethod::BytesBlob { receiver })
+            | BuiltinValue::Method(BuiltinMethod::StreamCollect { receiver })
             | BuiltinValue::Method(BuiltinMethod::TreeFile { receiver })
             | BuiltinValue::Method(BuiltinMethod::TreeMerge { receiver })
             | BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver })
@@ -499,6 +518,7 @@ impl BuiltinValue {
     pub fn key(&self) -> Option<String> {
         match self {
             BuiltinValue::Namespace(BuiltinNamespace::Blob) => Some("builtin:Blob".into()),
+            BuiltinValue::Namespace(BuiltinNamespace::Bytes) => Some("builtin:Bytes".into()),
             BuiltinValue::Namespace(BuiltinNamespace::Tree) => Some("builtin:Tree".into()),
             BuiltinValue::Function(BuiltinFunction::Exec) => Some("builtin:exec".into()),
             BuiltinValue::Function(BuiltinFunction::Discover) => Some("builtin:discover".into()),
@@ -519,6 +539,7 @@ impl BuiltinValue {
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => {
                 Some("builtin:Blob.from_string".into())
             }
+            BuiltinValue::Method(BuiltinMethod::BytesFromString) => Some("builtin:Bytes".into()),
             BuiltinValue::Method(BuiltinMethod::TreeOf) => Some("builtin:Tree.of".into()),
             BuiltinValue::Method(BuiltinMethod::TreeEmpty) => Some("builtin:Tree.empty".into()),
             BuiltinValue::Method(BuiltinMethod::TreeFromPath) => {
@@ -541,6 +562,24 @@ impl BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
                 Some(format!("builtin:blob.to_string({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver }) => {
+                Some(format!("builtin:blob.utf8({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy { receiver }) => {
+                Some(format!("builtin:blob.utf8_lossy({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::BytesUtf8 { receiver }) => {
+                Some(format!("builtin:bytes.utf8({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::BytesUtf8Lossy { receiver }) => {
+                Some(format!("builtin:bytes.utf8_lossy({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::BytesBlob { receiver }) => {
+                Some(format!("builtin:bytes.blob({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::StreamCollect { receiver }) => {
+                Some(format!("builtin:stream.collect({})", receiver.key()?))
             }
             BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => {
                 Some(format!("builtin:tree.file({})", receiver.key()?))
@@ -582,6 +621,7 @@ impl fmt::Display for Value {
             Value::Path(path) => write!(f, "{}", path.as_str()),
             Value::ExecPath(path) => write!(f, "{path}"),
             Value::Blob(blob) => write!(f, "{blob}"),
+            Value::Bytes(bytes) => write!(f, "<bytes {} bytes>", bytes.len()),
             Value::Tree(tree) => write!(f, "{tree}"),
             Value::ExecutorClass(label) => write!(f, "{label}"),
             Value::Host(_) => write!(f, "<host>"),
@@ -652,6 +692,7 @@ impl PartialEq for Value {
             (Value::Path(a), Value::Path(b)) => a == b,
             (Value::ExecPath(a), Value::ExecPath(b)) => a == b,
             (Value::Blob(a), Value::Blob(b)) => a == b,
+            (Value::Bytes(a), Value::Bytes(b)) => a == b,
             (Value::Tree(a), Value::Tree(b)) => a == b,
             (Value::ExecutorClass(a), Value::ExecutorClass(b)) => a == b,
             (Value::Host(a), Value::Host(b)) => a == b,
@@ -747,6 +788,7 @@ impl PartialEq for BuiltinMethod {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (BuiltinMethod::BlobFromString, BuiltinMethod::BlobFromString)
+            | (BuiltinMethod::BytesFromString, BuiltinMethod::BytesFromString)
             | (BuiltinMethod::TreeOf, BuiltinMethod::TreeOf)
             | (BuiltinMethod::TreeEmpty, BuiltinMethod::TreeEmpty)
             | (BuiltinMethod::TreeFromPath, BuiltinMethod::TreeFromPath) => true,
@@ -773,6 +815,30 @@ impl PartialEq for BuiltinMethod {
             | (
                 BuiltinMethod::BlobToString { receiver: left },
                 BuiltinMethod::BlobToString { receiver: right },
+            )
+            | (
+                BuiltinMethod::BlobUtf8 { receiver: left },
+                BuiltinMethod::BlobUtf8 { receiver: right },
+            )
+            | (
+                BuiltinMethod::BlobUtf8Lossy { receiver: left },
+                BuiltinMethod::BlobUtf8Lossy { receiver: right },
+            )
+            | (
+                BuiltinMethod::BytesUtf8 { receiver: left },
+                BuiltinMethod::BytesUtf8 { receiver: right },
+            )
+            | (
+                BuiltinMethod::BytesUtf8Lossy { receiver: left },
+                BuiltinMethod::BytesUtf8Lossy { receiver: right },
+            )
+            | (
+                BuiltinMethod::BytesBlob { receiver: left },
+                BuiltinMethod::BytesBlob { receiver: right },
+            )
+            | (
+                BuiltinMethod::StreamCollect { receiver: left },
+                BuiltinMethod::StreamCollect { receiver: right },
             )
             | (
                 BuiltinMethod::TreeFile { receiver: left },
@@ -859,6 +925,7 @@ impl fmt::Display for BuiltinValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BuiltinValue::Namespace(BuiltinNamespace::Blob) => write!(f, "Blob"),
+            BuiltinValue::Namespace(BuiltinNamespace::Bytes) => write!(f, "Bytes"),
             BuiltinValue::Namespace(BuiltinNamespace::Tree) => write!(f, "Tree"),
             BuiltinValue::Function(BuiltinFunction::Exec) => write!(f, "exec"),
             BuiltinValue::Function(BuiltinFunction::Discover) => write!(f, "discover"),
@@ -869,6 +936,7 @@ impl fmt::Display for BuiltinValue {
                 write!(f, "{type_name}")
             }
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => write!(f, "Blob.from_string"),
+            BuiltinValue::Method(BuiltinMethod::BytesFromString) => write!(f, "Bytes"),
             BuiltinValue::Method(BuiltinMethod::TreeOf) => write!(f, "Tree.of"),
             BuiltinValue::Method(BuiltinMethod::TreeEmpty) => write!(f, "Tree.empty"),
             BuiltinValue::Method(BuiltinMethod::TreeFromPath) => write!(f, "Tree.from_path"),
@@ -889,6 +957,24 @@ impl fmt::Display for BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::BlobToString { .. }) => {
                 write!(f, "<bound blob.to_string>")
+            }
+            BuiltinValue::Method(BuiltinMethod::BlobUtf8 { .. }) => {
+                write!(f, "<bound blob.utf8>")
+            }
+            BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy { .. }) => {
+                write!(f, "<bound blob.utf8_lossy>")
+            }
+            BuiltinValue::Method(BuiltinMethod::BytesUtf8 { .. }) => {
+                write!(f, "<bound bytes.utf8>")
+            }
+            BuiltinValue::Method(BuiltinMethod::BytesUtf8Lossy { .. }) => {
+                write!(f, "<bound bytes.utf8_lossy>")
+            }
+            BuiltinValue::Method(BuiltinMethod::BytesBlob { .. }) => {
+                write!(f, "<bound bytes.blob>")
+            }
+            BuiltinValue::Method(BuiltinMethod::StreamCollect { .. }) => {
+                write!(f, "<bound stream.collect>")
             }
             BuiltinValue::Method(BuiltinMethod::TreeFile { .. }) => {
                 write!(f, "<bound tree.file>")
