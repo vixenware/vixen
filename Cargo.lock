@@ -1820,6 +1820,7 @@ dependencies = [
 name = "margin-term"
 version = "0.1.0"
 dependencies = [
+ "arborium-theme",
  "margin",
  "unicode-width",
 ]

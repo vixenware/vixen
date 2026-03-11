@@ -1,3 +1,4 @@
+use arborium_theme::builtin;
 use margin::{
     Annotation, AnnotationRole, Diagnostics, Note, NoteKind, Report, Severity, Source, SourceId,
     Span, SyntaxClass,
@@ -115,6 +116,35 @@ fn render_changes_with_width_and_capabilities() {
     assert!(narrow.contains("╰─"));
     assert!(!narrow.contains("consider defining the binding before using it"));
     assert!(wide.contains("consider defining the binding before using it"));
+}
+
+// d[verify theme.capability-fallback]
+// d[verify test.capability-matrix]
+#[test]
+fn render_can_use_rgb24_colors_from_arborium_theme() {
+    let plan = super::layout(
+        &sample_diagnostics(),
+        TerminalCapabilities {
+            width: 48,
+            glyph_mode: GlyphMode::Unicode,
+            color_level: ColorLevel::Rgb24,
+            tab_width: 4,
+        },
+    )
+    .unwrap();
+    let rendered = render_plan_with_theme(
+        &plan,
+        TerminalCapabilities {
+            width: 48,
+            glyph_mode: GlyphMode::Unicode,
+            color_level: ColorLevel::Rgb24,
+            tab_width: 4,
+        },
+        Theme::from_arborium(&builtin::catppuccin_mocha()),
+    );
+
+    println!("{rendered}");
+    assert!(rendered.contains("\u{1b}[38;2;"), "{rendered}");
 }
 
 // d[verify layout.ellipsis]

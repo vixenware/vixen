@@ -20,6 +20,7 @@
 
 use std::fmt::Write;
 
+use arborium_theme::{Theme as ArboriumTheme, ThemeSlot, slot_to_highlight_index};
 use margin::{
     AnnotationRole, Diagnostics, LayoutError, LayoutOptions, LayoutPlan, Note, NoteKind,
     PlacementMode, ResolvedSpan, Severity, SourceWindow, SyntaxClass, WindowAnnotation, plan,
@@ -39,6 +40,7 @@ pub enum GlyphMode {
 pub enum ColorLevel {
     None,
     Ansi16,
+    Rgb24,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,12 +64,33 @@ pub struct Theme {
     pub gutter: Style,
     pub connector: Style,
     pub emphasis: Style,
+    syntax_styles: [Style; SYNTAX_CLASS_COUNT],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Style {
     ansi16: Option<u8>,
+    fg_rgb24: Option<Rgb24>,
+    bg_rgb24: Option<Rgb24>,
+    modifiers: TextModifiers,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Rgb24 {
+    r: u8,
+    g: u8,
+    b: u8,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TextModifiers {
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strikethrough: bool,
+}
+
+const SYNTAX_CLASS_COUNT: usize = 27;
 
 impl Default for TerminalCapabilities {
     fn default() -> Self {
@@ -94,17 +117,82 @@ impl Default for Theme {
             gutter: Style::ansi16(90),
             connector: Style::ansi16(90),
             emphasis: Style::ansi16(35),
+            syntax_styles: std::array::from_fn(|index| {
+                fallback_syntax_style(syntax_class_from_index(index))
+            }),
         }
     }
 }
 
 impl Style {
     const fn ansi16(code: u8) -> Self {
-        Self { ansi16: Some(code) }
+        Self {
+            ansi16: Some(code),
+            fg_rgb24: None,
+            bg_rgb24: None,
+            modifiers: TextModifiers {
+                bold: false,
+                italic: false,
+                underline: false,
+                strikethrough: false,
+            },
+        }
     }
 
     const fn plain() -> Self {
-        Self { ansi16: None }
+        Self {
+            ansi16: None,
+            fg_rgb24: None,
+            bg_rgb24: None,
+            modifiers: TextModifiers {
+                bold: false,
+                italic: false,
+                underline: false,
+                strikethrough: false,
+            },
+        }
+    }
+
+    fn from_arborium(theme: &ArboriumTheme, slot: ThemeSlot) -> Option<Self> {
+        let index = slot_to_highlight_index(slot)?;
+        let style = theme.style(index)?;
+        if style.is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            ansi16: None,
+            fg_rgb24: style.fg.map(Rgb24::from),
+            bg_rgb24: style.bg.map(Rgb24::from),
+            modifiers: TextModifiers {
+                bold: style.modifiers.bold,
+                italic: style.modifiers.italic,
+                underline: style.modifiers.underline,
+                strikethrough: style.modifiers.strikethrough,
+            },
+        })
+    }
+
+    fn has_effect(self, color_level: ColorLevel) -> bool {
+        match color_level {
+            ColorLevel::None => false,
+            ColorLevel::Ansi16 => {
+                self.ansi16.is_some()
+                    || self.modifiers.bold
+                    || self.modifiers.italic
+                    || self.modifiers.underline
+                    || self.modifiers.strikethrough
+            }
+            ColorLevel::Rgb24 => {
+                self.ansi16.is_some()
+                    || self.fg_rgb24.is_some()
+                    || self.bg_rgb24.is_some()
+                    || self.modifiers.bold
+                    || self.modifiers.italic
+                    || self.modifiers.underline
+                    || self.modifiers.strikethrough
+            }
+        }
     }
 }
 
@@ -288,7 +376,7 @@ fn style_source_line(
                 };
                 overlaps.then(|| theme.style_for_syntax_class(*syntax_class))
             })
-            .filter(|style| style.ansi16.is_some());
+            .filter(|style| style.has_effect(capabilities.color_level));
 
         if style != current_style {
             flush_styled_run(
@@ -546,10 +634,43 @@ fn colorize(text: &str, style: Style, color_level: ColorLevel) -> String {
         return text.to_string();
     }
 
-    let Some(code) = style.ansi16 else {
+    let mut codes = Vec::<String>::new();
+    if style.modifiers.bold {
+        codes.push("1".to_string());
+    }
+    if style.modifiers.italic {
+        codes.push("3".to_string());
+    }
+    if style.modifiers.underline {
+        codes.push("4".to_string());
+    }
+    if style.modifiers.strikethrough {
+        codes.push("9".to_string());
+    }
+
+    match color_level {
+        ColorLevel::None => {}
+        ColorLevel::Ansi16 => {
+            if let Some(code) = style.ansi16 {
+                codes.push(code.to_string());
+            }
+        }
+        ColorLevel::Rgb24 => {
+            if let Some(fg) = style.fg_rgb24 {
+                codes.push(format!("38;2;{};{};{}", fg.r, fg.g, fg.b));
+            } else if let Some(code) = style.ansi16 {
+                codes.push(code.to_string());
+            }
+            if let Some(bg) = style.bg_rgb24 {
+                codes.push(format!("48;2;{};{};{}", bg.r, bg.g, bg.b));
+            }
+        }
+    }
+
+    if codes.is_empty() {
         return text.to_string();
-    };
-    format!("\u{1b}[{code}m{text}\u{1b}[0m")
+    }
+    format!("\u{1b}[{}m{text}\u{1b}[0m", codes.join(";"))
 }
 
 fn glyphs(mode: GlyphMode) -> Glyphs {
@@ -585,6 +706,35 @@ struct RenderableAnnotation<'a> {
 }
 
 impl Theme {
+    pub fn from_arborium(theme: &ArboriumTheme) -> Self {
+        let default = Self::default();
+
+        Self {
+            severity_error: Style::from_arborium(theme, ThemeSlot::Error)
+                .unwrap_or(default.severity_error),
+            severity_warning: Style::from_arborium(theme, ThemeSlot::Type)
+                .unwrap_or(default.secondary_label),
+            severity_advice: Style::from_arborium(theme, ThemeSlot::Function)
+                .unwrap_or(default.severity_advice),
+            primary_label: Style::from_arborium(theme, ThemeSlot::Error)
+                .unwrap_or(default.primary_label),
+            secondary_label: Style::from_arborium(theme, ThemeSlot::Type)
+                .unwrap_or(default.secondary_label),
+            syntax_token: Style::from_arborium(theme, ThemeSlot::Function)
+                .unwrap_or(default.syntax_token),
+            note: Style::from_arborium(theme, ThemeSlot::Comment).unwrap_or(default.note),
+            help: Style::from_arborium(theme, ThemeSlot::String).unwrap_or(default.help),
+            gutter: Style::from_arborium(theme, ThemeSlot::Comment).unwrap_or(default.gutter),
+            connector: Style::from_arborium(theme, ThemeSlot::Comment).unwrap_or(default.connector),
+            emphasis: Style::from_arborium(theme, ThemeSlot::Keyword).unwrap_or(default.emphasis),
+            syntax_styles: std::array::from_fn(|index| {
+                let class = syntax_class_from_index(index);
+                Style::from_arborium(theme, theme_slot_for_syntax_class(class))
+                    .unwrap_or(fallback_syntax_style(class))
+            }),
+        }
+    }
+
     fn style_for_severity(self, severity: Severity) -> Style {
         match severity {
             Severity::Error => self.severity_error,
@@ -613,29 +763,141 @@ impl Theme {
     }
 
     fn style_for_syntax_class(self, syntax_class: Option<SyntaxClass>) -> Style {
-        match syntax_class {
-            Some(SyntaxClass::Keyword)
-            | Some(SyntaxClass::Operator)
-            | Some(SyntaxClass::Macro)
-            | Some(SyntaxClass::Namespace)
-            | Some(SyntaxClass::Tag)
-            | Some(SyntaxClass::Title)
-            | Some(SyntaxClass::Strong)
-            | Some(SyntaxClass::Emphasis)
-            | Some(SyntaxClass::Link)
-            | Some(SyntaxClass::Literal)
-            | Some(SyntaxClass::Strikethrough) => self.emphasis,
-            Some(SyntaxClass::Function) | Some(SyntaxClass::Constructor) => self.syntax_token,
-            Some(SyntaxClass::String) | Some(SyntaxClass::DiffAdd) => self.help,
-            Some(SyntaxClass::Comment) | Some(SyntaxClass::Punctuation) => self.gutter,
-            Some(SyntaxClass::Type) | Some(SyntaxClass::Attribute) => self.secondary_label,
-            Some(SyntaxClass::Constant)
-            | Some(SyntaxClass::Number)
-            | Some(SyntaxClass::Property)
-            | Some(SyntaxClass::Label)
-            | Some(SyntaxClass::Embedded) => self.severity_advice,
-            Some(SyntaxClass::DiffDelete) | Some(SyntaxClass::Error) => self.primary_label,
-            Some(SyntaxClass::Variable) | None => Style::plain(),
+        syntax_class
+            .map(|class| self.syntax_styles[syntax_class_index(class)])
+            .unwrap_or(Style::plain())
+    }
+}
+
+impl From<arborium_theme::Color> for Rgb24 {
+    fn from(value: arborium_theme::Color) -> Self {
+        Self {
+            r: value.r,
+            g: value.g,
+            b: value.b,
         }
+    }
+}
+
+fn fallback_syntax_style(class: SyntaxClass) -> Style {
+    match class {
+        SyntaxClass::Keyword
+        | SyntaxClass::Operator
+        | SyntaxClass::Macro
+        | SyntaxClass::Namespace
+        | SyntaxClass::Tag
+        | SyntaxClass::Title
+        | SyntaxClass::Strong
+        | SyntaxClass::Emphasis
+        | SyntaxClass::Link
+        | SyntaxClass::Literal
+        | SyntaxClass::Strikethrough => Style::ansi16(35),
+        SyntaxClass::Function | SyntaxClass::Constructor => Style::ansi16(36),
+        SyntaxClass::String | SyntaxClass::DiffAdd => Style::ansi16(32),
+        SyntaxClass::Comment | SyntaxClass::Punctuation => Style::ansi16(90),
+        SyntaxClass::Type | SyntaxClass::Attribute => Style::ansi16(33),
+        SyntaxClass::Constant
+        | SyntaxClass::Number
+        | SyntaxClass::Property
+        | SyntaxClass::Label
+        | SyntaxClass::Embedded => Style::ansi16(36),
+        SyntaxClass::DiffDelete | SyntaxClass::Error => Style::ansi16(31),
+        SyntaxClass::Variable => Style::plain(),
+    }
+}
+
+const fn syntax_class_index(class: SyntaxClass) -> usize {
+    match class {
+        SyntaxClass::Keyword => 0,
+        SyntaxClass::Function => 1,
+        SyntaxClass::String => 2,
+        SyntaxClass::Comment => 3,
+        SyntaxClass::Type => 4,
+        SyntaxClass::Variable => 5,
+        SyntaxClass::Constant => 6,
+        SyntaxClass::Number => 7,
+        SyntaxClass::Operator => 8,
+        SyntaxClass::Punctuation => 9,
+        SyntaxClass::Property => 10,
+        SyntaxClass::Attribute => 11,
+        SyntaxClass::Tag => 12,
+        SyntaxClass::Macro => 13,
+        SyntaxClass::Label => 14,
+        SyntaxClass::Namespace => 15,
+        SyntaxClass::Constructor => 16,
+        SyntaxClass::Title => 17,
+        SyntaxClass::Strong => 18,
+        SyntaxClass::Emphasis => 19,
+        SyntaxClass::Link => 20,
+        SyntaxClass::Literal => 21,
+        SyntaxClass::Strikethrough => 22,
+        SyntaxClass::DiffAdd => 23,
+        SyntaxClass::DiffDelete => 24,
+        SyntaxClass::Embedded => 25,
+        SyntaxClass::Error => 26,
+    }
+}
+
+const fn syntax_class_from_index(index: usize) -> SyntaxClass {
+    match index {
+        0 => SyntaxClass::Keyword,
+        1 => SyntaxClass::Function,
+        2 => SyntaxClass::String,
+        3 => SyntaxClass::Comment,
+        4 => SyntaxClass::Type,
+        5 => SyntaxClass::Variable,
+        6 => SyntaxClass::Constant,
+        7 => SyntaxClass::Number,
+        8 => SyntaxClass::Operator,
+        9 => SyntaxClass::Punctuation,
+        10 => SyntaxClass::Property,
+        11 => SyntaxClass::Attribute,
+        12 => SyntaxClass::Tag,
+        13 => SyntaxClass::Macro,
+        14 => SyntaxClass::Label,
+        15 => SyntaxClass::Namespace,
+        16 => SyntaxClass::Constructor,
+        17 => SyntaxClass::Title,
+        18 => SyntaxClass::Strong,
+        19 => SyntaxClass::Emphasis,
+        20 => SyntaxClass::Link,
+        21 => SyntaxClass::Literal,
+        22 => SyntaxClass::Strikethrough,
+        23 => SyntaxClass::DiffAdd,
+        24 => SyntaxClass::DiffDelete,
+        25 => SyntaxClass::Embedded,
+        _ => SyntaxClass::Error,
+    }
+}
+
+const fn theme_slot_for_syntax_class(class: SyntaxClass) -> ThemeSlot {
+    match class {
+        SyntaxClass::Keyword => ThemeSlot::Keyword,
+        SyntaxClass::Function => ThemeSlot::Function,
+        SyntaxClass::String => ThemeSlot::String,
+        SyntaxClass::Comment => ThemeSlot::Comment,
+        SyntaxClass::Type => ThemeSlot::Type,
+        SyntaxClass::Variable => ThemeSlot::Variable,
+        SyntaxClass::Constant => ThemeSlot::Constant,
+        SyntaxClass::Number => ThemeSlot::Number,
+        SyntaxClass::Operator => ThemeSlot::Operator,
+        SyntaxClass::Punctuation => ThemeSlot::Punctuation,
+        SyntaxClass::Property => ThemeSlot::Property,
+        SyntaxClass::Attribute => ThemeSlot::Attribute,
+        SyntaxClass::Tag => ThemeSlot::Tag,
+        SyntaxClass::Macro => ThemeSlot::Macro,
+        SyntaxClass::Label => ThemeSlot::Label,
+        SyntaxClass::Namespace => ThemeSlot::Namespace,
+        SyntaxClass::Constructor => ThemeSlot::Constructor,
+        SyntaxClass::Title => ThemeSlot::Title,
+        SyntaxClass::Strong => ThemeSlot::Strong,
+        SyntaxClass::Emphasis => ThemeSlot::Emphasis,
+        SyntaxClass::Link => ThemeSlot::Link,
+        SyntaxClass::Literal => ThemeSlot::Literal,
+        SyntaxClass::Strikethrough => ThemeSlot::Strikethrough,
+        SyntaxClass::DiffAdd => ThemeSlot::DiffAdd,
+        SyntaxClass::DiffDelete => ThemeSlot::DiffDelete,
+        SyntaxClass::Embedded => ThemeSlot::Embedded,
+        SyntaxClass::Error => ThemeSlot::Error,
     }
 }

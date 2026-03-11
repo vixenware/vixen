@@ -14,7 +14,7 @@ use margin::{
     Annotation, AnnotationRole, Diagnostics, Note, NoteKind, Report, Severity, Source, SourceId,
     Span, SyntaxClass,
 };
-use margin_term::{ColorLevel, GlyphMode, TerminalCapabilities};
+use margin_term::{ColorLevel, GlyphMode, TerminalCapabilities, Theme as TerminalTheme};
 use vxd_proto::{
     BuildDiagnosticLabelKind, BuildDiagnosticReport, BuildDiagnosticSeverity,
     BuildDiagnosticSource, BuildDiagnosticSpan, BuildFailure,
@@ -28,16 +28,18 @@ pub(crate) fn render_build_failure(failure: &BuildFailure, full_stack: bool) -> 
     }
 
     let diagnostics = build_failure_to_diagnostics(failure, full_stack)?;
-    margin_term::render(
-        &diagnostics,
-        TerminalCapabilities {
-            width: 80,
-            glyph_mode: GlyphMode::Unicode,
-            color_level: ColorLevel::Ansi16,
-            tab_width: 4,
-        },
-    )
-    .map_err(|error| eyre!(error.to_string()))
+    let capabilities = TerminalCapabilities {
+        width: 80,
+        glyph_mode: GlyphMode::Unicode,
+        color_level: ColorLevel::Rgb24,
+        tab_width: 4,
+    };
+    let plan = margin_term::layout(&diagnostics, capabilities)?;
+    Ok(margin_term::render_plan_with_theme(
+        &plan,
+        capabilities,
+        TerminalTheme::from_arborium(&arborium_theme::builtin::catppuccin_mocha()),
+    ))
 }
 
 fn build_failure_to_diagnostics(failure: &BuildFailure, full_stack: bool) -> Result<Diagnostics> {
