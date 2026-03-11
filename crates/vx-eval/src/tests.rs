@@ -1730,7 +1730,7 @@ fn if_with_condition() {
 fn function_call() {
     let val = eval(
         "fn double(x: U64) { x + x }
-         fn main() { double 21 }",
+         fn main() { double(21) }",
         "main",
     )
     .unwrap();
@@ -1741,7 +1741,7 @@ fn function_call() {
 fn nested_function_calls() {
     let val = eval(
         "fn add(a: U64, b: U64) { a + b }
-         fn main() { add (add 1 2) (add 3 4) }",
+         fn main() { add(add(1, 2), add(3, 4)) }",
         "main",
     )
     .unwrap();
@@ -1752,9 +1752,9 @@ fn nested_function_calls() {
 fn recursive_function() {
     let val = eval(
         "fn factorial(n: U64) {
-           if n <= 1 { 1 } else { n * factorial (n - 1) }
+           if n <= 1 { 1 } else { n * factorial(n - 1) }
          }
-         fn main() { factorial 5 }",
+         fn main() { factorial(5) }",
         "main",
     )
     .unwrap();
@@ -1864,8 +1864,8 @@ fn empty_function_returns_unit() {
 fn function_as_value() {
     let val = eval(
         "fn add(a: U64, b: U64) { a + b }
-         fn apply(f: Fn(U64, U64) -> U64, x: U64, y: U64) { f x y }
-         fn main() { apply add 3 4 }",
+         fn apply(f: Fn(U64, U64) -> U64, x: U64, y: U64) { f(x, y) }
+         fn main() { apply(add, 3, 4) }",
         "main",
     )
     .unwrap();
@@ -1877,7 +1877,7 @@ fn function_as_value() {
 // r[verify fn.closure]
 fn closures_capture_by_value_and_support_block_bodies() {
     let val = eval(
-        "fn apply(f: Fn(U64) -> U64, x: U64) { f x }
+        "fn apply(f: Fn(U64) -> U64, x: U64) { f(x) }
          fn main() {
            let offset = 40;
            let add = (x) => {
@@ -1885,7 +1885,7 @@ fn closures_capture_by_value_and_support_block_bodies() {
              y
            };
            let offset = 1;
-           apply add 2
+           apply(add, 2)
          }",
         "main",
     )
@@ -1923,7 +1923,7 @@ fn shipped_functions_preserve_global_calls_and_captures() {
         "fn helper(x: U64) { x + 1 }
          fn make(offset: U64) {
            let base = 40;
-           (x) => helper (base + offset + x)
+           (x) => helper(base + offset + x)
          }",
     );
 
@@ -1997,7 +1997,7 @@ fn shadowing() {
 fn user_bindings_can_shadow_exec() {
     let val = eval(
         "fn exec() { 42 }
-         fn main() { exec! }",
+         fn main() { exec() }",
         "main",
     )
     .unwrap();
@@ -2011,7 +2011,7 @@ fn early_return() {
            if n > 10 { return 999 } else { () };
            n + 1
          }
-         fn main() { check 20 }",
+         fn main() { check(20) }",
         "main",
     )
     .unwrap();
@@ -2022,9 +2022,9 @@ fn early_return() {
 fn fibonacci() {
     let val = eval(
         "fn fib(n: U64) {
-           if n <= 1 { n } else { fib (n - 1) + fib (n - 2) }
+           if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
          }
-         fn main() { fib 10 }",
+         fn main() { fib(10) }",
         "main",
     )
     .unwrap();
@@ -2147,7 +2147,7 @@ fn demand_only_reaches_the_taken_if_branch() {
     let engine = engine(
         "fn choose(flag: Bool, unused: U64) { flag }
          fn branch(flag: Bool, poison: U64) {
-           if choose flag poison { 1 } else { poison }
+           if choose(flag, poison) { 1 } else { poison }
          }",
     );
     let call = engine
@@ -2202,8 +2202,8 @@ fn multiple_independent_poisons_are_collected_deterministically() {
 // r[verify eval.demand-depth]
 fn circular_recursion_poisons_with_a_circular_dependency() {
     let err = eval(
-        "fn loop_forever(n: U64) { loop_forever n }
-         fn main() { loop_forever 1 }",
+        "fn loop_forever(n: U64) { loop_forever(n) }
+         fn main() { loop_forever(1) }",
         "main",
     )
     .unwrap_err();
@@ -2261,8 +2261,8 @@ fn independent_children_are_forced_concurrently() {
 // r[verify fn.identity]
 // r[verify eval.memoization]
 fn transitive_callee_changes_update_the_caller_identity() {
-    let source_a = "fn helper() { 1 } fn wrapper() { helper! }";
-    let source_b = "fn helper() { 2 } fn wrapper() { helper! }";
+    let source_a = "fn helper() { 1 } fn wrapper() { helper() }";
+    let source_b = "fn helper() { 2 } fn wrapper() { helper() }";
 
     let key_a = engine(source_a).function_key("wrapper").unwrap();
     let key_b = engine(source_b).function_key("wrapper").unwrap();
@@ -2275,10 +2275,10 @@ fn transitive_callee_changes_update_the_caller_identity() {
 fn all_visible_overloads_contribute_to_caller_identity() {
     let source_a = "fn helper(x: U64) { 1 }
                     fn helper(x: Bool) { 2 }
-                    fn wrapper() { helper 1 }";
+                    fn wrapper() { helper(1) }";
     let source_b = "fn helper(x: U64) { 1 }
                     fn helper(x: Bool) { 99 }
-                    fn wrapper() { helper 1 }";
+                    fn wrapper() { helper(1) }";
 
     let key_a = engine(source_a).function_key("wrapper").unwrap();
     let key_b = engine(source_b).function_key("wrapper").unwrap();
@@ -2289,7 +2289,7 @@ fn all_visible_overloads_contribute_to_caller_identity() {
 #[test]
 // r[verify fn.identity.stability]
 fn comments_and_whitespace_do_not_change_function_identity() {
-    let source_a = "fn helper() { 1 }\nfn wrapper() { helper! }";
+    let source_a = "fn helper() { 1 }\nfn wrapper() { helper() }";
     let source_b = r#"
 // wrapper should keep the same identity
 fn helper() {
@@ -2298,7 +2298,7 @@ fn helper() {
 }
 
 fn wrapper() {
-  helper!
+  helper()
 }
 "#;
 
@@ -2311,8 +2311,8 @@ fn wrapper() {
 #[test]
 // r[verify fn.identity.scc]
 fn mutually_recursive_functions_share_one_code_identity() {
-    let source = "fn even(n: U64) { if n == 0 { true } else { odd (n - 1) } }
-                  fn odd(n: U64) { if n == 0 { false } else { even (n - 1) } }";
+    let source = "fn even(n: U64) { if n == 0 { true } else { odd(n - 1) } }
+                  fn odd(n: U64) { if n == 0 { false } else { even(n - 1) } }";
     let engine = engine(source);
 
     assert_eq!(
@@ -2359,7 +2359,7 @@ fn interpolated_path_literal_with_tree_yields_exec_path() {
 // r[verify store.blob]
 // r[verify store.blob.utf8]
 fn blob_from_string_round_trips_text() {
-    let value = eval(r#"fn main() { (Blob "hello").to_string! }"#, "main").unwrap();
+    let value = eval(r#"fn main() { Blob("hello").utf8() }"#, "main").unwrap();
     assert_eq!(value, Value::String(Arc::from("hello")));
 }
 
