@@ -13,6 +13,8 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 eyre = { workspace = true }
 facet = { workspace = true }
 figue = { workspace = true }
+indicatif = { workspace = true }
+owo-colors = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
 

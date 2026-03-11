@@ -4325,6 +4325,8 @@ dependencies = [
  "eyre",
  "facet",
  "figue",
+ "indicatif",
+ "owo-colors",
  "tempfile",
  "tokio",
 ]

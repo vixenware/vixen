@@ -86,12 +86,18 @@ Full-stack daemon/VFS scenarios run through `xtask` instead of nextest:
 cargo run -p xtask -- integration list
 cargo run -p xtask -- integration run
 cargo run -p xtask -- integration run cache-basics
+cargo run -p xtask -- integration run json-output --jobs 8
+cargo run -p xtask -- integration run lua --no-capture
 ```
 
 The `xtask integration run` suite owns the migrated `vx build` end-to-end
 scenarios that need explicit fixture setup, daemon lifecycle, and retained
-artifacts. On failure, the runner prints and retains its temp/artifact
-directory so logs can be inspected after teardown.
+artifacts. It bootstraps one shared daemon session, runs an explicit warmup
+build before parallel scenarios, supports bounded parallelism with fail-fast
+or `--no-fail-fast`, and reports live pass/fail/running counts.
+On failure, the runner prints merged output plus retained temp/artifact
+directories so logs can be inspected after teardown. `--no-capture` switches
+to serial execution and streams scenario output directly for debugging.
 
 ## Co-developed with LLMs
 

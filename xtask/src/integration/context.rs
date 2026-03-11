@@ -5,12 +5,15 @@ use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 use eyre::{Context, Result, bail, eyre};
+use owo_colors::OwoColorize;
 use tempfile::{Builder, TempDir};
-use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::{Child, Command};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
+use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep, timeout};
 
 use crate::find_workspace_root;
@@ -18,6 +21,15 @@ use crate::find_workspace_root;
 const REQUIRED_BINARIES: &[&str] = &["vx", "vxd", "vx-runner", "vx-store", "vx-vfsd"];
 const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+
+pub(crate) struct IntegrationRun {
+    tempdir: Option<TempDir>,
+    root_dir: PathBuf,
+    daemon_logs_dir: PathBuf,
+    shared: Arc<SharedRun>,
+    daemon: Option<DaemonGuard>,
+}
 
 pub(crate) struct IntegrationContext {
     tempdir: Option<TempDir>,
@@ -25,12 +37,10 @@ pub(crate) struct IntegrationContext {
     project_dir: PathBuf,
     fake_bin_dir: PathBuf,
     logs_dir: PathBuf,
-    vx_home: PathBuf,
-    vx_binary: PathBuf,
     path_env: OsString,
-    capture_output: bool,
+    session_id: String,
     command_seq: usize,
-    daemon: Option<DaemonGuard>,
+    shared: Arc<SharedRun>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -46,14 +56,47 @@ pub(crate) struct CommandOutput {
     pub(crate) stderr: String,
     stdout_path: PathBuf,
     stderr_path: PathBuf,
+    merged_output: String,
+}
+
+pub(crate) struct BootstrapReport {
+    pub(crate) spawn: Duration,
+    pub(crate) ready: Duration,
+    pub(crate) warmup: Duration,
+}
+
+pub(crate) struct ShutdownReport {
+    pub(crate) kill: Duration,
+    pub(crate) wait: Duration,
+    pub(crate) forced: bool,
+    pub(crate) grace: Duration,
 }
 
 struct DaemonGuard {
     child: Child,
     log_path: PathBuf,
+    stopped: bool,
     vx_binary: PathBuf,
     vx_home: PathBuf,
+}
+
+pub(crate) struct SharedRun {
+    vx_home: PathBuf,
+    vx_binary: PathBuf,
     vxd: PathBuf,
+    http_cache_dir: PathBuf,
+    capture_output: bool,
+}
+
+#[derive(Clone, Copy)]
+enum StreamKind {
+    Stdout,
+    Stderr,
+}
+
+struct StreamItem {
+    stream: StreamKind,
+    line: String,
 }
 
 impl BuildOptions {
@@ -73,42 +116,263 @@ impl BuildOptions {
     }
 }
 
-impl IntegrationContext {
-    pub(crate) fn new(name: &str, capture_output: bool) -> Result<Self> {
+impl IntegrationRun {
+    pub(crate) fn new(capture_output: bool) -> Result<Self> {
         let workspace_root =
             find_workspace_root().ok_or_else(|| eyre!("Could not find workspace root"))?;
-        let target_dir_root = scenario_temp_root();
-        fs::create_dir_all(&target_dir_root)
-            .with_context(|| format!("failed to create {}", target_dir_root.display()))?;
+        ensure_workspace_binaries(&workspace_root)?;
+
+        let temp_root = run_temp_root();
+        fs::create_dir_all(&temp_root)
+            .with_context(|| format!("failed to create {}", temp_root.display()))?;
+
+        let tempdir = Builder::new()
+            .prefix("run.")
+            .tempdir_in(&temp_root)
+            .with_context(|| format!("failed to create temp dir in {}", temp_root.display()))?;
+
+        let root_dir = tempdir.path().to_path_buf();
+        let daemon_logs_dir = root_dir.join("logs");
+        let vx_home = root_dir.join("vx-home");
+        for dir in [&daemon_logs_dir, &vx_home] {
+            fs::create_dir_all(dir)
+                .with_context(|| format!("failed to create {}", dir.display()))?;
+        }
+
+        let vx_binary = target_root(&workspace_root)
+            .join("debug")
+            .join(binary_name("vx"));
+        if !vx_binary.exists() {
+            bail!("expected vx binary at {}", vx_binary.display());
+        }
+
+        let shared = Arc::new(SharedRun {
+            vxd: vx_home.join(endpoint_name("vxd")),
+            vx_home,
+            vx_binary,
+            http_cache_dir: http_cache_dir(),
+            capture_output,
+        });
+
+        Ok(Self {
+            tempdir: Some(tempdir),
+            root_dir,
+            daemon_logs_dir,
+            shared,
+            daemon: None,
+        })
+    }
+
+    pub(crate) async fn bootstrap(&mut self) -> Result<BootstrapReport> {
+        if self.daemon.is_some() {
+            return Ok(BootstrapReport {
+                spawn: Duration::ZERO,
+                ready: Duration::ZERO,
+                warmup: Duration::ZERO,
+            });
+        }
+
+        let spawn_started = Instant::now();
+        let mut daemon = self.start_daemon().await?;
+        let spawn = spawn_started.elapsed();
+
+        let ready_started = Instant::now();
+        self.wait_for_daemon(&mut daemon).await?;
+        let ready = ready_started.elapsed();
+
+        let warmup_started = Instant::now();
+        self.warmup_toolchain().await?;
+        let warmup = warmup_started.elapsed();
+        self.daemon = Some(daemon);
+        Ok(BootstrapReport {
+            spawn,
+            ready,
+            warmup,
+        })
+    }
+
+    pub(crate) fn shared(&self) -> Arc<SharedRun> {
+        Arc::clone(&self.shared)
+    }
+
+    pub(crate) async fn shutdown(&mut self) -> Result<ShutdownReport> {
+        if let Some(mut daemon) = self.daemon.take() {
+            let mut report = daemon.stop().await?;
+            let grace_started = Instant::now();
+            sleep(SHUTDOWN_GRACE).await;
+            report.grace = grace_started.elapsed();
+            return Ok(report);
+        }
+        Ok(ShutdownReport {
+            kill: Duration::ZERO,
+            wait: Duration::ZERO,
+            forced: false,
+            grace: Duration::ZERO,
+        })
+    }
+
+    pub(crate) fn keep(&mut self) -> Result<PathBuf> {
+        if let Some(tempdir) = self.tempdir.take() {
+            return Ok(tempdir.keep());
+        }
+        Ok(self.root_dir.clone())
+    }
+
+    async fn start_daemon(&self) -> Result<DaemonGuard> {
+        let log_path = self.daemon_logs_dir.join("vxd.log");
+        let stdout = File::create(&log_path)
+            .with_context(|| format!("failed to create {}", log_path.display()))?;
+        let stderr = OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("failed to reopen {}", log_path.display()))?;
+
+        let mut cmd = Command::new(&self.shared.vx_binary);
+        cmd.current_dir(&self.root_dir);
+        cmd.env("VX_HOME", &self.shared.vx_home);
+        cmd.env("VX_HTTP_CACHE_DIR", &self.shared.http_cache_dir);
+        cmd.env("VX_TEST", "1");
+        cmd.env_remove("VXD");
+        cmd.arg("start");
+        cmd.arg("--no-tui");
+        cmd.stdout(Stdio::from(stdout));
+        cmd.stderr(Stdio::from(stderr));
+
+        let child = cmd.spawn().context("failed to start vxd")?;
+
+        Ok(DaemonGuard {
+            child,
+            log_path,
+            stopped: false,
+            vx_binary: self.shared.vx_binary.clone(),
+            vx_home: self.shared.vx_home.clone(),
+        })
+    }
+
+    async fn wait_for_daemon(&self, daemon: &mut DaemonGuard) -> Result<()> {
+        let ping_log = self.daemon_logs_dir.join("ping.log");
+        let deadline = Instant::now() + READINESS_TIMEOUT;
+
+        while Instant::now() < deadline {
+            if let Some(status) = daemon.child.try_wait().context("failed to poll vxd")? {
+                bail!(
+                    "vxd exited with {status} before becoming ready at {}\n--- daemon log ({}) ---\n{}",
+                    self.shared.vxd.display(),
+                    daemon.log_path.display(),
+                    read_log(&daemon.log_path)
+                );
+            }
+
+            let mut cmd = Command::new(&self.shared.vx_binary);
+            cmd.current_dir(&self.root_dir);
+            cmd.env("VX_HOME", &self.shared.vx_home);
+            cmd.env("VX_HTTP_CACHE_DIR", &self.shared.http_cache_dir);
+            cmd.env("VX_TEST", "1");
+            cmd.env("VXD", &self.shared.vxd);
+            cmd.arg("ping");
+
+            let status =
+                run_status_with_timeout(&mut cmd, Duration::from_secs(2), &ping_log, "vx ping")
+                    .await?;
+            if status.success() {
+                return Ok(());
+            }
+
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        bail!(
+            "vxd did not become ready within {:?}\n--- daemon log ({}) ---\n{}",
+            READINESS_TIMEOUT,
+            daemon.log_path.display(),
+            read_log(&daemon.log_path)
+        )
+    }
+
+    async fn warmup_toolchain(&self) -> Result<()> {
+        let warmup_dir = self.root_dir.join("warmup");
+        let src_dir = warmup_dir.join("src");
+        fs::create_dir_all(&src_dir)
+            .with_context(|| format!("failed to create {}", src_dir.display()))?;
+        fs::write(
+            warmup_dir.join("Cargo.toml"),
+            "[package]\nname = \"warmup\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .with_context(|| {
+            format!(
+                "failed to write {}",
+                warmup_dir.join("Cargo.toml").display()
+            )
+        })?;
+        fs::write(src_dir.join("main.rs"), "fn main() {}\n")
+            .with_context(|| format!("failed to write {}", src_dir.join("main.rs").display()))?;
+
+        let stdout_log = self.daemon_logs_dir.join("warmup.stdout.log");
+        let stderr_log = self.daemon_logs_dir.join("warmup.stderr.log");
+        let mut cmd = Command::new(&self.shared.vx_binary);
+        cmd.current_dir(&warmup_dir);
+        cmd.env("VX_HOME", &self.shared.vx_home);
+        cmd.env("VX_HTTP_CACHE_DIR", &self.shared.http_cache_dir);
+        cmd.env("VX_TEST", "1");
+        cmd.env("VX_TEST_SESSION", "warmup");
+        cmd.env("VXD", &self.shared.vxd);
+        cmd.arg("--no-tui");
+        cmd.arg("build");
+        cmd.stdout(Stdio::from(File::create(&stdout_log).with_context(
+            || format!("failed to create {}", stdout_log.display()),
+        )?));
+        cmd.stderr(Stdio::from(File::create(&stderr_log).with_context(
+            || format!("failed to create {}", stderr_log.display()),
+        )?));
+
+        let status = timeout(COMMAND_TIMEOUT, cmd.status())
+            .await
+            .map_err(|_| {
+                eyre!(
+                    "warmup build timed out after {:?}\nstdout log: {}\nstderr log: {}",
+                    COMMAND_TIMEOUT,
+                    stdout_log.display(),
+                    stderr_log.display()
+                )
+            })?
+            .context("failed to run warmup build")?;
+
+        if status.success() {
+            return Ok(());
+        }
+
+        bail!(
+            "warmup build failed with {status}\nstdout log: {}\nstderr log: {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            stdout_log.display(),
+            stderr_log.display(),
+            read_log(&stdout_log),
+            read_log(&stderr_log),
+        );
+    }
+}
+
+impl IntegrationContext {
+    pub(crate) fn new(shared: Arc<SharedRun>, name: &str, scenario_id: usize) -> Result<Self> {
+        let temp_root = scenario_temp_root();
+        fs::create_dir_all(&temp_root)
+            .with_context(|| format!("failed to create {}", temp_root.display()))?;
 
         let tempdir = Builder::new()
             .prefix(&format!("vxi-{}.", tempdir_scenario_slug(name)))
-            .tempdir_in(&target_dir_root)
-            .with_context(|| {
-                format!("failed to create temp dir in {}", target_dir_root.display())
-            })?;
-
-        ensure_workspace_binaries(&workspace_root)?;
+            .tempdir_in(&temp_root)
+            .with_context(|| format!("failed to create temp dir in {}", temp_root.display()))?;
 
         let root_dir = tempdir.path().to_path_buf();
         let project_dir = root_dir.join("project");
         let fake_bin_dir = root_dir.join("fake-bin");
         let logs_dir = root_dir.join("logs");
-        let vx_home = root_dir.join("vx-home");
-
-        for dir in [&project_dir, &fake_bin_dir, &logs_dir, &vx_home] {
+        for dir in [&project_dir, &fake_bin_dir, &logs_dir] {
             fs::create_dir_all(dir)
                 .with_context(|| format!("failed to create {}", dir.display()))?;
         }
 
-        let target_dir = target_root(&workspace_root).join("debug");
-        let vx_binary = target_dir.join(binary_name("vx"));
-
-        if !vx_binary.exists() {
-            bail!("expected vx binary at {}", vx_binary.display());
-        }
-
         let path_env = joined_path(&fake_bin_dir)?;
+        let session_id = format!("scenario-pid{}-{scenario_id}", std::process::id());
 
         Ok(Self {
             tempdir: Some(tempdir),
@@ -116,12 +380,10 @@ impl IntegrationContext {
             project_dir,
             fake_bin_dir,
             logs_dir,
-            vx_home,
-            vx_binary,
             path_env,
-            capture_output,
+            session_id,
             command_seq: 0,
-            daemon: None,
+            shared,
         })
     }
 
@@ -184,19 +446,7 @@ impl IntegrationContext {
         Ok(())
     }
 
-    pub(crate) async fn ensure_daemon(&mut self) -> Result<()> {
-        if self.daemon.is_some() {
-            return Ok(());
-        }
-
-        let mut daemon = self.start_daemon().await?;
-        self.wait_for_daemon(&mut daemon).await?;
-        self.daemon = Some(daemon);
-        Ok(())
-    }
-
     pub(crate) async fn run_vx_build(&mut self, options: BuildOptions) -> Result<CommandOutput> {
-        self.ensure_daemon().await?;
         let work_dir = match &options.subdir {
             Some(subdir) => self.project_dir.join(subdir),
             None => self.project_dir.clone(),
@@ -215,7 +465,6 @@ impl IntegrationContext {
     }
 
     pub(crate) async fn run_vx_clean(&mut self, cache: bool) -> Result<CommandOutput> {
-        self.ensure_daemon().await?;
         let label = if cache {
             self.next_command_label("clean-cache")
         } else {
@@ -231,14 +480,6 @@ impl IntegrationContext {
         .await
     }
 
-    pub(crate) async fn shutdown(&mut self) -> Result<()> {
-        if let Some(mut daemon) = self.daemon.take() {
-            daemon.stop().await?;
-            sleep(Duration::from_millis(500)).await;
-        }
-        Ok(())
-    }
-
     fn write_file(&self, base: &Path, relative_path: &str, contents: &str) -> Result<()> {
         let path = base.join(relative_path);
         if let Some(parent) = path.parent() {
@@ -250,91 +491,20 @@ impl IntegrationContext {
         Ok(())
     }
 
-    async fn start_daemon(&self) -> Result<DaemonGuard> {
-        let log_path = self.logs_dir.join("vxd.log");
-        let stdout = File::create(&log_path)
-            .with_context(|| format!("failed to create {}", log_path.display()))?;
-        let stderr = OpenOptions::new()
-            .append(true)
-            .open(&log_path)
-            .with_context(|| format!("failed to reopen {}", log_path.display()))?;
-
-        let mut cmd = Command::new(&self.vx_binary);
-        cmd.current_dir(&self.project_dir);
-        cmd.env("PATH", &self.path_env);
-        cmd.env("VX_HOME", &self.vx_home);
-        cmd.env("VX_TEST", "1");
-        cmd.env_remove("VXD");
-        cmd.arg("start");
-        cmd.arg("--no-tui");
-        cmd.stdout(Stdio::from(stdout));
-        cmd.stderr(Stdio::from(stderr));
-
-        let child = cmd.spawn().context("failed to start vxd")?;
-
-        Ok(DaemonGuard {
-            child,
-            log_path,
-            vx_binary: self.vx_binary.clone(),
-            vx_home: self.vx_home.clone(),
-            vxd: self.vx_home.join(endpoint_name("vxd")),
-        })
-    }
-
-    async fn wait_for_daemon(&self, daemon: &mut DaemonGuard) -> Result<()> {
-        let ping_log = self.logs_dir.join("ping.log");
-        let deadline = Instant::now() + READINESS_TIMEOUT;
-
-        while Instant::now() < deadline {
-            if let Some(status) = daemon.child.try_wait().context("failed to poll vxd")? {
-                bail!(
-                    "vxd exited with {status} before becoming ready at {}\n--- daemon log ({}) ---\n{}",
-                    daemon.vxd.display(),
-                    daemon.log_path.display(),
-                    read_log(&daemon.log_path)
-                );
-            }
-
-            let mut cmd = Command::new(&self.vx_binary);
-            cmd.current_dir(&self.project_dir);
-            cmd.env("PATH", &self.path_env);
-            cmd.env("VX_HOME", &self.vx_home);
-            cmd.env("VX_TEST", "1");
-            cmd.env("VXD", &daemon.vxd);
-            cmd.arg("ping");
-
-            let status =
-                run_status_with_timeout(&mut cmd, Duration::from_secs(2), &ping_log, "vx ping")
-                    .await?;
-            if status.success() {
-                return Ok(());
-            }
-
-            sleep(Duration::from_millis(100)).await;
-        }
-
-        bail!(
-            "vxd did not become ready within {:?}\n--- daemon log ({}) ---\n{}",
-            READINESS_TIMEOUT,
-            daemon.log_path.display(),
-            read_log(&daemon.log_path)
-        );
-    }
-
     async fn run_vx_command(
         &self,
         label: &str,
         work_dir: &Path,
         configure: impl FnOnce(&mut Command),
     ) -> Result<CommandOutput> {
-        let mut cmd = Command::new(&self.vx_binary);
+        let mut cmd = Command::new(&self.shared.vx_binary);
         cmd.current_dir(work_dir);
         cmd.env("PATH", &self.path_env);
-        cmd.env("VX_HOME", &self.vx_home);
+        cmd.env("VX_HOME", &self.shared.vx_home);
+        cmd.env("VX_HTTP_CACHE_DIR", &self.shared.http_cache_dir);
         cmd.env("VX_TEST", "1");
-        if let Some(daemon) = &self.daemon {
-            cmd.env("VXD", &daemon.vxd);
-        }
+        cmd.env("VX_TEST_SESSION", &self.session_id);
+        cmd.env("VXD", &self.shared.vxd);
         configure(&mut cmd);
         self.run_logged_command(label, &mut cmd, COMMAND_TIMEOUT)
             .await
@@ -348,6 +518,7 @@ impl IntegrationContext {
     ) -> Result<CommandOutput> {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
 
         let mut child = cmd
             .spawn()
@@ -362,8 +533,7 @@ impl IntegrationContext {
             .take()
             .ok_or_else(|| eyre!("failed to capture stderr for {label}"))?;
 
-        let stdout_task = tokio::spawn(read_child_output(stdout));
-        let stderr_task = tokio::spawn(read_child_output(stderr));
+        let output_task = tokio::spawn(capture_output(stdout, stderr, !self.shared.capture_output));
 
         let timed_out = match timeout(limit, child.wait()).await {
             Ok(status) => {
@@ -377,27 +547,19 @@ impl IntegrationContext {
             }
         };
 
-        let stdout = join_output_task(stdout_task, label, "stdout").await?;
-        let stderr = join_output_task(stderr_task, label, "stderr").await?;
-        let (stdout_path, stderr_path) = self.write_command_logs(label, &stdout, &stderr)?;
-
-        if !self.capture_output {
-            if !stdout.is_empty() {
-                print!("{stdout}");
-            }
-            if !stderr.is_empty() {
-                eprint!("{stderr}");
-            }
-        }
+        let captured = output_task
+            .await
+            .map_err(|error| eyre!("failed to join output capture for {label}: {error}"))??;
+        let (stdout_path, stderr_path) =
+            self.write_command_logs(label, &captured.stdout, &captured.stderr)?;
 
         if timed_out {
             bail!(
-                "{label} timed out after {:?}\nstdout log: {}\nstderr log: {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                "{label} timed out after {:?}\nstdout log: {}\nstderr log: {}\n--- output ---\n{}",
                 limit,
                 stdout_path.display(),
                 stderr_path.display(),
-                stdout,
-                stderr,
+                captured.merged,
             );
         }
 
@@ -408,10 +570,11 @@ impl IntegrationContext {
 
         Ok(CommandOutput {
             status,
-            stdout,
-            stderr,
+            stdout: captured.stdout,
+            stderr: captured.stderr,
             stdout_path,
             stderr_path,
+            merged_output: captured.merged,
         })
     }
 
@@ -453,12 +616,11 @@ impl CommandOutput {
         }
 
         bail!(
-            "{label} failed with {status}\nstdout log: {stdout}\nstderr log: {stderr}\n--- stdout ---\n{stdout_contents}\n--- stderr ---\n{stderr_contents}",
+            "{label} failed with {status}\nstdout log: {}\nstderr log: {}\n--- output ---\n{}",
+            self.stdout_path.display(),
+            self.stderr_path.display(),
+            self.merged_output,
             status = self.status,
-            stdout = self.stdout_path.display(),
-            stderr = self.stderr_path.display(),
-            stdout_contents = self.stdout,
-            stderr_contents = self.stderr,
         );
     }
 
@@ -469,11 +631,10 @@ impl CommandOutput {
         }
 
         bail!(
-            "expected cache hit but build was not cached\nstdout log: {}\nstderr log: {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            "expected cache hit but build was not cached\nstdout log: {}\nstderr log: {}\n--- output ---\n{}",
             self.stdout_path.display(),
             self.stderr_path.display(),
-            self.stdout,
-            self.stderr,
+            self.merged_output,
         );
     }
 
@@ -484,11 +645,10 @@ impl CommandOutput {
         }
 
         bail!(
-            "expected cache miss but build was cached\nstdout log: {}\nstderr log: {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            "expected cache miss but build was cached\nstdout log: {}\nstderr log: {}\n--- output ---\n{}",
             self.stdout_path.display(),
             self.stderr_path.display(),
-            self.stdout,
-            self.stderr,
+            self.merged_output,
         );
     }
 
@@ -498,11 +658,10 @@ impl CommandOutput {
         }
 
         bail!(
-            "expected {label} to fail but it succeeded\nstdout log: {}\nstderr log: {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            "expected {label} to fail but it succeeded\nstdout log: {}\nstderr log: {}\n--- output ---\n{}",
             self.stdout_path.display(),
             self.stderr_path.display(),
-            self.stdout,
-            self.stderr,
+            self.merged_output,
         );
     }
 
@@ -513,17 +672,20 @@ impl CommandOutput {
         }
 
         bail!(
-            "expected {label} failure to contain {needle:?}\nstdout log: {}\nstderr log: {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            "expected {label} failure to contain {needle:?}\nstdout log: {}\nstderr log: {}\n--- output ---\n{}",
             self.stdout_path.display(),
             self.stderr_path.display(),
-            self.stdout,
-            self.stderr,
+            self.merged_output,
         );
     }
 }
 
 impl Drop for DaemonGuard {
     fn drop(&mut self) {
+        if self.stopped {
+            return;
+        }
+
         let _ = std::process::Command::new(&self.vx_binary)
             .env("VX_HOME", &self.vx_home)
             .env("VX_TEST", "1")
@@ -539,7 +701,8 @@ impl Drop for DaemonGuard {
 }
 
 impl DaemonGuard {
-    async fn stop(&mut self) -> Result<()> {
+    async fn stop(&mut self) -> Result<ShutdownReport> {
+        let kill_started = Instant::now();
         let status = std::process::Command::new(&self.vx_binary)
             .env("VX_HOME", &self.vx_home)
             .env("VX_TEST", "1")
@@ -551,19 +714,99 @@ impl DaemonGuard {
         if !status.success() {
             bail!("vx kill exited with {status}");
         }
+        let kill = kill_started.elapsed();
 
+        let wait_started = Instant::now();
+        let mut forced = false;
         match timeout(Duration::from_secs(10), self.child.wait()).await {
             Ok(status) => {
                 let _ = status.context("failed waiting for vxd to exit")?;
             }
             Err(_) => {
+                forced = true;
                 let _ = self.child.start_kill();
                 let _ = self.child.wait().await;
             }
         }
+        let wait = wait_started.elapsed();
+        self.stopped = true;
 
-        Ok(())
+        Ok(ShutdownReport {
+            kill,
+            wait,
+            forced,
+            grace: Duration::ZERO,
+        })
     }
+}
+
+struct CapturedOutput {
+    stdout: String,
+    stderr: String,
+    merged: String,
+}
+
+async fn capture_output(
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+    stream_live: bool,
+) -> Result<CapturedOutput> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let stdout_task = tokio::spawn(capture_stream(stdout, StreamKind::Stdout, tx.clone()));
+    let stderr_task = tokio::spawn(capture_stream(stderr, StreamKind::Stderr, tx));
+
+    let mut stdout_buf = String::new();
+    let mut stderr_buf = String::new();
+    let mut merged = String::new();
+
+    while let Some(item) = rx.recv().await {
+        match item.stream {
+            StreamKind::Stdout => {
+                stdout_buf.push_str(&item.line);
+                stdout_buf.push('\n');
+                if stream_live {
+                    println!("{}", item.line);
+                }
+                merged.push_str(&format!("{} {}\n", "stdout".cyan().bold(), item.line));
+            }
+            StreamKind::Stderr => {
+                stderr_buf.push_str(&item.line);
+                stderr_buf.push('\n');
+                if stream_live {
+                    eprintln!("{}", item.line);
+                }
+                merged.push_str(&format!("{} {}\n", "stderr".red().bold(), item.line));
+            }
+        }
+    }
+
+    stdout_task
+        .await
+        .map_err(|error| eyre!("failed to join stdout capture task: {error}"))??;
+    stderr_task
+        .await
+        .map_err(|error| eyre!("failed to join stderr capture task: {error}"))??;
+
+    Ok(CapturedOutput {
+        stdout: stdout_buf,
+        stderr: stderr_buf,
+        merged,
+    })
+}
+
+async fn capture_stream<T>(
+    stream: T,
+    kind: StreamKind,
+    tx: mpsc::UnboundedSender<StreamItem>,
+) -> Result<()>
+where
+    T: tokio::io::AsyncRead + Unpin,
+{
+    let mut lines = BufReader::new(stream).lines();
+    while let Some(line) = lines.next_line().await? {
+        let _ = tx.send(StreamItem { stream: kind, line });
+    }
+    Ok(())
 }
 
 fn ensure_workspace_binaries(workspace_root: &Path) -> Result<()> {
@@ -637,25 +880,6 @@ async fn run_status_with_timeout(
     }
 }
 
-async fn read_child_output<T>(mut stream: T) -> Result<String>
-where
-    T: AsyncRead + Unpin,
-{
-    let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).await?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
-}
-
-async fn join_output_task(
-    task: tokio::task::JoinHandle<Result<String>>,
-    label: &str,
-    stream: &str,
-) -> Result<String> {
-    task.await
-        .map_err(|error| eyre!("failed to join {stream} capture task for {label}: {error}"))?
-        .with_context(|| format!("failed reading {stream} for {label}"))
-}
-
 fn joined_path(prefix: &Path) -> Result<OsString> {
     let mut paths = vec![prefix.to_path_buf()];
     if let Some(existing) = env::var_os("PATH") {
@@ -705,6 +929,48 @@ pub(crate) fn target_root(workspace_root: &Path) -> PathBuf {
 
 pub(crate) fn keep_artifacts() -> bool {
     env::var("VX_KEEP_INTEGRATION_TMP").as_deref() == Ok("1")
+}
+
+fn http_cache_dir() -> PathBuf {
+    if let Some(path) = env::var_os("VX_HTTP_CACHE_DIR") {
+        return PathBuf::from(path);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Caches")
+                .join("vx-test-http-cache");
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(cache_home) = env::var_os("XDG_CACHE_HOME") {
+            return PathBuf::from(cache_home).join("vx-test-http-cache");
+        }
+        if let Some(home) = env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join(".cache")
+                .join("vx-test-http-cache");
+        }
+    }
+
+    env::temp_dir().join("vx-test-http-cache")
+}
+
+fn run_temp_root() -> PathBuf {
+    #[cfg(unix)]
+    {
+        return PathBuf::from("/tmp/vxi-run");
+    }
+
+    #[cfg(not(unix))]
+    {
+        env::temp_dir().join("vx-integration-run")
+    }
 }
 
 fn scenario_temp_root() -> PathBuf {
