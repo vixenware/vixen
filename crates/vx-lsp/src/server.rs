@@ -101,12 +101,51 @@ impl DocumentState {
 
     /// Extract the doc comment attached to a definition's syntax node.
     fn doc_comment_for(&self, def: &vx_resolve::Definition) -> Option<String> {
-        let root = self.parsed.tree().syntax().clone();
-        let token = root
-            .token_at_offset(def.full_range.start())
-            .right_biased()?;
-        let node = token.parent()?;
+        let node = self.declaration_node_for(def)?;
         vx::doc_comment(&node)
+    }
+
+    fn declaration_node_for(&self, def: &vx_resolve::Definition) -> Option<vx::SyntaxNode> {
+        let expected_kind = match def.kind {
+            vx_resolve::DefKind::Function => SyntaxKind::FN_DECL,
+            vx_resolve::DefKind::Struct => SyntaxKind::STRUCT_DECL,
+            vx_resolve::DefKind::Enum => SyntaxKind::ENUM_DECL,
+            vx_resolve::DefKind::Newtype => SyntaxKind::NEWTYPE_DECL,
+            vx_resolve::DefKind::TypeAlias => SyntaxKind::TYPE_ALIAS_DECL,
+            vx_resolve::DefKind::Binding
+            | vx_resolve::DefKind::Parameter
+            | vx_resolve::DefKind::Variant
+            | vx_resolve::DefKind::Field
+            | vx_resolve::DefKind::Builtin => return None,
+        };
+
+        self.parsed
+            .tree()
+            .syntax()
+            .descendants()
+            .find(|node| node.kind() == expected_kind && node.text_range() == def.full_range)
+    }
+
+    fn inferred_def_type(&self, def: &vx_resolve::Definition) -> Option<vx_types::Ty> {
+        if let Some(ty) = self.type_check.binding_types.get(&def.name_range) {
+            return Some(ty.clone());
+        }
+
+        if let Some(ty) = self.type_check.closure_param_types.get(&def.name_range) {
+            return Some(ty.clone());
+        }
+
+        for resolved_ref in &self.resolution.refs {
+            if let Ok(ref target) = resolved_ref.target {
+                if target.name_range == def.name_range {
+                    if let Some(ty) = self.type_check.expr_types.get(&resolved_ref.ref_range) {
+                        return Some(ty.clone());
+                    }
+                }
+            }
+        }
+
+        self.type_check.expr_types.get(&def.name_range).cloned()
     }
 
     fn to_lsp_range(&self, range: TextRange) -> Range {
@@ -529,39 +568,9 @@ impl LanguageServer for VxLanguageServer {
                     def.kind,
                     vx_resolve::DefKind::Parameter | vx_resolve::DefKind::Binding
                 ) {
-                    let mut found_type = false;
-
-                    // Check binding_types first (for let bindings)
-                    if let Some(ty) = state.type_check.binding_types.get(&def.name_range) {
+                    if let Some(ty) = state.inferred_def_type(def) {
                         let display = ty.display_with_env(&state.types.env);
                         markdown.push_str(&format!("\n\nType: `{display}`"));
-                        found_type = true;
-                    }
-
-                    if !found_type {
-                        // Find any name reference to this def that has an inferred type
-                        for resolved_ref in &state.resolution.refs {
-                            if let Ok(ref target) = resolved_ref.target {
-                                if target.name_range == def.name_range {
-                                    if let Some(ty) =
-                                        state.type_check.expr_types.get(&resolved_ref.ref_range)
-                                    {
-                                        let display = ty.display_with_env(&state.types.env);
-                                        markdown.push_str(&format!("\n\nType: `{display}`"));
-                                        found_type = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Also check if the def's own name range has a type (for closure params)
-                    if !found_type {
-                        if let Some(ty) = state.type_check.expr_types.get(&def.name_range) {
-                            let display = ty.display_with_env(&state.types.env);
-                            markdown.push_str(&format!("\n\nType: `{display}`"));
-                        }
                     }
                 }
 
@@ -1814,15 +1823,8 @@ fn dot_completions(
                 def.kind,
                 vx_resolve::DefKind::Binding | vx_resolve::DefKind::Parameter
             ) {
-                // Check binding_types from the type checker first
-                if let Some(ty) = state.type_check.binding_types.get(&def.name_range) {
-                    if let Some(items) = completions_for_type(ty, state) {
-                        return Some(items);
-                    }
-                }
-                // Check closure_param_types via expr_types
-                if let Some(ty) = state.type_check.expr_types.get(&name_range) {
-                    if let Some(items) = completions_for_type(ty, state) {
+                if let Some(ty) = state.inferred_def_type(def) {
+                    if let Some(items) = completions_for_type(&ty, state) {
                         return Some(items);
                     }
                 }
@@ -2317,6 +2319,15 @@ mod tests {
         }
     }
 
+    fn definition_named<'a>(state: &'a DocumentState, name: &str) -> &'a vx_resolve::Definition {
+        state
+            .resolution
+            .scopes
+            .all_definitions()
+            .find(|def| def.name == name)
+            .unwrap_or_else(|| panic!("missing definition `{name}`"))
+    }
+
     #[test]
     fn parameter_hints_anchor_on_effective_argument_tokens() {
         let text = r#"
@@ -2366,6 +2377,72 @@ fn demo() {
         assert_eq!(
             state.to_lsp_range(def.name_range),
             text_range(text, "class:", 5)
+        );
+    }
+
+    #[test]
+    fn doc_comment_for_ignores_plain_comments() {
+        let text = r#"
+// Minimal cc-version build sketch for the current
+// resolver/evaluator lane.
+fn build(ws: Path) -> Tree {
+  Tree(ws)
+}
+"#;
+
+        let state = DocumentState::new(text.to_string());
+        let def = definition_named(&state, "build");
+
+        assert_eq!(state.doc_comment_for(def), None);
+    }
+
+    #[test]
+    fn doc_comment_for_returns_markdown_prose() {
+        let text = r#"
+/// Build the output tree.
+///
+/// Uses `ws` as the input workspace.
+fn build(ws: Path) -> Tree {
+  Tree(ws)
+}
+"#;
+
+        let state = DocumentState::new(text.to_string());
+        let def = definition_named(&state, "build");
+
+        assert_eq!(
+            state.doc_comment_for(def).as_deref(),
+            Some("Build the output tree.\n\nUses `ws` as the input workspace.")
+        );
+    }
+
+    #[test]
+    fn inferred_def_type_uses_closure_parameter_types() {
+        let text = r#"
+fn build() {
+  exec(["echo"]) where {
+    observer: (proc, tree) => {
+      proc.exit_code
+    },
+  };
+}
+"#;
+
+        let state = DocumentState::new(text.to_string());
+        let proc = definition_named(&state, "proc");
+        let tree = definition_named(&state, "tree");
+
+        assert_eq!(
+            state
+                .inferred_def_type(proc)
+                .map(|ty| ty.display_with_env(&state.types.env).to_string()),
+            Some(String::from("Process"))
+        );
+        assert_eq!(
+            state
+                .inferred_def_type(tree)
+                .map(|ty| ty.display_with_env(&state.types.env).to_string()),
+            Some(String::from("Tree"))
         );
     }
 }

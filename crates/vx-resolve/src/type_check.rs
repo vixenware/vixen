@@ -50,6 +50,8 @@ pub enum TypeErrorKind {
 pub struct TypeCheckResult {
     /// Map from expression text ranges to their inferred types.
     pub expr_types: HashMap<TextRange, Ty>,
+    /// Types for closure parameters inferred from callback slots.
+    pub closure_param_types: HashMap<TextRange, Ty>,
     /// Map from binding name ranges to their inferred types.
     pub binding_types: HashMap<TextRange, Ty>,
     /// Type errors found during checking.
@@ -81,6 +83,7 @@ pub fn type_check(
 
     TypeCheckResult {
         expr_types: checker.expr_types,
+        closure_param_types: checker.closure_param_types,
         binding_types: checker.binding_types,
         errors: checker.errors,
     }
