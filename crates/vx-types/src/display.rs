@@ -28,6 +28,10 @@ impl fmt::Display for Ty {
                 write!(f, "<alias#{}>", a.id.0)?;
                 write_type_args(f, &a.type_args)
             }
+            Ty::Opaque(o) => {
+                write!(f, "<opaque#{}>", o.id.0)?;
+                write_type_args(f, &o.type_args)
+            }
             Ty::Tuple(t) => write!(f, "{t}"),
             Ty::Function(func) => write!(f, "{func}"),
             Ty::Optional(inner) => write!(f, "{inner}?"),

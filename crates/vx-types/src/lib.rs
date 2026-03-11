@@ -45,6 +45,9 @@ pub enum Ty {
     /// for error messages.
     Alias(AliasTy),
 
+    /// An opaque nominal type declared without a target, e.g. `type Blob;`.
+    Opaque(OpaqueTy),
+
     /// A heterogeneous tuple: `(A, B, C)`.
     Tuple(TupleTy),
 
@@ -145,6 +148,13 @@ pub struct AliasTy {
     pub type_args: Vec<Ty>,
 }
 
+/// An opaque nominal type with optional generic arguments.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct OpaqueTy {
+    pub id: TypeId,
+    pub type_args: Vec<Ty>,
+}
+
 /// A heterogeneous tuple type.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TupleTy {
@@ -175,6 +185,7 @@ pub enum TypeDef {
     Enum(EnumDef),
     Newtype(NewtypeDef),
     Alias(AliasDef),
+    Opaque(OpaqueDef),
 }
 
 /// A struct definition with its fields and generic parameters.
@@ -221,6 +232,13 @@ pub struct AliasDef {
     pub name: String,
     pub type_params: Vec<String>,
     pub target: Ty,
+}
+
+/// An opaque nominal type definition: `type Name;`.
+#[derive(Clone, Debug)]
+pub struct OpaqueDef {
+    pub name: String,
+    pub type_params: Vec<String>,
 }
 
 /// A sum type — the target of a type alias like `type Entry = Blob | Tree`.
@@ -334,6 +352,7 @@ impl TypeDef {
             TypeDef::Enum(d) => &d.name,
             TypeDef::Newtype(d) => &d.name,
             TypeDef::Alias(d) => &d.name,
+            TypeDef::Opaque(d) => &d.name,
         }
     }
 
@@ -344,6 +363,7 @@ impl TypeDef {
             TypeDef::Enum(d) => &d.type_params,
             TypeDef::Newtype(d) => &d.type_params,
             TypeDef::Alias(d) => &d.type_params,
+            TypeDef::Opaque(d) => &d.type_params,
         }
     }
 }
@@ -359,6 +379,7 @@ impl Ty {
             Ty::Enum(e) => e.type_args.iter().any(Ty::has_infer_vars),
             Ty::Newtype(n) => n.type_args.iter().any(Ty::has_infer_vars),
             Ty::Alias(a) => a.type_args.iter().any(Ty::has_infer_vars),
+            Ty::Opaque(o) => o.type_args.iter().any(Ty::has_infer_vars),
             Ty::Tuple(t) => t.elements.iter().any(Ty::has_infer_vars),
             Ty::Function(f) => f.params.iter().any(Ty::has_infer_vars) || f.ret.has_infer_vars(),
             Ty::Optional(inner) | Ty::Array(inner) | Ty::Stream(inner) => inner.has_infer_vars(),
@@ -375,6 +396,7 @@ impl Ty {
             Ty::Enum(e) => e.type_args.iter().any(Ty::has_params),
             Ty::Newtype(n) => n.type_args.iter().any(Ty::has_params),
             Ty::Alias(a) => a.type_args.iter().any(Ty::has_params),
+            Ty::Opaque(o) => o.type_args.iter().any(Ty::has_params),
             Ty::Tuple(t) => t.elements.iter().any(Ty::has_params),
             Ty::Function(f) => f.params.iter().any(Ty::has_params) || f.ret.has_params(),
             Ty::Optional(inner) | Ty::Array(inner) | Ty::Stream(inner) => inner.has_params(),
@@ -419,6 +441,14 @@ impl Ty {
             Ty::Alias(a) => Ty::Alias(AliasTy {
                 id: a.id,
                 type_args: a
+                    .type_args
+                    .iter()
+                    .map(|t| t.substitute(substitution))
+                    .collect(),
+            }),
+            Ty::Opaque(o) => Ty::Opaque(OpaqueTy {
+                id: o.id,
+                type_args: o
                     .type_args
                     .iter()
                     .map(|t| t.substitute(substitution))
@@ -491,6 +521,21 @@ impl<'a> std::fmt::Display for TyDisplay<'a> {
                 if !e.type_args.is_empty() {
                     write!(f, "[")?;
                     for (i, arg) in e.type_args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", arg.display_with_env(self.env))?;
+                    }
+                    write!(f, "]")?;
+                }
+                Ok(())
+            }
+            Ty::Opaque(o) => {
+                let name = self.env.get(o.id).name();
+                write!(f, "{name}")?;
+                if !o.type_args.is_empty() {
+                    write!(f, "[")?;
+                    for (i, arg) in o.type_args.iter().enumerate() {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
@@ -586,6 +631,24 @@ mod tests {
     fn infer_var_display() {
         assert_eq!(Ty::Infer(InferVar(0)).to_string(), "?0");
         assert_eq!(Ty::Infer(InferVar(42)).to_string(), "?42");
+    }
+
+    #[test]
+    fn opaque_display_with_env() {
+        let mut env = TypeEnv::new();
+        let id = env.define(
+            "Token",
+            TypeDef::Opaque(OpaqueDef {
+                name: "Token".to_owned(),
+                type_params: vec![],
+            }),
+        );
+        let ty = Ty::Opaque(OpaqueTy {
+            id,
+            type_args: vec![],
+        });
+        assert_eq!(ty.display_with_env(&env).to_string(), "Token");
+        assert_eq!(ty.to_string(), format!("<opaque#{}>", id.0));
     }
 
     #[test]

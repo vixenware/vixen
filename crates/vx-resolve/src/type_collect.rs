@@ -11,8 +11,8 @@ use vx_parser::{
     SyntaxKind, TypeAliasDecl,
 };
 use vx_types::{
-    AliasDef, EnumDef, FieldDef, FnSig, KeywordParamDef, NewtypeDef, ParamDef, StructDef, Ty,
-    TypeDef, TypeEnv, TypeId,
+    AliasDef, EnumDef, FieldDef, FnSig, KeywordParamDef, NewtypeDef, OpaqueDef, ParamDef,
+    StructDef, Ty, TypeDef, TypeEnv, TypeId,
 };
 
 use crate::{DefSite, Definition, SourceFileRef, SourceId};
@@ -143,15 +143,26 @@ pub fn collect_types_for_sources(sources: &[SourceFileRef]) -> TypeCollection {
                     {
                         let name = name_token.text().to_string();
                         let type_params = collect_type_params(syntax);
-                        let id = env.define(
-                            &name,
-                            TypeDef::Alias(AliasDef {
-                                name: name.clone(),
-                                type_params,
-                                target: Ty::Poison, // filled in second pass
-                            }),
-                        );
-                        name_to_id.insert(name, (id, TypeKind::Alias));
+                        let (def, kind) = if decl.aliased_type().is_some() {
+                            (
+                                TypeDef::Alias(AliasDef {
+                                    name: name.clone(),
+                                    type_params,
+                                    target: Ty::Poison, // filled in second pass
+                                }),
+                                TypeKind::Alias,
+                            )
+                        } else {
+                            (
+                                TypeDef::Opaque(OpaqueDef {
+                                    name: name.clone(),
+                                    type_params,
+                                }),
+                                TypeKind::Opaque,
+                            )
+                        };
+                        let id = env.define(&name, def);
+                        name_to_id.insert(name, (id, kind));
                         def_to_type.insert(
                             DefSite {
                                 source: source.id,
@@ -260,12 +271,12 @@ pub fn collect_types_for_sources(sources: &[SourceFileRef]) -> TypeCollection {
                     if let Some(decl) = TypeAliasDecl::cast(syntax.clone())
                         && let Some(name_token) = decl.name()
                     {
+                        let Some(aliased_type) = decl.aliased_type() else {
+                            continue;
+                        };
                         let (id, _) = name_to_id[name_token.text()];
                         let type_params = collect_type_param_names(syntax);
-                        let target = decl
-                            .aliased_type()
-                            .map(|t| resolver.resolve_type(&t, &type_params))
-                            .unwrap_or(Ty::Poison);
+                        let target = resolver.resolve_type(&aliased_type, &type_params);
                         if let TypeDef::Alias(ref mut a) = env[id] {
                             a.target = target;
                         }
@@ -528,6 +539,7 @@ pub(crate) enum TypeKind {
     Enum,
     Newtype,
     Alias,
+    Opaque,
 }
 
 /// Resolves AST type annotations to [`Ty`] values.
@@ -703,6 +715,7 @@ impl<'a> TypeResolver<'a> {
             TypeKind::Enum => Ty::Enum(vx_types::EnumTy { id, type_args }),
             TypeKind::Newtype => Ty::Newtype(vx_types::NewtypeTy { id, type_args }),
             TypeKind::Alias => Ty::Alias(vx_types::AliasTy { id, type_args }),
+            TypeKind::Opaque => Ty::Opaque(vx_types::OpaqueTy { id, type_args }),
         })
     }
 }

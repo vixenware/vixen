@@ -674,6 +674,50 @@ type Name = String
     }
 }
 
+#[test]
+fn type_collect_opaque_types() {
+    let file = parse_file(
+        r#"
+type Token;
+
+fn id(token: Token) -> Token {
+    token
+}
+"#,
+    );
+
+    let tc = crate::collect_types(&file);
+
+    let token_ids = tc.env.lookup("Token");
+    assert_eq!(token_ids.len(), 1);
+    match tc.env.get(token_ids[0]) {
+        vx_types::TypeDef::Opaque(o) => {
+            assert!(o.type_params.is_empty());
+        }
+        other => panic!("expected opaque type, got {other:?}"),
+    }
+
+    let sig = tc
+        .def_to_fn_sig
+        .values()
+        .find(|sig| sig.name == "id")
+        .expect("id signature");
+    assert_eq!(
+        sig.positional_params[0].ty,
+        vx_types::Ty::Opaque(vx_types::OpaqueTy {
+            id: token_ids[0],
+            type_args: vec![],
+        })
+    );
+    assert_eq!(
+        sig.ret,
+        vx_types::Ty::Opaque(vx_types::OpaqueTy {
+            id: token_ids[0],
+            type_args: vec![],
+        })
+    );
+}
+
 fn check_caps(src: &str) -> crate::CapCheckResult {
     let file = parse_file(src);
     let resolution = resolve_with_stdlib(&file);
