@@ -557,6 +557,20 @@ impl Engine {
         }
     }
 
+    fn force_selector_receiver(&self, value: Value) -> Result<Value, PoisonError> {
+        match value {
+            Value::Pending(node_id) => {
+                let value = self.force_pending_shallow(node_id)?;
+                self.force_selector_receiver(value)
+            }
+            Value::Discovered(discovered) => {
+                let inner = self.force_selector_receiver(*discovered.value)?;
+                Ok(self.attach_obligations(inner, discovered.obligations.iter().cloned()))
+            }
+            other => Ok(other),
+        }
+    }
+
     // r[impl eval.forcing.boundary]
     fn force_value(&self, value: Value) -> Result<Value, PoisonError> {
         match value {
@@ -766,7 +780,7 @@ impl Engine {
             ),
             NodeJob::Invoke { function, args } => self.invoke_function(function, args.clone()),
             NodeJob::Field { receiver, field } => {
-                let receiver = self.force_value(receiver.clone())?;
+                let receiver = self.force_selector_receiver(receiver.clone())?;
                 self.select_field(&receiver, field)
             }
             NodeJob::Fail { message } => Err(self.user_fail(message.clone())?),

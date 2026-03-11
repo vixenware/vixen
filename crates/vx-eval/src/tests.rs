@@ -9,6 +9,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 
 use blake3::hash as blake3_hash;
+use indoc::indoc;
 use tempfile::TempDir;
 use vx_parser::{Pattern as AstPattern, SourceFile, Stmt as AstStmt};
 use vx_store_proto::{Blake3Hash, BlobRef, ChunkHash, NodeHash};
@@ -1532,7 +1533,11 @@ fn interpolated_path_literal_builds_plain_paths() {
 
 #[test]
 fn lowering_keeps_interpolated_path_literals_in_function_bodies() {
-    let parse = vx_parser::parse(r#"fn main(root: Path) { @({root}/src/./lib.rs) }"#);
+    let parse = vx_parser::parse(indoc! {r#"
+        fn main(root: Path) {
+          @({root}/src/./lib.rs)
+        }
+    "#});
     assert_eq!(parse.errors(), []);
     let file = SourceFile::cast_root(parse.syntax());
     let function = match file.items().next().expect("function item") {
@@ -1556,14 +1561,14 @@ fn lowering_keeps_interpolated_path_literals_in_function_bodies() {
 
 #[test]
 fn lowering_keeps_map_payloads_for_tree_constructor_calls() {
-    let parse = vx_parser::parse(
-        r#"fn main(other: Blob) {
-               Tree {
-                 @a.txt: Blob "alpha",
-                 @b.txt: other,
-               }
-             }"#,
-    );
+    let parse = vx_parser::parse(indoc! {r#"
+        fn main(other: Blob) {
+          Tree({
+            @a.txt: Blob("alpha"),
+            @b.txt: other,
+          })
+        }
+    "#});
     assert_eq!(parse.errors(), []);
     let file = SourceFile::cast_root(parse.syntax());
     let function = match file.items().next().expect("function item") {
@@ -1578,6 +1583,23 @@ fn lowering_keeps_map_payloads_for_tree_constructor_calls() {
     let parsed_args = parsed_call.positional_args();
     assert_eq!(parsed_args.len(), 1);
     match &parsed_args[0] {
+        vx_parser::Expr::Paren(paren) => match paren.expr() {
+            Some(vx_parser::Expr::Map(map)) => {
+                let entries = map.entries().collect::<Vec<_>>();
+                assert_eq!(entries.len(), 2);
+                assert!(entries.iter().all(|entry| entry.key().is_some()));
+                assert!(entries.iter().all(|entry| entry.value().is_some()));
+                assert!(matches!(
+                    entries[0].key(),
+                    Some(vx_parser::Expr::PathLiteral(_))
+                ));
+                assert!(matches!(
+                    entries[1].key(),
+                    Some(vx_parser::Expr::PathLiteral(_))
+                ));
+            }
+            other => panic!("expected map payload inside parens, got {other:?}"),
+        },
         vx_parser::Expr::Map(map) => {
             let entries = map.entries().collect::<Vec<_>>();
             assert_eq!(entries.len(), 2);
@@ -1612,17 +1634,17 @@ fn lowering_keeps_map_payloads_for_tree_constructor_calls() {
 
 #[test]
 fn lowering_keeps_where_calls_as_final_expression_statements() {
-    let parse = vx_parser::parse(
-        r#"fn observe(process: Process, tree: Tree) {
-               process.exit_code
-             }
+    let parse = vx_parser::parse(indoc! {r#"
+        fn observe(process: Process, tree: Tree) {
+          process.exit_code
+        }
 
-             fn build() {
-               exec ["/bin/true"] where {
-                 observer: observe,
-               }
-             }"#,
-    );
+        fn build() {
+          exec(["/bin/true"]) where {
+            observer: observe,
+          }
+        }
+    "#});
     assert_eq!(parse.errors(), []);
     let file = SourceFile::cast_root(parse.syntax());
     let build_fn = match file.items().find(|item| match item {
@@ -1646,10 +1668,25 @@ fn lowering_keeps_where_calls_as_final_expression_statements() {
         .expect("build function");
 
     match build.body.stmts.as_slice() {
-        [crate::instr::Stmt::Expr(crate::instr::Expr::Call { args, kwargs, .. })] => {
+        [
+            crate::instr::Stmt::Expr(crate::instr::Expr::Call {
+                args,
+                kwargs,
+                kwargs_expr,
+                ..
+            }),
+        ] => {
             assert_eq!(args.len(), 1);
-            assert_eq!(kwargs.len(), 1);
-            assert_eq!(kwargs[0].0, "observer");
+            assert!(kwargs.is_empty());
+            match kwargs_expr.as_deref() {
+                Some(crate::instr::Expr::Record(items)) => match items.as_slice() {
+                    [crate::instr::RecordItem::Field { name, .. }] => {
+                        assert_eq!(name, "observer");
+                    }
+                    other => panic!("unexpected kwargs record items: {other:?}"),
+                },
+                other => panic!("unexpected kwargs expr: {other:?}"),
+            }
         }
         other => panic!("unexpected lowered body: {other:?}"),
     }
@@ -1938,17 +1975,17 @@ fn shipped_functions_preserve_global_calls_and_captures() {
 
 #[test]
 fn inline_values_round_trip_through_transport() {
-    let engine = engine(
-        r#"fn pack(root: Path) {
-               {
-                 "root": root,
-                 "tree": Tree {
-                   @hello.txt: Blob "hello",
-                 },
-                 "values": [41, 42],
-               }
-             }"#,
-    );
+    let engine = engine(indoc! {r#"
+        fn pack(root: Path) {
+          {
+            "root": root,
+            "tree": Tree({
+              @hello.txt: Blob("hello"),
+            }),
+            "values": [41, 42],
+          }
+        }
+    "#});
     let value = engine
         .call("pack", vec![Value::Path(PathValue::new("src"))])
         .unwrap();
@@ -2367,14 +2404,14 @@ fn blob_from_string_round_trips_text() {
 // r[verify store.tree]
 // r[verify store.tree.file]
 fn tree_of_and_file_only_force_the_selected_entry() {
-    let engine = engine(
-        r#"fn main(other: Blob) {
-               ((Tree {
-                 @a.txt: Blob "alpha",
-                 @b.txt: other,
-               }).file "a.txt").to_string!
-             }"#,
-    );
+    let engine = engine(indoc! {r#"
+        fn main(other: Blob) {
+          Tree({
+            @a.txt: Blob("alpha"),
+            @b.txt: other,
+          }).file("a.txt").utf8()
+        }
+    "#});
     let value = engine
         .call("main", vec![engine.poison_value("unused tree entry")])
         .unwrap();
@@ -2385,13 +2422,15 @@ fn tree_of_and_file_only_force_the_selected_entry() {
 #[test]
 fn tree_subtree_selects_nested_directories() {
     let value = eval(
-        r#"fn main() {
-               (((Tree {
-                 @include: Tree {
-                   @lua.h: Blob "header",
-                 },
-               }).subtree "include").file "lua.h").to_string!
-             }"#,
+        indoc! {r#"
+            fn main() {
+              Tree({
+                @include: Tree({
+                  @lua.h: Blob("header"),
+                }),
+              }).subtree("include").file("lua.h").utf8()
+            }
+        "#},
         "main",
     )
     .unwrap();
@@ -2402,26 +2441,28 @@ fn tree_subtree_selects_nested_directories() {
 #[test]
 fn tree_merge_combines_directories_recursively() {
     let value = eval(
-        r#"fn main() {
-               let base = Tree {
-                 @include: Tree {
-                   @lua.h: Blob "lua header",
-                 },
-                 @liblua.a: Blob "old archive",
-               };
-               let overlay = Tree {
-                 @include: Tree {
-                   @lauxlib.h: Blob "aux header",
-                 },
-                 @liblua.a: Blob "new archive",
-               };
-               let merged = base.merge overlay;
-               (merged.file "include/lua.h").to_string!
-                 + "|"
-                 + (merged.file "include/lauxlib.h").to_string!
-                 + "|"
-                 + (merged.file "liblua.a").to_string!
-             }"#,
+        indoc! {r#"
+            fn main() {
+              let base = Tree({
+                @include: Tree({
+                  @lua.h: Blob("lua header"),
+                }),
+                @liblua.a: Blob("old archive"),
+              });
+              let overlay = Tree({
+                @include: Tree({
+                  @lauxlib.h: Blob("aux header"),
+                }),
+                @liblua.a: Blob("new archive"),
+              });
+              let merged = base.merge(overlay);
+              merged.file("include/lua.h").utf8()
+                + "|"
+                + merged.file("include/lauxlib.h").utf8()
+                + "|"
+                + merged.file("liblua.a").utf8()
+            }
+        "#},
         "main",
     )
     .unwrap();
@@ -2981,15 +3022,15 @@ fn exec_spreads_tree_args_in_canonical_path_order() {
 fn exec_mounts_subtrees_instead_of_the_whole_tree() {
     let captured = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&captured);
-    let engine = engine(
-        r#"fn observe(process: Process, tree: Tree) {
-               process.exit_code
-             }
+    let engine = engine(indoc! {r#"
+            fn observe(process: Process, tree: Tree) {
+              process.exit_code
+            }
 
-             fn build(input: Tree) {
-               exec ["tool", input.subtree "dir"] where { observer: observe }
-             }"#,
-    )
+            fn build(input: Tree) {
+              exec(["tool", input.subtree("dir")]) where { observer: observe }
+            }
+        "#})
     .with_exec_handler(Arc::new(move |request| {
         *sink.lock().unwrap() = Some(request);
         Ok(Value::U64(0))
@@ -3035,15 +3076,15 @@ fn exec_mounts_subtrees_instead_of_the_whole_tree() {
 fn exec_mounts_merged_trees() {
     let captured = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&captured);
-    let engine = engine(
-        r#"fn observe(process: Process, tree: Tree) {
-               process.exit_code
-             }
+    let engine = engine(indoc! {r#"
+            fn observe(process: Process, tree: Tree) {
+              process.exit_code
+            }
 
-             fn build(base: Tree, overlay: Tree) {
-               exec ["tool", base.merge overlay] where { observer: observe }
-             }"#,
-    )
+            fn build(base: Tree, overlay: Tree) {
+              exec(["tool", base.merge(overlay)]) where { observer: observe }
+            }
+        "#})
     .with_exec_handler(Arc::new(move |request| {
         *sink.lock().unwrap() = Some(request);
         Ok(Value::U64(0))

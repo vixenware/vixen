@@ -24,3 +24,4 @@ crossbeam-channel = "0.5"
 tempfile.workspace = true
 
 [dev-dependencies]
+indoc = "2"
