@@ -151,6 +151,46 @@ fn render_below_span_connector_uses_the_label_style() {
     assert!(!rendered.contains("\u{1b}[90m╰─\u{1b}[0m"), "{rendered}");
 }
 
+#[test]
+fn render_multiline_annotations_only_emit_the_message_once() {
+    let diagnostics = Diagnostics {
+        sources: vec![Source {
+            id: SourceId("main".to_string()),
+            name: "src/main.vx".to_string(),
+            hyperlink: None,
+            text: "alpha\nbeta\ngamma\n".to_string(),
+        }],
+        reports: vec![Report {
+            severity: Severity::Error,
+            title: "spans lines".to_string(),
+            annotations: vec![Annotation {
+                spans: vec![Span::new("main", 2, 8)],
+                role: AnnotationRole::PrimaryLabel,
+                syntax_class: None,
+                message: Some("spans lines".to_string()),
+                priority: 100,
+            }],
+            notes: Vec::new(),
+            sections: Vec::new(),
+        }],
+    };
+
+    let rendered = render(
+        &diagnostics,
+        TerminalCapabilities {
+            width: 32,
+            glyph_mode: GlyphMode::Ascii,
+            color_level: ColorLevel::None,
+            hyperlink_mode: HyperlinkMode::None,
+            tab_width: 4,
+        },
+    )
+    .unwrap();
+
+    println!("{rendered}");
+    assert_eq!(rendered.matches("spans lines").count(), 2, "{rendered}");
+}
+
 // d[verify test.width-matrix]
 // d[verify test.capability-matrix]
 // d[verify glyph.unicode-ascii]
@@ -263,6 +303,51 @@ fn render_clips_long_lines_with_explicit_ellipsis() {
 
     println!("{rendered}");
     assert!(rendered.contains("012345678901234..."));
+}
+
+#[test]
+fn render_wraps_long_path_like_tokens() {
+    let diagnostics = Diagnostics {
+        sources: vec![Source {
+            id: SourceId("main".to_string()),
+            name: "src/main.vx".to_string(),
+            hyperlink: None,
+            text: "command\n".to_string(),
+        }],
+        reports: vec![Report {
+            severity: Severity::Error,
+            title: "missing".to_string(),
+            annotations: vec![Annotation {
+                spans: vec![Span::new("main", 0, 7)],
+                role: AnnotationRole::PrimaryLabel,
+                syntax_class: None,
+                message: Some("src/very/long/path/component/file.c".to_string()),
+                priority: 100,
+            }],
+            notes: Vec::new(),
+            sections: Vec::new(),
+        }],
+    };
+
+    let rendered = render(
+        &diagnostics,
+        TerminalCapabilities {
+            width: 28,
+            glyph_mode: GlyphMode::Unicode,
+            color_level: ColorLevel::None,
+            hyperlink_mode: HyperlinkMode::None,
+            tab_width: 4,
+        },
+    )
+    .unwrap();
+
+    println!("{rendered}");
+    assert!(
+        !rendered.contains("src/very/long/path/component/file.c"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("src/very/long/path/"), "{rendered}");
+    assert!(rendered.contains("component/file.c"), "{rendered}");
 }
 
 // d[verify term.ansi-discipline]

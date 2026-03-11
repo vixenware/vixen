@@ -546,14 +546,14 @@ fn annotations_for_line<'a>(
     let mut renderable = annotations
         .iter()
         .flat_map(|annotation| {
+            let message_owner = annotation.segments.first().copied();
             annotation
                 .segments
                 .iter()
                 .copied()
-                .enumerate()
-                .filter(move |(_, segment)| segment.line_number == line_number)
-                .map(move |(index, segment)| RenderableAnnotation {
-                    message: (index == 0)
+                .filter(move |segment| segment.line_number == line_number)
+                .map(move |segment| RenderableAnnotation {
+                    message: (message_owner == Some(segment))
                         .then_some(annotation.message.as_deref())
                         .flatten(),
                     placement: annotation.placement,
@@ -632,26 +632,7 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
         let mut saw_content = false;
         for word in paragraph.split_whitespace() {
             saw_content = true;
-            if UnicodeWidthStr::width(word) > width {
-                if !current.is_empty() {
-                    lines.push(current);
-                    current = String::new();
-                }
-                lines.extend(wrap_long_token(word, width));
-                continue;
-            }
-
-            let candidate = if current.is_empty() {
-                word.to_string()
-            } else {
-                format!("{current} {word}")
-            };
-            if UnicodeWidthStr::width(candidate.as_str()) > width && !current.is_empty() {
-                lines.push(current);
-                current = word.to_string();
-            } else {
-                current = candidate;
-            }
+            push_wrapped_word(&mut lines, &mut current, word, width);
         }
         if current.is_empty() && !saw_content {
             lines.push(String::new());
@@ -662,34 +643,69 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn wrap_long_token(text: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut used = 0;
-
-    for ch in text.chars() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + ch_width > width && !current.is_empty() {
-            lines.push(current);
-            current = String::new();
-            used = 0;
-        }
-
-        current.push(ch);
-        used += ch_width;
-    }
-
-    if current.is_empty() {
-        lines.push(String::new());
-    } else {
-        lines.push(current);
-    }
-
-    lines
-}
-
 fn indent_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
+}
+
+fn push_wrapped_word(lines: &mut Vec<String>, current: &mut String, word: &str, width: usize) {
+    let mut remaining = word;
+
+    loop {
+        let separator = if current.is_empty() { "" } else { " " };
+        let candidate = format!("{current}{separator}{remaining}");
+        if UnicodeWidthStr::width(candidate.as_str()) <= width {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(remaining);
+            return;
+        }
+
+        if !current.is_empty() {
+            lines.push(std::mem::take(current));
+            continue;
+        }
+
+        let (head, tail) = split_long_token(remaining, width);
+        lines.push(head.to_string());
+        if tail.is_empty() {
+            return;
+        }
+        remaining = tail;
+    }
+}
+
+fn split_long_token(token: &str, width: usize) -> (&str, &str) {
+    let mut used = 0;
+    let mut furthest_end = 0;
+    let mut preferred_end = None;
+
+    for (index, ch) in token.char_indices() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > width {
+            break;
+        }
+
+        used += ch_width;
+        furthest_end = index + ch.len_utf8();
+        if is_path_wrap_boundary(ch) {
+            preferred_end = Some(furthest_end);
+        }
+    }
+
+    let split_at = preferred_end.or_else(|| {
+        if furthest_end > 0 {
+            Some(furthest_end)
+        } else {
+            token.chars().next().map(char::len_utf8)
+        }
+    });
+    let split_at = split_at.unwrap_or(0);
+    (&token[..split_at], &token[split_at..])
+}
+
+fn is_path_wrap_boundary(ch: char) -> bool {
+    matches!(ch, '/' | '\\' | ':' | '.' | '-' | '_')
 }
 
 fn severity_label(severity: Severity) -> &'static str {

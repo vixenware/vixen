@@ -25,13 +25,14 @@ use vxd_proto::{
 };
 
 const SYNTAX_CONTEXT_RADIUS: i32 = 2;
+const DEFAULT_TRIMMED_BRANCHES: usize = 2;
 
 pub(crate) fn render_build_failure(failure: &BuildFailure, full_stack: bool) -> Result<String> {
     if failure.reports.is_empty() {
         return Ok(failure.message.clone());
     }
 
-    render_build_failure_with_capabilities(failure, full_stack, terminal_capabilities())
+    render_build_failure_with_capabilities(failure, full_stack, detect_terminal_capabilities())
 }
 
 fn render_build_failure_with_capabilities(
@@ -48,74 +49,89 @@ fn render_build_failure_with_capabilities(
     ))
 }
 
-fn terminal_capabilities() -> TerminalCapabilities {
-    let is_terminal = std::io::stderr().is_terminal();
+fn detect_terminal_capabilities() -> TerminalCapabilities {
+    let stderr_is_terminal = std::io::stderr().is_terminal();
     TerminalCapabilities {
-        width: terminal_width(),
+        width: detect_terminal_width(stderr_is_terminal),
         glyph_mode: GlyphMode::Unicode,
-        color_level: detected_color_level(is_terminal),
-        hyperlink_mode: detected_hyperlink_mode(is_terminal),
+        color_level: detect_color_level(stderr_is_terminal),
+        hyperlink_mode: detect_hyperlink_mode(stderr_is_terminal),
         tab_width: 4,
     }
 }
 
-fn terminal_width() -> usize {
-    if let Ok(cols) = std::env::var("COLUMNS")
-        && let Ok(width) = cols.parse::<usize>()
+fn detect_terminal_width(stderr_is_terminal: bool) -> usize {
+    if let Ok(columns) = std::env::var("COLUMNS")
+        && let Ok(width) = columns.parse::<usize>()
         && width > 0
     {
         return width;
     }
 
-    #[cfg(unix)]
-    {
-        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-        let ret = unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut ws) };
-        if ret == 0 && ws.ws_col > 0 {
-            return ws.ws_col as usize;
+    if stderr_is_terminal {
+        #[cfg(unix)]
+        {
+            let mut winsize: libc::winsize = unsafe { std::mem::zeroed() };
+            let result =
+                unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut winsize) };
+            if result == 0 && winsize.ws_col > 0 {
+                return winsize.ws_col as usize;
+            }
         }
     }
 
     80
 }
 
-fn detected_color_level(is_terminal: bool) -> ColorLevel {
-    if !is_terminal || std::env::var_os("NO_COLOR").is_some() {
+fn detect_color_level(stderr_is_terminal: bool) -> ColorLevel {
+    if !stderr_is_terminal || std::env::var_os("NO_COLOR").is_some() {
         return ColorLevel::None;
     }
 
-    if std::env::var("TERM").is_ok_and(|term| term == "dumb") {
-        return ColorLevel::None;
-    }
-
-    if std::env::var("COLORTERM")
-        .map(|value| matches!(value.as_str(), "truecolor" | "24bit"))
-        .unwrap_or(false)
+    let colorterm = std::env::var("COLORTERM").ok();
+    let term = std::env::var("TERM").ok();
+    if colorterm
+        .as_deref()
+        .is_some_and(|value| value.contains("truecolor") || value.contains("24bit"))
+        || term.as_deref().is_some_and(|value| {
+            value.contains("direct") || value.contains("kitty") || value.contains("wezterm")
+        })
     {
-        return ColorLevel::Rgb24;
+        ColorLevel::Rgb24
+    } else {
+        ColorLevel::Ansi16
     }
-
-    ColorLevel::Ansi16
 }
 
-fn detected_hyperlink_mode(is_terminal: bool) -> HyperlinkMode {
-    if !is_terminal {
+fn detect_hyperlink_mode(stderr_is_terminal: bool) -> HyperlinkMode {
+    if !stderr_is_terminal
+        || std::env::var_os("NO_HYPERLINK").is_some()
+        || std::env::var("TERM").ok().as_deref() == Some("dumb")
+    {
         return HyperlinkMode::None;
     }
 
-    if std::env::var("TERM").is_ok_and(|term| term == "dumb") {
-        return HyperlinkMode::None;
-    }
+    let term_program = std::env::var("TERM_PROGRAM").ok();
+    let vte_version = std::env::var("VTE_VERSION")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok());
+    let term = std::env::var("TERM").ok();
 
-    let supported = std::env::var_os("WT_SESSION").is_some()
-        || std::env::var_os("KITTY_WINDOW_ID").is_some()
+    if std::env::var_os("WT_SESSION").is_some()
         || std::env::var_os("KONSOLE_VERSION").is_some()
-        || std::env::var_os("VTE_VERSION").is_some()
-        || std::env::var("TERM_PROGRAM")
-            .map(|program| matches!(program.as_str(), "WezTerm" | "iTerm.app"))
-            .unwrap_or(false);
-
-    if supported {
+        || std::env::var_os("DOMTERM").is_some()
+        || std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some()
+        || term_program.as_deref().is_some_and(|program| {
+            matches!(
+                program,
+                "iTerm.app" | "WezTerm" | "vscode" | "Hyper" | "Ghostty"
+            )
+        })
+        || vte_version.is_some_and(|version| version >= 5000)
+        || term
+            .as_deref()
+            .is_some_and(|value| value.contains("xterm-kitty"))
+    {
         HyperlinkMode::Osc8
     } else {
         HyperlinkMode::None
@@ -195,13 +211,24 @@ fn visible_reports(failure: &BuildFailure, full_stack: bool) -> Vec<&BuildDiagno
         }
 
         if !advice.is_empty() {
-            if let Some(first_dependency) = advice
+            let mut kept_dependencies: Vec<&BuildDiagnosticReport> = Vec::new();
+            for dependency in advice
                 .iter()
                 .copied()
-                .find(|report| report.message != "while evaluating build entry")
+                .filter(|report| report.message != "while evaluating build entry")
             {
-                visible.push(first_dependency);
+                if kept_dependencies
+                    .iter()
+                    .any(|existing| same_report_site(existing, dependency))
+                {
+                    continue;
+                }
+                kept_dependencies.push(dependency);
+                if kept_dependencies.len() == DEFAULT_TRIMMED_BRANCHES {
+                    break;
+                }
             }
+            visible.extend(kept_dependencies);
 
             if let Some(build_entry) = advice
                 .iter()
@@ -220,6 +247,13 @@ fn visible_reports(failure: &BuildFailure, full_stack: bool) -> Vec<&BuildDiagno
     }
 
     visible
+}
+
+fn same_report_site(left: &BuildDiagnosticReport, right: &BuildDiagnosticReport) -> bool {
+    left.message == right.message
+        && left.primary_span.source_id == right.primary_span.source_id
+        && left.primary_span.start == right.primary_span.start
+        && left.primary_span.end == right.primary_span.end
 }
 
 fn workspace_root_note(failure: &BuildFailure) -> Option<&str> {
@@ -552,30 +586,6 @@ mod tests {
         }
     }
 
-    fn test_capabilities() -> TerminalCapabilities {
-        TerminalCapabilities {
-            width: 80,
-            glyph_mode: GlyphMode::Unicode,
-            color_level: ColorLevel::Rgb24,
-            hyperlink_mode: HyperlinkMode::Osc8,
-            tab_width: 4,
-        }
-    }
-
-    fn with_env_var<T>(key: &str, value: Option<&str>, f: impl FnOnce() -> T) -> T {
-        let previous = std::env::var_os(key);
-        match value {
-            Some(value) => unsafe { std::env::set_var(key, value) },
-            None => unsafe { std::env::remove_var(key) },
-        }
-        let result = f();
-        match previous {
-            Some(previous) => unsafe { std::env::set_var(key, previous) },
-            None => unsafe { std::env::remove_var(key) },
-        }
-        result
-    }
-
     fn strip_osc8_hyperlinks(text: &str) -> String {
         let mut stripped = String::with_capacity(text.len());
         let mut remainder = text;
@@ -606,6 +616,34 @@ mod tests {
         stripped
     }
 
+    fn test_terminal_capabilities() -> TerminalCapabilities {
+        TerminalCapabilities {
+            width: 80,
+            glyph_mode: GlyphMode::Unicode,
+            color_level: ColorLevel::Rgb24,
+            hyperlink_mode: HyperlinkMode::Osc8,
+            tab_width: 4,
+        }
+    }
+
+    fn render_test_build_failure(failure: &BuildFailure, full_stack: bool) -> Result<String> {
+        render_build_failure_with_capabilities(failure, full_stack, test_terminal_capabilities())
+    }
+
+    fn with_env_var<T>(key: &str, value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let previous = std::env::var_os(key);
+        match value {
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+        let result = f();
+        match previous {
+            Some(previous) => unsafe { std::env::set_var(key, previous) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+        result
+    }
+
     // d[impl test.vixen-acceptance-fixtures]
     // d[verify product.compiler-grade]
     // d[verify integration.vx-adapter]
@@ -624,7 +662,7 @@ mod tests {
         let start = source.find(label_text).expect("label start");
         let end = start + label_text.len();
 
-        let rendered = render_build_failure_with_capabilities(
+        let rendered = render_test_build_failure(
             &BuildFailure {
                 message: "build input not found".to_string(),
                 sources: vec![BuildDiagnosticSource {
@@ -659,7 +697,6 @@ mod tests {
                 }],
             },
             false,
-            test_capabilities(),
         )
         .expect("render");
         let visible = strip_osc8_hyperlinks(&rendered);
@@ -703,7 +740,7 @@ mod tests {
         let start = source.find(label_text).expect("label start");
         let end = start + label_text.len();
 
-        let rendered = render_build_failure_with_capabilities(
+        let rendered = render_test_build_failure(
             &BuildFailure {
                 message: "build input not found".to_string(),
                 sources: vec![BuildDiagnosticSource {
@@ -734,7 +771,6 @@ mod tests {
                 }],
             },
             false,
-            test_capabilities(),
         )
         .expect("render");
         let plain = strip_ansi_escapes::strip_str(&rendered);
@@ -829,13 +865,12 @@ mod tests {
         };
 
         let trimmed = strip_ansi_escapes::strip_str(
-            render_build_failure_with_capabilities(&failure, false, test_capabilities())
-                .expect("render trimmed"),
+            render_test_build_failure(&failure, false).expect("render trimmed"),
         );
-        assert_eq!(trimmed.matches("advice:").count(), 2, "{trimmed}");
+        assert_eq!(trimmed.matches("advice:").count(), 3, "{trimmed}");
         assert_eq!(
             trimmed.matches("required by this expression").count(),
-            1,
+            2,
             "{trimmed}"
         );
         assert_eq!(
@@ -845,8 +880,7 @@ mod tests {
         );
 
         let full = strip_ansi_escapes::strip_str(
-            render_build_failure_with_capabilities(&failure, true, test_capabilities())
-                .expect("render full"),
+            render_test_build_failure(&failure, true).expect("render full"),
         );
         assert_eq!(full.matches("advice:").count(), 3, "{full}");
         assert_eq!(
@@ -922,16 +956,14 @@ mod tests {
         };
 
         let trimmed = strip_ansi_escapes::strip_str(
-            render_build_failure_with_capabilities(&failure, false, test_capabilities())
-                .expect("render trimmed"),
+            render_test_build_failure(&failure, false).expect("render trimmed"),
         );
         let advice_pos = trimmed.find("advice:").expect("advice position");
         let error_pos = trimmed.rfind("error:").expect("error position");
         assert!(advice_pos < error_pos, "{trimmed}");
 
         let full = strip_ansi_escapes::strip_str(
-            render_build_failure_with_capabilities(&failure, true, test_capabilities())
-                .expect("render full"),
+            render_test_build_failure(&failure, true).expect("render full"),
         );
         let advice_pos = full.find("advice:").expect("advice position");
         let error_pos = full.rfind("error:").expect("error position");
@@ -953,7 +985,7 @@ mod tests {
         let start = source.find("fn compile").expect("compile start");
         let end = source.rfind(")").expect("compile end") + 1;
 
-        let rendered = render_build_failure_with_capabilities(
+        let rendered = render_test_build_failure(
             &BuildFailure {
                 message: "build command inputs not found".to_string(),
                 sources: vec![BuildDiagnosticSource {
@@ -985,7 +1017,6 @@ mod tests {
                 }],
             },
             false,
-            test_capabilities(),
         )
         .expect("render");
         let plain = strip_ansi_escapes::strip_str(&strip_osc8_hyperlinks(&rendered));
@@ -1004,7 +1035,7 @@ mod tests {
     fn terminal_width_prefers_columns_env_var() {
         let _env = ENV_LOCK.lock().expect("env lock");
         with_env_var("COLUMNS", Some("123"), || {
-            assert_eq!(terminal_width(), 123);
+            assert_eq!(detect_terminal_width(false), 123);
         });
     }
 
@@ -1012,18 +1043,131 @@ mod tests {
     fn detected_terminal_capabilities_respect_env() {
         let _env = ENV_LOCK.lock().expect("env lock");
         with_env_var("NO_COLOR", None, || {
-            with_env_var("TERM", Some("xterm-256color"), || {
-                with_env_var("COLORTERM", Some("truecolor"), || {
-                    with_env_var("WT_SESSION", Some("1"), || {
-                        assert_eq!(detected_color_level(true), ColorLevel::Rgb24);
-                        assert_eq!(detected_hyperlink_mode(true), HyperlinkMode::Osc8);
+            with_env_var("NO_HYPERLINK", None, || {
+                with_env_var("TERM", Some("xterm-256color"), || {
+                    with_env_var("COLORTERM", Some("truecolor"), || {
+                        with_env_var("WT_SESSION", Some("1"), || {
+                            assert_eq!(detect_color_level(true), ColorLevel::Rgb24);
+                            assert_eq!(detect_hyperlink_mode(true), HyperlinkMode::Osc8);
+                        })
                     })
                 })
             })
         });
 
         with_env_var("NO_COLOR", Some("1"), || {
-            assert_eq!(detected_color_level(true), ColorLevel::None);
+            assert_eq!(detect_color_level(true), ColorLevel::None);
         });
+
+        with_env_var("NO_HYPERLINK", Some("1"), || {
+            assert_eq!(detect_hyperlink_mode(true), HyperlinkMode::None);
+        });
+    }
+
+    #[test]
+    fn render_build_failure_keeps_grouped_compile_branches_visible() {
+        let _color = ColorOverrideGuard::always_ansi();
+        let source = indoc::indoc! {r#"
+            fn compile(file: Path) -> Tree (
+              cexec [
+                cc,
+                @(src/{file}),
+              ]
+            )
+
+            fn build() -> Tree (
+              let liblua = archive(objects);
+              let lua_exe = link(Tree [compile @lua.c, liblua]);
+              Tree {
+                @bin/lua: lua_exe.file(@bin/lua).executable(),
+                @lib/liblua.a: liblua.file(@liblua.a),
+              }
+            )
+        "#};
+        let source_id = "build.vx";
+        let compile_start = source.find("compile(file: Path)").expect("compile");
+        let objects_start = source.find("archive(objects)").expect("objects");
+        let lua_exe_start = source
+            .find("link(Tree [compile @lua.c, liblua])")
+            .expect("lua_exe");
+
+        let rendered = render_test_build_failure(
+            &BuildFailure {
+                message: "build command inputs not found".to_string(),
+                sources: vec![BuildDiagnosticSource {
+                    source_id: source_id.to_string(),
+                    language: Some("vixen".to_string()),
+                    text: source.to_string(),
+                }],
+                reports: vec![
+                    BuildDiagnosticReport {
+                        severity: BuildDiagnosticSeverity::Advice,
+                        message: "required by `objects`".to_string(),
+                        primary_span: BuildDiagnosticSpan {
+                            source_id: source_id.to_string(),
+                            start: objects_start as u32,
+                            end: (objects_start + "archive(objects)".len()) as u32,
+                        },
+                        labels: vec![],
+                        notes: Vec::new(),
+                    },
+                    BuildDiagnosticReport {
+                        severity: BuildDiagnosticSeverity::Advice,
+                        message: "required by `lua_exe`".to_string(),
+                        primary_span: BuildDiagnosticSpan {
+                            source_id: source_id.to_string(),
+                            start: lua_exe_start as u32,
+                            end: (lua_exe_start + "link(Tree [compile @lua.c, liblua])".len())
+                                as u32,
+                        },
+                        labels: vec![],
+                        notes: Vec::new(),
+                    },
+                    BuildDiagnosticReport {
+                        severity: BuildDiagnosticSeverity::Error,
+                        message: "build command inputs not found".to_string(),
+                        primary_span: BuildDiagnosticSpan {
+                            source_id: source_id.to_string(),
+                            start: compile_start as u32,
+                            end: (compile_start + "compile(file: Path)".len()) as u32,
+                        },
+                        labels: vec![BuildDiagnosticLabel {
+                            span: BuildDiagnosticSpan {
+                                source_id: source_id.to_string(),
+                                start: compile_start as u32,
+                                end: (compile_start + "compile(file: Path)".len()) as u32,
+                            },
+                            kind: BuildDiagnosticLabelKind::Primary,
+                            message: Some(
+                                "this source site produced input paths that were not present in the sandbox"
+                                    .to_string(),
+                            ),
+                        }],
+                        notes: vec![
+                            "2 commands failed with the same missing-input pattern".to_string(),
+                            "missing process inputs: src/lapi.c, src/lua.c".to_string(),
+                            "similar sandbox paths: src/src/lapi.c, src/src/lua.c".to_string(),
+                            "workspace root: /workspace".to_string(),
+                        ],
+                    },
+                ],
+            },
+            false,
+        )
+        .expect("render");
+        let plain = strip_ansi_escapes::strip_str(strip_osc8_hyperlinks(&rendered));
+
+        println!("{rendered}");
+        assert!(plain.contains("required by `objects`"), "{rendered}");
+        assert!(plain.contains("required by `lua_exe`"), "{rendered}");
+        assert!(
+            plain.contains("build command inputs not found"),
+            "{rendered}"
+        );
+        assert!(plain.contains("compile(file: Path)"), "{rendered}");
+        assert!(
+            plain.contains("missing process inputs: src/lapi.c, src/lua.c"),
+            "{rendered}"
+        );
     }
 }
