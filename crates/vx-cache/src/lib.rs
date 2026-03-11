@@ -471,9 +471,10 @@ mod tests {
                         stmts: vec![TransportStmt::Expr(TransportExpr::LitInt(1))],
                     },
                 }],
+                top_level: TransportBlock { stmts: vec![] },
             },
             observer: None,
-            verifier: None,
+            verification_obligations: vec![],
         };
         let second_eval = RunEvalPayload {
             module: TransportModule {
@@ -484,9 +485,10 @@ mod tests {
                         stmts: vec![TransportStmt::Expr(TransportExpr::LitInt(2))],
                     },
                 }],
+                top_level: TransportBlock { stmts: vec![] },
             },
             observer: None,
-            verifier: None,
+            verification_obligations: vec![],
         };
 
         let first_request = RunRequest {
