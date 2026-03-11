@@ -1809,6 +1809,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "margin"
+version = "0.1.0"
+dependencies = [
+ "facet",
+ "unicode-width",
+]
+
+[[package]]
+name = "margin-term"
+version = "0.1.0"
+dependencies = [
+ "margin",
+ "unicode-width",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

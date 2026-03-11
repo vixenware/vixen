@@ -22,6 +22,8 @@ vx-manifest = { path = "crates/vx-manifest" }
 vx-project = { path = "crates/vx-project" }
 vxd-proto = { path = "crates/vxd-proto" }
 vx-report = { path = "crates/vx-report" }
+margin = { path = "crates/margin" }
+margin-term = { path = "crates/margin-term" }
 vx-plan = { path = "crates/vx-plan" }
 vx-io = { path = "crates/vx-io" }
 vx-tarball = { path = "crates/vx-tarball" }
