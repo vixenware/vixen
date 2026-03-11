@@ -2555,7 +2555,7 @@ fn exec_verification_failures_poison_locally() {
     fs::write(&input_path, "toolchain-v1").unwrap();
     let source = format!(
         r#"fn probe() #discover {{
-               discover (executor_class "default") ((host) => host.read {path:?})
+               discover(executor_class("default"), (host) => host.read({path:?}))
              }}
 
              fn observe(process: Process, tree: Tree) {{
@@ -2644,7 +2644,7 @@ fn exec_handler_receives_verification_obligations_from_discovered_values() {
     let sink = Arc::clone(&captured);
     let source = format!(
         r#"fn probe() #discover {{
-               discover (executor_class "default") ((host) => host.read {path:?})
+               discover(executor_class("default"), (host) => host.read({path:?}))
              }}
 
              fn observe(process: Process, tree: Tree) {{
@@ -2688,12 +2688,12 @@ fn exec_rejects_raw_path_mount_values() {
     fs::write(tempdir.path().join("input.txt"), "hello from path mount").unwrap();
     let engine = engine(
         r#"fn observe(process: Process, tree: Tree) {
-               Tree.empty!
+               Tree.empty()
              }
 
              fn build(workspace: Path) {
                exec ["/bin/true"] where {
-                 mounts: { "src": workspace },
+                 mounts: { @src: workspace },
                  observer: observe,
                }
              }"#,
@@ -2732,10 +2732,10 @@ fn discover_records_host_obligations_locally() {
     let tool_str = tool_path.to_string_lossy().to_string();
     let source = format!(
         r#"fn probe() #discover {{
-               discover (executor_class "default") ((host) => {{
-                 host.read {path:?};
-                 host.hash {path:?};
-                 host.which {path:?}
+               discover(executor_class("default"), (host) => {{
+                 host.read({path:?});
+                 host.hash({path:?});
+                 host.which({path:?})
                }})
              }}"#,
         path = tool_path.to_string_lossy(),
@@ -2784,15 +2784,15 @@ fn host_which_poisons_by_default_and_fallible_calls_return_options() {
     let missing = tempdir.path().join("missing.sh");
     let source = format!(
         r##"fn found() #discover {{
-               discover (executor_class "default") ((host) => host.which? {tool_path:?})
+               discover(executor_class("default"), (host) => host.which({tool_path:?})?)
              }}
 
              fn missing() #discover {{
-               discover (executor_class "default") ((host) => host.which {missing:?})
+               discover(executor_class("default"), (host) => host.which({missing:?}))
              }}
 
              fn missing_fallible() #discover {{
-               discover (executor_class "default") ((host) => host.which? {missing:?})
+               discover(executor_class("default"), (host) => host.which({missing:?})?)
              }}"##,
         tool_path = tool_path.to_string_lossy(),
         missing = missing.to_string_lossy(),
