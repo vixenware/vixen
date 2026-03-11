@@ -9,11 +9,13 @@ fn sample_diagnostics() -> Diagnostics {
             Source {
                 id: SourceId("main".to_string()),
                 name: "src/main.vx".to_string(),
+                hyperlink: None,
                 text: "let number = 1\nnumber + missing\n".to_string(),
             },
             Source {
                 id: SourceId("lib".to_string()),
                 name: "src/lib.vx".to_string(),
+                hyperlink: None,
                 text: "fn helper() {}\n".to_string(),
             },
         ],
@@ -114,6 +116,7 @@ fn plan_keeps_zero_width_and_multiline_segments_intact() {
         sources: vec![Source {
             id: SourceId("main".to_string()),
             name: "src/main.vx".to_string(),
+            hyperlink: None,
             text: "alpha\nbeta\ngamma\n".to_string(),
         }],
         reports: vec![Report {
@@ -172,6 +175,7 @@ fn plan_merges_nearby_windows_and_assigns_explicit_geometry_and_placement() {
         sources: vec![Source {
             id: SourceId("main".to_string()),
             name: "src/main.vx".to_string(),
+            hyperlink: None,
             text: "012345678901234567890123456789\n".to_string(),
         }],
         reports: vec![Report {
@@ -274,6 +278,7 @@ fn plan_coalesces_annotations_and_respects_priority_lattice() {
         sources: vec![Source {
             id: SourceId("main".to_string()),
             name: "src/main.vx".to_string(),
+            hyperlink: None,
             text: "Cafe\u{301} syntax zone tail\n".to_string(),
         }],
         reports: vec![Report {

@@ -44,10 +44,17 @@ pub enum ColorLevel {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HyperlinkMode {
+    None,
+    Osc8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalCapabilities {
     pub width: usize,
     pub glyph_mode: GlyphMode,
     pub color_level: ColorLevel,
+    pub hyperlink_mode: HyperlinkMode,
     pub tab_width: usize,
 }
 
@@ -98,6 +105,7 @@ impl Default for TerminalCapabilities {
             width: 80,
             glyph_mode: GlyphMode::Unicode,
             color_level: ColorLevel::None,
+            hyperlink_mode: HyperlinkMode::None,
             tab_width: 4,
         }
     }
@@ -280,11 +288,16 @@ fn render_window(
     theme: Theme,
 ) {
     let glyphs = glyphs(capabilities.glyph_mode);
+    let source_name = hyperlink_text(
+        window.source_name.as_str(),
+        window.source_hyperlink.as_deref(),
+        capabilities.hyperlink_mode,
+    );
     let _ = writeln!(
         output,
         "{} {}",
         colorize(glyphs.source, theme.connector, capabilities.color_level),
-        window.source_name
+        source_name
     );
     if window.omitted_before {
         let _ = writeln!(
@@ -416,6 +429,15 @@ fn flush_styled_run(
         None => output.push_str(run),
     }
     run.clear();
+}
+
+fn hyperlink_text(text: &str, target: Option<&str>, mode: HyperlinkMode) -> String {
+    match (mode, target) {
+        (HyperlinkMode::Osc8, Some(target)) => {
+            format!("\u{1b}]8;;{target}\u{1b}\\{text}\u{1b}]8;;\u{1b}\\")
+        }
+        _ => text.to_string(),
+    }
 }
 
 fn render_note(output: &mut String, note: &Note, capabilities: TerminalCapabilities, theme: Theme) {

@@ -9,12 +9,15 @@ use arborium::advanced::{CompiledGrammar, GrammarConfig};
 use arborium::{GrammarStore, Highlighter};
 use arborium_highlight::spans_to_themed;
 use arborium_theme::{HIGHLIGHTS, ThemeSlot, capture_to_slot};
+use camino::Utf8Path;
 use eyre::{Result, eyre};
 use margin::{
     Annotation, AnnotationRole, Diagnostics, Note, NoteKind, Report, Severity, Source, SourceId,
     Span, SyntaxClass,
 };
-use margin_term::{ColorLevel, GlyphMode, TerminalCapabilities, Theme as TerminalTheme};
+use margin_term::{
+    ColorLevel, GlyphMode, HyperlinkMode, TerminalCapabilities, Theme as TerminalTheme,
+};
 use vxd_proto::{
     BuildDiagnosticLabelKind, BuildDiagnosticReport, BuildDiagnosticSeverity,
     BuildDiagnosticSource, BuildDiagnosticSpan, BuildFailure,
@@ -32,6 +35,7 @@ pub(crate) fn render_build_failure(failure: &BuildFailure, full_stack: bool) -> 
         width: 80,
         glyph_mode: GlyphMode::Unicode,
         color_level: ColorLevel::Rgb24,
+        hyperlink_mode: HyperlinkMode::Osc8,
         tab_width: 4,
     };
     let plan = margin_term::layout(&diagnostics, capabilities)?;
@@ -42,13 +46,17 @@ pub(crate) fn render_build_failure(failure: &BuildFailure, full_stack: bool) -> 
     ))
 }
 
+<<<<<<< HEAD
+    let workspace_root = workspace_root_note(failure);
 fn build_failure_to_diagnostics(failure: &BuildFailure, full_stack: bool) -> Result<Diagnostics> {
+    let workspace_root = workspace_root_note(failure);
     let sources = failure
         .sources
         .iter()
         .map(|source| Source {
             id: SourceId(source.source_id.clone()),
             name: source.source_id.clone(),
+            hyperlink: source_hyperlink(source.source_id.as_str(), workspace_root),
             text: source.text.clone(),
         })
         .collect::<Vec<_>>();
@@ -141,6 +149,39 @@ fn visible_reports<'a>(
     }
 
     visible
+}
+
+fn workspace_root_note(failure: &BuildFailure) -> Option<&str> {
+    failure
+        .reports
+        .iter()
+        .flat_map(|report| report.notes.iter())
+        .find_map(|note| note.strip_prefix("workspace root: "))
+}
+
+fn source_hyperlink(source_id: &str, workspace_root: Option<&str>) -> Option<String> {
+    let path = if Utf8Path::new(source_id).is_absolute() {
+        source_id.to_string()
+    } else {
+        let root = workspace_root?;
+        Utf8Path::new(root).join(source_id).into_string()
+    };
+
+    Some(file_uri(path.as_str()))
+}
+
+fn file_uri(path: &str) -> String {
+    let mut uri = String::from("file://");
+    for byte in path.bytes() {
+        let ch = byte as char;
+        if ch.is_ascii_alphanumeric() || matches!(ch, '/' | '-' | '_' | '.' | '~') {
+            uri.push(ch);
+        } else {
+            uri.push('%');
+            uri.push_str(format!("{byte:02X}").as_str());
+        }
+    }
+    uri
 }
 
 fn build_report(
@@ -439,6 +480,36 @@ mod tests {
         }
     }
 
+    fn strip_osc8_hyperlinks(text: &str) -> String {
+        let mut stripped = String::with_capacity(text.len());
+        let mut remainder = text;
+        let open = "\u{1b}]8;;";
+        let st = "\u{1b}\\";
+
+        while let Some(start) = remainder.find(open) {
+            stripped.push_str(&remainder[..start]);
+            let after_open = &remainder[start + open.len()..];
+            let Some(uri_end) = after_open.find(st) else {
+                stripped.push_str(&remainder[start..]);
+                return stripped;
+            };
+            let visible = &after_open[uri_end + st.len()..];
+            let Some(close) = visible.find(open) else {
+                stripped.push_str(visible);
+                return stripped;
+            };
+            stripped.push_str(&visible[..close]);
+            let after_close = &visible[close + open.len()..];
+            let Some(close_end) = after_close.find(st) else {
+                return stripped;
+            };
+            remainder = &after_close[close_end + st.len()..];
+        }
+
+        stripped.push_str(remainder);
+        stripped
+    }
+
     // d[impl test.vixen-acceptance-fixtures]
     // d[verify product.compiler-grade]
     // d[verify integration.vx-adapter]
@@ -494,10 +565,15 @@ mod tests {
             false,
         )
         .expect("render");
-        let plain = strip_ansi_escapes::strip_str(&rendered);
+        let visible = strip_osc8_hyperlinks(&rendered);
+        let plain = strip_ansi_escapes::strip_str(&visible);
 
         println!("{rendered}");
         assert!(rendered.contains("build input not found"), "{rendered}");
+        assert!(
+            rendered.contains("\u{1b}]8;;file:///workspace/build.vx\u{1b}\\"),
+            "{rendered}"
+        );
         assert!(
             plain.contains("this path does not exist in the current"),
             "{rendered}"
@@ -507,7 +583,7 @@ mod tests {
             plain.contains("resolved path: /workspace/zoo/lua-src"),
             "{rendered}"
         );
-        assert_eq!(rendered.matches("build.vx").count(), 1, "{rendered}");
+        assert_eq!(plain.matches("build.vx").count(), 1, "{rendered}");
         assert!(rendered.contains("\u{1b}["), "{rendered:?}");
     }
 

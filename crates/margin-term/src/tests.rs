@@ -4,13 +4,17 @@ use margin::{
     Span, SyntaxClass,
 };
 
-use super::{ColorLevel, GlyphMode, TerminalCapabilities, Theme, render, render_plan_with_theme};
+use super::{
+    ColorLevel, GlyphMode, HyperlinkMode, TerminalCapabilities, Theme, render,
+    render_plan_with_theme,
+};
 
 fn sample_diagnostics() -> Diagnostics {
     Diagnostics {
         sources: vec![Source {
             id: SourceId("main".to_string()),
             name: "src/main.vx".to_string(),
+            hyperlink: Some("file:///workspace/src/main.vx".to_string()),
             text: "let number = 1\nnumber + missing\n".to_string(),
         }],
         reports: vec![Report {
@@ -62,6 +66,7 @@ fn render_supports_plaintext_ascii_output() {
             width: 48,
             glyph_mode: GlyphMode::Ascii,
             color_level: ColorLevel::None,
+            hyperlink_mode: HyperlinkMode::None,
             tab_width: 4,
         },
     )
@@ -78,6 +83,30 @@ fn render_supports_plaintext_ascii_output() {
     assert!(!rendered.contains("\u{1b}["));
 }
 
+// d[verify term.explicit-capabilities]
+// d[verify api.renderer-options]
+#[test]
+fn render_can_hyperlink_source_headers() {
+    let rendered = render(
+        &sample_diagnostics(),
+        TerminalCapabilities {
+            width: 48,
+            glyph_mode: GlyphMode::Unicode,
+            color_level: ColorLevel::None,
+            hyperlink_mode: HyperlinkMode::Osc8,
+            tab_width: 4,
+        },
+    )
+    .unwrap();
+
+    println!("{rendered}");
+    assert!(
+        rendered.contains("\u{1b}]8;;file:///workspace/src/main.vx\u{1b}\\"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("src/main.vx"), "{rendered}");
+}
+
 // d[verify label.multiline-message-alignment]
 #[test]
 fn render_below_span_message_stays_anchored_to_the_span() {
@@ -87,6 +116,7 @@ fn render_below_span_message_stays_anchored_to_the_span() {
             width: 28,
             glyph_mode: GlyphMode::Ascii,
             color_level: ColorLevel::None,
+            hyperlink_mode: HyperlinkMode::None,
             tab_width: 4,
         },
     )
@@ -114,6 +144,7 @@ fn render_changes_with_width_and_capabilities() {
             width: 28,
             glyph_mode: GlyphMode::Unicode,
             color_level: ColorLevel::Ansi16,
+            hyperlink_mode: HyperlinkMode::None,
             tab_width: 4,
         },
     )
@@ -124,6 +155,7 @@ fn render_changes_with_width_and_capabilities() {
             width: 72,
             glyph_mode: GlyphMode::Unicode,
             color_level: ColorLevel::Ansi16,
+            hyperlink_mode: HyperlinkMode::None,
             tab_width: 4,
         },
     )
@@ -150,6 +182,7 @@ fn render_can_use_rgb24_colors_from_arborium_theme() {
             width: 48,
             glyph_mode: GlyphMode::Unicode,
             color_level: ColorLevel::Rgb24,
+            hyperlink_mode: HyperlinkMode::None,
             tab_width: 4,
         },
     )
@@ -160,6 +193,7 @@ fn render_can_use_rgb24_colors_from_arborium_theme() {
             width: 48,
             glyph_mode: GlyphMode::Unicode,
             color_level: ColorLevel::Rgb24,
+            hyperlink_mode: HyperlinkMode::None,
             tab_width: 4,
         },
         Theme::from_arborium(&builtin::catppuccin_mocha()),
@@ -176,6 +210,7 @@ fn render_clips_long_lines_with_explicit_ellipsis() {
         sources: vec![Source {
             id: SourceId("main".to_string()),
             name: "src/main.vx".to_string(),
+            hyperlink: None,
             text: "012345678901234567890123456789\n".to_string(),
         }],
         reports: vec![Report {
@@ -199,6 +234,7 @@ fn render_clips_long_lines_with_explicit_ellipsis() {
             width: 20,
             glyph_mode: GlyphMode::Unicode,
             color_level: ColorLevel::None,
+            hyperlink_mode: HyperlinkMode::None,
             tab_width: 4,
         },
     )
@@ -218,6 +254,7 @@ fn render_uses_balanced_ansi_sequences_and_role_styles() {
             width: 40,
             glyph_mode: GlyphMode::Unicode,
             color_level: ColorLevel::Ansi16,
+            hyperlink_mode: HyperlinkMode::None,
             tab_width: 4,
         },
     )
@@ -228,6 +265,7 @@ fn render_uses_balanced_ansi_sequences_and_role_styles() {
             width: 40,
             glyph_mode: GlyphMode::Unicode,
             color_level: ColorLevel::Ansi16,
+            hyperlink_mode: HyperlinkMode::None,
             tab_width: 4,
         },
         Theme::default(),
@@ -253,6 +291,7 @@ fn render_expands_tabs_and_keeps_unicode_text_stable() {
         sources: vec![Source {
             id: SourceId("main".to_string()),
             name: "src/main.vx".to_string(),
+            hyperlink: None,
             text: "a\tCafe\u{301}\n".to_string(),
         }],
         reports: vec![Report {
@@ -279,6 +318,7 @@ fn render_expands_tabs_and_keeps_unicode_text_stable() {
             width: 32,
             glyph_mode: GlyphMode::Unicode,
             color_level: ColorLevel::None,
+            hyperlink_mode: HyperlinkMode::None,
             tab_width: 4,
         },
     )

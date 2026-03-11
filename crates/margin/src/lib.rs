@@ -92,6 +92,7 @@ impl From<&str> for SourceId {
 pub struct Source {
     pub id: SourceId,
     pub name: String,
+    pub hyperlink: Option<String>,
     pub text: String,
 }
 
@@ -284,6 +285,7 @@ pub struct PlannedReport {
 pub struct SourceWindow {
     pub source_id: SourceId,
     pub source_name: String,
+    pub source_hyperlink: Option<String>,
     pub geometry: GutterGeometry,
     pub first_line_number: usize,
     pub last_line_number: usize,
@@ -520,6 +522,7 @@ fn build_windows(
             Ok(SourceWindow {
                 source_id: source.id.clone(),
                 source_name: source.name.clone(),
+                source_hyperlink: source.hyperlink.clone(),
                 geometry,
                 first_line_number: line_start,
                 last_line_number,
