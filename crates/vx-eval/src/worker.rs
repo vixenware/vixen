@@ -759,7 +759,7 @@ impl Engine {
             ),
             NodeJob::Invoke { function, args } => self.invoke_function(function, args.clone()),
             NodeJob::Field { receiver, field } => {
-                let receiver = self.force_value_shallow(receiver.clone())?;
+                let receiver = self.force_value(receiver.clone())?;
                 self.select_field(&receiver, field)
             }
             NodeJob::Fail { message } => Err(self.user_fail(message.clone())?),

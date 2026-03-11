@@ -6,10 +6,11 @@
 use camino::Utf8PathBuf;
 use jiff::Zoned;
 use moire::task::FutureExt;
+use std::collections::BTreeSet;
 use std::time::Instant;
 use tokio::task::spawn_blocking;
 use tracing::{debug, info};
-use vx_eval::PathValue;
+use vx_eval::{HostObservation, PathValue};
 use vx_runner_proto::{
     CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, DiscoverRequest,
     DiscoverResult, RunArg, RunFailureKind, RunFileMount, RunOutput, RunRequest, RunResult,
@@ -65,6 +66,45 @@ fn outputs_stay_within_writable_roots(outputs: &[RunOutput], writable_roots: &[S
             .iter()
             .any(|root| covers_path(root, &out.path))
     })
+}
+
+fn parent_dir(path: &str) -> Option<&str> {
+    let (parent, _) = path.rsplit_once('/')?;
+    (!parent.is_empty()).then_some(parent)
+}
+
+fn parent_dirs_for_request(request: &RunRequest) -> Vec<String> {
+    let mut dirs = BTreeSet::new();
+    let mut record = |path: &str| {
+        if !path.starts_with("${VX_TOOLCHAIN}/")
+            && let Some(parent) = parent_dir(path)
+            && is_relative_vfs_path(parent)
+        {
+            dirs.insert(parent.to_string());
+        }
+    };
+
+    if let Some(RunArg::Path(path)) = &request.program {
+        record(path);
+    }
+    for arg in &request.args {
+        if let RunArg::Path(path) = arg {
+            record(path);
+        }
+    }
+    for (_, value) in &request.env {
+        if let RunArg::Path(path) = value {
+            record(path);
+        }
+    }
+    if let Some(cwd) = &request.cwd {
+        record(cwd);
+    }
+    for output in &request.outputs {
+        record(&output.path);
+    }
+
+    dirs.into_iter().collect()
 }
 
 fn uses_toolchain_placeholder(value: &RunArg) -> bool {
@@ -141,6 +181,7 @@ pub struct ActionContext {
     pub mount_base: Utf8PathBuf,
     pub prefix_path: Utf8PathBuf,
     pub out_path: Utf8PathBuf,
+    pub allowed_host_exec_paths: Vec<Utf8PathBuf>,
 }
 
 impl ActionContext {
@@ -218,7 +259,27 @@ impl RunnerService {
             mount_base,
             prefix_path,
             out_path,
+            allowed_host_exec_paths: Vec::new(),
         }
+    }
+
+    fn allowed_host_exec_paths(request: &RunRequest) -> Vec<Utf8PathBuf> {
+        let mut paths = BTreeSet::new();
+        let Some(eval) = &request.eval else {
+            return Vec::new();
+        };
+        for obligation in &eval.verification_obligations {
+            if let HostObservation::Which {
+                expected_path: Some(path),
+                ..
+            } = obligation
+                && std::path::Path::new(path).is_absolute()
+                && let Ok(path) = Utf8PathBuf::from_path_buf(path.into())
+            {
+                paths.insert(path);
+            }
+        }
+        paths.into_iter().collect()
     }
 
     /// Compile a Rust crate using VFS-based execution
@@ -1259,10 +1320,11 @@ impl RunnerService {
     ) -> RunResult {
         let start = Instant::now();
 
-        let action = self
+        let mut action = self
             .create_action_context()
             .named("runner.run_vfs.create_action_context")
             .await;
+        action.allowed_host_exec_paths = Self::allowed_host_exec_paths(&request);
 
         let needs_toolchain = request.program.is_none()
             || request
@@ -1502,6 +1564,9 @@ impl RunnerService {
         // r[impl exec.writable]
         for root in &request.writable_roots {
             self.vfs.add_dir_to_prefix(&action.prefix_id, root).await;
+        }
+        for dir in parent_dirs_for_request(&request) {
+            self.vfs.add_dir_to_prefix(&action.prefix_id, &dir).await;
         }
 
         if !outputs_stay_within_writable_roots(&request.outputs, &request.writable_roots) {
@@ -1975,5 +2040,43 @@ mod tests {
             &uncovered,
             &writable_roots,
         ));
+    }
+
+    #[test]
+    fn parent_dirs_are_derived_from_path_inputs() {
+        let request = RunRequest {
+            toolchain_manifest: Blake3Hash([0; 32]),
+            program_rel: String::new(),
+            program: Some(RunArg::literal("cc")),
+            args: vec![
+                RunArg::literal("-c"),
+                RunArg::path("src/lua.c"),
+                RunArg::literal("-o"),
+                RunArg::path("out/obj/lua.c.o"),
+            ],
+            tree_mounts: Vec::new(),
+            file_mounts: Vec::new(),
+            outputs: vec![RunOutput {
+                logical: "object".to_string(),
+                path: "out/obj/lua.c.o".to_string(),
+                executable: false,
+            }],
+            writable_roots: vec!["out".to_string()],
+            cwd: Some("build/tmp".to_string()),
+            env: vec![("LUA_OUTPUT".to_string(), RunArg::path("gen/config.h"))],
+            clear_env: false,
+            eval: None,
+            macos_commandlinetools_version: None,
+        };
+
+        assert_eq!(
+            parent_dirs_for_request(&request),
+            vec![
+                "build".to_string(),
+                "gen".to_string(),
+                "out/obj".to_string(),
+                "src".to_string(),
+            ],
+        );
     }
 }

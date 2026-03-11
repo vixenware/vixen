@@ -18,18 +18,20 @@ use moire::task::FutureExt;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
 use std::fs;
+use std::future::Future;
 use std::io::ErrorKind;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::task::block_in_place;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use vx_eval::{
-    BlobValue, DemandChain, DiscoverRequest as EvalDiscoverRequest, Engine, ExecArgValue,
-    ExecMount, ExecRequest, PathValue, PoisonError, PoisonKind, TreeValue, Value,
-    lower_source_file,
+    BlobValue, DemandChain, DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine,
+    ExecArgValue, ExecMount, ExecRequest, MapValue, PathValue, PoisonError, PoisonKind,
+    StructValue, TreeValue, Value, lower_source_file,
 };
 use vx_io::spawn::ServiceHandle;
 use vx_parser::SourceFile;
@@ -914,11 +916,13 @@ async fn run_build_vx_exec_via_runner(
             "runner did not return an observer value",
         )
     })?;
-    Value::try_from(observer_value)
-        .map_err(|error| exec_bridge_poison(PoisonKind::UserFail, error.to_string()))
+    let value = Value::try_from(observer_value)
+        .map_err(|error| exec_bridge_poison(PoisonKind::UserFail, error.to_string()))?;
+    hydrate_exec_value_from_store(store, value).await
 }
 
 async fn run_build_vx_discover_via_runner(
+    store: &StoreClient,
     exec: &RunnerClient,
     request: EvalDiscoverRequest,
 ) -> std::result::Result<Value, PoisonError> {
@@ -931,12 +935,133 @@ async fn run_build_vx_discover_via_runner(
         .await
         .map_err(|error| exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}")))?;
 
-    Value::try_from(result.value)
-        .map_err(|error| exec_bridge_poison(PoisonKind::UserFail, error.to_string()))
+    let value = Value::try_from(result.value)
+        .map_err(|error| exec_bridge_poison(PoisonKind::UserFail, error.to_string()))?;
+    hydrate_exec_value_from_store(store, value).await
 }
 
 fn exec_bridge_poison(kind: PoisonKind, message: impl Into<String>) -> PoisonError {
     PoisonError::new(kind, message, DemandChain::new())
+}
+
+fn hydrate_exec_value_from_store<'a>(
+    store: &'a StoreClient,
+    value: Value,
+) -> Pin<Box<dyn Future<Output = std::result::Result<Value, PoisonError>> + 'a>> {
+    Box::pin(async move {
+        match value {
+            Value::Blob(BlobValue::Store(blob_ref)) => {
+                let bytes = fetch_store_blob_bytes(store, &blob_ref)
+                    .await
+                    .map_err(|error| exec_bridge_poison(PoisonKind::Internal, error.to_string()))?;
+                Ok(Value::Blob(BlobValue::Inline(Arc::from(bytes))))
+            }
+            Value::Tree(TreeValue::Store(root)) => {
+                let directory = load_store_directory(store, root)
+                    .await
+                    .map_err(|error| exec_bridge_poison(PoisonKind::Internal, error.to_string()))?;
+                let mut entries = Vec::with_capacity(directory.entries.len());
+                for entry in directory.entries {
+                    let value = match entry.kind {
+                        DirEntryKind::SmallFile {
+                            content_hash, size, ..
+                        } => {
+                            let blob_ref = BlobRef::Small {
+                                chunk: ChunkHash(content_hash.0),
+                                size,
+                            };
+                            hydrate_exec_value_from_store(
+                                store,
+                                Value::Blob(BlobValue::Store(blob_ref)),
+                            )
+                            .await?
+                        }
+                        DirEntryKind::LargeFile {
+                            blob_node,
+                            content_hash,
+                            size,
+                            ..
+                        } => {
+                            let blob_ref = BlobRef::Large {
+                                blob_node,
+                                content_hash,
+                                size,
+                            };
+                            hydrate_exec_value_from_store(
+                                store,
+                                Value::Blob(BlobValue::Store(blob_ref)),
+                            )
+                            .await?
+                        }
+                        DirEntryKind::Dir { hash, .. } => {
+                            hydrate_exec_value_from_store(
+                                store,
+                                Value::Tree(TreeValue::Store(hash)),
+                            )
+                            .await?
+                        }
+                        DirEntryKind::Symlink { target } => {
+                            return Err(exec_bridge_poison(
+                                PoisonKind::Internal,
+                                format!(
+                                    "store-backed symlink values are not supported in the build.vx evaluator bridge yet (target: {target})"
+                                ),
+                            ));
+                        }
+                    };
+                    entries.push((Arc::from(entry.name), value));
+                }
+                Ok(Value::Tree(TreeValue::Inline(Arc::from(entries))))
+            }
+            Value::Discovered(discovered) => {
+                let inner = hydrate_exec_value_from_store(store, *discovered.value).await?;
+                Ok(Value::Discovered(DiscoveredValue {
+                    value: Box::new(inner),
+                    obligations: discovered.obligations,
+                }))
+            }
+            Value::Tuple(values) => {
+                let mut hydrated = Vec::with_capacity(values.len());
+                for value in values.iter() {
+                    hydrated.push(hydrate_exec_value_from_store(store, value.clone()).await?);
+                }
+                Ok(Value::Tuple(Arc::from(hydrated)))
+            }
+            Value::Array(values) => {
+                let mut hydrated = Vec::with_capacity(values.len());
+                for value in values.iter() {
+                    hydrated.push(hydrate_exec_value_from_store(store, value.clone()).await?);
+                }
+                Ok(Value::Array(Arc::from(hydrated)))
+            }
+            Value::Map(map) => {
+                let mut entries = Vec::with_capacity(map.entries.len());
+                for (key, value) in map.entries.iter() {
+                    entries.push((
+                        hydrate_exec_value_from_store(store, key.clone()).await?,
+                        hydrate_exec_value_from_store(store, value.clone()).await?,
+                    ));
+                }
+                Ok(Value::Map(MapValue {
+                    entries: Arc::from(entries),
+                }))
+            }
+            Value::Struct(struct_value) => {
+                let mut fields = Vec::with_capacity(struct_value.fields.len());
+                for (name, value) in struct_value.fields.iter() {
+                    fields.push((
+                        name.clone(),
+                        hydrate_exec_value_from_store(store, value.clone()).await?,
+                    ));
+                }
+                Ok(Value::Struct(StructValue {
+                    type_name: struct_value.type_name,
+                    fields: Arc::from(fields),
+                }))
+            }
+            other => Ok(other),
+        }
+    })
 }
 
 fn build_rule_plan_from_crate_graph(graph: &CrateGraph) -> RulePlan {
@@ -1466,6 +1591,7 @@ impl VxdService {
                 let store = Arc::clone(&self.store);
                 let exec = Arc::clone(&self.exec);
                 let runtime = Handle::current();
+                let discover_store = Arc::clone(&self.store);
                 let discover_exec = Arc::clone(&self.exec);
                 let discover_runtime = runtime.clone();
                 let engine = Engine::from_module(&module)
@@ -1478,10 +1604,12 @@ impl VxdService {
                         })
                     }))
                     .with_discover_handler(Arc::new(move |request| {
+                        let store = Arc::clone(&discover_store);
                         let exec = Arc::clone(&discover_exec);
                         let runtime = discover_runtime.clone();
                         block_in_place(|| {
-                            runtime.block_on(run_build_vx_discover_via_runner(&exec, request))
+                            runtime
+                                .block_on(run_build_vx_discover_via_runner(&store, &exec, request))
                         })
                     }));
                 let output = engine

@@ -14,6 +14,8 @@
 //!
 //! Also provides timeout enforcement and streamed output for all platforms.
 
+#[cfg(target_os = "macos")]
+use camino::Utf8Path;
 use moire::process::Command;
 use moire::task::FutureExt;
 use std::process::ExitStatus;
@@ -407,7 +409,7 @@ fn reap_process_group(_pid: u32) {}
 ///
 /// TODO: Replace system linker with hermetic Zig lld + mount system libraries in VFS
 #[cfg(target_os = "macos")]
-const SEATBELT_PROFILE: &str = r#"(version 1)
+const SEATBELT_PROFILE_BASE: &str = r#"(version 1)
 (debug deny)
 (deny default)
 (import "system.sb")
@@ -431,22 +433,67 @@ const SEATBELT_PROFILE: &str = r#"(version 1)
 (allow file-write* (subpath "/private/var/folders"))
 (deny network*)"#;
 
+#[cfg(target_os = "macos")]
+fn sbpl_literal(path: &str) -> String {
+    let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+#[cfg(target_os = "macos")]
+fn host_exec_path_variants(path: &Utf8Path) -> Vec<String> {
+    let original = path.as_str().to_string();
+    let mut variants = vec![original.clone()];
+
+    let private_tmp = original.replace("/tmp/", "/private/tmp/");
+    if private_tmp != original {
+        variants.push(private_tmp);
+    }
+
+    let private_var = original.replace("/var/", "/private/var/");
+    if private_var != original {
+        variants.push(private_var);
+    }
+
+    variants.sort();
+    variants.dedup();
+    variants
+}
+
+#[cfg(target_os = "macos")]
+fn build_seatbelt_profile(action: &ActionContext) -> String {
+    let mut profile = String::from(SEATBELT_PROFILE_BASE);
+    for path in &action.allowed_host_exec_paths {
+        for variant in host_exec_path_variants(path) {
+            profile.push('\n');
+            profile.push_str("(allow process-exec (literal ");
+            profile.push_str(&sbpl_literal(&variant));
+            profile.push_str("))");
+            profile.push('\n');
+            profile.push_str("(allow file-read* (literal ");
+            profile.push_str(&sbpl_literal(&variant));
+            profile.push_str("))");
+        }
+    }
+    profile
+}
+
 /// Create a `Command` that runs `program` under the seatbelt sandbox.
 ///
 /// On non-macOS platforms, returns `Command::new(program)` directly.
 #[cfg(target_os = "macos")]
 pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
+    let profile = build_seatbelt_profile(action);
     tracing::trace!(
         program,
         vfs_root = %action.mount_base,
         write_dir = %action.out_path,
-        profile_len = SEATBELT_PROFILE.len(),
+        profile_len = profile.len(),
         "sandboxed_command: wrapping with sandbox-exec"
     );
-    tracing::trace!(profile = %SEATBELT_PROFILE, "seatbelt profile");
+    tracing::trace!(profile = %profile, "seatbelt profile");
 
     let mut cmd = Command::new("/usr/bin/sandbox-exec");
-    cmd.arg("-p").arg(SEATBELT_PROFILE);
+    cmd.arg("-p").arg(&profile);
 
     // Pass both /tmp and /private/tmp variants since macOS may resolve either way
     let write_dir = action.out_path.to_string();
@@ -525,8 +572,10 @@ pub fn sandboxed_command(program: &str, _action: &ActionContext) -> Command {
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "macos")]
-    use super::SEATBELT_PROFILE;
+    use super::{ActionContext, SEATBELT_PROFILE_BASE, build_seatbelt_profile};
     use super::{ActionKind, run_sandboxed_command};
+    #[cfg(target_os = "macos")]
+    use camino::Utf8PathBuf;
     use moire::process::Command;
     use roam::Tx;
     use vx_store_proto::StoreProgress;
@@ -534,13 +583,29 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn seatbelt_allows_bin_execs() {
-        assert!(SEATBELT_PROFILE.contains("(allow process-exec (subpath \"/bin\"))"));
+        assert!(SEATBELT_PROFILE_BASE.contains("(allow process-exec (subpath \"/bin\"))"));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn seatbelt_allows_bin_reads() {
-        assert!(SEATBELT_PROFILE.contains("(allow file-read* (subpath \"/bin\"))"));
+        assert!(SEATBELT_PROFILE_BASE.contains("(allow file-read* (subpath \"/bin\"))"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_allows_verified_host_tool_execs() {
+        let action = ActionContext {
+            prefix_id: "build-123".into(),
+            mount_base: Utf8PathBuf::from("/tmp/vx/vfs"),
+            prefix_path: Utf8PathBuf::from("/tmp/vx/vfs/build-123"),
+            out_path: Utf8PathBuf::from("/tmp/vx/vfs/build-123/out"),
+            allowed_host_exec_paths: vec![Utf8PathBuf::from("/tmp/tools/cc")],
+        };
+        let profile = build_seatbelt_profile(&action);
+        assert!(profile.contains("(allow process-exec (literal \"/tmp/tools/cc\"))"));
+        assert!(profile.contains("(allow file-read* (literal \"/tmp/tools/cc\"))"));
+        assert!(profile.contains("(allow process-exec (literal \"/private/tmp/tools/cc\"))"));
     }
 
     #[cfg(unix)]

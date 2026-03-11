@@ -92,7 +92,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   let lua_exe = link(Tree [compile @lua.c, liblua]);
 
   Tree {
-    @bin/lua: lua_exe,
-    @lib/liblua.a: liblua,
+    @bin/lua: lua_exe.file(@bin/lua),
+    @lib/liblua.a: liblua.file(@liblua.a),
   }
 )
