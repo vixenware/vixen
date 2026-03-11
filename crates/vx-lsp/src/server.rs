@@ -42,9 +42,12 @@ impl DocumentState {
         }
     }
 
-    /// Find the definition under the cursor. Works whether the cursor is on
-    /// a definition site or on a reference that resolves to one.
-    fn definition_at(&self, offset: rowan::TextSize) -> Option<&vx_resolve::Definition> {
+    /// Find the definition under the cursor and the range that should be
+    /// treated as the origin span for editor features.
+    fn definition_with_origin_at(
+        &self,
+        offset: rowan::TextSize,
+    ) -> Option<(&vx_resolve::Definition, TextRange)> {
         // Check if cursor is on a reference
         if let Some(resolved) = self
             .resolution
@@ -52,14 +55,22 @@ impl DocumentState {
             .iter()
             .find(|r| r.ref_range.contains_inclusive(offset))
         {
-            return resolved.target.as_ref().ok();
+            return Some((resolved.target.as_ref().ok()?, resolved.ref_range));
         }
 
         // Check if cursor is on a definition site
-        self.resolution
+        let def = self
+            .resolution
             .scopes
             .all_definitions()
-            .find(|d| d.name_range.contains_inclusive(offset))
+            .find(|d| d.name_range.contains_inclusive(offset))?;
+        Some((def, def.name_range))
+    }
+
+    /// Find the definition under the cursor. Works whether the cursor is on
+    /// a definition site or on a reference that resolves to one.
+    fn definition_at(&self, offset: rowan::TextSize) -> Option<&vx_resolve::Definition> {
+        Some(self.definition_with_origin_at(offset)?.0)
     }
 
     /// Find all reference ranges that point to a given definition.
@@ -457,7 +468,7 @@ impl LanguageServer for VxLanguageServer {
             })?;
 
             // First, try definition-based hover (existing behavior)
-            if let Some(def) = state.definition_at(offset) {
+            if let Some((def, hover_range)) = state.definition_with_origin_at(offset) {
                 // Special handling for builtin functions
                 if def.kind == vx_resolve::DefKind::Builtin {
                     if let Some(sig) = vx_resolve::builtins::builtin_fn_sig(&def.name) {
@@ -497,7 +508,7 @@ impl LanguageServer for VxLanguageServer {
                                 kind: MarkupKind::Markdown,
                                 value: markdown,
                             }),
-                            range: Some(state.to_lsp_range(def.name_range)),
+                            range: Some(state.to_lsp_range(hover_range)),
                         });
                     }
                 }
@@ -584,7 +595,7 @@ impl LanguageServer for VxLanguageServer {
                         kind: MarkupKind::Markdown,
                         value: markdown,
                     }),
-                    range: Some(state.to_lsp_range(def.name_range)),
+                    range: Some(state.to_lsp_range(hover_range)),
                 });
             }
 
@@ -2278,6 +2289,7 @@ fn unwrap_paren_expr(expr: vx::Expr) -> vx::Expr {
 #[cfg(test)]
 mod tests {
     use rowan::TextSize;
+    use tower_lsp::lsp_types::Range;
     use tower_lsp::lsp_types::{InlayHintLabel, Position};
     use vx_parser::LineIndex;
 
@@ -2290,6 +2302,19 @@ mod tests {
         let line_index = LineIndex::new(text);
         let pos = line_index.position(TextSize::new(byte_offset as u32));
         Position::new(pos.line, pos.col)
+    }
+
+    fn text_range(text: &str, needle: &str, len: usize) -> Range {
+        let byte_offset = text
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing `{needle}`"));
+        let line_index = LineIndex::new(text);
+        let start = line_index.position(TextSize::new(byte_offset as u32));
+        let end = line_index.position(TextSize::new((byte_offset + len) as u32));
+        Range {
+            start: Position::new(start.line, start.col),
+            end: Position::new(end.line, end.col),
+        }
     }
 
     #[test]
@@ -2318,5 +2343,29 @@ fn demo(class: String, cc: String) {
         assert!(hints.contains(&(String::from("probe:"), hint_position(text, "(host)"))));
         assert!(hints.contains(&(String::from("args:"), hint_position(text, "[cc"))));
         assert!(hints.contains(&(String::from("label:"), hint_position(text, "\"default\""))));
+    }
+
+    #[test]
+    fn definition_with_origin_at_uses_reference_range_for_hovered_usages() {
+        let text = r#"
+fn demo() {
+  let class: String = "default";
+  discover(class);
+}
+"#;
+
+        let state = DocumentState::new(text.to_string());
+        let usage_offset = TextSize::new(text.rfind("class").unwrap() as u32);
+        let (def, origin_range) = state.definition_with_origin_at(usage_offset).unwrap();
+
+        assert_eq!(def.name, "class");
+        assert_eq!(
+            state.to_lsp_range(origin_range),
+            text_range(text, "class);", 5)
+        );
+        assert_eq!(
+            state.to_lsp_range(def.name_range),
+            text_range(text, "class:", 5)
+        );
     }
 }
