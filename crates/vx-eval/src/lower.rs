@@ -59,11 +59,6 @@ pub fn lower_source_file(source: &SourceFile) -> instr::Module {
     }
 }
 
-fn lower_fn_decl(f: &FnDecl) -> Option<instr::FnDef> {
-    let mut ctx = LowerCtx::default();
-    lower_fn_decl_with_ctx(f, &mut ctx)
-}
-
 fn lower_fn_decl_with_ctx(f: &FnDecl, ctx: &mut LowerCtx) -> Option<instr::FnDef> {
     let name = f.name()?.text().to_string();
     lower_fn_decl_named(f, &name, ctx)

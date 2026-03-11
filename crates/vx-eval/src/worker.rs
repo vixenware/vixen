@@ -3299,28 +3299,6 @@ impl Engine {
         }
     }
 
-    fn exec_path_is_covered(
-        &self,
-        path: &str,
-        mounts: &[(PathValue, Value)],
-        writable_roots: &[PathValue],
-    ) -> bool {
-        mounts
-            .iter()
-            .any(|(mount_path, _)| self.covers_path(mount_path.as_str(), path))
-            || writable_roots
-                .iter()
-                .any(|root| self.covers_path(root.as_str(), path))
-    }
-
-    fn covers_path(&self, prefix: &str, path: &str) -> bool {
-        prefix.is_empty()
-            || path == prefix
-            || path
-                .strip_prefix(prefix)
-                .is_some_and(|suffix| suffix.starts_with('/'))
-    }
-
     fn materialize_mount_value(
         &self,
         sandbox_root: &PathValue,

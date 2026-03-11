@@ -1,8 +1,6 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
@@ -35,7 +33,6 @@ pub(crate) struct IntegrationContext {
     tempdir: Option<TempDir>,
     root_dir: PathBuf,
     project_dir: PathBuf,
-    fake_bin_dir: PathBuf,
     logs_dir: PathBuf,
     path_env: OsString,
     session_id: String,
@@ -368,21 +365,19 @@ impl IntegrationContext {
 
         let root_dir = tempdir.path().to_path_buf();
         let project_dir = root_dir.join("project");
-        let fake_bin_dir = root_dir.join("fake-bin");
         let logs_dir = root_dir.join("logs");
-        for dir in [&project_dir, &fake_bin_dir, &logs_dir] {
+        for dir in [&project_dir, &logs_dir] {
             fs::create_dir_all(dir)
                 .with_context(|| format!("failed to create {}", dir.display()))?;
         }
 
-        let path_env = joined_path(&fake_bin_dir)?;
+        let path_env = env::var_os("PATH").unwrap_or_default();
         let session_id = format!("scenario-pid{}-{scenario_id}", std::process::id());
 
         Ok(Self {
             tempdir: Some(tempdir),
             root_dir,
             project_dir,
-            fake_bin_dir,
             logs_dir,
             path_env,
             session_id,
@@ -408,22 +403,6 @@ impl IntegrationContext {
 
     pub(crate) fn project_path(&self, relative_path: &str) -> PathBuf {
         self.project_dir.join(relative_path)
-    }
-
-    pub(crate) fn write_fake_tool(&self, name: &str, contents: &str) -> Result<()> {
-        let path = self.fake_bin_dir.join(binary_name(name));
-        fs::write(&path, contents)
-            .with_context(|| format!("failed to write {}", path.display()))?;
-        #[cfg(unix)]
-        {
-            let mut perms = fs::metadata(&path)
-                .with_context(|| format!("failed to stat {}", path.display()))?
-                .permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&path, perms)
-                .with_context(|| format!("failed to chmod {}", path.display()))?;
-        }
-        Ok(())
     }
 
     pub(crate) fn file_exists(&self, relative_path: &str) -> bool {
@@ -887,14 +866,6 @@ async fn run_status_with_timeout(
             );
         }
     }
-}
-
-fn joined_path(prefix: &Path) -> Result<OsString> {
-    let mut paths = vec![prefix.to_path_buf()];
-    if let Some(existing) = env::var_os("PATH") {
-        paths.extend(env::split_paths(&existing));
-    }
-    env::join_paths(paths).context("failed to construct PATH")
 }
 
 fn sanitized_scenario_name(name: &str) -> String {
