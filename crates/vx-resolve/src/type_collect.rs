@@ -7,7 +7,8 @@
 use std::collections::HashMap;
 
 use vx_parser::{
-    AstNode, EnumDecl, FnDecl, NewtypeDecl, SourceFile, StructDecl, SyntaxKind, TypeAliasDecl,
+    AstNode, EnumDecl, FnDecl, Item, NamespaceDecl, NewtypeDecl, SourceFile, StructDecl,
+    SyntaxKind, TypeAliasDecl,
 };
 use vx_types::{
     AliasDef, EnumDef, FieldDef, FnSig, KeywordParamDef, NewtypeDef, ParamDef, StructDef, Ty,
@@ -285,6 +286,11 @@ pub fn collect_types_for_sources(sources: &[SourceFileRef]) -> TypeCollection {
                         );
                     }
                 }
+                SyntaxKind::NAMESPACE_DECL => {
+                    if let Some(decl) = NamespaceDecl::cast(syntax.clone()) {
+                        collect_namespace_fn_sigs(source.id, &decl, &resolver, &mut def_to_fn_sig);
+                    }
+                }
                 _ => {}
             }
         }
@@ -414,6 +420,43 @@ fn collect_fn_sig(decl: &FnDecl, resolver: &TypeResolver<'_>, type_params: &[Str
         keyword_params,
         ret,
         capabilities,
+    }
+}
+
+fn collect_namespace_fn_sigs(
+    source: SourceId,
+    namespace: &NamespaceDecl,
+    resolver: &TypeResolver<'_>,
+    def_to_fn_sig: &mut HashMap<DefSite, FnSig>,
+) {
+    let Some(body) = namespace.body() else {
+        return;
+    };
+
+    for item in body.items() {
+        match item {
+            Item::FnDecl(decl) => {
+                let Some(name_token) = decl.name() else {
+                    continue;
+                };
+                let type_params = collect_type_param_names(decl.syntax());
+                let sig = collect_fn_sig(&decl, resolver, &type_params);
+                def_to_fn_sig.insert(
+                    DefSite {
+                        source,
+                        range: name_token.text_range(),
+                    },
+                    sig,
+                );
+            }
+            Item::NamespaceDecl(decl) => {
+                collect_namespace_fn_sigs(source, &decl, resolver, def_to_fn_sig);
+            }
+            Item::StructDecl(_)
+            | Item::EnumDecl(_)
+            | Item::NewtypeDecl(_)
+            | Item::TypeAliasDecl(_) => {}
+        }
     }
 }
 

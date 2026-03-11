@@ -7,7 +7,7 @@ use crate::scope::ScopeTree;
 use crate::{
     DefKind, ImportGraph, ScopeKind, SourceFileRef, SourceId, resolve, resolve_in_program,
 };
-use vx_types::{Builtin, Ty};
+use vx_types::{Builtin, Scalar, Ty};
 
 const TEST_SOURCE_ID: SourceId = SourceId(0);
 
@@ -85,6 +85,67 @@ type Id = U64
     assert_eq!(defs[2].kind, DefKind::Enum);
     assert_eq!(defs[3].kind, DefKind::Newtype);
     assert_eq!(defs[4].kind, DefKind::TypeAlias);
+}
+
+#[test]
+fn namespace_scope_collects_member_items() {
+    let file = parse_file(
+        r#"
+namespace Blob {
+    fn Blob(s: String) -> Self;
+    fn utf8(self: Self) -> String;
+}
+"#,
+    );
+    let tree = ScopeTree::build(&file);
+    let defs = tree.definitions(crate::ScopeId::ROOT);
+    let namespace = defs
+        .iter()
+        .find(|def| def.name == "Blob")
+        .expect("Blob namespace");
+    assert_eq!(namespace.kind, DefKind::Namespace);
+
+    let scope = tree.owned_scope(namespace).expect("namespace scope");
+    let member_names: Vec<_> = tree
+        .definitions(scope)
+        .iter()
+        .map(|def| (def.name.as_str(), def.kind))
+        .collect();
+    assert_eq!(
+        member_names,
+        vec![("Blob", DefKind::Function), ("utf8", DefKind::Function),]
+    );
+}
+
+#[test]
+fn namespace_member_function_signatures_are_collected() {
+    let file = parse_file(
+        r#"
+namespace Blob {
+    fn Blob(s: String) -> Self;
+    fn utf8(self: Self) -> String;
+}
+"#,
+    );
+    let tree = ScopeTree::build(&file);
+    let namespace = tree
+        .definitions(crate::ScopeId::ROOT)
+        .iter()
+        .find(|def| def.name == "Blob")
+        .expect("Blob namespace");
+    let scope = tree.owned_scope(namespace).expect("namespace scope");
+    let utf8 = tree
+        .definitions(scope)
+        .iter()
+        .find(|def| def.name == "utf8")
+        .expect("utf8 member");
+
+    let types = crate::collect_types(&file);
+    let sig = types.fn_sig_for_def(utf8).expect("utf8 signature");
+    assert_eq!(sig.name, "utf8");
+    assert_eq!(sig.positional_params.len(), 1);
+    assert_eq!(sig.positional_params[0].name, "self");
+    assert_eq!(sig.ret, Ty::Scalar(Scalar::String));
 }
 
 #[test]

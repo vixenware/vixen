@@ -34,6 +34,8 @@ impl ScopeId {
 pub enum ScopeKind {
     /// Top-level module scope (source file).
     Module,
+    /// Namespace body.
+    Namespace,
     /// Function body.
     Function,
     /// Block expression `{ ... }`.
@@ -117,6 +119,7 @@ struct Scope {
 #[derive(Debug)]
 pub struct ScopeTree {
     scopes: Vec<Scope>,
+    owned_scopes: HashMap<DefSite, ScopeId>,
 }
 
 #[derive(Debug)]
@@ -139,10 +142,12 @@ impl ScopeTree {
             scopes: Vec::new(),
             source: source.id,
             next_def_id: 0,
+            owned_scopes: HashMap::new(),
         };
         builder.build_module(&source.file);
         ScopeTree {
             scopes: builder.scopes,
+            owned_scopes: builder.owned_scopes,
         }
     }
 
@@ -190,7 +195,7 @@ impl ScopeTree {
             let scope = &self.scopes[id.index()];
             match scope.kind {
                 // In module scope, all items are visible regardless of position
-                ScopeKind::Module => {
+                ScopeKind::Module | ScopeKind::Namespace => {
                     if let Some(def) = scope.definitions.iter().rev().find(|d| d.name == name) {
                         if def.kind != DefKind::Binding || def.name_span.range.start() < offset {
                             return Some(def);
@@ -275,6 +280,10 @@ impl ScopeTree {
     pub fn scope_count(&self) -> usize {
         self.scopes.len()
     }
+
+    pub fn owned_scope(&self, def: &Definition) -> Option<ScopeId> {
+        self.owned_scopes.get(&def.site()).copied()
+    }
 }
 
 impl ProgramScopes {
@@ -343,6 +352,10 @@ impl ProgramScopes {
         result
     }
 
+    pub fn owned_scope(&self, def: &Definition) -> Option<ScopeId> {
+        self.tree(def.source())?.owned_scope(def)
+    }
+
     fn lookup_imported<'a>(
         &'a self,
         source: SourceId,
@@ -401,6 +414,7 @@ struct ScopeTreeBuilder {
     scopes: Vec<Scope>,
     source: SourceId,
     next_def_id: u32,
+    owned_scopes: HashMap<DefSite, ScopeId>,
 }
 
 impl ScopeTreeBuilder {
@@ -436,6 +450,19 @@ impl ScopeTreeBuilder {
             self.collect_item_def(module_scope, &item);
         }
 
+        for item in file.items() {
+            match item {
+                Item::FnDecl(fn_decl) => self.build_fn_scope(module_scope, &fn_decl),
+                Item::NamespaceDecl(namespace_decl) => {
+                    self.build_namespace_scope(module_scope, &namespace_decl);
+                }
+                Item::StructDecl(_)
+                | Item::EnumDecl(_)
+                | Item::NewtypeDecl(_)
+                | Item::TypeAliasDecl(_) => {}
+            }
+        }
+
         for stmt in file.statements() {
             match stmt {
                 Stmt::FnDecl(fn_decl) => self.build_fn_scope(module_scope, &fn_decl),
@@ -444,6 +471,45 @@ impl ScopeTreeBuilder {
                 | Stmt::NewtypeDecl(_)
                 | Stmt::TypeAliasDecl(_) => {}
                 _ => self.visit_stmt(module_scope, &stmt),
+            }
+        }
+    }
+
+    fn build_namespace_scope(
+        &mut self,
+        parent: ScopeId,
+        namespace_decl: &vx_parser::NamespaceDecl,
+    ) {
+        let namespace_scope = self.push_scope(
+            ScopeKind::Namespace,
+            Some(parent),
+            namespace_decl.syntax().text_range(),
+        );
+        if let Some(name_tok) = namespace_decl.name() {
+            self.owned_scopes.insert(
+                SourceSpan::new(self.source, name_tok.text_range()),
+                namespace_scope,
+            );
+        }
+
+        let Some(body) = namespace_decl.body() else {
+            return;
+        };
+
+        for item in body.items() {
+            self.collect_item_def(namespace_scope, &item);
+        }
+
+        for item in body.items() {
+            match item {
+                Item::FnDecl(fn_decl) => self.build_fn_scope(namespace_scope, &fn_decl),
+                Item::NamespaceDecl(namespace_decl) => {
+                    self.build_namespace_scope(namespace_scope, &namespace_decl);
+                }
+                Item::StructDecl(_)
+                | Item::EnumDecl(_)
+                | Item::NewtypeDecl(_)
+                | Item::TypeAliasDecl(_) => {}
             }
         }
     }
@@ -700,6 +766,7 @@ impl ScopeTreeBuilder {
                         decl.syntax().text_range(),
                     );
                 }
+                self.build_namespace_scope(scope, decl);
             }
             Stmt::Expr(expr) => {
                 self.visit_expr(scope, expr);
