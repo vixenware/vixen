@@ -159,20 +159,20 @@ fn string_literal() {
 
 #[test]
 fn option_unwrap_or_returns_the_inner_value() {
-    let val = eval(r#"fn main() { (Some { value: 7 }).unwrap_or 9 }"#, "main").unwrap();
+    let val = eval(r#"fn main() { (Some { value: 7 }).unwrap_or(9) }"#, "main").unwrap();
     assert_eq!(val, Value::U64(7));
 }
 
 #[test]
 fn option_unwrap_or_returns_the_default_for_none() {
-    let val = eval(r#"fn main() { None.unwrap_or 9 }"#, "main").unwrap();
+    let val = eval(r#"fn main() { None.unwrap_or(9) }"#, "main").unwrap();
     assert_eq!(val, Value::U64(9));
 }
 
 #[test]
 fn option_unwrap_or_does_not_force_the_default_when_some() {
     let val = eval(
-        r#"fn main() { (Some { value: 7 }).unwrap_or (fail "should not be forced") }"#,
+        r#"fn main() { (Some { value: 7 }).unwrap_or((fail "should not be forced")) }"#,
         "main",
     )
     .unwrap();
@@ -2441,7 +2441,7 @@ fn fs_backed_trees_read_files_on_demand() {
     let file_path = tempdir.path().join("hello.txt");
     fs::write(&file_path, "hello from fs").unwrap();
 
-    let engine = engine(r#"fn main(tree: Tree) { (tree.file "hello.txt").to_string! }"#);
+    let engine = engine(r#"fn main(tree: Tree) { tree.file("hello.txt").utf8() }"#);
     let tree = Value::Tree(TreeValue::FsDir(PathValue::new(
         tempdir.path().to_string_lossy(),
     )));
@@ -2456,9 +2456,7 @@ fn tree_from_path_creates_a_lazy_fs_backed_tree() {
     let file_path = tempdir.path().join("hello.txt");
     fs::write(&file_path, "hello from from_path").unwrap();
 
-    let engine = engine(
-        r#"fn main(workspace: Path) { ((Tree.from_path workspace).file "hello.txt").to_string! }"#,
-    );
+    let engine = engine(r#"fn main(workspace: Path) { Tree(workspace).file("hello.txt").utf8() }"#);
     let value = engine
         .call(
             "main",
@@ -3165,8 +3163,7 @@ fn exec_can_be_routed_through_a_host_handler() {
              fn build(workspace: Path) {
                exec ["/bin/cp", "src/input.txt", "out/output.txt"] where {
                  env: { "INPUT": "src/input.txt" },
-                 mounts: { "src": Tree.from_path workspace },
-                 writable: ["out"],
+                 mounts: { "src": Tree(workspace) },
                  observer: observe,
                }
              }"#,
@@ -3217,7 +3214,7 @@ fn exec_can_be_routed_through_a_host_handler() {
         entries[0].1,
         Value::Blob(BlobValue::from_string("hello from handler"))
     );
-    assert_eq!(request.writable_roots, vec![PathValue::new("out")]);
+    assert!(request.writable_roots.is_empty());
     assert_eq!(request.observer.def.name, "observe");
     assert!(request.verification_obligations.is_empty());
     assert_eq!(request.module.functions.len(), 2);
