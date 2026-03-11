@@ -70,7 +70,8 @@ Logging differs by mode:
 
 - Normal mode: daemon stdout/stderr is redirected to log files under `VX_HOME`
 - Test mode (`VX_TEST=1`): daemon stdout/stderr is inherited by the current
-  terminal (useful in CI and `cargo nextest`)
+  terminal or captured by the explicit scenario runner (useful in CI and
+  `cargo run -p xtask -- integration run`)
 
 ## Multiplexing across tests
 

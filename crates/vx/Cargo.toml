@@ -33,10 +33,6 @@ vx-vfs = { workspace = true }
 strip-ansi-escapes = { workspace = true }
 unicode-width = { workspace = true }
 
-[dev-dependencies]
-tempfile = { workspace = true }
-ulid = { workspace = true }
-
 [features]
 default = []
 diagnostics = ["moire/diagnostics", "roam-stream/diagnostics", "vx-vfs/diagnostics"]

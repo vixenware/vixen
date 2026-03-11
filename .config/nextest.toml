@@ -1,24 +1,4 @@
-# Nextest configuration for vx integration tests
-
-# Enable experimental setup scripts feature
-experimental = ["setup-scripts"]
+# Nextest configuration
 
 [profile.default]
 slow-timeout = { period = "5s", terminate-after = 6 }
-
-[scripts.setup.setup-unix]
-command = 'bash tests/setup.sh'
-
-[scripts.setup.setup-windows]
-command = ['powershell', '-ExecutionPolicy', 'Bypass', '-File', 'tests/setup.ps1']
-
-# Run setup scripts for all tests (platform-specific)
-[[profile.default.scripts]]
-platform = { host = "cfg(unix)" }
-filter = 'all()'
-setup = ['setup-unix']
-
-[[profile.default.scripts]]
-platform = { host = "cfg(windows)" }
-filter = 'all()'
-setup = ['setup-windows']

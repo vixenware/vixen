@@ -5,8 +5,13 @@ use eyre::{Result, bail};
 use facet::Facet;
 use figue as args;
 
+mod cache_basics;
 mod context;
+mod error_handling;
+mod json_output;
 mod lua;
+mod multi_crate;
+mod scaffold;
 
 use self::context::IntegrationContext;
 
@@ -60,10 +65,144 @@ struct Scenario {
     run: ScenarioFn,
 }
 
-const SCENARIOS: &[Scenario] = &[Scenario {
-    name: "lua",
-    run: lua::run,
-}];
+const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "lua",
+        run: lua::run,
+    },
+    Scenario {
+        name: "cache-basics/fresh-build-succeeds",
+        run: cache_basics::fresh_build_succeeds,
+    },
+    Scenario {
+        name: "cache-basics/cargo-compat-build-succeeds-without-build-vx",
+        run: cache_basics::cargo_compat_build_succeeds_without_build_vx,
+    },
+    Scenario {
+        name: "cache-basics/build-vx-is-evaluated-and-materialized-into-dot-vx-build",
+        run: cache_basics::build_vx_is_evaluated_and_materialized_into_dot_vx_build,
+    },
+    Scenario {
+        name: "cache-basics/build-vx-observer-can-interpret-failed-processes",
+        run: cache_basics::build_vx_observer_can_interpret_failed_processes,
+    },
+    Scenario {
+        name: "cache-basics/second-build-is-cache-hit",
+        run: cache_basics::second_build_is_cache_hit,
+    },
+    Scenario {
+        name: "cache-basics/source-change-causes-cache-miss",
+        run: cache_basics::source_change_causes_cache_miss,
+    },
+    Scenario {
+        name: "cache-basics/profile-change-causes-cache-miss",
+        run: cache_basics::profile_change_causes_cache_miss,
+    },
+    Scenario {
+        name: "cache-basics/edition-change-causes-cache-miss",
+        run: cache_basics::edition_change_causes_cache_miss,
+    },
+    Scenario {
+        name: "cache-basics/clean-removes-project-local-vx-dir",
+        run: cache_basics::clean_removes_project_local_vx_dir,
+    },
+    Scenario {
+        name: "cache-basics/clean-cache-invalidates-last-build",
+        run: cache_basics::clean_cache_invalidates_last_build,
+    },
+    Scenario {
+        name: "cache-basics/multi-file-crate-builds-successfully",
+        run: cache_basics::multi_file_crate_builds_successfully,
+    },
+    Scenario {
+        name: "cache-basics/module-change-causes-cache-miss",
+        run: cache_basics::module_change_causes_cache_miss,
+    },
+    Scenario {
+        name: "cache-basics/different-checkout-path-is-cache-hit",
+        run: cache_basics::different_checkout_path_is_cache_hit,
+    },
+    Scenario {
+        name: "error-handling/rejects-registry-deps-without-lockfile",
+        run: error_handling::rejects_registry_deps_without_lockfile,
+    },
+    Scenario {
+        name: "error-handling/rejects-workspace",
+        run: error_handling::rejects_workspace,
+    },
+    Scenario {
+        name: "error-handling/rejects-build-script",
+        run: error_handling::rejects_build_script,
+    },
+    Scenario {
+        name: "error-handling/rejects-features",
+        run: error_handling::rejects_features,
+    },
+    Scenario {
+        name: "error-handling/rejects-proc-macros",
+        run: error_handling::rejects_proc_macros,
+    },
+    Scenario {
+        name: "error-handling/invalid-build-vx-reports-parse-errors",
+        run: error_handling::invalid_build_vx_reports_parse_errors,
+    },
+    Scenario {
+        name: "error-handling/build-vx-requires-tree-output",
+        run: error_handling::build_vx_requires_tree_output,
+    },
+    Scenario {
+        name: "json-output/success",
+        run: json_output::json_output_success,
+    },
+    Scenario {
+        name: "json-output/cache-hit",
+        run: json_output::json_output_cache_hit,
+    },
+    Scenario {
+        name: "json-output/build-error",
+        run: json_output::json_output_build_error,
+    },
+    Scenario {
+        name: "json-output/has-action-events",
+        run: json_output::json_output_has_action_events,
+    },
+    Scenario {
+        name: "json-output/is-valid-ndjson",
+        run: json_output::json_output_is_valid_ndjson,
+    },
+    Scenario {
+        name: "multi-crate/build-succeeds",
+        run: multi_crate::multi_crate_build_succeeds,
+    },
+    Scenario {
+        name: "multi-crate/second-build-is-cache-hit",
+        run: multi_crate::multi_crate_second_build_is_cache_hit,
+    },
+    Scenario {
+        name: "multi-crate/dep-change-rebuilds-both",
+        run: multi_crate::dep_change_rebuilds_both,
+    },
+    Scenario {
+        name: "multi-crate/app-change-rebuilds-only-app",
+        run: multi_crate::app_change_rebuilds_only_app,
+    },
+    Scenario {
+        name: "multi-crate/module-rename-invalidates-cache",
+        run: multi_crate::module_rename_invalidates_cache,
+    },
+    Scenario {
+        name: "multi-crate/diamond-dependency-builds",
+        run: multi_crate::diamond_dependency_builds,
+    },
+    Scenario {
+        name: "multi-crate/diamond-dependency-cache-hit",
+        run: multi_crate::diamond_dependency_cache_hit,
+    },
+    Scenario {
+        name: "multi-crate/diamond-shared-dep-change-rebuilds-dependents",
+        run: multi_crate::diamond_shared_dep_change_rebuilds_dependents,
+    },
+];
 
 pub fn run(raw_args: &[String]) -> Result<()> {
     let cli: Cli = args::Driver::new(
@@ -133,8 +272,10 @@ async fn run_named_scenario(scenario: Scenario, capture_output: bool) -> Result<
     println!("Running scenario `{}`", scenario.name);
 
     let result = (scenario.run)(&mut context).await;
-    match result {
-        Ok(()) => {
+    let shutdown_result = context.shutdown().await;
+
+    match (result, shutdown_result) {
+        (Ok(()), Ok(())) => {
             if context::keep_artifacts() {
                 let kept = context.keep()?;
                 println!(
@@ -147,12 +288,31 @@ async fn run_named_scenario(scenario: Scenario, capture_output: bool) -> Result<
             }
             Ok(())
         }
-        Err(error) => {
+        (Ok(()), Err(error)) => {
+            let kept = context.keep()?;
+            eprintln!("Scenario `{}` failed during teardown.", scenario.name);
+            eprintln!("Artifacts retained at {}", kept.display());
+            eprintln!("Logs are under {}", kept.join("logs").display());
+            Err(error.wrap_err(format!(
+                "integration scenario `{}` failed while shutting down",
+                scenario.name
+            )))
+        }
+        (Err(error), Ok(())) => {
             let kept = context.keep()?;
             eprintln!("Scenario `{}` failed.", scenario.name);
             eprintln!("Artifacts retained at {}", kept.display());
             eprintln!("Logs are under {}", kept.join("logs").display());
             Err(error.wrap_err(format!("integration scenario `{}` failed", scenario.name)))
+        }
+        (Err(error), Err(shutdown_error)) => {
+            let kept = context.keep()?;
+            eprintln!("Scenario `{}` failed.", scenario.name);
+            eprintln!("Artifacts retained at {}", kept.display());
+            eprintln!("Logs are under {}", kept.join("logs").display());
+            Err(error
+                .wrap_err(format!("integration scenario `{}` failed", scenario.name))
+                .wrap_err(format!("failed while shutting down: {shutdown_error:#}")))
         }
     }
 }
@@ -176,9 +336,9 @@ mod tests {
 
     #[test]
     fn filter_matches_by_substring() {
-        let scenarios = matching_scenarios(Some("lu"));
+        let scenarios = matching_scenarios(Some("multi-crate/build-succeeds"));
         assert_eq!(scenarios.len(), 1);
-        assert_eq!(scenarios[0].name, "lua");
+        assert_eq!(scenarios[0].name, "multi-crate/build-succeeds");
     }
 
     #[test]

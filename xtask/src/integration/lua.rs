@@ -1,4 +1,7 @@
-use super::{ScenarioFuture, context::IntegrationContext};
+use super::{
+    ScenarioFuture,
+    context::{BuildOptions, IntegrationContext},
+};
 
 const LUA_SKETCH: &str = include_str!("../../../zoo/lua.vx");
 
@@ -97,11 +100,7 @@ exit 0
 "#,
             )?;
 
-            let path_env = context.prefixed_path()?;
-            let daemon = context.start_daemon(&path_env).await?;
-            context.wait_for_daemon(&path_env, &daemon).await?;
-
-            let build = context.run_vx_build(&path_env, &daemon.vxd).await?;
+            let build = context.run_vx_build(BuildOptions::default()).await?;
             build.assert_success("vx build")?;
 
             context.assert_file_contents(".vx/build/bin/lua", "fake cc output\n")?;
