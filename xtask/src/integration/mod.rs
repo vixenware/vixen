@@ -70,6 +70,10 @@ struct RunArgs {
     /// Maximum number of scenarios to run in parallel
     #[facet(args::named, default = 8)]
     jobs: usize,
+
+    /// Keep temp dirs even for successful scenarios
+    #[facet(args::named)]
+    keep_temp: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -287,6 +291,7 @@ async fn run_command(args: RunArgs) -> Result<()> {
     let jobs = normalized_jobs(args.jobs, args.no_capture, selected.len());
     let fail_fast = !args.no_fail_fast;
     let capture_output = !args.no_capture;
+    let keep_temp = args.keep_temp || context::keep_artifacts_env();
     let name_width = selected
         .iter()
         .map(|s| s.name.len())
@@ -303,11 +308,12 @@ async fn run_command(args: RunArgs) -> Result<()> {
     let mut failed = Vec::new();
     let mut cancelled = 0usize;
     let mut stop_scheduling = false;
+    let mut interrupted = false;
     let mut interval = time::interval(Duration::from_secs(1));
     interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut reporter = Reporter::new(capture_output);
 
-    let mut run = IntegrationRun::new(capture_output)?;
+    let mut run = IntegrationRun::new(capture_output, keep_temp)?;
     reporter.runner_line(
         "BOOT",
         global_start.elapsed(),
@@ -318,9 +324,40 @@ async fn run_command(args: RunArgs) -> Result<()> {
         None,
         name_width,
     );
-    let bootstrap = match run.bootstrap().await {
-        Ok(report) => report,
-        Err(error) => {
+    let bootstrap = tokio::select! {
+        signal = tokio::signal::ctrl_c() => {
+            signal?;
+            interrupted = true;
+            cancelled = total;
+            queue.clear();
+            reporter.runner_line(
+                "INT",
+                global_start.elapsed(),
+                "received Ctrl-C during bootstrap",
+                None,
+                name_width,
+            );
+            None
+        }
+        result = run.bootstrap() => {
+            Some(result)
+        }
+    };
+    match bootstrap {
+        Some(Ok(report)) => {
+            emit_bootstrap_report(&mut reporter, Duration::ZERO, &report, name_width);
+            reporter.status_line(
+                global_start.elapsed(),
+                passed,
+                failed.len(),
+                cancelled,
+                running.len(),
+                queue.len(),
+                total,
+                &running,
+            );
+        }
+        Some(Err(error)) => {
             let kept = run.keep()?;
             reporter.println(&format!(
                 "{} {}",
@@ -329,18 +366,8 @@ async fn run_command(args: RunArgs) -> Result<()> {
             ));
             bail!("failed to bootstrap shared integration daemon: {error:#}");
         }
-    };
-    emit_bootstrap_report(&mut reporter, Duration::ZERO, &bootstrap, name_width);
-    reporter.status_line(
-        global_start.elapsed(),
-        passed,
-        failed.len(),
-        cancelled,
-        running.len(),
-        queue.len(),
-        total,
-        &running,
-    );
+        None => {}
+    }
 
     while !queue.is_empty() || !running.is_empty() {
         while !stop_scheduling && running.len() < jobs {
@@ -363,7 +390,7 @@ async fn run_command(args: RunArgs) -> Result<()> {
             let abort_handle = joinset.spawn(async move {
                 let mut context = IntegrationContext::new(shared, scenario.name, scenario_id)?;
                 let result = (scenario.run)(&mut context).await;
-                let artifact_dir = if result.is_err() || context::keep_artifacts() {
+                let artifact_dir = if result.is_err() || context.should_keep() {
                     Some(context.keep()?)
                 } else {
                     None
@@ -391,6 +418,23 @@ async fn run_command(args: RunArgs) -> Result<()> {
         }
 
         tokio::select! {
+            signal = tokio::signal::ctrl_c(), if !interrupted => {
+                signal?;
+                interrupted = true;
+                stop_scheduling = true;
+                cancelled += queue.len() + running.len();
+                queue.clear();
+                reporter.runner_line(
+                    "INT",
+                    global_start.elapsed(),
+                    "received Ctrl-C, cancelling run",
+                    None,
+                    name_width,
+                );
+                for scenario in running.values() {
+                    scenario.abort_handle.abort();
+                }
+            }
             _ = interval.tick() => {
                 reporter.status_line(
                     global_start.elapsed(),
@@ -501,7 +545,7 @@ async fn run_command(args: RunArgs) -> Result<()> {
     if let Ok(report) = &shutdown_result {
         emit_shutdown_report(&mut reporter, shutdown_started, report, name_width);
     }
-    let run_root = if !failed.is_empty() || context::keep_artifacts() || shutdown_result.is_err() {
+    let run_root = if !failed.is_empty() || keep_temp || shutdown_result.is_err() || interrupted {
         Some(run.keep()?)
     } else {
         None
@@ -541,6 +585,9 @@ async fn run_command(args: RunArgs) -> Result<()> {
     ));
 
     if failed.is_empty() {
+        if interrupted {
+            bail!("integration run interrupted");
+        }
         return Ok(());
     }
 
@@ -663,6 +710,7 @@ fn format_status_label(status: &str) -> String {
         "PASS" => padded.green().bold().to_string(),
         "FAIL" => padded.red().bold().to_string(),
         "CANCEL" => padded.yellow().bold().to_string(),
+        "INT" => padded.red().bold().to_string(),
         "START" => padded.cyan().bold().to_string(),
         "BOOT" => padded.blue().bold().to_string(),
         "READY" => padded.blue().bold().to_string(),
@@ -862,6 +910,7 @@ mod tests {
             "lua",
             "--no-fail-fast",
             "--no-capture",
+            "--keep-temp",
             "--jobs",
             "4",
         ])
@@ -871,6 +920,7 @@ mod tests {
                 assert_eq!(args.filter.as_deref(), Some("lua"));
                 assert!(args.no_fail_fast);
                 assert!(args.no_capture);
+                assert!(args.keep_temp);
                 assert_eq!(args.jobs, 4);
             }
             CliCommand::List(_) => panic!("expected run command"),

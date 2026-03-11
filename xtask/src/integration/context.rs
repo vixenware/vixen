@@ -86,6 +86,7 @@ pub(crate) struct SharedRun {
     vxd: PathBuf,
     http_cache_dir: PathBuf,
     capture_output: bool,
+    keep_temp: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -117,7 +118,7 @@ impl BuildOptions {
 }
 
 impl IntegrationRun {
-    pub(crate) fn new(capture_output: bool) -> Result<Self> {
+    pub(crate) fn new(capture_output: bool, keep_temp: bool) -> Result<Self> {
         let workspace_root =
             find_workspace_root().ok_or_else(|| eyre!("Could not find workspace root"))?;
         ensure_workspace_binaries(&workspace_root)?;
@@ -152,6 +153,7 @@ impl IntegrationRun {
             vx_binary,
             http_cache_dir: http_cache_dir(),
             capture_output,
+            keep_temp,
         });
 
         Ok(Self {
@@ -235,6 +237,7 @@ impl IntegrationRun {
         cmd.env_remove("VXD");
         cmd.arg("start");
         cmd.arg("--no-tui");
+        cmd.kill_on_drop(true);
         cmd.stdout(Stdio::from(stdout));
         cmd.stderr(Stdio::from(stderr));
 
@@ -318,6 +321,7 @@ impl IntegrationRun {
         cmd.env("VXD", &self.shared.vxd);
         cmd.arg("--no-tui");
         cmd.arg("build");
+        cmd.kill_on_drop(true);
         cmd.stdout(Stdio::from(File::create(&stdout_log).with_context(
             || format!("failed to create {}", stdout_log.display()),
         )?));
@@ -392,6 +396,10 @@ impl IntegrationContext {
             return Ok(tempdir.keep());
         }
         Ok(self.root_dir.clone())
+    }
+
+    pub(crate) fn should_keep(&self) -> bool {
+        self.shared.keep_temp
     }
 
     pub(crate) fn write_project_file(&self, relative_path: &str, contents: &str) -> Result<()> {
@@ -860,6 +868,7 @@ async fn run_status_with_timeout(
         .with_context(|| format!("failed to reopen {}", log_path.display()))?;
     cmd.stdout(Stdio::from(stdout));
     cmd.stderr(Stdio::from(stderr));
+    cmd.kill_on_drop(true);
 
     let mut child = cmd
         .spawn()
@@ -927,7 +936,7 @@ pub(crate) fn target_root(workspace_root: &Path) -> PathBuf {
     }
 }
 
-pub(crate) fn keep_artifacts() -> bool {
+pub(crate) fn keep_artifacts_env() -> bool {
     env::var("VX_KEEP_INTEGRATION_TMP").as_deref() == Ok("1")
 }
 

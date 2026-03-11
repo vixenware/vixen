@@ -88,6 +88,7 @@ cargo run -p xtask -- integration run
 cargo run -p xtask -- integration run cache-basics
 cargo run -p xtask -- integration run json-output --jobs 8
 cargo run -p xtask -- integration run lua --no-capture
+cargo run -p xtask -- integration run json-output --keep-temp
 ```
 
 The `xtask integration run` suite owns the migrated `vx build` end-to-end
@@ -97,7 +98,9 @@ build before parallel scenarios, supports bounded parallelism with fail-fast
 or `--no-fail-fast`, and reports live pass/fail/running counts.
 On failure, the runner prints merged output plus retained temp/artifact
 directories so logs can be inspected after teardown. `--no-capture` switches
-to serial execution and streams scenario output directly for debugging.
+to serial execution and streams scenario output directly for debugging, and
+`--keep-temp` keeps scenario temp dirs even on success. `Ctrl-C` cancels the
+run and still tears the shared daemon down.
 
 ## Co-developed with LLMs
 
