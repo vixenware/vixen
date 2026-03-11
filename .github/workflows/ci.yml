@@ -42,6 +42,8 @@ jobs:
 
   integration-linux:
     runs-on: depot-ubuntu-24.04-32
+    env:
+      VX_KEEP_INTEGRATION_TMP: 1
     steps:
       - uses: actions/checkout@v6
 
@@ -49,15 +51,25 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - uses: taiki-e/install-action@nextest
-
       - name: Install FUSE
         run: sudo apt-get update && sudo apt-get install -y fuse3 libfuse3-dev
 
-      - run: cargo nextest run -E 'package(vx)' -j4 --no-fail-fast
+      - run: cargo run -p xtask -- integration run
+
+      - name: Upload integration artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-linux-artifacts
+          path: |
+            /tmp/vxi
+            /tmp/vxi-run
+          if-no-files-found: ignore
   
   integration-windows:
     runs-on: [self-hosted, Windows, X64, eggs]
+    env:
+      VX_KEEP_INTEGRATION_TMP: 1
     steps:
       - uses: actions/checkout@v6
 
@@ -70,6 +82,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - uses: taiki-e/install-action@nextest
+      - run: cargo run -p xtask -- integration run
 
-      - run: cargo nextest run -E 'package(vx)' -j4 --no-fail-fast
+      - name: Upload integration artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-windows-artifacts
+          path: |
+            ${{ runner.temp }}\vx-integration
+            ${{ runner.temp }}\vx-integration-run
+          if-no-files-found: ignore
