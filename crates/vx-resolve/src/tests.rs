@@ -451,6 +451,25 @@ fn main() {
 }
 
 #[test]
+fn top_level_path_array_binding_type_is_visible_from_function_body() {
+    let src = r#"
+let paths = [@a.c, @b.c]
+
+fn compile(path: Path) -> Tree {
+    Tree(path)
+}
+
+fn main() {
+    paths.map(compile)
+}
+"#;
+    let (result, types) = type_check_with_types(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let ty = find_expr_type(&result, src, "paths.map(compile)");
+    assert_eq!(ty, Some(Ty::Array(Box::new(nominal_ty(&types, "Tree")))));
+}
+
+#[test]
 fn top_level_let_is_not_visible_before_definition() {
     let file = parse_file(
         r#"
@@ -1586,6 +1605,18 @@ fn main() {
     let result = type_check(src);
     let ty = find_expr_type(&result, src, "42");
     assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::U64)));
+}
+
+#[test]
+fn path_literal_is_nominal_path() {
+    let src = r#"
+fn main() {
+    @out
+}
+"#;
+    let (result, types) = type_check_with_types(src);
+    let ty = find_expr_type(&result, src, "@out");
+    assert_eq!(ty, Some(nominal_ty(&types, "Path")));
 }
 
 // r[type.builtin.read_file] — read_file returns Blob

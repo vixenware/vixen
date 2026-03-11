@@ -203,6 +203,7 @@ impl<'a> ExprTyper<'a> {
     fn infer_expr(&mut self, expr: &Expr) -> Ty {
         let ty = match expr {
             Expr::Literal(lit) => self.infer_literal(lit),
+            Expr::PathLiteral(_) => self.nominal_ty("Path"),
             Expr::NameRef(name_ref) => self.infer_name_ref(name_ref),
             Expr::Paren(paren) => paren
                 .expr()
@@ -262,6 +263,35 @@ impl<'a> ExprTyper<'a> {
             SyntaxKind::STRING => Ty::Scalar(vx_types::Scalar::String),
             SyntaxKind::TRUE_KW | SyntaxKind::FALSE_KW => Ty::Scalar(vx_types::Scalar::Bool),
             _ => Ty::Poison,
+        }
+    }
+
+    fn nominal_ty(&self, name: &str) -> Ty {
+        let Some(&id) = self.types.env.lookup(name).first() else {
+            return Ty::Poison;
+        };
+
+        match self.types.env.get(id) {
+            vx_types::TypeDef::Struct(_) => Ty::Struct(vx_types::StructTy {
+                id,
+                type_args: vec![],
+            }),
+            vx_types::TypeDef::Enum(_) => Ty::Enum(vx_types::EnumTy {
+                id,
+                type_args: vec![],
+            }),
+            vx_types::TypeDef::Newtype(_) => Ty::Newtype(vx_types::NewtypeTy {
+                id,
+                type_args: vec![],
+            }),
+            vx_types::TypeDef::Alias(_) => Ty::Alias(vx_types::AliasTy {
+                id,
+                type_args: vec![],
+            }),
+            vx_types::TypeDef::Opaque(_) => Ty::Opaque(vx_types::OpaqueTy {
+                id,
+                type_args: vec![],
+            }),
         }
     }
 
