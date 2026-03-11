@@ -1,6 +1,4 @@
-use eyre::Result;
-
-use super::context::IntegrationContext;
+use super::{ScenarioFuture, context::IntegrationContext};
 
 const LUA_SKETCH: &str = include_str!("../../../zoo/lua.vx");
 
@@ -41,24 +39,25 @@ const LUA_SOURCES: &[&str] = &[
     "lua.c",
 ];
 
-pub(crate) fn run(context: &mut IntegrationContext) -> Result<()> {
-    #[cfg(not(unix))]
-    bail!("the lua integration scenario currently requires a unix-like host");
+pub(crate) fn run(context: &mut IntegrationContext) -> ScenarioFuture<'_> {
+    Box::pin(async move {
+        #[cfg(not(unix))]
+        eyre::bail!("the lua integration scenario currently requires a unix-like host");
 
-    #[cfg(unix)]
-    {
-        context.write_project_file("build.vx", LUA_SKETCH)?;
+        #[cfg(unix)]
+        {
+            context.write_project_file("build.vx", LUA_SKETCH)?;
 
-        for source in LUA_SOURCES {
-            context.write_project_file(
-                &format!("zoo/lua-src/{source}"),
-                "int main(void) { return 0; }\n",
-            )?;
-        }
+            for source in LUA_SOURCES {
+                context.write_project_file(
+                    &format!("zoo/lua-src/{source}"),
+                    "int main(void) { return 0; }\n",
+                )?;
+            }
 
-        context.write_fake_tool(
-            "cc",
-            r#"#!/bin/sh
+            context.write_fake_tool(
+                "cc",
+                r#"#!/bin/sh
 out=""
 prev=""
 for arg in "$@"; do
@@ -74,10 +73,10 @@ if [ -n "$out" ]; then
 fi
 exit 0
 "#,
-        )?;
-        context.write_fake_tool(
-            "ar",
-            r#"#!/bin/sh
+            )?;
+            context.write_fake_tool(
+                "ar",
+                r#"#!/bin/sh
 out=""
 for arg in "$@"; do
   case "$arg" in
@@ -90,24 +89,25 @@ if [ -n "$out" ]; then
 fi
 exit 0
 "#,
-        )?;
-        context.write_fake_tool(
-            "ranlib",
-            r#"#!/bin/sh
+            )?;
+            context.write_fake_tool(
+                "ranlib",
+                r#"#!/bin/sh
 exit 0
 "#,
-        )?;
+            )?;
 
-        let path_env = context.prefixed_path()?;
-        let daemon = context.start_daemon(&path_env)?;
-        context.wait_for_daemon(&path_env, &daemon)?;
+            let path_env = context.prefixed_path()?;
+            let daemon = context.start_daemon(&path_env).await?;
+            context.wait_for_daemon(&path_env, &daemon).await?;
 
-        let build = context.run_vx_build(&path_env, &daemon.vxd)?;
-        build.assert_success("vx build")?;
+            let build = context.run_vx_build(&path_env, &daemon.vxd).await?;
+            build.assert_success("vx build")?;
 
-        context.assert_file_contents(".vx/build/bin/lua", "fake cc output\n")?;
-        context.assert_file_contents(".vx/build/lib/liblua.a", "fake archive\n")?;
+            context.assert_file_contents(".vx/build/bin/lua", "fake cc output\n")?;
+            context.assert_file_contents(".vx/build/lib/liblua.a", "fake archive\n")?;
 
-        Ok(())
-    }
+            Ok(())
+        }
+    })
 }

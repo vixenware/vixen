@@ -11,7 +11,10 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
 eyre = { workspace = true }
+facet = { workspace = true }
+figue = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true

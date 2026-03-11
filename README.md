@@ -83,7 +83,8 @@ cargo nextest run
 Full-stack daemon/VFS scenarios run through `xtask` instead of nextest:
 
 ```bash
-cargo run -p xtask -- integration lua
+cargo run -p xtask -- integration list
+cargo run -p xtask -- integration run lua
 ```
 
 On failure, the scenario runner prints and retains its temp/artifact directory so
