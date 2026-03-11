@@ -798,10 +798,8 @@ impl Engine {
                 let mut merged_kwargs = partial.kwargs.iter().cloned().collect::<Vec<_>>();
                 merged_kwargs.extend(kwargs.iter().cloned());
                 let merged_kwargs_expr = match (partial.kwargs_expr.as_ref(), kwargs_expr) {
-                    (Some(_), Some(_)) => {
-                        return Err(self.type_error(
-                            "cannot supply a second keyword record to a partial call",
-                        ));
+                    (Some(left), Some(right)) => {
+                        Some(self.merge_keyword_records((**left).clone(), right)?)
                     }
                     (Some(value), None) => Some((**value).clone()),
                     (None, value) => value,
@@ -1829,12 +1827,13 @@ impl Engine {
                         self.split_obligations(self.force_value_shallow(args[0].clone())?);
                     match value {
                         Value::Map(map) => self.tree_from_map(&map),
+                        Value::Array(_) => self.array_merge(&value),
                         Value::Path(path) => Ok(Value::Tree(TreeValue::FsDir(path))),
                         Value::String(path) => {
                             Ok(Value::Tree(TreeValue::FsDir(PathValue::new(path.as_ref()))))
                         }
                         other => Err(self.type_error(&format!(
-                            "Tree expects Map or Path/String, got {}",
+                            "Tree expects Map, Array, or Path/String, got {}",
                             other.type_name()
                         ))),
                     }
@@ -2068,19 +2067,70 @@ impl Engine {
     }
 
     fn tree_from_map(&self, map: &MapValue) -> Result<Value, PoisonError> {
-        let mut entries = Vec::with_capacity(map.entries.len());
+        fn insert_tree_path(
+            engine: &Engine,
+            entries: &mut BTreeMap<Arc<str>, Value>,
+            segments: &[&str],
+            value: Value,
+        ) -> Result<(), PoisonError> {
+            let Some((head, tail)) = segments.split_first() else {
+                return Err(engine.type_error("Tree entry path cannot be empty"));
+            };
+            if tail.is_empty() {
+                if entries.contains_key(*head) {
+                    return Err(engine.type_error(&format!(
+                        "Tree contains duplicate entry '{}'",
+                        segments.join("/")
+                    )));
+                }
+                entries.insert(Arc::from(*head), value);
+                return Ok(());
+            }
+
+            let child = entries
+                .entry(Arc::from(*head))
+                .or_insert_with(|| Value::Tree(TreeValue::Inline(Arc::from([]))));
+            match child {
+                Value::Tree(TreeValue::Inline(existing)) => {
+                    let mut nested = existing
+                        .iter()
+                        .cloned()
+                        .collect::<BTreeMap<Arc<str>, Value>>();
+                    insert_tree_path(engine, &mut nested, tail, value)?;
+                    *child = Value::Tree(TreeValue::Inline(Arc::from(
+                        nested.into_iter().collect::<Vec<_>>(),
+                    )));
+                    Ok(())
+                }
+                Value::Tree(TreeValue::FsDir(_))
+                | Value::Tree(TreeValue::Store(_))
+                | Value::Blob(_)
+                | Value::Pending(_) => Err(engine.type_error(&format!(
+                    "Tree entry path '{}' collides with an existing non-inline tree entry",
+                    segments.join("/")
+                ))),
+                other => Err(engine.type_error(&format!(
+                    "tree entries must be Blob or Tree, got {}",
+                    other.type_name()
+                ))),
+            }
+        }
+
+        let mut nested = BTreeMap::<Arc<str>, Value>::new();
         for (key, value) in map.entries.iter() {
             let key = self.force_value(key.clone())?;
-            let name = self.expect_tree_entry_name(&key)?;
-            entries.push((Arc::from(name), value.clone()));
+            let path = self.expect_relative_path(&key, "Tree entry path")?;
+            let raw = path.as_str();
+            if raw.is_empty() || raw == "." {
+                return Err(self.type_error("Tree entry path cannot be empty"));
+            }
+            let segments = raw.split('/').collect::<Vec<_>>();
+            insert_tree_path(self, &mut nested, &segments, value.clone())?;
         }
-        self.validate_tree_entries(
-            &entries
-                .iter()
-                .map(|(_, value)| value.clone())
-                .collect::<Vec<_>>(),
-        )?;
-        Ok(Value::Tree(TreeValue::Inline(Arc::from(entries))))
+        self.validate_tree_entries(&nested.values().cloned().collect::<Vec<_>>())?;
+        Ok(Value::Tree(TreeValue::Inline(Arc::from(
+            nested.into_iter().collect::<Vec<_>>(),
+        ))))
     }
 
     fn array_map(&self, receiver: &Value, callback: Value) -> Result<Value, PoisonError> {
@@ -2316,6 +2366,17 @@ impl Engine {
         }
 
         Ok(out)
+    }
+
+    fn merge_keyword_records(&self, left: Value, right: Value) -> Result<Value, PoisonError> {
+        let mut entries = Vec::new();
+        let left = self.force_value_shallow(left)?;
+        self.extend_record_with_spread(&mut entries, left)?;
+        let right = self.force_value_shallow(right)?;
+        self.extend_record_with_spread(&mut entries, right)?;
+        Ok(Value::Map(MapValue {
+            entries: Arc::from(entries),
+        }))
     }
 
     fn parse_exec_request(
@@ -2612,12 +2673,6 @@ impl Engine {
             Value::String(text) => Ok(ExecArgValue::Literal(text.to_string())),
             Value::Path(path) => {
                 let path = self.expect_relative_path(&Value::Path(path), context)?;
-                if !self.exec_path_is_covered(path.as_str(), mounts, writable_roots) {
-                    return Err(self.type_error(&format!(
-                        "{context} '{}' is not covered by a mount or writable root",
-                        path.as_str()
-                    )));
-                }
                 Ok(ExecArgValue::Path(path))
             }
             Value::ExecPath(path) => self.exec_arg_from_exec_path(mounts, &path),
@@ -2726,7 +2781,7 @@ impl Engine {
                 Ok(())
             }
             instr::Pattern::Struct(fields) => {
-                let value = self.force_value_shallow(value)?;
+                let (value, obligations) = self.split_obligations(self.force_value_shallow(value)?);
                 match value {
                     Value::Map(map) => {
                         for (name, nested) in fields {
@@ -2744,6 +2799,8 @@ impl Engine {
                                         "record pattern requires field '{name}'"
                                     ))
                                 })?;
+                            let field_value =
+                                self.attach_obligations(field_value, obligations.iter().cloned());
                             match nested {
                                 Some(nested) => {
                                     self.bind_pattern_into(nested, field_value, bindings)?
@@ -2767,6 +2824,8 @@ impl Engine {
                                         "struct pattern requires field '{name}'"
                                     ))
                                 })?;
+                            let field_value =
+                                self.attach_obligations(field_value, obligations.iter().cloned());
                             match nested {
                                 Some(nested) => {
                                     self.bind_pattern_into(nested, field_value, bindings)?
@@ -3722,25 +3781,6 @@ impl Engine {
             other => {
                 Err(self.type_error(&format!("cannot turn {} into Blob text", other.type_name())))
             }
-        }
-    }
-
-    fn expect_tree_entry_name<'a>(&self, value: &'a Value) -> Result<&'a str, PoisonError> {
-        let (value, _) = self.split_obligations_ref(value);
-        match value {
-            Value::String(name) => Ok(name.as_ref()),
-            Value::Path(path) => {
-                let name = path.as_str();
-                if name == "." || name == "/" || name.contains('/') {
-                    Err(self.type_error("Tree.of entry names must be a single path segment"))
-                } else {
-                    Ok(name)
-                }
-            }
-            other => Err(self.type_error(&format!(
-                "Tree.of keys must be String or Path, got {}",
-                other.type_name()
-            ))),
         }
     }
 
