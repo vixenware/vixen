@@ -1605,6 +1605,35 @@ fn lowering_keeps_call_provenance_with_source_spans() {
 }
 
 #[test]
+fn lowering_keeps_source_ids_for_local_function_provenance() {
+    let source = indoc! {r#"
+        fn build(ws: Path) {
+          fn compile() {
+            Tree(ws / @zoo/lua-src)
+          }
+
+          compile()
+        }
+    "#};
+    let parse = vx_parser::parse(source);
+    assert_eq!(parse.errors(), []);
+    let file = SourceFile::cast_root(parse.syntax());
+    let module = lower_source_file_with_source_id(&file, "fixtures/build.vx");
+    let build_fn = &module.functions[0];
+
+    let crate::instr::Stmt::FnDecl(local_fn) = &build_fn.body.stmts[0] else {
+        panic!("expected local function declaration");
+    };
+    let crate::instr::Stmt::Expr(crate::instr::Expr::Call { provenance, .. }) =
+        &local_fn.body.stmts[0]
+    else {
+        panic!("expected local function body to contain a call");
+    };
+    let provenance = provenance.as_ref().expect("call provenance");
+    assert_eq!(provenance.source_id.as_ref(), "fixtures/build.vx");
+}
+
+#[test]
 fn lowering_keeps_map_payloads_for_tree_constructor_calls() {
     let parse = vx_parser::parse(indoc! {r#"
         fn main(other: Blob) {

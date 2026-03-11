@@ -11,6 +11,7 @@
 //! - Materialize final outputs locally (via execd or direct store fetch)
 
 mod action_graph;
+mod build_failure;
 mod cas_tree;
 mod db;
 mod error;

@@ -35,10 +35,19 @@ vx-report = { workspace = true }
 vx-vfs = { workspace = true }
 strip-ansi-escapes = { workspace = true }
 unicode-width = { workspace = true }
+ariadne = { version = "0.6", features = ["auto-color"] }
+arborium = { path = "/Users/amos/bearcove/arborium/crates/arborium", default-features = false }
+arborium-highlight = { path = "/Users/amos/bearcove/arborium/crates/arborium-highlight" }
+arborium-theme = { path = "/Users/amos/bearcove/arborium/crates/arborium-theme" }
+tree-sitter-vixen = { path = "/Users/amos/bearcove/tree-sitter-vixen" }
 
 [features]
 default = []
 diagnostics = ["moire/diagnostics", "roam-stream/diagnostics", "vx-vfs/diagnostics"]
+
+[dev-dependencies]
+concolor = { version = "0.1", features = ["api"] }
+indoc = "2"
 
 [lints]
 workspace = true

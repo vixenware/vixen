@@ -7,6 +7,7 @@
 //! 4. Materializing outputs locally
 
 use crate::SpawnTracker;
+use crate::build_failure;
 use crate::db::Database;
 use crate::error::{Result, VxdError};
 use crate::executor::Executor;
@@ -52,7 +53,7 @@ use vx_store_proto::{
     StoreClient, StoreProgress,
 };
 use vxd_proto::{
-    ActionType, BuildRequest, BuildResult, ProgressListenerClient, UnpublishResult,
+    ActionType, BuildFailure, BuildRequest, BuildResult, ProgressListenerClient, UnpublishResult,
     VXD_PROTOCOL_VERSION, Vxd as VxdRpc,
 };
 
@@ -1596,15 +1597,9 @@ impl VxdService {
             let tree = {
                 let parse = vx_parser::parse(&source);
                 if !parse.errors().is_empty() {
-                    let message = parse
-                        .errors()
-                        .iter()
-                        .map(|error| error.message.as_str())
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    return Err(VxdError::InvalidManifest(format!(
-                        "failed to parse {build_label}: {message}"
-                    )));
+                    let failure =
+                        build_failure::from_parse_errors(&build_vx_path, &source, parse.errors());
+                    return Ok(build_failure_result(failure, 1));
                 }
 
                 let root = SourceFile::cast_root(parse.syntax());
@@ -1640,21 +1635,32 @@ impl VxdService {
                         Vec::new(),
                         Default::default(),
                     )
-                    .map_err(|error| VxdError::Compilation {
-                        crate_name: build_label.clone(),
-                        message: error.to_string(),
-                    })?;
+                    .map_err(|error| {
+                        build_failure_result(
+                            build_failure::from_poison_error(&request.project_path, &error),
+                            1,
+                        )
+                    });
+
+                let output = match output {
+                    Ok(output) => output,
+                    Err(result) => return Ok(result),
+                };
 
                 match output {
                     Value::Tree(tree) => tree,
                     other => {
-                        return Err(VxdError::Compilation {
-                            crate_name: build_label.clone(),
-                            message: format!(
-                                "build entry must return Tree for `vx build`, got {}",
-                                other.type_name()
-                            ),
-                        });
+                        return Ok(build_failure_result(
+                            BuildFailure {
+                                message: format!(
+                                    "build entry must return Tree for `vx build`, got {}",
+                                    other.type_name()
+                                ),
+                                sources: Vec::new(),
+                                reports: Vec::new(),
+                            },
+                            1,
+                        ));
                     }
                 }
             };
@@ -1674,6 +1680,7 @@ impl VxdService {
                 duration_ms: duration.as_millis() as u64,
                 output_path: None,
                 error: None,
+                failure: None,
                 total_actions: 1,
                 cache_hits: 0,
                 rebuilt: 1,
@@ -2117,6 +2124,7 @@ impl VxdService {
                     duration_ms: duration.as_millis() as u64,
                     output_path: exec_stats.bin_output,
                     error: None,
+                    failure: None,
                     total_actions,
                     cache_hits: exec_stats.cache_hits,
                     rebuilt: exec_stats.rebuilt,
@@ -2651,6 +2659,7 @@ impl VxdService {
             duration_ms: duration.as_millis() as u64,
             output_path: exec_stats.bin_output,
             error: None,
+            failure: None,
             total_actions,
             cache_hits: exec_stats.cache_hits,
             rebuilt: exec_stats.rebuilt,
@@ -2691,8 +2700,8 @@ impl VxdRpc for VxdService {
                 cached: false,
                 duration_ms: 0,
                 output_path: None,
-                // Convert structured error to string at RPC boundary
                 error: Some(e.to_string()),
+                failure: None,
                 total_actions: 0,
                 cache_hits: 0,
                 rebuilt: 0,
@@ -2730,5 +2739,21 @@ impl VxdRpc for VxdService {
             version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: VXD_PROTOCOL_VERSION,
         }
+    }
+}
+
+fn build_failure_result(failure: BuildFailure, total_actions: usize) -> BuildResult {
+    BuildResult {
+        success: false,
+        message: "Build failed".to_string(),
+        cached: false,
+        duration_ms: 0,
+        output_path: None,
+        error: Some(failure.message.clone()),
+        failure: Some(failure),
+        total_actions,
+        cache_hits: 0,
+        rebuilt: 0,
+        cancelled: 0,
     }
 }

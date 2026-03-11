@@ -195,6 +195,7 @@ fn ariadne_can_render_vixen_source_with_arborium_color_labels()
         report = report.with_label(
             Label::new((filename, span.start as usize..span.end as usize))
                 .with_order(line_order(source, span.start as usize))
+                .with_priority(0)
                 .with_color(AriadneColor::Rgb(fg.r, fg.g, fg.b)),
         );
     }
@@ -206,6 +207,7 @@ fn ariadne_can_render_vixen_source_with_arborium_color_labels()
         .with_label(
             Label::new((filename, semantic_range))
                 .with_order(line_order(source, semantic_start))
+                .with_priority(10)
                 .with_color(AriadneColor::Red)
                 .with_message("this path does not exist in the current workspace"),
         )

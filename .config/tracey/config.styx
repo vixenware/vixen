@@ -28,4 +28,15 @@ specs (
             }
         )
     }
+    {
+        name diagnostics
+        include (docs/content/spec/diagnostics.md)
+        impls (
+            {
+                name rust
+                include (crates/**/*.rs)
+                exclude (target/**)
+            }
+        )
+    }
 )

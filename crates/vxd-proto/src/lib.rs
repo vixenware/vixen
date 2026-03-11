@@ -14,7 +14,7 @@ use vx_store_proto::CacheKey;
 
 /// Daemon protocol version.
 /// Bump this when making breaking changes to the daemon RPC interface.
-pub const VXD_PROTOCOL_VERSION: u32 = 4;
+pub const VXD_PROTOCOL_VERSION: u32 = 5;
 
 /// Request to build a project
 #[derive(Debug, Clone, Facet)]
@@ -42,6 +42,8 @@ pub struct BuildResult {
     pub output_path: Option<Utf8PathBuf>,
     /// Error message (if failed)
     pub error: Option<String>,
+    /// Structured build failure details (if available)
+    pub failure: Option<BuildFailure>,
     /// Total number of actions in the build graph
     pub total_actions: usize,
     /// Number of actions that were cache hits
@@ -50,6 +52,75 @@ pub struct BuildResult {
     pub rebuilt: usize,
     /// Number of actions that were cancelled
     pub cancelled: usize,
+}
+
+/// Structured details for a user-facing build failure.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct BuildFailure {
+    /// One-line fallback summary.
+    pub message: String,
+    /// Source texts referenced by the rendered reports.
+    pub sources: Vec<BuildDiagnosticSource>,
+    /// Reports to render in order.
+    pub reports: Vec<BuildDiagnosticReport>,
+}
+
+/// A source file referenced by structured diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct BuildDiagnosticSource {
+    /// Stable source identifier, usually a file path.
+    pub source_id: String,
+    /// Optional language identifier used for syntax highlighting.
+    pub language: Option<String>,
+    /// Full source text.
+    pub text: String,
+}
+
+/// One Ariadne-style report within a build failure.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct BuildDiagnosticReport {
+    /// Severity / visual treatment.
+    pub severity: BuildDiagnosticSeverity,
+    /// Report headline.
+    pub message: String,
+    /// Primary span for the report.
+    pub primary_span: BuildDiagnosticSpan,
+    /// Labels shown inside the snippet.
+    pub labels: Vec<BuildDiagnosticLabel>,
+    /// Additional notes shown under the snippet.
+    pub notes: Vec<String>,
+}
+
+/// Severity of a build diagnostic report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum BuildDiagnosticSeverity {
+    Error,
+    Advice,
+}
+
+/// A source span stored in byte offsets.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct BuildDiagnosticSpan {
+    pub source_id: String,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// A labeled span inside a report.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct BuildDiagnosticLabel {
+    pub span: BuildDiagnosticSpan,
+    pub kind: BuildDiagnosticLabelKind,
+    pub message: Option<String>,
+}
+
+/// Label role used by the CLI renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum BuildDiagnosticLabelKind {
+    Primary,
+    Secondary,
 }
 
 /// Action type being tracked
@@ -178,6 +249,7 @@ mod tests {
             duration_ms: 100,
             output_path: Some(Utf8PathBuf::from("/output/binary")),
             error: None,
+            failure: None,
             total_actions: 5,
             cache_hits: 2,
             rebuilt: 3,
@@ -260,11 +332,13 @@ mod tests {
         message: String,
         cached: bool,
         duration_ms: u64,
-        output_path: Option<Utf8PathBuf>, // Field 5 of 9
+        output_path: Option<Utf8PathBuf>,
         error: Option<String>,
+        failure: Option<BuildFailure>,
         total_actions: u64,
         cache_hits: u64,
         rebuilt: u64,
+        cancelled: u64,
     }
 
     // With usize
@@ -274,11 +348,13 @@ mod tests {
         message: String,
         cached: bool,
         duration_ms: u64,
-        output_path: Option<Utf8PathBuf>, // Field 5 of 9
+        output_path: Option<Utf8PathBuf>,
         error: Option<String>,
+        failure: Option<BuildFailure>,
         total_actions: usize,
         cache_hits: usize,
         rebuilt: usize,
+        cancelled: usize,
     }
 
     #[test]
@@ -317,9 +393,11 @@ mod tests {
             duration_ms: 100,
             output_path: Some(Utf8PathBuf::from("/output/binary")),
             error: None,
+            failure: None,
             total_actions: 5,
             cache_hits: 2,
             rebuilt: 3,
+            cancelled: 0,
         };
 
         let bytes = to_vec(&value).expect("serialize");
@@ -327,5 +405,40 @@ mod tests {
 
         let decoded: MirrorBuildResult = from_slice(&bytes).expect("deserialize");
         assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn test_build_failure_roundtrip() {
+        let failure = BuildFailure {
+            message: "build input not found".to_string(),
+            sources: vec![BuildDiagnosticSource {
+                source_id: "build.vx".to_string(),
+                language: Some("vixen".to_string()),
+                text: "fn build()".to_string(),
+            }],
+            reports: vec![BuildDiagnosticReport {
+                severity: BuildDiagnosticSeverity::Error,
+                message: "build input not found".to_string(),
+                primary_span: BuildDiagnosticSpan {
+                    source_id: "build.vx".to_string(),
+                    start: 3,
+                    end: 8,
+                },
+                labels: vec![BuildDiagnosticLabel {
+                    span: BuildDiagnosticSpan {
+                        source_id: "build.vx".to_string(),
+                        start: 3,
+                        end: 8,
+                    },
+                    kind: BuildDiagnosticLabelKind::Primary,
+                    message: Some("missing input".to_string()),
+                }],
+                notes: vec!["resolved path: /workspace/input".to_string()],
+            }],
+        };
+
+        let bytes = to_vec(&failure).expect("serialize");
+        let decoded: BuildFailure = from_slice(&bytes).expect("deserialize");
+        assert_eq!(decoded, failure);
     }
 }

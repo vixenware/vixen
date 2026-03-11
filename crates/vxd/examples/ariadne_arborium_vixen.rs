@@ -60,6 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report = report.with_label(
             Label::new((filename, span.start as usize..span.end as usize))
                 .with_order(line_order(source, span.start as usize))
+                .with_priority(0)
                 .with_color(Color::Rgb(fg.r, fg.g, fg.b)),
         );
     }
@@ -68,6 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_label(
             Label::new((filename, semantic_range))
                 .with_order(line_order(source, semantic_start))
+                .with_priority(10)
                 .with_color(Color::Red)
                 .with_message("this path does not exist in the current workspace"),
         )

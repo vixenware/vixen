@@ -3487,12 +3487,18 @@ dependencies = [
 name = "vx"
 version = "0.1.0"
 dependencies = [
+ "arborium",
+ "arborium-highlight",
+ "arborium-theme",
+ "ariadne",
  "camino",
+ "concolor",
  "eyre",
  "facet",
  "facet-json",
  "figue",
  "indicatif",
+ "indoc",
  "libc",
  "moire",
  "owo-colors",
@@ -3503,6 +3509,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "tree-sitter-vixen",
  "unicode-width",
  "vx-io",
  "vx-report",

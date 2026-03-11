@@ -4,6 +4,7 @@
 
 mod build_json;
 mod cli;
+mod diagnostics;
 mod progress_listener;
 mod tui;
 mod types;
@@ -527,6 +528,16 @@ impl CliContext {
 
             Ok(())
         } else {
+            if let Some(failure) = &result.failure {
+                match diagnostics::render_build_failure(failure) {
+                    Ok(rendered) => eprintln!("{rendered}"),
+                    Err(render_error) => {
+                        tracing::warn!(error = %render_error, "failed to render build diagnostics");
+                        eprintln!("{}", failure.message);
+                    }
+                }
+                std::process::exit(1);
+            }
             if let Some(error) = &result.error {
                 eprintln!("{error}");
                 std::process::exit(1);

@@ -144,7 +144,10 @@ fn lower_stmt_with_ctx(stmt: &AstStmt, ctx: &mut LowerCtx) -> Option<instr::Stmt
             Some(instr::Stmt::Return(expr))
         }
         AstStmt::FnDecl(f) => {
-            let mut fn_ctx = LowerCtx::default();
+            let mut fn_ctx = LowerCtx {
+                source_id: Arc::clone(&ctx.source_id),
+                ..LowerCtx::default()
+            };
             let def = lower_fn_decl_with_ctx(f, &mut fn_ctx)?;
             Some(instr::Stmt::FnDecl(Arc::new(def)))
         }
