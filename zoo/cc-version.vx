@@ -1,19 +1,21 @@
 // Minimal cc-version build sketch for the current resolver/evaluator lane.
 //
-// This is intentionally separate from `zoo/lua.vx`: it exercises a small,
-// currently supported discovery/exec shape without pretending to model Lua.
+// This is intentionally separate from `zoo/lua.vx`: it exercises a small
+// discovery/exec path and returns a real output file instead of an empty tree.
 
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #discover -> Tree (
   let class = executor_class("default");
   let cc = discover(class, (host) => host.which("cc"));
 
   exec [cc, "--version"] where {
-    observer: (proc, vfs) => (
+    observer: (proc, _vfs) => (
       if proc.exit_code != 0 (
         fail `process failed`
       );
 
-      vfs.subtree(@out)
+      Tree {
+        @cc-version.txt: proc.stdout.collect().blob(),
+      }
     ),
   }
 )

@@ -716,18 +716,6 @@ insert_anchor_links = "heading"
 > value |> cexec [ranlib, _]
 > ```
 
-> r[expr.then]
->
-> `.then` transforms the return value of a callable while preserving its
-> full call surface:
->
-> ```vixen
-> f.then(g)
-> ```
->
-> means: call `f` normally, then pass its result to `g`. Positional
-> payload shape and keyword parameter shape are preserved.
-
 ### Update expressions
 
 > r[expr.with]
@@ -1647,6 +1635,18 @@ insert_anchor_links = "heading"
 >
 > Map combinators pass `(key, value)` pairs to the closure. `.keys()`
 > returns `Array[K]`, `.values()` returns `Array[V]`.
+
+> r[comb.then]
+>
+> `.then` transforms the return value of a callable while preserving its
+> full call surface:
+>
+> ```vixen
+> f.then(g)
+> ```
+>
+> means: call `f` normally, then pass its result to `g`. Positional
+> payload shape and keyword parameter shape are preserved.
 
 ## Option
 
