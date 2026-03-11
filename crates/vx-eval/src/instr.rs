@@ -29,6 +29,12 @@ pub struct Param {
 }
 
 #[derive(Debug, Clone)]
+pub enum Pattern {
+    Binding(String),
+    Struct(Vec<(String, Option<Pattern>)>),
+}
+
+#[derive(Debug, Clone)]
 pub enum TemplatePart {
     Text(String),
     Expr(Expr),
@@ -37,6 +43,12 @@ pub enum TemplatePart {
 #[derive(Debug, Clone)]
 pub enum ArrayItem {
     Expr(Expr),
+    Spread(Expr),
+}
+
+#[derive(Debug, Clone)]
+pub enum RecordItem {
+    Field { name: String, value: Expr },
     Spread(Expr),
 }
 
@@ -53,6 +65,8 @@ pub struct Block {
 pub enum Stmt {
     /// `let name = expr`
     Let { name: String, value: Expr },
+    /// `let pattern = expr`
+    LetPattern { pattern: Pattern, value: Expr },
     /// `name = expr` (reassignment / shadowing)
     Assign { name: String, value: Expr },
     /// A bare expression (the last one in a block is the block's value)
@@ -112,6 +126,15 @@ pub enum Expr {
         func: Box<Expr>,
         args: Vec<Expr>,
         kwargs: Vec<(String, Expr)>,
+        kwargs_expr: Option<Box<Expr>>,
+    },
+
+    /// Partial application of a call surface.
+    PartialCall {
+        func: Box<Expr>,
+        args: Vec<Expr>,
+        kwargs: Vec<(String, Expr)>,
+        kwargs_expr: Option<Box<Expr>>,
     },
 
     /// Struct literal: `TypeName { field: value, ... }`
@@ -119,6 +142,9 @@ pub enum Expr {
         name: String,
         fields: Vec<(String, Expr)>,
     },
+
+    /// Record literal: `{ field: value, ..other }`
+    Record(Vec<RecordItem>),
 
     /// Array literal: `[a, b, c]`
     Array(Vec<ArrayItem>),

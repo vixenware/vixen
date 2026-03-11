@@ -32,8 +32,8 @@ use crate::poison::{DemandChain, DemandEntry, PoisonError, PoisonKind};
 use crate::transport::{ShippedFunction, TransportModule, TransportValue};
 use crate::value::{
     BlobValue, BuiltinFunction, BuiltinMethod, BuiltinNamespace, BuiltinValue, DiscoveredValue,
-    ExecPathValue, FunctionValue, HostObservation, HostValue, MapValue, PathValue, StructValue,
-    TreeValue, Value,
+    ExecPathValue, FunctionValue, HostObservation, HostValue, MapValue, PartialValue, PathValue,
+    StructValue, TreeValue, Value,
 };
 
 thread_local! {
@@ -147,8 +147,12 @@ impl Engine {
         let function = function
             .to_runtime()
             .map_err(|message| engine.type_error(&message))?;
-        let value =
-            engine.execute_call(Value::Function(function), Arc::from(args), Arc::from([]))?;
+        let value = engine.execute_call(
+            Value::Function(function),
+            Arc::from(args),
+            Arc::from([]),
+            None,
+        )?;
         engine.force_value(value)
     }
 
@@ -278,8 +282,12 @@ impl Engine {
 
         self.begin_discovery_recording();
         let result = (|| {
-            let value =
-                self.execute_call(probe, Arc::from([Value::Host(HostValue)]), Arc::from([]))?;
+            let value = self.execute_call(
+                probe,
+                Arc::from([Value::Host(HostValue)]),
+                Arc::from([]),
+                None,
+            )?;
             self.force_value(value)
         })();
         let observations = self.finish_discovery_recording();
@@ -366,8 +374,25 @@ impl Engine {
                     self.collect_value_obligations(capture, obligations);
                 }
             }
+            Value::Partial(partial) => {
+                self.collect_value_obligations(&partial.function, obligations);
+                for value in partial.args.iter() {
+                    self.collect_value_obligations(value, obligations);
+                }
+                for (_, value) in partial.kwargs.iter() {
+                    self.collect_value_obligations(value, obligations);
+                }
+                if let Some(value) = &partial.kwargs_expr {
+                    self.collect_value_obligations(value, obligations);
+                }
+            }
             Value::Builtin(BuiltinValue::Method(method)) => match method {
-                BuiltinMethod::BlobToString { receiver }
+                BuiltinMethod::ArrayMap { receiver }
+                | BuiltinMethod::ArrayToMap { receiver }
+                | BuiltinMethod::ArrayFlatten { receiver }
+                | BuiltinMethod::ArrayMerge { receiver }
+                | BuiltinMethod::MapMapValues { receiver }
+                | BuiltinMethod::BlobToString { receiver }
                 | BuiltinMethod::TreeFile { receiver }
                 | BuiltinMethod::TreeMerge { receiver }
                 | BuiltinMethod::TreeSubtree { receiver }
@@ -442,6 +467,7 @@ impl Engine {
                 function,
                 args: Arc::from(args),
                 kwargs: Arc::from([]),
+                kwargs_expr: None,
             },
             "call(..)".into(),
         )
@@ -452,8 +478,9 @@ impl Engine {
         function: Value,
         args: Vec<Value>,
         kwargs: Vec<(Arc<str>, Value)>,
+        kwargs_expr: Option<Value>,
     ) -> Value {
-        if kwargs.is_empty() {
+        if kwargs.is_empty() && kwargs_expr.is_none() {
             return self.build_call(function, args);
         }
 
@@ -462,6 +489,7 @@ impl Engine {
                 function,
                 args: Arc::from(args),
                 kwargs: Arc::from(kwargs),
+                kwargs_expr,
             },
             "call(..)".into(),
         )
@@ -715,7 +743,13 @@ impl Engine {
                 function,
                 args,
                 kwargs,
-            } => self.execute_call(function.clone(), args.clone(), kwargs.clone()),
+                kwargs_expr,
+            } => self.execute_call(
+                function.clone(),
+                args.clone(),
+                kwargs.clone(),
+                kwargs_expr.clone(),
+            ),
             NodeJob::Invoke { function, args } => self.invoke_function(function, args.clone()),
             NodeJob::Field { receiver, field } => {
                 let receiver = self.force_value_shallow(receiver.clone())?;
@@ -738,20 +772,60 @@ impl Engine {
         function: Value,
         args: Arc<[Value]>,
         kwargs: Arc<[(Arc<str>, Value)]>,
+        kwargs_expr: Option<Value>,
     ) -> Result<Value, PoisonError> {
         let (function, function_obligations) = self.split_obligations(self.force_value(function)?);
-        let function = match function {
-            Value::Function(function) => function,
+        match function {
+            Value::Function(function) => {
+                return self.finish_execute_call(
+                    function,
+                    args,
+                    kwargs,
+                    kwargs_expr,
+                    function_obligations,
+                );
+            }
+            Value::Partial(partial) => {
+                let mut merged_args = partial.args.iter().cloned().collect::<Vec<_>>();
+                merged_args.extend(args.iter().cloned());
+                let mut merged_kwargs = partial.kwargs.iter().cloned().collect::<Vec<_>>();
+                merged_kwargs.extend(kwargs.iter().cloned());
+                let merged_kwargs_expr = match (partial.kwargs_expr.as_ref(), kwargs_expr) {
+                    (Some(_), Some(_)) => {
+                        return Err(self.type_error(
+                            "cannot supply a second keyword record to a partial call",
+                        ));
+                    }
+                    (Some(value), None) => Some((**value).clone()),
+                    (None, value) => value,
+                };
+                let result = self.execute_call(
+                    partial.function.clone(),
+                    Arc::from(merged_args),
+                    Arc::from(merged_kwargs),
+                    merged_kwargs_expr,
+                )?;
+                return Ok(self.attach_obligations(result, function_obligations));
+            }
             Value::Builtin(builtin) => {
-                let result = self.invoke_builtin(&builtin, &args, &kwargs)?;
+                let result = self.invoke_builtin(&builtin, &args, &kwargs, kwargs_expr)?;
                 return Ok(self.attach_obligations(result, function_obligations));
             }
             other => {
                 return Err(self.type_error(&format!("cannot call {}", other.type_name())));
             }
-        };
+        }
+    }
 
-        if !kwargs.is_empty() {
+    fn finish_execute_call(
+        &self,
+        function: FunctionValue,
+        args: Arc<[Value]>,
+        kwargs: Arc<[(Arc<str>, Value)]>,
+        kwargs_expr: Option<Value>,
+        function_obligations: Vec<HostObservation>,
+    ) -> Result<Value, PoisonError> {
+        if !kwargs.is_empty() || kwargs_expr.is_some() {
             return Err(self.type_error("keyword arguments are only supported for builtins"));
         }
 
@@ -827,6 +901,10 @@ impl Engine {
                     let value = self.eval_expr(value, &bindings, "<module>").into_value()?;
                     bindings.insert(name.clone(), value);
                 }
+                instr::Stmt::LetPattern { pattern, value } => {
+                    let value = self.eval_expr(value, &bindings, "<module>").into_value()?;
+                    self.bind_pattern_into(pattern, value, &mut bindings)?;
+                }
                 instr::Stmt::Return(_) => {
                     return Err(self.internal_error("return is not allowed at file scope"));
                 }
@@ -863,6 +941,18 @@ impl Engine {
                     match self.eval_expr(value, &local_bindings, current_code_identity) {
                         BuildResult::Value(value) => {
                             local_bindings.insert(name.clone(), value);
+                        }
+                        other => return other,
+                    }
+                }
+                instr::Stmt::LetPattern { pattern, value } => {
+                    match self.eval_expr(value, &local_bindings, current_code_identity) {
+                        BuildResult::Value(value) => {
+                            if let Err(error) =
+                                self.bind_pattern_into(pattern, value, &mut local_bindings)
+                            {
+                                return BuildResult::Poisoned(error);
+                            }
                         }
                         other => return other,
                     }
@@ -1024,7 +1114,12 @@ impl Engine {
                     capture_bindings(bindings),
                 )))
             }
-            instr::Expr::Call { func, args, kwargs } => {
+            instr::Expr::Call {
+                func,
+                args,
+                kwargs,
+                kwargs_expr,
+            } => {
                 let function = match self.eval_expr(func, bindings, current_code_identity) {
                     BuildResult::Value(value) => value,
                     other => return other,
@@ -1045,7 +1140,59 @@ impl Engine {
                         other => return other,
                     }
                 }
-                BuildResult::Value(self.build_call_with_kwargs(function, arg_values, kwarg_values))
+                let kwargs_expr_value = match kwargs_expr {
+                    Some(expr) => match self.eval_expr(expr, bindings, current_code_identity) {
+                        BuildResult::Value(value) => Some(value),
+                        other => return other,
+                    },
+                    None => None,
+                };
+                BuildResult::Value(self.build_call_with_kwargs(
+                    function,
+                    arg_values,
+                    kwarg_values,
+                    kwargs_expr_value,
+                ))
+            }
+            instr::Expr::PartialCall {
+                func,
+                args,
+                kwargs,
+                kwargs_expr,
+            } => {
+                let function = match self.eval_expr(func, bindings, current_code_identity) {
+                    BuildResult::Value(value) => value,
+                    other => return other,
+                };
+                let mut arg_values = Vec::with_capacity(args.len());
+                for arg in args {
+                    match self.eval_expr(arg, bindings, current_code_identity) {
+                        BuildResult::Value(value) => arg_values.push(value),
+                        other => return other,
+                    }
+                }
+                let mut kwarg_values = Vec::with_capacity(kwargs.len());
+                for (name, arg) in kwargs {
+                    match self.eval_expr(arg, bindings, current_code_identity) {
+                        BuildResult::Value(value) => {
+                            kwarg_values.push((Arc::from(name.as_str()), value));
+                        }
+                        other => return other,
+                    }
+                }
+                let kwargs_expr_value = match kwargs_expr {
+                    Some(expr) => match self.eval_expr(expr, bindings, current_code_identity) {
+                        BuildResult::Value(value) => Some(value),
+                        other => return other,
+                    },
+                    None => None,
+                };
+                BuildResult::Value(Value::Partial(Arc::new(PartialValue {
+                    function,
+                    args: Arc::from(arg_values),
+                    kwargs: Arc::from(kwarg_values),
+                    kwargs_expr: kwargs_expr_value.map(Box::new),
+                })))
             }
             instr::Expr::StructLit { name, fields } => {
                 let mut values = Vec::with_capacity(fields.len());
@@ -1060,6 +1207,42 @@ impl Engine {
                 BuildResult::Value(Value::Struct(StructValue {
                     type_name: Arc::from(name.as_str()),
                     fields: Arc::from(values),
+                }))
+            }
+            instr::Expr::Record(items) => {
+                let mut entries = Vec::new();
+                for item in items {
+                    match item {
+                        instr::RecordItem::Field { name, value } => {
+                            let value = match self.eval_expr(value, bindings, current_code_identity)
+                            {
+                                BuildResult::Value(value) => value,
+                                other => return other,
+                            };
+                            entries.push((Value::String(Arc::from(name.as_str())), value));
+                        }
+                        instr::RecordItem::Spread(spread_expr) => {
+                            let spread_value = match self.eval_expr(
+                                spread_expr,
+                                bindings,
+                                current_code_identity,
+                            ) {
+                                BuildResult::Value(value) => value,
+                                other => return other,
+                            };
+                            let spread_value = match self.force_value_shallow(spread_value) {
+                                Ok(value) => value,
+                                Err(error) => return BuildResult::Poisoned(error),
+                            };
+                            match self.extend_record_with_spread(&mut entries, spread_value) {
+                                Ok(()) => {}
+                                Err(error) => return BuildResult::Poisoned(error),
+                            }
+                        }
+                    }
+                }
+                BuildResult::Value(Value::Map(MapValue {
+                    entries: Arc::from(entries),
                 }))
             }
             instr::Expr::Array(items) => {
@@ -1401,6 +1584,44 @@ impl Engine {
                 }
                 Err(self.type_error(&format!("invalid tuple field '{}'", field)))
             }
+            Value::Array(_) if field == "map" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::ArrayMap {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::Array(_) if field == "to_map" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::ArrayToMap {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::Array(_) if field == "flatten" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::ArrayFlatten {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::Array(_) if field == "merge" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::ArrayMerge {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::Map(map) => {
+                if let Some((_, value)) = map.entries.iter().find(|(key, _)| match key {
+                    Value::String(name) => name.as_ref() == field,
+                    _ => false,
+                }) {
+                    return Ok(self.attach_obligations(value.clone(), obligations.iter().cloned()));
+                }
+
+                if field == "map_values" {
+                    Ok(Value::Builtin(BuiltinValue::Method(
+                        BuiltinMethod::MapMapValues {
+                            receiver: Box::new(receiver.clone()),
+                        },
+                    )))
+                } else {
+                    Err(self.type_error(&format!("no field '{}' on Map", field)))
+                }
+            }
             Value::Blob(_) if field == "to_string" => Ok(Value::Builtin(BuiltinValue::Method(
                 BuiltinMethod::BlobToString {
                     receiver: Box::new(receiver.clone()),
@@ -1563,6 +1784,7 @@ impl Engine {
         builtin: &BuiltinValue,
         args: &[Value],
         kwargs: &[(Arc<str>, Value)],
+        kwargs_expr: Option<Value>,
     ) -> Result<Value, PoisonError> {
         match builtin {
             BuiltinValue::Namespace(namespace) => match namespace {
@@ -1591,12 +1813,14 @@ impl Engine {
                     }
                 }
             },
-            BuiltinValue::Function(BuiltinFunction::Exec) => self.exec_builtin(args, kwargs),
+            BuiltinValue::Function(BuiltinFunction::Exec) => {
+                self.exec_builtin(args, kwargs, kwargs_expr)
+            }
             BuiltinValue::Function(BuiltinFunction::Discover) => {
-                self.discover_builtin(args, kwargs)
+                self.discover_builtin(args, kwargs, kwargs_expr)
             }
             BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
-                self.executor_class_builtin(args, kwargs)
+                self.executor_class_builtin(args, kwargs, kwargs_expr)
             }
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => {
                 self.require_no_kwargs("Blob.from_string", kwargs)?;
@@ -1629,6 +1853,31 @@ impl Engine {
                 let path = self.force_value(args[0].clone())?;
                 let path = self.expect_path_value(&path, "Tree.from_path path")?;
                 Ok(Value::Tree(TreeValue::FsDir(path)))
+            }
+            BuiltinValue::Method(BuiltinMethod::ArrayMap { receiver }) => {
+                self.require_no_kwargs("array.map", kwargs)?;
+                self.check_arity("array.map", args, 1)?;
+                self.array_map(receiver, args[0].clone())
+            }
+            BuiltinValue::Method(BuiltinMethod::ArrayToMap { receiver }) => {
+                self.require_no_kwargs("array.to_map", kwargs)?;
+                self.check_arity("array.to_map", args, 1)?;
+                self.array_to_map(receiver, args[0].clone())
+            }
+            BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver }) => {
+                self.require_no_kwargs("array.flatten", kwargs)?;
+                self.check_arity("array.flatten", args, 0)?;
+                self.array_flatten(receiver)
+            }
+            BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver }) => {
+                self.require_no_kwargs("array.merge", kwargs)?;
+                self.check_arity("array.merge", args, 0)?;
+                self.array_merge(receiver)
+            }
+            BuiltinValue::Method(BuiltinMethod::MapMapValues { receiver }) => {
+                self.require_no_kwargs("map.map_values", kwargs)?;
+                self.check_arity("map.map_values", args, 1)?;
+                self.map_map_values(receiver, args[0].clone())
             }
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
                 self.require_no_kwargs("blob.to_string", kwargs)?;
@@ -1717,6 +1966,7 @@ impl Engine {
                     receiver.as_ref().clone(),
                     Arc::from(args.to_vec()),
                     Arc::from(kwargs.to_vec()),
+                    None,
                 ) {
                     Ok(value) => Ok(option_some(value)),
                     Err(_) => Ok(option_none()),
@@ -1774,12 +2024,154 @@ impl Engine {
         Ok(Value::Tree(TreeValue::Inline(Arc::from(entries))))
     }
 
+    fn array_map(&self, receiver: &Value, callback: Value) -> Result<Value, PoisonError> {
+        let callback = self.force_value(callback)?;
+        let (receiver, obligations) =
+            self.split_obligations(self.force_value_shallow(receiver.clone())?);
+        let Value::Array(items) = receiver else {
+            return Err(self.type_error("array.map receiver must be Array"));
+        };
+
+        let mut out = Vec::with_capacity(items.len());
+        for item in items.iter() {
+            out.push(self.execute_call(
+                callback.clone(),
+                Arc::from(vec![item.clone()]),
+                Arc::from(Vec::<(Arc<str>, Value)>::new()),
+                None,
+            )?);
+        }
+
+        Ok(self.attach_obligations(Value::Array(Arc::from(out)), obligations))
+    }
+
+    fn array_to_map(&self, receiver: &Value, callback: Value) -> Result<Value, PoisonError> {
+        let callback = self.force_value(callback)?;
+        let (receiver, obligations) =
+            self.split_obligations(self.force_value_shallow(receiver.clone())?);
+        let Value::Array(items) = receiver else {
+            return Err(self.type_error("array.to_map receiver must be Array"));
+        };
+
+        let mut entries = Vec::with_capacity(items.len());
+        for item in items.iter() {
+            let value = self.execute_call(
+                callback.clone(),
+                Arc::from(vec![item.clone()]),
+                Arc::from(Vec::<(Arc<str>, Value)>::new()),
+                None,
+            )?;
+            entries.push((item.clone(), value));
+        }
+
+        Ok(self.attach_obligations(
+            Value::Map(MapValue {
+                entries: Arc::from(entries),
+            }),
+            obligations,
+        ))
+    }
+
+    fn array_flatten(&self, receiver: &Value) -> Result<Value, PoisonError> {
+        let (receiver, obligations) =
+            self.split_obligations(self.force_value_shallow(receiver.clone())?);
+        let Value::Array(items) = receiver else {
+            return Err(self.type_error("array.flatten receiver must be Array"));
+        };
+
+        let mut out = Vec::new();
+        for item in items.iter() {
+            let (item, item_obligations) =
+                self.split_obligations(self.force_value_shallow(item.clone())?);
+            let Value::Array(inner) = item else {
+                return Err(self.type_error("array.flatten expects Array items"));
+            };
+            for value in inner.iter() {
+                out.push(self.attach_obligations(value.clone(), item_obligations.iter().cloned()));
+            }
+        }
+
+        Ok(self.attach_obligations(Value::Array(Arc::from(out)), obligations))
+    }
+
+    fn array_merge(&self, receiver: &Value) -> Result<Value, PoisonError> {
+        let (receiver, receiver_obligations) =
+            self.split_obligations(self.force_value_shallow(receiver.clone())?);
+        let Value::Array(items) = receiver else {
+            return Err(self.type_error("array.merge receiver must be Array"));
+        };
+
+        let mut iter = items.iter();
+        let Some(first) = iter.next() else {
+            return Ok(self.attach_obligations(
+                Value::Tree(TreeValue::Inline(Arc::from([]))),
+                receiver_obligations,
+            ));
+        };
+
+        let (first, mut obligations) =
+            self.split_obligations(self.force_value_shallow(first.clone())?);
+        let Value::Tree(mut merged) = first else {
+            return Err(self.type_error("array.merge expects Tree items"));
+        };
+        obligations.extend(receiver_obligations);
+
+        for item in iter {
+            let (item, item_obligations) =
+                self.split_obligations(self.force_value_shallow(item.clone())?);
+            let Value::Tree(tree) = item else {
+                return Err(self.type_error("array.merge expects Tree items"));
+            };
+            merged = match self.tree_merge(&merged, &tree)? {
+                Value::Tree(tree) => tree,
+                other => {
+                    return Err(self.type_error(&format!(
+                        "array.merge expected Tree result, got {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            obligations.extend(item_obligations);
+        }
+
+        Ok(self.attach_obligations(Value::Tree(merged), obligations))
+    }
+
+    fn map_map_values(&self, receiver: &Value, callback: Value) -> Result<Value, PoisonError> {
+        let callback = self.force_value(callback)?;
+        let (receiver, obligations) =
+            self.split_obligations(self.force_value_shallow(receiver.clone())?);
+        let Value::Map(map) = receiver else {
+            return Err(self.type_error("map.map_values receiver must be Map"));
+        };
+
+        let mut entries = Vec::with_capacity(map.entries.len());
+        for (key, value) in map.entries.iter() {
+            let mapped = self.execute_call(
+                callback.clone(),
+                Arc::from(vec![value.clone()]),
+                Arc::from(Vec::<(Arc<str>, Value)>::new()),
+                None,
+            )?;
+            entries.push((key.clone(), mapped));
+        }
+
+        Ok(self.attach_obligations(
+            Value::Map(MapValue {
+                entries: Arc::from(entries),
+            }),
+            obligations,
+        ))
+    }
+
     fn exec_builtin(
         &self,
         args: &[Value],
         kwargs: &[(Arc<str>, Value)],
+        kwargs_expr: Option<Value>,
     ) -> Result<Value, PoisonError> {
-        let request = self.parse_exec_request(args, kwargs)?;
+        let kwargs = self.materialize_kwargs(kwargs, kwargs_expr, "exec")?;
+        let request = self.parse_exec_request(args, &kwargs)?;
         if let Some(exec_handler) = &self.exec_handler {
             let request = self.ship_exec_request(&request)?;
             return exec_handler(request);
@@ -1791,7 +2183,11 @@ impl Engine {
         &self,
         args: &[Value],
         kwargs: &[(Arc<str>, Value)],
+        kwargs_expr: Option<Value>,
     ) -> Result<Value, PoisonError> {
+        if kwargs_expr.is_some() {
+            return Err(self.type_error("discover does not accept keyword records"));
+        }
         self.require_no_kwargs("discover", kwargs)?;
         self.check_arity("discover", args, 2)?;
         let class = self.force_value(args[0].clone())?;
@@ -1814,12 +2210,53 @@ impl Engine {
         &self,
         args: &[Value],
         kwargs: &[(Arc<str>, Value)],
+        kwargs_expr: Option<Value>,
     ) -> Result<Value, PoisonError> {
+        if kwargs_expr.is_some() {
+            return Err(self.type_error("executor_class does not accept keyword records"));
+        }
         self.require_no_kwargs("executor_class", kwargs)?;
         self.check_arity("executor_class", args, 1)?;
         let name = self.force_value(args[0].clone())?;
         let name = self.expect_host_path(&name, "executor_class name")?;
         Ok(Value::ExecutorClass(Arc::from(name)))
+    }
+
+    fn materialize_kwargs(
+        &self,
+        kwargs: &[(Arc<str>, Value)],
+        kwargs_expr: Option<Value>,
+        context: &str,
+    ) -> Result<Vec<(Arc<str>, Value)>, PoisonError> {
+        let mut out = kwargs.to_vec();
+        let Some(kwargs_expr) = kwargs_expr else {
+            return Ok(out);
+        };
+
+        let kwargs_expr = self.force_value_shallow(kwargs_expr)?;
+        let (value, obligations) = self.split_obligations(kwargs_expr);
+        let Value::Map(map) = value else {
+            return Err(self.type_error(&format!(
+                "{context} keyword record must be a record/map, got {}",
+                value.type_name()
+            )));
+        };
+
+        for (key, value) in map.entries.iter() {
+            let key = self.force_value(key.clone())?;
+            let Value::String(name) = key else {
+                return Err(self.type_error(&format!(
+                    "{context} keyword record keys must be String, got {}",
+                    key.type_name()
+                )));
+            };
+            out.push((
+                Arc::from(name.as_ref()),
+                self.attach_obligations(value.clone(), obligations.iter().cloned()),
+            ));
+        }
+
+        Ok(out)
     }
 
     fn parse_exec_request(
@@ -1987,6 +2424,7 @@ impl Engine {
             request.observer,
             Arc::from(vec![process, tree]),
             Arc::from([]),
+            None,
         );
 
         if let Some(verification_task) = verification_task {
@@ -2165,6 +2603,111 @@ impl Engine {
                 "array spread requires Array or Tree, got {}",
                 other.type_name()
             ))),
+        }
+    }
+
+    fn extend_record_with_spread(
+        &self,
+        entries: &mut Vec<(Value, Value)>,
+        spread_value: Value,
+    ) -> Result<(), PoisonError> {
+        let (spread_value, obligations) = self.split_obligations(spread_value);
+        match spread_value {
+            Value::Map(map) => {
+                entries.extend(map.entries.iter().cloned().map(|(key, value)| {
+                    (
+                        self.attach_obligations(key, obligations.clone()),
+                        self.attach_obligations(value, obligations.clone()),
+                    )
+                }));
+                Ok(())
+            }
+            Value::Struct(struct_value) => {
+                entries.extend(struct_value.fields.iter().cloned().map(|(name, value)| {
+                    (
+                        self.attach_obligations(Value::String(name), obligations.clone()),
+                        self.attach_obligations(value, obligations.clone()),
+                    )
+                }));
+                Ok(())
+            }
+            other => Err(self.type_error(&format!(
+                "record spread requires Map or Struct, got {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn bind_pattern_into(
+        &self,
+        pattern: &instr::Pattern,
+        value: Value,
+        bindings: &mut HashMap<String, Value>,
+    ) -> Result<(), PoisonError> {
+        match pattern {
+            instr::Pattern::Binding(name) => {
+                bindings.insert(name.clone(), value);
+                Ok(())
+            }
+            instr::Pattern::Struct(fields) => {
+                let value = self.force_value_shallow(value)?;
+                match value {
+                    Value::Map(map) => {
+                        for (name, nested) in fields {
+                            let field_value = map
+                                .entries
+                                .iter()
+                                .find_map(|(key, value)| match key {
+                                    Value::String(key_name) if key_name.as_ref() == name => {
+                                        Some(value.clone())
+                                    }
+                                    _ => None,
+                                })
+                                .ok_or_else(|| {
+                                    self.type_error(&format!(
+                                        "record pattern requires field '{name}'"
+                                    ))
+                                })?;
+                            match nested {
+                                Some(nested) => {
+                                    self.bind_pattern_into(nested, field_value, bindings)?
+                                }
+                                None => {
+                                    bindings.insert(name.clone(), field_value);
+                                }
+                            }
+                        }
+                        Ok(())
+                    }
+                    Value::Struct(struct_value) => {
+                        for (name, nested) in fields {
+                            let field_value = struct_value
+                                .fields
+                                .iter()
+                                .find(|(field_name, _)| field_name.as_ref() == name)
+                                .map(|(_, value)| value.clone())
+                                .ok_or_else(|| {
+                                    self.type_error(&format!(
+                                        "struct pattern requires field '{name}'"
+                                    ))
+                                })?;
+                            match nested {
+                                Some(nested) => {
+                                    self.bind_pattern_into(nested, field_value, bindings)?
+                                }
+                                None => {
+                                    bindings.insert(name.clone(), field_value);
+                                }
+                            }
+                        }
+                        Ok(())
+                    }
+                    other => Err(self.type_error(&format!(
+                        "struct pattern requires Map or Struct, got {}",
+                        other.type_name()
+                    ))),
+                }
+            }
         }
     }
 
@@ -2684,6 +3227,7 @@ impl Engine {
             | Value::String(_)
             | Value::Unit
             | Value::Function(_)
+            | Value::Partial(_)
             | Value::Builtin(_) => Ok(value),
             Value::Blob(BlobValue::FsFile(path)) => {
                 let bytes = fs::read(path.as_str()).map_err(|error| {
@@ -3621,6 +4165,10 @@ fn collect_block_callee_names(
                 collect_expr_callee_names(value, &local_scope, top_level_names, deps);
                 local_scope.insert(name.clone());
             }
+            instr::Stmt::LetPattern { pattern, value } => {
+                collect_expr_callee_names(value, &local_scope, top_level_names, deps);
+                collect_pattern_bindings(pattern, &mut local_scope);
+            }
             instr::Stmt::Expr(expr) | instr::Stmt::Return(expr) => {
                 collect_expr_callee_names(expr, &local_scope, top_level_names, deps);
             }
@@ -3687,7 +4235,18 @@ fn collect_expr_callee_names(
             }
             collect_block_callee_names(&def.body, &mut closure_scope, top_level_names, deps);
         }
-        instr::Expr::Call { func, args, kwargs } => {
+        instr::Expr::Call {
+            func,
+            args,
+            kwargs,
+            kwargs_expr,
+        }
+        | instr::Expr::PartialCall {
+            func,
+            args,
+            kwargs,
+            kwargs_expr,
+        } => {
             if let instr::Expr::Var(name) = func.as_ref()
                 && !visible_locals.contains(name)
                 && top_level_names.contains(name)
@@ -3701,10 +4260,22 @@ fn collect_expr_callee_names(
             for (_, arg) in kwargs {
                 collect_expr_callee_names(arg, visible_locals, top_level_names, deps);
             }
+            if let Some(kwargs_expr) = kwargs_expr {
+                collect_expr_callee_names(kwargs_expr, visible_locals, top_level_names, deps);
+            }
         }
         instr::Expr::StructLit { fields, .. } => {
             for (_, value) in fields {
                 collect_expr_callee_names(value, visible_locals, top_level_names, deps);
+            }
+        }
+        instr::Expr::Record(items) => {
+            for item in items {
+                match item {
+                    instr::RecordItem::Field { value, .. } | instr::RecordItem::Spread(value) => {
+                        collect_expr_callee_names(value, visible_locals, top_level_names, deps);
+                    }
+                }
             }
         }
         instr::Expr::Array(items) => {
@@ -3728,6 +4299,23 @@ fn collect_expr_callee_names(
         instr::Expr::Tuple(elems) => {
             for elem in elems {
                 collect_expr_callee_names(elem, visible_locals, top_level_names, deps);
+            }
+        }
+    }
+}
+
+fn collect_pattern_bindings(pattern: &instr::Pattern, visible_locals: &mut HashSet<String>) {
+    match pattern {
+        instr::Pattern::Binding(name) => {
+            visible_locals.insert(name.clone());
+        }
+        instr::Pattern::Struct(fields) => {
+            for (name, nested) in fields {
+                if let Some(nested) = nested {
+                    collect_pattern_bindings(nested, visible_locals);
+                } else {
+                    visible_locals.insert(name.clone());
+                }
             }
         }
     }

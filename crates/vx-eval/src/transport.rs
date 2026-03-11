@@ -43,9 +43,33 @@ pub enum TransportArrayItem {
 
 #[derive(Debug, Clone, PartialEq, Facet)]
 #[repr(u8)]
+pub enum TransportPattern {
+    Binding(String),
+    Struct(Vec<(String, Option<TransportPattern>)>),
+}
+
+#[derive(Debug, Clone, PartialEq, Facet)]
+#[repr(u8)]
+pub enum TransportRecordItem {
+    Field { name: String, value: TransportExpr },
+    Spread(TransportExpr),
+}
+
+#[derive(Debug, Clone, PartialEq, Facet)]
+#[repr(u8)]
 pub enum TransportStmt {
-    Let { name: String, value: TransportExpr },
-    Assign { name: String, value: TransportExpr },
+    Let {
+        name: String,
+        value: TransportExpr,
+    },
+    LetPattern {
+        pattern: TransportPattern,
+        value: TransportExpr,
+    },
+    Assign {
+        name: String,
+        value: TransportExpr,
+    },
     Expr(TransportExpr),
     Return(TransportExpr),
     FnDecl(TransportFnDef),
@@ -92,11 +116,19 @@ pub enum TransportExpr {
         func: Box<TransportExpr>,
         args: Vec<TransportExpr>,
         kwargs: Vec<(String, TransportExpr)>,
+        kwargs_expr: Option<Box<TransportExpr>>,
+    },
+    PartialCall {
+        func: Box<TransportExpr>,
+        args: Vec<TransportExpr>,
+        kwargs: Vec<(String, TransportExpr)>,
+        kwargs_expr: Option<Box<TransportExpr>>,
     },
     StructLit {
         name: String,
         fields: Vec<(String, TransportExpr)>,
     },
+    Record(Vec<TransportRecordItem>),
     Array(Vec<TransportArrayItem>),
     Map(Vec<(TransportExpr, TransportExpr)>),
     Field {
@@ -287,6 +319,10 @@ impl From<&instr::Stmt> for TransportStmt {
                 name: name.clone(),
                 value: TransportExpr::from(value),
             },
+            instr::Stmt::LetPattern { pattern, value } => Self::LetPattern {
+                pattern: TransportPattern::from(pattern),
+                value: TransportExpr::from(value),
+            },
             instr::Stmt::Assign { name, value } => Self::Assign {
                 name: name.clone(),
                 value: TransportExpr::from(value),
@@ -305,6 +341,10 @@ impl From<TransportStmt> for instr::Stmt {
                 name,
                 value: value.into(),
             },
+            TransportStmt::LetPattern { pattern, value } => Self::LetPattern {
+                pattern: pattern.into(),
+                value: value.into(),
+            },
             TransportStmt::Assign { name, value } => Self::Assign {
                 name,
                 value: value.into(),
@@ -312,6 +352,60 @@ impl From<TransportStmt> for instr::Stmt {
             TransportStmt::Expr(expr) => Self::Expr(expr.into()),
             TransportStmt::Return(expr) => Self::Return(expr.into()),
             TransportStmt::FnDecl(def) => Self::FnDecl(Arc::new(def.into())),
+        }
+    }
+}
+
+impl From<&instr::Pattern> for TransportPattern {
+    fn from(pattern: &instr::Pattern) -> Self {
+        match pattern {
+            instr::Pattern::Binding(name) => Self::Binding(name.clone()),
+            instr::Pattern::Struct(fields) => Self::Struct(
+                fields
+                    .iter()
+                    .map(|(name, pattern)| {
+                        (name.clone(), pattern.as_ref().map(TransportPattern::from))
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl From<TransportPattern> for instr::Pattern {
+    fn from(pattern: TransportPattern) -> Self {
+        match pattern {
+            TransportPattern::Binding(name) => Self::Binding(name),
+            TransportPattern::Struct(fields) => Self::Struct(
+                fields
+                    .into_iter()
+                    .map(|(name, pattern)| (name, pattern.map(Into::into)))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl From<&instr::RecordItem> for TransportRecordItem {
+    fn from(item: &instr::RecordItem) -> Self {
+        match item {
+            instr::RecordItem::Field { name, value } => Self::Field {
+                name: name.clone(),
+                value: value.into(),
+            },
+            instr::RecordItem::Spread(value) => Self::Spread(value.into()),
+        }
+    }
+}
+
+impl From<TransportRecordItem> for instr::RecordItem {
+    fn from(item: TransportRecordItem) -> Self {
+        match item {
+            TransportRecordItem::Field { name, value } => Self::Field {
+                name,
+                value: value.into(),
+            },
+            TransportRecordItem::Spread(value) => Self::Spread(value.into()),
         }
     }
 }
@@ -372,13 +466,37 @@ impl From<&instr::Expr> for TransportExpr {
                 closure_id: *closure_id,
                 def: TransportFnDef::from(def.as_ref()),
             },
-            instr::Expr::Call { func, args, kwargs } => Self::Call {
+            instr::Expr::Call {
+                func,
+                args,
+                kwargs,
+                kwargs_expr,
+            } => Self::Call {
                 func: Box::new(TransportExpr::from(func.as_ref())),
                 args: args.iter().map(TransportExpr::from).collect(),
                 kwargs: kwargs
                     .iter()
                     .map(|(name, value)| (name.clone(), TransportExpr::from(value)))
                     .collect(),
+                kwargs_expr: kwargs_expr
+                    .as_ref()
+                    .map(|expr| Box::new(TransportExpr::from(expr.as_ref()))),
+            },
+            instr::Expr::PartialCall {
+                func,
+                args,
+                kwargs,
+                kwargs_expr,
+            } => Self::PartialCall {
+                func: Box::new(TransportExpr::from(func.as_ref())),
+                args: args.iter().map(TransportExpr::from).collect(),
+                kwargs: kwargs
+                    .iter()
+                    .map(|(name, value)| (name.clone(), TransportExpr::from(value)))
+                    .collect(),
+                kwargs_expr: kwargs_expr
+                    .as_ref()
+                    .map(|expr| Box::new(TransportExpr::from(expr.as_ref()))),
             },
             instr::Expr::StructLit { name, fields } => Self::StructLit {
                 name: name.clone(),
@@ -387,6 +505,9 @@ impl From<&instr::Expr> for TransportExpr {
                     .map(|(name, value)| (name.clone(), TransportExpr::from(value)))
                     .collect(),
             },
+            instr::Expr::Record(items) => {
+                Self::Record(items.iter().map(TransportRecordItem::from).collect())
+            }
             instr::Expr::Array(values) => Self::Array(
                 values
                     .iter()
@@ -455,13 +576,33 @@ impl From<TransportExpr> for instr::Expr {
                 closure_id,
                 def: Arc::new(def.into()),
             },
-            TransportExpr::Call { func, args, kwargs } => Self::Call {
+            TransportExpr::Call {
+                func,
+                args,
+                kwargs,
+                kwargs_expr,
+            } => Self::Call {
                 func: Box::new((*func).into()),
                 args: args.into_iter().map(Into::into).collect(),
                 kwargs: kwargs
                     .into_iter()
                     .map(|(name, value)| (name, value.into()))
                     .collect(),
+                kwargs_expr: kwargs_expr.map(|expr| Box::new((*expr).into())),
+            },
+            TransportExpr::PartialCall {
+                func,
+                args,
+                kwargs,
+                kwargs_expr,
+            } => Self::PartialCall {
+                func: Box::new((*func).into()),
+                args: args.into_iter().map(Into::into).collect(),
+                kwargs: kwargs
+                    .into_iter()
+                    .map(|(name, value)| (name, value.into()))
+                    .collect(),
+                kwargs_expr: kwargs_expr.map(|expr| Box::new((*expr).into())),
             },
             TransportExpr::StructLit { name, fields } => Self::StructLit {
                 name,
@@ -470,6 +611,9 @@ impl From<TransportExpr> for instr::Expr {
                     .map(|(field, value)| (field, value.into()))
                     .collect(),
             },
+            TransportExpr::Record(items) => {
+                Self::Record(items.into_iter().map(Into::into).collect())
+            }
             TransportExpr::Array(values) => Self::Array(
                 values
                     .into_iter()
@@ -640,6 +784,7 @@ impl TryFrom<&Value> for TransportValue {
             )),
             Value::Struct(value) => Ok(Self::Struct(TransportStruct::try_from(value)?)),
             Value::Function(function) => Ok(Self::Function(ShippedFunction::try_from(function)?)),
+            Value::Partial(_) => Err("cannot transport partially applied values".into()),
             Value::Builtin(value) => Ok(Self::Builtin(TransportBuiltinValue::try_from(value)?)),
         }
     }
@@ -866,7 +1011,12 @@ impl TryFrom<&BuiltinValue> for TransportBuiltinValue {
                     receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
                 })
             }
-            BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { .. })
+            BuiltinValue::Method(BuiltinMethod::ArrayMap { .. })
+            | BuiltinValue::Method(BuiltinMethod::ArrayToMap { .. })
+            | BuiltinValue::Method(BuiltinMethod::ArrayFlatten { .. })
+            | BuiltinValue::Method(BuiltinMethod::ArrayMerge { .. })
+            | BuiltinValue::Method(BuiltinMethod::MapMapValues { .. })
+            | BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { .. })
             | BuiltinValue::Method(BuiltinMethod::HostRead { .. })
             | BuiltinValue::Method(BuiltinMethod::HostHash { .. })
             | BuiltinValue::Method(BuiltinMethod::HostWhich { .. }) => {

@@ -796,46 +796,44 @@ fn type_path(p: &mut Parser<'_>) -> CompletedMarker {
     marker.complete(p, SyntaxKind::TYPE_PATH)
 }
 
-fn binding_pattern(p: &mut Parser<'_>) {
-    let marker = p.start();
+fn binding_pattern(p: &mut Parser<'_>) -> CompletedMarker {
     match p.current() {
-        SyntaxKind::UNDERSCORE => p.bump(),
-        SyntaxKind::LOWER_IDENT => p.bump(),
+        SyntaxKind::LOWER_IDENT => {
+            let marker = p.start();
+            p.bump();
+            marker.complete(p, SyntaxKind::BINDING_PATTERN)
+        }
         SyntaxKind::L_PAREN => tuple_or_paren_pattern(p),
         SyntaxKind::L_CURLY => struct_pattern(p),
         SyntaxKind::L_BRACKET => array_pattern(p),
         _ => wildcard_or_unit_pattern(p),
     }
-    marker.complete(p, SyntaxKind::BINDING_PATTERN);
 }
 
-fn wildcard_or_unit_pattern(p: &mut Parser<'_>) {
+fn wildcard_or_unit_pattern(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     if p.at(SyntaxKind::UNDERSCORE) {
         p.bump();
-        marker.complete(p, SyntaxKind::WILDCARD_PATTERN);
-        return;
+        return marker.complete(p, SyntaxKind::WILDCARD_PATTERN);
     } else if p.at(SyntaxKind::LOWER_IDENT) {
         p.bump();
     } else if p.at(SyntaxKind::L_PAREN) && p.nth(1) == SyntaxKind::R_PAREN {
         p.bump();
         p.bump();
-        marker.complete(p, SyntaxKind::UNIT_PATTERN);
-        return;
+        return marker.complete(p, SyntaxKind::UNIT_PATTERN);
     } else if p.at(SyntaxKind::ERROR_TOKEN) {
         p.bump();
     } else {
         p.error("expected binding pattern");
     }
-    marker.complete(p, SyntaxKind::WILDCARD_PATTERN);
+    marker.complete(p, SyntaxKind::WILDCARD_PATTERN)
 }
 
-fn tuple_or_paren_pattern(p: &mut Parser<'_>) {
+fn tuple_or_paren_pattern(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.expect(SyntaxKind::L_PAREN);
     if p.eat(SyntaxKind::R_PAREN) {
-        marker.complete(p, SyntaxKind::UNIT_PATTERN);
-        return;
+        return marker.complete(p, SyntaxKind::UNIT_PATTERN);
     }
     binding_pattern(p);
     if p.eat(SyntaxKind::COMMA) {
@@ -846,14 +844,14 @@ fn tuple_or_paren_pattern(p: &mut Parser<'_>) {
             }
         }
         p.expect(SyntaxKind::R_PAREN);
-        marker.complete(p, SyntaxKind::TUPLE_PATTERN);
+        marker.complete(p, SyntaxKind::TUPLE_PATTERN)
     } else {
         p.expect(SyntaxKind::R_PAREN);
-        marker.complete(p, SyntaxKind::PAREN_PATTERN);
+        marker.complete(p, SyntaxKind::PAREN_PATTERN)
     }
 }
 
-fn struct_pattern(p: &mut Parser<'_>) {
+fn struct_pattern(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.expect(SyntaxKind::L_CURLY);
     while !p.at(SyntaxKind::R_CURLY) && !p.at(SyntaxKind::EOF) {
@@ -875,10 +873,10 @@ fn struct_pattern(p: &mut Parser<'_>) {
         }
     }
     p.expect(SyntaxKind::R_CURLY);
-    marker.complete(p, SyntaxKind::STRUCT_PATTERN);
+    marker.complete(p, SyntaxKind::STRUCT_PATTERN)
 }
 
-fn array_pattern(p: &mut Parser<'_>) {
+fn array_pattern(p: &mut Parser<'_>) -> CompletedMarker {
     let marker = p.start();
     p.expect(SyntaxKind::L_BRACKET);
     while !p.at(SyntaxKind::R_BRACKET) && !p.at(SyntaxKind::EOF) {
@@ -895,7 +893,7 @@ fn array_pattern(p: &mut Parser<'_>) {
         }
     }
     p.expect(SyntaxKind::R_BRACKET);
-    marker.complete(p, SyntaxKind::ARRAY_PATTERN);
+    marker.complete(p, SyntaxKind::ARRAY_PATTERN)
 }
 
 // r[expr.block]

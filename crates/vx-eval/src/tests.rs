@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use blake3::hash as blake3_hash;
 use tempfile::TempDir;
-use vx_parser::SourceFile;
+use vx_parser::{Pattern as AstPattern, SourceFile, Stmt as AstStmt};
 use vx_store_proto::{Blake3Hash, BlobRef, ChunkHash, NodeHash};
 
 use crate::exec::ExecArgValue;
@@ -18,7 +18,7 @@ use crate::lower::lower_source_file;
 use crate::poison::PoisonKind;
 use crate::transport::TransportValue;
 use crate::value::{
-    BlobValue, ExecPathValue, HostObservation, PathValue, StructValue, TreeValue, Value,
+    BlobValue, ExecPathValue, HostObservation, HostValue, PathValue, StructValue, TreeValue, Value,
 };
 use crate::worker::Engine;
 
@@ -108,6 +108,142 @@ fn path_literal_normalizes_slashes() {
         .call("main", vec![Value::Path(PathValue::new("out//"))])
         .unwrap();
     assert_eq!(val, Value::Path(PathValue::new("out/artifact.o")));
+}
+
+#[test]
+fn symbol_keyed_toolchain_pipeline_supports_method_values_and_destructuring() {
+    let source = r#"
+fn build(host: Host) (
+  let toolchain = ([:sh, :cc] |> _.to_map(host.which) |> _.map_values((path) => ({ path, hash: host.hash(path) })));
+
+  let { sh, cc } = toolchain;
+  [sh.path, cc.path]
+)
+"#;
+    let parse = vx_parser::parse(source);
+    assert_eq!(parse.errors(), []);
+    let root = SourceFile::cast_root(parse.syntax());
+    let build_fn = match root.items().find(|item| match item {
+        vx_parser::Item::FnDecl(node) => node.name().is_some_and(|name| name.text() == "build"),
+        _ => false,
+    }) {
+        Some(vx_parser::Item::FnDecl(node)) => node,
+        other => panic!("expected build fn item, got {other:?}"),
+    };
+    let parsed_body = build_fn.body().expect("build body");
+    let parsed_stmts = parsed_body.statements().collect::<Vec<_>>();
+    assert_eq!(parsed_stmts.len(), 3);
+    let second_let = match &parsed_stmts[1] {
+        AstStmt::Let(stmt) => stmt,
+        other => panic!("expected second stmt to be let, got {other:?}"),
+    };
+    assert!(
+        matches!(second_let.pattern(), Some(AstPattern::Struct(_))),
+        "expected struct destructuring pattern in second let: {:?}",
+        second_let.pattern()
+    );
+    let module = lower_source_file(&root);
+    let build = module
+        .functions
+        .iter()
+        .find(|def| def.name == "build")
+        .expect("build fn");
+    assert!(
+        matches!(
+            build.body.stmts.as_slice(),
+            [crate::instr::Stmt::Let { name, .. }, crate::instr::Stmt::LetPattern { .. }, crate::instr::Stmt::Expr(_)]
+            if name == "toolchain"
+        ),
+        "unexpected lowered build body: {:?}",
+        build.body.stmts
+    );
+
+    let engine = Engine::from_module(&module);
+
+    let value = engine.call("build", vec![Value::Host(HostValue)]).unwrap();
+    let Value::Array(items) = value else {
+        panic!("expected array result");
+    };
+    assert_eq!(items.len(), 2);
+    assert!(matches!(&items[0], Value::String(_)));
+    assert!(matches!(&items[1], Value::String(_)));
+}
+
+#[test]
+fn partial_exec_where_common_preserves_keyword_records() {
+    let captured = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let engine = engine(
+        r#"
+fn observe(proc: Process, tree: Tree) (
+  proc.exit_code
+)
+
+fn build(input: Blob) (
+  let common = {
+    observer: observe,
+    mounts: { @src/input.txt: input },
+  };
+
+  let cexec = partial exec where common;
+  cexec(["/bin/cat", @src/input.txt])
+)
+"#,
+    )
+    .with_exec_handler(Arc::new(move |request| {
+        *sink.lock().unwrap() = Some(request);
+        Ok(Value::U64(0))
+    }));
+
+    let value = engine
+        .call("build", vec![Value::Blob(BlobValue::from_string("hello"))])
+        .unwrap();
+    assert_eq!(value, Value::U64(0));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("exec request should be captured");
+    assert_eq!(request.args.len(), 2);
+    assert_eq!(request.mounts.len(), 1);
+    assert_eq!(request.mounts[0].path, PathValue::new("src/input.txt"));
+}
+
+#[test]
+fn array_merge_combines_tree_results_in_current_syntax() {
+    let value = eval(
+        r#"
+fn build(a: Tree, b: Tree) (
+  [a, b].merge()
+)
+"#,
+        "build",
+    );
+    assert!(value.is_err(), "direct eval() should require arguments");
+
+    let engine = engine(
+        r#"
+fn build(a: Tree, b: Tree) (
+  [a, b].merge()
+)
+"#,
+    );
+    let left = Value::Tree(TreeValue::Inline(Arc::from([(
+        Arc::from("a.o"),
+        Value::Blob(BlobValue::from_string("left")),
+    )])));
+    let right = Value::Tree(TreeValue::Inline(Arc::from([(
+        Arc::from("b.o"),
+        Value::Blob(BlobValue::from_string("right")),
+    )])));
+    let value = engine.call("build", vec![left, right]).unwrap();
+    let Value::Tree(TreeValue::Inline(entries)) = value else {
+        panic!("expected merged tree");
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].0.as_ref(), "a.o");
+    assert_eq!(entries[1].0.as_ref(), "b.o");
 }
 
 #[test]

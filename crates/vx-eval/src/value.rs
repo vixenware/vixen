@@ -63,6 +63,8 @@ pub enum Value {
     Struct(StructValue),
     /// A function (closure or named function)
     Function(FunctionValue),
+    /// A partially applied call surface.
+    Partial(Arc<PartialValue>),
     /// Builtin namespace or bound builtin method.
     Builtin(BuiltinValue),
 }
@@ -150,6 +152,14 @@ pub struct FunctionValue {
     pub captures: Arc<[(Arc<str>, Value)]>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartialValue {
+    pub function: Value,
+    pub args: Arc<[Value]>,
+    pub kwargs: Arc<[(Arc<str>, Value)]>,
+    pub kwargs_expr: Option<Box<Value>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltinNamespace {
     Blob,
@@ -169,6 +179,11 @@ pub enum BuiltinMethod {
     TreeOf,
     TreeEmpty,
     TreeFromPath,
+    ArrayMap { receiver: Box<Value> },
+    ArrayToMap { receiver: Box<Value> },
+    ArrayFlatten { receiver: Box<Value> },
+    ArrayMerge { receiver: Box<Value> },
+    MapMapValues { receiver: Box<Value> },
     BlobToString { receiver: Box<Value> },
     TreeFile { receiver: Box<Value> },
     TreeMerge { receiver: Box<Value> },
@@ -209,6 +224,7 @@ impl Value {
             Value::Map(_) => "Map",
             Value::Struct(_) => "Struct",
             Value::Function(_) => "Fn",
+            Value::Partial(_) => "Partial",
             Value::Builtin(_) => "Builtin",
         }
     }
@@ -230,6 +246,18 @@ impl Value {
                 .captures
                 .iter()
                 .all(|(_, value)| value.is_fully_resolved()),
+            Value::Partial(partial) => {
+                partial.function.is_fully_resolved()
+                    && partial.args.iter().all(Value::is_fully_resolved)
+                    && partial
+                        .kwargs
+                        .iter()
+                        .all(|(_, value)| value.is_fully_resolved())
+                    && partial
+                        .kwargs_expr
+                        .as_ref()
+                        .is_none_or(|value| value.is_fully_resolved())
+            }
             Value::Builtin(builtin) => builtin.is_fully_resolved(),
             _ => true,
         }
@@ -281,6 +309,7 @@ impl Value {
                 Some(format!("struct:{}{{{}}}", s.type_name, parts.join(",")))
             }
             Value::Function(function) => Some(function.key()?),
+            Value::Partial(_) => None,
             Value::Builtin(builtin) => builtin.key(),
         }
     }
@@ -443,7 +472,12 @@ impl BuiltinValue {
             | BuiltinValue::Method(BuiltinMethod::TreeOf)
             | BuiltinValue::Method(BuiltinMethod::TreeEmpty)
             | BuiltinValue::Method(BuiltinMethod::TreeFromPath) => true,
-            BuiltinValue::Method(BuiltinMethod::BlobToString { receiver })
+            BuiltinValue::Method(BuiltinMethod::ArrayMap { receiver })
+            | BuiltinValue::Method(BuiltinMethod::ArrayToMap { receiver })
+            | BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver })
+            | BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver })
+            | BuiltinValue::Method(BuiltinMethod::MapMapValues { receiver })
+            | BuiltinValue::Method(BuiltinMethod::BlobToString { receiver })
             | BuiltinValue::Method(BuiltinMethod::TreeFile { receiver })
             | BuiltinValue::Method(BuiltinMethod::TreeMerge { receiver })
             | BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver })
@@ -473,6 +507,21 @@ impl BuiltinValue {
             BuiltinValue::Method(BuiltinMethod::TreeEmpty) => Some("builtin:Tree.empty".into()),
             BuiltinValue::Method(BuiltinMethod::TreeFromPath) => {
                 Some("builtin:Tree.from_path".into())
+            }
+            BuiltinValue::Method(BuiltinMethod::ArrayMap { receiver }) => {
+                Some(format!("builtin:array.map({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::ArrayToMap { receiver }) => {
+                Some(format!("builtin:array.to_map({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver }) => {
+                Some(format!("builtin:array.flatten({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver }) => {
+                Some(format!("builtin:array.merge({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::MapMapValues { receiver }) => {
+                Some(format!("builtin:map.map_values({})", receiver.key()?))
             }
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
                 Some(format!("builtin:blob.to_string({})", receiver.key()?))
@@ -566,6 +615,7 @@ impl fmt::Display for Value {
                 write!(f, " }}")
             }
             Value::Function(func) => write!(f, "<fn {}>", func.def.name),
+            Value::Partial(_) => write!(f, "<partial>"),
             Value::Builtin(builtin) => write!(f, "{builtin}"),
         }
     }
@@ -598,6 +648,12 @@ impl PartialEq for Value {
             }
             (Value::Function(a), Value::Function(b)) => {
                 a.identity() == b.identity() && a.captures == b.captures
+            }
+            (Value::Partial(a), Value::Partial(b)) => {
+                a.function == b.function
+                    && a.args == b.args
+                    && a.kwargs == b.kwargs
+                    && a.kwargs_expr == b.kwargs_expr
             }
             (Value::Builtin(a), Value::Builtin(b)) => a == b,
             _ => false,
@@ -679,6 +735,26 @@ impl PartialEq for BuiltinMethod {
             | (BuiltinMethod::TreeEmpty, BuiltinMethod::TreeEmpty)
             | (BuiltinMethod::TreeFromPath, BuiltinMethod::TreeFromPath) => true,
             (
+                BuiltinMethod::ArrayMap { receiver: left },
+                BuiltinMethod::ArrayMap { receiver: right },
+            )
+            | (
+                BuiltinMethod::ArrayToMap { receiver: left },
+                BuiltinMethod::ArrayToMap { receiver: right },
+            )
+            | (
+                BuiltinMethod::ArrayFlatten { receiver: left },
+                BuiltinMethod::ArrayFlatten { receiver: right },
+            )
+            | (
+                BuiltinMethod::ArrayMerge { receiver: left },
+                BuiltinMethod::ArrayMerge { receiver: right },
+            )
+            | (
+                BuiltinMethod::MapMapValues { receiver: left },
+                BuiltinMethod::MapMapValues { receiver: right },
+            )
+            | (
                 BuiltinMethod::BlobToString { receiver: left },
                 BuiltinMethod::BlobToString { receiver: right },
             )
@@ -777,6 +853,21 @@ impl fmt::Display for BuiltinValue {
             BuiltinValue::Method(BuiltinMethod::TreeOf) => write!(f, "Tree.of"),
             BuiltinValue::Method(BuiltinMethod::TreeEmpty) => write!(f, "Tree.empty"),
             BuiltinValue::Method(BuiltinMethod::TreeFromPath) => write!(f, "Tree.from_path"),
+            BuiltinValue::Method(BuiltinMethod::ArrayMap { .. }) => {
+                write!(f, "<bound array.map>")
+            }
+            BuiltinValue::Method(BuiltinMethod::ArrayToMap { .. }) => {
+                write!(f, "<bound array.to_map>")
+            }
+            BuiltinValue::Method(BuiltinMethod::ArrayFlatten { .. }) => {
+                write!(f, "<bound array.flatten>")
+            }
+            BuiltinValue::Method(BuiltinMethod::ArrayMerge { .. }) => {
+                write!(f, "<bound array.merge>")
+            }
+            BuiltinValue::Method(BuiltinMethod::MapMapValues { .. }) => {
+                write!(f, "<bound map.map_values>")
+            }
             BuiltinValue::Method(BuiltinMethod::BlobToString { .. }) => {
                 write!(f, "<bound blob.to_string>")
             }

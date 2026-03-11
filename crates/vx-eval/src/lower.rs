@@ -8,9 +8,9 @@ use std::sync::Arc;
 use vx_parser::{
     ArrayExpr, ArrayItem as AstArrayItem, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr,
     Expr as AstExpr, FailExpr, FieldExpr, FnDecl, IfExpr, InterpolatedStringExpr, InvokeExpr,
-    LiteralExpr, MapExpr, Parameter, PathLiteralExpr, PrefixExpr, RecordExpr, SourceFile,
-    Stmt as AstStmt, StringPart, StructLiteralExpr, StructLiteralField, SyntaxKind, TupleExpr,
-    WhereExpr,
+    LiteralExpr, MapExpr, Parameter, PartialAppExpr, PathLiteralExpr, Pattern as AstPattern,
+    PrefixExpr, RecordExpr, SourceFile, Stmt as AstStmt, StringPart, StructLiteralExpr,
+    StructLiteralField, SyntaxKind, TupleExpr, WhereExpr,
 };
 
 use crate::instr;
@@ -89,8 +89,16 @@ fn lower_block_with_ctx(block: &BlockExpr, ctx: &mut LowerCtx) -> instr::Block {
 fn lower_stmt_with_ctx(stmt: &AstStmt, ctx: &mut LowerCtx) -> Option<instr::Stmt> {
     match stmt {
         AstStmt::Let(l) => {
-            let name = l.name()?.text().to_string();
             let value = lower_expr_with_ctx(&l.expr()?, ctx)?;
+            if let Some(pattern) = l.pattern() {
+                let pattern = lower_pattern(&pattern)?;
+                return match pattern {
+                    instr::Pattern::Binding(name) => Some(instr::Stmt::Let { name, value }),
+                    pattern => Some(instr::Stmt::LetPattern { pattern, value }),
+                };
+            }
+
+            let name = l.name()?.text().to_string();
             Some(instr::Stmt::Let { name, value })
         }
         AstStmt::Assign(a) => {
@@ -143,7 +151,7 @@ fn lower_expr_with_ctx(expr: &AstExpr, ctx: &mut LowerCtx) -> Option<instr::Expr
         AstExpr::Call(call) => lower_call(call, ctx),
         AstExpr::Where(where_expr) => lower_where(where_expr, ctx),
         AstExpr::Invoke(invoke) => lower_invoke(invoke, ctx),
-        AstExpr::Record(_) => None,
+        AstExpr::Record(record) => lower_record(record, ctx),
         AstExpr::Field(field) => lower_field(field, ctx),
         AstExpr::Fail(fail) => lower_fail(fail, ctx),
         AstExpr::StructLiteral(lit) => lower_struct_literal(lit, ctx),
@@ -154,12 +162,31 @@ fn lower_expr_with_ctx(expr: &AstExpr, ctx: &mut LowerCtx) -> Option<instr::Expr
             &fallible.expr()?,
             ctx,
         )?))),
-        AstExpr::PartialApp(_)
-        | AstExpr::Index(_)
+        AstExpr::PartialApp(partial) => lower_partial(partial, ctx),
+        AstExpr::Index(_)
         | AstExpr::Match(_)
         | AstExpr::Range(_)
         | AstExpr::TypeOp(_)
         | AstExpr::With(_) => None,
+    }
+}
+
+fn lower_pattern(pattern: &AstPattern) -> Option<instr::Pattern> {
+    match pattern {
+        AstPattern::Binding(binding) => {
+            Some(instr::Pattern::Binding(binding.name()?.text().to_string()))
+        }
+        AstPattern::Struct(pattern) => {
+            let mut fields = Vec::new();
+            for field in pattern.fields() {
+                let name = field.name()?.text().to_string();
+                let nested = field.pattern().as_ref().and_then(lower_pattern);
+                fields.push((name, nested));
+            }
+            Some(instr::Pattern::Struct(fields))
+        }
+        AstPattern::Paren(pattern) => lower_pattern(&pattern.inner()?),
+        _ => None,
     }
 }
 
@@ -195,6 +222,7 @@ fn lower_literal(lit: &LiteralExpr) -> Option<instr::Expr> {
             let inner = &text[1..text.len() - 1];
             Some(instr::Expr::LitString(unescape_string(inner)))
         }
+        SyntaxKind::LOWER_IDENT => Some(instr::Expr::LitString(token.text().to_string())),
         _ => None,
     }
 }
@@ -344,6 +372,15 @@ fn unescape_string(s: &str) -> String {
 }
 
 fn lower_binary(bin: &BinaryExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
+    if bin
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|child| child.into_token())
+        .any(|token| token.kind() == SyntaxKind::PIPE_GT)
+    {
+        return lower_pipe(bin, ctx);
+    }
+
     let lhs = lower_expr_with_ctx(&bin.lhs()?, ctx)?;
     let rhs = lower_expr_with_ctx(&bin.rhs()?, ctx)?;
 
@@ -373,6 +410,269 @@ fn lower_binary(bin: &BinaryExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
         left: Box::new(lhs),
         right: Box::new(rhs),
     })
+}
+
+fn lower_pipe(bin: &BinaryExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
+    let lhs = lower_expr_with_ctx(&bin.lhs()?, ctx)?;
+    let rhs = lower_expr_with_ctx(&bin.rhs()?, ctx)?;
+
+    if contains_pipe_placeholder(&rhs) {
+        Some(substitute_pipe_placeholder(rhs, &lhs))
+    } else {
+        Some(instr::Expr::Call {
+            func: Box::new(rhs),
+            args: vec![lhs],
+            kwargs: vec![],
+            kwargs_expr: None,
+        })
+    }
+}
+
+fn contains_pipe_placeholder(expr: &instr::Expr) -> bool {
+    match expr {
+        instr::Expr::Var(name) => name == "_",
+        instr::Expr::Binary { left, right, .. } => {
+            contains_pipe_placeholder(left) || contains_pipe_placeholder(right)
+        }
+        instr::Expr::Unary { operand, .. } => contains_pipe_placeholder(operand),
+        instr::Expr::Block(block) => block.stmts.iter().any(stmt_contains_pipe_placeholder),
+        instr::Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            contains_pipe_placeholder(cond)
+                || then_branch.stmts.iter().any(stmt_contains_pipe_placeholder)
+                || else_branch.stmts.iter().any(stmt_contains_pipe_placeholder)
+        }
+        instr::Expr::Closure { .. } => false,
+        instr::Expr::Call {
+            func,
+            args,
+            kwargs,
+            kwargs_expr,
+        }
+        | instr::Expr::PartialCall {
+            func,
+            args,
+            kwargs,
+            kwargs_expr,
+        } => {
+            contains_pipe_placeholder(func)
+                || args.iter().any(contains_pipe_placeholder)
+                || kwargs
+                    .iter()
+                    .any(|(_, expr)| contains_pipe_placeholder(expr))
+                || kwargs_expr
+                    .as_deref()
+                    .is_some_and(contains_pipe_placeholder)
+        }
+        instr::Expr::StructLit { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| contains_pipe_placeholder(expr)),
+        instr::Expr::Record(items) => items.iter().any(|item| match item {
+            instr::RecordItem::Field { value, .. } => contains_pipe_placeholder(value),
+            instr::RecordItem::Spread(expr) => contains_pipe_placeholder(expr),
+        }),
+        instr::Expr::Array(items) => items.iter().any(|item| match item {
+            instr::ArrayItem::Expr(expr) | instr::ArrayItem::Spread(expr) => {
+                contains_pipe_placeholder(expr)
+            }
+        }),
+        instr::Expr::Map(entries) => entries
+            .iter()
+            .any(|(key, value)| contains_pipe_placeholder(key) || contains_pipe_placeholder(value)),
+        instr::Expr::Field { receiver, .. } => contains_pipe_placeholder(receiver),
+        instr::Expr::Fail(expr) | instr::Expr::Fallible(expr) => contains_pipe_placeholder(expr),
+        instr::Expr::Tuple(items) => items.iter().any(contains_pipe_placeholder),
+        instr::Expr::LitInt(_)
+        | instr::Expr::LitFloat(_)
+        | instr::Expr::LitBool(_)
+        | instr::Expr::LitString(_)
+        | instr::Expr::StringTemplate(_)
+        | instr::Expr::PathTemplate(_)
+        | instr::Expr::Unit => false,
+    }
+}
+
+fn stmt_contains_pipe_placeholder(stmt: &instr::Stmt) -> bool {
+    match stmt {
+        instr::Stmt::Let { value, .. }
+        | instr::Stmt::Assign { value, .. }
+        | instr::Stmt::Expr(value)
+        | instr::Stmt::Return(value)
+        | instr::Stmt::LetPattern { value, .. } => contains_pipe_placeholder(value),
+        instr::Stmt::FnDecl(_) => false,
+    }
+}
+
+fn substitute_pipe_placeholder(expr: instr::Expr, replacement: &instr::Expr) -> instr::Expr {
+    match expr {
+        instr::Expr::Var(name) if name == "_" => replacement.clone(),
+        instr::Expr::Binary { op, left, right } => instr::Expr::Binary {
+            op,
+            left: Box::new(substitute_pipe_placeholder(*left, replacement)),
+            right: Box::new(substitute_pipe_placeholder(*right, replacement)),
+        },
+        instr::Expr::Unary { op, operand } => instr::Expr::Unary {
+            op,
+            operand: Box::new(substitute_pipe_placeholder(*operand, replacement)),
+        },
+        instr::Expr::Block(block) => instr::Expr::Block(instr::Block {
+            stmts: block
+                .stmts
+                .into_iter()
+                .map(|stmt| substitute_pipe_placeholder_in_stmt(stmt, replacement))
+                .collect(),
+        }),
+        instr::Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => instr::Expr::If {
+            cond: Box::new(substitute_pipe_placeholder(*cond, replacement)),
+            then_branch: instr::Block {
+                stmts: then_branch
+                    .stmts
+                    .into_iter()
+                    .map(|stmt| substitute_pipe_placeholder_in_stmt(stmt, replacement))
+                    .collect(),
+            },
+            else_branch: instr::Block {
+                stmts: else_branch
+                    .stmts
+                    .into_iter()
+                    .map(|stmt| substitute_pipe_placeholder_in_stmt(stmt, replacement))
+                    .collect(),
+            },
+        },
+        instr::Expr::Closure { closure_id, def } => instr::Expr::Closure { closure_id, def },
+        instr::Expr::Call {
+            func,
+            args,
+            kwargs,
+            kwargs_expr,
+        } => instr::Expr::Call {
+            func: Box::new(substitute_pipe_placeholder(*func, replacement)),
+            args: args
+                .into_iter()
+                .map(|expr| substitute_pipe_placeholder(expr, replacement))
+                .collect(),
+            kwargs: kwargs
+                .into_iter()
+                .map(|(name, expr)| (name, substitute_pipe_placeholder(expr, replacement)))
+                .collect(),
+            kwargs_expr: kwargs_expr
+                .map(|expr| Box::new(substitute_pipe_placeholder(*expr, replacement))),
+        },
+        instr::Expr::PartialCall {
+            func,
+            args,
+            kwargs,
+            kwargs_expr,
+        } => instr::Expr::PartialCall {
+            func: Box::new(substitute_pipe_placeholder(*func, replacement)),
+            args: args
+                .into_iter()
+                .map(|expr| substitute_pipe_placeholder(expr, replacement))
+                .collect(),
+            kwargs: kwargs
+                .into_iter()
+                .map(|(name, expr)| (name, substitute_pipe_placeholder(expr, replacement)))
+                .collect(),
+            kwargs_expr: kwargs_expr
+                .map(|expr| Box::new(substitute_pipe_placeholder(*expr, replacement))),
+        },
+        instr::Expr::StructLit { name, fields } => instr::Expr::StructLit {
+            name,
+            fields: fields
+                .into_iter()
+                .map(|(field, expr)| (field, substitute_pipe_placeholder(expr, replacement)))
+                .collect(),
+        },
+        instr::Expr::Record(items) => instr::Expr::Record(
+            items
+                .into_iter()
+                .map(|item| match item {
+                    instr::RecordItem::Field { name, value } => instr::RecordItem::Field {
+                        name,
+                        value: substitute_pipe_placeholder(value, replacement),
+                    },
+                    instr::RecordItem::Spread(expr) => {
+                        instr::RecordItem::Spread(substitute_pipe_placeholder(expr, replacement))
+                    }
+                })
+                .collect(),
+        ),
+        instr::Expr::Array(items) => instr::Expr::Array(
+            items
+                .into_iter()
+                .map(|item| match item {
+                    instr::ArrayItem::Expr(expr) => {
+                        instr::ArrayItem::Expr(substitute_pipe_placeholder(expr, replacement))
+                    }
+                    instr::ArrayItem::Spread(expr) => {
+                        instr::ArrayItem::Spread(substitute_pipe_placeholder(expr, replacement))
+                    }
+                })
+                .collect(),
+        ),
+        instr::Expr::Map(entries) => instr::Expr::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| {
+                    (
+                        substitute_pipe_placeholder(key, replacement),
+                        substitute_pipe_placeholder(value, replacement),
+                    )
+                })
+                .collect(),
+        ),
+        instr::Expr::Field { receiver, field } => instr::Expr::Field {
+            receiver: Box::new(substitute_pipe_placeholder(*receiver, replacement)),
+            field,
+        },
+        instr::Expr::Fail(expr) => {
+            instr::Expr::Fail(Box::new(substitute_pipe_placeholder(*expr, replacement)))
+        }
+        instr::Expr::Fallible(expr) => {
+            instr::Expr::Fallible(Box::new(substitute_pipe_placeholder(*expr, replacement)))
+        }
+        instr::Expr::Tuple(items) => instr::Expr::Tuple(
+            items
+                .into_iter()
+                .map(|expr| substitute_pipe_placeholder(expr, replacement))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn substitute_pipe_placeholder_in_stmt(
+    stmt: instr::Stmt,
+    replacement: &instr::Expr,
+) -> instr::Stmt {
+    match stmt {
+        instr::Stmt::Let { name, value } => instr::Stmt::Let {
+            name,
+            value: substitute_pipe_placeholder(value, replacement),
+        },
+        instr::Stmt::LetPattern { pattern, value } => instr::Stmt::LetPattern {
+            pattern,
+            value: substitute_pipe_placeholder(value, replacement),
+        },
+        instr::Stmt::Assign { name, value } => instr::Stmt::Assign {
+            name,
+            value: substitute_pipe_placeholder(value, replacement),
+        },
+        instr::Stmt::Expr(expr) => {
+            instr::Stmt::Expr(substitute_pipe_placeholder(expr, replacement))
+        }
+        instr::Stmt::Return(expr) => {
+            instr::Stmt::Return(substitute_pipe_placeholder(expr, replacement))
+        }
+        other => other,
+    }
 }
 
 fn lower_prefix(pre: &PrefixExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
@@ -429,11 +729,12 @@ fn lower_call(call: &CallExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
         func: Box::new(func),
         args,
         kwargs: Vec::new(),
+        kwargs_expr: None,
     })
 }
 
 fn lower_where(where_expr: &WhereExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
-    let kwargs = lower_record_kwargs(&where_expr.keywords()?, ctx)?;
+    let kwargs_expr = lower_expr_with_ctx(&where_expr.keywords()?, ctx)?;
 
     match where_expr.callee()? {
         AstExpr::Call(call) => {
@@ -445,7 +746,8 @@ fn lower_where(where_expr: &WhereExpr, ctx: &mut LowerCtx) -> Option<instr::Expr
             Some(instr::Expr::Call {
                 func: Box::new(func),
                 args,
-                kwargs,
+                kwargs: Vec::new(),
+                kwargs_expr: Some(Box::new(kwargs_expr)),
             })
         }
         callee => {
@@ -453,30 +755,11 @@ fn lower_where(where_expr: &WhereExpr, ctx: &mut LowerCtx) -> Option<instr::Expr
             Some(instr::Expr::Call {
                 func: Box::new(func),
                 args: Vec::new(),
-                kwargs,
+                kwargs: Vec::new(),
+                kwargs_expr: Some(Box::new(kwargs_expr)),
             })
         }
     }
-}
-
-fn lower_record_kwargs(expr: &AstExpr, ctx: &mut LowerCtx) -> Option<Vec<(String, instr::Expr)>> {
-    let AstExpr::Record(record) = expr else {
-        return None;
-    };
-    lower_record_literal_kwargs(record, ctx)
-}
-
-fn lower_record_literal_kwargs(
-    record: &RecordExpr,
-    ctx: &mut LowerCtx,
-) -> Option<Vec<(String, instr::Expr)>> {
-    let mut kwargs = Vec::new();
-    for entry in record.fields() {
-        let name = entry.name()?.text().to_string();
-        let value = lower_expr_with_ctx(&entry.value()?, ctx)?;
-        kwargs.push((name, value));
-    }
-    Some(kwargs)
 }
 
 fn lower_invoke(invoke: &InvokeExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
@@ -485,6 +768,7 @@ fn lower_invoke(invoke: &InvokeExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> 
         func: Box::new(func),
         args: Vec::new(),
         kwargs: Vec::new(),
+        kwargs_expr: None,
     })
 }
 
@@ -502,13 +786,37 @@ fn lower_fail(fail: &FailExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
     Some(instr::Expr::Fail(Box::new(message)))
 }
 
+fn lower_record(record: &RecordExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
+    let mut items = Vec::new();
+    for entry in record.fields() {
+        if let Some(spread) = entry.spread() {
+            items.push(instr::RecordItem::Spread(lower_expr_with_ctx(
+                &spread.expr()?,
+                ctx,
+            )?));
+            continue;
+        }
+
+        let name = entry.name()?.text().to_string();
+        let value = match entry.value() {
+            Some(expr) => lower_expr_with_ctx(&expr, ctx)?,
+            None => instr::Expr::Var(name.clone()),
+        };
+        items.push(instr::RecordItem::Field { name, value });
+    }
+    Some(instr::Expr::Record(items))
+}
+
 fn lower_struct_literal(lit: &StructLiteralExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
     let name = lit.name()?.text().to_string();
     let fields: Vec<(String, instr::Expr)> = lit
         .fields()
         .filter_map(|f: StructLiteralField| {
             let field_name = f.name()?.text().to_string();
-            let value = lower_expr_with_ctx(&f.expr()?, ctx)?;
+            let value = match f.expr() {
+                Some(expr) => lower_expr_with_ctx(&expr, ctx)?,
+                None => instr::Expr::Var(field_name.clone()),
+            };
             Some((field_name, value))
         })
         .collect();
@@ -570,4 +878,61 @@ fn lower_closure(closure: &ClosureExpr, ctx: &mut LowerCtx) -> Option<instr::Exp
             body,
         }),
     })
+}
+
+fn lower_partial(partial: &PartialAppExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
+    let target = partial.callee()?;
+    match target {
+        AstExpr::Where(where_expr) => lower_partial_where(&where_expr, ctx),
+        AstExpr::Call(call) => {
+            let func = lower_expr_with_ctx(&call.callee()?, ctx)?;
+            let mut args = Vec::new();
+            for arg in call.args() {
+                args.push(lower_expr_with_ctx(&arg.expr()?, ctx)?);
+            }
+            Some(instr::Expr::PartialCall {
+                func: Box::new(func),
+                args,
+                kwargs: Vec::new(),
+                kwargs_expr: None,
+            })
+        }
+        AstExpr::Invoke(invoke) => Some(instr::Expr::PartialCall {
+            func: Box::new(lower_expr_with_ctx(&invoke.callee()?, ctx)?),
+            args: Vec::new(),
+            kwargs: Vec::new(),
+            kwargs_expr: None,
+        }),
+        other => Some(instr::Expr::PartialCall {
+            func: Box::new(lower_expr_with_ctx(&other, ctx)?),
+            args: Vec::new(),
+            kwargs: Vec::new(),
+            kwargs_expr: None,
+        }),
+    }
+}
+
+fn lower_partial_where(where_expr: &WhereExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
+    let kwargs_expr = lower_expr_with_ctx(&where_expr.keywords()?, ctx)?;
+    match where_expr.callee()? {
+        AstExpr::Call(call) => {
+            let func = lower_expr_with_ctx(&call.callee()?, ctx)?;
+            let mut args = Vec::new();
+            for arg in call.args() {
+                args.push(lower_expr_with_ctx(&arg.expr()?, ctx)?);
+            }
+            Some(instr::Expr::PartialCall {
+                func: Box::new(func),
+                args,
+                kwargs: Vec::new(),
+                kwargs_expr: Some(Box::new(kwargs_expr)),
+            })
+        }
+        callee => Some(instr::Expr::PartialCall {
+            func: Box::new(lower_expr_with_ctx(&callee, ctx)?),
+            args: Vec::new(),
+            kwargs: Vec::new(),
+            kwargs_expr: Some(Box::new(kwargs_expr)),
+        }),
+    }
 }

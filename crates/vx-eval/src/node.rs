@@ -73,6 +73,7 @@ pub enum NodeJob {
         function: Value,
         args: Arc<[Value]>,
         kwargs: Arc<[(Arc<str>, Value)]>,
+        kwargs_expr: Option<Value>,
     },
     Invoke {
         function: FunctionValue,

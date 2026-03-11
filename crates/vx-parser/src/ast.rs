@@ -1156,7 +1156,10 @@ impl NameRefExpr {
             .find(|token| {
                 matches!(
                     token.kind(),
-                    SyntaxKind::LOWER_IDENT | SyntaxKind::UPPER_IDENT | SyntaxKind::DOLLAR_IDENT
+                    SyntaxKind::LOWER_IDENT
+                        | SyntaxKind::UPPER_IDENT
+                        | SyntaxKind::DOLLAR_IDENT
+                        | SyntaxKind::UNDERSCORE
                 )
             })
     }
@@ -1170,6 +1173,7 @@ impl LiteralExpr {
                 SyntaxKind::INT
                     | SyntaxKind::FLOAT
                     | SyntaxKind::STRING
+                    | SyntaxKind::LOWER_IDENT
                     | SyntaxKind::TRUE_KW
                     | SyntaxKind::FALSE_KW
             )
@@ -1210,6 +1214,10 @@ impl StringInterpolation {
 }
 
 impl LetStmt {
+    pub fn pattern(&self) -> Option<Pattern> {
+        child(self.syntax())
+    }
+
     pub fn name(&self) -> Option<SyntaxToken> {
         first_descendant_token(self.syntax(), |kind| {
             matches!(kind, SyntaxKind::LOWER_IDENT | SyntaxKind::UNDERSCORE)
@@ -1307,7 +1315,7 @@ impl StructPatternField {
     }
 
     pub fn pattern(&self) -> Option<Pattern> {
-        self.syntax().children().find_map(Pattern::cast)
+        child(self.syntax())
     }
 }
 
@@ -1348,7 +1356,7 @@ impl AtPattern {
     }
 
     pub fn pattern(&self) -> Option<Pattern> {
-        self.syntax().children().find_map(Pattern::cast)
+        child(self.syntax())
     }
 }
 
