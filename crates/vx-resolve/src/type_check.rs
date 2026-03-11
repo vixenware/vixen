@@ -933,11 +933,7 @@ impl<'a> ExprTyper<'a> {
         };
         let field_name = field_name_tok.text();
 
-        if let Some(property_ty) = builtin_property_ty(&receiver_ty, field_name) {
-            return property_ty;
-        }
-
-        // Check builtin type methods/fields (property access without call)
+        // Check namespace methods/fields exposed as callable members.
         if let Some(member_def) = self.resolve_method_member_def(field, &receiver_ty) {
             self.record_member_def(field, member_def.clone());
             if let Some(method_sig) = self.method_sig_for_def(&receiver_ty, &member_def) {
@@ -1536,21 +1532,6 @@ impl<'a> ExprTyper<'a> {
             ret: substitute_bound_type_params(&template.ret, &substitutions),
             capabilities: template.capabilities,
         })
-    }
-}
-
-fn builtin_property_ty(receiver_ty: &Ty, field_name: &str) -> Option<Ty> {
-    match (receiver_ty, field_name) {
-        (Ty::Builtin(vx_types::Builtin::Process), "exit_code") => {
-            Some(Ty::Scalar(vx_types::Scalar::U64))
-        }
-        (Ty::Builtin(vx_types::Builtin::Process), "stdout") => {
-            Some(Ty::Stream(Box::new(Ty::Builtin(vx_types::Builtin::Blob))))
-        }
-        (Ty::Builtin(vx_types::Builtin::Process), "stderr") => {
-            Some(Ty::Stream(Box::new(Ty::Builtin(vx_types::Builtin::Blob))))
-        }
-        _ => None,
     }
 }
 

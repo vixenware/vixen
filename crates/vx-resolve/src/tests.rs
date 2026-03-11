@@ -1100,6 +1100,33 @@ fn main() {
 }
 
 #[test]
+fn observer_process_param_uses_stdlib_struct_type() {
+    let src = r#"
+fn main() {
+    exec(["echo"]) where {
+        observer: (proc, tree) => {
+            proc.exit_code
+        },
+    };
+}
+"#;
+    let file = parse_file(src);
+    let resolution = resolve_with_stdlib(&file);
+    let types = collect_types_with_stdlib(&file);
+    let result = crate::type_check(&file, &resolution, &types);
+    let ty = result
+        .closure_param_types
+        .get(&span_for_text(src, "proc"))
+        .cloned()
+        .expect("proc closure param type");
+
+    let Ty::Struct(struct_ty) = ty else {
+        panic!("expected Process to resolve as a stdlib struct, got {ty:?}");
+    };
+    assert_eq!(types.env.get(struct_ty.id).name(), "Process");
+}
+
+#[test]
 fn cc_version_sketch_resolves_and_typechecks() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cc-version.vx");
     let file = parse_file_path(&path);

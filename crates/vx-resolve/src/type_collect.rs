@@ -673,7 +673,6 @@ impl<'a> TypeResolver<'a> {
             "Blob" => return Some(Ty::Builtin(vx_types::Builtin::Blob)),
             "Tree" => return Some(Ty::Builtin(vx_types::Builtin::Tree)),
             "ExecPath" => return Some(Ty::Builtin(vx_types::Builtin::ExecPath)),
-            "Process" => return Some(Ty::Builtin(vx_types::Builtin::Process)),
             "Host" => return Some(Ty::Builtin(vx_types::Builtin::Host)),
             "ExecutorClass" => return Some(Ty::Builtin(vx_types::Builtin::ExecutorClass)),
             "Option" => {
