@@ -14,7 +14,10 @@ use vx_parser::{
 };
 use vx_types::{FnSig, Ty};
 
-use crate::builtins::{builtin_fn_sig, builtin_fn_sigs, builtin_method};
+use crate::builtins::{
+    builtin_fn_sig, builtin_fn_sigs, builtin_method, builtin_scalar_method,
+    builtin_static_method_sigs, is_builtin_namespace,
+};
 use crate::resolve::NameResolution;
 use crate::scope::{DefKind, Definition};
 use crate::type_collect::TypeCollection;
@@ -245,7 +248,7 @@ impl<'a> ExprTyper<'a> {
 
         // Not resolved — might be a builtin function name
         let name = token.text();
-        if builtin_fn_sig(name).is_some() {
+        if builtin_fn_sig(name).is_some() || is_builtin_namespace(name) {
             return Ty::Poison;
         }
         Ty::Poison
@@ -426,6 +429,7 @@ impl<'a> ExprTyper<'a> {
                 // Check for builtin function
                 let builtin_sigs = builtin_fn_sigs(&callee_name);
                 if let Some(sig) = self.select_builtin_fn_sig(call, &builtin_sigs) {
+                    let sig = self.instantiate_call_sig(call, sig);
                     // Type-check positional arguments
                     self.check_call_args(call, &sig);
                     self.check_keyword_args(call, &sig);
@@ -437,6 +441,7 @@ impl<'a> ExprTyper<'a> {
                     }
                     return sig.ret.clone();
                 } else if let Some(sig) = builtin_fn_sig(&callee_name) {
+                    let sig = self.instantiate_call_sig(call, sig);
                     self.check_call_args(call, &sig);
                     self.check_keyword_args(call, &sig);
                     self.infer_extra_call_args(call, sig.positional_params.len());
@@ -468,6 +473,14 @@ impl<'a> ExprTyper<'a> {
                 Ty::Poison
             }
             Expr::Field(field_expr) => {
+                if let Some(sig) = self.infer_static_namespace_call_sig(call, field_expr) {
+                    self.check_call_args(call, &sig);
+                    self.check_keyword_args(call, &sig);
+                    self.infer_extra_call_args(call, sig.positional_params.len());
+                    self.infer_all_keyword_arg_exprs(call);
+                    return sig.ret;
+                }
+
                 // Method call: receiver.method(args)
                 let receiver_ty = field_expr
                     .receiver()
@@ -486,15 +499,22 @@ impl<'a> ExprTyper<'a> {
                         self.infer_all_keyword_arg_exprs(call);
                         return method_sig.ret.clone();
                     }
-
-                    self.errors.push(TypeError {
-                        range: field_expr.syntax().text_range(),
-                        kind: TypeErrorKind::NoSuchMethod {
-                            receiver_ty: receiver_ty.clone(),
-                            method_name,
-                        },
-                    });
+                } else if let Ty::Scalar(ref scalar) = receiver_ty
+                    && let Some(method_sig) = builtin_scalar_method(scalar, &method_name)
+                {
+                    self.check_method_args(call, &method_sig.params, &method_name);
+                    self.infer_extra_call_args(call, method_sig.params.len());
+                    self.infer_all_keyword_arg_exprs(call);
+                    return method_sig.ret.clone();
                 }
+
+                self.errors.push(TypeError {
+                    range: field_expr.syntax().text_range(),
+                    kind: TypeErrorKind::NoSuchMethod {
+                        receiver_ty: receiver_ty.clone(),
+                        method_name,
+                    },
+                });
 
                 self.infer_call_arg_exprs(call);
                 Ty::Poison
@@ -528,6 +548,43 @@ impl<'a> ExprTyper<'a> {
             }
         }
         self.infer_all_keyword_arg_exprs(call);
+    }
+
+    fn infer_static_namespace_call_sig(
+        &mut self,
+        call: &CallExpr,
+        field_expr: &FieldExpr,
+    ) -> Option<FnSig> {
+        let Expr::NameRef(namespace_ref) = field_expr.receiver()? else {
+            return None;
+        };
+        let namespace = namespace_ref.token()?.text().to_string();
+        let method_name = field_expr.field_name()?.text().to_string();
+        let sigs = builtin_static_method_sigs(&namespace, &method_name);
+        let sig = self.select_builtin_fn_sig(call, &sigs)?;
+        Some(self.instantiate_call_sig(call, sig))
+    }
+
+    fn instantiate_call_sig(&self, call: &CallExpr, mut sig: FnSig) -> FnSig {
+        let Some(type_args) = call.type_args() else {
+            return sig;
+        };
+        let substitutions: Vec<Ty> = type_args
+            .types()
+            .map(|ty| self.types.resolve_type_annotation(&ty))
+            .collect();
+        if substitutions.is_empty() {
+            return sig;
+        }
+
+        for param in &mut sig.positional_params {
+            param.ty = substitute_type_params(&param.ty, &substitutions);
+        }
+        for param in &mut sig.keyword_params {
+            param.ty = substitute_type_params(&param.ty, &substitutions);
+        }
+        sig.ret = substitute_type_params(&sig.ret, &substitutions);
+        sig
     }
 
     fn select_builtin_fn_sig(&mut self, call: &CallExpr, sigs: &[FnSig]) -> Option<FnSig> {
@@ -694,6 +751,10 @@ impl<'a> ExprTyper<'a> {
     }
 
     fn infer_field(&mut self, field: &FieldExpr) -> Ty {
+        if let Some(static_fn_ty) = self.infer_static_namespace_field(field) {
+            return static_fn_ty;
+        }
+
         let receiver_ty = field
             .receiver()
             .map(|r| self.infer_expr(&r))
@@ -721,6 +782,19 @@ impl<'a> ExprTyper<'a> {
                     capabilities: method_sig.capabilities,
                 });
             }
+        }
+        if let Ty::Scalar(ref scalar) = receiver_ty
+            && let Some(method_sig) = builtin_scalar_method(scalar, field_name)
+        {
+            return Ty::Function(vx_types::FunctionTy {
+                params: method_sig
+                    .params
+                    .into_iter()
+                    .map(|param| param.ty)
+                    .collect(),
+                ret: Box::new(method_sig.ret),
+                capabilities: method_sig.capabilities,
+            });
         }
 
         // Check struct fields from type environment
@@ -824,6 +898,12 @@ impl<'a> ExprTyper<'a> {
 
                 if let Ty::Builtin(ref builtin) = receiver_ty
                     && let Some(method_sig) = builtin_method(builtin, &method_name)
+                    && method_sig.params.is_empty()
+                {
+                    return method_sig.ret;
+                }
+                if let Ty::Scalar(ref scalar) = receiver_ty
+                    && let Some(method_sig) = builtin_scalar_method(scalar, &method_name)
                     && method_sig.params.is_empty()
                 {
                     return method_sig.ret;
@@ -1188,6 +1268,26 @@ impl<'a> ExprTyper<'a> {
         }
         Ty::Array(Box::new(element_ty.unwrap_or(Ty::Poison)))
     }
+
+    fn infer_static_namespace_field(&self, field: &FieldExpr) -> Option<Ty> {
+        let Expr::NameRef(namespace_ref) = field.receiver()? else {
+            return None;
+        };
+        let namespace = namespace_ref.token()?.text().to_string();
+        let method_name = field.field_name()?.text().to_string();
+        let sig = builtin_static_method_sigs(&namespace, &method_name)
+            .into_iter()
+            .next()?;
+        Some(Ty::Function(vx_types::FunctionTy {
+            params: sig
+                .positional_params
+                .into_iter()
+                .map(|param| param.ty)
+                .collect(),
+            ret: Box::new(sig.ret),
+            capabilities: sig.capabilities,
+        }))
+    }
 }
 
 fn builtin_property_ty(receiver_ty: &Ty, field_name: &str) -> Option<Ty> {
@@ -1237,4 +1337,37 @@ fn builtin_call_matches(arg_tys: &[Ty], sig: &FnSig) -> bool {
             .iter()
             .zip(sig.positional_params.iter())
             .all(|(arg_ty, param)| types_compatible(arg_ty, &param.ty))
+}
+
+fn substitute_type_params(ty: &Ty, substitutions: &[Ty]) -> Ty {
+    match ty {
+        Ty::Param(param) => substitutions
+            .get(param.index as usize)
+            .cloned()
+            .unwrap_or_else(|| ty.clone()),
+        Ty::Optional(inner) => Ty::Optional(Box::new(substitute_type_params(inner, substitutions))),
+        Ty::Array(inner) => Ty::Array(Box::new(substitute_type_params(inner, substitutions))),
+        Ty::Map(key, value) => Ty::Map(
+            Box::new(substitute_type_params(key, substitutions)),
+            Box::new(substitute_type_params(value, substitutions)),
+        ),
+        Ty::Stream(inner) => Ty::Stream(Box::new(substitute_type_params(inner, substitutions))),
+        Ty::Tuple(tuple) => Ty::Tuple(vx_types::TupleTy {
+            elements: tuple
+                .elements
+                .iter()
+                .map(|element| substitute_type_params(element, substitutions))
+                .collect(),
+        }),
+        Ty::Function(function) => Ty::Function(vx_types::FunctionTy {
+            params: function
+                .params
+                .iter()
+                .map(|param| substitute_type_params(param, substitutions))
+                .collect(),
+            ret: Box::new(substitute_type_params(&function.ret, substitutions)),
+            capabilities: function.capabilities.clone(),
+        }),
+        _ => ty.clone(),
+    }
 }

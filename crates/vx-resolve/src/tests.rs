@@ -956,6 +956,56 @@ fn main(other: Tree) {
     assert_eq!(ty, Some(Ty::Builtin(Builtin::Tree)));
 }
 
+#[test]
+fn http_get_static_namespace_call_returns_blob() {
+    let src = r#"
+fn main() {
+    Http.get("https://example.com")
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, r#"Http.get("https://example.com")"#);
+    assert_eq!(ty, Some(Ty::Builtin(Builtin::Blob)));
+}
+
+#[test]
+fn toml_parse_typed_static_namespace_call_returns_concrete_type() {
+    let src = r#"
+struct CargoLock {}
+
+fn main(blob: Blob) {
+    Toml.parse[CargoLock](blob)
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, "Toml.parse[CargoLock](blob)");
+    assert!(matches!(ty, Some(Ty::Struct(_))), "got: {ty:?}");
+}
+
+#[test]
+fn string_split_once_method_returns_optional_tuple() {
+    let src = r#"
+fn main(s: String) {
+    s.split_once("/")
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, r#"s.split_once("/")"#);
+    assert!(matches!(ty, Some(Ty::Optional(_))), "got: {ty:?}");
+}
+
+#[test]
+fn string_len_method_returns_u64() {
+    let src = r#"
+fn main(s: String) {
+    s.len()
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, "s.len()");
+    assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::U64)));
+}
+
 // r[type.error.arg_mismatch] — host.read(123) gets a type diagnostic
 #[test]
 fn host_read_int_arg_type_error() {

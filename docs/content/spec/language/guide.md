@@ -67,6 +67,10 @@ Their lexical envelope is the simple ASCII set
 Inside `@( ... )`, `{expr}` interpolates and `{{` / `}}` produce
 literal braces.
 
+For application syntax, bare `@path` is not self-delimiting enough to
+use in juxtaposed call position. Use `f(@path)` for ordinary calls, or
+`f @(...)` when you want the juxtaposed form.
+
 ## 2. Unary application
 
 The base call form is:
@@ -98,15 +102,21 @@ form instead:
 ```vixen
 f [x, y];
 f { left: x, right: y };
-f @out/bin/lua;
 f @(out/obj/{file}.o);
 ```
 
 Use parentheses for ordinary expressions and identifiers:
 
 ```vixen
+host.hash(@tool);
 host.hash(tool.path);
 files.map(compile);
+```
+
+Bare path literals also use parentheses in ordinary call position:
+
+```vixen
+f(@out/bin/lua);
 ```
 
 Chained application is left-associative:

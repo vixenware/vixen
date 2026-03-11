@@ -548,12 +548,12 @@ insert_anchor_links = "heading"
 > f(x)
 > ```
 >
-> Array, braced, and path payloads can also be applied directly:
+> Array, braced, and parenthesized-path payloads can also be applied directly:
 >
 > ```vixen
 > f [x, y]
 > f { left: x, right: y }
-> f @out/bin/lua
+> f @(out/bin/lua)
 > ```
 >
 > Canonical formatting has no space before `(`, and a separating space
@@ -569,8 +569,9 @@ insert_anchor_links = "heading"
 > ```
 >
 > Juxtaposition application is only allowed when the payload is
-> self-delimiting: `(...)`, `[...]`, `{...}`, or a path literal. Bare
-> identifiers and most other expressions must use parentheses.
+> self-delimiting: `(...)`, `[...]`, `{...}`, or `@(...)`. Bare
+> identifiers, bare path literals, and most other expressions must use
+> parentheses.
 >
 > Chained application is left-associative:
 >
@@ -578,6 +579,21 @@ insert_anchor_links = "heading"
 > f(x)(y)            // means: (f(x))(y)
 > f [x, y] { z: 1 }  // means: (f [x, y]) { z: 1 }
 > ```
+>
+> So:
+>
+> ```vixen
+> f(@out/bin/lua)
+> f @(out/bin/lua)
+> ```
+>
+> are valid, but:
+>
+> ```vixen
+> f @out/bin/lua
+> ```
+>
+> is not.
 >
 > `f { ... }` is ordinary unary application to a braced payload. It is
 > never keyword application. `where` is the only keyword-application

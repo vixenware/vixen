@@ -99,7 +99,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
       if proc.exit_code != 0 (
         fail `process failed`
       );
-      vfs.subtree @out
+      vfs.subtree(@out)
     ),
   };
 

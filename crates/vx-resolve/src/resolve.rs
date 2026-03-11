@@ -90,7 +90,9 @@ impl<'a> RefCollector<'a> {
             Some(def) => Ok(def.clone()),
             None => {
                 // Check if this is a builtin function name
-                if builtins::builtin_fn_sig(&name).is_some() {
+                if builtins::builtin_fn_sig(&name).is_some()
+                    || builtins::is_builtin_namespace(&name)
+                {
                     Ok(Definition {
                         name: name.clone(),
                         kind: DefKind::Builtin,

@@ -33,8 +33,11 @@ pub struct MethodSig {
 struct BuiltinRegistry {
     fns: HashMap<String, Vec<FnSig>>,
     methods: HashMap<(Builtin, String), MethodSig>,
+    scalar_methods: HashMap<(Scalar, String), MethodSig>,
+    static_methods: HashMap<(String, String), Vec<FnSig>>,
     fn_names: Vec<String>,
     method_names: HashMap<Builtin, Vec<String>>,
+    namespace_names: Vec<String>,
 }
 
 static REGISTRY: OnceLock<BuiltinRegistry> = OnceLock::new();
@@ -107,6 +110,31 @@ pub fn builtin_method(receiver: &Builtin, method_name: &str) -> Option<MethodSig
         .or_else(|| fallback_builtin_method(receiver, method_name))
 }
 
+/// Look up a method signature on a scalar type.
+pub fn builtin_scalar_method(receiver: &Scalar, method_name: &str) -> Option<MethodSig> {
+    registry()
+        .scalar_methods
+        .get(&(*receiver, method_name.to_string()))
+        .cloned()
+}
+
+/// Check whether a name resolves to a builtin namespace.
+pub fn is_builtin_namespace(name: &str) -> bool {
+    registry()
+        .namespace_names
+        .iter()
+        .any(|namespace| namespace == name)
+}
+
+/// Look up all static namespace member signatures by namespace and member name.
+pub fn builtin_static_method_sigs(namespace: &str, method_name: &str) -> Vec<FnSig> {
+    registry()
+        .static_methods
+        .get(&(namespace.to_string(), method_name.to_string()))
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn registry() -> &'static BuiltinRegistry {
     REGISTRY.get_or_init(BuiltinRegistry::load)
 }
@@ -141,9 +169,9 @@ impl BuiltinRegistry {
     }
 
     fn load_namespace(&mut self, namespace: &NamespaceDecl) {
-        let Some(receiver) = namespace_receiver(namespace) else {
-            return;
-        };
+        let namespace_name = namespace_name(namespace);
+        self.namespace_names.push(namespace_name.clone());
+        let receiver = namespace_receiver(namespace);
         let Some(body) = namespace.body() else {
             return;
         };
@@ -153,28 +181,38 @@ impl BuiltinRegistry {
                 continue;
             };
 
-            let fn_name = fn_decl
-                .name()
-                .map(|name| name.text().to_string())
-                .unwrap_or_default();
+            let Some(fn_name) = fn_decl.name().map(|name| name.text().to_string()) else {
+                continue;
+            };
 
             let Some(first_param) = fn_decl.parameters().next() else {
-                if fn_name == namespace_name(namespace) {
-                    self.insert_fn(collect_fn_sig(&fn_decl, Some(receiver)));
+                let sig = collect_fn_sig(&fn_decl, receiver);
+                self.insert_static_method(&namespace_name, sig.clone());
+                if receiver.is_some() && fn_name == namespace_name {
+                    self.insert_fn(sig);
                 }
                 continue;
             };
             let is_instance_method = first_param.name().is_some_and(|name| name.text() == "self");
             if is_instance_method {
-                let sig = collect_method_sig(&fn_decl, receiver);
-                self.methods
-                    .entry((receiver, sig.name.clone()))
-                    .or_insert(sig);
+                if let Some(receiver) = receiver {
+                    let sig = collect_method_sig(&fn_decl, receiver);
+                    self.methods
+                        .entry((receiver, sig.name.clone()))
+                        .or_insert(sig);
+                } else if let Some(receiver) = namespace_scalar_receiver(&namespace_name) {
+                    let sig = collect_method_sig_for_scalar(&fn_decl, receiver);
+                    self.scalar_methods
+                        .entry((receiver, sig.name.clone()))
+                        .or_insert(sig);
+                }
                 continue;
             }
 
-            if fn_name == namespace_name(namespace) {
-                self.insert_fn(collect_fn_sig(&fn_decl, Some(receiver)));
+            let sig = collect_fn_sig(&fn_decl, receiver);
+            self.insert_static_method(&namespace_name, sig.clone());
+            if receiver.is_some() && fn_name == namespace_name {
+                self.insert_fn(sig);
             }
         }
     }
@@ -183,9 +221,18 @@ impl BuiltinRegistry {
         self.fns.entry(sig.name.clone()).or_default().push(sig);
     }
 
+    fn insert_static_method(&mut self, namespace: &str, sig: FnSig) {
+        self.static_methods
+            .entry((namespace.to_string(), sig.name.clone()))
+            .or_default()
+            .push(sig);
+    }
+
     fn rebuild_name_indexes(&mut self) {
         self.fn_names = self.fns.keys().cloned().collect();
         self.fn_names.sort();
+        self.namespace_names.sort();
+        self.namespace_names.dedup();
 
         for ((receiver, method_name), _) in &self.methods {
             self.method_names
@@ -227,11 +274,19 @@ fn namespace_name(namespace: &NamespaceDecl) -> String {
         .unwrap_or_default()
 }
 
+fn namespace_scalar_receiver(name: &str) -> Option<Scalar> {
+    match name {
+        "String" => Some(Scalar::String),
+        _ => None,
+    }
+}
+
 fn collect_fn_sig(decl: &FnDecl, self_ty: Option<Builtin>) -> FnSig {
     let type_params = collect_type_param_names(decl.syntax());
     let lowerer = TypeLowerer {
         type_params: &type_params,
         self_ty,
+        self_scalar: None,
     };
 
     let positional_params = decl
@@ -309,6 +364,82 @@ fn collect_method_sig(decl: &FnDecl, receiver: Builtin) -> MethodSig {
     }
 }
 
+fn collect_method_sig_for_scalar(decl: &FnDecl, receiver: Scalar) -> MethodSig {
+    let mut sig = collect_fn_sig_for_scalar(decl, receiver);
+    if !sig.positional_params.is_empty() {
+        sig.positional_params.remove(0);
+    }
+    MethodSig {
+        name: sig.name,
+        params: sig.positional_params,
+        ret: sig.ret,
+        capabilities: sig.capabilities,
+    }
+}
+
+fn collect_fn_sig_for_scalar(decl: &FnDecl, self_scalar: Scalar) -> FnSig {
+    let type_params = collect_type_param_names(decl.syntax());
+    let lowerer = TypeLowerer {
+        type_params: &type_params,
+        self_ty: None,
+        self_scalar: Some(self_scalar),
+    };
+
+    let positional_params = decl
+        .parameters()
+        .filter_map(|param| {
+            let name = param.name()?.text().to_string();
+            let ty = param
+                .slot_type()
+                .and_then(|slot| slot.ty())
+                .map(|ty| lowerer.lower(&ty))
+                .unwrap_or(Ty::Poison);
+            Some(ParamDef { name, ty })
+        })
+        .collect();
+
+    let keyword_params = decl
+        .keyword_parameters()
+        .filter_map(|param| {
+            let name = param.name()?.text().to_string();
+            let ty = param
+                .slot_type()
+                .and_then(|slot| slot.ty())
+                .map(|ty| lowerer.lower(&ty))
+                .unwrap_or(Ty::Poison);
+            let has_default = param
+                .syntax()
+                .children()
+                .any(|child| vx_parser::Expr::cast(child).is_some());
+            Some(KeywordParamDef {
+                name,
+                ty,
+                has_default,
+            })
+        })
+        .collect();
+
+    let ret = decl
+        .return_type()
+        .and_then(|ret| ret.ty())
+        .map(|ty| lowerer.lower(&ty))
+        .unwrap_or(Ty::Unit);
+
+    let capabilities = collect_capabilities(decl);
+
+    FnSig {
+        name: decl
+            .name()
+            .map(|name| name.text().to_string())
+            .unwrap_or_default(),
+        type_params,
+        positional_params,
+        keyword_params,
+        ret,
+        capabilities,
+    }
+}
+
 fn collect_type_param_names(node: &vx_parser::SyntaxNode) -> Vec<String> {
     node.children()
         .find(|child| child.kind() == SyntaxKind::TYPE_PARAM_LIST)
@@ -339,6 +470,7 @@ fn collect_capabilities(decl: &FnDecl) -> Vec<Capability> {
 struct TypeLowerer<'a> {
     type_params: &'a [String],
     self_ty: Option<Builtin>,
+    self_scalar: Option<Scalar>,
 }
 
 impl TypeLowerer<'_> {
@@ -420,6 +552,11 @@ impl TypeLowerer<'_> {
         {
             return Ty::Builtin(self_ty);
         }
+        if name == "Self"
+            && let Some(self_scalar) = self.self_scalar
+        {
+            return Ty::Scalar(self_scalar);
+        }
 
         if let Some(index) = self.type_params.iter().position(|param| param == name) {
             return Ty::Param(TypeParam {
@@ -448,6 +585,7 @@ impl TypeLowerer<'_> {
             .unwrap_or_default();
 
         match name.as_str() {
+            "Option" => Ty::Optional(Box::new(type_args.into_iter().next().unwrap_or(Ty::Poison))),
             "Array" => Ty::Array(Box::new(type_args.into_iter().next().unwrap_or(Ty::Poison))),
             "Map" => {
                 let mut args = type_args.into_iter();
@@ -624,7 +762,10 @@ fn fallback_builtin_method(receiver: &Builtin, method_name: &str) -> Option<Meth
 mod tests {
     use vx_types::Scalar;
 
-    use super::{builtin_fn_sig, builtin_fn_sigs, builtin_method};
+    use super::{
+        builtin_fn_sig, builtin_fn_sigs, builtin_method, builtin_scalar_method,
+        builtin_static_method_sigs, is_builtin_namespace,
+    };
 
     #[test]
     fn stdlib_host_methods_are_loaded() {
@@ -644,6 +785,16 @@ mod tests {
     }
 
     #[test]
+    fn stdlib_string_methods_are_loaded() {
+        let split_once =
+            builtin_scalar_method(&Scalar::String, "split_once").expect("string.split_once");
+        assert!(matches!(split_once.ret, vx_types::Ty::Optional(_)));
+
+        let len = builtin_scalar_method(&Scalar::String, "len").expect("string.len");
+        assert_eq!(len.ret, vx_types::Ty::Scalar(Scalar::U64));
+    }
+
+    #[test]
     fn stdlib_tree_constructors_are_loaded() {
         let constructors = builtin_fn_sigs("Tree");
         assert_eq!(constructors.len(), 3);
@@ -653,6 +804,23 @@ mod tests {
                 .any(|sig| sig.ret == vx_types::Ty::Builtin(vx_types::Builtin::Tree))
         );
         assert!(builtin_fn_sig("Tree").is_some());
+    }
+
+    #[test]
+    fn stdlib_static_namespace_methods_are_loaded() {
+        assert!(is_builtin_namespace("Toml"));
+        assert!(is_builtin_namespace("Http"));
+
+        let toml_parse = builtin_static_method_sigs("Toml", "parse");
+        assert_eq!(toml_parse.len(), 1);
+        assert!(matches!(toml_parse[0].ret, vx_types::Ty::Param(_)));
+
+        let http_get = builtin_static_method_sigs("Http", "get");
+        assert_eq!(http_get.len(), 1);
+        assert_eq!(
+            http_get[0].ret,
+            vx_types::Ty::Builtin(vx_types::Builtin::Blob)
+        );
     }
 
     #[test]
