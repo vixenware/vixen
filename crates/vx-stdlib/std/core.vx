@@ -4,6 +4,8 @@ type Symbol;
 type Path;
 /// Opaque file content.
 type Blob;
+/// Raw bytes not yet committed or interpreted as a file.
+type Bytes;
 /// Opaque directory content.
 type Tree;
 /// A path-like exec argument carrying implicit mount provenance.
@@ -26,10 +28,10 @@ type ExecInput = String | Path | Blob | Tree | ExecPath;
 
 /// Process result visible to an `exec` observer.
 struct Process {
-  /// Standard output as a stream of blobs.
-  stdout: Stream[Blob],
-  /// Standard error as a stream of blobs.
-  stderr: Stream[Blob],
+  /// Standard output as a stream of raw bytes.
+  stdout: Stream[Bytes],
+  /// Standard error as a stream of raw bytes.
+  stderr: Stream[Bytes],
   /// Exit status once the process finishes.
   exit_code: U64,
 }
@@ -100,6 +102,22 @@ namespace Blob {
   fn utf8(self) -> String;
   /// Decode the blob as UTF-8 with replacement on invalid input.
   fn utf8_lossy(self) -> String;
+}
+
+namespace Bytes {
+  /// Construct a raw byte sequence from a string's UTF-8 encoding.
+  fn Bytes(s: String) -> Self;
+  /// Decode the bytes as UTF-8, poisoning on invalid input.
+  fn utf8(self) -> String;
+  /// Decode the bytes as UTF-8 with replacement on invalid input.
+  fn utf8_lossy(self) -> String;
+  /// Materialize the bytes as a blob.
+  fn blob(self) -> Blob;
+}
+
+namespace Stream[T] {
+  /// Collect the entire stream into a single value.
+  fn collect(self) -> T;
 }
 
 namespace Toml {

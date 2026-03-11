@@ -13,6 +13,19 @@ insert_anchor_links = "heading"
 > Blake3 hashes). `Blob(s)` creates a blob from a text string. Blobs
 > with binary content come from `exec`.
 
+> r[store.bytes]
+>
+> `Bytes` is a raw finite byte sequence. Unlike `Blob`, it is not
+> inherently file-like and carries no path or store location by itself.
+> Process pipes and similar in-memory results use `Bytes`; `bytes.blob()`
+> materializes them as a `Blob` when file semantics are needed.
+
+> r[store.bytes.utf8]
+>
+> `bytes.utf8()` returns the byte sequence interpreted as a UTF-8
+> string. It poisons if the content is not valid UTF-8.
+> `bytes.utf8_lossy()` always succeeds and replaces invalid sequences.
+
 > r[store.blob.utf8]
 >
 > `blob.utf8()` returns the blob's content interpreted as a UTF-8 string.
@@ -208,7 +221,7 @@ insert_anchor_links = "heading"
 
 > r[exec.process]
 >
-> `Process` has `stdout: Stream[Blob]`, `stderr: Stream[Blob]`, and
+> `Process` has `stdout: Stream[Bytes]`, `stderr: Stream[Bytes]`, and
 > `exit_code: U64` (pending until the process exits). No stdin — processes
 > are not interactive. No signal API. `Process` exists on the executor;
 > the orchestrator observes it only through the shipped observer's
