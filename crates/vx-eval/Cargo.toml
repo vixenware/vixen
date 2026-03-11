@@ -14,12 +14,9 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 blake3 = { workspace = true }
 facet = { workspace = true }
 vx-parser = { path = "../vx-parser" }
-vx-resolve = { path = "../vx-resolve" }
 vx-store-proto = { workspace = true }
-vx-types = { path = "../vx-types" }
 dashmap = "6"
 parking_lot = "0.12"
-crossbeam-deque = "0.8"
 crossbeam-channel = "0.5"
 tempfile.workspace = true
 

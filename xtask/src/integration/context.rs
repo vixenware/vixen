@@ -944,7 +944,7 @@ fn http_cache_dir() -> PathBuf {
 fn run_temp_root() -> PathBuf {
     #[cfg(unix)]
     {
-        return PathBuf::from("/tmp/vxi-run");
+        PathBuf::from("/tmp/vxi-run")
     }
 
     #[cfg(not(unix))]
@@ -956,7 +956,7 @@ fn run_temp_root() -> PathBuf {
 fn scenario_temp_root() -> PathBuf {
     #[cfg(unix)]
     {
-        return PathBuf::from("/tmp/vxi");
+        PathBuf::from("/tmp/vxi")
     }
 
     #[cfg(not(unix))]

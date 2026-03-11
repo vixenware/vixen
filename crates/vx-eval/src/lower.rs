@@ -970,8 +970,10 @@ fn lower_closure(closure: &ClosureExpr, ctx: &mut LowerCtx) -> Option<instr::Exp
         })
         .collect::<Vec<_>>();
 
-    let mut nested_ctx = LowerCtx::default();
-    nested_ctx.source_id = Arc::clone(&ctx.source_id);
+    let mut nested_ctx = LowerCtx {
+        source_id: Arc::clone(&ctx.source_id),
+        ..LowerCtx::default()
+    };
     let body = match closure.body()? {
         AstExpr::Block(block) => lower_block_with_ctx(&block, &mut nested_ctx),
         expr => instr::Block {

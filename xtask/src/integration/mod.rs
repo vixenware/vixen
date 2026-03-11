@@ -635,6 +635,7 @@ fn render_runner_line(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_status_line(
     elapsed: Duration,
     passed: usize,
@@ -832,6 +833,7 @@ impl Reporter {
         ));
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn status_line(
         &mut self,
         elapsed: Duration,

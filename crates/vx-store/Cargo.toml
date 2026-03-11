@@ -9,12 +9,10 @@ edition.workspace = true
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-blake3 = { workspace = true }
 camino = { workspace = true }
 eyre = { workspace = true }
 facet = { workspace = true }
 figue = { workspace = true }
-fastcdc = { workspace = true }
 futures-util = { workspace = true }
 hex = { workspace = true }
 http-body-util = "0.1"
@@ -39,7 +37,6 @@ vx-tarball = { workspace = true }
 vx-toolchain = { workspace = true }
 
 [dev-dependencies]
-blake3 = { workspace = true }
 roam-stream = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }

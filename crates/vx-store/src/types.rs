@@ -11,6 +11,11 @@ use crate::{
     toolchain::{ExtractedRustComponent, ToolchainManager},
 };
 
+type RustComponentFlightKey = (ToolchainSpecKey, RustComponent);
+type RustComponentFlight = Arc<moire::sync::OnceCell<EnsureRustToolchainComponentResult>>;
+type RustComponentFlightMap =
+    std::collections::HashMap<RustComponentFlightKey, RustComponentFlight>;
+
 /// CAS service implementation
 #[derive(Clone)]
 pub(crate) struct StoreService {
@@ -49,12 +54,7 @@ pub(crate) struct StoreServiceInner {
         SyncMutex<std::collections::HashMap<(ToolchainSpecKey, RustComponent), BlobRef>>,
 
     /// In-flight Rust component tarball downloads by (spec_key, component)
-    pub(crate) rust_component_tarball_flights: SyncMutex<
-        std::collections::HashMap<
-            (ToolchainSpecKey, RustComponent),
-            Arc<moire::sync::OnceCell<EnsureRustToolchainComponentResult>>,
-        >,
-    >,
+    pub(crate) rust_component_tarball_flights: SyncMutex<RustComponentFlightMap>,
 
     /// Extracted Rust toolchain components by (spec_key, component)
     pub(crate) rust_component_trees: SyncMutex<
@@ -62,10 +62,5 @@ pub(crate) struct StoreServiceInner {
     >,
 
     /// In-flight Rust component extractions by (spec_key, component)
-    pub(crate) rust_component_tree_flights: SyncMutex<
-        std::collections::HashMap<
-            (ToolchainSpecKey, RustComponent),
-            Arc<moire::sync::OnceCell<EnsureRustToolchainComponentResult>>,
-        >,
-    >,
+    pub(crate) rust_component_tree_flights: SyncMutex<RustComponentFlightMap>,
 }

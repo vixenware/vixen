@@ -1072,13 +1072,7 @@ impl fmt::Display for BuiltinValue {
 }
 
 fn float_eq(left: f64, right: f64) -> bool {
-    if left.is_nan() && right.is_nan() {
-        true
-    } else if left == 0.0 && right == 0.0 {
-        true
-    } else {
-        left == right
-    }
+    (left.is_nan() && right.is_nan()) || left == right
 }
 
 fn float_key(value: f64) -> String {

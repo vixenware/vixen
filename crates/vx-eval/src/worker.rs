@@ -821,13 +821,7 @@ impl Engine {
         let (function, function_obligations) = self.split_obligations(self.force_value(function)?);
         match function {
             Value::Function(function) => {
-                return self.finish_execute_call(
-                    function,
-                    args,
-                    kwargs,
-                    kwargs_expr,
-                    function_obligations,
-                );
+                self.finish_execute_call(function, args, kwargs, kwargs_expr, function_obligations)
             }
             Value::Partial(partial) => {
                 let mut merged_args = partial.args.iter().cloned().collect::<Vec<_>>();
@@ -847,15 +841,13 @@ impl Engine {
                     Arc::from(merged_kwargs),
                     merged_kwargs_expr,
                 )?;
-                return Ok(self.attach_obligations(result, function_obligations));
+                Ok(self.attach_obligations(result, function_obligations))
             }
             Value::Builtin(builtin) => {
                 let result = self.invoke_builtin(&builtin, &args, &kwargs, kwargs_expr)?;
-                return Ok(self.attach_obligations(result, function_obligations));
+                Ok(self.attach_obligations(result, function_obligations))
             }
-            other => {
-                return Err(self.type_error(&format!("cannot call {}", other.type_name())));
-            }
+            other => Err(self.type_error(&format!("cannot call {}", other.type_name()))),
         }
     }
 

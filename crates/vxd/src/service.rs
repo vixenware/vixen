@@ -2163,16 +2163,14 @@ impl VxdService {
             return Err(VxdError::InvalidManifest(format!(
                 "expected build file at {}",
                 build_vx_path
-            ))
-            .into());
+            )));
         }
 
         let cargo_manifest_path = project_path.join("Cargo.toml");
         if !cargo_manifest_path.exists() {
             return Err(VxdError::InvalidManifest(
                 "expected vx.styx or Cargo.toml at the project root".to_string(),
-            )
-            .into());
+            ));
         }
 
         // r[impl eval.entry.cargo-compat]

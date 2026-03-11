@@ -258,12 +258,11 @@ impl DocumentState {
         }
 
         for resolved_ref in &self.resolution.refs {
-            if let Ok(ref target) = resolved_ref.target {
-                if target.id == def.id {
-                    if let Some(ty) = self.type_check.expr_types.get(&resolved_ref.span) {
-                        return Some(ty.clone());
-                    }
-                }
+            if let Ok(ref target) = resolved_ref.target
+                && target.id == def.id
+                && let Some(ty) = self.type_check.expr_types.get(&resolved_ref.span)
+            {
+                return Some(ty.clone());
             }
         }
 
@@ -416,7 +415,7 @@ impl LanguageServer for VxLanguageServer {
 
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
         let ranges = self.with_document(&params.text_document.uri, |state| {
-            let vx_ranges = vx::folding_ranges(&state.parsed.tree().syntax());
+            let vx_ranges = vx::folding_ranges(state.parsed.tree().syntax());
             vx_ranges
                 .into_iter()
                 .map(|r| {
@@ -444,7 +443,7 @@ impl LanguageServer for VxLanguageServer {
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
         let data = self.with_document(&params.text_document.uri, |state| {
-            let tokens = vx::semantic_tokens(&state.parsed.tree().syntax());
+            let tokens = vx::semantic_tokens(state.parsed.tree().syntax());
             // Collect ranges of builtin references for modifier tagging
             let builtin_ranges: std::collections::HashSet<rowan::TextRange> = state
                 .resolution
@@ -498,30 +497,24 @@ impl LanguageServer for VxLanguageServer {
             // Try field access: jump to struct field definition
             let root = state.parsed.tree().syntax().clone();
             let token = root.token_at_offset(offset).left_biased()?;
-            if let Some(field_node) = token.parent().and_then(vx::FieldExpr::cast) {
-                if let Some(field_name_tok) = field_node.field_name() {
-                    if field_name_tok.text_range().contains_inclusive(offset) {
-                        let field_name = field_name_tok.text();
-                        if let Some(receiver_expr) = field_node.receiver() {
-                            let receiver_ty = state
-                                .type_check
-                                .expr_types
-                                .get(&state.current_span(receiver_expr.syntax().text_range()));
-                            if let Some(vx_types::Ty::Struct(struct_ty)) = receiver_ty {
-                                if let vx_types::TypeDef::Struct(sdef) =
-                                    &state.types.env[struct_ty.id]
-                                {
-                                    if let Some(fdef) =
-                                        sdef.fields.iter().find(|f| f.name == field_name)
-                                    {
-                                        return Some(GotoDefinitionResponse::Scalar(Location {
-                                            uri: uri.clone(),
-                                            range: state.to_lsp_range(fdef.name_range),
-                                        }));
-                                    }
-                                }
-                            }
-                        }
+            if let Some(field_node) = token.parent().and_then(vx::FieldExpr::cast)
+                && let Some(field_name_tok) = field_node.field_name()
+                && field_name_tok.text_range().contains_inclusive(offset)
+            {
+                let field_name = field_name_tok.text();
+                if let Some(receiver_expr) = field_node.receiver() {
+                    let receiver_ty = state
+                        .type_check
+                        .expr_types
+                        .get(&state.current_span(receiver_expr.syntax().text_range()));
+                    if let Some(vx_types::Ty::Struct(struct_ty)) = receiver_ty
+                        && let vx_types::TypeDef::Struct(sdef) = &state.types.env[struct_ty.id]
+                        && let Some(fdef) = sdef.fields.iter().find(|f| f.name == field_name)
+                    {
+                        return Some(GotoDefinitionResponse::Scalar(Location {
+                            uri: uri.clone(),
+                            range: state.to_lsp_range(fdef.name_range),
+                        }));
                     }
                 }
             }
@@ -665,11 +658,10 @@ impl LanguageServer for VxLanguageServer {
                 if matches!(
                     def.kind,
                     vx_resolve::DefKind::Parameter | vx_resolve::DefKind::Binding
-                ) {
-                    if let Some(ty) = state.inferred_def_type(def) {
-                        let display = ty.display_with_env(&state.types.env);
-                        markdown.push_str(&format!("\n\nType: `{display}`"));
-                    }
+                ) && let Some(ty) = state.inferred_def_type(def)
+                {
+                    let display = ty.display_with_env(&state.types.env);
+                    markdown.push_str(&format!("\n\nType: `{display}`"));
                 }
 
                 // Show fields for structs
@@ -711,22 +703,21 @@ impl LanguageServer for VxLanguageServer {
             let token = root.token_at_offset(offset).left_biased()?;
             let mut node = token.parent();
             while let Some(n) = node {
-                if let Some(expr) = vx::Expr::cast(n.clone()) {
-                    if let Some(ty) = state
+                if let Some(expr) = vx::Expr::cast(n.clone())
+                    && let Some(ty) = state
                         .type_check
                         .expr_types
                         .get(&state.current_span(expr.syntax().text_range()))
-                    {
-                        let display = ty.display_with_env(&state.types.env);
-                        let markdown = format!("```vx\n{display}\n```");
-                        return Some(Hover {
-                            contents: HoverContents::Markup(MarkupContent {
-                                kind: MarkupKind::Markdown,
-                                value: markdown,
-                            }),
-                            range: Some(state.to_lsp_range(expr.syntax().text_range())),
-                        });
-                    }
+                {
+                    let display = ty.display_with_env(&state.types.env);
+                    let markdown = format!("```vx\n{display}\n```");
+                    return Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: markdown,
+                        }),
+                        range: Some(state.to_lsp_range(expr.syntax().text_range())),
+                    });
                 }
                 node = n.parent();
             }
@@ -792,7 +783,7 @@ impl LanguageServer for VxLanguageServer {
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
         let result = self.with_document(&params.text_document.uri, |state| {
-            let formatted = vx::format(&state.parsed.tree().syntax());
+            let formatted = vx::format(state.parsed.tree().syntax());
             let last_line = state.text.lines().count() as u32;
             let last_col = state.text.lines().last().map_or(0, |l| l.len() as u32);
             vec![TextEdit {
@@ -1077,37 +1068,34 @@ impl LanguageServer for VxLanguageServer {
                 // "did you mean?" quickfix for unresolved names
                 if diag.source.as_deref() == Some("vx-resolve")
                     && diag.message.starts_with("unresolved name")
+                    && let Some(name) = diag.message.split('`').nth(1)
                 {
-                    if let Some(name) = diag.message.split('`').nth(1) {
-                        // Compute offset for the diagnostic start
-                        let offset = state.line_index.offset(vx::Position {
-                            line: diag.range.start.line,
-                            col: diag.range.start.character,
-                        });
-                        if let Some(offset) = offset {
-                            let visible = state
-                                .resolution
-                                .scopes
-                                .visible_at(state.current_source, offset);
-                            // Find closest name by edit distance
-                            if let Some(suggestion) = closest_name(name, &visible) {
-                                let edit = TextEdit {
-                                    range: diag.range,
-                                    new_text: suggestion.clone(),
-                                };
-                                let mut changes = std::collections::HashMap::new();
-                                changes.insert(uri.clone(), vec![edit]);
-                                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                                    title: format!("Did you mean `{suggestion}`?"),
-                                    kind: Some(CodeActionKind::QUICKFIX),
-                                    diagnostics: Some(vec![diag.clone()]),
-                                    edit: Some(WorkspaceEdit {
-                                        changes: Some(changes),
-                                        ..Default::default()
-                                    }),
+                    let offset = state.line_index.offset(vx::Position {
+                        line: diag.range.start.line,
+                        col: diag.range.start.character,
+                    });
+                    if let Some(offset) = offset {
+                        let visible = state
+                            .resolution
+                            .scopes
+                            .visible_at(state.current_source, offset);
+                        if let Some(suggestion) = closest_name(name, &visible) {
+                            let edit = TextEdit {
+                                range: diag.range,
+                                new_text: suggestion.clone(),
+                            };
+                            let mut changes = std::collections::HashMap::new();
+                            changes.insert(uri.clone(), vec![edit]);
+                            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                                title: format!("Did you mean `{suggestion}`?"),
+                                kind: Some(CodeActionKind::QUICKFIX),
+                                diagnostics: Some(vec![diag.clone()]),
+                                edit: Some(WorkspaceEdit {
+                                    changes: Some(changes),
                                     ..Default::default()
-                                }));
-                            }
+                                }),
+                                ..Default::default()
+                            }));
                         }
                     }
                 }
@@ -1862,14 +1850,14 @@ fn dot_completions(
                     let items: Vec<CompletionItem> = e
                         .variants
                         .iter()
-                        .filter_map(|&vid| {
+                        .map(|&vid| {
                             let vdef = &state.types.env[vid];
                             let vname = vdef.name().to_string();
-                            Some(CompletionItem {
+                            CompletionItem {
                                 label: vname,
                                 kind: Some(CompletionItemKind::ENUM_MEMBER),
                                 ..Default::default()
-                            })
+                            }
                         })
                         .collect();
                     return Some(items);
@@ -1881,10 +1869,10 @@ fn dot_completions(
                 def.kind,
                 vx_resolve::DefKind::Binding | vx_resolve::DefKind::Parameter
             ) {
-                if let Some(ty) = state.inferred_def_type(def) {
-                    if let Some(items) = completions_for_type(&ty, state, offset) {
-                        return Some(items);
-                    }
+                if let Some(ty) = state.inferred_def_type(def)
+                    && let Some(items) = completions_for_type(&ty, state, offset)
+                {
+                    return Some(items);
                 }
                 // Fall back to function signature matching
                 if let Some(fields) = resolve_binding_fields(def, state) {
@@ -1893,12 +1881,11 @@ fn dot_completions(
             }
 
             // If it's a function, offer completions on the return type
-            if def.kind == vx_resolve::DefKind::Function {
-                if let Some(sig) = state.types.fn_sig_for_def(def) {
-                    if let Some(items) = completions_for_type(&sig.ret, state, offset) {
-                        return Some(items);
-                    }
-                }
+            if def.kind == vx_resolve::DefKind::Function
+                && let Some(sig) = state.types.fn_sig_for_def(def)
+                && let Some(items) = completions_for_type(&sig.ret, state, offset)
+            {
+                return Some(items);
             }
 
             None
@@ -2051,10 +2038,8 @@ fn closest_name(target: &str, visible: &[&vx_resolve::Definition]) -> Option<Str
     let mut best: Option<(usize, String)> = None;
     for def in visible {
         let dist = levenshtein(target, &def.name);
-        if dist > 0 && dist <= 2 {
-            if best.as_ref().is_none_or(|(d, _)| dist < *d) {
-                best = Some((dist, def.name.clone()));
-            }
+        if dist > 0 && dist <= 2 && best.as_ref().is_none_or(|(d, _)| dist < *d) {
+            best = Some((dist, def.name.clone()));
         }
     }
     best.map(|(_, name)| name)
@@ -2066,11 +2051,11 @@ fn levenshtein(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let (m, n) = (a.len(), b.len());
     let mut dp = vec![vec![0usize; n + 1]; m + 1];
-    for i in 0..=m {
-        dp[i][0] = i;
+    for (i, row) in dp.iter_mut().enumerate().take(m + 1) {
+        row[0] = i;
     }
-    for j in 0..=n {
-        dp[0][j] = j;
+    for (j, cell) in dp[0].iter_mut().enumerate().take(n + 1) {
+        *cell = j;
     }
     for i in 1..=m {
         for j in 1..=n {

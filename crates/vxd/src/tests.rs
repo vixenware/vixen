@@ -207,7 +207,7 @@ fn ariadne_can_render_vixen_source_with_arborium_color_labels()
         .write((filename, Source::from(source)), &mut out)?;
 
     assert!(
-        out.iter().any(|byte| *byte == b'\x1b'),
+        out.contains(&b'\x1b'),
         "expected ANSI escape codes in forced-color output: {out:?}"
     );
 

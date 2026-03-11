@@ -474,12 +474,8 @@ impl<'a> ExprTyper<'a> {
         // Walk up the scope chain from the parameter's scope to find its
         // enclosing function scope, then look up the FnSig by matching the
         // function's name range inside the scope's text range.
-        let Some(scope_range) = self.resolution.scopes.text_range(def.source(), def.scope) else {
-            return None;
-        };
-        let Some(scope_kind) = self.resolution.scopes.scope_kind(def.source(), def.scope) else {
-            return None;
-        };
+        let scope_range = self.resolution.scopes.text_range(def.source(), def.scope)?;
+        let scope_kind = self.resolution.scopes.scope_kind(def.source(), def.scope)?;
 
         // Parameters can be in Function or Closure scopes
         if scope_kind != crate::scope::ScopeKind::Function {
@@ -1058,17 +1054,17 @@ impl<'a> ExprTyper<'a> {
             let Some(kw_name) = kw.name() else { continue };
             // Check keyword params
             let kw_param = sig.keyword_params.iter().find(|p| p.name == kw_name.text());
-            if let Some(kw_param) = kw_param {
-                if let vx_types::Ty::Function(fn_ty) = &kw_param.ty {
-                    let kw_expr = kw.expr().map(Self::peel_parens);
-                    if let Some(Expr::Closure(closure)) = kw_expr {
-                        self.bind_closure_params(
-                            &closure,
-                            &fn_ty.params,
-                            kw_param.doc.as_deref(),
-                            &kw_param.name,
-                        );
-                    }
+            if let Some(kw_param) = kw_param
+                && let vx_types::Ty::Function(fn_ty) = &kw_param.ty
+            {
+                let kw_expr = kw.expr().map(Self::peel_parens);
+                if let Some(Expr::Closure(closure)) = kw_expr {
+                    self.bind_closure_params(
+                        &closure,
+                        &fn_ty.params,
+                        kw_param.doc.as_deref(),
+                        &kw_param.name,
+                    );
                 }
             }
             // Also check positional params passed by keyword name
@@ -1076,17 +1072,17 @@ impl<'a> ExprTyper<'a> {
                 .positional_params
                 .iter()
                 .find(|p| p.name == kw_name.text());
-            if let Some(pos_param) = pos_param {
-                if let vx_types::Ty::Function(fn_ty) = &pos_param.ty {
-                    let kw_expr = kw.expr().map(Self::peel_parens);
-                    if let Some(Expr::Closure(closure)) = kw_expr {
-                        self.bind_closure_params(
-                            &closure,
-                            &fn_ty.params,
-                            pos_param.doc.as_deref(),
-                            &pos_param.name,
-                        );
-                    }
+            if let Some(pos_param) = pos_param
+                && let vx_types::Ty::Function(fn_ty) = &pos_param.ty
+            {
+                let kw_expr = kw.expr().map(Self::peel_parens);
+                if let Some(Expr::Closure(closure)) = kw_expr {
+                    self.bind_closure_params(
+                        &closure,
+                        &fn_ty.params,
+                        pos_param.doc.as_deref(),
+                        &pos_param.name,
+                    );
                 }
             }
         }
@@ -1246,17 +1242,18 @@ impl<'a> ExprTyper<'a> {
         for (arg, param) in call.args().zip(sig.positional_params.iter()) {
             if let Some(arg_expr) = arg.expr() {
                 let arg_ty = self.infer_arg_with_expected_type(&arg_expr, &param.ty);
-                if !arg_ty.is_poison() && !param.ty.is_poison() {
-                    if !self.types_compatible(&arg_ty, &param.ty) {
-                        self.push_error(TypeError {
-                            range: arg_expr.syntax().text_range(),
-                            kind: TypeErrorKind::ArgTypeMismatch {
-                                param_name: param.name.clone(),
-                                expected: param.ty.clone(),
-                                found: arg_ty,
-                            },
-                        });
-                    }
+                if !arg_ty.is_poison()
+                    && !param.ty.is_poison()
+                    && !self.types_compatible(&arg_ty, &param.ty)
+                {
+                    self.push_error(TypeError {
+                        range: arg_expr.syntax().text_range(),
+                        kind: TypeErrorKind::ArgTypeMismatch {
+                            param_name: param.name.clone(),
+                            expected: param.ty.clone(),
+                            found: arg_ty,
+                        },
+                    });
                 }
             }
         }
@@ -1300,17 +1297,18 @@ impl<'a> ExprTyper<'a> {
         for (arg, param) in call.args().zip(params.iter()) {
             if let Some(arg_expr) = arg.expr() {
                 let arg_ty = self.infer_arg_with_expected_type(&arg_expr, &param.ty);
-                if !arg_ty.is_poison() && !param.ty.is_poison() {
-                    if !self.types_compatible(&arg_ty, &param.ty) {
-                        self.push_error(TypeError {
-                            range: arg_expr.syntax().text_range(),
-                            kind: TypeErrorKind::ArgTypeMismatch {
-                                param_name: param.name.clone(),
-                                expected: param.ty.clone(),
-                                found: arg_ty,
-                            },
-                        });
-                    }
+                if !arg_ty.is_poison()
+                    && !param.ty.is_poison()
+                    && !self.types_compatible(&arg_ty, &param.ty)
+                {
+                    self.push_error(TypeError {
+                        range: arg_expr.syntax().text_range(),
+                        kind: TypeErrorKind::ArgTypeMismatch {
+                            param_name: param.name.clone(),
+                            expected: param.ty.clone(),
+                            found: arg_ty,
+                        },
+                    });
                 }
             }
         }
@@ -1348,12 +1346,11 @@ impl<'a> ExprTyper<'a> {
         }
 
         // Check struct fields from type environment
-        if let Ty::Struct(ref struct_ty) = receiver_ty {
-            if let vx_types::TypeDef::Struct(ref s) = self.types.env[struct_ty.id] {
-                if let Some(field_def) = s.fields.iter().find(|f| f.name == field_name) {
-                    return field_def.ty.clone();
-                }
-            }
+        if let Ty::Struct(ref struct_ty) = receiver_ty
+            && let vx_types::TypeDef::Struct(ref s) = self.types.env[struct_ty.id]
+            && let Some(field_def) = s.fields.iter().find(|f| f.name == field_name)
+        {
+            return field_def.ty.clone();
         }
 
         Ty::Poison
@@ -1537,38 +1534,32 @@ impl<'a> ExprTyper<'a> {
     fn type_pattern(&mut self, pat: &Pattern, ty: &Ty) {
         match pat {
             Pattern::Binding(bp) => {
-                if let Some(name_tok) = bp.name() {
-                    if !ty.is_poison() {
-                        self.binding_types
-                            .insert(self.span(name_tok.text_range()), ty.clone());
-                    }
+                if let Some(name_tok) = bp.name()
+                    && !ty.is_poison()
+                {
+                    self.binding_types
+                        .insert(self.span(name_tok.text_range()), ty.clone());
                 }
             }
             Pattern::Variant(vp) => {
                 // Resolve the variant to find field types
                 let variant_struct = self.resolve_variant_type(vp, ty);
-                if let Some(struct_pat) = vp.fields() {
-                    if let Some((struct_def_fields, _)) = &variant_struct {
-                        for field in struct_pat.fields() {
-                            if let Some(field_name_tok) = field.name() {
-                                let field_name = field_name_tok.text();
-                                let field_ty = struct_def_fields
-                                    .iter()
-                                    .find(|f| f.name == field_name)
-                                    .map(|f| f.ty.clone())
-                                    .unwrap_or(Ty::Poison);
-                                // If there's a nested pattern (e.g., `Foo { bar: Baz { x } }`), recurse
-                                if let Some(nested_pat) = field.pattern() {
-                                    self.type_pattern(&nested_pat, &field_ty);
-                                } else {
-                                    // Simple field binding: `Foo { bar }` — bar gets the field type
-                                    if !field_ty.is_poison() {
-                                        self.binding_types.insert(
-                                            self.span(field_name_tok.text_range()),
-                                            field_ty,
-                                        );
-                                    }
-                                }
+                if let Some(struct_pat) = vp.fields()
+                    && let Some((struct_def_fields, _)) = &variant_struct
+                {
+                    for field in struct_pat.fields() {
+                        if let Some(field_name_tok) = field.name() {
+                            let field_name = field_name_tok.text();
+                            let field_ty = struct_def_fields
+                                .iter()
+                                .find(|f| f.name == field_name)
+                                .map(|f| f.ty.clone())
+                                .unwrap_or(Ty::Poison);
+                            if let Some(nested_pat) = field.pattern() {
+                                self.type_pattern(&nested_pat, &field_ty);
+                            } else if !field_ty.is_poison() {
+                                self.binding_types
+                                    .insert(self.span(field_name_tok.text_range()), field_ty);
                             }
                         }
                     }
@@ -1576,23 +1567,23 @@ impl<'a> ExprTyper<'a> {
             }
             Pattern::Struct(sp) => {
                 // Direct struct pattern (not under a variant): fields get types from the matched struct
-                if let Ty::Struct(struct_ty) = ty {
-                    if let vx_types::TypeDef::Struct(ref sdef) = self.types.env[struct_ty.id] {
-                        for field in sp.fields() {
-                            if let Some(field_name_tok) = field.name() {
-                                let field_name = field_name_tok.text();
-                                let field_ty = sdef
-                                    .fields
-                                    .iter()
-                                    .find(|f| f.name == field_name)
-                                    .map(|f| f.ty.clone())
-                                    .unwrap_or(Ty::Poison);
-                                if let Some(nested_pat) = field.pattern() {
-                                    self.type_pattern(&nested_pat, &field_ty);
-                                } else if !field_ty.is_poison() {
-                                    self.binding_types
-                                        .insert(self.span(field_name_tok.text_range()), field_ty);
-                                }
+                if let Ty::Struct(struct_ty) = ty
+                    && let vx_types::TypeDef::Struct(ref sdef) = self.types.env[struct_ty.id]
+                {
+                    for field in sp.fields() {
+                        if let Some(field_name_tok) = field.name() {
+                            let field_name = field_name_tok.text();
+                            let field_ty = sdef
+                                .fields
+                                .iter()
+                                .find(|f| f.name == field_name)
+                                .map(|f| f.ty.clone())
+                                .unwrap_or(Ty::Poison);
+                            if let Some(nested_pat) = field.pattern() {
+                                self.type_pattern(&nested_pat, &field_ty);
+                            } else if !field_ty.is_poison() {
+                                self.binding_types
+                                    .insert(self.span(field_name_tok.text_range()), field_ty);
                             }
                         }
                     }
@@ -1607,11 +1598,11 @@ impl<'a> ExprTyper<'a> {
             }
             Pattern::At(at) => {
                 // `name @ pattern` — bind name to the whole type, recurse into pattern
-                if let Some(name_tok) = at.binding_name() {
-                    if !ty.is_poison() {
-                        self.binding_types
-                            .insert(self.span(name_tok.text_range()), ty.clone());
-                    }
+                if let Some(name_tok) = at.binding_name()
+                    && !ty.is_poison()
+                {
+                    self.binding_types
+                        .insert(self.span(name_tok.text_range()), ty.clone());
                 }
                 if let Some(inner) = at.pattern() {
                     self.type_pattern(&inner, ty);
@@ -1665,14 +1656,14 @@ impl<'a> ExprTyper<'a> {
         }
 
         // If the scrutinee is an enum, find the matching variant
-        if let Ty::Enum(enum_ty) = scrutinee_ty {
-            if let vx_types::TypeDef::Enum(ref edef) = self.types.env[enum_ty.id] {
-                for &variant_id in &edef.variants {
-                    if let vx_types::TypeDef::Struct(ref sdef) = self.types.env[variant_id] {
-                        if sdef.name == variant_name {
-                            return Some((sdef.fields.clone(), variant_id));
-                        }
-                    }
+        if let Ty::Enum(enum_ty) = scrutinee_ty
+            && let vx_types::TypeDef::Enum(ref edef) = self.types.env[enum_ty.id]
+        {
+            for &variant_id in &edef.variants {
+                if let vx_types::TypeDef::Struct(ref sdef) = self.types.env[variant_id]
+                    && sdef.name == variant_name
+                {
+                    return Some((sdef.fields.clone(), variant_id));
                 }
             }
         }
@@ -1680,10 +1671,10 @@ impl<'a> ExprTyper<'a> {
         // Also try resolving by name if the scrutinee type is unknown
         let type_ids = self.types.env.lookup(&variant_name);
         for &id in type_ids {
-            if let vx_types::TypeDef::Struct(ref sdef) = self.types.env[id] {
-                if sdef.parent_enum.is_some() {
-                    return Some((sdef.fields.clone(), id));
-                }
+            if let vx_types::TypeDef::Struct(ref sdef) = self.types.env[id]
+                && sdef.parent_enum.is_some()
+            {
+                return Some((sdef.fields.clone(), id));
             }
         }
 
@@ -1925,13 +1916,13 @@ impl<'a> ExprTyper<'a> {
         let name = name_tok.text();
         let type_ids = self.types.env.lookup(name);
         for &id in type_ids {
-            if let vx_types::TypeDef::Struct(ref sdef) = self.types.env[id] {
-                if sdef.parent_enum.is_none() {
-                    return Ty::Struct(vx_types::StructTy {
-                        id,
-                        type_args: vec![],
-                    });
-                }
+            if let vx_types::TypeDef::Struct(ref sdef) = self.types.env[id]
+                && sdef.parent_enum.is_none()
+            {
+                return Ty::Struct(vx_types::StructTy {
+                    id,
+                    type_args: vec![],
+                });
             }
         }
         Ty::Poison

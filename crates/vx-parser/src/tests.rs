@@ -211,7 +211,7 @@ fn assert_stdlib_header_parses(relative: &str) {
 }
 
 fn assert_file_parses(path: &Path) {
-    let source = fs::read_to_string(&path).unwrap_or_else(|err| {
+    let source = fs::read_to_string(path).unwrap_or_else(|err| {
         panic!("failed to read {}: {err}", path.display());
     });
     let parse = parse(&source);
@@ -740,7 +740,7 @@ fn build(process: Process, args: Array[String], defaults: Config) {
 "#;
 
     let parsed = parse_source_file(input);
-    let formatted = crate::format(&parsed.tree().syntax());
+    let formatted = crate::format(parsed.tree().syntax());
 
     assert!(formatted.contains("exec_fn(args) where"));
     assert!(formatted.contains("@bin/lua: process.stdout()"));
@@ -860,7 +860,7 @@ fn enclosing_nodes_finds_breadcrumb_trail() {
     assert_eq!(parsed.errors(), []);
 
     let offset = TextSize::from(input.find("42").unwrap() as u32);
-    let crumbs = enclosing_nodes(&parsed.tree().syntax(), offset);
+    let crumbs = enclosing_nodes(parsed.tree().syntax(), offset);
 
     assert_has_breadcrumb(&crumbs, SyntaxKind::SOURCE_FILE);
     assert_has_breadcrumb(&crumbs, SyntaxKind::FN_DECL);
@@ -888,7 +888,7 @@ fn build(flag: Bool) -> U64 {
     let parsed = parse_source_file(input);
     assert_eq!(parsed.errors(), []);
 
-    let ranges = folding_ranges(&parsed.tree().syntax());
+    let ranges = folding_ranges(parsed.tree().syntax());
     assert!(
         ranges
             .iter()
@@ -908,7 +908,7 @@ fn build(process: Process, args: Array[String], defaults: Config) -> String {
     let parsed = parse_source_file(input);
     assert_eq!(parsed.errors(), []);
 
-    let tokens = semantic_tokens(&parsed.tree().syntax());
+    let tokens = semantic_tokens(parsed.tree().syntax());
     let classified = tokens
         .iter()
         .map(|token| {

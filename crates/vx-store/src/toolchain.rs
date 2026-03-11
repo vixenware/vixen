@@ -1318,7 +1318,7 @@ impl StoreService {
             &target_manifest.url,
             &target_manifest.hash,
             component_name,
-            &progress,
+            progress,
         )
         .await
         {
@@ -1501,7 +1501,7 @@ impl StoreService {
         };
 
         send_progress_best_effort(
-            &progress,
+            progress,
             StoreProgress {
                 message: format!("extracting {component_name}"),
                 current: None,

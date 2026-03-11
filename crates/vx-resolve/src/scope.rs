@@ -196,10 +196,10 @@ impl ScopeTree {
             match scope.kind {
                 // In module scope, all items are visible regardless of position
                 ScopeKind::Module | ScopeKind::Namespace => {
-                    if let Some(def) = scope.definitions.iter().rev().find(|d| d.name == name) {
-                        if def.kind != DefKind::Binding || def.name_span.range.start() < offset {
-                            return Some(def);
-                        }
+                    if let Some(def) = scope.definitions.iter().rev().find(|d| d.name == name)
+                        && (def.kind != DefKind::Binding || def.name_span.range.start() < offset)
+                    {
+                        return Some(def);
                     }
                 }
                 // In blocks, only bindings defined before the reference are visible

@@ -302,10 +302,10 @@ impl<'a> CapChecker<'a> {
     fn check_expr_for_callbacks(&mut self, expr: &Expr) {
         match expr {
             Expr::Call(call) => {
-                if !call
+                if call
                     .syntax()
                     .parent()
-                    .is_some_and(|parent| parent.kind() == SyntaxKind::WHERE_EXPR)
+                    .is_none_or(|parent| parent.kind() != SyntaxKind::WHERE_EXPR)
                 {
                     self.check_call_callbacks(call);
                 }

@@ -1281,12 +1281,7 @@ impl TryFrom<TransportBuiltinValue> for BuiltinValue {
             TransportBuiltinValue::StructConstructor { type_name, fields } => {
                 Ok(Self::Function(BuiltinFunction::StructConstructor {
                     type_name: Arc::from(type_name),
-                    fields: Arc::from(
-                        fields
-                            .into_iter()
-                            .map(|field| Arc::<str>::from(field))
-                            .collect::<Vec<_>>(),
-                    ),
+                    fields: Arc::from(fields.into_iter().map(Arc::<str>::from).collect::<Vec<_>>()),
                 }))
             }
             TransportBuiltinValue::BlobFromString => {

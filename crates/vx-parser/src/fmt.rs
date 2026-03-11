@@ -732,7 +732,6 @@ impl Formatter {
 
     fn fmt_match_arm(&mut self, node: &SyntaxNode) {
         // pattern [if guard] => expr
-        let mut seen_arrow = false;
         for child in node.children_with_tokens() {
             match &child {
                 NodeOrToken::Token(t) => match t.kind() {
@@ -741,7 +740,6 @@ impl Formatter {
                         self.space();
                         self.write("=>");
                         self.space();
-                        seen_arrow = true;
                     }
                     SyntaxKind::IF_KW => {
                         self.space();
@@ -750,13 +748,7 @@ impl Formatter {
                     }
                     _ => self.write(t.text()),
                 },
-                NodeOrToken::Node(n) => {
-                    if seen_arrow {
-                        self.fmt_node(n);
-                    } else {
-                        self.fmt_node(n);
-                    }
-                }
+                NodeOrToken::Node(n) => self.fmt_node(n),
             }
         }
     }
@@ -777,7 +769,7 @@ impl Formatter {
     }
 
     fn fmt_where_expr(&mut self, node: &SyntaxNode) {
-        let mut children = node.children().filter_map(|child| crate::Expr::cast(child));
+        let mut children = node.children().filter_map(crate::Expr::cast);
         if let Some(base) = children.next() {
             self.fmt_node(base.syntax());
         }
