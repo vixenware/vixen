@@ -130,6 +130,27 @@ fn render_below_span_message_stays_anchored_to_the_span() {
     );
 }
 
+#[test]
+fn render_below_span_connector_uses_the_label_style() {
+    let rendered = render(
+        &sample_diagnostics(),
+        TerminalCapabilities {
+            width: 28,
+            glyph_mode: GlyphMode::Unicode,
+            color_level: ColorLevel::Ansi16,
+            hyperlink_mode: HyperlinkMode::None,
+            tab_width: 4,
+        },
+    )
+    .unwrap();
+
+    println!("{rendered}");
+    assert!(rendered.contains("\u{1b}[31m"), "{rendered}");
+    assert!(rendered.contains("───────"), "{rendered}");
+    assert!(rendered.contains("\u{1b}[31m╰─\u{1b}[0m"), "{rendered}");
+    assert!(!rendered.contains("\u{1b}[90m╰─\u{1b}[0m"), "{rendered}");
+}
+
 // d[verify test.width-matrix]
 // d[verify test.capability-matrix]
 // d[verify glyph.unicode-ascii]

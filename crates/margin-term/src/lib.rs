@@ -473,10 +473,11 @@ fn render_annotation(
     theme: Theme,
 ) {
     let glyphs = glyphs(capabilities.glyph_mode);
+    let annotation_style = theme.style_for_annotation_role(annotation.role, annotation.severity);
     let marker_line = marker_line(annotation.segment, capabilities.glyph_mode);
     let colored = colorize(
         marker_line.as_str(),
-        theme.style_for_annotation_role(annotation.role, annotation.severity),
+        annotation_style,
         capabilities.color_level,
     );
     let gutter = format!(
@@ -510,7 +511,7 @@ fn render_annotation(
                         if index == 0 {
                             format!(
                                 "{} ",
-                                colorize(glyphs.branch, theme.connector, capabilities.color_level)
+                                colorize(glyphs.branch, annotation_style, capabilities.color_level)
                             )
                         } else {
                             continuation_padding.clone()
@@ -526,7 +527,7 @@ fn render_annotation(
                     let _ = writeln!(
                         output,
                         "{gutter}{} = {line}",
-                        colorize(glyphs.branch, theme.emphasis, capabilities.color_level)
+                        colorize(glyphs.branch, annotation_style, capabilities.color_level)
                     );
                 }
             }
