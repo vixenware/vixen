@@ -1766,6 +1766,23 @@ fn main(name: String?) {
 }
 
 #[test]
+fn option_variant_pattern_binds_inner_value_type() {
+    let src = r#"
+fn main(name: String?) {
+    match name (
+        Some { value } => value.ends_with("?"),
+        None => false,
+    )
+}
+"#;
+    let result = type_check(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let ty = find_expr_type(&result, src, r#"value.ends_with("?")"#);
+    assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::Bool)));
+}
+
+#[test]
 fn string_slice_accepts_range_argument() {
     let src = r#"
 fn main(name: String) {

@@ -1474,6 +1474,24 @@ impl<'a> ExprTyper<'a> {
     ) -> Option<(Vec<vx_types::FieldDef>, vx_types::TypeId)> {
         let variant_name: String = vp.segments().last()?.text().to_string();
 
+        if let Ty::Optional(inner) = scrutinee_ty {
+            let variant_id = self.option_variant_id(&variant_name)?;
+            let vx_types::TypeDef::Struct(struct_def) = &self.types.env[variant_id] else {
+                return None;
+            };
+            let fields = struct_def
+                .fields
+                .iter()
+                .map(|field| vx_types::FieldDef {
+                    name: field.name.clone(),
+                    ty: substitute_type_params(&field.ty, &[(*inner.clone())]),
+                    has_default: field.has_default,
+                    name_range: field.name_range,
+                })
+                .collect();
+            return Some((fields, variant_id));
+        }
+
         // If the scrutinee is an enum, find the matching variant
         if let Ty::Enum(enum_ty) = scrutinee_ty {
             if let vx_types::TypeDef::Enum(ref edef) = self.types.env[enum_ty.id] {
@@ -1498,6 +1516,25 @@ impl<'a> ExprTyper<'a> {
         }
 
         None
+    }
+
+    fn option_variant_id(&self, variant_name: &str) -> Option<vx_types::TypeId> {
+        let option_id = self
+            .types
+            .env
+            .lookup("Option")
+            .iter()
+            .copied()
+            .find(|&id| matches!(self.types.env.get(id), vx_types::TypeDef::Enum(_)))?;
+        let vx_types::TypeDef::Enum(enum_def) = self.types.env.get(option_id) else {
+            return None;
+        };
+        enum_def.variants.iter().copied().find(|variant_id| {
+            matches!(
+                self.types.env.get(*variant_id),
+                vx_types::TypeDef::Struct(struct_def) if struct_def.name == variant_name
+            )
+        })
     }
 
     fn infer_binary(&mut self, bin: &BinaryExpr) -> Ty {
