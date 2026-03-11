@@ -2604,15 +2604,20 @@ impl Engine {
         self.collect_value_obligations(&observer, &mut verification_obligations);
 
         let mut mounts = self.exec_mounts_from_value(mounts_value)?;
-        let writable_roots = self.exec_writable_from_value(writable_value)?;
-        let env = self.exec_env_from_value(env_value, &mut mounts, &writable_roots)?;
+        let explicit_writable = self.exec_writable_from_value(writable_value)?;
+        let env = self.exec_env_from_value(env_value, &mut mounts, &explicit_writable)?;
         let exec_args = exec_args_raw
             .iter()
-            .map(|value| self.parse_exec_arg(value, &mut mounts, &writable_roots, "exec arg"))
+            .map(|value| self.parse_exec_arg(value, &mut mounts, &explicit_writable, "exec arg"))
             .collect::<Result<Vec<_>, _>>()?;
         if exec_args.is_empty() {
             return Err(self.type_error("exec requires at least one program argument"));
         }
+        let writable_roots = if explicit_writable.is_empty() {
+            self.infer_exec_writable_roots(&mounts, &exec_args, &env)
+        } else {
+            explicit_writable
+        };
 
         Ok(ParsedExecRequest {
             args: exec_args,
@@ -2780,6 +2785,40 @@ impl Engine {
         Ok(writable)
     }
 
+    fn infer_exec_writable_roots(
+        &self,
+        _mounts: &[(PathValue, Value)],
+        args: &[ExecArgValue],
+        env: &[(String, ExecArgValue)],
+    ) -> Vec<PathValue> {
+        let mut roots = BTreeSet::new();
+
+        let mut add_parent_paths = |path: &PathValue| {
+            let mut current = path.as_str();
+            while let Some((parent, _)) = current.rsplit_once('/') {
+                if parent.is_empty() {
+                    break;
+                }
+                roots.insert(parent.to_string());
+                current = parent;
+            }
+        };
+
+        for arg in args {
+            if let ExecArgValue::Path(path) = arg {
+                add_parent_paths(path);
+            }
+        }
+
+        for (_, value) in env {
+            if let ExecArgValue::Path(path) = value {
+                add_parent_paths(path);
+            }
+        }
+
+        roots.into_iter().map(PathValue::new).collect()
+    }
+
     fn exec_env_from_value(
         &self,
         value: Option<Value>,
@@ -2818,7 +2857,7 @@ impl Engine {
         &self,
         value: &Value,
         mounts: &mut Vec<(PathValue, Value)>,
-        writable_roots: &[PathValue],
+        _writable_roots: &[PathValue],
         context: &str,
     ) -> Result<ExecArgValue, PoisonError> {
         let (value, _) = self.split_obligations(self.force_value(value.clone())?);
