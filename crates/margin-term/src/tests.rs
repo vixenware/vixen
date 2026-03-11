@@ -474,6 +474,11 @@ fn render_multiline_annotations_emit_the_message_once() {
 
     println!("{rendered}");
     assert_eq!(rendered.matches("shared message").count(), 1, "{rendered}");
+    assert!(rendered.contains("▌ fn compile() {"), "{rendered}");
+    assert!(rendered.contains("▌   line_one();"), "{rendered}");
+    assert!(rendered.contains("▌   line_two();"), "{rendered}");
+    assert!(rendered.contains("  ▌ ╰─ shared message"), "{rendered}");
+    assert!(!rendered.contains("────"), "{rendered}");
 }
 
 #[test]

@@ -317,12 +317,13 @@ fn render_window(
             capabilities,
             theme,
         );
+        let separator = line_separator(&window.annotations, line.line_number, capabilities, theme);
         let omission = if line.clipped { "..." } else { "" };
         let _ = writeln!(
             output,
             "{:>width$} {} {}{}",
             line.line_number,
-            colorize(glyphs.separator, theme.gutter, capabilities.color_level),
+            separator,
             styled,
             omission,
             width = window.geometry.line_number_width
@@ -474,6 +475,37 @@ fn render_annotation(
 ) {
     let glyphs = glyphs(capabilities.glyph_mode);
     let annotation_style = theme.style_for_annotation_role(annotation.role, annotation.severity);
+    if annotation.block {
+        if let Some(message) = annotation.message {
+            let gutter = format!(
+                "{:>width$} {} ",
+                "",
+                colorize(glyphs.block, annotation_style, capabilities.color_level),
+                width = window.geometry.line_number_width
+            );
+            let continuation_padding = " ".repeat(indent_width(glyphs.branch) + 1);
+            let available = window
+                .geometry
+                .source_columns
+                .saturating_sub(indent_width(glyphs.branch) + 1);
+            for (index, line) in wrap_text(message, available).into_iter().enumerate() {
+                let _ = writeln!(
+                    output,
+                    "{gutter}{}{line}",
+                    if index == 0 {
+                        format!(
+                            "{} ",
+                            colorize(glyphs.branch, annotation_style, capabilities.color_level)
+                        )
+                    } else {
+                        continuation_padding.clone()
+                    }
+                );
+            }
+        }
+        return;
+    }
+
     let marker_line = marker_line(
         annotation.segment,
         annotation.placement,
@@ -546,13 +578,25 @@ fn annotations_for_line<'a>(
     let mut renderable = annotations
         .iter()
         .flat_map(|annotation| {
-            let message_owner = annotation.segments.first().copied();
+            let block = is_gutter_block_annotation(annotation);
+            let message_owner = if block {
+                annotation.segments.last().copied()
+            } else {
+                annotation.segments.first().copied()
+            };
             annotation
                 .segments
                 .iter()
                 .copied()
-                .filter(move |segment| segment.line_number == line_number)
+                .filter(move |segment| {
+                    if block {
+                        message_owner == Some(*segment) && segment.line_number == line_number
+                    } else {
+                        segment.line_number == line_number
+                    }
+                })
                 .map(move |segment| RenderableAnnotation {
+                    block,
                     message: (message_owner == Some(segment))
                         .then_some(annotation.message.as_deref())
                         .flatten(),
@@ -566,6 +610,38 @@ fn annotations_for_line<'a>(
         .collect::<Vec<_>>();
     renderable.sort_by(|left, right| right.priority.cmp(&left.priority));
     renderable
+}
+
+fn line_separator(
+    annotations: &[WindowAnnotation],
+    line_number: usize,
+    capabilities: TerminalCapabilities,
+    theme: Theme,
+) -> String {
+    let glyphs = glyphs(capabilities.glyph_mode);
+    if let Some(annotation) = annotations
+        .iter()
+        .filter(|annotation| is_gutter_block_annotation(annotation))
+        .filter(|annotation| {
+            annotation
+                .segments
+                .iter()
+                .any(|segment| segment.line_number == line_number)
+        })
+        .max_by_key(|annotation| annotation.priority)
+    {
+        let style =
+            theme.style_for_annotation_role(annotation.role, severity_for_role(annotation.role));
+        colorize(glyphs.block, style, capabilities.color_level)
+    } else {
+        colorize(glyphs.separator, theme.gutter, capabilities.color_level)
+    }
+}
+
+fn is_gutter_block_annotation(annotation: &WindowAnnotation) -> bool {
+    annotation.message.is_some()
+        && annotation.role != AnnotationRole::SyntaxToken
+        && annotation.segments.len() >= 3
 }
 
 fn marker_line(span: ResolvedSpan, placement: PlacementMode, glyph_mode: GlyphMode) -> String {
@@ -778,11 +854,13 @@ fn glyphs(mode: GlyphMode) -> Glyphs {
             source: "╭─>",
             separator: "│",
             branch: "╰─",
+            block: "▌",
         },
         GlyphMode::Ascii => Glyphs {
             source: "-->",
             separator: "|",
             branch: "\\-",
+            block: "|",
         },
     }
 }
@@ -792,10 +870,12 @@ struct Glyphs {
     source: &'static str,
     separator: &'static str,
     branch: &'static str,
+    block: &'static str,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct RenderableAnnotation<'a> {
+    block: bool,
     message: Option<&'a str>,
     placement: PlacementMode,
     role: AnnotationRole,
