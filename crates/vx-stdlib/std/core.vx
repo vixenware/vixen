@@ -75,6 +75,12 @@ namespace String {
 namespace Array[T] {
   /// Apply `f` to each element.
   fn map[U](self, f: Fn(T) -> U) -> Array[U];
+  /// Keep the elements for which `pred` returns true.
+  fn filter(self, pred: Fn(T) -> Bool) -> Array[T];
+  /// Return the first element for which `pred` returns true.
+  fn find(self, pred: Fn(T) -> Bool) -> Option[T];
+  /// Materialize an array-shaped collection as an array.
+  fn to_array(self) -> Array[T];
   /// Build a map by using each element as the key.
   fn to_map[V](self, f: Fn(T) -> V) -> Map[T, V];
   /// Flatten one level of nested arrays.
@@ -84,6 +90,8 @@ namespace Array[T] {
 }
 
 namespace Map[K, V] {
+  /// Apply `f` to each `(key, value)` pair and collect the results.
+  fn map[U](self, f: Fn(K, V) -> U) -> Array[U];
   /// Apply `f` to each value while preserving keys.
   fn map_values[U](self, f: Fn(V) -> U) -> Map[K, U];
 }

@@ -1578,6 +1578,85 @@ fn main(values: Map[String, String]) {
 }
 
 #[test]
+fn map_map_closure_params_are_typed_from_key_and_value_types() {
+    let src = r#"
+struct DependencyRequest {
+    name: String,
+    dep_len: U64,
+}
+
+struct CargoManifest {
+    dependencies: Map[String, String],
+}
+
+fn request_from_dep(name: String, dep: String, kind: String) -> DependencyRequest {
+    let _kind = kind;
+    DependencyRequest { name, dep_len: dep.len() }
+}
+
+fn main(manifest: CargoManifest) {
+    manifest.dependencies
+        .map((name, dep) => request_from_dep(name, dep, "normal"))
+        .to_array()
+}
+"#;
+    let result = type_check(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let dep_len_ty = find_expr_type(&result, src, "dep.len()");
+    assert_eq!(dep_len_ty, Some(Ty::Scalar(vx_types::Scalar::U64)));
+
+    let (result, types) = type_check_with_types(src);
+    let ty = find_expr_type(
+        &result,
+        src,
+        r#"manifest.dependencies
+        .map((name, dep) => request_from_dep(name, dep, "normal"))
+        .to_array()"#,
+    );
+    assert_eq!(
+        ty,
+        Some(Ty::Array(Box::new(nominal_ty(&types, "DependencyRequest"))))
+    );
+}
+
+#[test]
+fn array_filter_and_find_closure_params_are_typed() {
+    let src = r#"
+struct IndexEntry {
+    vers: String,
+    yanked: Bool,
+}
+
+fn main(entries: Array[IndexEntry]) {
+    let filtered =
+        entries
+            .filter((entry) => !entry.yanked)
+            .to_array();
+    filtered.find((entry) => entry.vers == "1.0.0")
+}
+"#;
+    let result = type_check(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let yanked_ty = find_expr_type(&result, src, "entry.yanked");
+    assert_eq!(yanked_ty, Some(Ty::Scalar(vx_types::Scalar::Bool)));
+
+    let vers_ty = find_expr_type(&result, src, "entry.vers");
+    assert_eq!(vers_ty, Some(Ty::Scalar(vx_types::Scalar::String)));
+
+    let found_ty = find_last_expr_type(
+        &result,
+        src,
+        r#"filtered.find((entry) => entry.vers == "1.0.0")"#,
+    );
+    assert!(
+        matches!(found_ty, Some(Ty::Optional(_))),
+        "got: {found_ty:?}"
+    );
+}
+
+#[test]
 fn array_flatten_returns_inner_array_type() {
     let src = r#"
 fn main(parts: Array[Array[String]]) {
