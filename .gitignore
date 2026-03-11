@@ -28,3 +28,6 @@ fdprefix*
 zoo/lua-src/
 zoo/zlib-src/
 zoo/libpng-src/
+
+# vx build system cache (auto-added by vx)
+/.vx

@@ -228,8 +228,6 @@ pub struct BuildBuilder {
     release: bool,
     json: bool,
     subdir: Option<String>,
-    extra_env: Vec<(String, String)>,
-    removed_env: Vec<String>,
 }
 
 impl BuildBuilder {
@@ -240,8 +238,6 @@ impl BuildBuilder {
             release: false,
             json: false,
             subdir: None,
-            extra_env: Vec::new(),
-            removed_env: Vec::new(),
         }
     }
 
@@ -260,16 +256,6 @@ impl BuildBuilder {
         self
     }
 
-    pub fn env(mut self, key: &str, value: &str) -> Self {
-        self.extra_env.push((key.to_owned(), value.to_owned()));
-        self
-    }
-
-    pub fn env_remove(mut self, key: &str) -> Self {
-        self.removed_env.push(key.to_owned());
-        self
-    }
-
     pub fn run(self) -> VxOutput {
         let mut cmd = Command::new(TestEnv::vx_binary());
         let work_dir = match &self.subdir {
@@ -279,12 +265,6 @@ impl BuildBuilder {
         cmd.current_dir(&work_dir);
 
         cmd.env("VX_TEST_SESSION", &self.session_id);
-        for key in &self.removed_env {
-            cmd.env_remove(key);
-        }
-        for (key, value) in &self.extra_env {
-            cmd.env(key, value);
-        }
         cmd.arg("build");
         // Let vx spawn daemons if needed (they'll be shared due to VX_HOME)
         if self.release {
