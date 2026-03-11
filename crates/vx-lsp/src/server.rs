@@ -2480,6 +2480,53 @@ fn build() {
     }
 
     #[test]
+    fn inferred_def_type_uses_specialized_exec_return_type() {
+        let text = r#"
+fn build() {
+  let output = exec(["echo"]) where {
+    observer: (proc, tree) => tree.subtree(@out),
+  };
+
+  output
+}
+"#;
+
+        let state = DocumentState::new(text.to_string());
+        let output = definition_named(&state, "output");
+
+        assert_eq!(
+            state
+                .inferred_def_type(output)
+                .map(|ty| ty.display_with_env(&state.types.env).to_string()),
+            Some(String::from("Tree"))
+        );
+    }
+
+    #[test]
+    fn inferred_def_type_uses_specialized_partial_exec_return_type() {
+        let text = r#"
+fn build() {
+  let common = {
+    observer: (proc, tree) => tree.subtree(@out),
+  };
+  let cexec = partial exec where common;
+
+  cexec
+}
+"#;
+
+        let state = DocumentState::new(text.to_string());
+        let cexec = definition_named(&state, "cexec");
+
+        assert_eq!(
+            state
+                .inferred_def_type(cexec)
+                .map(|ty| ty.display_with_env(&state.types.env).to_string()),
+            Some(String::from("Fn(Array[ExecInput]) -> Tree"))
+        );
+    }
+
+    #[test]
     fn documentation_for_uses_callback_slot_docs() {
         let text = r#"
 fn build() {

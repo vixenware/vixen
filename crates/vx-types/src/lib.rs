@@ -477,6 +477,8 @@ pub struct TyDisplay<'a> {
 impl<'a> std::fmt::Display for TyDisplay<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.ty {
+            Ty::Scalar(s) => write!(f, "{s}"),
+            Ty::Unit => write!(f, "()"),
             Ty::Struct(s) => {
                 let name = self.env.get(s.id).name();
                 write!(f, "{name}")?;
@@ -507,6 +509,36 @@ impl<'a> std::fmt::Display for TyDisplay<'a> {
                 }
                 Ok(())
             }
+            Ty::Newtype(n) => {
+                let name = self.env.get(n.id).name();
+                write!(f, "{name}")?;
+                if !n.type_args.is_empty() {
+                    write!(f, "[")?;
+                    for (i, arg) in n.type_args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", arg.display_with_env(self.env))?;
+                    }
+                    write!(f, "]")?;
+                }
+                Ok(())
+            }
+            Ty::Alias(a) => {
+                let name = self.env.get(a.id).name();
+                write!(f, "{name}")?;
+                if !a.type_args.is_empty() {
+                    write!(f, "[")?;
+                    for (i, arg) in a.type_args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", arg.display_with_env(self.env))?;
+                    }
+                    write!(f, "]")?;
+                }
+                Ok(())
+            }
             Ty::Opaque(o) => {
                 let name = self.env.get(o.id).name();
                 write!(f, "{name}")?;
@@ -522,8 +554,47 @@ impl<'a> std::fmt::Display for TyDisplay<'a> {
                 }
                 Ok(())
             }
-            // For all other types, delegate to the standard Display
-            other => write!(f, "{other}"),
+            Ty::Tuple(tuple) => {
+                write!(f, "(")?;
+                for (i, elem) in tuple.elements.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", elem.display_with_env(self.env))?;
+                }
+                if tuple.elements.len() == 1 {
+                    write!(f, ",")?;
+                }
+                write!(f, ")")
+            }
+            Ty::Function(function) => {
+                write!(f, "Fn(")?;
+                for (i, param) in function.params.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", param.display_with_env(self.env))?;
+                }
+                write!(f, ")")?;
+                for cap in &function.capabilities {
+                    write!(f, " {cap}")?;
+                }
+                write!(f, " -> {}", function.ret.display_with_env(self.env))
+            }
+            Ty::Optional(inner) => write!(f, "{}?", inner.display_with_env(self.env)),
+            Ty::Array(inner) => write!(f, "Array[{}]", inner.display_with_env(self.env)),
+            Ty::Map(key, value) => {
+                write!(
+                    f,
+                    "Map[{}, {}]",
+                    key.display_with_env(self.env),
+                    value.display_with_env(self.env)
+                )
+            }
+            Ty::Stream(inner) => write!(f, "Stream[{}]", inner.display_with_env(self.env)),
+            Ty::Param(param) => write!(f, "{param}"),
+            Ty::Infer(var) => write!(f, "{var}"),
+            Ty::Poison => write!(f, "<poison>"),
         }
     }
 }
@@ -626,6 +697,42 @@ mod tests {
         });
         assert_eq!(ty.display_with_env(&env).to_string(), "Token");
         assert_eq!(ty.to_string(), format!("<opaque#{}>", id.0));
+    }
+
+    #[test]
+    fn function_display_with_env_is_recursive() {
+        let mut env = TypeEnv::new();
+        let tree_id = env.define(
+            "Tree",
+            TypeDef::Opaque(OpaqueDef {
+                name: "Tree".to_owned(),
+                type_params: vec![],
+            }),
+        );
+        let exec_input_id = env.define(
+            "ExecInput",
+            TypeDef::Alias(AliasDef {
+                name: "ExecInput".to_owned(),
+                type_params: vec![],
+                target: Ty::Scalar(Scalar::String),
+            }),
+        );
+        let ty = Ty::Function(FunctionTy {
+            params: vec![Ty::Array(Box::new(Ty::Alias(AliasTy {
+                id: exec_input_id,
+                type_args: vec![],
+            })))],
+            ret: Box::new(Ty::Opaque(OpaqueTy {
+                id: tree_id,
+                type_args: vec![],
+            })),
+            capabilities: vec![],
+        });
+
+        assert_eq!(
+            ty.display_with_env(&env).to_string(),
+            "Fn(Array[ExecInput]) -> Tree"
+        );
     }
 
     #[test]
