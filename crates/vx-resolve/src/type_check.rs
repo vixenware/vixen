@@ -15,14 +15,11 @@ use vx_parser::{
 use vx_types::{FnSig, Ty};
 
 use crate::SourceSpan;
-use crate::builtins::{
-    builtin_fn_sig, builtin_fn_sigs, builtin_generic_method, builtin_method, builtin_scalar_method,
-    builtin_static_method_sigs,
-};
+use crate::builtins::builtin_generic_method;
 use crate::resolve::NameResolution;
 use crate::scope::{DefKind, Definition};
 use crate::type_collect::TypeCollection;
-use crate::{resolve_member_for_receiver, resolve_namespace_member};
+use crate::{resolve_member_for_receiver, resolve_namespace_members};
 
 /// A type error found during expression typing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,25 +257,21 @@ impl<'a> ExprTyper<'a> {
     }
 
     fn infer_name_ref(&self, name_ref: &NameRefExpr) -> Ty {
-        let Some(token) = name_ref.token() else {
-            return Ty::Poison;
-        };
-        let ref_span = self.span(token.text_range());
-
-        // Look up in name resolution
-        let resolved = self.resolution.refs.iter().find(|r| r.span == ref_span);
-
-        if let Some(resolved) = resolved {
-            if let Ok(def) = &resolved.target {
-                // Check if this definition is a closure parameter with a known type
-                if let Some(ty) = self.closure_param_types.get(&def.name_span) {
-                    return ty.clone();
-                }
-                return self.type_of_def(def);
+        if let Some(def) = self.resolved_def_for_name_ref(name_ref) {
+            if let Some(ty) = self.closure_param_types.get(&def.name_span) {
+                return ty.clone();
             }
+            return self.type_of_def(def);
         }
 
         Ty::Poison
+    }
+
+    fn resolved_def_for_name_ref(&self, name_ref: &NameRefExpr) -> Option<&Definition> {
+        let token = name_ref.token()?;
+        let ref_span = self.span(token.text_range());
+        let resolved = self.resolution.refs.iter().find(|r| r.span == ref_span)?;
+        resolved.target.as_ref().ok()
     }
 
     fn type_of_def(&self, def: &Definition) -> Ty {
@@ -362,22 +355,22 @@ impl<'a> ExprTyper<'a> {
     }
 
     fn sig_for_name_ref(&self, name_ref: &NameRefExpr) -> Option<FnSig> {
-        let token = name_ref.token()?;
-        if let Some(sig) = builtin_fn_sig(token.text()) {
-            return Some(sig);
+        let def = self.resolved_def_for_name_ref(name_ref)?;
+        match def.kind {
+            DefKind::Function => self.types.fn_sig_for_def(def).cloned(),
+            DefKind::Namespace => {
+                let mut sigs = self.constructor_sigs_for_namespace(def);
+                (sigs.len() == 1).then(|| sigs.swap_remove(0))
+            }
+            _ => None,
         }
+    }
 
-        let resolved = self
-            .resolution
-            .refs
-            .iter()
-            .find(|r| r.span == self.span(token.text_range()))?;
-        let def = resolved.target.as_ref().ok()?;
-        if def.kind != DefKind::Function {
-            return None;
-        }
-
-        self.types.fn_sig_for_def(def).cloned()
+    fn constructor_sigs_for_namespace(&self, namespace: &Definition) -> Vec<FnSig> {
+        resolve_namespace_members(&self.resolution.scopes, namespace, &namespace.name)
+            .into_iter()
+            .filter_map(|def| self.types.fn_sig_for_def(&def).cloned())
+            .collect()
     }
 
     fn check_record_keyword_args(&mut self, record: &RecordExpr, sig: &FnSig) {
@@ -468,50 +461,17 @@ impl<'a> ExprTyper<'a> {
         match &callee {
             Expr::NameRef(name_ref) => {
                 let callee_name = name_ref.token().map(|t| t.text().to_string());
-                let Some(callee_name) = callee_name else {
-                    return Ty::Poison;
-                };
-
-                // Populate closure param types for known callback slots
-                self.populate_callback_param_types(call, &callee_name);
-
-                // Check for builtin function
-                let builtin_sigs = builtin_fn_sigs(&callee_name);
-                if let Some(sig) = self.select_builtin_fn_sig(call, &builtin_sigs) {
-                    let sig = self.instantiate_call_sig(call, sig);
-                    // Type-check positional arguments
+                if let Some(sig) = self.call_sig_for_name_ref(call, name_ref) {
+                    self.populate_callback_param_types_from_sig(call, &sig);
                     self.check_call_args(call, &sig);
                     self.check_keyword_args(call, &sig);
                     self.infer_extra_call_args(call, sig.positional_params.len());
-                    if callee_name == "discover"
+                    if callee_name.as_deref() == Some("discover")
                         && let Some(discovered_ty) = self.infer_discover_call(call)
                     {
                         return discovered_ty;
                     }
                     return sig.ret.clone();
-                } else if let Some(sig) = builtin_fn_sig(&callee_name) {
-                    let sig = self.instantiate_call_sig(call, sig);
-                    self.check_call_args(call, &sig);
-                    self.check_keyword_args(call, &sig);
-                    self.infer_extra_call_args(call, sig.positional_params.len());
-                    return sig.ret.clone();
-                }
-
-                // Check for user-declared function
-                let ref_span = name_ref.token().map(|t| self.span(t.text_range()));
-                if let Some(ref_span) = ref_span {
-                    let resolved = self.resolution.refs.iter().find(|r| r.span == ref_span);
-                    if let Some(resolved) = resolved
-                        && let Ok(def) = &resolved.target
-                        && def.kind == DefKind::Function
-                    {
-                        if let Some(sig) = self.types.fn_sig_for_def(def) {
-                            self.check_call_args(call, sig);
-                            self.check_keyword_args(call, sig);
-                            self.infer_extra_call_args(call, sig.positional_params.len());
-                            return sig.ret.clone();
-                        }
-                    }
                 }
 
                 self.infer_call_arg_exprs(call);
@@ -547,24 +507,7 @@ impl<'a> ExprTyper<'a> {
                     }
                 }
 
-                if let Ty::Builtin(ref builtin) = receiver_ty {
-                    if let Some(method_sig) = builtin_method(builtin, &method_name) {
-                        self.populate_method_callback_param_types(call, &method_sig.params);
-                        // Type-check method arguments
-                        self.check_method_args(call, &method_sig.params, &method_name);
-                        self.infer_extra_call_args(call, method_sig.params.len());
-                        self.infer_all_keyword_arg_exprs(call);
-                        return method_sig.ret.clone();
-                    }
-                } else if let Ty::Scalar(ref scalar) = receiver_ty
-                    && let Some(method_sig) = builtin_scalar_method(scalar, &method_name)
-                {
-                    self.populate_method_callback_param_types(call, &method_sig.params);
-                    self.check_method_args(call, &method_sig.params, &method_name);
-                    self.infer_extra_call_args(call, method_sig.params.len());
-                    self.infer_all_keyword_arg_exprs(call);
-                    return method_sig.ret.clone();
-                } else if let Some(method_sig) =
+                if let Some(method_sig) =
                     self.infer_generic_method_call_sig(&receiver_ty, &method_name, call)
                 {
                     self.populate_method_callback_param_types(call, &method_sig.params);
@@ -623,20 +566,9 @@ impl<'a> ExprTyper<'a> {
         call: &CallExpr,
         field_expr: &FieldExpr,
     ) -> Option<FnSig> {
-        if let Some(member_def) = self.resolve_static_member_def(field_expr) {
-            self.record_member_def(field_expr, member_def.clone());
-            if let Some(sig) = self.types.fn_sig_for_def(&member_def).cloned() {
-                return Some(self.instantiate_call_sig(call, sig));
-            }
-        }
-
-        let Expr::NameRef(namespace_ref) = field_expr.receiver()? else {
-            return None;
-        };
-        let namespace = namespace_ref.token()?.text().to_string();
-        let method_name = field_expr.field_name()?.text().to_string();
-        let sigs = builtin_static_method_sigs(&namespace, &method_name);
-        let sig = self.select_builtin_fn_sig(call, &sigs)?;
+        let member_defs = self.resolve_static_member_defs(field_expr);
+        let (member_def, sig) = self.select_overloaded_def_sig(call, &member_defs)?;
+        self.record_member_def(field_expr, member_def);
         Some(self.instantiate_call_sig(call, sig))
     }
 
@@ -662,7 +594,7 @@ impl<'a> ExprTyper<'a> {
         sig
     }
 
-    fn select_builtin_fn_sig(&mut self, call: &CallExpr, sigs: &[FnSig]) -> Option<FnSig> {
+    fn select_fn_sig(&mut self, call: &CallExpr, sigs: &[FnSig]) -> Option<FnSig> {
         if sigs.is_empty() {
             return None;
         }
@@ -674,12 +606,48 @@ impl<'a> ExprTyper<'a> {
             .collect();
 
         sigs.iter()
-            .find(|sig| builtin_call_matches(&arg_tys, sig))
+            .find(|sig| call_matches(&arg_tys, sig))
             .cloned()
             .or_else(|| {
                 (sigs.len() == 1 && arg_tys.len() == sigs[0].positional_params.len())
                     .then(|| sigs[0].clone())
             })
+    }
+
+    fn select_overloaded_def_sig(
+        &mut self,
+        call: &CallExpr,
+        defs: &[Definition],
+    ) -> Option<(Definition, FnSig)> {
+        if defs.is_empty() {
+            return None;
+        }
+
+        let arg_tys: Vec<Ty> = call
+            .args()
+            .filter_map(|arg| arg.expr())
+            .map(|arg| self.infer_expr(&arg))
+            .collect();
+
+        let mut candidates: Vec<(Definition, FnSig)> = defs
+            .iter()
+            .filter_map(|def| {
+                self.types
+                    .fn_sig_for_def(def)
+                    .cloned()
+                    .map(|sig| (def.clone(), sig))
+            })
+            .collect();
+
+        if let Some(index) = candidates
+            .iter()
+            .position(|(_, sig)| call_matches(&arg_tys, sig))
+        {
+            return Some(candidates.swap_remove(index));
+        }
+
+        (candidates.len() == 1 && arg_tys.len() == candidates[0].1.positional_params.len())
+            .then(|| candidates.swap_remove(0))
     }
 
     fn infer_extra_call_args(&mut self, call: &CallExpr, checked_positional: usize) {
@@ -719,12 +687,8 @@ impl<'a> ExprTyper<'a> {
     }
 
     /// Populate closure parameter types for callback slots.
-    /// Derives parameter types from the FnSig of the callee.
-    fn populate_callback_param_types(&mut self, call: &CallExpr, callee_name: &str) {
-        let Some(sig) = self.sig_for_callee_name(call, callee_name) else {
-            return;
-        };
-
+    /// Derives parameter types from the resolved call signature.
+    fn populate_callback_param_types_from_sig(&mut self, call: &CallExpr, sig: &FnSig) {
         // Check positional args against function-typed parameters
         for (arg, param) in call.args().zip(sig.positional_params.iter()) {
             if let vx_types::Ty::Function(fn_ty) = &param.ty {
@@ -779,34 +743,50 @@ impl<'a> ExprTyper<'a> {
         }
     }
 
-    fn sig_for_callee_name(&self, call: &CallExpr, callee_name: &str) -> Option<FnSig> {
-        if let Some(sig) = builtin_fn_sig(callee_name) {
-            return Some(sig);
+    fn call_sig_for_name_ref(&mut self, call: &CallExpr, name_ref: &NameRefExpr) -> Option<FnSig> {
+        let def = self.resolved_def_for_name_ref(name_ref)?;
+        match def.kind {
+            DefKind::Function => {
+                let sig = self.types.fn_sig_for_def(def)?.clone();
+                Some(self.instantiate_call_sig(call, sig))
+            }
+            DefKind::Namespace => {
+                let sigs = self.constructor_sigs_for_namespace(def);
+                let sig = self.select_fn_sig(call, &sigs)?;
+                Some(self.instantiate_call_sig(call, sig))
+            }
+            _ => None,
         }
-
-        let callee = call.callee()?;
-        let Expr::NameRef(name_ref) = callee else {
-            return None;
-        };
-        self.sig_for_name_ref(&name_ref)
     }
 
-    fn resolve_static_member_def(&self, field: &FieldExpr) -> Option<Definition> {
-        let Expr::NameRef(namespace_ref) = field.receiver()? else {
-            return None;
+    fn resolve_static_member_defs(&self, field: &FieldExpr) -> Vec<Definition> {
+        let Some(receiver) = field.receiver() else {
+            return Vec::new();
         };
-        let namespace_span = self.span(namespace_ref.token()?.text_range());
-        let namespace_def = self
+        let Expr::NameRef(namespace_ref) = receiver else {
+            return Vec::new();
+        };
+        let Some(namespace_token) = namespace_ref.token() else {
+            return Vec::new();
+        };
+        let namespace_span = self.span(namespace_token.text_range());
+        let Some(namespace_def) = self
             .resolution
             .refs
             .iter()
-            .find(|r| r.span == namespace_span)?
-            .target
-            .as_ref()
-            .ok()?;
-        let field_name = field.field_name()?;
-        let member_name = field_name.text();
-        resolve_namespace_member(&self.resolution.scopes, namespace_def, member_name)
+            .find(|r| r.span == namespace_span)
+            .and_then(|resolved| resolved.target.as_ref().ok())
+        else {
+            return Vec::new();
+        };
+        let Some(field_name) = field.field_name() else {
+            return Vec::new();
+        };
+        resolve_namespace_members(&self.resolution.scopes, namespace_def, field_name.text())
+    }
+
+    fn resolve_static_member_def(&self, field: &FieldExpr) -> Option<Definition> {
+        self.resolve_static_member_defs(field).into_iter().next()
     }
 
     fn resolve_method_member_def(&self, field: &FieldExpr, receiver_ty: &Ty) -> Option<Definition> {
@@ -973,32 +953,6 @@ impl<'a> ExprTyper<'a> {
             }
         }
 
-        if let Ty::Builtin(ref builtin) = receiver_ty {
-            if let Some(method_sig) = builtin_method(builtin, field_name) {
-                return Ty::Function(vx_types::FunctionTy {
-                    params: method_sig
-                        .params
-                        .into_iter()
-                        .map(|param| param.ty)
-                        .collect(),
-                    ret: Box::new(method_sig.ret),
-                    capabilities: method_sig.capabilities,
-                });
-            }
-        }
-        if let Ty::Scalar(ref scalar) = receiver_ty
-            && let Some(method_sig) = builtin_scalar_method(scalar, field_name)
-        {
-            return Ty::Function(vx_types::FunctionTy {
-                params: method_sig
-                    .params
-                    .into_iter()
-                    .map(|param| param.ty)
-                    .collect(),
-                ret: Box::new(method_sig.ret),
-                capabilities: method_sig.capabilities,
-            });
-        }
         if let Some(method_sig) = self.instantiate_generic_method(&receiver_ty, field_name, &[]) {
             return Ty::Function(vx_types::FunctionTy {
                 params: method_sig
@@ -1128,14 +1082,8 @@ impl<'a> ExprTyper<'a> {
                     return Ty::Poison;
                 };
 
-                if let Ty::Builtin(ref builtin) = receiver_ty
-                    && let Some(method_sig) = builtin_method(builtin, &method_name)
-                    && method_sig.params.is_empty()
-                {
-                    return method_sig.ret;
-                }
-                if let Ty::Scalar(ref scalar) = receiver_ty
-                    && let Some(method_sig) = builtin_scalar_method(scalar, &method_name)
+                if let Some(member_def) = self.resolve_method_member_def(field, &receiver_ty)
+                    && let Some(method_sig) = self.method_sig_for_def(&receiver_ty, &member_def)
                     && method_sig.params.is_empty()
                 {
                     return method_sig.ret;
@@ -1526,24 +1474,7 @@ impl<'a> ExprTyper<'a> {
                 }));
             }
         }
-
-        let Expr::NameRef(namespace_ref) = field.receiver()? else {
-            return None;
-        };
-        let namespace = namespace_ref.token()?.text().to_string();
-        let method_name = field.field_name()?.text().to_string();
-        let sig = builtin_static_method_sigs(&namespace, &method_name)
-            .into_iter()
-            .next()?;
-        Some(Ty::Function(vx_types::FunctionTy {
-            params: sig
-                .positional_params
-                .into_iter()
-                .map(|param| param.ty)
-                .collect(),
-            ret: Box::new(sig.ret),
-            capabilities: sig.capabilities,
-        }))
+        None
     }
 
     fn infer_generic_method_call_sig(
@@ -1649,7 +1580,7 @@ fn types_compatible(actual: &Ty, expected: &Ty) -> bool {
     }
 }
 
-fn builtin_call_matches(arg_tys: &[Ty], sig: &FnSig) -> bool {
+fn call_matches(arg_tys: &[Ty], sig: &FnSig) -> bool {
     arg_tys.len() == sig.positional_params.len()
         && arg_tys
             .iter()

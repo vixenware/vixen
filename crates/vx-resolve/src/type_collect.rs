@@ -276,7 +276,7 @@ pub fn collect_types_for_sources(sources: &[SourceFileRef]) -> TypeCollection {
                         && let Some(name_token) = decl.name()
                     {
                         let type_params = collect_type_param_names(syntax);
-                        let sig = collect_fn_sig(&decl, &resolver, &type_params);
+                        let sig = collect_fn_sig(&decl, &resolver, &type_params, None);
                         def_to_fn_sig.insert(
                             DefSite {
                                 source: source.id,
@@ -360,7 +360,12 @@ fn collect_fields(
         .collect()
 }
 
-fn collect_fn_sig(decl: &FnDecl, resolver: &TypeResolver<'_>, type_params: &[String]) -> FnSig {
+fn collect_fn_sig(
+    decl: &FnDecl,
+    resolver: &TypeResolver<'_>,
+    type_params: &[String],
+    self_ty: Option<&Ty>,
+) -> FnSig {
     let name = decl
         .name()
         .map(|t| t.text().to_string())
@@ -373,7 +378,7 @@ fn collect_fn_sig(decl: &FnDecl, resolver: &TypeResolver<'_>, type_params: &[Str
             let ty = p
                 .slot_type()
                 .and_then(|st| st.ty())
-                .map(|t| resolver.resolve_type(&t, type_params))
+                .map(|t| resolver.resolve_type_in_context(&t, type_params, self_ty))
                 .unwrap_or(Ty::Poison);
             Some(ParamDef {
                 name: pname,
@@ -390,7 +395,7 @@ fn collect_fn_sig(decl: &FnDecl, resolver: &TypeResolver<'_>, type_params: &[Str
             let ty = kp
                 .slot_type()
                 .and_then(|st| st.ty())
-                .map(|t| resolver.resolve_type(&t, type_params))
+                .map(|t| resolver.resolve_type_in_context(&t, type_params, self_ty))
                 .unwrap_or(Ty::Poison);
             let has_default = kp
                 .syntax()
@@ -408,7 +413,7 @@ fn collect_fn_sig(decl: &FnDecl, resolver: &TypeResolver<'_>, type_params: &[Str
     let ret = decl
         .return_type()
         .and_then(|rt| rt.ty())
-        .map(|t| resolver.resolve_type(&t, type_params))
+        .map(|t| resolver.resolve_type_in_context(&t, type_params, self_ty))
         .unwrap_or(Ty::Unit);
 
     let capabilities = collect_capabilities(decl);
@@ -429,6 +434,8 @@ fn collect_namespace_fn_sigs(
     resolver: &TypeResolver<'_>,
     def_to_fn_sig: &mut HashMap<DefSite, FnSig>,
 ) {
+    let namespace_type_params = collect_namespace_type_param_names(namespace);
+    let namespace_self_ty = namespace_self_ty(namespace, resolver, &namespace_type_params);
     let Some(body) = namespace.body() else {
         return;
     };
@@ -439,8 +446,9 @@ fn collect_namespace_fn_sigs(
                 let Some(name_token) = decl.name() else {
                     continue;
                 };
-                let type_params = collect_type_param_names(decl.syntax());
-                let sig = collect_fn_sig(&decl, resolver, &type_params);
+                let mut type_params = namespace_type_params.clone();
+                type_params.extend(collect_type_param_names(decl.syntax()));
+                let sig = collect_fn_sig(&decl, resolver, &type_params, namespace_self_ty.as_ref());
                 def_to_fn_sig.insert(
                     DefSite {
                         source,
@@ -458,6 +466,45 @@ fn collect_namespace_fn_sigs(
             | Item::TypeAliasDecl(_) => {}
         }
     }
+}
+
+fn namespace_self_ty(
+    namespace: &NamespaceDecl,
+    resolver: &TypeResolver<'_>,
+    namespace_type_params: &[String],
+) -> Option<Ty> {
+    let name = namespace.name()?.text().to_string();
+    let type_args = namespace_type_params
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            Ty::Param(vx_types::TypeParam {
+                name: name.clone(),
+                index: index as u32,
+            })
+        })
+        .collect();
+    resolver.resolve_named_type(&name, type_args)
+}
+
+fn collect_namespace_type_param_names(namespace: &NamespaceDecl) -> Vec<String> {
+    namespace
+        .target()
+        .and_then(|target| target.type_args())
+        .map(|type_args| {
+            type_args
+                .types()
+                .filter_map(|ty| match ty {
+                    vx_parser::Type::Path(path) => {
+                        let mut segments = path.segments();
+                        let name = segments.next()?;
+                        segments.next().is_none().then(|| name.text().to_string())
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn collect_capabilities(decl: &FnDecl) -> Vec<vx_types::Capability> {
@@ -493,13 +540,22 @@ impl<'a> TypeResolver<'a> {
     }
 
     fn resolve_type(&self, ty: &vx_parser::Type, type_params: &[String]) -> Ty {
+        self.resolve_type_in_context(ty, type_params, None)
+    }
+
+    fn resolve_type_in_context(
+        &self,
+        ty: &vx_parser::Type,
+        type_params: &[String],
+        self_ty: Option<&Ty>,
+    ) -> Ty {
         use vx_parser::Type;
         match ty {
-            Type::Path(path) => self.resolve_type_path(path, type_params),
+            Type::Path(path) => self.resolve_type_path(path, type_params, self_ty),
             Type::Optional(opt) => {
                 let inner = opt
                     .inner()
-                    .map(|t| self.resolve_type(&t, type_params))
+                    .map(|t| self.resolve_type_in_context(&t, type_params, self_ty))
                     .unwrap_or(Ty::Poison);
                 // The parser wraps ALL type_expr in OPTIONAL_TYPE, even without `?`.
                 // Only make it Optional if there's actually a QUESTION token.
@@ -516,18 +572,18 @@ impl<'a> TypeResolver<'a> {
             Type::Tuple(tup) => {
                 let elements: Vec<Ty> = tup
                     .items()
-                    .map(|t| self.resolve_type(&t, type_params))
+                    .map(|t| self.resolve_type_in_context(&t, type_params, self_ty))
                     .collect();
                 Ty::Tuple(vx_types::TupleTy { elements })
             }
             Type::Function(func) => {
                 let params: Vec<Ty> = func
                     .parameter_types()
-                    .map(|t| self.resolve_type(&t, type_params))
+                    .map(|t| self.resolve_type_in_context(&t, type_params, self_ty))
                     .collect();
                 let ret = func
                     .return_type()
-                    .map(|t| self.resolve_type(&t, type_params))
+                    .map(|t| self.resolve_type_in_context(&t, type_params, self_ty))
                     .unwrap_or(Ty::Unit);
                 let capabilities = func
                     .capability_list()
@@ -549,13 +605,13 @@ impl<'a> TypeResolver<'a> {
             }
             Type::Paren(p) => p
                 .inner()
-                .map(|t| self.resolve_type(&t, type_params))
+                .map(|t| self.resolve_type_in_context(&t, type_params, self_ty))
                 .unwrap_or(Ty::Poison),
             Type::Sum(sum) => {
                 // Sum types are just used in type aliases, resolve each variant
                 let alts: Vec<Ty> = sum
                     .variants()
-                    .map(|t| self.resolve_type(&t, type_params))
+                    .map(|t| self.resolve_type_in_context(&t, type_params, self_ty))
                     .collect();
                 if alts.len() == 1 {
                     alts.into_iter().next().unwrap()
@@ -568,12 +624,21 @@ impl<'a> TypeResolver<'a> {
         }
     }
 
-    fn resolve_type_path(&self, path: &vx_parser::TypePath, type_params: &[String]) -> Ty {
+    fn resolve_type_path(
+        &self,
+        path: &vx_parser::TypePath,
+        type_params: &[String],
+        self_ty: Option<&Ty>,
+    ) -> Ty {
         let segments: Vec<String> = path.segments().map(|s| s.text().to_string()).collect();
         let name = match segments.first() {
             Some(n) => n,
             None => return Ty::Poison,
         };
+
+        if name == "Self" {
+            return self_ty.cloned().unwrap_or(Ty::Poison);
+        }
 
         // Check if it's a type parameter
         if let Some(index) = type_params.iter().position(|p| p == name) {
@@ -583,67 +648,61 @@ impl<'a> TypeResolver<'a> {
             });
         }
 
-        // Check built-in scalar types
-        match name.as_str() {
-            "U64" => return Ty::Scalar(vx_types::Scalar::U64),
-            "I64" => return Ty::Scalar(vx_types::Scalar::I64),
-            "F64" => return Ty::Scalar(vx_types::Scalar::F64),
-            "Bool" => return Ty::Scalar(vx_types::Scalar::Bool),
-            "String" => return Ty::Scalar(vx_types::Scalar::String),
-            "Unit" => return Ty::Unit,
-            "Path" => return Ty::Builtin(vx_types::Builtin::Path),
-            "Blob" => return Ty::Builtin(vx_types::Builtin::Blob),
-            "Tree" => return Ty::Builtin(vx_types::Builtin::Tree),
-            "ExecPath" => return Ty::Builtin(vx_types::Builtin::ExecPath),
-            "Process" => return Ty::Builtin(vx_types::Builtin::Process),
-            "Host" => return Ty::Builtin(vx_types::Builtin::Host),
-            "ExecutorClass" => return Ty::Builtin(vx_types::Builtin::ExecutorClass),
-            _ => {}
-        }
-
         // Resolve type args
         let type_args: Vec<Ty> = path
             .type_args()
             .map(|args| {
                 args.types()
-                    .map(|t| self.resolve_type(&t, type_params))
+                    .map(|t| self.resolve_type_in_context(&t, type_params, self_ty))
                     .collect()
             })
             .unwrap_or_default();
+        self.resolve_named_type(name, type_args)
+            .unwrap_or(Ty::Poison)
+    }
 
-        // Check special built-in generic types
-        match name.as_str() {
+    fn resolve_named_type(&self, name: &str, type_args: Vec<Ty>) -> Option<Ty> {
+        match name {
+            "U64" => return Some(Ty::Scalar(vx_types::Scalar::U64)),
+            "I64" => return Some(Ty::Scalar(vx_types::Scalar::I64)),
+            "F64" => return Some(Ty::Scalar(vx_types::Scalar::F64)),
+            "Bool" => return Some(Ty::Scalar(vx_types::Scalar::Bool)),
+            "String" => return Some(Ty::Scalar(vx_types::Scalar::String)),
+            "Unit" => return Some(Ty::Unit),
+            "Path" => return Some(Ty::Builtin(vx_types::Builtin::Path)),
+            "Blob" => return Some(Ty::Builtin(vx_types::Builtin::Blob)),
+            "Tree" => return Some(Ty::Builtin(vx_types::Builtin::Tree)),
+            "ExecPath" => return Some(Ty::Builtin(vx_types::Builtin::ExecPath)),
+            "Process" => return Some(Ty::Builtin(vx_types::Builtin::Process)),
+            "Host" => return Some(Ty::Builtin(vx_types::Builtin::Host)),
+            "ExecutorClass" => return Some(Ty::Builtin(vx_types::Builtin::ExecutorClass)),
             "Option" => {
                 let inner = type_args.into_iter().next().unwrap_or(Ty::Poison);
-                return Ty::Optional(Box::new(inner));
+                return Some(Ty::Optional(Box::new(inner)));
             }
             "Array" => {
                 let inner = type_args.into_iter().next().unwrap_or(Ty::Poison);
-                return Ty::Array(Box::new(inner));
+                return Some(Ty::Array(Box::new(inner)));
             }
             "Map" => {
                 let mut iter = type_args.into_iter();
                 let key = iter.next().unwrap_or(Ty::Poison);
                 let val = iter.next().unwrap_or(Ty::Poison);
-                return Ty::Map(Box::new(key), Box::new(val));
+                return Some(Ty::Map(Box::new(key), Box::new(val)));
             }
             "Stream" => {
                 let inner = type_args.into_iter().next().unwrap_or(Ty::Poison);
-                return Ty::Stream(Box::new(inner));
+                return Some(Ty::Stream(Box::new(inner)));
             }
             _ => {}
         }
 
-        // Look up in the type environment
-        if let Some(&(id, kind)) = self.name_to_id.get(name) {
-            return match kind {
-                TypeKind::Struct => Ty::Struct(vx_types::StructTy { id, type_args }),
-                TypeKind::Enum => Ty::Enum(vx_types::EnumTy { id, type_args }),
-                TypeKind::Newtype => Ty::Newtype(vx_types::NewtypeTy { id, type_args }),
-                TypeKind::Alias => Ty::Alias(vx_types::AliasTy { id, type_args }),
-            };
-        }
-
-        Ty::Poison
+        let &(id, kind) = self.name_to_id.get(name)?;
+        Some(match kind {
+            TypeKind::Struct => Ty::Struct(vx_types::StructTy { id, type_args }),
+            TypeKind::Enum => Ty::Enum(vx_types::EnumTy { id, type_args }),
+            TypeKind::Newtype => Ty::Newtype(vx_types::NewtypeTy { id, type_args }),
+            TypeKind::Alias => Ty::Alias(vx_types::AliasTy { id, type_args }),
+        })
     }
 }

@@ -155,7 +155,49 @@ namespace Blob {
     assert_eq!(sig.name, "utf8");
     assert_eq!(sig.positional_params.len(), 1);
     assert_eq!(sig.positional_params[0].name, "self");
+    assert_eq!(sig.positional_params[0].ty, Ty::Builtin(Builtin::Blob));
     assert_eq!(sig.ret, Ty::Scalar(Scalar::String));
+}
+
+#[test]
+fn generic_namespace_member_signatures_keep_namespace_type_params() {
+    let file = parse_file(
+        r#"
+namespace Array[T] {
+    fn map[U](self: Self, f: Fn(T) -> U) -> Array[U];
+}
+"#,
+    );
+    let tree = ScopeTree::build(&file);
+    let array_namespace = tree
+        .definitions(crate::ScopeId::ROOT)
+        .iter()
+        .find(|def| def.name == "Array")
+        .expect("Array namespace");
+    let scope = tree.owned_scope(array_namespace).expect("namespace scope");
+    let map = tree
+        .definitions(scope)
+        .iter()
+        .find(|def| def.name == "map")
+        .expect("map member");
+
+    let types = crate::collect_types(&file);
+    let sig = types.fn_sig_for_def(map).expect("map signature");
+    assert_eq!(sig.type_params, vec!["T".to_string(), "U".to_string()]);
+    assert_eq!(
+        sig.positional_params[0].ty,
+        Ty::Array(Box::new(Ty::Param(vx_types::TypeParam {
+            name: "T".to_string(),
+            index: 0,
+        })))
+    );
+    assert_eq!(
+        sig.ret,
+        Ty::Array(Box::new(Ty::Param(vx_types::TypeParam {
+            name: "U".to_string(),
+            index: 1,
+        })))
+    );
 }
 
 #[test]

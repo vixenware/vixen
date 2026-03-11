@@ -8,10 +8,24 @@ pub fn resolve_namespace_member(
     namespace: &Definition,
     member_name: &str,
 ) -> Option<Definition> {
+    resolve_namespace_members(scopes, namespace, member_name)
+        .into_iter()
+        .next()
+}
+
+pub fn resolve_namespace_members(
+    scopes: &ProgramScopes,
+    namespace: &Definition,
+    member_name: &str,
+) -> Vec<Definition> {
     if namespace.kind != DefKind::Namespace {
-        return None;
+        return Vec::new();
     }
-    scopes.lookup_member(namespace, member_name).cloned()
+    scopes
+        .lookup_members(namespace, member_name)
+        .into_iter()
+        .cloned()
+        .collect()
 }
 
 pub fn resolve_visible_namespace_member(
@@ -24,6 +38,22 @@ pub fn resolve_visible_namespace_member(
     let scope = scopes.scope_at(source, offset)?;
     let namespace = scopes.lookup_at(source, namespace_name, scope, offset)?;
     resolve_namespace_member(scopes, namespace, member_name)
+}
+
+pub fn resolve_visible_namespace_members(
+    scopes: &ProgramScopes,
+    source: SourceId,
+    offset: TextSize,
+    namespace_name: &str,
+    member_name: &str,
+) -> Vec<Definition> {
+    let Some(scope) = scopes.scope_at(source, offset) else {
+        return Vec::new();
+    };
+    let Some(namespace) = scopes.lookup_at(source, namespace_name, scope, offset) else {
+        return Vec::new();
+    };
+    resolve_namespace_members(scopes, namespace, member_name)
 }
 
 pub fn resolve_member_for_receiver(

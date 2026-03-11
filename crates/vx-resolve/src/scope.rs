@@ -367,6 +367,16 @@ impl ProgramScopes {
             .find(|def| def.name == name)
     }
 
+    pub fn lookup_members<'a>(&'a self, namespace: &Definition, name: &str) -> Vec<&'a Definition> {
+        let Some(scope) = self.owned_scope(namespace) else {
+            return Vec::new();
+        };
+        let Some(definitions) = self.definitions(namespace.source(), scope) else {
+            return Vec::new();
+        };
+        definitions.iter().filter(|def| def.name == name).collect()
+    }
+
     fn lookup_imported<'a>(
         &'a self,
         source: SourceId,

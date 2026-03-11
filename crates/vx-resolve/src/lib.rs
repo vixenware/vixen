@@ -11,7 +11,8 @@ pub mod builtins;
 
 mod members;
 pub use members::{
-    resolve_member_for_receiver, resolve_namespace_member, resolve_visible_namespace_member,
+    resolve_member_for_receiver, resolve_namespace_member, resolve_namespace_members,
+    resolve_visible_namespace_member, resolve_visible_namespace_members,
     visible_members_for_receiver,
 };
 
