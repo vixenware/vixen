@@ -22,13 +22,38 @@
 // d[impl input.multiple-sources]
 // d[impl input.overlay-kinds]
 // d[impl span.authoritative-source]
+// d[impl span.unicode-correct]
 // d[impl span.zero-width]
 // d[impl span.line-breaks]
+// d[impl label.clustered]
+// d[impl label.multispan]
+// d[impl label.priority]
+// d[impl label.priority-lattice]
+// d[impl label.semantic-over-syntax]
+// d[impl label.single-message-bearing]
+// d[impl syntax.non-owning]
+// d[impl syntax.overlay-model]
+// d[impl syntax.overlay-priority]
+// d[impl syntax.window-bounded]
+// d[impl coalesce.deterministic]
+// d[impl coalesce.identical]
+// d[impl coalesce.message-bearing]
+// d[impl coalesce.nearby]
+// d[impl coalesce.report-sections]
+// d[impl layout.cell-grid]
 // d[impl layout.pipeline]
 // d[impl layout.pure-planning]
+// d[impl layout.gutter-geometry]
+// d[impl layout.crowding-policy]
+// d[impl layout.placement-modes]
+// d[impl layout.message-placement]
+// d[impl layout.long-lines]
 // d[impl layout.width-aware]
 // d[impl window.primary-context]
 // d[impl window.cross-file]
+// d[impl window.context-policy]
+// d[impl window.merge-nearby]
+// d[impl window.stable-selection]
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -168,7 +193,9 @@ pub struct LayoutOptions {
     pub width: usize,
     pub primary_context_lines: usize,
     pub secondary_context_lines: usize,
+    pub merge_distance_lines: usize,
     pub tab_width: usize,
+    pub long_line_mode: LongLineMode,
 }
 
 impl LayoutOptions {
@@ -186,9 +213,17 @@ impl Default for LayoutOptions {
             width: 80,
             primary_context_lines: 2,
             secondary_context_lines: 1,
+            merge_distance_lines: 1,
             tab_width: 4,
+            long_line_mode: LongLineMode::Clip,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum LongLineMode {
+    Clip,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
@@ -210,6 +245,7 @@ pub struct PlannedReport {
 pub struct SourceWindow {
     pub source_id: SourceId,
     pub source_name: String,
+    pub geometry: GutterGeometry,
     pub first_line_number: usize,
     pub last_line_number: usize,
     pub omitted_before: bool,
@@ -222,14 +258,32 @@ pub struct SourceWindow {
 pub struct WindowLine {
     pub line_number: usize,
     pub text: String,
+    pub clipped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct WindowAnnotation {
     pub role: AnnotationRole,
     pub message: Option<String>,
+    pub placement: PlacementMode,
     pub priority: u16,
     pub segments: Vec<ResolvedSpan>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum PlacementMode {
+    Side,
+    BelowSpan,
+    Stacked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+pub struct GutterGeometry {
+    pub line_number_width: usize,
+    pub separator_columns: usize,
+    pub connector_columns: usize,
+    pub source_columns: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
@@ -373,7 +427,7 @@ fn build_windows(
     source_id: &SourceId,
     annotations: Vec<PendingAnnotation<'_>>,
     sources: &BTreeMap<&SourceId, &Source>,
-    _options: &LayoutOptions,
+    options: &LayoutOptions,
 ) -> Result<Vec<SourceWindow>, LayoutError> {
     let source = sources
         .get(source_id)
@@ -385,12 +439,14 @@ fn build_windows(
             .iter()
             .map(|annotation| (annotation.line_start.max(1), annotation.line_end.max(1)))
             .collect(),
+        options.merge_distance_lines,
     );
 
     ranges
         .into_iter()
         .map(|(line_start, line_end)| {
             let last_line_number = line_end.min(source_lines.len());
+            let geometry = compute_geometry(last_line_number, options.width);
             let lines = source_lines
                 .iter()
                 .enumerate()
@@ -401,32 +457,17 @@ fn build_windows(
                 .map(|(index, line)| WindowLine {
                     line_number: index + 1,
                     text: (*line).to_string(),
+                    clipped: is_line_clipped(line, &geometry, options.long_line_mode),
                 })
                 .collect::<Vec<_>>();
 
-            let annotations = annotations
-                .iter()
-                .filter_map(|annotation| {
-                    let segments = annotation
-                        .segments
-                        .iter()
-                        .copied()
-                        .filter(|segment| {
-                            (line_start..=last_line_number).contains(&segment.line_number)
-                        })
-                        .collect::<Vec<_>>();
-                    (!segments.is_empty()).then(|| WindowAnnotation {
-                        role: annotation.annotation.role,
-                        message: annotation.annotation.message.clone(),
-                        priority: annotation.annotation.priority,
-                        segments,
-                    })
-                })
-                .collect::<Vec<_>>();
+            let annotations =
+                planned_window_annotations(&annotations, line_start, last_line_number, &geometry);
 
             Ok(SourceWindow {
                 source_id: source.id.clone(),
                 source_name: source.name.clone(),
+                geometry,
                 first_line_number: line_start,
                 last_line_number,
                 omitted_before: line_start > 1,
@@ -438,13 +479,16 @@ fn build_windows(
         .collect()
 }
 
-fn merge_line_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+fn merge_line_ranges(
+    mut ranges: Vec<(usize, usize)>,
+    merge_distance_lines: usize,
+) -> Vec<(usize, usize)> {
     ranges.sort_unstable();
 
     let mut merged: Vec<(usize, usize)> = Vec::new();
     for (start, end) in ranges {
         if let Some((_, current_end)) = merged.last_mut()
-            && start <= *current_end + 1
+            && start <= *current_end + merge_distance_lines + 1
         {
             *current_end = (*current_end).max(end);
             continue;
@@ -452,6 +496,210 @@ fn merge_line_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
         merged.push((start, end));
     }
     merged
+}
+
+fn planned_window_annotations(
+    annotations: &[PendingAnnotation<'_>],
+    line_start: usize,
+    last_line_number: usize,
+    geometry: &GutterGeometry,
+) -> Vec<WindowAnnotation> {
+    let mut crowded_lines = BTreeMap::<usize, usize>::new();
+    let mut visible = annotations
+        .iter()
+        .filter_map(|annotation| {
+            let segments = annotation
+                .segments
+                .iter()
+                .copied()
+                .filter(|segment| (line_start..=last_line_number).contains(&segment.line_number))
+                .collect::<Vec<_>>();
+            if segments.is_empty() {
+                return None;
+            }
+            Some(WindowAnnotation {
+                role: annotation.annotation.role,
+                message: annotation.annotation.message.clone(),
+                placement: PlacementMode::BelowSpan,
+                priority: annotation.annotation.priority,
+                segments,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    visible.sort_by(window_annotation_sort_key);
+    visible = coalesce_window_annotations(visible);
+    visible = apply_priority_lattice(visible);
+    visible.sort_by(window_annotation_sort_key);
+
+    for annotation in &mut visible {
+        annotation.segments.sort_by(resolved_span_sort_key);
+        annotation.placement = choose_placement(annotation, &mut crowded_lines, geometry);
+    }
+
+    visible
+}
+
+fn window_annotation_sort_key(
+    left: &WindowAnnotation,
+    right: &WindowAnnotation,
+) -> std::cmp::Ordering {
+    right
+        .priority
+        .cmp(&left.priority)
+        .then_with(|| role_rank(left.role).cmp(&role_rank(right.role)))
+        .then_with(|| left.message.cmp(&right.message))
+        .then_with(|| resolved_span_sort_key(&left.segments[0], &right.segments[0]))
+}
+
+fn resolved_span_sort_key(left: &ResolvedSpan, right: &ResolvedSpan) -> std::cmp::Ordering {
+    left.line_number
+        .cmp(&right.line_number)
+        .then_with(|| left.start_column.cmp(&right.start_column))
+        .then_with(|| left.end_column.cmp(&right.end_column))
+}
+
+fn coalesce_window_annotations(annotations: Vec<WindowAnnotation>) -> Vec<WindowAnnotation> {
+    let mut merged: Vec<WindowAnnotation> = Vec::new();
+
+    for mut annotation in annotations {
+        annotation.segments.sort_by(resolved_span_sort_key);
+        annotation.segments.dedup();
+
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|existing| can_cluster(existing, &annotation))
+        {
+            existing
+                .segments
+                .extend(annotation.segments.iter().copied());
+            existing.segments.sort_by(resolved_span_sort_key);
+            existing.segments.dedup();
+            if existing.message.is_none() {
+                existing.message = annotation.message.clone();
+            }
+            continue;
+        }
+
+        merged.push(annotation);
+    }
+
+    merged
+}
+
+fn can_cluster(left: &WindowAnnotation, right: &WindowAnnotation) -> bool {
+    if left.role != right.role || left.priority != right.priority {
+        return false;
+    }
+    if !messages_compatible(left.message.as_deref(), right.message.as_deref()) {
+        return false;
+    }
+
+    let left_anchor = left.segments[0];
+    let right_anchor = right.segments[0];
+
+    left_anchor.line_number.abs_diff(right_anchor.line_number) <= 1
+        && left_anchor.start_column.abs_diff(right_anchor.start_column) <= 8
+}
+
+fn messages_compatible(left: Option<&str>, right: Option<&str>) -> bool {
+    left.is_none() || right.is_none() || left == right
+}
+
+fn apply_priority_lattice(annotations: Vec<WindowAnnotation>) -> Vec<WindowAnnotation> {
+    let mut accepted = Vec::<WindowAnnotation>::new();
+    let mut occupied = Vec::<(ResolvedSpan, u16, u8)>::new();
+
+    for mut annotation in annotations {
+        let rank = role_rank(annotation.role);
+        annotation.segments.retain(|segment| {
+            !occupied
+                .iter()
+                .any(|(accepted_segment, priority, accepted_rank)| {
+                    overlaps(*segment, *accepted_segment)
+                        && (*priority > annotation.priority
+                            || (*priority == annotation.priority && *accepted_rank <= rank))
+                })
+        });
+
+        if annotation.segments.is_empty() {
+            continue;
+        }
+
+        for segment in &annotation.segments {
+            occupied.push((*segment, annotation.priority, rank));
+        }
+        accepted.push(annotation);
+    }
+
+    accepted
+}
+
+fn overlaps(left: ResolvedSpan, right: ResolvedSpan) -> bool {
+    left.line_number == right.line_number
+        && left.start_column < right.end_column
+        && right.start_column < left.end_column
+}
+
+fn role_rank(role: AnnotationRole) -> u8 {
+    match role {
+        AnnotationRole::PrimaryLabel => 0,
+        AnnotationRole::SecondaryLabel => 1,
+        AnnotationRole::RelatedLabel => 2,
+        AnnotationRole::Emphasis => 3,
+        AnnotationRole::Selection => 4,
+        AnnotationRole::SearchHighlight => 5,
+        AnnotationRole::SyntaxToken => 6,
+    }
+}
+
+fn choose_placement(
+    annotation: &WindowAnnotation,
+    crowded_lines: &mut BTreeMap<usize, usize>,
+    geometry: &GutterGeometry,
+) -> PlacementMode {
+    let Some(message) = annotation.message.as_deref() else {
+        return PlacementMode::Stacked;
+    };
+
+    let anchor = annotation.segments[0];
+    let side_budget = geometry
+        .source_columns
+        .saturating_sub(anchor.start_column)
+        .saturating_sub(1);
+    let message_width = message.chars().count();
+    let used_slots = crowded_lines.entry(anchor.line_number).or_default();
+
+    if message_width <= side_budget && *used_slots == 0 {
+        *used_slots += 1;
+        PlacementMode::Side
+    } else if *used_slots <= 1 {
+        *used_slots += 1;
+        PlacementMode::BelowSpan
+    } else {
+        *used_slots += 1;
+        PlacementMode::Stacked
+    }
+}
+
+fn compute_geometry(last_line_number: usize, width: usize) -> GutterGeometry {
+    let line_number_width = last_line_number.max(1).to_string().len();
+    let separator_columns = 1;
+    let connector_columns = 1;
+    let source_columns = width.saturating_sub(line_number_width + 2 + separator_columns + 1);
+
+    GutterGeometry {
+        line_number_width,
+        separator_columns,
+        connector_columns,
+        source_columns,
+    }
+}
+
+fn is_line_clipped(line: &str, geometry: &GutterGeometry, long_line_mode: LongLineMode) -> bool {
+    match long_line_mode {
+        LongLineMode::Clip => line.chars().count() > geometry.source_columns,
+    }
 }
 
 fn resolve_span(source: &Source, span: Span) -> Result<Vec<ResolvedSpan>, LayoutError> {

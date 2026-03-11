@@ -42,6 +42,8 @@ fn sample_diagnostics() -> Diagnostics {
 // d[verify term.explicit-capabilities]
 // d[verify term.plaintext-mode]
 // d[verify test.fixture-first]
+// d[verify layout.no-terminal-wrap]
+// d[verify layout.notes-wrap]
 #[test]
 fn render_supports_plaintext_ascii_output() {
     let rendered = render(
@@ -62,6 +64,8 @@ fn render_supports_plaintext_ascii_output() {
 
 // d[verify test.width-matrix]
 // d[verify test.capability-matrix]
+// d[verify label.multiline-message-alignment]
+// d[verify layout.multiline-labels]
 #[test]
 fn render_changes_with_width_and_capabilities() {
     let narrow = render(
@@ -85,6 +89,43 @@ fn render_changes_with_width_and_capabilities() {
 
     assert!(narrow.contains("\u{1b}[31merror\u{1b}[0m"));
     assert!(narrow.contains("╭─> src/main.vx"));
+    assert!(narrow.contains("╰─"));
     assert!(!narrow.contains("consider defining the binding before using it"));
     assert!(wide.contains("consider defining the binding before using it"));
+}
+
+// d[verify layout.ellipsis]
+#[test]
+fn render_clips_long_lines_with_explicit_ellipsis() {
+    let diagnostics = Diagnostics {
+        sources: vec![Source {
+            id: SourceId("main".to_string()),
+            name: "src/main.vx".to_string(),
+            text: "012345678901234567890123456789\n".to_string(),
+        }],
+        reports: vec![Report {
+            severity: Severity::Error,
+            title: "too long".to_string(),
+            annotations: vec![Annotation {
+                spans: vec![Span::new("main", 20, 24)],
+                role: AnnotationRole::PrimaryLabel,
+                message: Some("past the clip".to_string()),
+                priority: 100,
+            }],
+            notes: Vec::new(),
+            sections: Vec::new(),
+        }],
+    };
+
+    let rendered = render(
+        &diagnostics,
+        TerminalCapabilities {
+            width: 20,
+            glyph_mode: GlyphMode::Unicode,
+            color_level: ColorLevel::None,
+        },
+    )
+    .unwrap();
+
+    assert!(rendered.contains("012345678901234..."));
 }

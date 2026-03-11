@@ -2,6 +2,11 @@
 // d[impl package.primary-split]
 // d[impl api.layout-render-separation]
 // d[impl api.renderer-options]
+// d[impl layout.ellipsis]
+// d[impl label.multiline-message-alignment]
+// d[impl layout.multiline-labels]
+// d[impl layout.no-terminal-wrap]
+// d[impl layout.notes-wrap]
 // d[impl term.explicit-capabilities]
 // d[impl term.plaintext-mode]
 // d[impl test.fixture-first]
@@ -12,7 +17,7 @@ use std::fmt::Write;
 
 use margin::{
     AnnotationRole, Diagnostics, LayoutError, LayoutOptions, LayoutPlan, Note, NoteKind,
-    ResolvedSpan, Severity, SourceWindow, WindowAnnotation, plan,
+    PlacementMode, ResolvedSpan, Severity, SourceWindow, WindowAnnotation, plan,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -114,31 +119,20 @@ fn render_window(output: &mut String, window: &SourceWindow, capabilities: Termi
     }
 
     for line in &window.lines {
-        let clipped = clip_to_width(&line.text, capabilities.width.saturating_sub(8));
+        let clipped = clip_to_width(&line.text, window.geometry.source_columns);
+        let omission = if line.clipped { "..." } else { "" };
         let _ = writeln!(
             output,
-            "{:>4} {} {}",
-            line.line_number, glyphs.separator, clipped
+            "{:>width$} {} {}{}",
+            line.line_number,
+            glyphs.separator,
+            clipped,
+            omission,
+            width = window.geometry.line_number_width
         );
 
         for annotation in annotations_for_line(&window.annotations, line.line_number) {
-            let marker_line = marker_line(annotation.segment, capabilities.glyph_mode);
-            let message = annotation
-                .message
-                .as_deref()
-                .map(|message| format!(" {}", message))
-                .unwrap_or_default();
-            let _ = writeln!(
-                output,
-                "     {} {}{}",
-                glyphs.separator,
-                colorize(
-                    marker_line.as_str(),
-                    annotation.severity,
-                    capabilities.color_level
-                ),
-                message
-            );
+            render_annotation(output, annotation, window, capabilities);
         }
     }
 
@@ -167,6 +161,53 @@ fn render_note(output: &mut String, note: &Note, capabilities: TerminalCapabilit
     }
 }
 
+fn render_annotation(
+    output: &mut String,
+    annotation: RenderableAnnotation<'_>,
+    window: &SourceWindow,
+    capabilities: TerminalCapabilities,
+) {
+    let glyphs = glyphs(capabilities.glyph_mode);
+    let marker_line = marker_line(annotation.segment, capabilities.glyph_mode);
+    let colored = colorize(
+        marker_line.as_str(),
+        annotation.severity,
+        capabilities.color_level,
+    );
+    let gutter = format!(
+        "{:>width$} {} ",
+        "",
+        glyphs.separator,
+        width = window.geometry.line_number_width
+    );
+
+    match annotation.placement {
+        PlacementMode::Side => {
+            let message = annotation
+                .message
+                .map(|message| format!(" {}", message))
+                .unwrap_or_default();
+            let _ = writeln!(output, "{gutter}{colored}{message}");
+        }
+        PlacementMode::BelowSpan => {
+            let _ = writeln!(output, "{gutter}{colored}");
+            if let Some(message) = annotation.message {
+                for line in wrap_text(message, window.geometry.source_columns.saturating_sub(2)) {
+                    let _ = writeln!(output, "{gutter}{} {line}", glyphs.branch);
+                }
+            }
+        }
+        PlacementMode::Stacked => {
+            let _ = writeln!(output, "{gutter}{colored}");
+            if let Some(message) = annotation.message {
+                for line in wrap_text(message, window.geometry.source_columns.saturating_sub(4)) {
+                    let _ = writeln!(output, "{gutter}{} = {line}", glyphs.branch);
+                }
+            }
+        }
+    }
+}
+
 fn annotations_for_line<'a>(
     annotations: &'a [WindowAnnotation],
     line_number: usize,
@@ -181,6 +222,7 @@ fn annotations_for_line<'a>(
                 .filter(move |segment| segment.line_number == line_number)
                 .map(move |segment| RenderableAnnotation {
                     message: annotation.message.as_deref(),
+                    placement: annotation.placement,
                     severity: severity_for_role(annotation.role),
                     priority: annotation.priority,
                     segment,
@@ -314,6 +356,7 @@ struct Glyphs {
 #[derive(Debug, Clone, Copy)]
 struct RenderableAnnotation<'a> {
     message: Option<&'a str>,
+    placement: PlacementMode,
     severity: Severity,
     priority: u16,
     segment: ResolvedSpan,
