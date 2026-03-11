@@ -217,6 +217,13 @@ impl DocumentState {
             .find(|node| node.kind() == expected_kind && node.text_range() == def.full_range)
     }
 
+    fn fn_decl_for(&self, def: &vx_resolve::Definition) -> Option<FnDecl> {
+        if def.kind != vx_resolve::DefKind::Function {
+            return None;
+        }
+        FnDecl::cast(self.declaration_node_for(def)?)
+    }
+
     fn inferred_def_type(&self, def: &vx_resolve::Definition) -> Option<vx_types::Ty> {
         if let Some(ty) = self.type_check.binding_types.get(&def.name_range) {
             return Some(ty.clone());
@@ -972,12 +979,7 @@ impl LanguageServer for VxLanguageServer {
                 if let Some(def) = def
                     && def.kind == vx_resolve::DefKind::Function
                 {
-                    // User-declared function — use FnDecl from definition site
-                    let def_token = root.token_at_offset(def.full_range.start()).right_biased();
-                    let fn_node =
-                        def_token.and_then(|t| t.parent_ancestors().find_map(FnDecl::cast));
-
-                    if let Some(fn_node) = fn_node {
+                    if let Some(fn_node) = state.fn_decl_for(def) {
                         let fn_name = fn_node
                             .name()
                             .map(|t| t.text().to_string())
@@ -1310,7 +1312,7 @@ impl LanguageServer for VxLanguageServer {
                     r.target
                         .as_ref()
                         .ok()
-                        .is_some_and(|d| d.name_range == target_def.name_range)
+                        .is_some_and(|d| d.site() == target_def.site())
                 })
                 .filter(|r| {
                     // Only include refs that are the root callee of an application chain.
@@ -1338,7 +1340,7 @@ impl LanguageServer for VxLanguageServer {
                     .find(|d| d.name_range == caller_name_range)?;
 
                 by_caller
-                    .entry(caller_name_range)
+                    .entry(caller_def.site().range)
                     .or_insert_with(|| (caller_def.clone(), Vec::new()))
                     .1
                     .push(r.ref_range);
@@ -1377,8 +1379,10 @@ impl LanguageServer for VxLanguageServer {
             let fn_range = fn_node.syntax().text_range();
 
             // Find all CALL_EXPR nodes inside this function
-            let mut by_target: HashMap<rowan::TextRange, (vx_resolve::Definition, Vec<TextRange>)> =
-                HashMap::new();
+            let mut by_target: HashMap<
+                vx_resolve::DefSite,
+                (vx_resolve::Definition, Vec<TextRange>),
+            > = HashMap::new();
 
             for node in fn_node.syntax().descendants() {
                 if node.kind() != SyntaxKind::CALL_EXPR {
@@ -1416,7 +1420,7 @@ impl LanguageServer for VxLanguageServer {
                 }
 
                 by_target
-                    .entry(def.name_range)
+                    .entry(def.site())
                     .or_insert_with(|| (def.clone(), Vec::new()))
                     .1
                     .push(callee_range);
@@ -2278,11 +2282,7 @@ fn collect_inlay_hints(state: &DocumentState) -> Vec<InlayHint> {
         if let Some(d) = def
             && d.kind == vx_resolve::DefKind::Function
         {
-            let def_token = match root.token_at_offset(d.full_range.start()).right_biased() {
-                Some(t) => t,
-                None => continue,
-            };
-            let fn_node = match def_token.parent_ancestors().find_map(FnDecl::cast) {
+            let fn_node = match state.fn_decl_for(d) {
                 Some(f) => f,
                 None => continue,
             };
@@ -2630,5 +2630,25 @@ fn demo() {
             uri.path().ends_with("/crates/vx-stdlib/std/build.vx"),
             "expected stdlib build.vx uri, got {uri}"
         );
+    }
+
+    #[test]
+    fn inlay_hints_use_stdlib_function_parameters() {
+        let text = r#"
+fn demo() {
+  executor_class("default")
+}
+"#;
+
+        let state = DocumentState::new(text.to_string());
+        let hints = collect_inlay_hints(&state)
+            .into_iter()
+            .filter_map(|hint| match hint.label {
+                InlayHintLabel::String(label) => Some((label, hint.position)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(hints.contains(&(String::from("label:"), hint_position(text, "\"default\""))));
     }
 }
