@@ -1,6 +1,11 @@
 /// Construct an executor class selector value.
 fn executor_class(label: String) -> ExecutorClass;
 
+/// Evaluate a build entry function through the runtime.
+fn build[T](
+  entry: Fn(Path, Array[String], Map[String, String]) #fs #discover -> T,
+) -> T;
+
 /// Probe a representative executor in the class with host authority.
 ///
 /// Values returned from `discover` carry hidden verification obligations
@@ -32,6 +37,21 @@ fn acquire(url: String) where {
 fn render[T](template: Path) where {
   bindings: T,
 } -> Blob;
+
+/// Read a local file as a blob.
+fn read_file(path: String) #fs -> Blob;
+
+/// List entries in a local directory.
+fn read_dir(path: String) #fs -> Array[String];
+
+/// Expand a local glob pattern.
+fn glob(pattern: String) #fs -> Array[String];
+
+/// Test whether a local path exists.
+fn exists(path: String) #fs -> Bool;
+
+/// Read basic metadata for a local path.
+fn metadata(path: String) #fs -> Map[String, String];
 
 /// Run a sandboxed process on an executor and return the observer result.
 ///

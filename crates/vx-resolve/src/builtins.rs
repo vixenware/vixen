@@ -56,7 +56,6 @@ struct BuiltinRegistry {
     static_methods: HashMap<(String, String), Vec<FnSig>>,
     fn_names: Vec<String>,
     method_names: HashMap<Builtin, Vec<String>>,
-    namespace_names: Vec<String>,
 }
 
 static REGISTRY: OnceLock<BuiltinRegistry> = OnceLock::new();
@@ -82,17 +81,6 @@ pub fn builtin_method_caps(receiver: &Builtin, method_name: &str) -> Option<CapS
     builtin_method(receiver, method_name).map(|sig| caps_from_capabilities(&sig.capabilities))
 }
 
-/// List all builtin free function names.
-pub fn all_builtin_fn_names() -> Vec<String> {
-    let mut names: BTreeSet<String> = registry().fn_names.iter().cloned().collect();
-    names.extend(
-        fallback_builtin_fn_names()
-            .iter()
-            .map(|name| (*name).to_string()),
-    );
-    names.into_iter().collect()
-}
-
 /// List all method names on a given builtin type.
 pub fn builtin_methods_for(receiver: &Builtin) -> Vec<String> {
     let mut names: BTreeSet<String> = registry()
@@ -112,7 +100,7 @@ pub fn builtin_methods_for(receiver: &Builtin) -> Vec<String> {
 
 /// Look up a builtin free function signature by name.
 pub fn builtin_fn_sig(name: &str) -> Option<FnSig> {
-    fallback_builtin_fn_sig(name).or_else(|| builtin_fn_sigs(name).into_iter().next())
+    builtin_fn_sigs(name).into_iter().next()
 }
 
 /// Look up all builtin free-function signatures by name.
@@ -150,14 +138,6 @@ pub fn builtin_generic_method(receiver: &Ty, method_name: &str) -> Option<Generi
         .generic_methods
         .get(&(kind, method_name.to_string()))
         .cloned()
-}
-
-/// Check whether a name resolves to a builtin namespace.
-pub fn is_builtin_namespace(name: &str) -> bool {
-    registry()
-        .namespace_names
-        .iter()
-        .any(|namespace| namespace == name)
 }
 
 /// Look up all static namespace member signatures by namespace and member name.
@@ -204,7 +184,6 @@ impl BuiltinRegistry {
 
     fn load_namespace(&mut self, namespace: &NamespaceDecl) {
         let namespace_name = namespace_name(namespace);
-        self.namespace_names.push(namespace_name.clone());
         let receiver = namespace_receiver(namespace);
         let generic_receiver = namespace_generic_receiver(namespace);
         let Some(body) = namespace.body() else {
@@ -277,8 +256,6 @@ impl BuiltinRegistry {
     fn rebuild_name_indexes(&mut self) {
         self.fn_names = self.fns.keys().cloned().collect();
         self.fn_names.sort();
-        self.namespace_names.sort();
-        self.namespace_names.dedup();
 
         for ((receiver, method_name), _) in &self.methods {
             self.method_names
@@ -754,124 +731,9 @@ fn builtin_from_name(name: &str) -> Option<Builtin> {
     }
 }
 
-fn fallback_builtin_fn_names() -> &'static [&'static str] {
-    &[
-        "build",
-        "read_file",
-        "read_dir",
-        "glob",
-        "exists",
-        "metadata",
-    ]
-}
-
 fn fallback_builtin_method_names(receiver: &Builtin) -> &'static [&'static str] {
     match receiver {
         _ => &[],
-    }
-}
-
-fn fallback_builtin_fn_sig(name: &str) -> Option<FnSig> {
-    match name {
-        // r[eval.entry] — build(entry: Fn(Path, Array[String], Map[String, String]) #fs #discover -> T) -> T
-        "build" => Some(FnSig {
-            name: "build".into(),
-            type_params: vec!["T".into()],
-            positional_params: vec![ParamDef {
-                name: "entry".into(),
-                ty: Ty::Function(FunctionTy {
-                    params: vec![
-                        Ty::Builtin(Builtin::Path),
-                        Ty::Array(Box::new(Ty::Scalar(Scalar::String))),
-                        Ty::Map(
-                            Box::new(Ty::Scalar(Scalar::String)),
-                            Box::new(Ty::Scalar(Scalar::String)),
-                        ),
-                    ],
-                    ret: Box::new(Ty::Param(TypeParam {
-                        name: "T".into(),
-                        index: 0,
-                    })),
-                    capabilities: vec![
-                        Capability { name: "fs".into() },
-                        Capability {
-                            name: "discover".into(),
-                        },
-                    ],
-                }),
-                doc: None,
-            }],
-            keyword_params: vec![],
-            ret: Ty::Param(TypeParam {
-                name: "T".into(),
-                index: 0,
-            }),
-            capabilities: vec![],
-        }),
-        "read_file" => Some(FnSig {
-            name: "read_file".into(),
-            type_params: vec![],
-            positional_params: vec![ParamDef {
-                name: "path".into(),
-                ty: Ty::Scalar(Scalar::String),
-                doc: None,
-            }],
-            keyword_params: vec![],
-            ret: Ty::Builtin(Builtin::Blob),
-            capabilities: vec![Capability { name: "fs".into() }],
-        }),
-        "read_dir" => Some(FnSig {
-            name: "read_dir".into(),
-            type_params: vec![],
-            positional_params: vec![ParamDef {
-                name: "path".into(),
-                ty: Ty::Scalar(Scalar::String),
-                doc: None,
-            }],
-            keyword_params: vec![],
-            ret: Ty::Array(Box::new(Ty::Scalar(Scalar::String))),
-            capabilities: vec![Capability { name: "fs".into() }],
-        }),
-        "glob" => Some(FnSig {
-            name: "glob".into(),
-            type_params: vec![],
-            positional_params: vec![ParamDef {
-                name: "pattern".into(),
-                ty: Ty::Scalar(Scalar::String),
-                doc: None,
-            }],
-            keyword_params: vec![],
-            ret: Ty::Array(Box::new(Ty::Scalar(Scalar::String))),
-            capabilities: vec![Capability { name: "fs".into() }],
-        }),
-        "exists" => Some(FnSig {
-            name: "exists".into(),
-            type_params: vec![],
-            positional_params: vec![ParamDef {
-                name: "path".into(),
-                ty: Ty::Scalar(Scalar::String),
-                doc: None,
-            }],
-            keyword_params: vec![],
-            ret: Ty::Scalar(Scalar::Bool),
-            capabilities: vec![Capability { name: "fs".into() }],
-        }),
-        "metadata" => Some(FnSig {
-            name: "metadata".into(),
-            type_params: vec![],
-            positional_params: vec![ParamDef {
-                name: "path".into(),
-                ty: Ty::Scalar(Scalar::String),
-                doc: None,
-            }],
-            keyword_params: vec![],
-            ret: Ty::Map(
-                Box::new(Ty::Scalar(Scalar::String)),
-                Box::new(Ty::Scalar(Scalar::String)),
-            ),
-            capabilities: vec![Capability { name: "fs".into() }],
-        }),
-        _ => None,
     }
 }
 
@@ -887,7 +749,7 @@ mod tests {
 
     use super::{
         builtin_fn_sig, builtin_fn_sigs, builtin_generic_method, builtin_method,
-        builtin_scalar_method, builtin_static_method_sigs, is_builtin_namespace,
+        builtin_scalar_method, builtin_static_method_sigs,
     };
 
     #[test]
@@ -963,9 +825,6 @@ mod tests {
 
     #[test]
     fn stdlib_static_namespace_methods_are_loaded() {
-        assert!(is_builtin_namespace("Toml"));
-        assert!(is_builtin_namespace("Http"));
-
         let toml_parse = builtin_static_method_sigs("Toml", "parse");
         assert_eq!(toml_parse.len(), 1);
         assert!(matches!(toml_parse[0].ret, vx_types::Ty::Param(_)));
@@ -986,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_free_functions_remain_available() {
+    fn stdlib_runtime_helpers_are_loaded() {
         let read_file = builtin_fn_sig("read_file").expect("read_file");
         assert_eq!(
             read_file.ret,

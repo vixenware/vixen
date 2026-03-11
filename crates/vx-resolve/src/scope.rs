@@ -49,6 +49,8 @@ pub enum ScopeKind {
 pub enum DefKind {
     /// `fn name(...) { ... }`
     Function,
+    /// `namespace Name { ... }`
+    Namespace,
     /// `struct Name { ... }`
     Struct,
     /// `enum Name { ... }`
@@ -65,8 +67,6 @@ pub enum DefKind {
     Variant,
     /// Struct field
     Field,
-    /// A runtime-provided name that does not yet have a source declaration.
-    Builtin,
 }
 
 pub type DefSite = SourceSpan;
@@ -74,7 +74,6 @@ pub type DefSite = SourceSpan;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefId {
     Source { source: SourceId, local: u32 },
-    Synthetic(SourceSpan),
 }
 
 /// A name definition in a scope.
@@ -462,6 +461,17 @@ impl ScopeTreeBuilder {
                     decl.syntax().text_range(),
                 )
             }
+            Item::NamespaceDecl(decl) => {
+                let Some(name_tok) = decl.name() else {
+                    return;
+                };
+                (
+                    name_tok.text().to_string(),
+                    DefKind::Namespace,
+                    name_tok.text_range(),
+                    decl.syntax().text_range(),
+                )
+            }
             Item::StructDecl(decl) => {
                 let Some(name_tok) = decl.name() else {
                     return;
@@ -506,7 +516,6 @@ impl ScopeTreeBuilder {
                     decl.syntax().text_range(),
                 )
             }
-            Item::NamespaceDecl(_) => return,
         };
         self.add_named_def(scope, name, kind, name_range, full_range);
     }
@@ -681,7 +690,17 @@ impl ScopeTreeBuilder {
                     );
                 }
             }
-            Stmt::NamespaceDecl(_) => {}
+            Stmt::NamespaceDecl(decl) => {
+                if let Some(name_tok) = decl.name() {
+                    self.add_named_def(
+                        scope,
+                        name_tok.text().to_string(),
+                        DefKind::Namespace,
+                        name_tok.text_range(),
+                        decl.syntax().text_range(),
+                    );
+                }
+            }
             Stmt::Expr(expr) => {
                 self.visit_expr(scope, expr);
             }

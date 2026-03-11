@@ -198,6 +198,7 @@ impl DocumentState {
     fn declaration_node_for(&self, def: &vx_resolve::Definition) -> Option<vx::SyntaxNode> {
         let expected_kind = match def.kind {
             vx_resolve::DefKind::Function => SyntaxKind::FN_DECL,
+            vx_resolve::DefKind::Namespace => SyntaxKind::NAMESPACE_DECL,
             vx_resolve::DefKind::Struct => SyntaxKind::STRUCT_DECL,
             vx_resolve::DefKind::Enum => SyntaxKind::ENUM_DECL,
             vx_resolve::DefKind::Newtype => SyntaxKind::NEWTYPE_DECL,
@@ -205,8 +206,7 @@ impl DocumentState {
             vx_resolve::DefKind::Binding
             | vx_resolve::DefKind::Parameter
             | vx_resolve::DefKind::Variant
-            | vx_resolve::DefKind::Field
-            | vx_resolve::DefKind::Builtin => return None,
+            | vx_resolve::DefKind::Field => return None,
         };
 
         self.source_doc(def.source())?
@@ -427,9 +427,7 @@ impl LanguageServer for VxLanguageServer {
                 .refs
                 .iter()
                 .filter_map(|r| r.target.as_ref().ok().map(|def| (r.span.range, def)))
-                .filter(|(_, def)| {
-                    def.kind == vx_resolve::DefKind::Builtin || def.source() != state.current_source
-                })
+                .filter(|(_, def)| def.source() != state.current_source)
                 .map(|(range, _)| range)
                 .collect();
             encode_semantic_tokens(&tokens, &state.line_index, &builtin_ranges)
@@ -627,50 +625,6 @@ impl LanguageServer for VxLanguageServer {
 
             // First, try definition-based hover (existing behavior)
             if let Some((def, hover_range)) = state.definition_with_origin_at(offset) {
-                // Special handling for builtin functions
-                if def.kind == vx_resolve::DefKind::Builtin {
-                    if let Some(sig) = vx_resolve::builtins::builtin_fn_sig(&def.name) {
-                        let ret_display = sig.ret.display_with_env(&state.types.env);
-                        let params: Vec<String> = sig
-                            .positional_params
-                            .iter()
-                            .map(|p| format!("{}: {}", p.name, p.ty))
-                            .chain(sig.keyword_params.iter().map(|p| {
-                                if p.has_default {
-                                    format!("{}: {} = ...", p.name, p.ty)
-                                } else {
-                                    format!("{}: {}", p.name, p.ty)
-                                }
-                            }))
-                            .collect();
-                        let caps_str = if sig.capabilities.is_empty() {
-                            String::new()
-                        } else {
-                            let caps: Vec<_> = sig
-                                .capabilities
-                                .iter()
-                                .map(|c| format!("#{}", c.name))
-                                .collect();
-                            format!(" {}", caps.join(" "))
-                        };
-                        let snippet = format!(
-                            "fn {}({}){} -> {}",
-                            def.name,
-                            params.join(", "),
-                            caps_str,
-                            ret_display
-                        );
-                        let markdown = format!("```vx\n{snippet}\n```\n---\n*builtin function*");
-                        return Some(Hover {
-                            contents: HoverContents::Markup(MarkupContent {
-                                kind: MarkupKind::Markdown,
-                                value: markdown,
-                            }),
-                            range: Some(state.to_lsp_range_span(hover_range)),
-                        });
-                    }
-                }
-
                 let kind_label = def_kind_label(def.kind);
                 let snippet = state.declaration_snippet(def);
                 let doc = state.documentation_for(def);
@@ -867,9 +821,6 @@ impl LanguageServer for VxLanguageServer {
                 })
                 .collect();
 
-            // Add builtin function completions
-            items.extend(builtin_completions(&state.types.env));
-
             // Add keyword snippets
             items.extend(keyword_completions());
 
@@ -976,7 +927,6 @@ impl LanguageServer for VxLanguageServer {
                 };
 
                 let callee_range = callee_token.text_range();
-                let callee_name_str = callee_token.text().to_string();
                 let resolved = state
                     .resolution
                     .refs
@@ -1052,50 +1002,6 @@ impl LanguageServer for VxLanguageServer {
                         doc = state.documentation_for(def);
                     } else {
                         return None;
-                    }
-                } else if let Some(sig) = vx_resolve::builtins::builtin_fn_sig(&callee_name_str) {
-                    // Builtin function — use typed signature
-                    label_parts.push(format!("fn {}(", sig.name));
-
-                    for (i, p) in sig.positional_params.iter().enumerate() {
-                        if i > 0 {
-                            label_parts.push(", ".to_string());
-                        }
-                        let param_label =
-                            format!("{}: {}", p.name, p.ty.display_with_env(&state.types.env));
-                        params.push(ParameterInformation {
-                            label: ParameterLabel::Simple(param_label.clone()),
-                            documentation: None,
-                        });
-                        label_parts.push(param_label);
-                    }
-
-                    if !sig.keyword_params.is_empty() {
-                        if !sig.positional_params.is_empty() {
-                            label_parts.push("; ".to_string());
-                        }
-                        for (i, kp) in sig.keyword_params.iter().enumerate() {
-                            if i > 0 {
-                                label_parts.push(", ".to_string());
-                            }
-                            let param_label = format!(
-                                "{}: {}",
-                                kp.name,
-                                kp.ty.display_with_env(&state.types.env)
-                            );
-                            params.push(ParameterInformation {
-                                label: ParameterLabel::Simple(param_label.clone()),
-                                documentation: None,
-                            });
-                            label_parts.push(param_label);
-                        }
-                    }
-
-                    label_parts.push(")".to_string());
-
-                    if !sig.ret.is_poison() {
-                        let ret_display = sig.ret.display_with_env(&state.types.env);
-                        label_parts.push(format!(" -> {ret_display}"));
                     }
                 } else {
                     return None;
@@ -1698,6 +1604,7 @@ fn convert_symbol_kind(kind: vx::SymbolKind) -> SymbolKind {
 fn def_kind_label(kind: vx_resolve::DefKind) -> &'static str {
     match kind {
         vx_resolve::DefKind::Function => "function",
+        vx_resolve::DefKind::Namespace => "namespace",
         vx_resolve::DefKind::Struct => "struct",
         vx_resolve::DefKind::Enum => "enum",
         vx_resolve::DefKind::Newtype => "newtype",
@@ -1706,13 +1613,13 @@ fn def_kind_label(kind: vx_resolve::DefKind) -> &'static str {
         vx_resolve::DefKind::Parameter => "parameter",
         vx_resolve::DefKind::Variant => "variant",
         vx_resolve::DefKind::Field => "field",
-        vx_resolve::DefKind::Builtin => "builtin",
     }
 }
 
 fn def_kind_to_completion(kind: vx_resolve::DefKind) -> CompletionItemKind {
     match kind {
         vx_resolve::DefKind::Function => CompletionItemKind::FUNCTION,
+        vx_resolve::DefKind::Namespace => CompletionItemKind::MODULE,
         vx_resolve::DefKind::Struct => CompletionItemKind::STRUCT,
         vx_resolve::DefKind::Enum => CompletionItemKind::ENUM,
         vx_resolve::DefKind::Newtype => CompletionItemKind::CLASS,
@@ -1721,7 +1628,6 @@ fn def_kind_to_completion(kind: vx_resolve::DefKind) -> CompletionItemKind {
         vx_resolve::DefKind::Parameter => CompletionItemKind::VARIABLE,
         vx_resolve::DefKind::Variant => CompletionItemKind::ENUM_MEMBER,
         vx_resolve::DefKind::Field => CompletionItemKind::FIELD,
-        vx_resolve::DefKind::Builtin => CompletionItemKind::FUNCTION,
     }
 }
 
@@ -1836,6 +1742,7 @@ fn make_call_hierarchy_item(
 fn def_kind_to_symbol(kind: vx_resolve::DefKind) -> SymbolKind {
     match kind {
         vx_resolve::DefKind::Function => SymbolKind::FUNCTION,
+        vx_resolve::DefKind::Namespace => SymbolKind::NAMESPACE,
         vx_resolve::DefKind::Struct => SymbolKind::STRUCT,
         vx_resolve::DefKind::Enum => SymbolKind::ENUM,
         vx_resolve::DefKind::Newtype => SymbolKind::CLASS,
@@ -1844,7 +1751,6 @@ fn def_kind_to_symbol(kind: vx_resolve::DefKind) -> SymbolKind {
         vx_resolve::DefKind::Parameter => SymbolKind::VARIABLE,
         vx_resolve::DefKind::Variant => SymbolKind::ENUM_MEMBER,
         vx_resolve::DefKind::Field => SymbolKind::FIELD,
-        vx_resolve::DefKind::Builtin => SymbolKind::FUNCTION,
     }
 }
 
@@ -2086,23 +1992,6 @@ fn struct_fields_from_ty(ty: &vx_types::Ty, state: &DocumentState) -> Option<Vec
     }
 }
 
-fn builtin_completions(env: &vx_types::TypeEnv) -> Vec<CompletionItem> {
-    vx_resolve::builtins::all_builtin_fn_names()
-        .into_iter()
-        .filter_map(|name| {
-            let sig = vx_resolve::builtins::builtin_fn_sig(&name)?;
-            let ret_display = sig.ret.display_with_env(env);
-            let detail = format!("fn {name}(...) -> {ret_display}");
-            Some(CompletionItem {
-                label: name,
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some(detail),
-                ..Default::default()
-            })
-        })
-        .collect()
-}
-
 fn keyword_completions() -> Vec<CompletionItem> {
     let snippets = [
         (
@@ -2154,15 +2043,6 @@ fn closest_name(target: &str, visible: &[&vx_resolve::Definition]) -> Option<Str
         if dist > 0 && dist <= 2 {
             if best.as_ref().is_none_or(|(d, _)| dist < *d) {
                 best = Some((dist, def.name.clone()));
-            }
-        }
-    }
-    // Also check builtins
-    for name in vx_resolve::builtins::all_builtin_fn_names() {
-        let dist = levenshtein(target, &name);
-        if dist > 0 && dist <= 2 {
-            if best.as_ref().is_none_or(|(d, _)| dist < *d) {
-                best = Some((dist, name));
             }
         }
     }
@@ -2281,9 +2161,8 @@ fn collect_inlay_hints(state: &DocumentState) -> Vec<InlayHint> {
             None => continue,
         };
 
-        // Resolve to definition or builtin
+        // Resolve to the callee declaration.
         let callee_range = callee_token.text_range();
-        let callee_name = callee_token.text().to_string();
         let resolved = state
             .resolution
             .refs
@@ -2291,7 +2170,7 @@ fn collect_inlay_hints(state: &DocumentState) -> Vec<InlayHint> {
             .find(|r| r.span == state.current_span(callee_range));
         let def = resolved.and_then(|r| r.target.as_ref().ok());
 
-        // Collect parameter names — either from user FnDecl or builtin sig
+        // Collect parameter names from the resolved declaration.
         let param_names: Vec<String>;
         if let Some(d) = def
             && d.kind == vx_resolve::DefKind::Function
@@ -2303,12 +2182,6 @@ fn collect_inlay_hints(state: &DocumentState) -> Vec<InlayHint> {
             param_names = fn_node
                 .parameters()
                 .filter_map(|p| p.name().map(|t| t.text().to_string()))
-                .collect();
-        } else if let Some(sig) = vx_resolve::builtins::builtin_fn_sig(&callee_name) {
-            param_names = sig
-                .positional_params
-                .iter()
-                .map(|p| p.name.clone())
                 .collect();
         } else {
             continue;
@@ -2650,6 +2523,35 @@ fn demo() {
         assert!(
             disk_path == vx_resolve::source_disk_path("crates/vx-stdlib/std/build.vx"),
             "expected stdlib build.vx uri to point at real file, got {uri}"
+        );
+    }
+
+    #[test]
+    fn stdlib_namespace_reference_points_at_real_namespace_definition() {
+        let text = r#"
+struct Config {}
+
+fn demo(blob: Blob) {
+  Toml.parse[Config](blob)
+}
+"#;
+
+        let state = DocumentState::new(text.to_string());
+        let offset = TextSize::new(text.find("Toml").unwrap() as u32);
+        let def = state.definition_at(offset).unwrap();
+
+        assert_eq!(def.name, "Toml");
+        assert_eq!(def.kind, vx_resolve::DefKind::Namespace);
+        assert_ne!(def.source(), state.current_source);
+        assert_eq!(state.declaration_snippet(def), "namespace Toml {");
+
+        let uri = state.uri_for_source(def.source()).unwrap();
+        let disk_path = uri
+            .to_file_path()
+            .unwrap_or_else(|_| panic!("expected file uri, got {uri}"));
+        assert_eq!(
+            disk_path,
+            vx_resolve::source_disk_path("crates/vx-stdlib/std/core.vx")
         );
     }
 

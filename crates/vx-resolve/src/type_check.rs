@@ -17,7 +17,7 @@ use vx_types::{FnSig, Ty};
 use crate::SourceSpan;
 use crate::builtins::{
     builtin_fn_sig, builtin_fn_sigs, builtin_generic_method, builtin_method, builtin_scalar_method,
-    builtin_static_method_sigs, is_builtin_namespace,
+    builtin_static_method_sigs,
 };
 use crate::resolve::NameResolution;
 use crate::scope::{DefKind, Definition};
@@ -264,12 +264,6 @@ impl<'a> ExprTyper<'a> {
             }
         }
 
-        // Not resolved — the remaining namespace-only runtime names do not yet
-        // participate in ordinary source-based typing.
-        let name = token.text();
-        if is_builtin_namespace(name) {
-            return Ty::Poison;
-        }
         Ty::Poison
     }
 

@@ -2,8 +2,7 @@
 
 use vx_parser::{AstNode, NameRefExpr, SourceFile, SyntaxKind, SyntaxNode};
 
-use crate::builtins;
-use crate::scope::{DefId, DefKind, Definition, ScopeId};
+use crate::scope::Definition;
 use crate::{ImportGraph, ProgramScopes, SourceFileRef, SourceId, SourceSpan};
 
 /// A resolved name reference.
@@ -117,24 +116,12 @@ impl<'a> RefCollector<'a> {
         {
             Some(def) => Ok(def.clone()),
             None => {
-                // Check if this is a builtin function name
-                if builtins::is_builtin_namespace(&name) {
-                    Ok(Definition {
-                        id: DefId::Synthetic(ref_span),
-                        name: name.clone(),
-                        kind: DefKind::Builtin,
-                        name_span: ref_span,
-                        full_span: ref_span,
-                        scope: ScopeId::ROOT,
-                    })
-                } else {
-                    let err = ResolveError::Unresolved {
-                        name: name.clone(),
-                        span: ref_span,
-                    };
-                    self.errors.push(err.clone());
-                    Err(err)
-                }
+                let err = ResolveError::Unresolved {
+                    name: name.clone(),
+                    span: ref_span,
+                };
+                self.errors.push(err.clone());
+                Err(err)
             }
         };
 

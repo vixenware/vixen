@@ -1431,6 +1431,34 @@ fn main() {
     );
 }
 
+#[test]
+fn stdlib_namespace_names_resolve_to_real_definitions() {
+    let file = parse_file(
+        r#"
+struct Config {}
+
+fn main(blob: Blob) {
+    Toml.parse[Config](blob)
+}
+"#,
+    );
+    let resolution = resolve_with_stdlib(&file);
+    assert!(
+        resolution.errors.is_empty(),
+        "expected no resolve errors, got: {:?}",
+        resolution.errors
+    );
+
+    let toml = resolution
+        .refs
+        .iter()
+        .find(|r| r.name == "Toml")
+        .and_then(|r| r.target.as_ref().ok())
+        .expect("Toml should resolve");
+    assert_eq!(toml.kind, DefKind::Namespace);
+    assert_ne!(toml.source(), TEST_SOURCE_ID);
+}
+
 // --- Function parameter types from declared signatures ---
 
 #[test]
