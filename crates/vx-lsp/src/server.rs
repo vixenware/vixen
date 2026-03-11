@@ -92,8 +92,9 @@ impl DocumentState {
             imports,
         );
         let types = vx_resolve::collect_types_for_sources(&sources);
-        let cap_check = vx_resolve::check_capabilities(&parsed.tree(), &resolution.scopes, &types);
         let type_check = vx_resolve::type_check(&parsed.tree(), &resolution, &types);
+        let cap_check =
+            vx_resolve::check_capabilities(&parsed.tree(), &resolution, &types, &type_check);
         Self {
             current_source,
             text,

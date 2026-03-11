@@ -2,31 +2,22 @@
 //!
 //! r[cap.model]
 //!
-//! Infers the capability fingerprint of closures from the builtins they call,
+//! Infers the capability fingerprint of closures from the callable stdlib/runtime surface,
 //! and checks that closures passed to capability-masked callback slots satisfy
 //! the mask.
 
 use std::collections::HashMap;
 
 use rowan::TextRange;
-use vx_parser::{AstNode, CallExpr, ClosureExpr, Expr, FnDecl, Item, SourceFile, Stmt, SyntaxKind};
+use vx_parser::{
+    AstNode, CallExpr, ClosureExpr, Expr, FieldExpr, FnDecl, Item, NameRefExpr, SourceFile, Stmt,
+    SyntaxKind,
+};
 
-use vx_types::{Builtin, Capability};
+use vx_types::{Capability, FnSig};
 
-use crate::ProgramScopes;
-use crate::builtins;
 use crate::type_collect::TypeCollection;
-
-/// All builtin runtime types, for iterating when we don't know the receiver type.
-const ALL_BUILTINS: &[Builtin] = &[
-    Builtin::Host,
-    Builtin::Process,
-    Builtin::Blob,
-    Builtin::Tree,
-    Builtin::Path,
-    Builtin::ExecPath,
-    Builtin::ExecutorClass,
-];
+use crate::{NameResolution, SourceSpan, TypeCheckResult};
 
 /// Derive a CapSet from the capabilities on a function type.
 fn caps_from_fn_ty_capabilities(caps: &[Capability]) -> CapSet {
@@ -37,11 +28,6 @@ fn caps_from_fn_ty_capabilities(caps: &[Capability]) -> CapSet {
         }
     }
     result
-}
-
-/// Get the capability requirements for a bare function name.
-fn caps_for_name(name: &str) -> Option<CapSet> {
-    builtins::builtin_fn_caps(name)
 }
 
 /// A set of capabilities, represented as a bitset.
@@ -144,12 +130,14 @@ pub struct CapCheckResult {
 /// Run capability checking on a parsed source file.
 pub fn check_capabilities(
     file: &SourceFile,
-    scopes: &ProgramScopes,
+    resolution: &NameResolution,
     types: &TypeCollection,
+    type_check: &TypeCheckResult,
 ) -> CapCheckResult {
     let mut checker = CapChecker {
-        scopes,
+        resolution,
         types,
+        type_check,
         fn_caps: HashMap::new(),
         errors: Vec::new(),
     };
@@ -202,16 +190,19 @@ fn caps_from_fn_decl(fn_decl: &FnDecl) -> CapSet {
 }
 
 struct CapChecker<'a> {
-    #[allow(dead_code)]
-    scopes: &'a ProgramScopes,
-    #[allow(dead_code)]
+    resolution: &'a NameResolution,
     types: &'a TypeCollection,
+    type_check: &'a TypeCheckResult,
     /// Maps function names to their declared capability masks.
     fn_caps: HashMap<String, CapSet>,
     errors: Vec<CapError>,
 }
 
 impl<'a> CapChecker<'a> {
+    fn span(&self, range: TextRange) -> SourceSpan {
+        SourceSpan::new(self.resolution.source, range)
+    }
+
     fn is_closure_expr(expr: &Expr) -> bool {
         match expr {
             Expr::Closure(_) => true,
@@ -222,9 +213,60 @@ impl<'a> CapChecker<'a> {
         }
     }
 
-    fn sig_for_name(&self, name: &str) -> Option<vx_types::FnSig> {
-        builtins::builtin_fn_sig(name)
-            .or_else(|| self.types.fn_sigs().find(|sig| sig.name == name).cloned())
+    fn resolved_def_for_name_ref(&self, name_ref: &NameRefExpr) -> Option<&crate::Definition> {
+        let token = name_ref.token()?;
+        let span = self.span(token.text_range());
+        let resolved = self
+            .resolution
+            .refs
+            .iter()
+            .find(|resolved| resolved.span == span)?;
+        resolved.target.as_ref().ok()
+    }
+
+    fn sig_for_name_ref(&self, name_ref: &NameRefExpr) -> Option<FnSig> {
+        let def = self.resolved_def_for_name_ref(name_ref)?;
+        (def.kind == crate::DefKind::Function)
+            .then(|| self.types.fn_sig_for_def(def).cloned())
+            .flatten()
+    }
+
+    fn sig_for_field_call(&self, field_expr: &FieldExpr) -> Option<FnSig> {
+        let field_name = field_expr.field_name()?;
+        let def = self
+            .type_check
+            .member_defs
+            .get(&self.span(field_name.text_range()))?;
+        let mut sig = self.types.fn_sig_for_def(def)?.clone();
+        if sig
+            .positional_params
+            .first()
+            .is_some_and(|param| param.name == "self")
+        {
+            sig.positional_params.remove(0);
+        }
+        Some(sig)
+    }
+
+    fn sig_for_callee(&self, callee: &Expr) -> Option<FnSig> {
+        match callee {
+            Expr::NameRef(name_ref) => self.sig_for_name_ref(name_ref),
+            Expr::Field(field_expr) => self.sig_for_field_call(field_expr),
+            _ => None,
+        }
+    }
+
+    fn caps_for_callee(&self, callee: &Expr) -> Option<CapSet> {
+        let sig = self.sig_for_callee(callee)?;
+        Some(caps_from_fn_ty_capabilities(&sig.capabilities))
+    }
+
+    fn callee_label(&self, callee: &Expr) -> Option<String> {
+        match callee {
+            Expr::NameRef(name_ref) => Some(name_ref.token()?.text().to_string()),
+            Expr::Field(field_expr) => Some(field_expr.field_name()?.text().to_string()),
+            _ => None,
+        }
     }
 
     fn check_stmts_for_callbacks(&mut self, block: &vx_parser::BlockExpr) {
@@ -328,19 +370,14 @@ impl<'a> CapChecker<'a> {
         }
     }
 
-    /// Check a call expression for known callback-accepting builtins.
-    /// Derives callback slot masks from the FnSig in builtins.rs.
     fn check_call_callbacks(&mut self, call: &CallExpr) {
-        let callee_name = match call.callee() {
-            Some(Expr::NameRef(name_ref)) => name_ref.token().map(|t| t.text().to_string()),
-            _ => None,
-        };
-
-        let Some(callee_name) = callee_name else {
+        let Some(callee) = call.callee() else {
             return;
         };
-
-        let Some(sig) = builtins::builtin_fn_sig(&callee_name) else {
+        let Some(callee_name) = self.callee_label(&callee) else {
+            return;
+        };
+        let Some(sig) = self.sig_for_callee(&callee) else {
             return;
         };
 
@@ -397,21 +434,18 @@ impl<'a> CapChecker<'a> {
     }
 
     fn check_where_callbacks(&mut self, where_expr: &vx_parser::WhereExpr) {
-        let (callee_name, positional_args) = match where_expr.callee() {
-            Some(Expr::Call(call)) => {
-                let callee_name = match call.callee() {
-                    Some(Expr::NameRef(name_ref)) => name_ref.token().map(|t| t.text().to_string()),
-                    _ => None,
-                };
-                (callee_name, Some(call.args().collect::<Vec<_>>()))
-            }
-            Some(Expr::NameRef(name_ref)) => (name_ref.token().map(|t| t.text().to_string()), None),
-            _ => (None, None),
+        let (callee_expr, positional_args) = match where_expr.callee() {
+            Some(Expr::Call(call)) => (call.callee(), Some(call.args().collect::<Vec<_>>())),
+            Some(expr) => (Some(expr), None),
+            None => (None, None),
         };
-        let Some(callee_name) = callee_name else {
+        let Some(callee_expr) = callee_expr else {
             return;
         };
-        let Some(sig) = self.sig_for_name(&callee_name) else {
+        let Some(callee_name) = self.callee_label(&callee_expr) else {
+            return;
+        };
+        let Some(sig) = self.sig_for_callee(&callee_expr) else {
             return;
         };
 
@@ -502,14 +536,13 @@ impl<'a> CapChecker<'a> {
                 .unwrap_or(CapSet::EMPTY),
             Expr::NameRef(name_ref) => {
                 // If this references a function with declared caps, propagate them
-                if let Some(tok) = name_ref.token() {
-                    let name = tok.text();
-                    if let Some(&caps) = self.fn_caps.get(name) {
-                        return caps;
-                    }
-                    if let Some(caps) = caps_for_name(name) {
-                        return caps;
-                    }
+                if let Some(tok) = name_ref.token()
+                    && let Some(&caps) = self.fn_caps.get(tok.text())
+                {
+                    return caps;
+                }
+                if let Some(sig) = self.sig_for_name_ref(name_ref) {
+                    return caps_from_fn_ty_capabilities(&sig.capabilities);
                 }
                 CapSet::EMPTY
             }
@@ -544,17 +577,8 @@ impl<'a> CapChecker<'a> {
                 let mut caps = CapSet::EMPTY;
                 if let Some(callee) = invoke.callee() {
                     caps = caps.union(self.infer_body_caps(&callee));
-                    if let Expr::Field(field_expr) = callee
-                        && let Some(field_name) = field_expr.field_name()
-                    {
-                        for receiver in ALL_BUILTINS {
-                            if let Some(method_caps) =
-                                builtins::builtin_method_caps(receiver, field_name.text())
-                            {
-                                caps = caps.union(method_caps);
-                                break;
-                            }
-                        }
+                    if let Some(callee_caps) = self.caps_for_callee(&callee) {
+                        caps = caps.union(callee_caps);
                     }
                 }
                 caps
@@ -586,14 +610,13 @@ impl<'a> CapChecker<'a> {
                 self.infer_closure_caps(inner)
             }
             Expr::NameRef(name_ref) => {
-                if let Some(tok) = name_ref.token() {
-                    let name = tok.text();
-                    if let Some(&caps) = self.fn_caps.get(name) {
-                        return caps;
-                    }
-                    if let Some(caps) = caps_for_name(name) {
-                        return caps;
-                    }
+                if let Some(tok) = name_ref.token()
+                    && let Some(&caps) = self.fn_caps.get(tok.text())
+                {
+                    return caps;
+                }
+                if let Some(sig) = self.sig_for_name_ref(name_ref) {
+                    return caps_from_fn_ty_capabilities(&sig.capabilities);
                 }
                 CapSet::EMPTY
             }
@@ -635,34 +658,14 @@ impl<'a> CapChecker<'a> {
 
         // Capabilities from the callee
         if let Some(callee) = call.callee() {
-            match &callee {
-                Expr::NameRef(name_ref) => {
-                    if let Some(tok) = name_ref.token() {
-                        let name = tok.text();
-                        if let Some(builtin) = caps_for_name(name) {
-                            caps = caps.union(builtin);
-                        }
-                        if let Some(&fn_caps) = self.fn_caps.get(name) {
-                            caps = caps.union(fn_caps);
-                        }
-                    }
-                }
-                Expr::Field(field_expr) => {
-                    // Method calls like host.which(...) — check all builtin
-                    // receiver types for the method name
-                    if let Some(field_name) = field_expr.field_name() {
-                        let method_name = field_name.text();
-                        for receiver in ALL_BUILTINS {
-                            if let Some(method_caps) =
-                                builtins::builtin_method_caps(receiver, method_name)
-                            {
-                                caps = caps.union(method_caps);
-                                break;
-                            }
-                        }
-                    }
-                }
-                _ => {}
+            if let Some(callee_caps) = self.caps_for_callee(&callee) {
+                caps = caps.union(callee_caps);
+            }
+            if let Expr::NameRef(name_ref) = &callee
+                && let Some(tok) = name_ref.token()
+                && let Some(&fn_caps) = self.fn_caps.get(tok.text())
+            {
+                caps = caps.union(fn_caps);
             }
         }
 

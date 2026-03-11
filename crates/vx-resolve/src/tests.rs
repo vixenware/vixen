@@ -638,7 +638,8 @@ fn check_caps(src: &str) -> crate::CapCheckResult {
     let file = parse_file(src);
     let resolution = resolve_with_stdlib(&file);
     let types = collect_types_with_stdlib(&file);
-    crate::check_capabilities(&file, &resolution.scopes, &types)
+    let type_check = crate::type_check(&file, &resolution, &types);
+    crate::check_capabilities(&file, &resolution, &types, &type_check)
 }
 
 // r[cap.mask] — pure closure satisfies any callback mask
@@ -856,9 +857,9 @@ fn main() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 }
 
-// Method-style host calls in observer are rejected
+// Unresolved method names do not imply host authority.
 #[test]
-fn observer_method_call_host_rejected() {
+fn unresolved_method_name_does_not_imply_host_capability() {
     let result = check_caps(
         r#"
 fn main() {
@@ -871,16 +872,7 @@ fn main() {
 }
 "#,
     );
-    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
-    match &result.errors[0].kind {
-        CapErrorKind::CapabilityViolation {
-            slot_name, excess, ..
-        } => {
-            assert_eq!(slot_name, "exec observer");
-            assert!(excess.names().contains(&"host"), "excess: {excess}");
-        }
-        other => panic!("expected CapabilityViolation, got: {other:?}"),
-    }
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 }
 
 // FnSig collects capabilities from declarations
@@ -1402,11 +1394,11 @@ fn main() {
     );
 }
 
-// --- Step 1: cap_check derives from builtins.rs ---
+// --- Step 1: cap_check derives from real stdlib signatures ---
 
 #[test]
-fn cap_check_derives_fs_from_builtin_sig() {
-    // read_file has #fs in its FnSig — cap_check should derive FS from it
+fn cap_check_derives_fs_from_stdlib_sig() {
+    // read_file has #fs in std/build.vx — cap_check should derive FS from it
     let result = check_caps(
         r#"
 fn main() {
@@ -1420,7 +1412,7 @@ fn main() {
 }
 
 #[test]
-fn cap_check_derives_discover_from_builtin_sig() {
+fn cap_check_derives_discover_from_stdlib_sig() {
     // build's entry slot now allows #discover as well as #fs
     let result = check_caps(
         r#"
@@ -1435,8 +1427,8 @@ fn main() {
 }
 
 #[test]
-fn cap_check_method_caps_from_builtin_method() {
-    // host.which has #host capability from MethodSig
+fn cap_check_method_caps_from_stdlib_method_sig() {
+    // host.which has #host capability from std/core.vx
     let result = check_caps(
         r#"
 fn probe() #discover {
