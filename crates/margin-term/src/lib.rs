@@ -22,7 +22,7 @@ use std::fmt::Write;
 
 use margin::{
     AnnotationRole, Diagnostics, LayoutError, LayoutOptions, LayoutPlan, Note, NoteKind,
-    PlacementMode, ResolvedSpan, Severity, SourceWindow, WindowAnnotation, plan,
+    PlacementMode, ResolvedSpan, Severity, SourceWindow, SyntaxClass, WindowAnnotation, plan,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -101,6 +101,10 @@ impl Default for Theme {
 impl Style {
     const fn ansi16(code: u8) -> Self {
         Self { ansi16: Some(code) }
+    }
+
+    const fn plain() -> Self {
+        Self { ansi16: None }
     }
 }
 
@@ -205,18 +209,28 @@ fn render_window(
     for line in &window.lines {
         let expanded = expand_tabs(&line.text, capabilities.tab_width);
         let clipped = clip_to_width(&expanded, window.geometry.source_columns);
+        let styled = style_source_line(
+            clipped.as_str(),
+            line.line_number,
+            &window.annotations,
+            capabilities,
+            theme,
+        );
         let omission = if line.clipped { "..." } else { "" };
         let _ = writeln!(
             output,
             "{:>width$} {} {}{}",
             line.line_number,
             colorize(glyphs.separator, theme.gutter, capabilities.color_level),
-            clipped,
+            styled,
             omission,
             width = window.geometry.line_number_width
         );
 
-        for annotation in annotations_for_line(&window.annotations, line.line_number) {
+        for annotation in annotations_for_line(&window.annotations, line.line_number)
+            .into_iter()
+            .filter(|annotation| annotation.role != AnnotationRole::SyntaxToken)
+        {
             render_annotation(output, annotation, window, capabilities, theme);
         }
     }
@@ -228,6 +242,92 @@ fn render_window(
             colorize(glyphs.separator, theme.gutter, capabilities.color_level)
         );
     }
+}
+
+fn style_source_line(
+    text: &str,
+    line_number: usize,
+    annotations: &[WindowAnnotation],
+    capabilities: TerminalCapabilities,
+    theme: Theme,
+) -> String {
+    if capabilities.color_level == ColorLevel::None {
+        return text.to_string();
+    }
+
+    let syntax_segments = annotations
+        .iter()
+        .filter(|annotation| annotation.role == AnnotationRole::SyntaxToken)
+        .flat_map(|annotation| {
+            annotation
+                .segments
+                .iter()
+                .copied()
+                .map(move |segment| (segment, annotation.syntax_class))
+        })
+        .filter(|(segment, _)| segment.line_number == line_number)
+        .collect::<Vec<_>>();
+
+    if syntax_segments.is_empty() {
+        return text.to_string();
+    }
+
+    let mut styled = String::new();
+    let mut run = String::new();
+    let mut current_style = None;
+    let mut column = 0;
+    for ch in text.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        let style = syntax_segments
+            .iter()
+            .find_map(|(segment, syntax_class)| {
+                let overlaps = if width == 0 {
+                    segment.start_column <= column && column < segment.end_column
+                } else {
+                    segment.start_column < column + width && column < segment.end_column
+                };
+                overlaps.then(|| theme.style_for_syntax_class(*syntax_class))
+            })
+            .filter(|style| style.ansi16.is_some());
+
+        if style != current_style {
+            flush_styled_run(
+                &mut styled,
+                &mut run,
+                current_style,
+                capabilities.color_level,
+            );
+            current_style = style;
+        }
+        run.push(ch);
+
+        column += width;
+    }
+    flush_styled_run(
+        &mut styled,
+        &mut run,
+        current_style,
+        capabilities.color_level,
+    );
+
+    styled
+}
+
+fn flush_styled_run(
+    output: &mut String,
+    run: &mut String,
+    style: Option<Style>,
+    color_level: ColorLevel,
+) {
+    if run.is_empty() {
+        return;
+    }
+
+    match style {
+        Some(style) => output.push_str(&colorize(run.as_str(), style, color_level)),
+        None => output.push_str(run),
+    }
+    run.clear();
 }
 
 fn render_note(output: &mut String, note: &Note, capabilities: TerminalCapabilities, theme: Theme) {
@@ -509,6 +609,33 @@ impl Theme {
             AnnotationRole::RelatedLabel
             | AnnotationRole::SearchHighlight
             | AnnotationRole::Selection => self.style_for_severity(severity),
+        }
+    }
+
+    fn style_for_syntax_class(self, syntax_class: Option<SyntaxClass>) -> Style {
+        match syntax_class {
+            Some(SyntaxClass::Keyword)
+            | Some(SyntaxClass::Operator)
+            | Some(SyntaxClass::Macro)
+            | Some(SyntaxClass::Namespace)
+            | Some(SyntaxClass::Tag)
+            | Some(SyntaxClass::Title)
+            | Some(SyntaxClass::Strong)
+            | Some(SyntaxClass::Emphasis)
+            | Some(SyntaxClass::Link)
+            | Some(SyntaxClass::Literal)
+            | Some(SyntaxClass::Strikethrough) => self.emphasis,
+            Some(SyntaxClass::Function) | Some(SyntaxClass::Constructor) => self.syntax_token,
+            Some(SyntaxClass::String) | Some(SyntaxClass::DiffAdd) => self.help,
+            Some(SyntaxClass::Comment) | Some(SyntaxClass::Punctuation) => self.gutter,
+            Some(SyntaxClass::Type) | Some(SyntaxClass::Attribute) => self.secondary_label,
+            Some(SyntaxClass::Constant)
+            | Some(SyntaxClass::Number)
+            | Some(SyntaxClass::Property)
+            | Some(SyntaxClass::Label)
+            | Some(SyntaxClass::Embedded) => self.severity_advice,
+            Some(SyntaxClass::DiffDelete) | Some(SyntaxClass::Error) => self.primary_label,
+            Some(SyntaxClass::Variable) | None => Style::plain(),
         }
     }
 }

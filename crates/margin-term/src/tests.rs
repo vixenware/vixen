@@ -1,6 +1,6 @@
 use margin::{
     Annotation, AnnotationRole, Diagnostics, Note, NoteKind, Report, Severity, Source, SourceId,
-    Span,
+    Span, SyntaxClass,
 };
 
 use super::{ColorLevel, GlyphMode, TerminalCapabilities, Theme, render, render_plan_with_theme};
@@ -19,12 +19,21 @@ fn sample_diagnostics() -> Diagnostics {
                 Annotation {
                     spans: vec![Span::new("main", 24, 31)],
                     role: AnnotationRole::PrimaryLabel,
+                    syntax_class: None,
                     message: Some("not found in this scope".to_string()),
                     priority: 100,
                 },
                 Annotation {
                     spans: vec![Span::new("main", 0, 3)],
                     role: AnnotationRole::SyntaxToken,
+                    syntax_class: Some(SyntaxClass::Keyword),
+                    message: None,
+                    priority: 1,
+                },
+                Annotation {
+                    spans: vec![Span::new("main", 13, 14)],
+                    role: AnnotationRole::SyntaxToken,
+                    syntax_class: Some(SyntaxClass::Number),
                     message: None,
                     priority: 1,
                 },
@@ -57,9 +66,14 @@ fn render_supports_plaintext_ascii_output() {
     )
     .unwrap();
 
+    println!("{rendered}");
     assert!(rendered.contains("error: unknown name `missing`"));
     assert!(rendered.contains("--> src/main.vx"));
     assert!(rendered.contains("|"));
+    assert!(
+        !rendered.contains("1 | let number = 1\n  | ^^^"),
+        "{rendered}"
+    );
     assert!(!rendered.contains("\u{1b}["));
 }
 
@@ -92,7 +106,11 @@ fn render_changes_with_width_and_capabilities() {
     )
     .unwrap();
 
+    println!("-- narrow --\n{narrow}");
+    println!("-- wide --\n{wide}");
     assert!(narrow.contains("\u{1b}[31merror\u{1b}[0m"));
+    assert!(narrow.contains("\u{1b}[35mlet\u{1b}[0m"), "{narrow}");
+    assert!(narrow.contains("\u{1b}[36m1\u{1b}[0m"), "{narrow}");
     assert!(narrow.contains("src/main.vx"));
     assert!(narrow.contains("╰─"));
     assert!(!narrow.contains("consider defining the binding before using it"));
@@ -114,6 +132,7 @@ fn render_clips_long_lines_with_explicit_ellipsis() {
             annotations: vec![Annotation {
                 spans: vec![Span::new("main", 20, 24)],
                 role: AnnotationRole::PrimaryLabel,
+                syntax_class: None,
                 message: Some("past the clip".to_string()),
                 priority: 100,
             }],
@@ -133,6 +152,7 @@ fn render_clips_long_lines_with_explicit_ellipsis() {
     )
     .unwrap();
 
+    println!("{rendered}");
     assert!(rendered.contains("012345678901234..."));
 }
 
@@ -161,6 +181,7 @@ fn render_uses_balanced_ansi_sequences_and_role_styles() {
         Theme::default(),
     );
 
+    println!("{rendered}");
     assert!(rendered.matches("\u{1b}[0m").count() >= 3, "{rendered}");
     assert!(rendered.contains("\u{1b}[90m│\u{1b}[0m"), "{rendered}");
     assert!(
@@ -188,6 +209,7 @@ fn render_expands_tabs_and_keeps_unicode_text_stable() {
             annotations: vec![Annotation {
                 spans: vec![Span::new("main", 2, "a\tCafe\u{301}".len())],
                 role: AnnotationRole::PrimaryLabel,
+                syntax_class: None,
                 message: Some("accented".to_string()),
                 priority: 100,
             }],
@@ -210,6 +232,7 @@ fn render_expands_tabs_and_keeps_unicode_text_stable() {
     )
     .unwrap();
 
+    println!("{rendered}");
     assert!(rendered.contains("a   Cafe\u{301}"), "{rendered}");
     assert!(rendered.contains("accented"), "{rendered}");
     assert!(rendered.contains("Cafe\u{301}"), "{rendered}");

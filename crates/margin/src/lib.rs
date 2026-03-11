@@ -152,10 +152,43 @@ pub enum AnnotationRole {
     Emphasis,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Facet)]
+#[repr(u8)]
+pub enum SyntaxClass {
+    Keyword,
+    Function,
+    String,
+    Comment,
+    Type,
+    Variable,
+    Constant,
+    Number,
+    Operator,
+    Punctuation,
+    Property,
+    Attribute,
+    Tag,
+    Macro,
+    Label,
+    Namespace,
+    Constructor,
+    Title,
+    Strong,
+    Emphasis,
+    Link,
+    Literal,
+    Strikethrough,
+    DiffAdd,
+    DiffDelete,
+    Embedded,
+    Error,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct Annotation {
     pub spans: Vec<Span>,
     pub role: AnnotationRole,
+    pub syntax_class: Option<SyntaxClass>,
     pub message: Option<String>,
     pub priority: u16,
 }
@@ -270,6 +303,7 @@ pub struct WindowLine {
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct WindowAnnotation {
     pub role: AnnotationRole,
+    pub syntax_class: Option<SyntaxClass>,
     pub message: Option<String>,
     pub placement: PlacementMode,
     pub priority: u16,
@@ -538,6 +572,7 @@ fn planned_window_annotations(
             }
             Some(WindowAnnotation {
                 role: annotation.annotation.role,
+                syntax_class: annotation.annotation.syntax_class,
                 message: annotation.annotation.message.clone(),
                 placement: PlacementMode::BelowSpan,
                 priority: annotation.annotation.priority,
@@ -567,6 +602,7 @@ fn window_annotation_sort_key(
         .priority
         .cmp(&left.priority)
         .then_with(|| role_rank(left.role).cmp(&role_rank(right.role)))
+        .then_with(|| left.syntax_class.cmp(&right.syntax_class))
         .then_with(|| left.message.cmp(&right.message))
         .then_with(|| resolved_span_sort_key(&left.segments[0], &right.segments[0]))
 }
@@ -607,7 +643,10 @@ fn coalesce_window_annotations(annotations: Vec<WindowAnnotation>) -> Vec<Window
 }
 
 fn can_cluster(left: &WindowAnnotation, right: &WindowAnnotation) -> bool {
-    if left.role != right.role || left.priority != right.priority {
+    if left.role != right.role
+        || left.syntax_class != right.syntax_class
+        || left.priority != right.priority
+    {
         return false;
     }
     if !messages_compatible(left.message.as_deref(), right.message.as_deref()) {

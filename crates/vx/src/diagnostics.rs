@@ -8,10 +8,11 @@ use std::sync::Arc;
 use arborium::advanced::{CompiledGrammar, GrammarConfig};
 use arborium::{GrammarStore, Highlighter};
 use arborium_highlight::spans_to_themed;
+use arborium_theme::{HIGHLIGHTS, ThemeSlot, capture_to_slot};
 use eyre::{Result, eyre};
 use margin::{
     Annotation, AnnotationRole, Diagnostics, Note, NoteKind, Report, Severity, Source, SourceId,
-    Span,
+    Span, SyntaxClass,
 };
 use margin_term::{ColorLevel, GlyphMode, TerminalCapabilities};
 use vxd_proto::{
@@ -213,6 +214,7 @@ fn annotation_from_span(
     Ok(Annotation {
         spans: vec![Span::new(span.source_id.as_str(), start, end)],
         role,
+        syntax_class: None,
         message,
         priority,
     })
@@ -359,6 +361,7 @@ impl SyntaxHighlighter {
             annotations.push(Annotation {
                 spans: vec![Span::new(source.source_id.as_str(), start, end)],
                 role: AnnotationRole::SyntaxToken,
+                syntax_class: syntax_class_for_theme_index(span.theme_index),
                 message: None,
                 priority: 0,
             });
@@ -366,6 +369,41 @@ impl SyntaxHighlighter {
 
         Ok(annotations)
     }
+}
+
+fn syntax_class_for_theme_index(theme_index: usize) -> Option<SyntaxClass> {
+    let highlight = HIGHLIGHTS.get(theme_index)?;
+    let slot = capture_to_slot(highlight.name);
+    Some(match slot {
+        ThemeSlot::Keyword => SyntaxClass::Keyword,
+        ThemeSlot::Function => SyntaxClass::Function,
+        ThemeSlot::String => SyntaxClass::String,
+        ThemeSlot::Comment => SyntaxClass::Comment,
+        ThemeSlot::Type => SyntaxClass::Type,
+        ThemeSlot::Variable => SyntaxClass::Variable,
+        ThemeSlot::Constant => SyntaxClass::Constant,
+        ThemeSlot::Number => SyntaxClass::Number,
+        ThemeSlot::Operator => SyntaxClass::Operator,
+        ThemeSlot::Punctuation => SyntaxClass::Punctuation,
+        ThemeSlot::Property => SyntaxClass::Property,
+        ThemeSlot::Attribute => SyntaxClass::Attribute,
+        ThemeSlot::Tag => SyntaxClass::Tag,
+        ThemeSlot::Macro => SyntaxClass::Macro,
+        ThemeSlot::Label => SyntaxClass::Label,
+        ThemeSlot::Namespace => SyntaxClass::Namespace,
+        ThemeSlot::Constructor => SyntaxClass::Constructor,
+        ThemeSlot::Title => SyntaxClass::Title,
+        ThemeSlot::Strong => SyntaxClass::Strong,
+        ThemeSlot::Emphasis => SyntaxClass::Emphasis,
+        ThemeSlot::Link => SyntaxClass::Link,
+        ThemeSlot::Literal => SyntaxClass::Literal,
+        ThemeSlot::Strikethrough => SyntaxClass::Strikethrough,
+        ThemeSlot::DiffAdd => SyntaxClass::DiffAdd,
+        ThemeSlot::DiffDelete => SyntaxClass::DiffDelete,
+        ThemeSlot::Embedded => SyntaxClass::Embedded,
+        ThemeSlot::Error => SyntaxClass::Error,
+        ThemeSlot::None => return None,
+    })
 }
 
 #[cfg(test)]
@@ -523,6 +561,7 @@ mod tests {
         .expect("render");
         let plain = strip_ansi_escapes::strip_str(&rendered);
 
+        println!("{rendered}");
         assert!(
             !plain.contains("this_line_should_not_show_up"),
             "{rendered}"
