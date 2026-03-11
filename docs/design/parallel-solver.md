@@ -69,6 +69,23 @@ Cargo, npm, pip, Maven, or some future planning problem should be expressible
 by changing Vixen code, not by teaching the Rust runtime new solver tricks for
 each domain.
 
+Two decisions from the language discussion matter here:
+
+1. join semantics belong to the value type, not to the runtime
+2. optimization preference belongs to an ordinary runtime value, not to a type
+   annotation
+
+In practice that means:
+
+1. `#[join]` does not mean `#[join(Union)]` or `#[join(Intersect)]`
+2. the runtime only needs to know that a parameter is joinable
+3. the actual operation is provided by the type's `join(...)` method
+4. search direction such as "prefer newest" vs "prefer oldest" should be an
+   ordinary value such as `prefer: Fn(T, T) -> Bool`
+
+This keeps the runtime generic and allows domains to define their own lattice
+types and preference policies in Vixen.
+
 ## 4. Semantic volumes and conflict clusters
 
 The current solver direction treats the search space as volumes inside conflict
@@ -159,6 +176,18 @@ Characteristics:
 
 The first valid graph found becomes the incumbent.
 
+For Cargo-like resolution, the natural "find a floor fast" strategy is:
+
+1. run with the minimization preference first
+2. obtain a valid lowest-feasible graph if one exists
+3. use that graph as the initial incumbent
+
+This matters because:
+
+1. the floor is itself a correct answer
+2. every later search tier becomes optimization over a known-valid solution
+3. if optimization is interrupted, the floor remains usable
+
 ### 7.2 Tier 2: squeeze
 
 Goal: prove that nothing better than the incumbent exists.
@@ -171,6 +200,22 @@ Characteristics:
 
 This is where the exactness story lives. The point is not just "find a valid
 answer", but "prove there is no better one."
+
+The important optimization idea here is range widening:
+
+1. a conflict is first discovered at a point in the search space
+2. user-defined widening logic scans adjacent metadata regions
+3. if the same dependency declaration / incompatibility persists across a
+   contiguous range, the runtime may exclude the whole range instead of only
+   the original point
+4. metadata change points determine the natural boundaries of safe widening and
+   splitting
+
+So:
+
+1. point conflicts are the minimum correctness story
+2. widened exclusions are the practical pruning story
+3. the widening logic itself still belongs to Vixen code, not Rust
 
 ### 7.3 Tier 3: diagnostic fallback
 
@@ -211,6 +256,10 @@ These facts should be:
 
 Heuristic local exclusions used only to speed up Tier 1 must stay clearly
 outside this trusted fact set.
+
+Range-widened exclusions are still trusted only if the widening argument is
+itself justified by metadata or replayable evidence. Otherwise they remain
+heuristic hints and must not be persisted as proven facts.
 
 ## 9. Language-level pressure
 
@@ -257,6 +306,13 @@ The open design question is:
 
 This note does not settle that question.
 
+One useful way to think about the relationship is:
+
+1. branch-local assumptions are the probable semantic primitive
+2. `#[choose]` is plausible surface sugar over those assumptions
+3. neither one should move semver, feature logic, or conflict widening into the
+   runtime
+
 ## 10. What we should not do
 
 We should avoid these traps:
@@ -270,6 +326,14 @@ We should avoid these traps:
 
 The fixpoint is a property of the graph. It should not be explained to users as
 "we just loop until stable."
+
+Likewise, the runtime should not be described as "rerunning a closure until the
+graph stops changing." The intended story is:
+
+1. nodes have keys
+2. joined inputs widen monotonically
+3. wider demands cause the relevant nodes to be re-evaluated
+4. the graph converges by ordinary demand-driven recomputation
 
 ## 11. Research and implementation posture
 
@@ -294,7 +358,119 @@ In short:
 3. the design should not collapse into "just write Cargo in Rust, then maybe
    parallelize later"
 
-## 12. Why this matters
+## 12. Prototype order / MVP path
+
+The architecture above is the destination. The route there still matters.
+
+The intended prototype order is:
+
+1. convergent demand only
+2. structured conflicts
+3. branch-local assumptions
+4. exact search
+5. learned point no-goods
+6. range widening
+7. metadata-aware splitting
+8. parallel frontier work
+
+### 12.1 Convergent demand only
+
+Start with:
+
+1. `#[key]`
+2. `#[join]`
+3. keyed memoization with join-on-collision
+
+This is already enough for domains such as:
+
+1. Go minimal version selection
+2. pure feature unification
+3. NixOS-style option merging
+
+The runtime still knows nothing about Cargo.
+
+### 12.2 Structured conflicts
+
+The next step is not search. It is structured failure.
+
+Resolver code should be able to `fail Conflict { ... }` with domain-specific
+data. The runtime only needs to preserve and replay that value with provenance.
+
+This gives:
+
+1. precise explanations before optimization exists
+2. a later input to no-good learning and widening
+
+### 12.3 Branch-local assumptions
+
+This is the first real search primitive.
+
+The runtime must be able to evaluate the same convergent graph under different
+branch-local assumption contexts without turning those assumptions into global
+joins.
+
+This can exist before any aggressive parallel machinery.
+
+### 12.4 Exact search
+
+Once branch-local assumptions exist, the runtime can:
+
+1. explore a branch
+2. observe success or structured conflict
+3. split into narrower branches
+4. compare complete solutions by the user-defined dominance order
+
+This is already enough for a correct solver, even without no-good learning.
+
+### 12.5 Learned point no-goods
+
+The first learning step should be very conservative:
+
+1. user code widens nothing
+2. each discovered conflict can at least become a point exclusion
+3. proven point exclusions become replayable facts
+
+This validates the justified-fact model before any aggressive widening logic
+appears.
+
+### 12.6 Range widening
+
+Only after point no-goods work should user-defined widening logic arrive.
+
+The key idea is:
+
+1. scan adjacent versions or adjacent metadata regions
+2. detect where the same incompatibility declaration still holds
+3. publish one larger exclusion instead of many point exclusions
+
+This is where the geometry of volumes starts paying off.
+
+### 12.7 Metadata-aware splitting
+
+Once widening exists, the runtime should split only at metadata change points
+rather than at arbitrary version boundaries.
+
+That keeps the search aligned with real declaration changes instead of raw
+version count.
+
+### 12.8 Parallel frontier work
+
+Parallelism is not the semantic core, but it is not an afterthought either.
+
+The language/runtime model should remain parallel-friendly from day one. But
+the most aggressive frontier scheduling, cluster fusion, and squeeze
+optimizations can arrive after:
+
+1. convergent demand
+2. structured conflict
+3. branch assumptions
+4. exact search
+5. learned exclusions
+
+That keeps the implementation staged without redefining the semantics as
+sequential.
+
+## 13. Why this matters
 
 If this works, Vixen is not just "a build language that can run a solver."
 
