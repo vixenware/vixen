@@ -1,0 +1,20 @@
+// Reduced Lua-flavored build sketch for the current resolver/evaluator lane.
+//
+// This is intentionally smaller than `zoo/lua.vx`: it keeps the discovery and
+// observer shape, but only uses surface area that the current implementation
+// already understands end-to-end.
+
+fn build(ws: Path, args: Array[String], env: Map[String, String]) #discover -> Tree (
+  let class = executor_class("default");
+  let cc = discover(class, (host) => host.which("cc"));
+
+  exec [cc, "--version"] where {
+    observer: (proc, vfs) => (
+      if proc.exit_code != 0 (
+        fail `process failed`
+      );
+
+      vfs.subtree @out
+    ),
+  }
+)

@@ -248,6 +248,12 @@ fn cargo_resolve_sketch_parses() {
 }
 
 #[test]
+fn lua_sketch_parses() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
+    assert_file_parses(&path);
+}
+
+#[test]
 fn match_arm_variant_struct_pattern_parses() {
     let parse = parse(
         r#"

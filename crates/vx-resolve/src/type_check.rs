@@ -678,6 +678,10 @@ impl<'a> ExprTyper<'a> {
         };
         let field_name = field_name_tok.text();
 
+        if let Some(property_ty) = builtin_property_ty(&receiver_ty, field_name) {
+            return property_ty;
+        }
+
         // Check builtin type methods/fields (property access without call)
         if let Ty::Builtin(ref builtin) = receiver_ty {
             if let Some(method_sig) = builtin_method(builtin, field_name) {
@@ -1157,6 +1161,21 @@ impl<'a> ExprTyper<'a> {
             }
         }
         Ty::Array(Box::new(element_ty.unwrap_or(Ty::Poison)))
+    }
+}
+
+fn builtin_property_ty(receiver_ty: &Ty, field_name: &str) -> Option<Ty> {
+    match (receiver_ty, field_name) {
+        (Ty::Builtin(vx_types::Builtin::Process), "exit_code") => {
+            Some(Ty::Scalar(vx_types::Scalar::U64))
+        }
+        (Ty::Builtin(vx_types::Builtin::Process), "stdout") => {
+            Some(Ty::Builtin(vx_types::Builtin::Blob))
+        }
+        (Ty::Builtin(vx_types::Builtin::Process), "stderr") => {
+            Some(Ty::Builtin(vx_types::Builtin::Blob))
+        }
+        _ => None,
     }
 }
 

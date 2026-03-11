@@ -1,3 +1,5 @@
+use std::{fs, path::Path};
+
 use vx_parser::{AstNode, SourceFile, parse};
 
 use crate::cap_check::{CapErrorKind, CapSet};
@@ -13,6 +15,12 @@ fn parse_file(src: &str) -> SourceFile {
         parsed.errors()
     );
     SourceFile::cast(parsed.syntax()).unwrap()
+}
+
+fn parse_file_path(path: &Path) -> SourceFile {
+    let source = fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+    parse_file(&source)
 }
 
 #[test]
@@ -818,6 +826,22 @@ fn main() {
     );
 }
 
+#[test]
+fn process_exit_code_field_returns_u64() {
+    let src = r#"
+fn main() {
+    exec(["echo"]) where {
+        observer: (proc, tree) => {
+            proc.exit_code
+        },
+    };
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, "proc.exit_code");
+    assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::U64)));
+}
+
 // r[type.builtin.blob] — blob.utf8() returns String
 #[test]
 fn blob_utf8_returns_string() {
@@ -840,14 +864,37 @@ fn observer_params_typed() {
 fn main() {
     exec(["echo"]) where {
         observer: (proc, tree) => {
-            proc.exit_code()
+            proc.exit_code
         },
     };
 }
 "#;
     let result = type_check(src);
-    let ty = find_expr_type(&result, src, "proc.exit_code()");
+    let ty = find_expr_type(&result, src, "proc.exit_code");
     assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::U64)));
+}
+
+#[test]
+fn lua_simple_sketch_resolves_and_typechecks() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua-simple.vx");
+    let file = parse_file_path(&path);
+
+    let resolution = resolve(&file);
+    assert!(
+        resolution.errors.is_empty(),
+        "resolve errors in {}: {:?}",
+        path.display(),
+        resolution.errors
+    );
+
+    let types = crate::collect_types(&file);
+    let checked = crate::type_check(&file, &resolution, &types);
+    assert!(
+        checked.errors.is_empty(),
+        "type errors in {}: {:?}",
+        path.display(),
+        checked.errors
+    );
 }
 
 // r[type.error.arg_mismatch] — host.read(123) gets a type diagnostic
