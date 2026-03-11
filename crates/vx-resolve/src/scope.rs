@@ -152,7 +152,9 @@ impl ScopeTree {
                 // In module scope, all items are visible regardless of position
                 ScopeKind::Module => {
                     if let Some(def) = scope.definitions.iter().rev().find(|d| d.name == name) {
-                        return Some(def);
+                        if def.kind != DefKind::Binding || def.name_range.start() < offset {
+                            return Some(def);
+                        }
                     }
                 }
                 // In blocks, only bindings defined before the reference are visible
@@ -273,10 +275,14 @@ impl ScopeTreeBuilder {
             self.collect_item_def(module_scope, &item);
         }
 
-        // Now descend into function bodies to build inner scopes
-        for item in file.items() {
-            if let Item::FnDecl(fn_decl) = item {
-                self.build_fn_scope(module_scope, &fn_decl);
+        for stmt in file.statements() {
+            match stmt {
+                Stmt::FnDecl(fn_decl) => self.build_fn_scope(module_scope, &fn_decl),
+                Stmt::StructDecl(_)
+                | Stmt::EnumDecl(_)
+                | Stmt::NewtypeDecl(_)
+                | Stmt::TypeAliasDecl(_) => {}
+                _ => self.visit_stmt(module_scope, &stmt),
             }
         }
     }

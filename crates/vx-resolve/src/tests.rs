@@ -179,6 +179,41 @@ fn callee() {}
 }
 
 #[test]
+fn top_level_let_visible_from_function_body() {
+    let file = parse_file(
+        r#"
+let greeting = "hello"
+
+fn main() {
+    greeting
+}
+"#,
+    );
+    let res = resolve(&file);
+    assert!(res.errors.is_empty(), "errors: {:?}", res.errors);
+
+    let greeting_ref = res.refs.iter().find(|r| r.name == "greeting").unwrap();
+    let def = greeting_ref.target.as_ref().unwrap();
+    assert_eq!(def.kind, DefKind::Binding);
+    assert_eq!(def.name, "greeting");
+}
+
+#[test]
+fn top_level_let_is_not_visible_before_definition() {
+    let file = parse_file(
+        r#"
+let first = second
+let second = "hello"
+"#,
+    );
+    let res = resolve(&file);
+    assert_eq!(res.errors.len(), 1, "errors: {:?}", res.errors);
+    match &res.errors[0] {
+        crate::ResolveError::Unresolved { name, .. } => assert_eq!(name, "second"),
+    }
+}
+
+#[test]
 fn scope_tree_structure() {
     let file = parse_file(
         r#"
