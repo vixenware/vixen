@@ -55,6 +55,13 @@ fn vixen_grammar_store() -> Result<Arc<GrammarStore>, Box<dyn std::error::Error>
     Ok(store)
 }
 
+fn line_order(source: &str, offset: usize) -> i32 {
+    Source::from(source)
+        .get_offset_line(offset)
+        .map(|(_, line, _)| line as i32)
+        .expect("offset should map to a source line")
+}
+
 #[test]
 fn test_sanitize_id_component_replaces_non_identifier_chars() {
     assert_eq!(
@@ -187,6 +194,7 @@ fn ariadne_can_render_vixen_source_with_arborium_color_labels()
         syntax_label_count += 1;
         report = report.with_label(
             Label::new((filename, span.start as usize..span.end as usize))
+                .with_order(line_order(source, span.start as usize))
                 .with_color(AriadneColor::Rgb(fg.r, fg.g, fg.b)),
         );
     }
@@ -197,6 +205,7 @@ fn ariadne_can_render_vixen_source_with_arborium_color_labels()
     report
         .with_label(
             Label::new((filename, semantic_range))
+                .with_order(line_order(source, semantic_start))
                 .with_color(AriadneColor::Red)
                 .with_message("this path does not exist in the current workspace"),
         )
@@ -223,6 +232,7 @@ fn ariadne_can_render_vixen_source_with_arborium_color_labels()
         rendered.contains("resolved path: /workspace/zoo/lua-src"),
         "{rendered}"
     );
+    assert_eq!(rendered.matches("build.vx:").count(), 1, "{rendered}");
 
     Ok(())
 }

@@ -7,6 +7,13 @@ use arborium_theme::theme::builtin;
 use ariadne::{Color, Config, Label, Report, ReportKind, Source};
 use concolor::ColorChoice;
 
+fn line_order(source: &str, offset: usize) -> i32 {
+    Source::from(source)
+        .get_offset_line(offset)
+        .map(|(_, line, _)| line as i32)
+        .expect("offset should map to a source line")
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     concolor::set(ColorChoice::AlwaysAnsi);
 
@@ -52,6 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         report = report.with_label(
             Label::new((filename, span.start as usize..span.end as usize))
+                .with_order(line_order(source, span.start as usize))
                 .with_color(Color::Rgb(fg.r, fg.g, fg.b)),
         );
     }
@@ -59,6 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     report
         .with_label(
             Label::new((filename, semantic_range))
+                .with_order(line_order(source, semantic_start))
                 .with_color(Color::Red)
                 .with_message("this path does not exist in the current workspace"),
         )
