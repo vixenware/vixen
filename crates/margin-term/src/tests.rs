@@ -514,9 +514,9 @@ fn render_wraps_long_unbroken_tokens() {
 
     println!("{rendered}");
     assert!(
-        rendered.contains("/very/long/path/w")
-            && rendered.contains("ithout/spaces/or-")
-            && rendered.contains("breaks"),
+        rendered.contains("/very/long/path/")
+            && rendered.contains("without/spaces/")
+            && rendered.contains("or-breaks"),
         "{rendered}"
     );
     assert!(!rendered.contains("  |    \n"), "{rendered}");

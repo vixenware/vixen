@@ -1019,7 +1019,7 @@ mod tests {
             false,
         )
         .expect("render");
-        let plain = strip_ansi_escapes::strip_str(&strip_osc8_hyperlinks(&rendered));
+        let plain = strip_ansi_escapes::strip_str(strip_osc8_hyperlinks(&rendered));
 
         println!("{rendered}");
         assert_eq!(
