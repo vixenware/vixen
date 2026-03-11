@@ -7,8 +7,6 @@
 mod cap_check;
 pub use cap_check::{CapCheckResult, CapError, CapErrorKind, CapSet, check_capabilities};
 
-pub mod builtins;
-
 mod members;
 pub use members::{
     resolve_member_for_receiver, resolve_namespace_member, resolve_namespace_members,

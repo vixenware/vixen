@@ -20,7 +20,7 @@ pub struct InferVar(pub u32);
 ///
 /// Every type in a Vixen program is represented as a `Ty`. Types are structural
 /// where possible (tuples, functions, optionals) and nominal where the language
-/// requires it (structs, enums, newtypes).
+/// requires it (structs, enums, newtypes, opaque declarations).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Ty {
     /// A scalar type: U64, I64, F64, Bool, String.
@@ -73,32 +73,9 @@ pub enum Ty {
     /// An inference variable — a placeholder the checker fills in.
     Infer(InferVar),
 
-    /// A builtin runtime type (Path, Blob, Tree, etc.) that doesn't come
-    /// from user declarations but exists in the Vixen runtime surface.
-    Builtin(Builtin),
-
     /// A poisoned type — the result of a type error. Propagates silently
     /// so we don't cascade errors.
     Poison,
-}
-
-/// Builtin runtime types that exist in the Vixen runtime surface.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Builtin {
-    /// A filesystem path.
-    Path,
-    /// An opaque binary blob (file contents).
-    Blob,
-    /// A directory tree (build artifact or source tree).
-    Tree,
-    /// A resolved executable path.
-    ExecPath,
-    /// A running or completed process.
-    Process,
-    /// Host introspection handle (for verifier callbacks).
-    Host,
-    /// An executor class descriptor.
-    ExecutorClass,
 }
 
 /// Scalar types built into the language.
@@ -373,7 +350,7 @@ impl Ty {
     pub fn has_infer_vars(&self) -> bool {
         match self {
             Ty::Infer(_) => true,
-            Ty::Scalar(_) | Ty::Unit | Ty::Builtin(_) | Ty::Poison => false,
+            Ty::Scalar(_) | Ty::Unit | Ty::Poison => false,
             Ty::Param(_) => false,
             Ty::Struct(s) => s.type_args.iter().any(Ty::has_infer_vars),
             Ty::Enum(e) => e.type_args.iter().any(Ty::has_infer_vars),
@@ -391,7 +368,7 @@ impl Ty {
     pub fn has_params(&self) -> bool {
         match self {
             Ty::Param(_) => true,
-            Ty::Scalar(_) | Ty::Unit | Ty::Builtin(_) | Ty::Poison | Ty::Infer(_) => false,
+            Ty::Scalar(_) | Ty::Unit | Ty::Poison | Ty::Infer(_) => false,
             Ty::Struct(s) => s.type_args.iter().any(Ty::has_params),
             Ty::Enum(e) => e.type_args.iter().any(Ty::has_params),
             Ty::Newtype(n) => n.type_args.iter().any(Ty::has_params),
@@ -413,7 +390,7 @@ impl Ty {
                 .get(p.index as usize)
                 .cloned()
                 .unwrap_or_else(|| self.clone()),
-            Ty::Scalar(_) | Ty::Unit | Ty::Builtin(_) | Ty::Poison | Ty::Infer(_) => self.clone(),
+            Ty::Scalar(_) | Ty::Unit | Ty::Poison | Ty::Infer(_) => self.clone(),
             Ty::Struct(s) => Ty::Struct(StructTy {
                 id: s.id,
                 type_args: s

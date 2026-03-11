@@ -1,5 +1,5 @@
 use rowan::TextSize;
-use vx_types::{Builtin, Scalar, Ty, TypeEnv};
+use vx_types::{Scalar, Ty, TypeEnv};
 
 use crate::{DefKind, Definition, ProgramScopes, SourceId};
 
@@ -97,12 +97,6 @@ pub fn visible_members_for_receiver(
 
 fn namespace_name_for_receiver(receiver_ty: &Ty, env: &TypeEnv) -> Option<String> {
     match receiver_ty {
-        Ty::Builtin(Builtin::Blob) => Some("Blob".to_string()),
-        Ty::Builtin(Builtin::Tree) => Some("Tree".to_string()),
-        Ty::Builtin(Builtin::Host) => Some("Host".to_string()),
-        Ty::Builtin(Builtin::Path) => Some("Path".to_string()),
-        Ty::Builtin(Builtin::Process) => Some("Process".to_string()),
-        Ty::Builtin(Builtin::ExecutorClass) => Some("ExecutorClass".to_string()),
         Ty::Scalar(Scalar::String) => Some("String".to_string()),
         Ty::Array(_) => Some("Array".to_string()),
         Ty::Map(_, _) => Some("Map".to_string()),
