@@ -474,7 +474,11 @@ fn render_annotation(
 ) {
     let glyphs = glyphs(capabilities.glyph_mode);
     let annotation_style = theme.style_for_annotation_role(annotation.role, annotation.severity);
-    let marker_line = marker_line(annotation.segment, capabilities.glyph_mode);
+    let marker_line = marker_line(
+        annotation.segment,
+        annotation.placement,
+        capabilities.glyph_mode,
+    );
     let colored = colorize(
         marker_line.as_str(),
         annotation_style,
@@ -561,17 +565,20 @@ fn annotations_for_line<'a>(
     renderable
 }
 
-fn marker_line(span: ResolvedSpan, glyph_mode: GlyphMode) -> String {
-    let glyph = match glyph_mode {
-        GlyphMode::Unicode => '─',
-        GlyphMode::Ascii => '^',
+fn marker_line(span: ResolvedSpan, placement: PlacementMode, glyph_mode: GlyphMode) -> String {
+    let (start, fill) = match (placement, glyph_mode) {
+        (PlacementMode::BelowSpan, GlyphMode::Unicode) => ('┬', '─'),
+        (_, GlyphMode::Unicode) => ('─', '─'),
+        (_, GlyphMode::Ascii) => ('^', '^'),
     };
     let width = span.end_column.saturating_sub(span.start_column).max(1);
-    format!(
-        "{}{}",
-        " ".repeat(span.start_column),
-        glyph.to_string().repeat(width)
-    )
+    let mut marker = String::with_capacity(span.start_column + width);
+    marker.push_str(&" ".repeat(span.start_column));
+    marker.push(start);
+    if width > 1 {
+        marker.push_str(&fill.to_string().repeat(width - 1));
+    }
+    marker
 }
 
 fn expand_tabs(text: &str, tab_width: usize) -> String {

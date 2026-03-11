@@ -146,7 +146,7 @@ fn render_below_span_connector_uses_the_label_style() {
 
     println!("{rendered}");
     assert!(rendered.contains("\u{1b}[31m"), "{rendered}");
-    assert!(rendered.contains("───────"), "{rendered}");
+    assert!(rendered.contains("┬──────"), "{rendered}");
     assert!(rendered.contains("\u{1b}[31m╰─\u{1b}[0m"), "{rendered}");
     assert!(!rendered.contains("\u{1b}[90m╰─\u{1b}[0m"), "{rendered}");
 }
