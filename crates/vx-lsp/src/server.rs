@@ -755,146 +755,7 @@ impl LanguageServer for VxLanguageServer {
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let uri = &params.text_document.uri;
 
-        let result = self.with_document(uri, |state| {
-            let root = state.parsed.tree().syntax().clone();
-            let mut hints = Vec::new();
-
-            // Walk all CALL_EXPR nodes in the document
-            for node in root.descendants() {
-                if node.kind() != SyntaxKind::CALL_EXPR {
-                    continue;
-                }
-
-                let call = match vx::CallExpr::cast(node) {
-                    Some(c) => c,
-                    None => continue,
-                };
-                if call
-                    .syntax()
-                    .parent()
-                    .is_some_and(|parent| parent.kind() == SyntaxKind::CALL_EXPR)
-                {
-                    continue;
-                }
-
-                // Get callee — must be a simple name reference
-                let callee = match call.callee() {
-                    Some(vx::Expr::NameRef(nr)) => nr,
-                    _ => continue,
-                };
-                let callee_token = match callee.token() {
-                    Some(t) => t,
-                    None => continue,
-                };
-
-                // Resolve to definition or builtin
-                let callee_range = callee_token.text_range();
-                let callee_name = callee_token.text().to_string();
-                let resolved = state
-                    .resolution
-                    .refs
-                    .iter()
-                    .find(|r| r.ref_range == callee_range);
-                let def = resolved.and_then(|r| r.target.as_ref().ok());
-
-                // Collect parameter names — either from user FnDecl or builtin sig
-                let param_names: Vec<String>;
-                if let Some(d) = def
-                    && d.kind == vx_resolve::DefKind::Function
-                {
-                    let def_token = match root.token_at_offset(d.full_range.start()).right_biased()
-                    {
-                        Some(t) => t,
-                        None => continue,
-                    };
-                    let fn_node = match def_token.parent_ancestors().find_map(FnDecl::cast) {
-                        Some(f) => f,
-                        None => continue,
-                    };
-                    param_names = fn_node
-                        .parameters()
-                        .filter_map(|p| p.name().map(|t| t.text().to_string()))
-                        .collect();
-                } else if let Some(sig) = vx_resolve::builtins::builtin_fn_sig(&callee_name) {
-                    param_names = sig
-                        .positional_params
-                        .iter()
-                        .map(|p| p.name.clone())
-                        .collect();
-                } else {
-                    continue;
-                };
-
-                let args = call.positional_args();
-
-                // Emit hints for positional args that match named parameters
-                for (i, arg) in args.iter().enumerate() {
-                    let param_name = match param_names.get(i) {
-                        Some(n) => n.clone(),
-                        None => break,
-                    };
-
-                    // Skip if the argument is already a simple name matching the parameter
-                    // (e.g., `foo(x)` where param is `x` — hint would be redundant)
-                    if is_same_name_as_param(arg, &param_name) {
-                        continue;
-                    }
-
-                    let pos = state.line_index.position(arg.syntax().text_range().start());
-                    hints.push(InlayHint {
-                        position: Position::new(pos.line, pos.col),
-                        label: InlayHintLabel::String(format!("{param_name}:")),
-                        kind: Some(InlayHintKind::PARAMETER),
-                        text_edits: None,
-                        tooltip: None,
-                        padding_left: None,
-                        padding_right: Some(true),
-                        data: None,
-                    });
-                }
-
-                // Keyword args already have names in the source — no hints needed
-            }
-
-            // Walk all LET_STMT nodes to show inferred binding types
-            for node in root.descendants() {
-                if node.kind() != SyntaxKind::LET_STMT {
-                    continue;
-                }
-                let let_stmt = match vx::LetStmt::cast(node) {
-                    Some(ls) => ls,
-                    None => continue,
-                };
-
-                // Skip if there's already an explicit type annotation
-                if let_stmt.slot_type().is_some() {
-                    continue;
-                }
-
-                let Some(name_tok) = let_stmt.name() else {
-                    continue;
-                };
-
-                // Look up the inferred type for this binding
-                let Some(ty) = state.type_check.binding_types.get(&name_tok.text_range()) else {
-                    continue;
-                };
-
-                let pos = state.line_index.position(name_tok.text_range().end());
-                hints.push(InlayHint {
-                    position: Position::new(pos.line, pos.col),
-                    label: InlayHintLabel::String(format!(": {ty}")),
-                    kind: Some(InlayHintKind::TYPE),
-                    text_edits: None,
-                    tooltip: None,
-                    padding_left: None,
-                    padding_right: None,
-                    data: None,
-                });
-            }
-
-            hints
-        });
+        let result = self.with_document(uri, collect_inlay_hints);
 
         Ok(result)
     }
@@ -2227,6 +2088,146 @@ fn active_call_param(
     }
 }
 
+fn collect_inlay_hints(state: &DocumentState) -> Vec<InlayHint> {
+    let root = state.parsed.tree().syntax().clone();
+    let mut hints = Vec::new();
+
+    // Walk all CALL_EXPR nodes in the document
+    for node in root.descendants() {
+        if node.kind() != SyntaxKind::CALL_EXPR {
+            continue;
+        }
+
+        let call = match vx::CallExpr::cast(node) {
+            Some(c) => c,
+            None => continue,
+        };
+        if call
+            .syntax()
+            .parent()
+            .is_some_and(|parent| parent.kind() == SyntaxKind::CALL_EXPR)
+        {
+            continue;
+        }
+
+        // Get callee — must be a simple name reference
+        let callee = match call.callee() {
+            Some(vx::Expr::NameRef(nr)) => nr,
+            _ => continue,
+        };
+        let callee_token = match callee.token() {
+            Some(t) => t,
+            None => continue,
+        };
+
+        // Resolve to definition or builtin
+        let callee_range = callee_token.text_range();
+        let callee_name = callee_token.text().to_string();
+        let resolved = state
+            .resolution
+            .refs
+            .iter()
+            .find(|r| r.ref_range == callee_range);
+        let def = resolved.and_then(|r| r.target.as_ref().ok());
+
+        // Collect parameter names — either from user FnDecl or builtin sig
+        let param_names: Vec<String>;
+        if let Some(d) = def
+            && d.kind == vx_resolve::DefKind::Function
+        {
+            let def_token = match root.token_at_offset(d.full_range.start()).right_biased() {
+                Some(t) => t,
+                None => continue,
+            };
+            let fn_node = match def_token.parent_ancestors().find_map(FnDecl::cast) {
+                Some(f) => f,
+                None => continue,
+            };
+            param_names = fn_node
+                .parameters()
+                .filter_map(|p| p.name().map(|t| t.text().to_string()))
+                .collect();
+        } else if let Some(sig) = vx_resolve::builtins::builtin_fn_sig(&callee_name) {
+            param_names = sig
+                .positional_params
+                .iter()
+                .map(|p| p.name.clone())
+                .collect();
+        } else {
+            continue;
+        };
+
+        let args = call.positional_args();
+
+        // Emit hints for positional args that match named parameters
+        for (i, arg) in args.iter().enumerate() {
+            let param_name = match param_names.get(i) {
+                Some(n) => n.clone(),
+                None => break,
+            };
+
+            // Skip if the argument is already a simple name matching the parameter
+            // (e.g., `foo(x)` where param is `x` — hint would be redundant)
+            if is_same_name_as_param(arg, &param_name) {
+                continue;
+            }
+
+            let pos = state.line_index.position(inlay_hint_anchor_offset(arg));
+            hints.push(InlayHint {
+                position: Position::new(pos.line, pos.col),
+                label: InlayHintLabel::String(format!("{param_name}:")),
+                kind: Some(InlayHintKind::PARAMETER),
+                text_edits: None,
+                tooltip: None,
+                padding_left: None,
+                padding_right: Some(true),
+                data: None,
+            });
+        }
+
+        // Keyword args already have names in the source — no hints needed
+    }
+
+    // Walk all LET_STMT nodes to show inferred binding types
+    for node in root.descendants() {
+        if node.kind() != SyntaxKind::LET_STMT {
+            continue;
+        }
+        let let_stmt = match vx::LetStmt::cast(node) {
+            Some(ls) => ls,
+            None => continue,
+        };
+
+        // Skip if there's already an explicit type annotation
+        if let_stmt.slot_type().is_some() {
+            continue;
+        }
+
+        let Some(name_tok) = let_stmt.name() else {
+            continue;
+        };
+
+        // Look up the inferred type for this binding
+        let Some(ty) = state.type_check.binding_types.get(&name_tok.text_range()) else {
+            continue;
+        };
+
+        let pos = state.line_index.position(name_tok.text_range().end());
+        hints.push(InlayHint {
+            position: Position::new(pos.line, pos.col),
+            label: InlayHintLabel::String(format!(": {ty}")),
+            kind: Some(InlayHintKind::TYPE),
+            text_edits: None,
+            tooltip: None,
+            padding_left: None,
+            padding_right: None,
+            data: None,
+        });
+    }
+
+    hints
+}
+
 fn is_root_callee_ref(token: &vx::SyntaxToken) -> bool {
     let Some(name_ref) = token.parent().and_then(vx::NameRefExpr::cast) else {
         return false;
@@ -2250,5 +2251,72 @@ fn is_same_name_as_param(arg: &vx::Expr, param_name: &str) -> bool {
     match arg {
         vx::Expr::NameRef(nr) => nr.token().is_some_and(|t| t.text() == param_name),
         _ => false,
+    }
+}
+
+fn inlay_hint_anchor_offset(arg: &vx::Expr) -> rowan::TextSize {
+    let anchor_expr = unwrap_paren_expr(arg.clone());
+    anchor_expr
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .find(|token| !token.kind().is_trivia())
+        .map(|token| token.text_range().start())
+        .unwrap_or_else(|| anchor_expr.syntax().text_range().start())
+}
+
+fn unwrap_paren_expr(expr: vx::Expr) -> vx::Expr {
+    match expr {
+        vx::Expr::Paren(paren) => match paren.expr() {
+            Some(inner) => unwrap_paren_expr(inner),
+            None => vx::Expr::Paren(paren),
+        },
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rowan::TextSize;
+    use tower_lsp::lsp_types::{InlayHintLabel, Position};
+    use vx_parser::LineIndex;
+
+    use super::{DocumentState, collect_inlay_hints};
+
+    fn hint_position(text: &str, needle: &str) -> Position {
+        let byte_offset = text
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing `{needle}`"));
+        let line_index = LineIndex::new(text);
+        let pos = line_index.position(TextSize::new(byte_offset as u32));
+        Position::new(pos.line, pos.col)
+    }
+
+    #[test]
+    fn parameter_hints_anchor_on_effective_argument_tokens() {
+        let text = r#"
+fn discover_like(class: String, probe: Fn(String) -> String) {}
+fn run(args: Array[String]) {}
+fn executor_class(label: String) {}
+
+fn demo(class: String, cc: String) {
+  discover_like(class, (host) => host);
+  run [cc, "--version"];
+  executor_class("default");
+}
+"#;
+
+        let state = DocumentState::new(text.to_string());
+        let hints = collect_inlay_hints(&state)
+            .into_iter()
+            .filter_map(|hint| match hint.label {
+                InlayHintLabel::String(label) => Some((label, hint.position)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(hints.contains(&(String::from("probe:"), hint_position(text, "(host)"))));
+        assert!(hints.contains(&(String::from("args:"), hint_position(text, "[cc"))));
+        assert!(hints.contains(&(String::from("label:"), hint_position(text, "\"default\""))));
     }
 }
