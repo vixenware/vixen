@@ -6,7 +6,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use vx_parser::{self as vx, AstNode, FnDecl, Parsed, SourceFile, SyntaxKind};
-use vx_resolve::{ImportGraph, NameResolution, SourceFileRef, SourceId};
+use vx_resolve::{ImportGraph, NameResolution, SourceFileRef, SourceId, SourceSpan};
 
 pub struct VxLanguageServer {
     client: Client,
@@ -112,15 +112,15 @@ impl DocumentState {
     fn definition_with_origin_at(
         &self,
         offset: rowan::TextSize,
-    ) -> Option<(&vx_resolve::Definition, TextRange)> {
+    ) -> Option<(&vx_resolve::Definition, SourceSpan)> {
         // Check if cursor is on a reference
         if let Some(resolved) = self
             .resolution
             .refs
             .iter()
-            .find(|r| r.ref_range.contains_inclusive(offset))
+            .find(|r| r.span.contains_inclusive(offset))
         {
-            return Some((resolved.target.as_ref().ok()?, resolved.ref_range));
+            return Some((resolved.target.as_ref().ok()?, resolved.span));
         }
 
         // Check if cursor is on a definition site
@@ -129,8 +129,8 @@ impl DocumentState {
             .scopes
             .all_definitions_in(self.current_source)
             .into_iter()
-            .find(|d| d.name_range.contains_inclusive(offset))?;
-        Some((def, def.name_range))
+            .find(|d| d.name_span.contains_inclusive(offset))?;
+        Some((def, def.name_span))
     }
 
     /// Find the definition under the cursor. Works whether the cursor is on
@@ -140,14 +140,14 @@ impl DocumentState {
     }
 
     /// Find all reference ranges that point to a given definition.
-    fn references_to(&self, def: &vx_resolve::Definition) -> Vec<TextRange> {
+    fn references_to(&self, def: &vx_resolve::Definition) -> Vec<SourceSpan> {
         self.resolution
             .refs
             .iter()
             .filter_map(|r| {
                 let target = r.target.as_ref().ok()?;
-                if target.site() == def.site() {
-                    Some(r.ref_range)
+                if target.id == def.id {
+                    Some(r.span)
                 } else {
                     None
                 }
@@ -166,11 +166,11 @@ impl DocumentState {
     /// Extract a declaration snippet for hover display.
     /// Takes the first line of the full declaration range.
     fn declaration_snippet(&self, def: &vx_resolve::Definition) -> String {
-        let Some(doc) = self.source_doc(def.source) else {
+        let Some(doc) = self.source_doc(def.source()) else {
             return String::new();
         };
-        let start = u32::from(def.full_range.start()) as usize;
-        let end = u32::from(def.full_range.end()) as usize;
+        let start = u32::from(def.full_span.start()) as usize;
+        let end = u32::from(def.full_span.end()) as usize;
         let slice = &doc.text[start..end];
         slice
             .lines()
@@ -190,7 +190,7 @@ impl DocumentState {
         self.doc_comment_for(def).or_else(|| {
             self.type_check
                 .closure_param_docs
-                .get(&def.name_range)
+                .get(&def.name_span)
                 .cloned()
         })
     }
@@ -209,12 +209,12 @@ impl DocumentState {
             | vx_resolve::DefKind::Builtin => return None,
         };
 
-        self.source_doc(def.source)?
+        self.source_doc(def.source())?
             .parsed
             .tree()
             .syntax()
             .descendants()
-            .find(|node| node.kind() == expected_kind && node.text_range() == def.full_range)
+            .find(|node| node.kind() == expected_kind && node.text_range() == def.full_span.range)
     }
 
     fn fn_decl_for(&self, def: &vx_resolve::Definition) -> Option<FnDecl> {
@@ -225,42 +225,46 @@ impl DocumentState {
     }
 
     fn inferred_def_type(&self, def: &vx_resolve::Definition) -> Option<vx_types::Ty> {
-        if let Some(ty) = self.type_check.binding_types.get(&def.name_range) {
+        if let Some(ty) = self.type_check.binding_types.get(&def.name_span) {
             return Some(ty.clone());
         }
 
-        if let Some(ty) = self.type_check.closure_param_types.get(&def.name_range) {
+        if let Some(ty) = self.type_check.closure_param_types.get(&def.name_span) {
             return Some(ty.clone());
         }
 
         for resolved_ref in &self.resolution.refs {
             if let Ok(ref target) = resolved_ref.target {
-                if target.site() == def.site() {
-                    if let Some(ty) = self.type_check.expr_types.get(&resolved_ref.ref_range) {
+                if target.id == def.id {
+                    if let Some(ty) = self.type_check.expr_types.get(&resolved_ref.span) {
                         return Some(ty.clone());
                     }
                 }
             }
         }
 
-        self.type_check.expr_types.get(&def.name_range).cloned()
+        self.type_check.expr_types.get(&def.name_span).cloned()
     }
 
     fn to_lsp_range(&self, range: TextRange) -> Range {
-        self.to_lsp_range_in(self.current_source, range)
+        self.to_lsp_range_span(SourceSpan::new(self.current_source, range))
     }
 
-    fn to_lsp_range_in(&self, source: SourceId, range: TextRange) -> Range {
+    fn to_lsp_range_span(&self, span: SourceSpan) -> Range {
         let line_index = self
-            .source_doc(source)
+            .source_doc(span.source)
             .map(|doc| &doc.line_index)
             .unwrap_or(&self.line_index);
-        let start = line_index.position(range.start());
-        let end = line_index.position(range.end());
+        let start = line_index.position(span.range.start());
+        let end = line_index.position(span.range.end());
         Range {
             start: Position::new(start.line, start.col),
             end: Position::new(end.line, end.col),
         }
+    }
+
+    fn current_span(&self, range: TextRange) -> SourceSpan {
+        SourceSpan::new(self.current_source, range)
     }
 }
 
@@ -422,9 +426,9 @@ impl LanguageServer for VxLanguageServer {
                 .resolution
                 .refs
                 .iter()
-                .filter_map(|r| r.target.as_ref().ok().map(|def| (r.ref_range, def)))
+                .filter_map(|r| r.target.as_ref().ok().map(|def| (r.span.range, def)))
                 .filter(|(_, def)| {
-                    def.kind == vx_resolve::DefKind::Builtin || def.source != state.current_source
+                    def.kind == vx_resolve::DefKind::Builtin || def.source() != state.current_source
                 })
                 .map(|(range, _)| range)
                 .collect();
@@ -456,13 +460,13 @@ impl LanguageServer for VxLanguageServer {
                 .resolution
                 .refs
                 .iter()
-                .find(|r| r.ref_range.contains_inclusive(offset))
+                .find(|r| r.span.contains_inclusive(offset))
             {
                 let def = resolved.target.as_ref().ok()?;
-                let range = state.to_lsp_range_in(def.source, def.name_range);
+                let range = state.to_lsp_range_span(def.name_span);
                 return Some(GotoDefinitionResponse::Scalar(Location {
                     uri: state
-                        .uri_for_source(def.source)
+                        .uri_for_source(def.source())
                         .unwrap_or_else(|| uri.clone()),
                     range,
                 }));
@@ -479,7 +483,7 @@ impl LanguageServer for VxLanguageServer {
                             let receiver_ty = state
                                 .type_check
                                 .expr_types
-                                .get(&receiver_expr.syntax().text_range());
+                                .get(&state.current_span(receiver_expr.syntax().text_range()));
                             if let Some(vx_types::Ty::Struct(struct_ty)) = receiver_ty {
                                 if let vx_types::TypeDef::Struct(sdef) =
                                     &state.types.env[struct_ty.id]
@@ -520,18 +524,18 @@ impl LanguageServer for VxLanguageServer {
             let mut locations: Vec<Location> = state
                 .references_to(def)
                 .into_iter()
-                .map(|range| Location {
+                .map(|span| Location {
                     uri: uri.clone(),
-                    range: state.to_lsp_range(range),
+                    range: state.to_lsp_range_span(span),
                 })
                 .collect();
 
             if include_declaration {
                 locations.push(Location {
                     uri: state
-                        .uri_for_source(def.source)
+                        .uri_for_source(def.source())
                         .unwrap_or_else(|| uri.clone()),
-                    range: state.to_lsp_range_in(def.source, def.name_range),
+                    range: state.to_lsp_range_span(def.name_span),
                 });
             }
 
@@ -555,11 +559,11 @@ impl LanguageServer for VxLanguageServer {
             })?;
 
             let def = state.definition_at(offset)?;
-            if def.source != state.current_source {
+            if def.source() != state.current_source {
                 return None;
             }
             Some(PrepareRenameResponse::RangeWithPlaceholder {
-                range: state.to_lsp_range_in(def.source, def.name_range),
+                range: state.to_lsp_range_span(def.name_span),
                 placeholder: def.name.clone(),
             })
         });
@@ -579,7 +583,7 @@ impl LanguageServer for VxLanguageServer {
             })?;
 
             let def = state.definition_at(offset)?;
-            if def.source != state.current_source {
+            if def.source() != state.current_source {
                 return None;
             }
 
@@ -587,15 +591,15 @@ impl LanguageServer for VxLanguageServer {
             let mut edits: Vec<TextEdit> = state
                 .references_to(def)
                 .into_iter()
-                .map(|range| TextEdit {
-                    range: state.to_lsp_range(range),
+                .map(|span| TextEdit {
+                    range: state.to_lsp_range_span(span),
                     new_text: new_name.clone(),
                 })
                 .collect();
 
             // Also rename the definition itself
             edits.push(TextEdit {
-                range: state.to_lsp_range_in(def.source, def.name_range),
+                range: state.to_lsp_range_span(def.name_span),
                 new_text: new_name.clone(),
             });
 
@@ -662,7 +666,7 @@ impl LanguageServer for VxLanguageServer {
                                 kind: MarkupKind::Markdown,
                                 value: markdown,
                             }),
-                            range: Some(state.to_lsp_range(hover_range)),
+                            range: Some(state.to_lsp_range_span(hover_range)),
                         });
                     }
                 }
@@ -719,7 +723,7 @@ impl LanguageServer for VxLanguageServer {
                         kind: MarkupKind::Markdown,
                         value: markdown,
                     }),
-                    range: Some(state.to_lsp_range(hover_range)),
+                    range: Some(state.to_lsp_range_span(hover_range)),
                 });
             }
 
@@ -735,7 +739,7 @@ impl LanguageServer for VxLanguageServer {
                             let receiver_ty = state
                                 .type_check
                                 .expr_types
-                                .get(&receiver_expr.syntax().text_range());
+                                .get(&state.current_span(receiver_expr.syntax().text_range()));
                             if let Some(vx_types::Ty::Builtin(builtin)) = receiver_ty {
                                 let method_name = field_name_tok.text();
                                 if let Some(method_sig) =
@@ -794,7 +798,11 @@ impl LanguageServer for VxLanguageServer {
             let mut node = token.parent();
             while let Some(n) = node {
                 if let Some(expr) = vx::Expr::cast(n.clone()) {
-                    if let Some(ty) = state.type_check.expr_types.get(&expr.syntax().text_range()) {
+                    if let Some(ty) = state
+                        .type_check
+                        .expr_types
+                        .get(&state.current_span(expr.syntax().text_range()))
+                    {
                         let display = ty.display_with_env(&state.types.env);
                         let markdown = format!("```vx\n{display}\n```");
                         return Some(Hover {
@@ -929,7 +937,7 @@ impl LanguageServer for VxLanguageServer {
                 let receiver_ty = state
                     .type_check
                     .expr_types
-                    .get(&receiver_expr.syntax().text_range());
+                    .get(&state.current_span(receiver_expr.syntax().text_range()));
                 if let Some(vx_types::Ty::Builtin(builtin)) = receiver_ty {
                     if let Some(method_sig) =
                         vx_resolve::builtins::builtin_method(builtin, &method_name)
@@ -973,7 +981,7 @@ impl LanguageServer for VxLanguageServer {
                     .resolution
                     .refs
                     .iter()
-                    .find(|r| r.ref_range == callee_range);
+                    .find(|r| r.span == state.current_span(callee_range));
                 let def = resolved.and_then(|r| r.target.as_ref().ok());
 
                 if let Some(def) = def
@@ -1220,16 +1228,16 @@ impl LanguageServer for VxLanguageServer {
             let def = state.definition_at(offset)?;
 
             let mut highlights = Vec::new();
-            if def.source == state.current_source {
+            if def.source() == state.current_source {
                 highlights.push(DocumentHighlight {
-                    range: state.to_lsp_range_in(def.source, def.name_range),
+                    range: state.to_lsp_range_span(def.name_span),
                     kind: Some(DocumentHighlightKind::WRITE),
                 });
             }
 
-            for ref_range in state.references_to(def) {
+            for ref_span in state.references_to(def) {
                 highlights.push(DocumentHighlight {
-                    range: state.to_lsp_range(ref_range),
+                    range: state.to_lsp_range_span(ref_span),
                     kind: Some(DocumentHighlightKind::READ),
                 });
             }
@@ -1312,20 +1320,22 @@ impl LanguageServer for VxLanguageServer {
                     r.target
                         .as_ref()
                         .ok()
-                        .is_some_and(|d| d.site() == target_def.site())
+                        .is_some_and(|d| d.id == target_def.id)
                 })
                 .filter(|r| {
                     // Only include refs that are the root callee of an application chain.
-                    let token = root.token_at_offset(r.ref_range.start()).right_biased();
+                    let token = root.token_at_offset(r.span.start()).right_biased();
                     token.is_some_and(|t| is_root_callee_ref(&t))
                 })
                 .collect();
 
             // Group by enclosing function
-            let mut by_caller: HashMap<rowan::TextRange, (vx_resolve::Definition, Vec<TextRange>)> =
-                HashMap::new();
+            let mut by_caller: HashMap<
+                vx_resolve::DefId,
+                (vx_resolve::Definition, Vec<TextRange>),
+            > = HashMap::new();
             for r in &call_refs {
-                let token = root.token_at_offset(r.ref_range.start()).right_biased()?;
+                let token = root.token_at_offset(r.span.start()).right_biased()?;
                 // Walk up to find the enclosing FN_DECL
                 let fn_node = token.parent_ancestors().find_map(FnDecl::cast)?;
                 let caller_name_token = fn_node.name()?;
@@ -1337,13 +1347,13 @@ impl LanguageServer for VxLanguageServer {
                     .scopes
                     .all_definitions_in(state.current_source)
                     .into_iter()
-                    .find(|d| d.name_range == caller_name_range)?;
+                    .find(|d| d.name_span.range == caller_name_range)?;
 
                 by_caller
-                    .entry(caller_def.site().range)
+                    .entry(caller_def.id)
                     .or_insert_with(|| (caller_def.clone(), Vec::new()))
                     .1
-                    .push(r.ref_range);
+                    .push(r.span.range);
             }
 
             let calls: Vec<_> = by_caller
@@ -1413,7 +1423,7 @@ impl LanguageServer for VxLanguageServer {
                     .resolution
                     .refs
                     .iter()
-                    .find(|r| r.ref_range == callee_range)?;
+                    .find(|r| r.span == state.current_span(callee_range))?;
                 let def = resolved.target.as_ref().ok()?;
                 if def.kind != vx_resolve::DefKind::Function {
                     continue;
@@ -1471,9 +1481,9 @@ impl LanguageServer for VxLanguageServer {
                         deprecated: None,
                         location: Location {
                             uri: state
-                                .uri_for_source(def.source)
+                                .uri_for_source(def.source())
                                 .unwrap_or_else(|| uri.clone()),
-                            range: state.to_lsp_range_in(def.source, def.name_range),
+                            range: state.to_lsp_range_span(def.name_span),
                         },
                         container_name: None,
                     });
@@ -1498,13 +1508,13 @@ impl LanguageServer for VxLanguageServer {
             })?;
 
             let def = state.definition_at(offset)?;
-            if def.source != state.current_source {
+            if def.source() != state.current_source {
                 return None;
             }
 
-            let mut ranges = vec![state.to_lsp_range_in(def.source, def.name_range)];
-            for ref_range in state.references_to(def) {
-                ranges.push(state.to_lsp_range(ref_range));
+            let mut ranges = vec![state.to_lsp_range_span(def.name_span)];
+            for ref_span in state.references_to(def) {
+                ranges.push(state.to_lsp_range_span(ref_span));
             }
 
             Some(LinkedEditingRanges {
@@ -1535,9 +1545,9 @@ impl VxLanguageServer {
         // Unresolved name diagnostics from resolution
         for err in &state.resolution.errors {
             match err {
-                vx_resolve::ResolveError::Unresolved { name, range } => {
+                vx_resolve::ResolveError::Unresolved { name, span } => {
                     diagnostics.push(Diagnostic {
-                        range: state.to_lsp_range(*range),
+                        range: state.to_lsp_range_span(*span),
                         severity: Some(DiagnosticSeverity::ERROR),
                         source: Some("vx-resolve".to_string()),
                         message: format!("unresolved name `{name}`"),
@@ -1603,7 +1613,7 @@ impl VxLanguageServer {
                 }
                 if !referenced.contains(&def.site()) {
                     diagnostics.push(Diagnostic {
-                        range: state.to_lsp_range_in(def.source, def.name_range),
+                        range: state.to_lsp_range_span(def.name_span),
                         severity: Some(DiagnosticSeverity::HINT),
                         source: Some("vx-lint".to_string()),
                         message: format!(
@@ -1815,10 +1825,10 @@ fn make_call_hierarchy_item(
         tags: None,
         detail: None,
         uri: state
-            .uri_for_source(def.source)
+            .uri_for_source(def.source())
             .unwrap_or_else(|| uri.clone()),
-        range: state.to_lsp_range_in(def.source, def.full_range),
-        selection_range: state.to_lsp_range_in(def.source, def.name_range),
+        range: state.to_lsp_range_span(def.full_span),
+        selection_range: state.to_lsp_range_span(def.name_span),
         data: None,
     }
 }
@@ -1928,7 +1938,7 @@ fn dot_completions(
                 .resolution
                 .refs
                 .iter()
-                .find(|r| r.ref_range == name_range)?;
+                .find(|r| r.span == state.current_span(name_range))?;
             let def = resolved.target.as_ref().ok()?;
 
             // If it's an enum, offer variants
@@ -1982,7 +1992,11 @@ fn dot_completions(
         _ => {
             // For any other expression, try the type checker's expr_types
             let expr_range = receiver_expr.syntax().text_range();
-            if let Some(ty) = state.type_check.expr_types.get(&expr_range) {
+            if let Some(ty) = state
+                .type_check
+                .expr_types
+                .get(&state.current_span(expr_range))
+            {
                 return completions_for_type(ty, state);
             }
             None
@@ -2274,7 +2288,7 @@ fn collect_inlay_hints(state: &DocumentState) -> Vec<InlayHint> {
             .resolution
             .refs
             .iter()
-            .find(|r| r.ref_range == callee_range);
+            .find(|r| r.span == state.current_span(callee_range));
         let def = resolved.and_then(|r| r.target.as_ref().ok());
 
         // Collect parameter names — either from user FnDecl or builtin sig
@@ -2351,7 +2365,11 @@ fn collect_inlay_hints(state: &DocumentState) -> Vec<InlayHint> {
         };
 
         // Look up the inferred type for this binding
-        let Some(ty) = state.type_check.binding_types.get(&name_tok.text_range()) else {
+        let Some(ty) = state
+            .type_check
+            .binding_types
+            .get(&state.current_span(name_tok.text_range()))
+        else {
             continue;
         };
 
@@ -2502,11 +2520,11 @@ fn demo() {
 
         assert_eq!(def.name, "class");
         assert_eq!(
-            state.to_lsp_range(origin_range),
+            state.to_lsp_range_span(origin_range),
             text_range(text, "class);", 5)
         );
         assert_eq!(
-            state.to_lsp_range(def.name_range),
+            state.to_lsp_range_span(def.name_span),
             text_range(text, "class:", 5)
         );
     }
@@ -2614,7 +2632,7 @@ fn demo() {
         let def = state.definition_at(offset).unwrap();
 
         assert_eq!(def.name, "executor_class");
-        assert_ne!(def.source, state.current_source);
+        assert_ne!(def.source(), state.current_source);
         assert_eq!(def.kind, vx_resolve::DefKind::Function);
         assert_eq!(
             state.declaration_snippet(def),
@@ -2625,10 +2643,13 @@ fn demo() {
             Some("Construct an executor class selector value.")
         );
 
-        let uri = state.uri_for_source(def.source).unwrap();
+        let uri = state.uri_for_source(def.source()).unwrap();
+        let disk_path = uri
+            .to_file_path()
+            .unwrap_or_else(|_| panic!("expected file uri, got {uri}"));
         assert!(
-            uri.path().ends_with("/crates/vx-stdlib/std/build.vx"),
-            "expected stdlib build.vx uri, got {uri}"
+            disk_path == vx_resolve::source_disk_path("crates/vx-stdlib/std/build.vx"),
+            "expected stdlib build.vx uri to point at real file, got {uri}"
         );
     }
 

@@ -10,14 +10,16 @@ pub use cap_check::{CapCheckResult, CapError, CapErrorKind, CapSet, check_capabi
 pub mod builtins;
 
 mod stdlib;
-pub use stdlib::{ImportGraph, SourceFileRef, SourceId, source_disk_path, stdlib_sources};
+pub use stdlib::{
+    ImportGraph, SourceFileRef, SourceId, SourceSpan, source_disk_path, stdlib_sources,
+};
 
 mod resolve;
 pub use resolve::{NameResolution, ResolveError, resolve, resolve_in_program};
 
 mod scope;
 pub use scope::{
-    DefKind, DefSite, Definition, ProgramScopes, ScopeId, ScopeKind, ScopeTree,
+    DefId, DefKind, DefSite, Definition, ProgramScopes, ScopeId, ScopeKind, ScopeTree,
     top_level_definitions,
 };
 

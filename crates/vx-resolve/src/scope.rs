@@ -15,7 +15,7 @@ use vx_parser::{
     Stmt, SyntaxKind, SyntaxNode,
 };
 
-use crate::{ImportGraph, SourceFileRef, SourceId};
+use crate::{ImportGraph, SourceFileRef, SourceId, SourceSpan};
 
 /// Identifies a scope in the scope tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -69,35 +69,38 @@ pub enum DefKind {
     Builtin,
 }
 
+pub type DefSite = SourceSpan;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DefSite {
-    pub source: SourceId,
-    pub range: TextRange,
+pub enum DefId {
+    Source { source: SourceId, local: u32 },
+    Synthetic(SourceSpan),
 }
 
 /// A name definition in a scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Definition {
+    /// Stable identity for this definition.
+    pub id: DefId,
     /// The name being defined.
     pub name: String,
     /// What kind of definition this is.
     pub kind: DefKind,
-    /// Which source file owns this definition.
-    pub source: SourceId,
     /// Text range of the name token (for go-to-definition).
-    pub name_range: TextRange,
+    pub name_span: SourceSpan,
     /// Text range of the entire declaration (for highlight).
-    pub full_range: TextRange,
+    pub full_span: SourceSpan,
     /// The scope this definition belongs to.
     pub scope: ScopeId,
 }
 
 impl Definition {
+    pub fn source(&self) -> SourceId {
+        self.name_span.source
+    }
+
     pub fn site(&self) -> DefSite {
-        DefSite {
-            source: self.source,
-            range: self.name_range,
-        }
+        self.name_span
     }
 }
 
@@ -136,6 +139,7 @@ impl ScopeTree {
         let mut builder = ScopeTreeBuilder {
             scopes: Vec::new(),
             source: source.id,
+            next_def_id: 0,
         };
         builder.build_module(&source.file);
         ScopeTree {
@@ -189,7 +193,7 @@ impl ScopeTree {
                 // In module scope, all items are visible regardless of position
                 ScopeKind::Module => {
                     if let Some(def) = scope.definitions.iter().rev().find(|d| d.name == name) {
-                        if def.kind != DefKind::Binding || def.name_range.start() < offset {
+                        if def.kind != DefKind::Binding || def.name_span.range.start() < offset {
                             return Some(def);
                         }
                     }
@@ -200,7 +204,7 @@ impl ScopeTree {
                         .definitions
                         .iter()
                         .rev()
-                        .find(|d| d.name == name && d.name_range.start() < offset)
+                        .find(|d| d.name == name && d.name_span.range.start() < offset)
                     {
                         return Some(def);
                     }
@@ -255,7 +259,7 @@ impl ScopeTree {
             let scope = &self.scopes[id.index()];
             for def in scope.definitions.iter().rev() {
                 // In blocks, only show defs before the cursor
-                if scope.kind == ScopeKind::Block && def.name_range.start() >= offset {
+                if scope.kind == ScopeKind::Block && def.name_span.range.start() >= offset {
                     continue;
                 }
                 // First occurrence wins (shadowing)
@@ -397,6 +401,7 @@ impl ProgramScopes {
 struct ScopeTreeBuilder {
     scopes: Vec<Scope>,
     source: SourceId,
+    next_def_id: u32,
 }
 
 impl ScopeTreeBuilder {
@@ -514,17 +519,35 @@ impl ScopeTreeBuilder {
         name_range: TextRange,
         full_range: TextRange,
     ) {
-        self.add_def(
-            scope,
-            Definition {
-                name,
-                kind,
+        let def = self.named_definition(scope, name, kind, name_range, full_range);
+        self.add_def(scope, def);
+    }
+
+    fn alloc_def_id(&mut self) -> u32 {
+        let id = self.next_def_id;
+        self.next_def_id += 1;
+        id
+    }
+
+    fn named_definition(
+        &mut self,
+        scope: ScopeId,
+        name: String,
+        kind: DefKind,
+        name_range: TextRange,
+        full_range: TextRange,
+    ) -> Definition {
+        Definition {
+            id: DefId::Source {
                 source: self.source,
-                name_range,
-                full_range,
-                scope,
+                local: self.alloc_def_id(),
             },
-        );
+            name,
+            kind,
+            name_span: SourceSpan::new(self.source, name_range),
+            full_span: SourceSpan::new(self.source, full_range),
+            scope,
+        }
     }
 
     // r[decl.fn]
@@ -538,34 +561,28 @@ impl ScopeTreeBuilder {
         // r[decl.fn.destructure] — parameters introduce bindings
         for param in fn_decl.parameters() {
             if let Some(name_tok) = param.name() {
-                self.add_def(
+                let def = self.named_definition(
                     fn_scope,
-                    Definition {
-                        name: name_tok.text().to_string(),
-                        kind: DefKind::Parameter,
-                        source: self.source,
-                        name_range: name_tok.text_range(),
-                        full_range: param.syntax().text_range(),
-                        scope: fn_scope,
-                    },
+                    name_tok.text().to_string(),
+                    DefKind::Parameter,
+                    name_tok.text_range(),
+                    param.syntax().text_range(),
                 );
+                self.add_def(fn_scope, def);
             }
         }
 
         // r[decl.fn.keyword-args] — keyword parameters
         for kw_param in fn_decl.keyword_parameters() {
             if let Some(name_tok) = kw_param.name() {
-                self.add_def(
+                let def = self.named_definition(
                     fn_scope,
-                    Definition {
-                        name: name_tok.text().to_string(),
-                        kind: DefKind::Parameter,
-                        source: self.source,
-                        name_range: name_tok.text_range(),
-                        full_range: kw_param.syntax().text_range(),
-                        scope: fn_scope,
-                    },
+                    name_tok.text().to_string(),
+                    DefKind::Parameter,
+                    name_tok.text_range(),
+                    kw_param.syntax().text_range(),
                 );
+                self.add_def(fn_scope, def);
             }
         }
 
@@ -731,17 +748,14 @@ impl ScopeTreeBuilder {
         // Closure parameters
         for param in closure.parameters() {
             if let Some(name_tok) = param.name() {
-                self.add_def(
+                let def = self.named_definition(
                     closure_scope,
-                    Definition {
-                        name: name_tok.text().to_string(),
-                        kind: DefKind::Parameter,
-                        source: self.source,
-                        name_range: name_tok.text_range(),
-                        full_range: param.syntax().text_range(),
-                        scope: closure_scope,
-                    },
+                    name_tok.text().to_string(),
+                    DefKind::Parameter,
+                    name_tok.text_range(),
+                    param.syntax().text_range(),
                 );
+                self.add_def(closure_scope, def);
             }
         }
 
@@ -792,17 +806,14 @@ impl ScopeTreeBuilder {
         if let Some(name_tok) = let_stmt.name()
             && name_tok.kind() != SyntaxKind::UNDERSCORE
         {
-            self.add_def(
+            let def = self.named_definition(
                 scope,
-                Definition {
-                    name: name_tok.text().to_string(),
-                    kind: DefKind::Binding,
-                    source: self.source,
-                    name_range: name_tok.text_range(),
-                    full_range: syntax.text_range(),
-                    scope,
-                },
+                name_tok.text().to_string(),
+                DefKind::Binding,
+                name_tok.text_range(),
+                syntax.text_range(),
             );
+            self.add_def(scope, def);
         }
     }
 
@@ -812,17 +823,14 @@ impl ScopeTreeBuilder {
                 if let Some(name_tok) = bp.name()
                     && name_tok.kind() != SyntaxKind::UNDERSCORE
                 {
-                    self.add_def(
+                    let def = self.named_definition(
                         scope,
-                        Definition {
-                            name: name_tok.text().to_string(),
-                            kind: DefKind::Binding,
-                            source: self.source,
-                            name_range: name_tok.text_range(),
-                            full_range: bp.syntax().text_range(),
-                            scope,
-                        },
+                        name_tok.text().to_string(),
+                        DefKind::Binding,
+                        name_tok.text_range(),
+                        bp.syntax().text_range(),
                     );
+                    self.add_def(scope, def);
                 }
             }
             Pattern::Tuple(tp) => {
@@ -836,17 +844,14 @@ impl ScopeTreeBuilder {
                         self.collect_pattern_bindings(scope, &sub_pat);
                     } else if let Some(name_tok) = field.name() {
                         // Shorthand `{ field }` binds `field`
-                        self.add_def(
+                        let def = self.named_definition(
                             scope,
-                            Definition {
-                                name: name_tok.text().to_string(),
-                                kind: DefKind::Binding,
-                                source: self.source,
-                                name_range: name_tok.text_range(),
-                                full_range: field.syntax().text_range(),
-                                scope,
-                            },
+                            name_tok.text().to_string(),
+                            DefKind::Binding,
+                            name_tok.text_range(),
+                            field.syntax().text_range(),
                         );
+                        self.add_def(scope, def);
                     }
                 }
             }
@@ -857,17 +862,14 @@ impl ScopeTreeBuilder {
             }
             Pattern::ArrayRest(rp) => {
                 if let Some(name_tok) = rp.name() {
-                    self.add_def(
+                    let def = self.named_definition(
                         scope,
-                        Definition {
-                            name: name_tok.text().to_string(),
-                            kind: DefKind::Binding,
-                            source: self.source,
-                            name_range: name_tok.text_range(),
-                            full_range: rp.syntax().text_range(),
-                            scope,
-                        },
+                        name_tok.text().to_string(),
+                        DefKind::Binding,
+                        name_tok.text_range(),
+                        rp.syntax().text_range(),
                     );
+                    self.add_def(scope, def);
                 }
             }
             Pattern::Variant(vp) => {
@@ -876,34 +878,28 @@ impl ScopeTreeBuilder {
                         if let Some(sub_pat) = field.pattern() {
                             self.collect_pattern_bindings(scope, &sub_pat);
                         } else if let Some(name_tok) = field.name() {
-                            self.add_def(
+                            let def = self.named_definition(
                                 scope,
-                                Definition {
-                                    name: name_tok.text().to_string(),
-                                    kind: DefKind::Binding,
-                                    source: self.source,
-                                    name_range: name_tok.text_range(),
-                                    full_range: field.syntax().text_range(),
-                                    scope,
-                                },
+                                name_tok.text().to_string(),
+                                DefKind::Binding,
+                                name_tok.text_range(),
+                                field.syntax().text_range(),
                             );
+                            self.add_def(scope, def);
                         }
                     }
                 }
             }
             Pattern::At(at) => {
                 if let Some(name_tok) = at.binding_name() {
-                    self.add_def(
+                    let def = self.named_definition(
                         scope,
-                        Definition {
-                            name: name_tok.text().to_string(),
-                            kind: DefKind::Binding,
-                            source: self.source,
-                            name_range: name_tok.text_range(),
-                            full_range: at.syntax().text_range(),
-                            scope,
-                        },
+                        name_tok.text().to_string(),
+                        DefKind::Binding,
+                        name_tok.text_range(),
+                        at.syntax().text_range(),
                     );
+                    self.add_def(scope, def);
                 }
                 if let Some(sub) = at.pattern() {
                     self.collect_pattern_bindings(scope, &sub);

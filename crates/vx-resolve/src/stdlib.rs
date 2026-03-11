@@ -3,10 +3,35 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use rowan::{TextRange, TextSize};
 use vx_parser::SourceFile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SourceSpan {
+    pub source: SourceId,
+    pub range: TextRange,
+}
+
+impl SourceSpan {
+    pub fn new(source: SourceId, range: TextRange) -> Self {
+        Self { source, range }
+    }
+
+    pub fn start(self) -> TextSize {
+        self.range.start()
+    }
+
+    pub fn end(self) -> TextSize {
+        self.range.end()
+    }
+
+    pub fn contains_inclusive(self, offset: TextSize) -> bool {
+        self.range.contains_inclusive(offset)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SourceFileRef {
@@ -58,5 +83,8 @@ pub fn source_disk_path(relative: &str) -> PathBuf {
 }
 
 fn workspace_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .unwrap()
 }

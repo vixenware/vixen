@@ -14,6 +14,7 @@ use vx_parser::{
 };
 use vx_types::{FnSig, Ty};
 
+use crate::SourceSpan;
 use crate::builtins::{
     builtin_fn_sig, builtin_fn_sigs, builtin_generic_method, builtin_method, builtin_scalar_method,
     builtin_static_method_sigs, is_builtin_namespace,
@@ -49,13 +50,13 @@ pub enum TypeErrorKind {
 #[derive(Debug)]
 pub struct TypeCheckResult {
     /// Map from expression text ranges to their inferred types.
-    pub expr_types: HashMap<TextRange, Ty>,
+    pub expr_types: HashMap<SourceSpan, Ty>,
     /// Types for closure parameters inferred from callback slots.
-    pub closure_param_types: HashMap<TextRange, Ty>,
+    pub closure_param_types: HashMap<SourceSpan, Ty>,
     /// Documentation inherited from callback slots for closure parameters.
-    pub closure_param_docs: HashMap<TextRange, String>,
+    pub closure_param_docs: HashMap<SourceSpan, String>,
     /// Map from binding name ranges to their inferred types.
-    pub binding_types: HashMap<TextRange, Ty>,
+    pub binding_types: HashMap<SourceSpan, Ty>,
     /// Type errors found during checking.
     pub errors: Vec<TypeError>,
 }
@@ -96,18 +97,22 @@ pub fn type_check(
 struct ExprTyper<'a> {
     resolution: &'a NameResolution,
     types: &'a TypeCollection,
-    expr_types: HashMap<TextRange, Ty>,
+    expr_types: HashMap<SourceSpan, Ty>,
     errors: Vec<TypeError>,
     /// Types for closure parameters, populated when we see a closure in a
     /// known callback slot (e.g., exec observer's proc and tree params).
-    closure_param_types: HashMap<TextRange, Ty>,
+    closure_param_types: HashMap<SourceSpan, Ty>,
     /// Documentation for closure parameters inherited from the callback slot.
-    closure_param_docs: HashMap<TextRange, String>,
+    closure_param_docs: HashMap<SourceSpan, String>,
     /// Types for let bindings, keyed by the binding's name_range.
-    binding_types: HashMap<TextRange, Ty>,
+    binding_types: HashMap<SourceSpan, Ty>,
 }
 
 impl<'a> ExprTyper<'a> {
+    fn span(&self, range: TextRange) -> SourceSpan {
+        SourceSpan::new(self.resolution.source, range)
+    }
+
     fn push_error(&mut self, error: TypeError) {
         if !self.errors.contains(&error) {
             self.errors.push(error);
@@ -147,12 +152,14 @@ impl<'a> ExprTyper<'a> {
                     let ty = annotation_ty.unwrap_or(inferred_ty);
                     if !ty.is_poison() {
                         if let Some(name_tok) = let_stmt.name() {
-                            self.binding_types.insert(name_tok.text_range(), ty);
+                            self.binding_types
+                                .insert(self.span(name_tok.text_range()), ty);
                         }
                     }
                 } else if let Some(ty) = annotation_ty {
                     if let Some(name_tok) = let_stmt.name() {
-                        self.binding_types.insert(name_tok.text_range(), ty);
+                        self.binding_types
+                            .insert(self.span(name_tok.text_range()), ty);
                     }
                 }
             }
@@ -220,7 +227,7 @@ impl<'a> ExprTyper<'a> {
 
         if !ty.is_poison() {
             self.expr_types
-                .insert(expr.syntax().text_range(), ty.clone());
+                .insert(self.span(expr.syntax().text_range()), ty.clone());
         }
         ty
     }
@@ -242,19 +249,15 @@ impl<'a> ExprTyper<'a> {
         let Some(token) = name_ref.token() else {
             return Ty::Poison;
         };
-        let ref_range = token.text_range();
+        let ref_span = self.span(token.text_range());
 
         // Look up in name resolution
-        let resolved = self
-            .resolution
-            .refs
-            .iter()
-            .find(|r| r.ref_range == ref_range);
+        let resolved = self.resolution.refs.iter().find(|r| r.span == ref_span);
 
         if let Some(resolved) = resolved {
             if let Ok(def) = &resolved.target {
                 // Check if this definition is a closure parameter with a known type
-                if let Some(ty) = self.closure_param_types.get(&def.name_range) {
+                if let Some(ty) = self.closure_param_types.get(&def.name_span) {
                     return ty.clone();
                 }
                 return self.type_of_def(def);
@@ -274,7 +277,7 @@ impl<'a> ExprTyper<'a> {
         match def.kind {
             DefKind::Parameter => {
                 // Check if this parameter has a type from closure_param_types
-                if let Some(ty) = self.closure_param_types.get(&def.name_range) {
+                if let Some(ty) = self.closure_param_types.get(&def.name_span) {
                     return ty.clone();
                 }
                 // Check function parameter types from FnSig
@@ -300,7 +303,7 @@ impl<'a> ExprTyper<'a> {
             }
             DefKind::Binding => {
                 // Look up the type recorded when the let initializer was typed
-                if let Some(ty) = self.binding_types.get(&def.name_range) {
+                if let Some(ty) = self.binding_types.get(&def.name_span) {
                     return ty.clone();
                 }
                 Ty::Poison
@@ -313,10 +316,10 @@ impl<'a> ExprTyper<'a> {
         // Walk up the scope chain from the parameter's scope to find its
         // enclosing function scope, then look up the FnSig by matching the
         // function's name range inside the scope's text range.
-        let Some(scope_range) = self.resolution.scopes.text_range(def.source, def.scope) else {
+        let Some(scope_range) = self.resolution.scopes.text_range(def.source(), def.scope) else {
             return None;
         };
-        let Some(scope_kind) = self.resolution.scopes.scope_kind(def.source, def.scope) else {
+        let Some(scope_kind) = self.resolution.scopes.scope_kind(def.source(), def.scope) else {
             return None;
         };
 
@@ -327,7 +330,7 @@ impl<'a> ExprTyper<'a> {
 
         // Find the FnSig whose name range is within this function scope's range
         for (site, sig) in &self.types.def_to_fn_sig {
-            if site.source == def.source && scope_range.contains_range(site.range) {
+            if site.source == def.source() && scope_range.contains_range(site.range) {
                 // Match by position in positional params
                 for (i, param) in sig.positional_params.iter().enumerate() {
                     if param.name == def.name {
@@ -360,7 +363,7 @@ impl<'a> ExprTyper<'a> {
             .resolution
             .refs
             .iter()
-            .find(|r| r.ref_range == token.text_range())?;
+            .find(|r| r.span == self.span(token.text_range()))?;
         let def = resolved.target.as_ref().ok()?;
         if def.kind != DefKind::Function {
             return None;
@@ -487,13 +490,9 @@ impl<'a> ExprTyper<'a> {
                 }
 
                 // Check for user-declared function
-                let ref_range = name_ref.token().map(|t| t.text_range());
-                if let Some(ref_range) = ref_range {
-                    let resolved = self
-                        .resolution
-                        .refs
-                        .iter()
-                        .find(|r| r.ref_range == ref_range);
+                let ref_span = name_ref.token().map(|t| self.span(t.text_range()));
+                if let Some(ref_span) = ref_span {
+                    let resolved = self.resolution.refs.iter().find(|r| r.span == ref_span);
                     if let Some(resolved) = resolved
                         && let Ok(def) = &resolved.target
                         && def.kind == DefKind::Function
@@ -583,7 +582,9 @@ impl<'a> ExprTyper<'a> {
         match probe {
             Expr::Closure(closure) => {
                 let body = closure.body()?;
-                self.expr_types.get(&body.syntax().text_range()).cloned()
+                self.expr_types
+                    .get(&self.span(body.syntax().text_range()))
+                    .cloned()
             }
             _ => None,
         }
@@ -775,10 +776,10 @@ impl<'a> ExprTyper<'a> {
         for (param, ty) in closure.parameters().zip(types.iter()) {
             if let Some(name_tok) = param.name() {
                 self.closure_param_types
-                    .insert(name_tok.text_range(), ty.clone());
+                    .insert(self.span(name_tok.text_range()), ty.clone());
                 if let Some(doc) = inherited_doc.as_ref() {
                     self.closure_param_docs
-                        .insert(name_tok.text_range(), doc.clone());
+                        .insert(self.span(name_tok.text_range()), doc.clone());
                 }
             }
         }
@@ -968,7 +969,11 @@ impl<'a> ExprTyper<'a> {
             .map(|param| {
                 param
                     .name()
-                    .and_then(|name| self.closure_param_types.get(&name.text_range()).cloned())
+                    .and_then(|name| {
+                        self.closure_param_types
+                            .get(&self.span(name.text_range()))
+                            .cloned()
+                    })
                     .unwrap_or(Ty::Poison)
             })
             .collect();
@@ -1088,7 +1093,8 @@ impl<'a> ExprTyper<'a> {
             Pattern::Binding(bp) => {
                 if let Some(name_tok) = bp.name() {
                     if !ty.is_poison() {
-                        self.binding_types.insert(name_tok.text_range(), ty.clone());
+                        self.binding_types
+                            .insert(self.span(name_tok.text_range()), ty.clone());
                     }
                 }
             }
@@ -1111,8 +1117,10 @@ impl<'a> ExprTyper<'a> {
                                 } else {
                                     // Simple field binding: `Foo { bar }` — bar gets the field type
                                     if !field_ty.is_poison() {
-                                        self.binding_types
-                                            .insert(field_name_tok.text_range(), field_ty);
+                                        self.binding_types.insert(
+                                            self.span(field_name_tok.text_range()),
+                                            field_ty,
+                                        );
                                     }
                                 }
                             }
@@ -1137,7 +1145,7 @@ impl<'a> ExprTyper<'a> {
                                     self.type_pattern(&nested_pat, &field_ty);
                                 } else if !field_ty.is_poison() {
                                     self.binding_types
-                                        .insert(field_name_tok.text_range(), field_ty);
+                                        .insert(self.span(field_name_tok.text_range()), field_ty);
                                 }
                             }
                         }
@@ -1155,7 +1163,8 @@ impl<'a> ExprTyper<'a> {
                 // `name @ pattern` — bind name to the whole type, recurse into pattern
                 if let Some(name_tok) = at.binding_name() {
                     if !ty.is_poison() {
-                        self.binding_types.insert(name_tok.text_range(), ty.clone());
+                        self.binding_types
+                            .insert(self.span(name_tok.text_range()), ty.clone());
                     }
                 }
                 if let Some(inner) = at.pattern() {

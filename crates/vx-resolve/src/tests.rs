@@ -832,7 +832,7 @@ fn find_expr_type_at_offset(
             start <= offset && end >= offset + needle_len
         })
         .min_by_key(|(range, _)| {
-            let len: u32 = range.len().into();
+            let len: u32 = range.range.len().into();
             len
         })
         .map(|(_, ty)| ty.clone())
@@ -1423,7 +1423,7 @@ fn main() {
         .refs
         .iter()
         .filter_map(|r| r.target.as_ref().ok())
-        .filter(|def| def.kind == DefKind::Function && def.source != TEST_SOURCE_ID)
+        .filter(|def| def.kind == DefKind::Function && def.source() != TEST_SOURCE_ID)
         .collect();
     assert!(
         stdlib_refs.len() >= 3,
