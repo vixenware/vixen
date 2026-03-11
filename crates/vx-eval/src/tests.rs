@@ -114,10 +114,19 @@ fn path_literal_normalizes_slashes() {
 fn symbol_keyed_toolchain_pipeline_supports_method_values_and_destructuring() {
     let source = r#"
 fn build(host: Host) (
-  let toolchain = ([:sh, :cc] |> _.to_map(host.which) |> _.map_values((path) => ({ path, hash: host.hash(path) })));
+  struct Tool {
+    path: String,
+    hash: Blob,
+  }
+
+  namespace Tool {
+    fn to_string(self) -> String self.path;
+  }
+
+  let toolchain = ([:sh, :cc] |> _.to_map(host.which) |> _.map_values((path) => Tool { path, hash: host.hash(path) }));
 
   let { sh, cc } = toolchain;
-  [sh.path, cc.path]
+  [sh.to_string(), cc.to_string()]
 )
 "#;
     let parse = vx_parser::parse(source);
@@ -132,17 +141,38 @@ fn build(host: Host) (
     };
     let parsed_body = build_fn.body().expect("build body");
     let parsed_stmts = parsed_body.statements().collect::<Vec<_>>();
-    assert_eq!(parsed_stmts.len(), 3);
-    let second_let = match &parsed_stmts[1] {
+    assert_eq!(parsed_stmts.len(), 5);
+    let toolchain_let = match &parsed_stmts[2] {
         AstStmt::Let(stmt) => stmt,
-        other => panic!("expected second stmt to be let, got {other:?}"),
+        other => panic!("expected toolchain let stmt, got {other:?}"),
     };
     assert!(
-        matches!(second_let.pattern(), Some(AstPattern::Struct(_))),
-        "expected struct destructuring pattern in second let: {:?}",
-        second_let.pattern()
+        matches!(toolchain_let.pattern(), Some(AstPattern::Binding(_))),
+        "expected binding pattern in toolchain let: {:?}",
+        toolchain_let.pattern()
+    );
+    let destructuring_let = match &parsed_stmts[3] {
+        AstStmt::Let(stmt) => stmt,
+        other => panic!("expected destructuring let stmt, got {other:?}"),
+    };
+    assert!(
+        matches!(destructuring_let.pattern(), Some(AstPattern::Struct(_))),
+        "expected struct destructuring pattern in final let: {:?}",
+        destructuring_let.pattern()
     );
     let module = lower_source_file(&root);
+    assert!(
+        module
+            .functions
+            .iter()
+            .any(|def| def.name == "Tool.to_string"),
+        "expected lowered namespace method in module functions: {:?}",
+        module
+            .functions
+            .iter()
+            .map(|def| def.name.as_str())
+            .collect::<Vec<_>>()
+    );
     let build = module
         .functions
         .iter()
@@ -151,7 +181,12 @@ fn build(host: Host) (
     assert!(
         matches!(
             build.body.stmts.as_slice(),
-            [crate::instr::Stmt::Let { name, .. }, crate::instr::Stmt::LetPattern { .. }, crate::instr::Stmt::Expr(_)]
+            [
+                crate::instr::Stmt::StructDecl(_),
+                crate::instr::Stmt::Let { name, .. },
+                crate::instr::Stmt::LetPattern { .. },
+                crate::instr::Stmt::Expr(_)
+            ]
             if name == "toolchain"
         ),
         "unexpected lowered build body: {:?}",
@@ -165,8 +200,54 @@ fn build(host: Host) (
         panic!("expected array result");
     };
     assert_eq!(items.len(), 2);
-    assert!(matches!(&items[0], Value::String(_)));
-    assert!(matches!(&items[1], Value::String(_)));
+    assert_eq!(items[0], Value::String(Arc::from("/bin/sh")));
+    assert_eq!(items[1], Value::String(Arc::from("/usr/bin/cc")));
+}
+
+#[test]
+fn exec_stringifies_custom_values_via_to_string_method() {
+    let captured = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let engine = engine(
+        r#"
+fn build() (
+  struct Tool {
+    path: String,
+    hash: Blob,
+  }
+
+  namespace Tool {
+    fn to_string(self) -> String self.path;
+  }
+
+  let tool = Tool { path: "/bin/sh", hash: Blob("x") };
+  exec [tool, "-c", "exit 0"] where {
+    observer: (proc, tree) => proc.exit_code,
+  }
+)
+"#,
+    )
+    .with_exec_handler(Arc::new(move |request| {
+        *sink.lock().unwrap() = Some(request);
+        Ok(Value::U64(0))
+    }));
+
+    let value = engine.call("build", vec![]).unwrap();
+    assert_eq!(value, Value::U64(0));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("exec request should be captured");
+    assert_eq!(
+        request.args,
+        vec![
+            ExecArgValue::Literal("/bin/sh".into()),
+            ExecArgValue::Literal("-c".into()),
+            ExecArgValue::Literal("exit 0".into()),
+        ]
+    );
 }
 
 #[test]

@@ -344,6 +344,7 @@ impl ScopeTreeBuilder {
                     decl.syntax().text_range(),
                 )
             }
+            Item::NamespaceDecl(_) => return,
         };
         self.add_named_def(scope, name, kind, name_range, full_range);
     }
@@ -503,6 +504,7 @@ impl ScopeTreeBuilder {
                     );
                 }
             }
+            Stmt::NamespaceDecl(_) => {}
             Stmt::Expr(expr) => {
                 self.visit_expr(scope, expr);
             }

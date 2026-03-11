@@ -22,6 +22,12 @@ pub struct FnDef {
     pub body: Block,
 }
 
+#[derive(Debug, Clone)]
+pub struct StructDecl {
+    pub name: String,
+    pub fields: Arc<[Arc<str>]>,
+}
+
 /// A function parameter.
 #[derive(Debug, Clone)]
 pub struct Param {
@@ -75,6 +81,8 @@ pub enum Stmt {
     Return(Expr),
     /// A local function declaration
     FnDecl(Arc<FnDef>),
+    /// A local struct declaration
+    StructDecl(Arc<StructDecl>),
 }
 
 /// An expression — the core of the instruction tree.

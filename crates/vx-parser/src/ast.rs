@@ -171,6 +171,7 @@ pub enum Item {
     EnumDecl(EnumDecl),
     NewtypeDecl(NewtypeDecl),
     TypeAliasDecl(TypeAliasDecl),
+    NamespaceDecl(NamespaceDecl),
 }
 
 impl AstNode for Item {
@@ -182,6 +183,7 @@ impl AstNode for Item {
                 | SyntaxKind::ENUM_DECL
                 | SyntaxKind::NEWTYPE_DECL
                 | SyntaxKind::TYPE_ALIAS_DECL
+                | SyntaxKind::NAMESPACE_DECL
         )
     }
 
@@ -192,6 +194,7 @@ impl AstNode for Item {
             SyntaxKind::ENUM_DECL => Some(Self::EnumDecl(EnumDecl::cast(node)?)),
             SyntaxKind::NEWTYPE_DECL => Some(Self::NewtypeDecl(NewtypeDecl::cast(node)?)),
             SyntaxKind::TYPE_ALIAS_DECL => Some(Self::TypeAliasDecl(TypeAliasDecl::cast(node)?)),
+            SyntaxKind::NAMESPACE_DECL => Some(Self::NamespaceDecl(NamespaceDecl::cast(node)?)),
             _ => None,
         }
     }
@@ -203,6 +206,7 @@ impl AstNode for Item {
             Self::EnumDecl(node) => node.syntax(),
             Self::NewtypeDecl(node) => node.syntax(),
             Self::TypeAliasDecl(node) => node.syntax(),
+            Self::NamespaceDecl(node) => node.syntax(),
         }
     }
 }
@@ -498,6 +502,7 @@ pub enum Stmt {
     EnumDecl(EnumDecl),
     NewtypeDecl(NewtypeDecl),
     TypeAliasDecl(TypeAliasDecl),
+    NamespaceDecl(NamespaceDecl),
     Expr(Expr),
 }
 
@@ -513,6 +518,7 @@ impl AstNode for Stmt {
             || EnumDecl::can_cast(kind)
             || NewtypeDecl::can_cast(kind)
             || TypeAliasDecl::can_cast(kind)
+            || NamespaceDecl::can_cast(kind)
             || Expr::can_cast(kind)
     }
 
@@ -530,6 +536,7 @@ impl AstNode for Stmt {
             SyntaxKind::ENUM_DECL => Some(Self::EnumDecl(EnumDecl::cast(node)?)),
             SyntaxKind::NEWTYPE_DECL => Some(Self::NewtypeDecl(NewtypeDecl::cast(node)?)),
             SyntaxKind::TYPE_ALIAS_DECL => Some(Self::TypeAliasDecl(TypeAliasDecl::cast(node)?)),
+            SyntaxKind::NAMESPACE_DECL => Some(Self::NamespaceDecl(NamespaceDecl::cast(node)?)),
             _ => Expr::cast(node).map(Self::Expr),
         }
     }
@@ -546,6 +553,7 @@ impl AstNode for Stmt {
             Self::EnumDecl(node) => node.syntax(),
             Self::NewtypeDecl(node) => node.syntax(),
             Self::TypeAliasDecl(node) => node.syntax(),
+            Self::NamespaceDecl(node) => node.syntax(),
             Self::Expr(node) => node.syntax(),
         }
     }
@@ -619,6 +627,10 @@ impl FnDecl {
 
     pub fn body(&self) -> Option<BlockExpr> {
         child(self.syntax())
+    }
+
+    pub fn body_expr(&self) -> Option<Expr> {
+        self.syntax().children().find_map(Expr::cast)
     }
 
     pub fn capability_list(&self) -> Option<CapabilityList> {

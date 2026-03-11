@@ -85,6 +85,7 @@ fn item_symbol(item: Item) -> Option<DocumentSymbol> {
         Item::EnumDecl(decl) => enum_symbol(&decl),
         Item::NewtypeDecl(decl) => newtype_symbol(&decl),
         Item::TypeAliasDecl(decl) => type_alias_symbol(&decl),
+        Item::NamespaceDecl(_decl) => None,
     }
 }
 

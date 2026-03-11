@@ -171,6 +171,10 @@ pub enum BuiltinFunction {
     Exec,
     Discover,
     ExecutorClass,
+    StructConstructor {
+        type_name: Arc<str>,
+        fields: Arc<[Arc<str>]>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -468,6 +472,7 @@ impl BuiltinValue {
             | BuiltinValue::Function(BuiltinFunction::Exec)
             | BuiltinValue::Function(BuiltinFunction::Discover)
             | BuiltinValue::Function(BuiltinFunction::ExecutorClass)
+            | BuiltinValue::Function(BuiltinFunction::StructConstructor { .. })
             | BuiltinValue::Method(BuiltinMethod::BlobFromString)
             | BuiltinValue::Method(BuiltinMethod::TreeOf)
             | BuiltinValue::Method(BuiltinMethod::TreeEmpty)
@@ -499,6 +504,17 @@ impl BuiltinValue {
             BuiltinValue::Function(BuiltinFunction::Discover) => Some("builtin:discover".into()),
             BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
                 Some("builtin:executor_class".into())
+            }
+            BuiltinValue::Function(BuiltinFunction::StructConstructor { type_name, fields }) => {
+                Some(format!(
+                    "builtin:struct_ctor:{}({})",
+                    type_name,
+                    fields
+                        .iter()
+                        .map(|field| field.as_ref())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ))
             }
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => {
                 Some("builtin:Blob.from_string".into())
@@ -848,6 +864,9 @@ impl fmt::Display for BuiltinValue {
             BuiltinValue::Function(BuiltinFunction::Discover) => write!(f, "discover"),
             BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
                 write!(f, "executor_class")
+            }
+            BuiltinValue::Function(BuiltinFunction::StructConstructor { type_name, .. }) => {
+                write!(f, "{type_name}")
             }
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => write!(f, "Blob.from_string"),
             BuiltinValue::Method(BuiltinMethod::TreeOf) => write!(f, "Tree.of"),

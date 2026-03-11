@@ -8,9 +8,10 @@ use std::sync::Arc;
 use vx_parser::{
     ArrayExpr, ArrayItem as AstArrayItem, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr,
     Expr as AstExpr, FailExpr, FieldExpr, FnDecl, IfExpr, InterpolatedStringExpr, InvokeExpr,
-    LiteralExpr, MapExpr, Parameter, PartialAppExpr, PathLiteralExpr, Pattern as AstPattern,
-    PrefixExpr, RecordExpr, SourceFile, Stmt as AstStmt, StringPart, StructLiteralExpr,
-    StructLiteralField, SyntaxKind, TupleExpr, WhereExpr,
+    LiteralExpr, MapExpr, NamespaceDecl, Parameter, PartialAppExpr, PathLiteralExpr,
+    Pattern as AstPattern, PrefixExpr, RecordExpr, SourceFile, Stmt as AstStmt, StringPart,
+    StructDecl as AstStructDecl, StructLiteralExpr, StructLiteralField, SyntaxKind, TupleExpr,
+    WhereExpr,
 };
 
 use crate::instr;
@@ -18,6 +19,7 @@ use crate::instr;
 #[derive(Default)]
 struct LowerCtx {
     next_closure_id: usize,
+    namespace_methods: Vec<Arc<instr::FnDef>>,
 }
 
 impl LowerCtx {
@@ -36,7 +38,7 @@ pub fn lower_source_file(source: &SourceFile) -> instr::Module {
 
     for stmt in source.statements() {
         if let AstStmt::FnDecl(f) = &stmt
-            && let Some(def) = lower_fn_decl(f)
+            && let Some(def) = lower_fn_decl_with_ctx(f, &mut ctx)
         {
             let def = Arc::new(def);
             functions.push(Arc::clone(&def));
@@ -48,6 +50,8 @@ pub fn lower_source_file(source: &SourceFile) -> instr::Module {
             top_level.push(stmt);
         }
     }
+
+    functions.extend(ctx.namespace_methods);
 
     instr::Module {
         functions,
@@ -62,6 +66,10 @@ fn lower_fn_decl(f: &FnDecl) -> Option<instr::FnDef> {
 
 fn lower_fn_decl_with_ctx(f: &FnDecl, ctx: &mut LowerCtx) -> Option<instr::FnDef> {
     let name = f.name()?.text().to_string();
+    lower_fn_decl_named(f, &name, ctx)
+}
+
+fn lower_fn_decl_named(f: &FnDecl, name: &str, ctx: &mut LowerCtx) -> Option<instr::FnDef> {
     let params: Vec<instr::Param> = f
         .parameters()
         .filter_map(|p: Parameter| {
@@ -70,12 +78,19 @@ fn lower_fn_decl_with_ctx(f: &FnDecl, ctx: &mut LowerCtx) -> Option<instr::FnDef
             })
         })
         .collect();
-    let body = f
-        .body()
-        .map(|b| lower_block_with_ctx(&b, ctx))
-        .unwrap_or(instr::Block { stmts: vec![] });
+    let body = match f.body_expr() {
+        Some(AstExpr::Block(block)) => lower_block_with_ctx(&block, ctx),
+        Some(expr) => instr::Block {
+            stmts: vec![instr::Stmt::Expr(lower_expr_with_ctx(&expr, ctx)?)],
+        },
+        None => instr::Block { stmts: vec![] },
+    };
 
-    Some(instr::FnDef { name, params, body })
+    Some(instr::FnDef {
+        name: name.to_string(),
+        params,
+        body,
+    })
 }
 
 fn lower_block_with_ctx(block: &BlockExpr, ctx: &mut LowerCtx) -> instr::Block {
@@ -118,17 +133,50 @@ fn lower_stmt_with_ctx(stmt: &AstStmt, ctx: &mut LowerCtx) -> Option<instr::Stmt
             let def = lower_fn_decl_with_ctx(f, &mut fn_ctx)?;
             Some(instr::Stmt::FnDecl(Arc::new(def)))
         }
+        AstStmt::StructDecl(decl) => {
+            Some(instr::Stmt::StructDecl(Arc::new(lower_struct_decl(decl)?)))
+        }
+        AstStmt::NamespaceDecl(decl) => {
+            lower_namespace_decl(decl, ctx)?;
+            None
+        }
         AstStmt::Expr(e) => {
             let expr = lower_expr_with_ctx(e, ctx)?;
             Some(instr::Stmt::Expr(expr))
         }
-        AstStmt::StructDecl(_)
-        | AstStmt::EnumDecl(_)
+        AstStmt::EnumDecl(_)
         | AstStmt::NewtypeDecl(_)
         | AstStmt::TypeAliasDecl(_)
         | AstStmt::CompoundUpdate(_)
         | AstStmt::FieldAssign(_) => None,
     }
+}
+
+fn lower_struct_decl(decl: &AstStructDecl) -> Option<instr::StructDecl> {
+    let name = decl.name()?.text().to_string();
+    let fields = decl
+        .fields()
+        .filter_map(|field| field.name().map(|name| Arc::from(name.text())))
+        .collect::<Vec<_>>();
+    Some(instr::StructDecl {
+        name,
+        fields: Arc::from(fields),
+    })
+}
+
+fn lower_namespace_decl(decl: &NamespaceDecl, ctx: &mut LowerCtx) -> Option<()> {
+    let target = decl.target()?.syntax().text().to_string();
+    let target = target.trim().to_string();
+    let body = decl.body()?;
+    for item in body.items() {
+        if let vx_parser::Item::FnDecl(f) = item {
+            let method_name = f.name()?.text().to_string();
+            let qualified = format!("{target}.{method_name}");
+            let def = lower_fn_decl_named(&f, &qualified, ctx)?;
+            ctx.namespace_methods.push(Arc::new(def));
+        }
+    }
+    Some(())
 }
 
 fn lower_expr_with_ctx(expr: &AstExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
@@ -502,7 +550,7 @@ fn stmt_contains_pipe_placeholder(stmt: &instr::Stmt) -> bool {
         | instr::Stmt::Expr(value)
         | instr::Stmt::Return(value)
         | instr::Stmt::LetPattern { value, .. } => contains_pipe_placeholder(value),
-        instr::Stmt::FnDecl(_) => false,
+        instr::Stmt::FnDecl(_) | instr::Stmt::StructDecl(_) => false,
     }
 }
 

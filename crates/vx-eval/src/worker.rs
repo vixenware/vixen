@@ -445,6 +445,13 @@ impl Engine {
         }
     }
 
+    fn struct_constructor_value(&self, decl: &instr::StructDecl) -> Value {
+        Value::Builtin(BuiltinValue::Function(BuiltinFunction::StructConstructor {
+            type_name: Arc::from(decl.name.as_str()),
+            fields: decl.fields.clone(),
+        }))
+    }
+
     fn function_identity(&self, def: &Arc<instr::FnDef>) -> Arc<str> {
         self.function_identities
             .get(&fn_ptr(def))
@@ -911,10 +918,14 @@ impl Engine {
                 instr::Stmt::FnDecl(def) => {
                     bindings.insert(
                         def.name.clone(),
-                        Value::Function(
-                            self.local_function_value(def.clone(), capture_bindings(&bindings)),
-                        ),
+                        Value::Function(self.local_function_value(
+                            def.clone(),
+                            capture_referenced_bindings(&bindings, &def.params, &def.body),
+                        )),
                     );
+                }
+                instr::Stmt::StructDecl(decl) => {
+                    bindings.insert(decl.name.clone(), self.struct_constructor_value(decl));
                 }
                 instr::Stmt::Expr(expr) => {
                     let value = self.eval_expr(expr, &bindings, "<module>").into_value()?;
@@ -968,13 +979,14 @@ impl Engine {
                 instr::Stmt::FnDecl(def) => {
                     local_bindings.insert(
                         def.name.clone(),
-                        Value::Function(
-                            self.local_function_value(
-                                def.clone(),
-                                capture_bindings(&local_bindings),
-                            ),
-                        ),
+                        Value::Function(self.local_function_value(
+                            def.clone(),
+                            capture_referenced_bindings(&local_bindings, &def.params, &def.body),
+                        )),
                     );
+                }
+                instr::Stmt::StructDecl(decl) => {
+                    local_bindings.insert(decl.name.clone(), self.struct_constructor_value(decl));
                 }
                 instr::Stmt::Expr(expr) => {
                     match self.eval_expr(expr, &local_bindings, current_code_identity) {
@@ -1111,7 +1123,7 @@ impl Engine {
                 BuildResult::Value(Value::Function(self.closure_function_value(
                     def.clone(),
                     Arc::from(format!("{current_code_identity}::closure#{closure_id}")),
-                    capture_bindings(bindings),
+                    capture_referenced_bindings(bindings, &def.params, &def.body),
                 )))
             }
             instr::Expr::Call {
@@ -1569,6 +1581,9 @@ impl Engine {
                 .iter()
                 .find(|(name, _)| name.as_ref() == field)
                 .map(|(_, value)| value.clone())
+                .or_else(|| {
+                    self.user_method_value(receiver, struct_value.type_name.as_ref(), field)
+                })
                 .ok_or_else(|| {
                     self.type_error(&format!(
                         "no field '{}' on struct {}",
@@ -1779,6 +1794,18 @@ impl Engine {
         Ok(self.attach_obligations(result, obligations.iter().cloned()))
     }
 
+    fn user_method_value(&self, receiver: &Value, type_name: &str, field: &str) -> Option<Value> {
+        let qualified = format!("{type_name}.{field}");
+        let overloads = self.functions.get(&qualified)?;
+        let function = Value::Function(self.global_function_value(overloads[0].clone()));
+        Some(Value::Partial(Arc::new(PartialValue {
+            function,
+            args: Arc::from([receiver.clone()]),
+            kwargs: Arc::from([]),
+            kwargs_expr: None,
+        })))
+    }
+
     fn invoke_builtin(
         &self,
         builtin: &BuiltinValue,
@@ -1821,6 +1848,38 @@ impl Engine {
             }
             BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
                 self.executor_class_builtin(args, kwargs, kwargs_expr)
+            }
+            BuiltinValue::Function(BuiltinFunction::StructConstructor { type_name, fields }) => {
+                self.require_no_kwargs(type_name.as_ref(), kwargs)?;
+                self.check_arity(type_name.as_ref(), args, 1)?;
+                let (value, _) = self.split_obligations(self.force_value_shallow(args[0].clone())?);
+                let Value::Map(map) = value else {
+                    return Err(self.type_error(&format!(
+                        "{} expects a record/map payload, got {}",
+                        type_name,
+                        value.type_name()
+                    )));
+                };
+                let mut values = Vec::with_capacity(fields.len());
+                for field in fields.iter() {
+                    let field_value = map
+                        .entries
+                        .iter()
+                        .find_map(|(key, value)| match key {
+                            Value::String(name) if name.as_ref() == field.as_ref() => {
+                                Some(value.clone())
+                            }
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            self.type_error(&format!("{} requires field '{}'", type_name, field))
+                        })?;
+                    values.push((Arc::<str>::clone(field), field_value));
+                }
+                Ok(Value::Struct(StructValue {
+                    type_name: Arc::clone(type_name),
+                    fields: Arc::from(values),
+                }))
             }
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => {
                 self.require_no_kwargs("Blob.from_string", kwargs)?;
@@ -2568,10 +2627,27 @@ impl Engine {
             Value::Tree(tree) => Ok(ExecArgValue::Path(
                 self.ensure_tree_exec_mount(mounts, &tree),
             )),
-            other => Err(self.type_error(&format!(
-                "{context} must be String, Path, Blob, Tree, or ExecPath, got {}",
-                other.type_name()
-            ))),
+            other => {
+                if let Some(text) = self.try_stringify_exec_arg(&other)? {
+                    return Ok(ExecArgValue::Literal(text));
+                }
+                Err(self.type_error(&format!(
+                    "{context} must be String, Path, Blob, Tree, ExecPath, or a value with to_string(), got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    }
+
+    fn try_stringify_exec_arg(&self, value: &Value) -> Result<Option<String>, PoisonError> {
+        let Some(method) = self.select_field(value, "to_string").ok() else {
+            return Ok(None);
+        };
+        let result = self.execute_call(method, Arc::from([]), Arc::from([]), None)?;
+        let (result, _) = self.split_obligations(self.force_value(result)?);
+        match result {
+            Value::String(text) => Ok(Some(text.to_string())),
+            _ => Ok(None),
         }
     }
 
@@ -3812,13 +3888,182 @@ impl BuildResult {
     }
 }
 
-fn capture_bindings(bindings: &HashMap<String, Value>) -> Arc<[(Arc<str>, Value)]> {
-    let mut captures = bindings
+fn capture_referenced_bindings(
+    bindings: &HashMap<String, Value>,
+    params: &[instr::Param],
+    body: &instr::Block,
+) -> Arc<[(Arc<str>, Value)]> {
+    let mut visible_locals = params
         .iter()
-        .map(|(name, value)| (Arc::<str>::from(name.as_str()), value.clone()))
-        .collect::<Vec<_>>();
-    captures.sort_by(|left, right| left.0.cmp(&right.0));
-    Arc::from(captures)
+        .map(|param| param.name.clone())
+        .collect::<HashSet<_>>();
+    let mut captured = BTreeSet::new();
+    collect_block_capture_names(body, &mut visible_locals, bindings, &mut captured);
+    Arc::from(
+        captured
+            .into_iter()
+            .filter_map(|name| {
+                Some((
+                    Arc::<str>::from(name.as_str()),
+                    bindings.get(&name)?.clone(),
+                ))
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn collect_block_capture_names(
+    block: &instr::Block,
+    visible_locals: &mut HashSet<String>,
+    bindings: &HashMap<String, Value>,
+    captured: &mut BTreeSet<String>,
+) {
+    let mut local_scope = visible_locals.clone();
+
+    for stmt in &block.stmts {
+        match stmt {
+            instr::Stmt::Let { name, value } | instr::Stmt::Assign { name, value } => {
+                collect_expr_capture_names(value, &local_scope, bindings, captured);
+                local_scope.insert(name.clone());
+            }
+            instr::Stmt::LetPattern { pattern, value } => {
+                collect_expr_capture_names(value, &local_scope, bindings, captured);
+                collect_pattern_bindings(pattern, &mut local_scope);
+            }
+            instr::Stmt::Expr(expr) | instr::Stmt::Return(expr) => {
+                collect_expr_capture_names(expr, &local_scope, bindings, captured);
+            }
+            instr::Stmt::FnDecl(def) => {
+                local_scope.insert(def.name.clone());
+                let mut fn_scope = local_scope.clone();
+                for param in &def.params {
+                    fn_scope.insert(param.name.clone());
+                }
+                collect_block_capture_names(&def.body, &mut fn_scope, bindings, captured);
+            }
+            instr::Stmt::StructDecl(decl) => {
+                local_scope.insert(decl.name.clone());
+            }
+        }
+    }
+}
+
+fn collect_expr_capture_names(
+    expr: &instr::Expr,
+    visible_locals: &HashSet<String>,
+    bindings: &HashMap<String, Value>,
+    captured: &mut BTreeSet<String>,
+) {
+    match expr {
+        instr::Expr::Var(name) => {
+            if !visible_locals.contains(name) && bindings.contains_key(name) {
+                captured.insert(name.clone());
+            }
+        }
+        instr::Expr::LitInt(_)
+        | instr::Expr::LitFloat(_)
+        | instr::Expr::LitBool(_)
+        | instr::Expr::LitString(_)
+        | instr::Expr::Unit => {}
+        instr::Expr::StringTemplate(parts) | instr::Expr::PathTemplate(parts) => {
+            for part in parts {
+                if let instr::TemplatePart::Expr(expr) = part {
+                    collect_expr_capture_names(expr, visible_locals, bindings, captured);
+                }
+            }
+        }
+        instr::Expr::Binary { left, right, .. } => {
+            collect_expr_capture_names(left, visible_locals, bindings, captured);
+            collect_expr_capture_names(right, visible_locals, bindings, captured);
+        }
+        instr::Expr::Unary { operand, .. }
+        | instr::Expr::Fail(operand)
+        | instr::Expr::Fallible(operand) => {
+            collect_expr_capture_names(operand, visible_locals, bindings, captured);
+        }
+        instr::Expr::Block(block) => {
+            let mut nested_scope = visible_locals.clone();
+            collect_block_capture_names(block, &mut nested_scope, bindings, captured);
+        }
+        instr::Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_expr_capture_names(cond, visible_locals, bindings, captured);
+            let mut then_scope = visible_locals.clone();
+            collect_block_capture_names(then_branch, &mut then_scope, bindings, captured);
+            let mut else_scope = visible_locals.clone();
+            collect_block_capture_names(else_branch, &mut else_scope, bindings, captured);
+        }
+        instr::Expr::Closure { def, .. } => {
+            let mut closure_scope = visible_locals.clone();
+            for param in &def.params {
+                closure_scope.insert(param.name.clone());
+            }
+            collect_block_capture_names(&def.body, &mut closure_scope, bindings, captured);
+        }
+        instr::Expr::Call {
+            func,
+            args,
+            kwargs,
+            kwargs_expr,
+        }
+        | instr::Expr::PartialCall {
+            func,
+            args,
+            kwargs,
+            kwargs_expr,
+        } => {
+            collect_expr_capture_names(func, visible_locals, bindings, captured);
+            for arg in args {
+                collect_expr_capture_names(arg, visible_locals, bindings, captured);
+            }
+            for (_, arg) in kwargs {
+                collect_expr_capture_names(arg, visible_locals, bindings, captured);
+            }
+            if let Some(kwargs_expr) = kwargs_expr {
+                collect_expr_capture_names(kwargs_expr, visible_locals, bindings, captured);
+            }
+        }
+        instr::Expr::StructLit { fields, .. } => {
+            for (_, value) in fields {
+                collect_expr_capture_names(value, visible_locals, bindings, captured);
+            }
+        }
+        instr::Expr::Record(items) => {
+            for item in items {
+                match item {
+                    instr::RecordItem::Field { value, .. } | instr::RecordItem::Spread(value) => {
+                        collect_expr_capture_names(value, visible_locals, bindings, captured);
+                    }
+                }
+            }
+        }
+        instr::Expr::Array(items) => {
+            for item in items {
+                match item {
+                    instr::ArrayItem::Expr(expr) | instr::ArrayItem::Spread(expr) => {
+                        collect_expr_capture_names(expr, visible_locals, bindings, captured);
+                    }
+                }
+            }
+        }
+        instr::Expr::Map(entries) => {
+            for (key, value) in entries {
+                collect_expr_capture_names(key, visible_locals, bindings, captured);
+                collect_expr_capture_names(value, visible_locals, bindings, captured);
+            }
+        }
+        instr::Expr::Field { receiver, .. } => {
+            collect_expr_capture_names(receiver, visible_locals, bindings, captured);
+        }
+        instr::Expr::Tuple(elems) => {
+            for elem in elems {
+                collect_expr_capture_names(elem, visible_locals, bindings, captured);
+            }
+        }
+    }
 }
 
 fn builtin_namespace(name: &str) -> Option<BuiltinValue> {
@@ -4180,6 +4425,7 @@ fn collect_block_callee_names(
                 }
                 collect_block_callee_names(&def.body, &mut fn_scope, top_level_names, deps);
             }
+            instr::Stmt::StructDecl(_) => {}
         }
     }
 }

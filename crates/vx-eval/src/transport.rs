@@ -225,15 +225,29 @@ pub enum TransportBuiltinValue {
     ExecFunction,
     DiscoverFunction,
     ExecutorClassFunction,
+    StructConstructor {
+        type_name: String,
+        fields: Vec<String>,
+    },
     BlobFromString,
     TreeOf,
     TreeEmpty,
     TreeFromPath,
-    BlobToString { receiver: Box<TransportValue> },
-    TreeFile { receiver: Box<TransportValue> },
-    TreeMerge { receiver: Box<TransportValue> },
-    TreeSubtree { receiver: Box<TransportValue> },
-    FallibleCall { receiver: Box<TransportValue> },
+    BlobToString {
+        receiver: Box<TransportValue>,
+    },
+    TreeFile {
+        receiver: Box<TransportValue>,
+    },
+    TreeMerge {
+        receiver: Box<TransportValue>,
+    },
+    TreeSubtree {
+        receiver: Box<TransportValue>,
+    },
+    FallibleCall {
+        receiver: Box<TransportValue>,
+    },
 }
 
 impl From<&instr::Module> for TransportModule {
@@ -330,6 +344,7 @@ impl From<&instr::Stmt> for TransportStmt {
             instr::Stmt::Expr(expr) => Self::Expr(TransportExpr::from(expr)),
             instr::Stmt::Return(expr) => Self::Return(TransportExpr::from(expr)),
             instr::Stmt::FnDecl(def) => Self::FnDecl(TransportFnDef::from(def.as_ref())),
+            instr::Stmt::StructDecl(_) => Self::Expr(TransportExpr::Unit),
         }
     }
 }
@@ -986,6 +1001,12 @@ impl TryFrom<&BuiltinValue> for TransportBuiltinValue {
             BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
                 Ok(Self::ExecutorClassFunction)
             }
+            BuiltinValue::Function(BuiltinFunction::StructConstructor { type_name, fields }) => {
+                Ok(Self::StructConstructor {
+                    type_name: type_name.to_string(),
+                    fields: fields.iter().map(|field| field.to_string()).collect(),
+                })
+            }
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => Ok(Self::BlobFromString),
             BuiltinValue::Method(BuiltinMethod::TreeOf) => Ok(Self::TreeOf),
             BuiltinValue::Method(BuiltinMethod::TreeEmpty) => Ok(Self::TreeEmpty),
@@ -1039,6 +1060,17 @@ impl TryFrom<TransportBuiltinValue> for BuiltinValue {
             }
             TransportBuiltinValue::ExecutorClassFunction => {
                 Ok(Self::Function(BuiltinFunction::ExecutorClass))
+            }
+            TransportBuiltinValue::StructConstructor { type_name, fields } => {
+                Ok(Self::Function(BuiltinFunction::StructConstructor {
+                    type_name: Arc::from(type_name),
+                    fields: Arc::from(
+                        fields
+                            .into_iter()
+                            .map(|field| Arc::<str>::from(field))
+                            .collect::<Vec<_>>(),
+                    ),
+                }))
             }
             TransportBuiltinValue::BlobFromString => {
                 Ok(Self::Method(BuiltinMethod::BlobFromString))

@@ -4,9 +4,8 @@ use rowan::TextSize;
 
 use crate::{
     AstNode, Breadcrumb, DocumentSymbol, Expr, FoldingRangeKind, Item, LineIndex, MapEntry,
-    NamespaceDecl, PathLiteralExpr, Position, SemanticTokenType, SourceFile, Stmt, SymbolKind,
-    SyntaxKind, Type, document_symbols, enclosing_nodes, folding_ranges, parse, parse_source_file,
-    semantic_tokens,
+    PathLiteralExpr, Position, SemanticTokenType, SourceFile, Stmt, SymbolKind, SyntaxKind, Type,
+    document_symbols, enclosing_nodes, folding_ranges, parse, parse_source_file, semantic_tokens,
 };
 
 #[test]
@@ -146,7 +145,7 @@ namespace Blob {
 
     let file = SourceFile::cast_root(parse.syntax());
     let items = file.items().collect::<Vec<_>>();
-    assert_eq!(items.len(), 3);
+    assert_eq!(items.len(), 4);
 
     let opaque = match &items[0] {
         Item::TypeAliasDecl(node) => node,
@@ -190,11 +189,10 @@ namespace Blob {
         "declaration-only functions should not have a body"
     );
 
-    let namespace = file
-        .syntax()
-        .children()
-        .find_map(NamespaceDecl::cast)
-        .expect("namespace declaration should parse");
+    let namespace = match &items[3] {
+        Item::NamespaceDecl(node) => node,
+        item => panic!("expected namespace declaration, got {item:?}"),
+    };
     assert_eq!(
         namespace.name().map(|t| t.text().to_string()).as_deref(),
         Some("Blob")
