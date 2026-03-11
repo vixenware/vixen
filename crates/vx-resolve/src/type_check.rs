@@ -538,7 +538,7 @@ impl<'a> ExprTyper<'a> {
 
                 if let Some(member_def) = self.resolve_method_member_def(field_expr, &receiver_ty) {
                     self.record_member_def(field_expr, member_def.clone());
-                    if let Some(method_sig) = self.method_sig_for_def(&member_def) {
+                    if let Some(method_sig) = self.method_sig_for_def(&receiver_ty, &member_def) {
                         self.populate_method_callback_param_types(call, &method_sig.params);
                         self.check_method_args(call, &method_sig.params, &method_name);
                         self.infer_extra_call_args(call, method_sig.params.len());
@@ -822,7 +822,14 @@ impl<'a> ExprTyper<'a> {
         )
     }
 
-    fn method_sig_for_def(&self, def: &Definition) -> Option<crate::builtins::MethodSig> {
+    fn method_sig_for_def(
+        &self,
+        receiver_ty: &Ty,
+        def: &Definition,
+    ) -> Option<crate::builtins::MethodSig> {
+        if matches!(receiver_ty, Ty::Array(_) | Ty::Map(_, _) | Ty::Stream(_)) {
+            return None;
+        }
         let sig = self.types.fn_sig_for_def(def)?.clone();
         let (self_param, params) = sig.positional_params.split_first()?;
         if self_param.name != "self"
@@ -953,7 +960,7 @@ impl<'a> ExprTyper<'a> {
         // Check builtin type methods/fields (property access without call)
         if let Some(member_def) = self.resolve_method_member_def(field, &receiver_ty) {
             self.record_member_def(field, member_def.clone());
-            if let Some(method_sig) = self.method_sig_for_def(&member_def) {
+            if let Some(method_sig) = self.method_sig_for_def(&receiver_ty, &member_def) {
                 return Ty::Function(vx_types::FunctionTy {
                     params: method_sig
                         .params

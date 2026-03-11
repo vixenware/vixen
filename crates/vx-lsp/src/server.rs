@@ -123,6 +123,15 @@ impl DocumentState {
             return Some((resolved.target.as_ref().ok()?, resolved.span));
         }
 
+        if let Some((span, def)) = self
+            .type_check
+            .member_defs
+            .iter()
+            .find(|(span, _)| span.contains_inclusive(offset))
+        {
+            return Some((def, *span));
+        }
+
         // Check if cursor is on a definition site
         let def = self
             .resolution
@@ -141,7 +150,8 @@ impl DocumentState {
 
     /// Find all reference ranges that point to a given definition.
     fn references_to(&self, def: &vx_resolve::Definition) -> Vec<SourceSpan> {
-        self.resolution
+        let mut refs: Vec<_> = self
+            .resolution
             .refs
             .iter()
             .filter_map(|r| {
@@ -152,7 +162,20 @@ impl DocumentState {
                     None
                 }
             })
-            .collect()
+            .collect();
+        refs.extend(
+            self.type_check
+                .member_defs
+                .iter()
+                .filter_map(|(span, target)| {
+                    if target.id == def.id {
+                        Some(*span)
+                    } else {
+                        None
+                    }
+                }),
+        );
+        refs
     }
 
     fn source_doc(&self, source: SourceId) -> Option<&SourceDoc> {
@@ -429,6 +452,14 @@ impl LanguageServer for VxLanguageServer {
                 .filter_map(|r| r.target.as_ref().ok().map(|def| (r.span.range, def)))
                 .filter(|(_, def)| def.source() != state.current_source)
                 .map(|(range, _)| range)
+                .chain(
+                    state
+                        .type_check
+                        .member_defs
+                        .iter()
+                        .filter(|(_, def)| def.source() != state.current_source)
+                        .map(|(span, _)| span.range),
+                )
                 .collect();
             encode_semantic_tokens(&tokens, &state.line_index, &builtin_ranges)
         });
@@ -453,14 +484,7 @@ impl LanguageServer for VxLanguageServer {
                 col: pos.character,
             })?;
 
-            // Find a resolved ref whose range contains the cursor
-            if let Some(resolved) = state
-                .resolution
-                .refs
-                .iter()
-                .find(|r| r.span.contains_inclusive(offset))
-            {
-                let def = resolved.target.as_ref().ok()?;
+            if let Some(def) = state.definition_at(offset) {
                 let range = state.to_lsp_range_span(def.name_span);
                 return Some(GotoDefinitionResponse::Scalar(Location {
                     uri: state
@@ -681,74 +705,9 @@ impl LanguageServer for VxLanguageServer {
                 });
             }
 
-            // Try method name hover: hovering on `.method_name` in `receiver.method_name(...)`
+            // Walk up from the token to find the smallest expression with a type
             let root = state.parsed.tree().syntax().clone();
             let token = root.token_at_offset(offset).left_biased()?;
-
-            if let Some(field_node) = token.parent().and_then(vx::FieldExpr::cast) {
-                if let Some(field_name_tok) = field_node.field_name() {
-                    if field_name_tok.text_range().contains_inclusive(offset) {
-                        // Infer receiver type from type_check
-                        if let Some(receiver_expr) = field_node.receiver() {
-                            let receiver_ty = state
-                                .type_check
-                                .expr_types
-                                .get(&state.current_span(receiver_expr.syntax().text_range()));
-                            if let Some(vx_types::Ty::Builtin(builtin)) = receiver_ty {
-                                let method_name = field_name_tok.text();
-                                if let Some(method_sig) =
-                                    vx_resolve::builtins::builtin_method(builtin, method_name)
-                                {
-                                    let params: Vec<String> = method_sig
-                                        .params
-                                        .iter()
-                                        .map(|p| {
-                                            format!(
-                                                "{}: {}",
-                                                p.name,
-                                                p.ty.display_with_env(&state.types.env)
-                                            )
-                                        })
-                                        .collect();
-                                    let ret_display =
-                                        method_sig.ret.display_with_env(&state.types.env);
-                                    let caps_str = if method_sig.capabilities.is_empty() {
-                                        String::new()
-                                    } else {
-                                        let caps: Vec<_> = method_sig
-                                            .capabilities
-                                            .iter()
-                                            .map(|c| format!("#{}", c.name))
-                                            .collect();
-                                        format!(" {}", caps.join(" "))
-                                    };
-                                    let snippet = format!(
-                                        "fn {}({}){} -> {}",
-                                        method_name,
-                                        params.join(", "),
-                                        caps_str,
-                                        ret_display
-                                    );
-                                    let markdown = format!(
-                                        "```vx\n{snippet}\n```\n---\n*method on `{builtin}`*"
-                                    );
-                                    return Some(Hover {
-                                        contents: HoverContents::Markup(MarkupContent {
-                                            kind: MarkupKind::Markdown,
-                                            value: markdown,
-                                        }),
-                                        range: Some(
-                                            state.to_lsp_range(field_name_tok.text_range()),
-                                        ),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Walk up from the token to find the smallest expression with a type
             let mut node = token.parent();
             while let Some(n) = node {
                 if let Some(expr) = vx::Expr::cast(n.clone()) {
@@ -880,36 +839,81 @@ impl LanguageServer for VxLanguageServer {
 
             // Try method call: receiver.method(args)
             if let vx::Expr::Field(ref field_expr) = callee_expr {
-                let receiver_expr = field_expr.receiver()?;
                 let method_name_tok = field_expr.field_name()?;
-                let method_name = method_name_tok.text().to_string();
-
-                // Get receiver type from type checker
-                let receiver_ty = state
+                let member_def = state
                     .type_check
-                    .expr_types
-                    .get(&state.current_span(receiver_expr.syntax().text_range()));
-                if let Some(vx_types::Ty::Builtin(builtin)) = receiver_ty {
-                    if let Some(method_sig) =
-                        vx_resolve::builtins::builtin_method(builtin, &method_name)
+                    .member_defs
+                    .get(&state.current_span(method_name_tok.text_range()));
+                if let Some(def) = member_def
+                    && let Some(fn_node) = state.fn_decl_for(def)
+                {
+                    let fn_name = fn_node
+                        .name()
+                        .map(|t| t.text().to_string())
+                        .unwrap_or_default();
+                    label_parts.push(format!("fn {fn_name}("));
+
+                    let positional: Vec<_> = fn_node.parameters().collect();
+                    let keyword: Vec<_> = fn_node.keyword_parameters().collect();
+                    let first_positional_is_self = positional
+                        .first()
+                        .and_then(|param| param.name())
+                        .is_some_and(|name| name.text() == "self");
+
+                    for (i, param) in positional
+                        .iter()
+                        .enumerate()
+                        .skip(usize::from(first_positional_is_self))
                     {
-                        label_parts.push(format!("fn {method_name}("));
-                        for (i, p) in method_sig.params.iter().enumerate() {
+                        if i > usize::from(first_positional_is_self) {
+                            label_parts.push(", ".to_string());
+                        }
+                        let name = param
+                            .name()
+                            .map(|t| t.text().to_string())
+                            .unwrap_or("_".to_string());
+                        let type_str = param
+                            .slot_type()
+                            .map(|st| st.syntax().text().to_string())
+                            .unwrap_or_default();
+                        let param_label = format!("{name}{type_str}");
+                        params.push(ParameterInformation {
+                            label: ParameterLabel::Simple(param_label.clone()),
+                            documentation: None,
+                        });
+                        label_parts.push(param_label);
+                    }
+
+                    if !keyword.is_empty() {
+                        if positional.len() > usize::from(first_positional_is_self) {
+                            label_parts.push("; ".to_string());
+                        }
+                        for (i, kw) in keyword.iter().enumerate() {
                             if i > 0 {
                                 label_parts.push(", ".to_string());
                             }
-                            let param_label =
-                                format!("{}: {}", p.name, p.ty.display_with_env(&state.types.env));
+                            let name = kw
+                                .name()
+                                .map(|t| t.text().to_string())
+                                .unwrap_or("_".to_string());
+                            let type_str = kw
+                                .slot_type()
+                                .map(|st| st.syntax().text().to_string())
+                                .unwrap_or_default();
+                            let param_label = format!("{name}{type_str}");
                             params.push(ParameterInformation {
                                 label: ParameterLabel::Simple(param_label.clone()),
                                 documentation: None,
                             });
                             label_parts.push(param_label);
                         }
-                        label_parts.push(")".to_string());
-                        let ret_display = method_sig.ret.display_with_env(&state.types.env);
-                        label_parts.push(format!(" -> {ret_display}"));
                     }
+
+                    label_parts.push(")".to_string());
+                    if let Some(ret) = fn_node.return_type() {
+                        label_parts.push(format!(" {}", ret.syntax().text()));
+                    }
+                    doc = state.documentation_for(def);
                 }
             }
 
@@ -1818,12 +1822,15 @@ fn dot_completions(
     // Find the token just before the cursor — should be DOT or an ident after DOT
     let token = root.token_at_offset(offset).left_biased()?;
 
-    // Walk up to find a FIELD_EXPR or look for a DOT token
     let dot_token = if token.kind() == SyntaxKind::DOT {
         token
     } else {
-        // Maybe we're on the field name after the dot — look for DOT sibling
-        return None;
+        let field = token.parent().and_then(vx::FieldExpr::cast)?;
+        field
+            .syntax()
+            .children_with_tokens()
+            .filter_map(|child| child.into_token())
+            .find(|token| token.kind() == SyntaxKind::DOT)?
     };
 
     // The receiver is the expression before the dot in the parent node
@@ -1874,7 +1881,7 @@ fn dot_completions(
                 vx_resolve::DefKind::Binding | vx_resolve::DefKind::Parameter
             ) {
                 if let Some(ty) = state.inferred_def_type(def) {
-                    if let Some(items) = completions_for_type(&ty, state) {
+                    if let Some(items) = completions_for_type(&ty, state, offset) {
                         return Some(items);
                     }
                 }
@@ -1887,7 +1894,7 @@ fn dot_completions(
             // If it's a function, offer completions on the return type
             if def.kind == vx_resolve::DefKind::Function {
                 if let Some(sig) = state.types.fn_sig_for_def(def) {
-                    if let Some(items) = completions_for_type(&sig.ret, state) {
+                    if let Some(items) = completions_for_type(&sig.ret, state, offset) {
                         return Some(items);
                     }
                 }
@@ -1903,7 +1910,7 @@ fn dot_completions(
                 .expr_types
                 .get(&state.current_span(expr_range))
             {
-                return completions_for_type(ty, state);
+                return completions_for_type(ty, state, offset);
             }
             None
         }
@@ -1933,38 +1940,40 @@ fn resolve_binding_fields(
     None
 }
 
-/// Given a Ty, return completions for dot access — struct fields or builtin methods.
-fn completions_for_type(ty: &vx_types::Ty, state: &DocumentState) -> Option<Vec<CompletionItem>> {
+/// Given a Ty, return completions for dot access — struct fields or namespace members.
+fn completions_for_type(
+    ty: &vx_types::Ty,
+    state: &DocumentState,
+    offset: rowan::TextSize,
+) -> Option<Vec<CompletionItem>> {
     match ty {
-        vx_types::Ty::Builtin(builtin) => {
-            let method_names = vx_resolve::builtins::builtin_methods_for(builtin);
-            if method_names.is_empty() {
-                return None;
-            }
-            let items: Vec<CompletionItem> = method_names
-                .iter()
-                .filter_map(|name| {
-                    let sig = vx_resolve::builtins::builtin_method(builtin, name)?;
-                    let detail = if sig.params.is_empty() {
-                        format!("{}", sig.ret)
-                    } else {
-                        let params: Vec<_> =
-                            sig.params.iter().map(|p| format!("{}", p.ty)).collect();
-                        format!("({}) -> {}", params.join(", "), sig.ret)
-                    };
-                    Some(CompletionItem {
-                        label: name.to_string(),
-                        kind: Some(CompletionItemKind::METHOD),
-                        detail: Some(detail),
-                        ..Default::default()
-                    })
-                })
-                .collect();
-            if items.is_empty() { None } else { Some(items) }
-        }
-        vx_types::Ty::Optional(inner) => completions_for_type(inner, state),
+        vx_types::Ty::Optional(inner) => completions_for_type(inner, state, offset),
         _ => struct_fields_from_ty(ty, state),
     }
+    .or_else(|| {
+        let items: Vec<CompletionItem> = vx_resolve::visible_members_for_receiver(
+            &state.resolution.scopes,
+            state.current_source,
+            offset,
+            ty,
+        )
+        .into_iter()
+        .filter(|def| def.kind == vx_resolve::DefKind::Function)
+        .map(|def| CompletionItem {
+            label: def.name.clone(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some(state.declaration_snippet(&def)),
+            documentation: state.documentation_for(&def).map(|doc| {
+                Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: doc,
+                })
+            }),
+            ..Default::default()
+        })
+        .collect();
+        if items.is_empty() { None } else { Some(items) }
+    })
 }
 
 /// Given a Ty, if it's a struct, return field completions.
@@ -2313,10 +2322,10 @@ fn unwrap_paren_expr(expr: vx::Expr) -> vx::Expr {
 mod tests {
     use rowan::TextSize;
     use tower_lsp::lsp_types::Range;
-    use tower_lsp::lsp_types::{InlayHintLabel, Position};
+    use tower_lsp::lsp_types::{CompletionItemKind, Documentation, InlayHintLabel, Position};
     use vx_parser::LineIndex;
 
-    use super::{DocumentState, collect_inlay_hints};
+    use super::{DocumentState, collect_inlay_hints, completions_for_type};
 
     fn hint_position(text: &str, needle: &str) -> Position {
         let byte_offset = text
@@ -2552,6 +2561,63 @@ fn demo(blob: Blob) {
         assert_eq!(
             disk_path,
             vx_resolve::source_disk_path("crates/vx-stdlib/std/core.vx")
+        );
+    }
+
+    #[test]
+    fn stdlib_method_reference_points_at_real_member_definition() {
+        let text = r#"
+fn demo(host: Host) {
+  host.which("cc")
+}
+"#;
+
+        let state = DocumentState::new(text.to_string());
+        let offset = TextSize::new(text.find("which").unwrap() as u32);
+        let def = state.definition_at(offset).unwrap();
+
+        assert_eq!(def.name, "which");
+        assert_eq!(def.kind, vx_resolve::DefKind::Function);
+        assert_ne!(def.source(), state.current_source);
+        assert_eq!(
+            state.declaration_snippet(def),
+            "fn which(self, name: String) -> String"
+        );
+        assert_eq!(
+            state.doc_comment_for(def).as_deref(),
+            Some("Resolve a tool or executable name on the executor host.")
+        );
+    }
+
+    #[test]
+    fn completions_for_type_use_real_stdlib_member_definitions() {
+        let text = r#"
+fn demo(host: Host) {
+  host.which
+}
+"#;
+
+        let state = DocumentState::new(text.to_string());
+        let offset = TextSize::new(text.find("host.which").unwrap() as u32);
+        let host_ty = vx_types::Ty::Builtin(vx_types::Builtin::Host);
+        let items = completions_for_type(&host_ty, &state, offset).expect("member completions");
+        let which = items
+            .iter()
+            .find(|item| item.label == "which")
+            .expect("which completion");
+
+        assert_eq!(which.kind, Some(CompletionItemKind::METHOD));
+        assert_eq!(
+            which.detail.as_deref(),
+            Some("fn which(self, name: String) -> String")
+        );
+        let documentation = which.documentation.as_ref().and_then(|doc| match doc {
+            Documentation::MarkupContent(content) => Some(content.value.as_str()),
+            _ => None,
+        });
+        assert_eq!(
+            documentation,
+            Some("Resolve a tool or executable name on the executor host.")
         );
     }
 
