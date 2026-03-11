@@ -119,18 +119,32 @@ type Id = U64
     let tree = ScopeTree::build(&file);
     let defs = tree.definitions(crate::ScopeId::ROOT);
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-    assert_eq!(
-        names,
-        vec!["greet", "Point", "Circle", "Rect", "Shape", "Blake3", "Id"]
-    );
+    assert_eq!(names, vec!["greet", "Point", "Shape", "Blake3", "Id"]);
 
     assert_eq!(defs[0].kind, DefKind::Function);
     assert_eq!(defs[1].kind, DefKind::Struct);
-    assert_eq!(defs[2].kind, DefKind::Variant);
-    assert_eq!(defs[3].kind, DefKind::Variant);
-    assert_eq!(defs[4].kind, DefKind::Enum);
-    assert_eq!(defs[5].kind, DefKind::Newtype);
-    assert_eq!(defs[6].kind, DefKind::TypeAlias);
+    assert_eq!(defs[2].kind, DefKind::Enum);
+    assert_eq!(defs[3].kind, DefKind::Newtype);
+    assert_eq!(defs[4].kind, DefKind::TypeAlias);
+}
+
+#[test]
+fn option_variants_are_visible_unqualified() {
+    let file = parse_file(
+        r#"
+enum Option[T] {
+    struct Some { value: T },
+    struct None,
+}
+"#,
+    );
+    let tree = ScopeTree::build(&file);
+    let defs = tree.definitions(crate::ScopeId::ROOT);
+    let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(names, vec!["Some", "None", "Option"]);
+    assert_eq!(defs[0].kind, DefKind::Variant);
+    assert_eq!(defs[1].kind, DefKind::Variant);
+    assert_eq!(defs[2].kind, DefKind::Enum);
 }
 
 #[test]
@@ -408,6 +422,23 @@ fn callee() {}
         "top-level functions should be visible regardless of order: {:?}",
         res.errors
     );
+}
+
+#[test]
+fn nested_function_calls_use_collected_signature() {
+    let src = r#"
+fn main(ws: Path) {
+    fn compile(path: Path) -> Tree (
+        Tree(path)
+    )
+
+    compile(ws)
+}
+"#;
+    let (result, types) = type_check_with_types(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let ty = find_expr_type(&result, src, "compile(ws)");
+    assert_eq!(ty, Some(nominal_ty(&types, "Tree")));
 }
 
 #[test]
@@ -1207,7 +1238,7 @@ fn main() {
 }
 
 #[test]
-fn process_stdout_field_returns_stream_blob() {
+fn process_stdout_field_returns_stream_bytes() {
     let src = r#"
 fn main() {
     exec(["echo"]) where {
@@ -1219,11 +1250,11 @@ fn main() {
 "#;
     let (result, types) = type_check_with_types(src);
     let ty = find_expr_type(&result, src, "proc.stdout");
-    assert_eq!(ty, Some(Ty::Stream(Box::new(nominal_ty(&types, "Blob")))));
+    assert_eq!(ty, Some(Ty::Stream(Box::new(nominal_ty(&types, "Bytes")))));
 }
 
 #[test]
-fn process_stderr_field_returns_stream_blob() {
+fn process_stderr_field_returns_stream_bytes() {
     let src = r#"
 fn main() {
     exec(["echo"]) where {
@@ -1235,7 +1266,7 @@ fn main() {
 "#;
     let (result, types) = type_check_with_types(src);
     let ty = find_expr_type(&result, src, "proc.stderr");
-    assert_eq!(ty, Some(Ty::Stream(Box::new(nominal_ty(&types, "Blob")))));
+    assert_eq!(ty, Some(Ty::Stream(Box::new(nominal_ty(&types, "Bytes")))));
 }
 
 // r[type.builtin.blob] — blob.utf8() returns String
@@ -1446,6 +1477,65 @@ fn demo(value: Blob) {
     let result = type_check(src);
     let ty = find_expr_type(&result, src, "value |> _.utf8()");
     assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::String)));
+}
+
+#[test]
+fn dollar_placeholder_predicate_adapter_typechecks() {
+    let src = r#"
+fn main(lines: Array[String]) {
+    lines.filter(!$.is_empty()).to_array()
+}
+"#;
+    let result = type_check(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let ty = find_expr_type(&result, src, r#"lines.filter(!$.is_empty())"#);
+    assert_eq!(
+        ty,
+        Some(Ty::Array(Box::new(Ty::Scalar(vx_types::Scalar::String))))
+    );
+}
+
+#[test]
+fn dollar_placeholder_mapping_adapter_typechecks() {
+    let src = r#"
+struct Request {
+    name: String,
+    kind: String?,
+}
+
+fn request_key(req: Request) -> String (
+    req.name
+)
+
+fn main(lines: Array[String], requests: Array[Request]) {
+    let blobs = lines.map(Blob($)).to_array();
+    let grouped = requests.group_by(request_key($));
+    let filtered = requests.filter($.kind.unwrap_or("normal") == "normal").to_array();
+    (blobs, grouped, filtered)
+}
+"#;
+    let (result, types) = type_check_with_types(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let grouped_ty = find_expr_type(&result, src, "requests.group_by(request_key($))");
+    assert_eq!(
+        grouped_ty,
+        Some(Ty::Map(
+            Box::new(Ty::Scalar(vx_types::Scalar::String)),
+            Box::new(Ty::Array(Box::new(nominal_ty(&types, "Request")))),
+        ))
+    );
+
+    let filtered_ty = find_expr_type(
+        &result,
+        src,
+        r#"requests.filter($.kind.unwrap_or("normal") == "normal")"#,
+    );
+    assert_eq!(
+        filtered_ty,
+        Some(Ty::Array(Box::new(nominal_ty(&types, "Request"))))
+    );
 }
 
 #[test]
@@ -1751,6 +1841,10 @@ fn main(s: String) {
     let types = collect_types_with_stdlib(&file);
     let checked = crate::type_check(&file, &resolution, &types);
     assert!(checked.errors.is_empty(), "errors: {:?}", checked.errors);
+    assert_eq!(
+        find_expr_type(&checked, src, "Some(s)"),
+        Some(Ty::Optional(Box::new(Ty::Scalar(vx_types::Scalar::String))))
+    );
 }
 
 #[test]

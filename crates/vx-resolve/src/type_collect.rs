@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use vx_parser::{
     AstNode, EnumDecl, FnDecl, Item, NamespaceDecl, NewtypeDecl, SourceFile, StructDecl,
-    SyntaxKind, TypeAliasDecl,
+    SyntaxKind, Type, TypeAliasDecl,
 };
 use vx_types::{
     AliasDef, EnumDef, FieldDef, FnSig, KeywordParamDef, NewtypeDef, OpaqueDef, ParamDef,
@@ -27,6 +27,8 @@ pub struct TypeCollection {
     pub def_to_fn_sig: HashMap<DefSite, FnSig>,
     /// Map from type names to their TypeId and kind (for resolving type annotations).
     pub(crate) name_to_id: HashMap<String, (TypeId, TypeKind)>,
+    /// Full alternative sets for sum aliases like `ExecInput = String | Path | ...`.
+    pub alias_sum_alternatives: HashMap<TypeId, Vec<Ty>>,
 }
 
 impl TypeCollection {
@@ -55,6 +57,7 @@ pub fn collect_types_for_sources(sources: &[SourceFileRef]) -> TypeCollection {
     let mut env = TypeEnv::new();
     let mut def_to_type = HashMap::new();
     let mut def_to_fn_sig = HashMap::new();
+    let mut alias_sum_alternatives = HashMap::new();
 
     // Maps type names to their TypeId and kind for resolving type references.
     let mut name_to_id: HashMap<String, (TypeId, TypeKind)> = HashMap::new();
@@ -277,6 +280,13 @@ pub fn collect_types_for_sources(sources: &[SourceFileRef]) -> TypeCollection {
                         let (id, _) = name_to_id[name_token.text()];
                         let type_params = collect_type_param_names(syntax);
                         let target = resolver.resolve_type(&aliased_type, &type_params);
+                        if let Type::Sum(sum) = &aliased_type {
+                            let alternatives = sum
+                                .variants()
+                                .map(|variant| resolver.resolve_type(&variant, &type_params))
+                                .collect();
+                            alias_sum_alternatives.insert(id, alternatives);
+                        }
                         if let TypeDef::Alias(ref mut a) = env[id] {
                             a.target = target;
                         }
@@ -307,11 +317,42 @@ pub fn collect_types_for_sources(sources: &[SourceFileRef]) -> TypeCollection {
         }
     }
 
+    for source in sources {
+        for decl in source
+            .file
+            .syntax()
+            .descendants()
+            .filter_map(FnDecl::cast)
+            .filter(|decl| {
+                !decl
+                    .syntax()
+                    .ancestors()
+                    .skip(1)
+                    .any(|ancestor| ancestor.kind() == SyntaxKind::NAMESPACE_DECL)
+            })
+        {
+            let Some(name_token) = decl.name() else {
+                continue;
+            };
+            let site = DefSite {
+                source: source.id,
+                range: name_token.text_range(),
+            };
+            if def_to_fn_sig.contains_key(&site) {
+                continue;
+            }
+            let type_params = collect_type_param_names(decl.syntax());
+            let sig = collect_fn_sig(&decl, &resolver, &type_params, None);
+            def_to_fn_sig.insert(site, sig);
+        }
+    }
+
     TypeCollection {
         env,
         def_to_type,
         def_to_fn_sig,
         name_to_id,
+        alias_sum_alternatives,
     }
 }
 

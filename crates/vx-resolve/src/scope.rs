@@ -574,7 +574,9 @@ impl ScopeTreeBuilder {
                 let Some(name_tok) = decl.name() else {
                     return;
                 };
-                self.collect_enum_variant_defs(scope, decl);
+                if name_tok.text() == "Option" {
+                    self.collect_enum_variant_defs(scope, decl);
+                }
                 (
                     name_tok.text().to_string(),
                     DefKind::Enum,

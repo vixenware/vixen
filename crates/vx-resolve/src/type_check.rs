@@ -83,7 +83,7 @@ pub fn type_check(
         errors: Vec::new(),
         closure_param_types: HashMap::new(),
         closure_param_docs: HashMap::new(),
-        pipe_placeholder_types: HashMap::new(),
+        implicit_binding_types: HashMap::new(),
         binding_types: HashMap::new(),
     };
 
@@ -113,8 +113,8 @@ struct ExprTyper<'a> {
     closure_param_types: HashMap<SourceSpan, Ty>,
     /// Documentation for closure parameters inherited from the callback slot.
     closure_param_docs: HashMap<SourceSpan, String>,
-    /// Types for `_` placeholders bound by the current pipe stage.
-    pipe_placeholder_types: HashMap<SourceSpan, Ty>,
+    /// Types for implicit bindings like `_` pipe placeholders and `$` adapters.
+    implicit_binding_types: HashMap<SourceSpan, Ty>,
     /// Types for let bindings, keyed by the binding's name_range.
     binding_types: HashMap<SourceSpan, Ty>,
 }
@@ -127,6 +127,98 @@ impl<'a> ExprTyper<'a> {
     fn push_error(&mut self, error: TypeError) {
         if !self.errors.contains(&error) {
             self.errors.push(error);
+        }
+    }
+
+    fn alias_target(&self, ty: &Ty) -> Option<Ty> {
+        let Ty::Alias(alias_ty) = ty else {
+            return None;
+        };
+        let vx_types::TypeDef::Alias(alias_def) = self.types.env.get(alias_ty.id) else {
+            return None;
+        };
+        Some(substitute_type_params(
+            &alias_def.target,
+            &alias_ty.type_args,
+        ))
+    }
+
+    fn alias_sum_alternatives(&self, ty: &Ty) -> Option<Vec<Ty>> {
+        let Ty::Alias(alias_ty) = ty else {
+            return None;
+        };
+        let alternatives = self.types.alias_sum_alternatives.get(&alias_ty.id)?;
+        Some(
+            alternatives
+                .iter()
+                .map(|alternative| substitute_type_params(alternative, &alias_ty.type_args))
+                .collect(),
+        )
+    }
+
+    fn types_compatible(&self, actual: &Ty, expected: &Ty) -> bool {
+        if actual.is_poison() || expected.is_poison() {
+            return true;
+        }
+        if actual == expected {
+            return true;
+        }
+        if let Some(alternatives) = self.alias_sum_alternatives(expected) {
+            return alternatives
+                .iter()
+                .any(|alternative| self.types_compatible(actual, alternative));
+        }
+        if let Some(alternatives) = self.alias_sum_alternatives(actual) {
+            return alternatives
+                .iter()
+                .any(|alternative| self.types_compatible(alternative, expected));
+        }
+        if let Some(target) = self.alias_target(expected) {
+            return self.types_compatible(actual, &target);
+        }
+        if let Some(target) = self.alias_target(actual) {
+            return self.types_compatible(&target, expected);
+        }
+
+        match (actual, expected) {
+            (Ty::Optional(actual_inner), Ty::Optional(expected_inner)) => {
+                self.types_compatible(actual_inner, expected_inner)
+            }
+            (Ty::Array(actual_inner), Ty::Array(expected_inner)) => {
+                self.types_compatible(actual_inner, expected_inner)
+            }
+            (Ty::Map(actual_key, actual_value), Ty::Map(expected_key, expected_value)) => {
+                self.types_compatible(actual_key, expected_key)
+                    && self.types_compatible(actual_value, expected_value)
+            }
+            (Ty::Stream(actual_inner), Ty::Stream(expected_inner)) => {
+                self.types_compatible(actual_inner, expected_inner)
+            }
+            (Ty::Tuple(actual_tuple), Ty::Tuple(expected_tuple)) => {
+                actual_tuple.elements.len() == expected_tuple.elements.len()
+                    && actual_tuple
+                        .elements
+                        .iter()
+                        .zip(expected_tuple.elements.iter())
+                        .all(|(actual_elem, expected_elem)| {
+                            self.types_compatible(actual_elem, expected_elem)
+                        })
+            }
+            (Ty::Function(actual_fn), Ty::Function(expected_fn)) => {
+                actual_fn.params.len() == expected_fn.params.len()
+                    && actual_fn.params.iter().zip(expected_fn.params.iter()).all(
+                        |(actual_param, expected_param)| {
+                            self.types_compatible(actual_param, expected_param)
+                        },
+                    )
+                    && self.types_compatible(&actual_fn.ret, &expected_fn.ret)
+            }
+            _ => {
+                matches!(
+                    (actual, expected),
+                    (Ty::Infer(_), _) | (_, Ty::Infer(_)) | (Ty::Param(_), _) | (_, Ty::Param(_))
+                )
+            }
         }
     }
 
@@ -302,7 +394,7 @@ impl<'a> ExprTyper<'a> {
     fn infer_name_ref(&self, name_ref: &NameRefExpr) -> Ty {
         if let Some(token) = name_ref.token() {
             let span = self.span(token.text_range());
-            if let Some(ty) = self.pipe_placeholder_types.get(&span) {
+            if let Some(ty) = self.implicit_binding_types.get(&span) {
                 return ty.clone();
             }
         }
@@ -461,27 +553,29 @@ impl<'a> ExprTyper<'a> {
             return None;
         };
         let parent_enum = struct_def.parent_enum?;
-        let ret = if let vx_types::TypeDef::Enum(enum_def) = &self.types.env[parent_enum] {
-            if enum_def.name == "Option" {
-                let inner = struct_def
-                    .fields
-                    .iter()
-                    .find(|field| field.name == "value")
-                    .map(|field| field.ty.clone())
-                    .unwrap_or(Ty::Infer(InferVar(0)));
-                Ty::Optional(Box::new(inner))
+        let (type_params, ret) =
+            if let vx_types::TypeDef::Enum(enum_def) = &self.types.env[parent_enum] {
+                let ret = if enum_def.name == "Option" {
+                    let inner = struct_def
+                        .fields
+                        .iter()
+                        .find(|field| field.name == "value")
+                        .map(|field| field.ty.clone())
+                        .unwrap_or(Ty::Infer(InferVar(0)));
+                    Ty::Optional(Box::new(inner))
+                } else {
+                    Ty::Enum(vx_types::EnumTy {
+                        id: parent_enum,
+                        type_args: vec![],
+                    })
+                };
+                (enum_def.type_params.clone(), ret)
             } else {
-                Ty::Enum(vx_types::EnumTy {
-                    id: parent_enum,
-                    type_args: vec![],
-                })
-            }
-        } else {
-            return None;
-        };
+                return None;
+            };
         Some(FnSig {
             name: def.name.clone(),
-            type_params: vec![],
+            type_params,
             positional_params: struct_def
                 .fields
                 .iter()
@@ -549,7 +643,9 @@ impl<'a> ExprTyper<'a> {
                 continue;
             };
             let arg_ty = self.infer_expr(&arg_expr);
-            if !arg_ty.is_poison() && !param_ty.is_poison() && !types_compatible(&arg_ty, param_ty)
+            if !arg_ty.is_poison()
+                && !param_ty.is_poison()
+                && !self.types_compatible(&arg_ty, param_ty)
             {
                 self.push_error(TypeError {
                     range: arg_expr.syntax().text_range(),
@@ -758,25 +854,37 @@ impl<'a> ExprTyper<'a> {
         Some(self.instantiate_call_sig(call, sig))
     }
 
-    fn instantiate_call_sig(&self, call: &CallExpr, mut sig: FnSig) -> FnSig {
-        let Some(type_args) = call.type_args() else {
-            return sig;
-        };
-        let substitutions: Vec<Ty> = type_args
-            .types()
-            .map(|ty| self.types.resolve_type_annotation(&ty))
-            .collect();
-        if substitutions.is_empty() {
+    fn instantiate_call_sig(&mut self, call: &CallExpr, mut sig: FnSig) -> FnSig {
+        if sig.type_params.is_empty() {
             return sig;
         }
 
+        let mut substitutions = vec![None; sig.type_params.len()];
+        if let Some(type_args) = call.type_args() {
+            for (slot, ty) in substitutions.iter_mut().zip(type_args.types()) {
+                *slot = Some(self.types.resolve_type_annotation(&ty));
+            }
+        }
+        for (arg, param) in call.args().zip(sig.positional_params.iter()) {
+            let Some(arg_expr) = arg.expr() else {
+                continue;
+            };
+            if matches!(param.ty, Ty::Function(_))
+                && matches!(Self::peel_parens(arg_expr.clone()), Expr::Closure(_))
+            {
+                continue;
+            }
+            let arg_ty = self.infer_arg_with_expected_type(&arg_expr, &param.ty);
+            infer_type_params(&param.ty, &arg_ty, &mut substitutions);
+        }
+
         for param in &mut sig.positional_params {
-            param.ty = substitute_type_params(&param.ty, &substitutions);
+            param.ty = substitute_bound_type_params(&param.ty, &substitutions);
         }
         for param in &mut sig.keyword_params {
-            param.ty = substitute_type_params(&param.ty, &substitutions);
+            param.ty = substitute_bound_type_params(&param.ty, &substitutions);
         }
-        sig.ret = substitute_type_params(&sig.ret, &substitutions);
+        sig.ret = substitute_bound_type_params(&sig.ret, &substitutions);
         sig
     }
 
@@ -792,7 +900,7 @@ impl<'a> ExprTyper<'a> {
             .collect();
 
         sigs.iter()
-            .find(|sig| call_matches(&arg_tys, sig))
+            .find(|sig| self.call_matches(&arg_tys, sig))
             .cloned()
             .or_else(|| {
                 (sigs.len() == 1 && arg_tys.len() == sigs[0].positional_params.len())
@@ -827,13 +935,21 @@ impl<'a> ExprTyper<'a> {
 
         if let Some(index) = candidates
             .iter()
-            .position(|(_, sig)| call_matches(&arg_tys, sig))
+            .position(|(_, sig)| self.call_matches(&arg_tys, sig))
         {
             return Some(candidates.swap_remove(index));
         }
 
         (candidates.len() == 1 && arg_tys.len() == candidates[0].1.positional_params.len())
             .then(|| candidates.swap_remove(0))
+    }
+
+    fn call_matches(&self, arg_tys: &[Ty], sig: &FnSig) -> bool {
+        arg_tys.len() == sig.positional_params.len()
+            && arg_tys
+                .iter()
+                .zip(sig.positional_params.iter())
+                .all(|(arg_ty, param)| self.types_compatible(arg_ty, &param.ty))
     }
 
     fn infer_extra_call_args(&mut self, call: &CallExpr, checked_positional: usize) {
@@ -870,6 +986,53 @@ impl<'a> ExprTyper<'a> {
                 }
             }
         }
+    }
+
+    fn with_implicit_bindings<R>(
+        &mut self,
+        bindings: impl IntoIterator<Item = (SourceSpan, Ty)>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let bindings: Vec<(SourceSpan, Ty)> = bindings.into_iter().collect();
+        for (span, ty) in &bindings {
+            self.implicit_binding_types.insert(*span, ty.clone());
+        }
+        let result = f(self);
+        for (span, _) in bindings {
+            self.implicit_binding_types.remove(&span);
+        }
+        result
+    }
+
+    fn infer_function_adapter_expr(
+        &mut self,
+        expr: &Expr,
+        fn_ty: &vx_types::FunctionTy,
+    ) -> Option<Ty> {
+        let bindings = collect_dollar_placeholder_bindings(self.resolution.source, expr)?;
+        let body_ty = self.with_implicit_bindings(
+            bindings
+                .into_iter()
+                .filter_map(|(span, index)| fn_ty.params.get(index).cloned().map(|ty| (span, ty))),
+            |this| this.infer_expr(expr),
+        );
+        Some(Ty::Function(vx_types::FunctionTy {
+            params: fn_ty.params.clone(),
+            ret: Box::new(body_ty),
+            capabilities: fn_ty.capabilities.clone(),
+        }))
+    }
+
+    fn infer_arg_with_expected_type(&mut self, expr: &Expr, expected: &Ty) -> Ty {
+        if matches!(Self::peel_parens(expr.clone()), Expr::Closure(_)) {
+            return self.infer_expr(expr);
+        }
+        if let Ty::Function(fn_ty) = expected
+            && let Some(adapter_ty) = self.infer_function_adapter_expr(expr, fn_ty)
+        {
+            return adapter_ty;
+        }
+        self.infer_expr(expr)
     }
 
     /// Populate closure parameter types for callback slots.
@@ -934,6 +1097,10 @@ impl<'a> ExprTyper<'a> {
         match def.kind {
             DefKind::Function => {
                 let sig = self.types.fn_sig_for_def(def)?.clone();
+                Some(self.instantiate_call_sig(call, sig))
+            }
+            DefKind::Variant => {
+                let sig = self.variant_sig_for_def(def)?;
                 Some(self.instantiate_call_sig(call, sig))
             }
             DefKind::Namespace => {
@@ -1044,8 +1211,11 @@ impl<'a> ExprTyper<'a> {
 
         let arg_tys: Vec<Ty> = call
             .args()
-            .filter_map(|arg| arg.expr())
-            .map(|arg| self.infer_expr(&arg))
+            .zip(receiver_bound.params.iter())
+            .filter_map(|(arg, param)| {
+                arg.expr()
+                    .map(|expr| self.infer_arg_with_expected_type(&expr, &param.ty))
+            })
             .collect();
 
         self.instantiate_method_sig(receiver_ty, def, &arg_tys)
@@ -1075,9 +1245,9 @@ impl<'a> ExprTyper<'a> {
     fn check_call_args(&mut self, call: &CallExpr, sig: &FnSig) {
         for (arg, param) in call.args().zip(sig.positional_params.iter()) {
             if let Some(arg_expr) = arg.expr() {
-                let arg_ty = self.infer_expr(&arg_expr);
+                let arg_ty = self.infer_arg_with_expected_type(&arg_expr, &param.ty);
                 if !arg_ty.is_poison() && !param.ty.is_poison() {
-                    if !types_compatible(&arg_ty, &param.ty) {
+                    if !self.types_compatible(&arg_ty, &param.ty) {
                         self.push_error(TypeError {
                             range: arg_expr.syntax().text_range(),
                             kind: TypeErrorKind::ArgTypeMismatch {
@@ -1104,8 +1274,10 @@ impl<'a> ExprTyper<'a> {
                 self.infer_expr(&arg_expr);
                 continue;
             };
-            let arg_ty = self.infer_expr(&arg_expr);
-            if !arg_ty.is_poison() && !param.ty.is_poison() && !types_compatible(&arg_ty, &param.ty)
+            let arg_ty = self.infer_arg_with_expected_type(&arg_expr, &param.ty);
+            if !arg_ty.is_poison()
+                && !param.ty.is_poison()
+                && !self.types_compatible(&arg_ty, &param.ty)
             {
                 self.push_error(TypeError {
                     range: arg_expr.syntax().text_range(),
@@ -1127,9 +1299,9 @@ impl<'a> ExprTyper<'a> {
     ) {
         for (arg, param) in call.args().zip(params.iter()) {
             if let Some(arg_expr) = arg.expr() {
-                let arg_ty = self.infer_expr(&arg_expr);
+                let arg_ty = self.infer_arg_with_expected_type(&arg_expr, &param.ty);
                 if !arg_ty.is_poison() && !param.ty.is_poison() {
-                    if !types_compatible(&arg_ty, &param.ty) {
+                    if !self.types_compatible(&arg_ty, &param.ty) {
                         self.push_error(TypeError {
                             range: arg_expr.syntax().text_range(),
                             kind: TypeErrorKind::ArgTypeMismatch {
@@ -1586,14 +1758,10 @@ impl<'a> ExprTyper<'a> {
         let lhs_ty = self.infer_expr(&lhs);
         let placeholders = collect_pipe_placeholder_spans(self.resolution.source, &rhs);
         if !placeholders.is_empty() {
-            for span in &placeholders {
-                self.pipe_placeholder_types.insert(*span, lhs_ty.clone());
-            }
-            let rhs_ty = self.infer_expr(&rhs);
-            for span in placeholders {
-                self.pipe_placeholder_types.remove(&span);
-            }
-            return rhs_ty;
+            return self.with_implicit_bindings(
+                placeholders.into_iter().map(|span| (span, lhs_ty.clone())),
+                |this| this.infer_expr(&rhs),
+            );
         }
 
         match self.infer_expr(&rhs) {
@@ -1601,7 +1769,7 @@ impl<'a> ExprTyper<'a> {
                 let first_param = &function.params[0];
                 if !lhs_ty.is_poison()
                     && !first_param.is_poison()
-                    && !types_compatible(&lhs_ty, first_param)
+                    && !self.types_compatible(&lhs_ty, first_param)
                 {
                     self.push_error(TypeError {
                         range: lhs.syntax().text_range(),
@@ -1801,55 +1969,6 @@ impl<'a> ExprTyper<'a> {
     }
 }
 
-/// Check if two types are compatible (for argument checking).
-/// This is a simple structural check, not full unification.
-fn types_compatible(actual: &Ty, expected: &Ty) -> bool {
-    if actual.is_poison() || expected.is_poison() {
-        return true;
-    }
-    if actual == expected {
-        return true;
-    }
-    match (actual, expected) {
-        (Ty::Optional(actual_inner), Ty::Optional(expected_inner)) => {
-            types_compatible(actual_inner, expected_inner)
-        }
-        (Ty::Array(actual_inner), Ty::Array(expected_inner)) => {
-            types_compatible(actual_inner, expected_inner)
-        }
-        (Ty::Map(actual_key, actual_value), Ty::Map(expected_key, expected_value)) => {
-            types_compatible(actual_key, expected_key)
-                && types_compatible(actual_value, expected_value)
-        }
-        (Ty::Stream(actual_inner), Ty::Stream(expected_inner)) => {
-            types_compatible(actual_inner, expected_inner)
-        }
-        (Ty::Tuple(actual_tuple), Ty::Tuple(expected_tuple)) => {
-            actual_tuple.elements.len() == expected_tuple.elements.len()
-                && actual_tuple
-                    .elements
-                    .iter()
-                    .zip(expected_tuple.elements.iter())
-                    .all(|(actual_elem, expected_elem)| {
-                        types_compatible(actual_elem, expected_elem)
-                    })
-        }
-        (Ty::Function(actual_fn), Ty::Function(expected_fn)) => {
-            actual_fn.params.len() == expected_fn.params.len()
-                && actual_fn.params.iter().zip(expected_fn.params.iter()).all(
-                    |(actual_param, expected_param)| types_compatible(actual_param, expected_param),
-                )
-                && types_compatible(&actual_fn.ret, &expected_fn.ret)
-        }
-        _ => {
-            matches!(
-                (actual, expected),
-                (Ty::Infer(_), _) | (_, Ty::Infer(_)) | (Ty::Param(_), _) | (_, Ty::Param(_))
-            )
-        }
-    }
-}
-
 fn binary_operator_kind(binary: &BinaryExpr) -> Option<SyntaxKind> {
     binary.syntax().children_with_tokens().find_map(|child| {
         let rowan::NodeOrToken::Token(token) = child else {
@@ -1887,12 +2006,30 @@ fn collect_pipe_placeholder_spans(source: crate::SourceId, expr: &Expr) -> Vec<S
         .collect()
 }
 
-fn call_matches(arg_tys: &[Ty], sig: &FnSig) -> bool {
-    arg_tys.len() == sig.positional_params.len()
-        && arg_tys
-            .iter()
-            .zip(sig.positional_params.iter())
-            .all(|(arg_ty, param)| types_compatible(arg_ty, &param.ty))
+fn collect_dollar_placeholder_bindings(
+    source: crate::SourceId,
+    expr: &Expr,
+) -> Option<Vec<(SourceSpan, usize)>> {
+    let bindings: Vec<_> = expr
+        .syntax()
+        .descendants()
+        .filter_map(NameRefExpr::cast)
+        .filter_map(|name_ref| {
+            let token = name_ref.token()?;
+            let index = (token.kind() == SyntaxKind::DOLLAR_IDENT)
+                .then(|| dollar_placeholder_index(token.text()))??;
+            Some((SourceSpan::new(source, token.text_range()), index))
+        })
+        .collect();
+    (!bindings.is_empty()).then_some(bindings)
+}
+
+fn dollar_placeholder_index(text: &str) -> Option<usize> {
+    if text == "$" {
+        return Some(0);
+    }
+
+    text.strip_prefix('$')?.parse().ok()
 }
 
 fn substitute_type_params(ty: &Ty, substitutions: &[Ty]) -> Ty {
