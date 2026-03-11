@@ -1,5 +1,6 @@
 use std::{fs, path::Path};
 
+use rowan::{TextRange, TextSize};
 use vx_parser::{AstNode, SourceFile, parse};
 
 use crate::cap_check::{CapErrorKind, CapSet};
@@ -62,6 +63,15 @@ fn resolve_with_stdlib(file: &SourceFile) -> crate::NameResolution {
 fn collect_types_with_stdlib(file: &SourceFile) -> crate::TypeCollection {
     let (sources, _) = stdlib_program(file);
     crate::collect_types_for_sources(&sources)
+}
+
+fn span_for_text(src: &str, needle: &str) -> crate::SourceSpan {
+    let start = src
+        .find(needle)
+        .unwrap_or_else(|| panic!("missing `{needle}`"));
+    let start = TextSize::new(start as u32);
+    let end = start + TextSize::new(needle.len() as u32);
+    crate::SourceSpan::new(TEST_SOURCE_ID, TextRange::new(start, end))
 }
 
 #[test]
@@ -1518,6 +1528,83 @@ fn main(blob: Blob) {
         .expect("Toml should resolve");
     assert_eq!(toml.kind, DefKind::Namespace);
     assert_ne!(toml.source(), TEST_SOURCE_ID);
+}
+
+#[test]
+fn static_namespace_member_refs_point_to_real_definitions() {
+    let src = r#"
+struct Config {}
+
+fn main(blob: Blob) {
+    Toml.parse[Config](blob)
+}
+"#;
+    let file = parse_file(src);
+    let resolution = resolve_with_stdlib(&file);
+    let types = collect_types_with_stdlib(&file);
+    let checked = crate::type_check(&file, &resolution, &types);
+
+    let parse_def = checked
+        .member_defs
+        .get(&span_for_text(src, "parse"))
+        .expect("parse member def");
+    assert_eq!(parse_def.name, "parse");
+    assert_eq!(parse_def.kind, DefKind::Function);
+    assert_ne!(parse_def.source(), TEST_SOURCE_ID);
+    assert_eq!(
+        types.fn_sig_for_def(parse_def).expect("parse sig").name,
+        "parse"
+    );
+}
+
+#[test]
+fn builtin_method_refs_point_to_real_definitions() {
+    let src = r#"
+fn main(host: Host) {
+    host.which("cc")
+}
+"#;
+    let file = parse_file(src);
+    let resolution = resolve_with_stdlib(&file);
+    let types = collect_types_with_stdlib(&file);
+    let checked = crate::type_check(&file, &resolution, &types);
+
+    let which_def = checked
+        .member_defs
+        .get(&span_for_text(src, "which"))
+        .expect("which member def");
+    assert_eq!(which_def.name, "which");
+    assert_eq!(which_def.kind, DefKind::Function);
+    assert_ne!(which_def.source(), TEST_SOURCE_ID);
+    assert_eq!(
+        types.fn_sig_for_def(which_def).expect("which sig").name,
+        "which"
+    );
+}
+
+#[test]
+fn generic_method_refs_point_to_real_definitions() {
+    let src = r#"
+fn compile(path: String) -> Blob {
+    Blob(path)
+}
+
+fn main(paths: Array[String]) {
+    paths.map(compile)
+}
+"#;
+    let file = parse_file(src);
+    let resolution = resolve_with_stdlib(&file);
+    let types = collect_types_with_stdlib(&file);
+    let checked = crate::type_check(&file, &resolution, &types);
+
+    let map_def = checked
+        .member_defs
+        .get(&span_for_text(src, "map"))
+        .expect("map member def");
+    assert_eq!(map_def.name, "map");
+    assert_eq!(map_def.kind, DefKind::Function);
+    assert_ne!(map_def.source(), TEST_SOURCE_ID);
 }
 
 // --- Function parameter types from declared signatures ---

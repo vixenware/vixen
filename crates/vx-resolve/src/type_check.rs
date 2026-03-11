@@ -22,6 +22,7 @@ use crate::builtins::{
 use crate::resolve::NameResolution;
 use crate::scope::{DefKind, Definition};
 use crate::type_collect::TypeCollection;
+use crate::{resolve_member_for_receiver, resolve_namespace_member};
 
 /// A type error found during expression typing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +52,8 @@ pub enum TypeErrorKind {
 pub struct TypeCheckResult {
     /// Map from expression text ranges to their inferred types.
     pub expr_types: HashMap<SourceSpan, Ty>,
+    /// Real member-definition targets for field/method references.
+    pub member_defs: HashMap<SourceSpan, Definition>,
     /// Types for closure parameters inferred from callback slots.
     pub closure_param_types: HashMap<SourceSpan, Ty>,
     /// Documentation inherited from callback slots for closure parameters.
@@ -71,6 +74,7 @@ pub fn type_check(
         resolution,
         types,
         expr_types: HashMap::new(),
+        member_defs: HashMap::new(),
         errors: Vec::new(),
         closure_param_types: HashMap::new(),
         closure_param_docs: HashMap::new(),
@@ -87,6 +91,7 @@ pub fn type_check(
 
     TypeCheckResult {
         expr_types: checker.expr_types,
+        member_defs: checker.member_defs,
         closure_param_types: checker.closure_param_types,
         closure_param_docs: checker.closure_param_docs,
         binding_types: checker.binding_types,
@@ -98,6 +103,7 @@ struct ExprTyper<'a> {
     resolution: &'a NameResolution,
     types: &'a TypeCollection,
     expr_types: HashMap<SourceSpan, Ty>,
+    member_defs: HashMap<SourceSpan, Definition>,
     errors: Vec<TypeError>,
     /// Types for closure parameters, populated when we see a closure in a
     /// known callback slot (e.g., exec observer's proc and tree params).
@@ -117,6 +123,14 @@ impl<'a> ExprTyper<'a> {
         if !self.errors.contains(&error) {
             self.errors.push(error);
         }
+    }
+
+    fn record_member_def(&mut self, field: &FieldExpr, def: Definition) {
+        let Some(field_name) = field.field_name() else {
+            return;
+        };
+        self.member_defs
+            .insert(self.span(field_name.text_range()), def);
     }
 
     fn peel_parens(expr: Expr) -> Expr {
@@ -522,6 +536,17 @@ impl<'a> ExprTyper<'a> {
                     .map(|t| t.text().to_string())
                     .unwrap_or_default();
 
+                if let Some(member_def) = self.resolve_method_member_def(field_expr, &receiver_ty) {
+                    self.record_member_def(field_expr, member_def.clone());
+                    if let Some(method_sig) = self.method_sig_for_def(&member_def) {
+                        self.populate_method_callback_param_types(call, &method_sig.params);
+                        self.check_method_args(call, &method_sig.params, &method_name);
+                        self.infer_extra_call_args(call, method_sig.params.len());
+                        self.infer_all_keyword_arg_exprs(call);
+                        return method_sig.ret.clone();
+                    }
+                }
+
                 if let Ty::Builtin(ref builtin) = receiver_ty {
                     if let Some(method_sig) = builtin_method(builtin, &method_name) {
                         self.populate_method_callback_param_types(call, &method_sig.params);
@@ -598,6 +623,13 @@ impl<'a> ExprTyper<'a> {
         call: &CallExpr,
         field_expr: &FieldExpr,
     ) -> Option<FnSig> {
+        if let Some(member_def) = self.resolve_static_member_def(field_expr) {
+            self.record_member_def(field_expr, member_def.clone());
+            if let Some(sig) = self.types.fn_sig_for_def(&member_def).cloned() {
+                return Some(self.instantiate_call_sig(call, sig));
+            }
+        }
+
         let Expr::NameRef(namespace_ref) = field_expr.receiver()? else {
             return None;
         };
@@ -759,6 +791,54 @@ impl<'a> ExprTyper<'a> {
         self.sig_for_name_ref(&name_ref)
     }
 
+    fn resolve_static_member_def(&self, field: &FieldExpr) -> Option<Definition> {
+        let Expr::NameRef(namespace_ref) = field.receiver()? else {
+            return None;
+        };
+        let namespace_span = self.span(namespace_ref.token()?.text_range());
+        let namespace_def = self
+            .resolution
+            .refs
+            .iter()
+            .find(|r| r.span == namespace_span)?
+            .target
+            .as_ref()
+            .ok()?;
+        let field_name = field.field_name()?;
+        let member_name = field_name.text();
+        resolve_namespace_member(&self.resolution.scopes, namespace_def, member_name)
+    }
+
+    fn resolve_method_member_def(&self, field: &FieldExpr, receiver_ty: &Ty) -> Option<Definition> {
+        let offset = field.field_name()?.text_range().start();
+        let field_name = field.field_name()?;
+        let member_name = field_name.text();
+        resolve_member_for_receiver(
+            &self.resolution.scopes,
+            self.resolution.source,
+            offset,
+            receiver_ty,
+            member_name,
+        )
+    }
+
+    fn method_sig_for_def(&self, def: &Definition) -> Option<crate::builtins::MethodSig> {
+        let sig = self.types.fn_sig_for_def(def)?.clone();
+        let (self_param, params) = sig.positional_params.split_first()?;
+        if self_param.name != "self"
+            || sig.ret.is_poison()
+            || params.iter().any(|param| param.ty.is_poison())
+        {
+            return None;
+        }
+        Some(crate::builtins::MethodSig {
+            name: sig.name,
+            params: params.to_vec(),
+            ret: sig.ret,
+            capabilities: sig.capabilities,
+        })
+    }
+
     fn bind_closure_params(
         &mut self,
         closure: &ClosureExpr,
@@ -871,6 +951,21 @@ impl<'a> ExprTyper<'a> {
         }
 
         // Check builtin type methods/fields (property access without call)
+        if let Some(member_def) = self.resolve_method_member_def(field, &receiver_ty) {
+            self.record_member_def(field, member_def.clone());
+            if let Some(method_sig) = self.method_sig_for_def(&member_def) {
+                return Ty::Function(vx_types::FunctionTy {
+                    params: method_sig
+                        .params
+                        .into_iter()
+                        .map(|param| param.ty)
+                        .collect(),
+                    ret: Box::new(method_sig.ret),
+                    capabilities: method_sig.capabilities,
+                });
+            }
+        }
+
         if let Ty::Builtin(ref builtin) = receiver_ty {
             if let Some(method_sig) = builtin_method(builtin, field_name) {
                 return Ty::Function(vx_types::FunctionTy {
@@ -1409,7 +1504,22 @@ impl<'a> ExprTyper<'a> {
         Ty::Array(Box::new(element_ty.unwrap_or(Ty::Poison)))
     }
 
-    fn infer_static_namespace_field(&self, field: &FieldExpr) -> Option<Ty> {
+    fn infer_static_namespace_field(&mut self, field: &FieldExpr) -> Option<Ty> {
+        if let Some(member_def) = self.resolve_static_member_def(field) {
+            self.record_member_def(field, member_def.clone());
+            if let Some(sig) = self.types.fn_sig_for_def(&member_def) {
+                return Some(Ty::Function(vx_types::FunctionTy {
+                    params: sig
+                        .positional_params
+                        .iter()
+                        .map(|param| param.ty.clone())
+                        .collect(),
+                    ret: Box::new(sig.ret.clone()),
+                    capabilities: sig.capabilities.clone(),
+                }));
+            }
+        }
+
         let Expr::NameRef(namespace_ref) = field.receiver()? else {
             return None;
         };

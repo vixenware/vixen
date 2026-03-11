@@ -311,6 +311,10 @@ impl ProgramScopes {
         self.tree(source).map(|tree| tree.text_range(scope))
     }
 
+    pub fn definitions(&self, source: SourceId, scope: ScopeId) -> Option<&[Definition]> {
+        self.tree(source).map(|tree| tree.definitions(scope))
+    }
+
     pub fn all_definitions_in(&self, source: SourceId) -> Vec<&Definition> {
         self.tree(source)
             .into_iter()
@@ -354,6 +358,13 @@ impl ProgramScopes {
 
     pub fn owned_scope(&self, def: &Definition) -> Option<ScopeId> {
         self.tree(def.source())?.owned_scope(def)
+    }
+
+    pub fn lookup_member(&self, namespace: &Definition, name: &str) -> Option<&Definition> {
+        let scope = self.owned_scope(namespace)?;
+        self.definitions(namespace.source(), scope)?
+            .iter()
+            .find(|def| def.name == name)
     }
 
     fn lookup_imported<'a>(

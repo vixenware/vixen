@@ -9,6 +9,12 @@ pub use cap_check::{CapCheckResult, CapError, CapErrorKind, CapSet, check_capabi
 
 pub mod builtins;
 
+mod members;
+pub use members::{
+    resolve_member_for_receiver, resolve_namespace_member, resolve_visible_namespace_member,
+    visible_members_for_receiver,
+};
+
 mod stdlib;
 pub use stdlib::{
     ImportGraph, SourceFileRef, SourceId, SourceSpan, source_disk_path, stdlib_sources,
