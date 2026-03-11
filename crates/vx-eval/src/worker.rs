@@ -393,6 +393,7 @@ impl Engine {
                 | BuiltinMethod::ArrayMerge { receiver }
                 | BuiltinMethod::MapMapValues { receiver }
                 | BuiltinMethod::BlobToString { receiver }
+                | BuiltinMethod::BlobExecutable { receiver }
                 | BuiltinMethod::BlobUtf8 { receiver }
                 | BuiltinMethod::BlobUtf8Lossy { receiver }
                 | BuiltinMethod::BytesUtf8 { receiver }
@@ -1661,6 +1662,11 @@ impl Engine {
                     receiver: Box::new(receiver.clone()),
                 },
             ))),
+            Value::Blob(_) if field == "executable" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::BlobExecutable {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
             Value::Blob(_) if field == "utf8" => Ok(Value::Builtin(BuiltinValue::Method(
                 BuiltinMethod::BlobUtf8 {
                     receiver: Box::new(receiver.clone()),
@@ -2022,6 +2028,30 @@ impl Engine {
                 })?;
                 Ok(self.attach_obligations(Value::String(text), obligations))
             }
+            BuiltinValue::Method(BuiltinMethod::BlobExecutable { receiver }) => {
+                self.require_no_kwargs("blob.executable", kwargs)?;
+                self.check_arity("blob.executable", args, 0)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.force_value(receiver.as_ref().clone())?);
+                let Value::Blob(blob) = receiver else {
+                    return Err(self.type_error("blob.executable receiver must be Blob"));
+                };
+                let blob = match blob {
+                    BlobValue::Inline { bytes, .. } => BlobValue::Inline {
+                        bytes,
+                        executable: true,
+                    },
+                    BlobValue::FsFile { path, .. } => BlobValue::FsFile {
+                        path,
+                        executable: true,
+                    },
+                    BlobValue::Store { blob_ref, .. } => BlobValue::Store {
+                        blob_ref,
+                        executable: true,
+                    },
+                };
+                Ok(self.attach_obligations(Value::Blob(blob), obligations))
+            }
             BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver }) => {
                 self.require_no_kwargs("blob.utf8", kwargs)?;
                 self.check_arity("blob.utf8", args, 0)?;
@@ -2048,16 +2078,16 @@ impl Engine {
                     return Err(self.type_error("blob.utf8_lossy receiver must be Blob"));
                 };
                 let text = match blob {
-                    BlobValue::Inline(bytes) => {
+                    BlobValue::Inline { bytes, .. } => {
                         String::from_utf8_lossy(bytes.as_ref()).into_owned()
                     }
-                    BlobValue::FsFile(path) => {
+                    BlobValue::FsFile { path, .. } => {
                         let bytes = std::fs::read(path.as_str()).map_err(|error| {
                             self.type_error(&format!("failed to read {}: {error}", path.as_str()))
                         })?;
                         String::from_utf8_lossy(&bytes).into_owned()
                     }
-                    BlobValue::Store(blob_ref) => {
+                    BlobValue::Store { blob_ref, .. } => {
                         return Err(self.type_error(&format!(
                             "store-backed blob {:?} requires an external store resolver",
                             blob_ref
@@ -2102,7 +2132,13 @@ impl Engine {
                 let Value::Bytes(bytes) = receiver else {
                     return Err(self.type_error("bytes.blob receiver must be Bytes"));
                 };
-                Ok(self.attach_obligations(Value::Blob(BlobValue::Inline(bytes)), obligations))
+                Ok(self.attach_obligations(
+                    Value::Blob(BlobValue::Inline {
+                        bytes,
+                        executable: false,
+                    }),
+                    obligations,
+                ))
             }
             BuiltinValue::Method(BuiltinMethod::StreamCollect { receiver }) => {
                 self.require_no_kwargs("stream.collect", kwargs)?;
@@ -3218,21 +3254,33 @@ impl Engine {
 
     fn exec_blob_leaf_name(&self, blob: &BlobValue) -> String {
         match blob {
-            BlobValue::FsFile(path) => Path::new(path.as_str())
+            BlobValue::FsFile { path, .. } => Path::new(path.as_str())
                 .file_name()
                 .and_then(|name| name.to_str())
                 .filter(|name| !name.is_empty())
                 .map(ToOwned::to_owned)
                 .unwrap_or_else(|| self.synthetic_blob_leaf(blob)),
-            BlobValue::Inline(_) | BlobValue::Store(_) => self.synthetic_blob_leaf(blob),
+            BlobValue::Inline { .. } | BlobValue::Store { .. } => self.synthetic_blob_leaf(blob),
         }
     }
 
     fn synthetic_blob_leaf(&self, blob: &BlobValue) -> String {
         let digest = match blob {
-            BlobValue::Inline(bytes) => blake3::hash(bytes.as_ref()).to_hex().to_string(),
-            BlobValue::FsFile(path) => blake3::hash(path.as_str().as_bytes()).to_hex().to_string(),
-            BlobValue::Store(blob_ref) => blake3::hash(format!("{blob_ref:?}").as_bytes())
+            BlobValue::Inline { bytes, executable } => {
+                let mut keyed = Vec::with_capacity(bytes.len() + 1);
+                keyed.push(u8::from(*executable));
+                keyed.extend_from_slice(bytes);
+                blake3::hash(&keyed).to_hex().to_string()
+            }
+            BlobValue::FsFile { path, executable } => {
+                blake3::hash(format!("{executable}:{}", path.as_str()).as_bytes())
+                    .to_hex()
+                    .to_string()
+            }
+            BlobValue::Store {
+                blob_ref,
+                executable,
+            } => blake3::hash(format!("{executable}:{blob_ref:?}").as_bytes())
                 .to_hex()
                 .to_string(),
         };
@@ -3314,15 +3362,21 @@ impl Engine {
         }
 
         match blob {
-            BlobValue::Inline(bytes) => {
+            BlobValue::Inline { bytes, executable } => {
                 fs::write(destination.as_str(), bytes.as_ref()).map_err(|error| {
                     self.internal_error(&format!(
                         "failed to write {}: {error}",
                         destination.as_str()
                     ))
+                })?;
+                set_executable_if_needed(destination.as_str(), *executable).map_err(|error| {
+                    self.internal_error(&format!(
+                        "failed to set executable bit on {}: {error}",
+                        destination.as_str()
+                    ))
                 })
             }
-            BlobValue::FsFile(path) => {
+            BlobValue::FsFile { path, executable } => {
                 fs::copy(path.as_str(), destination.as_str()).map_err(|error| {
                     self.internal_error(&format!(
                         "failed to copy {} to {}: {error}",
@@ -3330,9 +3384,14 @@ impl Engine {
                         destination.as_str()
                     ))
                 })?;
-                Ok(())
+                set_executable_if_needed(destination.as_str(), *executable).map_err(|error| {
+                    self.internal_error(&format!(
+                        "failed to set executable bit on {}: {error}",
+                        destination.as_str()
+                    ))
+                })
             }
-            BlobValue::Store(blob_ref) => Err(self.internal_error(&format!(
+            BlobValue::Store { blob_ref, .. } => Err(self.internal_error(&format!(
                 "cannot materialize store-backed blob {:?} without an external store resolver",
                 blob_ref
             ))),
@@ -3385,7 +3444,13 @@ impl Engine {
             if metadata.is_dir() {
                 self.copy_dir_recursive(&source_path, &destination_path)?;
             } else {
-                self.write_blob_to_path(&BlobValue::FsFile(source_path), &destination_path)?;
+                self.write_blob_to_path(
+                    &BlobValue::FsFile {
+                        path: source_path.clone(),
+                        executable: host_path_is_executable(Path::new(source_path.as_str())),
+                    },
+                    &destination_path,
+                )?;
             }
         }
         Ok(())
@@ -3448,7 +3513,10 @@ impl Engine {
             path: path.to_string(),
             content_hash,
         });
-        Ok(Value::Blob(BlobValue::FsFile(PathValue::new(path))))
+        Ok(Value::Blob(BlobValue::FsFile {
+            path: PathValue::new(path),
+            executable: host_path_is_executable(Path::new(path)),
+        }))
     }
 
     fn host_hash(&self, path: &str) -> Result<Value, PoisonError> {
@@ -3543,8 +3611,8 @@ impl Engine {
             }
             Value::ExecPath(_) => Err(self
                 .internal_error("ExecPath values cannot cross the local exec observer boundary")),
-            Value::Blob(BlobValue::Inline(_))
-            | Value::Blob(BlobValue::Store(_))
+            Value::Blob(BlobValue::Inline { .. })
+            | Value::Blob(BlobValue::Store { .. })
             | Value::Bytes(_)
             | Value::Path(_)
             | Value::ExecutorClass(_)
@@ -3557,11 +3625,14 @@ impl Engine {
             | Value::Function(_)
             | Value::Partial(_)
             | Value::Builtin(_) => Ok(value),
-            Value::Blob(BlobValue::FsFile(path)) => {
+            Value::Blob(BlobValue::FsFile { path, executable }) => {
                 let bytes = fs::read(path.as_str()).map_err(|error| {
                     self.internal_error(&format!("failed to read {}: {error}", path.as_str()))
                 })?;
-                Ok(Value::Blob(BlobValue::Inline(Arc::from(bytes))))
+                Ok(Value::Blob(BlobValue::Inline {
+                    bytes: Arc::from(bytes),
+                    executable,
+                }))
             }
             Value::Tree(TreeValue::Inline(entries)) => {
                 let mut snapshotted = Vec::with_capacity(entries.len());
@@ -3635,7 +3706,10 @@ impl Engine {
                 let bytes = fs::read(child.as_str()).map_err(|error| {
                     self.internal_error(&format!("failed to read {}: {error}", child.as_str()))
                 })?;
-                Value::Blob(BlobValue::Inline(Arc::from(bytes)))
+                Value::Blob(BlobValue::Inline {
+                    bytes: Arc::from(bytes),
+                    executable: host_path_is_executable(Path::new(child.as_str())),
+                })
             };
             entries.push((Arc::from(name), value));
         }
@@ -3663,7 +3737,10 @@ impl Engine {
                         self.current_demand_chain(None),
                     ));
                 }
-                Ok(Value::Blob(BlobValue::FsFile(full_path)))
+                Ok(Value::Blob(BlobValue::FsFile {
+                    executable: host_path_is_executable(Path::new(full_path.as_str())),
+                    path: full_path,
+                }))
             }
             TreeValue::Store(root) => Err(self.internal_error(&format!(
                 "cannot read store-backed tree {root} without an external store resolver"
@@ -3851,7 +3928,10 @@ impl Engine {
                     let value = if metadata.is_dir() {
                         Value::Tree(TreeValue::FsDir(child))
                     } else {
-                        Value::Blob(BlobValue::FsFile(child))
+                        Value::Blob(BlobValue::FsFile {
+                            executable: host_path_is_executable(Path::new(child.as_str())),
+                            path: child,
+                        })
                     };
                     entries.push((Arc::from(name), value));
                 }
@@ -4434,6 +4514,22 @@ fn host_path_is_executable(path: &Path) -> bool {
     {
         true
     }
+}
+
+fn set_executable_if_needed(path: &str, executable: bool) -> std::io::Result<()> {
+    if !executable {
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        let metadata = fs::metadata(path)?;
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(permissions.mode() | 0o111);
+        fs::set_permissions(path, permissions)?;
+    }
+
+    Ok(())
 }
 
 // r[impl fn.identity]

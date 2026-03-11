@@ -677,18 +677,21 @@ async fn store_exec_blob(
     blob: &BlobValue,
 ) -> std::result::Result<DirEntryKind, String> {
     match blob {
-        BlobValue::Inline(bytes) => {
+        BlobValue::Inline { bytes, executable } => {
             let prepared = prepare_blob(bytes.as_ref());
             let blob_ref = store_prepared_blob(store, &prepared, bytes.as_ref()).await?;
-            Ok(exec_blob_kind_from_blob_ref(&blob_ref, false))
+            Ok(exec_blob_kind_from_blob_ref(&blob_ref, *executable))
         }
-        BlobValue::Store(blob_ref) => Ok(exec_blob_kind_from_blob_ref(blob_ref, false)),
-        BlobValue::FsFile(path) => {
+        BlobValue::Store {
+            blob_ref,
+            executable,
+        } => Ok(exec_blob_kind_from_blob_ref(blob_ref, *executable)),
+        BlobValue::FsFile { path, executable } => {
             let bytes = fs::read(path.as_str())
                 .map_err(|error| format!("failed to read {}: {error}", path.as_str()))?;
             let prepared = prepare_blob(&bytes);
             let blob_ref = store_prepared_blob(store, &prepared, &bytes).await?;
-            Ok(exec_blob_kind_from_blob_ref(&blob_ref, false))
+            Ok(exec_blob_kind_from_blob_ref(&blob_ref, *executable))
         }
     }
 }
@@ -950,11 +953,17 @@ fn hydrate_exec_value_from_store<'a>(
 ) -> Pin<Box<dyn Future<Output = std::result::Result<Value, PoisonError>> + 'a>> {
     Box::pin(async move {
         match value {
-            Value::Blob(BlobValue::Store(blob_ref)) => {
+            Value::Blob(BlobValue::Store {
+                blob_ref,
+                executable,
+            }) => {
                 let bytes = fetch_store_blob_bytes(store, &blob_ref)
                     .await
                     .map_err(|error| exec_bridge_poison(PoisonKind::Internal, error.to_string()))?;
-                Ok(Value::Blob(BlobValue::Inline(Arc::from(bytes))))
+                Ok(Value::Blob(BlobValue::Inline {
+                    bytes: Arc::from(bytes),
+                    executable,
+                }))
             }
             Value::Tree(TreeValue::Store(root)) => {
                 let directory = load_store_directory(store, root)
@@ -964,7 +973,9 @@ fn hydrate_exec_value_from_store<'a>(
                 for entry in directory.entries {
                     let value = match entry.kind {
                         DirEntryKind::SmallFile {
-                            content_hash, size, ..
+                            content_hash,
+                            size,
+                            executable,
                         } => {
                             let blob_ref = BlobRef::Small {
                                 chunk: ChunkHash(content_hash.0),
@@ -972,7 +983,10 @@ fn hydrate_exec_value_from_store<'a>(
                             };
                             hydrate_exec_value_from_store(
                                 store,
-                                Value::Blob(BlobValue::Store(blob_ref)),
+                                Value::Blob(BlobValue::Store {
+                                    blob_ref,
+                                    executable,
+                                }),
                             )
                             .await?
                         }
@@ -980,7 +994,7 @@ fn hydrate_exec_value_from_store<'a>(
                             blob_node,
                             content_hash,
                             size,
-                            ..
+                            executable,
                         } => {
                             let blob_ref = BlobRef::Large {
                                 blob_node,
@@ -989,7 +1003,10 @@ fn hydrate_exec_value_from_store<'a>(
                             };
                             hydrate_exec_value_from_store(
                                 store,
-                                Value::Blob(BlobValue::Store(blob_ref)),
+                                Value::Blob(BlobValue::Store {
+                                    blob_ref,
+                                    executable,
+                                }),
                             )
                             .await?
                         }
@@ -1741,22 +1758,29 @@ impl VxdService {
         })?;
 
         match blob {
-            BlobValue::Inline(bytes) => {
+            BlobValue::Inline { bytes, executable } => {
                 fs::write(path, bytes.as_ref()).map_err(|error| VxdError::WriteOutput {
                     path: path.to_path_buf(),
                     message: error.to_string(),
-                })
+                })?;
+                set_executable_if_needed(path, *executable)?;
+                Ok(())
             }
-            BlobValue::FsFile(source) => {
+            BlobValue::FsFile {
+                path: source,
+                executable,
+            } => {
                 fs::copy(source.as_str(), path).map_err(|error| VxdError::WriteOutput {
                     path: path.to_path_buf(),
                     message: error.to_string(),
                 })?;
+                set_executable_if_needed(path, *executable)?;
                 Ok(())
             }
-            BlobValue::Store(blob_ref) => {
-                materialize_store_blob_to_path(self.store.as_ref(), path, blob_ref, false)
-            }
+            BlobValue::Store {
+                blob_ref,
+                executable,
+            } => materialize_store_blob_to_path(self.store.as_ref(), path, blob_ref, *executable),
         }
     }
 
@@ -1795,7 +1819,14 @@ impl VxdService {
             } else {
                 self.materialize_build_vx_blob(
                     &destination_path,
-                    &BlobValue::FsFile(PathValue::new(source_path.as_str())),
+                    &BlobValue::FsFile {
+                        path: PathValue::new(source_path.as_str()),
+                        executable: host_path_is_executable(&PathValue::new(source_path.as_str()))
+                            .map_err(|message| VxdError::Compilation {
+                                crate_name: "build.vx".to_string(),
+                                message,
+                            })?,
+                    },
                 )?;
             }
         }

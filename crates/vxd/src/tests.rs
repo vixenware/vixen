@@ -853,6 +853,44 @@ async fn test_store_backed_build_vx_trees_materialize_from_cas() {
     assert_eq!(rendered, "hello from store");
 }
 
+#[vx_test]
+#[cfg(unix)]
+async fn test_store_backed_build_vx_trees_preserve_executable_bits() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = StoreTestEnv::new().await;
+
+    let bytes = b"#!/bin/sh\nexit 0\n";
+    let prepared = prepare_blob(bytes);
+    let blob_ref = store_prepared_blob(&env.client, &prepared, bytes)
+        .await
+        .expect("blob should store");
+    let file_kind = dir_entry_kind_from_blob_ref(&blob_ref, true);
+    let (root, _total_size) = crate::cas_tree::build_merkle_tree(
+        &env.client,
+        vec![crate::cas_tree::TreeFile {
+            path: "bin/tool".to_string(),
+            kind: file_kind,
+        }],
+    )
+    .await
+    .expect("tree should store");
+
+    let output = TempDir::new().expect("failed to create output tempdir");
+    let output_root = Utf8Path::from_path(output.path()).expect("tempdir should be utf-8");
+    crate::service::materialize_store_tree_into_dir_async(&env.client, root, output_root)
+        .await
+        .expect("store-backed tree should materialize");
+
+    let executable = output.path().join("bin/tool");
+    let mode = fs::metadata(&executable)
+        .expect("materialized file should stat")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o755, "expected executable mode on materialized file");
+}
+
 struct StoreTestEnv {
     _root: TempDir,
     _vx_home: TempDir,

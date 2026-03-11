@@ -136,6 +136,10 @@ impl IntegrationContext {
         self.write_file(&self.project_dir, relative_path, contents)
     }
 
+    pub(crate) fn project_path(&self, relative_path: &str) -> PathBuf {
+        self.project_dir.join(relative_path)
+    }
+
     pub(crate) fn write_fake_tool(&self, name: &str, contents: &str) -> Result<()> {
         let path = self.fake_bin_dir.join(binary_name(name));
         fs::write(&path, contents)

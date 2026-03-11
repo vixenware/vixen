@@ -93,9 +93,9 @@ pub enum ExecPathValue {
 /// Blob storage.
 #[derive(Debug, Clone)]
 pub enum BlobValue {
-    Inline(Arc<[u8]>),
-    FsFile(PathValue),
-    Store(BlobRef),
+    Inline { bytes: Arc<[u8]>, executable: bool },
+    FsFile { path: PathValue, executable: bool },
+    Store { blob_ref: BlobRef, executable: bool },
 }
 
 /// Tree storage.
@@ -193,6 +193,7 @@ pub enum BuiltinMethod {
     ArrayMerge { receiver: Box<Value> },
     MapMapValues { receiver: Box<Value> },
     BlobToString { receiver: Box<Value> },
+    BlobExecutable { receiver: Box<Value> },
     BlobUtf8 { receiver: Box<Value> },
     BlobUtf8Lossy { receiver: Box<Value> },
     BytesUtf8 { receiver: Box<Value> },
@@ -400,16 +401,27 @@ impl ExecPathValue {
 
 impl BlobValue {
     pub fn from_string(value: impl AsRef<str>) -> Self {
-        Self::Inline(Arc::from(value.as_ref().as_bytes()))
+        Self::Inline {
+            bytes: Arc::from(value.as_ref().as_bytes()),
+            executable: false,
+        }
+    }
+
+    pub fn executable(&self) -> bool {
+        match self {
+            BlobValue::Inline { executable, .. }
+            | BlobValue::FsFile { executable, .. }
+            | BlobValue::Store { executable, .. } => *executable,
+        }
     }
 
     // r[impl store.blob.utf8]
     pub fn to_utf8_string(&self) -> Result<Arc<str>, String> {
         let bytes = match self {
-            BlobValue::Inline(bytes) => bytes.to_vec(),
-            BlobValue::FsFile(path) => fs::read(path.as_str())
+            BlobValue::Inline { bytes, .. } => bytes.to_vec(),
+            BlobValue::FsFile { path, .. } => fs::read(path.as_str())
                 .map_err(|error| format!("failed to read {}: {error}", path.as_str()))?,
-            BlobValue::Store(blob_ref) => {
+            BlobValue::Store { blob_ref, .. } => {
                 return Err(format!(
                     "store-backed blob {} requires an external store resolver",
                     blob_ref_key(blob_ref)
@@ -423,9 +435,14 @@ impl BlobValue {
 
     pub fn key(&self) -> Option<String> {
         match self {
-            BlobValue::Inline(bytes) => Some(format!("blob:{}", hex_bytes(bytes))),
-            BlobValue::FsFile(_) => None,
-            BlobValue::Store(blob_ref) => Some(blob_ref_key(blob_ref)),
+            BlobValue::Inline { bytes, executable } => {
+                Some(format!("blob:{executable}:{}", hex_bytes(bytes)))
+            }
+            BlobValue::FsFile { .. } => None,
+            BlobValue::Store {
+                blob_ref,
+                executable,
+            } => Some(format!("blob:{executable}:{}", blob_ref_key(blob_ref))),
         }
     }
 }
@@ -496,6 +513,7 @@ impl BuiltinValue {
             | BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver })
             | BuiltinValue::Method(BuiltinMethod::MapMapValues { receiver })
             | BuiltinValue::Method(BuiltinMethod::BlobToString { receiver })
+            | BuiltinValue::Method(BuiltinMethod::BlobExecutable { receiver })
             | BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver })
             | BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy { receiver })
             | BuiltinValue::Method(BuiltinMethod::BytesUtf8 { receiver })
@@ -562,6 +580,9 @@ impl BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
                 Some(format!("builtin:blob.to_string({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::BlobExecutable { receiver }) => {
+                Some(format!("builtin:blob.executable({})", receiver.key()?))
             }
             BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver }) => {
                 Some(format!("builtin:blob.utf8({})", receiver.key()?))
@@ -761,9 +782,36 @@ impl Eq for MapValue {}
 impl PartialEq for BlobValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (BlobValue::Inline(a), BlobValue::Inline(b)) => a == b,
-            (BlobValue::FsFile(a), BlobValue::FsFile(b)) => a == b,
-            (BlobValue::Store(a), BlobValue::Store(b)) => blob_ref_eq(a, b),
+            (
+                BlobValue::Inline {
+                    bytes: a_bytes,
+                    executable: a_exec,
+                },
+                BlobValue::Inline {
+                    bytes: b_bytes,
+                    executable: b_exec,
+                },
+            ) => a_exec == b_exec && a_bytes == b_bytes,
+            (
+                BlobValue::FsFile {
+                    path: a_path,
+                    executable: a_exec,
+                },
+                BlobValue::FsFile {
+                    path: b_path,
+                    executable: b_exec,
+                },
+            ) => a_exec == b_exec && a_path == b_path,
+            (
+                BlobValue::Store {
+                    blob_ref: a_ref,
+                    executable: a_exec,
+                },
+                BlobValue::Store {
+                    blob_ref: b_ref,
+                    executable: b_exec,
+                },
+            ) => a_exec == b_exec && blob_ref_eq(a_ref, b_ref),
             _ => false,
         }
     }
@@ -815,6 +863,10 @@ impl PartialEq for BuiltinMethod {
             | (
                 BuiltinMethod::BlobToString { receiver: left },
                 BuiltinMethod::BlobToString { receiver: right },
+            )
+            | (
+                BuiltinMethod::BlobExecutable { receiver: left },
+                BuiltinMethod::BlobExecutable { receiver: right },
             )
             | (
                 BuiltinMethod::BlobUtf8 { receiver: left },
@@ -895,9 +947,21 @@ impl Eq for BuiltinValue {}
 impl fmt::Display for BlobValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BlobValue::Inline(bytes) => write!(f, "<blob {} bytes>", bytes.len()),
-            BlobValue::FsFile(path) => write!(f, "<blob {}>", path.as_str()),
-            BlobValue::Store(blob_ref) => write!(f, "<blob {}>", blob_ref_key(blob_ref)),
+            BlobValue::Inline { bytes, executable } => {
+                let mode = if *executable { "x" } else { "-" };
+                write!(f, "<blob {mode} {} bytes>", bytes.len())
+            }
+            BlobValue::FsFile { path, executable } => {
+                let mode = if *executable { "x" } else { "-" };
+                write!(f, "<blob {mode} {}>", path.as_str())
+            }
+            BlobValue::Store {
+                blob_ref,
+                executable,
+            } => {
+                let mode = if *executable { "x" } else { "-" };
+                write!(f, "<blob {mode} {}>", blob_ref_key(blob_ref))
+            }
         }
     }
 }
@@ -957,6 +1021,9 @@ impl fmt::Display for BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::BlobToString { .. }) => {
                 write!(f, "<bound blob.to_string>")
+            }
+            BuiltinValue::Method(BuiltinMethod::BlobExecutable { .. }) => {
+                write!(f, "<bound blob.executable>")
             }
             BuiltinValue::Method(BuiltinMethod::BlobUtf8 { .. }) => {
                 write!(f, "<bound blob.utf8>")

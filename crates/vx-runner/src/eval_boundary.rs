@@ -165,16 +165,24 @@ fn sandbox_tree_value(sandbox_root: &PathValue) -> Value {
 
 fn commit_blob<'a>(cas: &'a StoreClient, blob: BlobValue) -> BoundaryFuture<'a, BlobValue> {
     Box::pin(async move {
-        let blob_ref = match blob {
-            BlobValue::Inline(bytes) => store_blob_bytes(cas, bytes.as_ref()).await?,
-            BlobValue::FsFile(path) => {
+        let (blob_ref, executable) = match blob {
+            BlobValue::Inline { bytes, executable } => {
+                (store_blob_bytes(cas, bytes.as_ref()).await?, executable)
+            }
+            BlobValue::FsFile { path, executable } => {
                 let bytes = fs::read(path.as_str())
                     .map_err(|error| format!("failed to read {}: {error}", path.as_str()))?;
-                store_blob_bytes(cas, &bytes).await?
+                (store_blob_bytes(cas, &bytes).await?, executable)
             }
-            BlobValue::Store(blob_ref) => blob_ref,
+            BlobValue::Store {
+                blob_ref,
+                executable,
+            } => (blob_ref, executable),
         };
-        Ok(BlobValue::Store(blob_ref))
+        Ok(BlobValue::Store {
+            blob_ref,
+            executable,
+        })
     })
 }
 
@@ -265,19 +273,19 @@ fn commit_tree_entry<'a>(
         match value {
             Value::Blob(blob) => {
                 let (blob_ref, executable) = match blob {
-                    BlobValue::Inline(bytes) => {
-                        (store_blob_bytes(cas, bytes.as_ref()).await?, false)
+                    BlobValue::Inline { bytes, executable } => {
+                        (store_blob_bytes(cas, bytes.as_ref()).await?, executable)
                     }
-                    BlobValue::FsFile(path) => {
+                    BlobValue::FsFile { path, executable } => {
                         let bytes = fs::read(path.as_str()).map_err(|error| {
                             format!("failed to read {}: {error}", path.as_str())
                         })?;
-                        (
-                            store_blob_bytes(cas, &bytes).await?,
-                            is_executable_path(path.as_str())?,
-                        )
+                        (store_blob_bytes(cas, &bytes).await?, executable)
                     }
-                    BlobValue::Store(blob_ref) => (blob_ref, false),
+                    BlobValue::Store {
+                        blob_ref,
+                        executable,
+                    } => (blob_ref, executable),
                 };
                 let size = blob_ref_size(&blob_ref);
                 Ok((dir_entry_kind_from_blob_ref(&blob_ref, executable), size))
@@ -377,6 +385,8 @@ fn is_executable_path(path: &str) -> Result<bool, String> {
 mod tests {
     use std::fs;
     use std::net::TcpListener;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -510,14 +520,14 @@ mod tests {
             .expect("failed to write observer output");
 
         let engine = shipped_function_engine(
-            r#"fn observe(process: Process, tree: Tree) {
+            r#"fn observe(process: Process, tree: Tree) (
                    Tree {
-                     @stdout.txt: process.stdout,
-                     @output.txt: tree.file "out/output.txt",
+                     @stdout.txt: process.stdout.collect().blob(),
+                     @output.txt: tree.file(@out/output.txt),
                    }
-                 }
+                 )
 
-                 fn make() { observe }"#,
+                 fn make() ( observe )"#,
         );
         let eval = RunEvalPayload {
             module: engine.transport_module(),
@@ -565,6 +575,76 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "output.txt");
         assert_eq!(entries[1].name, "stdout.txt");
+    }
+
+    #[tokio::test]
+    async fn shipped_observer_preserves_executable_file_entries() {
+        let env = StoreTestEnv::new().await;
+        let sandbox = TempDir::new().expect("failed to create sandbox tempdir");
+        let out_dir = sandbox.path().join("out");
+        fs::create_dir_all(&out_dir).expect("failed to create out dir");
+        let exe_path = out_dir.join("lua");
+        fs::write(&exe_path, "fake exe").expect("failed to write executable output");
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&exe_path).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&exe_path, perms).expect("chmod");
+        }
+
+        let engine = shipped_function_engine(
+            r#"fn observe(_process: Process, tree: Tree) (
+                   Tree {
+                     @lua: tree.file(@out/lua),
+                   }
+                 )
+
+                 fn make() ( observe )"#,
+        );
+        let eval = RunEvalPayload {
+            module: engine.transport_module(),
+            observer: Some(
+                engine
+                    .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
+                    .expect("observer should ship"),
+            ),
+            verification_obligations: Vec::new(),
+        };
+
+        let observed = evaluate_shipped_observer(
+            &env.client,
+            &eval,
+            0,
+            "",
+            "",
+            &PathValue::new(sandbox.path().to_string_lossy()),
+        )
+        .await
+        .expect("observer should evaluate")
+        .expect("observer value should be present");
+
+        let root = match observed {
+            vx_eval::TransportValue::Tree(TransportTree::Store(root)) => root,
+            other => panic!("expected store-backed tree, got {other:?}"),
+        };
+
+        let node_bytes = env
+            .client
+            .get_node(root)
+            .await
+            .expect("store RPC should succeed")
+            .expect("directory node should exist");
+        let node = CasNode::from_bytes(&node_bytes).expect("directory should decode");
+        let CasNode::Directory(DirectoryNode { entries, .. }) = node else {
+            panic!("expected directory node");
+        };
+
+        let executable = match &entries[0].kind {
+            vx_store_proto::DirEntryKind::SmallFile { executable, .. }
+            | vx_store_proto::DirEntryKind::LargeFile { executable, .. } => *executable,
+            other => panic!("expected file entry, got {other:?}"),
+        };
+        assert!(executable, "expected executable bit on committed file");
     }
 
     #[test]
@@ -635,7 +715,7 @@ mod tests {
                     ]
                 );
                 match *value {
-                    vx_eval::TransportValue::Blob(vx_eval::TransportBlob::Store(_)) => {}
+                    vx_eval::TransportValue::Blob(vx_eval::TransportBlob::Store { .. }) => {}
                     other => panic!("expected committed blob, got {other:?}"),
                 }
             }

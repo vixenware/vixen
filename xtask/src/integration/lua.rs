@@ -1,46 +1,18 @@
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
+use eyre::{Context, Result, bail};
+use tempfile::tempdir;
+
 use super::{
     ScenarioFuture,
     context::{BuildOptions, IntegrationContext},
 };
 
 const LUA_SKETCH: &str = include_str!("../../../zoo/lua.vx");
-
-const LUA_SOURCES: &[&str] = &[
-    "lapi.c",
-    "lcode.c",
-    "lctype.c",
-    "ldebug.c",
-    "ldo.c",
-    "ldump.c",
-    "lfunc.c",
-    "lgc.c",
-    "llex.c",
-    "lmem.c",
-    "lobject.c",
-    "lopcodes.c",
-    "lparser.c",
-    "lstate.c",
-    "lstring.c",
-    "ltable.c",
-    "ltm.c",
-    "lundump.c",
-    "lvm.c",
-    "lzio.c",
-    "ltests.c",
-    "lauxlib.c",
-    "lbaselib.c",
-    "ldblib.c",
-    "liolib.c",
-    "lmathlib.c",
-    "loslib.c",
-    "ltablib.c",
-    "lstrlib.c",
-    "lutf8lib.c",
-    "loadlib.c",
-    "lcorolib.c",
-    "linit.c",
-    "lua.c",
-];
+const LUA_VERSION: &str = "5.4.8";
+const LUA_ARCHIVE_URL: &str = "https://www.lua.org/ftp/lua-5.4.8.tar.gz";
 
 pub(crate) fn run(context: &mut IntegrationContext) -> ScenarioFuture<'_> {
     Box::pin(async move {
@@ -50,63 +22,121 @@ pub(crate) fn run(context: &mut IntegrationContext) -> ScenarioFuture<'_> {
         #[cfg(unix)]
         {
             context.write_project_file("build.vx", LUA_SKETCH)?;
-
-            for source in LUA_SOURCES {
-                context.write_project_file(
-                    &format!("zoo/lua-src/{source}"),
-                    "int main(void) { return 0; }\n",
-                )?;
-            }
-
-            context.write_fake_tool(
-                "cc",
-                r#"#!/bin/sh
-out=""
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "-o" ]; then
-    out="$arg"
-    break
-  fi
-  prev="$arg"
-done
-if [ -n "$out" ]; then
-  mkdir -p "$(dirname "$out")"
-  printf 'fake cc output\n' > "$out"
-fi
-exit 0
-"#,
-            )?;
-            context.write_fake_tool(
-                "ar",
-                r#"#!/bin/sh
-out=""
-for arg in "$@"; do
-  case "$arg" in
-    *.a) out="$arg" ;;
-  esac
-done
-if [ -n "$out" ]; then
-  mkdir -p "$(dirname "$out")"
-  printf 'fake archive\n' > "$out"
-fi
-exit 0
-"#,
-            )?;
-            context.write_fake_tool(
-                "ranlib",
-                r#"#!/bin/sh
-exit 0
-"#,
-            )?;
+            stage_lua_sources(context).context("failed to stage real Lua sources")?;
 
             let build = context.run_vx_build(BuildOptions::default()).await?;
             build.assert_success("vx build")?;
 
-            context.assert_file_contents(".vx/build/bin/lua", "fake cc output\n")?;
-            context.assert_file_contents(".vx/build/lib/liblua.a", "fake archive\n")?;
+            if !context.file_exists(".vx/build/bin/lua") {
+                bail!("expected .vx/build/bin/lua to exist after build");
+            }
+            if !context.file_exists(".vx/build/lib/liblua.a") {
+                bail!("expected .vx/build/lib/liblua.a to exist after build");
+            }
+
+            let lua_binary = context.project_path(".vx/build/bin/lua");
+            let output = Command::new(&lua_binary)
+                .arg("-v")
+                .output()
+                .with_context(|| format!("failed to run {}", lua_binary.display()))?;
+            if !output.status.success() {
+                bail!(
+                    "built lua binary exited with {}\nstdout:\n{}\nstderr:\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if !stdout.contains(&format!("Lua {LUA_VERSION}")) {
+                bail!(
+                    "expected built lua binary to report version {LUA_VERSION}\nstdout:\n{}\nstderr:\n{}",
+                    stdout,
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
 
             Ok(())
         }
     })
+}
+
+fn stage_lua_sources(context: &IntegrationContext) -> Result<()> {
+    let download_dir = tempdir().context("failed to create Lua download temp dir")?;
+    let archive_path = download_dir.path().join("lua.tar.gz");
+
+    run_host_command(
+        Command::new("curl")
+            .arg("-fsSL")
+            .arg(LUA_ARCHIVE_URL)
+            .arg("-o")
+            .arg(&archive_path),
+        "download Lua source archive",
+    )?;
+
+    run_host_command(
+        Command::new("tar")
+            .arg("-xzf")
+            .arg(&archive_path)
+            .arg("-C")
+            .arg(download_dir.path()),
+        "extract Lua source archive",
+    )?;
+
+    let extracted = download_dir.path().join(format!("lua-{LUA_VERSION}/src"));
+    if !extracted.exists() {
+        bail!("expected extracted Lua sources at {}", extracted.display());
+    }
+
+    let project_sources = context.project_path("zoo/lua-src");
+    fs::create_dir_all(&project_sources)
+        .with_context(|| format!("failed to create {}", project_sources.display()))?;
+    copy_dir(&extracted, &project_sources)?;
+
+    Ok(())
+}
+
+fn run_host_command(cmd: &mut Command, label: &str) -> Result<()> {
+    let output = cmd.output().with_context(|| format!("failed to {label}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    bail!(
+        "{label} failed with {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    )
+}
+
+fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
+    for entry in
+        fs::read_dir(src).with_context(|| format!("failed to read dir {}", src.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("failed to read entry under {}", src.display()))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to stat {}", src_path.display()))?;
+
+        if file_type.is_dir() {
+            fs::create_dir_all(&dst_path)
+                .with_context(|| format!("failed to create {}", dst_path.display()))?;
+            copy_dir(&src_path, &dst_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&src_path, &dst_path).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    src_path.display(),
+                    dst_path.display()
+                )
+            })?;
+        }
+    }
+
+    Ok(())
 }

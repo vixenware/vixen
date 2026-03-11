@@ -201,8 +201,8 @@ pub enum TransportValue {
 #[derive(Debug, Clone, Facet)]
 #[repr(u8)]
 pub enum TransportBlob {
-    Inline(Vec<u8>),
-    Store(BlobRef),
+    Inline { bytes: Vec<u8>, executable: bool },
+    Store { blob_ref: BlobRef, executable: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Facet)]
@@ -237,6 +237,9 @@ pub enum TransportBuiltinValue {
     TreeEmpty,
     TreeFromPath,
     BlobToString {
+        receiver: Box<TransportValue>,
+    },
+    BlobExecutable {
         receiver: Box<TransportValue>,
     },
     BlobUtf8 {
@@ -881,12 +884,21 @@ impl TryFrom<&BlobValue> for TransportBlob {
 
     fn try_from(blob: &BlobValue) -> Result<Self, Self::Error> {
         match blob {
-            BlobValue::Inline(bytes) => Ok(Self::Inline(bytes.to_vec())),
-            BlobValue::FsFile(path) => Err(format!(
+            BlobValue::Inline { bytes, executable } => Ok(Self::Inline {
+                bytes: bytes.to_vec(),
+                executable: *executable,
+            }),
+            BlobValue::FsFile { path, .. } => Err(format!(
                 "cannot transport filesystem-backed blob {} yet",
                 path.as_str()
             )),
-            BlobValue::Store(blob_ref) => Ok(Self::Store(blob_ref.clone())),
+            BlobValue::Store {
+                blob_ref,
+                executable,
+            } => Ok(Self::Store {
+                blob_ref: blob_ref.clone(),
+                executable: *executable,
+            }),
         }
     }
 }
@@ -894,8 +906,17 @@ impl TryFrom<&BlobValue> for TransportBlob {
 impl From<TransportBlob> for BlobValue {
     fn from(blob: TransportBlob) -> Self {
         match blob {
-            TransportBlob::Inline(bytes) => Self::Inline(Arc::from(bytes)),
-            TransportBlob::Store(blob_ref) => Self::Store(blob_ref),
+            TransportBlob::Inline { bytes, executable } => Self::Inline {
+                bytes: Arc::from(bytes),
+                executable,
+            },
+            TransportBlob::Store {
+                blob_ref,
+                executable,
+            } => Self::Store {
+                blob_ref,
+                executable,
+            },
         }
     }
 }
@@ -903,8 +924,26 @@ impl From<TransportBlob> for BlobValue {
 impl PartialEq for TransportBlob {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (TransportBlob::Inline(a), TransportBlob::Inline(b)) => a == b,
-            (TransportBlob::Store(a), TransportBlob::Store(b)) => blob_ref_eq(a, b),
+            (
+                TransportBlob::Inline {
+                    bytes: a_bytes,
+                    executable: a_exec,
+                },
+                TransportBlob::Inline {
+                    bytes: b_bytes,
+                    executable: b_exec,
+                },
+            ) => a_exec == b_exec && a_bytes == b_bytes,
+            (
+                TransportBlob::Store {
+                    blob_ref: a_ref,
+                    executable: a_exec,
+                },
+                TransportBlob::Store {
+                    blob_ref: b_ref,
+                    executable: b_exec,
+                },
+            ) => a_exec == b_exec && blob_ref_eq(a_ref, b_ref),
             _ => false,
         }
     }
@@ -1041,6 +1080,11 @@ impl TryFrom<&BuiltinValue> for TransportBuiltinValue {
                     receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
                 })
             }
+            BuiltinValue::Method(BuiltinMethod::BlobExecutable { receiver }) => {
+                Ok(Self::BlobExecutable {
+                    receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
+                })
+            }
             BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver }) => Ok(Self::BlobUtf8 {
                 receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
             }),
@@ -1133,6 +1177,11 @@ impl TryFrom<TransportBuiltinValue> for BuiltinValue {
             TransportBuiltinValue::TreeFromPath => Ok(Self::Method(BuiltinMethod::TreeFromPath)),
             TransportBuiltinValue::BlobToString { receiver } => {
                 Ok(Self::Method(BuiltinMethod::BlobToString {
+                    receiver: Box::new(Value::try_from(*receiver)?),
+                }))
+            }
+            TransportBuiltinValue::BlobExecutable { receiver } => {
+                Ok(Self::Method(BuiltinMethod::BlobExecutable {
                     receiver: Box::new(Value::try_from(*receiver)?),
                 }))
             }

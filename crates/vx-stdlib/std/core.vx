@@ -98,6 +98,8 @@ namespace Path {
 namespace Blob {
   /// Construct a text blob from a string.
   fn Blob(s: String) -> Self;
+  /// Mark the blob as executable when materialized to a filesystem.
+  fn executable(self) -> Self;
   /// Decode the blob as UTF-8, poisoning on invalid input.
   fn utf8(self) -> String;
   /// Decode the blob as UTF-8 with replacement on invalid input.

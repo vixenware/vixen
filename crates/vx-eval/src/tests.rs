@@ -39,7 +39,7 @@ fn engine(source: &str) -> Engine {
 
 static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-const LUA_SKETCH_TAIL: &str = "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree {\n    @bin/lua: lua_exe.file(@bin/lua),\n    @lib/liblua.a: liblua.file(@liblua.a),\n  }\n";
+const LUA_SKETCH_TAIL: &str = "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree {\n    @bin/lua: lua_exe.file(@bin/lua).executable(),\n    @lib/liblua.a: liblua.file(@liblua.a),\n  }\n";
 
 fn collect_tree_leaf_paths(value: &Value) -> Vec<String> {
     fn walk_value(value: &Value, prefix: &str, out: &mut Vec<String>) {
@@ -322,7 +322,6 @@ fn lua_sketch_runs_with_discovered_tools_and_fake_sources() {
         "lundump.c",
         "lvm.c",
         "lzio.c",
-        "ltests.c",
         "lauxlib.c",
         "lbaselib.c",
         "ldblib.c",
@@ -350,8 +349,7 @@ fn lua_sketch_runs_with_discovered_tools_and_fake_sources() {
     let tools_dir = workspace.join("tools");
     fs::create_dir_all(&tools_dir).unwrap();
     let cc_script = tools_dir.join("cc");
-    let ar_script = tools_dir.join("ar");
-    let ranlib_script = tools_dir.join("ranlib");
+    let libtool_script = tools_dir.join("libtool");
     fs::write(
         &cc_script,
         r#"#!/bin/sh
@@ -369,18 +367,18 @@ printf 'artifact\n' > "$out"
     )
     .unwrap();
     fs::write(
-        &ar_script,
+        &libtool_script,
         r#"#!/bin/sh
-out="$2"
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
 mkdir -p "$(dirname "$out")"
 printf 'archive\n' > "$out"
-"#,
-    )
-    .unwrap();
-    fs::write(
-        &ranlib_script,
-        r#"#!/bin/sh
-exit 0
 "#,
     )
     .unwrap();
@@ -388,7 +386,7 @@ exit 0
     {
         use std::os::unix::fs::PermissionsExt;
 
-        for script in [&cc_script, &ar_script, &ranlib_script] {
+        for script in [&cc_script, &libtool_script] {
             let mut perms = fs::metadata(script).unwrap().permissions();
             perms.set_mode(0o755);
             fs::set_permissions(script, perms).unwrap();
@@ -561,7 +559,6 @@ fn lua_sketch_compile_map_returns_tree_items() {
         "lundump.c",
         "lvm.c",
         "lzio.c",
-        "ltests.c",
         "lauxlib.c",
         "lbaselib.c",
         "ldblib.c",
@@ -583,8 +580,7 @@ fn lua_sketch_compile_map_returns_tree_items() {
     let tools_dir = workspace.join("tools");
     fs::create_dir_all(&tools_dir).unwrap();
     let cc_script = tools_dir.join("cc");
-    let ar_script = tools_dir.join("ar");
-    let ranlib_script = tools_dir.join("ranlib");
+    let libtool_script = tools_dir.join("libtool");
     fs::write(
         &cc_script,
         r#"#!/bin/sh
@@ -601,13 +597,12 @@ printf 'artifact\n' > "$out"
 "#,
     )
     .unwrap();
-    fs::write(&ar_script, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::write(&ranlib_script, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(&libtool_script, "#!/bin/sh\nexit 0\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        for script in [&cc_script, &ar_script, &ranlib_script] {
+        for script in [&cc_script, &libtool_script] {
             let mut perms = fs::metadata(script).unwrap().permissions();
             perms.set_mode(0o755);
             fs::set_permissions(script, perms).unwrap();
@@ -761,7 +756,6 @@ fn lua_sketch_object_merge_returns_tree() {
         "lundump.c",
         "lvm.c",
         "lzio.c",
-        "ltests.c",
         "lauxlib.c",
         "lbaselib.c",
         "ldblib.c",
@@ -783,8 +777,7 @@ fn lua_sketch_object_merge_returns_tree() {
     let tools_dir = workspace.join("tools");
     fs::create_dir_all(&tools_dir).unwrap();
     let cc_script = tools_dir.join("cc");
-    let ar_script = tools_dir.join("ar");
-    let ranlib_script = tools_dir.join("ranlib");
+    let libtool_script = tools_dir.join("libtool");
     fs::write(
         &cc_script,
         r#"#!/bin/sh
@@ -801,13 +794,12 @@ printf 'artifact\n' > "$out"
 "#,
     )
     .unwrap();
-    fs::write(&ar_script, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::write(&ranlib_script, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(&libtool_script, "#!/bin/sh\nexit 0\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        for script in [&cc_script, &ar_script, &ranlib_script] {
+        for script in [&cc_script, &libtool_script] {
             let mut perms = fs::metadata(script).unwrap().permissions();
             perms.set_mode(0o755);
             fs::set_permissions(script, perms).unwrap();
@@ -888,7 +880,6 @@ fn lua_sketch_archive_returns_tree() {
         "lundump.c",
         "lvm.c",
         "lzio.c",
-        "ltests.c",
         "lauxlib.c",
         "lbaselib.c",
         "ldblib.c",
@@ -910,8 +901,7 @@ fn lua_sketch_archive_returns_tree() {
     let tools_dir = workspace.join("tools");
     fs::create_dir_all(&tools_dir).unwrap();
     let cc_script = tools_dir.join("cc");
-    let ar_script = tools_dir.join("ar");
-    let ranlib_script = tools_dir.join("ranlib");
+    let libtool_script = tools_dir.join("libtool");
     fs::write(
         &cc_script,
         r#"#!/bin/sh
@@ -929,20 +919,26 @@ printf 'artifact\n' > "$out"
     )
     .unwrap();
     fs::write(
-        &ar_script,
+        &libtool_script,
         r#"#!/bin/sh
-out="$2"
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
 mkdir -p "$(dirname "$out")"
 printf 'archive\n' > "$out"
 "#,
     )
     .unwrap();
-    fs::write(&ranlib_script, "#!/bin/sh\nexit 0\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        for script in [&cc_script, &ar_script, &ranlib_script] {
+        for script in [&cc_script, &libtool_script] {
             let mut perms = fs::metadata(script).unwrap().permissions();
             perms.set_mode(0o755);
             fs::set_permissions(script, perms).unwrap();
@@ -1023,7 +1019,6 @@ fn lua_sketch_link_input_array_contains_tree_items() {
         "lundump.c",
         "lvm.c",
         "lzio.c",
-        "ltests.c",
         "lauxlib.c",
         "lbaselib.c",
         "ldblib.c",
@@ -1046,8 +1041,7 @@ fn lua_sketch_link_input_array_contains_tree_items() {
     let tools_dir = workspace.join("tools");
     fs::create_dir_all(&tools_dir).unwrap();
     let cc_script = tools_dir.join("cc");
-    let ar_script = tools_dir.join("ar");
-    let ranlib_script = tools_dir.join("ranlib");
+    let libtool_script = tools_dir.join("libtool");
     fs::write(
         &cc_script,
         r#"#!/bin/sh
@@ -1065,20 +1059,26 @@ printf 'artifact\n' > "$out"
     )
     .unwrap();
     fs::write(
-        &ar_script,
+        &libtool_script,
         r#"#!/bin/sh
-out="$2"
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
 mkdir -p "$(dirname "$out")"
 printf 'archive\n' > "$out"
 "#,
     )
     .unwrap();
-    fs::write(&ranlib_script, "#!/bin/sh\nexit 0\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        for script in [&cc_script, &ar_script, &ranlib_script] {
+        for script in [&cc_script, &libtool_script] {
             let mut perms = fs::metadata(script).unwrap().permissions();
             perms.set_mode(0o755);
             fs::set_permissions(script, perms).unwrap();
@@ -1163,7 +1163,6 @@ fn lua_sketch_tree_constructor_over_link_inputs_returns_tree() {
         "lundump.c",
         "lvm.c",
         "lzio.c",
-        "ltests.c",
         "lauxlib.c",
         "lbaselib.c",
         "ldblib.c",
@@ -1186,8 +1185,7 @@ fn lua_sketch_tree_constructor_over_link_inputs_returns_tree() {
     let tools_dir = workspace.join("tools");
     fs::create_dir_all(&tools_dir).unwrap();
     let cc_script = tools_dir.join("cc");
-    let ar_script = tools_dir.join("ar");
-    let ranlib_script = tools_dir.join("ranlib");
+    let libtool_script = tools_dir.join("libtool");
     fs::write(
         &cc_script,
         r#"#!/bin/sh
@@ -1205,20 +1203,26 @@ printf 'artifact\n' > "$out"
     )
     .unwrap();
     fs::write(
-        &ar_script,
+        &libtool_script,
         r#"#!/bin/sh
-out="$2"
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
 mkdir -p "$(dirname "$out")"
 printf 'archive\n' > "$out"
 "#,
     )
     .unwrap();
-    fs::write(&ranlib_script, "#!/bin/sh\nexit 0\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        for script in [&cc_script, &ar_script, &ranlib_script] {
+        for script in [&cc_script, &libtool_script] {
             let mut perms = fs::metadata(script).unwrap().permissions();
             perms.set_mode(0o755);
             fs::set_permissions(script, perms).unwrap();
@@ -1299,7 +1303,6 @@ fn lua_sketch_link_returns_tree() {
         "lundump.c",
         "lvm.c",
         "lzio.c",
-        "ltests.c",
         "lauxlib.c",
         "lbaselib.c",
         "ldblib.c",
@@ -1322,8 +1325,7 @@ fn lua_sketch_link_returns_tree() {
     let tools_dir = workspace.join("tools");
     fs::create_dir_all(&tools_dir).unwrap();
     let cc_script = tools_dir.join("cc");
-    let ar_script = tools_dir.join("ar");
-    let ranlib_script = tools_dir.join("ranlib");
+    let libtool_script = tools_dir.join("libtool");
     fs::write(
         &cc_script,
         r#"#!/bin/sh
@@ -1341,20 +1343,26 @@ printf 'artifact\n' > "$out"
     )
     .unwrap();
     fs::write(
-        &ar_script,
+        &libtool_script,
         r#"#!/bin/sh
-out="$2"
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
 mkdir -p "$(dirname "$out")"
 printf 'archive\n' > "$out"
 "#,
     )
     .unwrap();
-    fs::write(&ranlib_script, "#!/bin/sh\nexit 0\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        for script in [&cc_script, &ar_script, &ranlib_script] {
+        for script in [&cc_script, &libtool_script] {
             let mut perms = fs::metadata(script).unwrap().permissions();
             perms.set_mode(0o755);
             fs::set_permissions(script, perms).unwrap();
@@ -2003,10 +2011,13 @@ fn inline_values_round_trip_through_transport() {
 #[test]
 fn store_backed_values_round_trip_through_transport() {
     let engine = engine("fn main() { () }");
-    let blob = Value::Blob(BlobValue::Store(BlobRef::Small {
-        chunk: ChunkHash(Blake3Hash([0x11; 32])),
-        size: 3,
-    }));
+    let blob = Value::Blob(BlobValue::Store {
+        blob_ref: BlobRef::Small {
+            chunk: ChunkHash(Blake3Hash([0x11; 32])),
+            size: 3,
+        },
+        executable: false,
+    });
     let tree = Value::Tree(TreeValue::Store(NodeHash(Blake3Hash([0x22; 32]))));
 
     let shipped_blob = engine.ship_value(blob.clone()).unwrap();
@@ -2401,6 +2412,18 @@ fn blob_from_string_round_trips_text() {
 }
 
 #[test]
+fn blob_executable_marks_blob_as_executable() {
+    let value = eval(r#"fn main() { Blob("hello").executable() }"#, "main").unwrap();
+    assert_eq!(
+        value,
+        Value::Blob(BlobValue::Inline {
+            bytes: Arc::from("hello".as_bytes()),
+            executable: true,
+        })
+    );
+}
+
+#[test]
 // r[verify store.tree]
 // r[verify store.tree.file]
 fn tree_of_and_file_only_force_the_selected_entry() {
@@ -2671,7 +2694,7 @@ fn observer_functions_can_return_tree_results_for_exec() {
     );
     assert!(matches!(
         by_name.get("output.txt"),
-        Some(&Value::Blob(BlobValue::FsFile(_)))
+        Some(&Value::Blob(BlobValue::FsFile { .. }))
     ));
 }
 

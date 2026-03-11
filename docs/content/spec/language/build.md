@@ -11,7 +11,10 @@ insert_anchor_links = "heading"
 >
 > `Blob` is a single file in the content-addressable store (keyed by
 > Blake3 hashes). `Blob(s)` creates a blob from a text string. Blobs
-> with binary content come from `exec`.
+> with binary content come from `exec`. A blob also carries filesystem
+> mode information relevant to materialization, such as whether it
+> should be executable. `blob.executable()` returns a blob whose
+> materialized file mode has the executable bit set.
 
 > r[store.bytes]
 >
