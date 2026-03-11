@@ -8,7 +8,7 @@ use crate::scope::ScopeTree;
 use crate::{
     DefKind, ImportGraph, ScopeKind, SourceFileRef, SourceId, resolve, resolve_in_program,
 };
-use vx_types::{Builtin, Scalar, Ty};
+use vx_types::{Scalar, Ty};
 
 const TEST_SOURCE_ID: SourceId = SourceId(0);
 
@@ -63,6 +63,37 @@ fn resolve_with_stdlib(file: &SourceFile) -> crate::NameResolution {
 fn collect_types_with_stdlib(file: &SourceFile) -> crate::TypeCollection {
     let (sources, _) = stdlib_program(file);
     crate::collect_types_for_sources(&sources)
+}
+
+fn nominal_ty(types: &crate::TypeCollection, name: &str) -> Ty {
+    let id = *types
+        .env
+        .lookup(name)
+        .iter()
+        .next()
+        .unwrap_or_else(|| panic!("missing type `{name}`"));
+    match types.env.get(id) {
+        vx_types::TypeDef::Struct(_) => Ty::Struct(vx_types::StructTy {
+            id,
+            type_args: vec![],
+        }),
+        vx_types::TypeDef::Enum(_) => Ty::Enum(vx_types::EnumTy {
+            id,
+            type_args: vec![],
+        }),
+        vx_types::TypeDef::Newtype(_) => Ty::Newtype(vx_types::NewtypeTy {
+            id,
+            type_args: vec![],
+        }),
+        vx_types::TypeDef::Alias(_) => Ty::Alias(vx_types::AliasTy {
+            id,
+            type_args: vec![],
+        }),
+        vx_types::TypeDef::Opaque(_) => Ty::Opaque(vx_types::OpaqueTy {
+            id,
+            type_args: vec![],
+        }),
+    }
 }
 
 fn span_for_text(src: &str, needle: &str) -> crate::SourceSpan {
@@ -131,6 +162,8 @@ namespace Blob {
 fn namespace_member_function_signatures_are_collected() {
     let file = parse_file(
         r#"
+type Blob;
+
 namespace Blob {
     fn Blob(s: String) -> Self;
     fn utf8(self: Self) -> String;
@@ -141,7 +174,7 @@ namespace Blob {
     let namespace = tree
         .definitions(crate::ScopeId::ROOT)
         .iter()
-        .find(|def| def.name == "Blob")
+        .find(|def| def.name == "Blob" && def.kind == DefKind::Namespace)
         .expect("Blob namespace");
     let scope = tree.owned_scope(namespace).expect("namespace scope");
     let utf8 = tree
@@ -155,7 +188,7 @@ namespace Blob {
     assert_eq!(sig.name, "utf8");
     assert_eq!(sig.positional_params.len(), 1);
     assert_eq!(sig.positional_params[0].name, "self");
-    assert_eq!(sig.positional_params[0].ty, Ty::Builtin(Builtin::Blob));
+    assert_eq!(sig.positional_params[0].ty, nominal_ty(&types, "Blob"));
     assert_eq!(sig.ret, Ty::Scalar(Scalar::String));
 }
 
@@ -990,10 +1023,15 @@ fn pure() -> String {}
 }
 
 fn type_check(src: &str) -> crate::TypeCheckResult {
+    type_check_with_types(src).0
+}
+
+fn type_check_with_types(src: &str) -> (crate::TypeCheckResult, crate::TypeCollection) {
     let file = parse_file(src);
     let resolution = resolve_with_stdlib(&file);
     let types = collect_types_with_stdlib(&file);
-    crate::type_check(&file, &resolution, &types)
+    let checked = crate::type_check(&file, &resolution, &types);
+    (checked, types)
 }
 
 fn find_expr_type(result: &crate::TypeCheckResult, src: &str, needle: &str) -> Option<Ty> {
@@ -1050,9 +1088,9 @@ fn main() {
     })
 }
 "#;
-    let result = type_check(src);
+    let (result, types) = type_check_with_types(src);
     let ty = find_expr_type(&result, src, r#"host.read("foo")"#);
-    assert_eq!(ty, Some(Ty::Builtin(Builtin::Blob)));
+    assert_eq!(ty, Some(nominal_ty(&types, "Blob")));
 }
 
 // r[exec.verifier.host] — host.hash(...) returns Blob
@@ -1065,9 +1103,9 @@ fn main() {
     })
 }
 "#;
-    let result = type_check(src);
+    let (result, types) = type_check_with_types(src);
     let ty = find_expr_type(&result, src, r#"host.hash("foo")"#);
-    assert_eq!(ty, Some(Ty::Builtin(Builtin::Blob)));
+    assert_eq!(ty, Some(nominal_ty(&types, "Blob")));
 }
 
 // r[exec.verifier.host] — host.which(...) returns String
@@ -1130,9 +1168,9 @@ fn main() {
     };
 }
 "#;
-    let result = type_check(src);
+    let (result, types) = type_check_with_types(src);
     let ty = find_expr_type(&result, src, "proc.stdout");
-    assert_eq!(ty, Some(Ty::Stream(Box::new(Ty::Builtin(Builtin::Blob)))));
+    assert_eq!(ty, Some(Ty::Stream(Box::new(nominal_ty(&types, "Blob")))));
 }
 
 #[test]
@@ -1146,9 +1184,9 @@ fn main() {
     };
 }
 "#;
-    let result = type_check(src);
+    let (result, types) = type_check_with_types(src);
     let ty = find_expr_type(&result, src, "proc.stderr");
-    assert_eq!(ty, Some(Ty::Stream(Box::new(Ty::Builtin(Builtin::Blob)))));
+    assert_eq!(ty, Some(Ty::Stream(Box::new(nominal_ty(&types, "Blob")))));
 }
 
 // r[type.builtin.blob] — blob.utf8() returns String
@@ -1240,9 +1278,9 @@ fn main(ws: Path) {
     Tree(ws)
 }
 "#;
-    let result = type_check(src);
+    let (result, types) = type_check_with_types(src);
     let ty = find_expr_type(&result, src, "Tree(ws)");
-    assert_eq!(ty, Some(Ty::Builtin(Builtin::Tree)));
+    assert_eq!(ty, Some(nominal_ty(&types, "Tree")));
 }
 
 #[test]
@@ -1252,9 +1290,9 @@ fn main(other: Tree) {
     Tree([other])
 }
 "#;
-    let result = type_check(src);
+    let (result, types) = type_check_with_types(src);
     let ty = find_expr_type(&result, src, "Tree([other])");
-    assert_eq!(ty, Some(Ty::Builtin(Builtin::Tree)));
+    assert_eq!(ty, Some(nominal_ty(&types, "Tree")));
 }
 
 #[test]
@@ -1264,9 +1302,9 @@ fn main() {
     Http.get("https://example.com")
 }
 "#;
-    let result = type_check(src);
+    let (result, types) = type_check_with_types(src);
     let ty = find_expr_type(&result, src, r#"Http.get("https://example.com")"#);
-    assert_eq!(ty, Some(Ty::Builtin(Builtin::Blob)));
+    assert_eq!(ty, Some(nominal_ty(&types, "Blob")));
 }
 
 #[test]
@@ -1336,7 +1374,7 @@ fn main(paths: Array[Path]) {
     paths.map(compile)
 }
 "#;
-    let result = type_check(src);
+    let (result, types) = type_check_with_types(src);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let compile_ty = find_last_expr_type(&result, src, "compile");
     assert!(
@@ -1344,7 +1382,7 @@ fn main(paths: Array[Path]) {
         "got: {compile_ty:?}"
     );
     let ty = find_expr_type(&result, src, "paths.map(compile)");
-    assert_eq!(ty, Some(Ty::Array(Box::new(Ty::Builtin(Builtin::Tree)))));
+    assert_eq!(ty, Some(Ty::Array(Box::new(nominal_ty(&types, "Tree")))));
 }
 
 #[test]
@@ -1412,9 +1450,9 @@ fn main(parts: Array[Tree]) {
     parts.merge()
 }
 "#;
-    let result = type_check(src);
+    let (result, types) = type_check_with_types(src);
     let ty = find_expr_type(&result, src, "parts.merge()");
-    assert_eq!(ty, Some(Ty::Builtin(Builtin::Tree)));
+    assert_eq!(ty, Some(nominal_ty(&types, "Tree")));
 }
 
 // r[type.error.arg_mismatch] — host.read(123) gets a type diagnostic
@@ -1464,9 +1502,9 @@ fn main() #fs {
     read_file("hello.txt")
 }
 "#;
-    let result = type_check(src);
+    let (result, types) = type_check_with_types(src);
     let ty = find_expr_type(&result, src, r#"read_file("hello.txt")"#);
-    assert_eq!(ty, Some(Ty::Builtin(Builtin::Blob)));
+    assert_eq!(ty, Some(nominal_ty(&types, "Blob")));
 }
 
 // r[type.builtin.executor_class] — executor_class returns ExecutorClass
@@ -1477,9 +1515,9 @@ fn main() {
     executor_class("default")
 }
 "#;
-    let result = type_check(src);
+    let (result, types) = type_check_with_types(src);
     let ty = find_expr_type(&result, src, r#"executor_class("default")"#);
-    assert_eq!(ty, Some(Ty::Builtin(Builtin::ExecutorClass)));
+    assert_eq!(ty, Some(nominal_ty(&types, "ExecutorClass")));
 }
 
 // r[type.discover.host_param] — discover callback host param is typed Host
@@ -1490,16 +1528,14 @@ fn main() {
     discover(executor_class("default"), (host) => host)
 }
 "#;
-    let result = type_check(src);
-    // The name ref "host" in the body should resolve to Builtin::Host
+    let (result, types) = type_check_with_types(src);
+    let host_ty = nominal_ty(&types, "Host");
+    // The name ref "host" in the body should resolve to the stdlib Host type.
     let _ty = find_expr_type(&result, src, "host\n");
     // The inner "host" expression (in the body, not the param declaration)
     // Find the last occurrence of "host" which is the expression use
     assert!(
-        result
-            .expr_types
-            .values()
-            .any(|ty| *ty == Ty::Builtin(Builtin::Host)),
+        result.expr_types.values().any(|ty| *ty == host_ty),
         "expected Host type in expr_types, got: {:?}",
         result.expr_types
     );
@@ -1564,7 +1600,7 @@ fn type_check_src(src: &str) -> crate::TypeCheckResult {
 
 #[test]
 fn let_binding_propagates_type() {
-    let result = type_check_src(
+    let (result, types) = type_check_with_types(
         r#"
 fn main() {
     build((path, args, env) => {
@@ -1574,6 +1610,7 @@ fn main() {
 }
 "#,
     );
+    let blob_ty = nominal_ty(&types, "Blob");
     assert!(
         result.errors.is_empty(),
         "expected no type errors, got: {:?}",
@@ -1581,10 +1618,7 @@ fn main() {
     );
     // Check that binding_types has an entry for b
     assert!(
-        result
-            .binding_types
-            .values()
-            .any(|ty| *ty == Ty::Builtin(Builtin::Blob)),
+        result.binding_types.values().any(|ty| *ty == blob_ty),
         "expected Blob binding type, got: {:?}",
         result.binding_types
     );
@@ -1855,8 +1889,8 @@ fn main() {
 }
 
 #[test]
-fn array_of_builtins() {
-    let result = type_check_src(
+fn array_of_nominal_blobs() {
+    let (result, types) = type_check_with_types(
         r#"
 fn main() {
     build((path, args, env) => {
@@ -1865,11 +1899,12 @@ fn main() {
 }
 "#,
     );
+    let blob_ty = nominal_ty(&types, "Blob");
     assert!(
         result
             .binding_types
             .values()
-            .any(|ty| matches!(ty, Ty::Array(inner) if matches!(inner.as_ref(), Ty::Builtin(Builtin::Blob)))),
+            .any(|ty| matches!(ty, Ty::Array(inner) if inner.as_ref() == &blob_ty)),
         "expected Array[Blob] binding type, got: {:?}",
         result.binding_types
     );

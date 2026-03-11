@@ -682,12 +682,6 @@ impl<'a> TypeResolver<'a> {
             "Bool" => return Some(Ty::Scalar(vx_types::Scalar::Bool)),
             "String" => return Some(Ty::Scalar(vx_types::Scalar::String)),
             "Unit" => return Some(Ty::Unit),
-            "Path" => return Some(Ty::Builtin(vx_types::Builtin::Path)),
-            "Blob" => return Some(Ty::Builtin(vx_types::Builtin::Blob)),
-            "Tree" => return Some(Ty::Builtin(vx_types::Builtin::Tree)),
-            "ExecPath" => return Some(Ty::Builtin(vx_types::Builtin::ExecPath)),
-            "Host" => return Some(Ty::Builtin(vx_types::Builtin::Host)),
-            "ExecutorClass" => return Some(Ty::Builtin(vx_types::Builtin::ExecutorClass)),
             "Option" => {
                 let inner = type_args.into_iter().next().unwrap_or(Ty::Poison);
                 return Some(Ty::Optional(Box::new(inner)));

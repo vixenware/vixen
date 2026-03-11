@@ -792,6 +792,7 @@ impl<'a> ExprTyper<'a> {
         let member_name = field_name.text();
         resolve_member_for_receiver(
             &self.resolution.scopes,
+            &self.types.env,
             self.resolution.source,
             offset,
             receiver_ty,
@@ -1498,10 +1499,10 @@ fn types_compatible(actual: &Ty, expected: &Ty) -> bool {
     if actual.is_poison() || expected.is_poison() {
         return true;
     }
+    if actual == expected {
+        return true;
+    }
     match (actual, expected) {
-        (Ty::Scalar(a), Ty::Scalar(b)) => a == b,
-        (Ty::Unit, Ty::Unit) => true,
-        (Ty::Builtin(a), Ty::Builtin(b)) => a == b,
         (Ty::Array(_), Ty::Array(_)) => true, // element type checking later
         (Ty::Map(_, _), Ty::Map(_, _)) => true,
         (Ty::Stream(_), Ty::Stream(_)) => true,

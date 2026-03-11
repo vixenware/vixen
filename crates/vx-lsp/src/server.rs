@@ -1954,6 +1954,7 @@ fn completions_for_type(
     .or_else(|| {
         let items: Vec<CompletionItem> = vx_resolve::visible_members_for_receiver(
             &state.resolution.scopes,
+            &state.types.env,
             state.current_source,
             offset,
             ty,
@@ -2600,7 +2601,11 @@ fn demo(host: Host) {
 
         let state = DocumentState::new(text.to_string());
         let offset = TextSize::new(text.find("host.which").unwrap() as u32);
-        let host_ty = vx_types::Ty::Builtin(vx_types::Builtin::Host);
+        let host_id = *state.types.env.lookup("Host").first().expect("Host type");
+        let host_ty = vx_types::Ty::Opaque(vx_types::OpaqueTy {
+            id: host_id,
+            type_args: vec![],
+        });
         let items = completions_for_type(&host_ty, &state, offset).expect("member completions");
         let which = items
             .iter()
