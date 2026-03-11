@@ -31,7 +31,7 @@ use tracing::{debug, info, warn};
 use vx_eval::{
     BlobValue, DemandChain, DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine,
     ExecArgValue, ExecMount, ExecRequest, MapValue, PathValue, PoisonError, PoisonKind,
-    StructValue, TreeValue, Value, lower_source_file,
+    StructValue, TreeValue, Value, lower_source_file_with_source_id,
 };
 use vx_io::spawn::ServiceHandle;
 use vx_parser::SourceFile;
@@ -1608,7 +1608,7 @@ impl VxdService {
                 }
 
                 let root = SourceFile::cast_root(parse.syntax());
-                let module = lower_source_file(&root);
+                let module = lower_source_file_with_source_id(&root, build_vx_path.to_string());
                 let store = Arc::clone(&self.store);
                 let exec = Arc::clone(&self.exec);
                 let runtime = Handle::current();

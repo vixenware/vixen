@@ -7,6 +7,30 @@
 
 use std::sync::Arc;
 
+use vx_parser::TextRange;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSpan {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl SourceSpan {
+    pub fn from_text_range(range: TextRange) -> Self {
+        Self {
+            start: u32::from(range.start()),
+            end: u32::from(range.end()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceProvenance {
+    pub source_id: Arc<str>,
+    pub span: SourceSpan,
+    pub label: String,
+}
+
 /// A lowered module — all top-level declarations from a source file.
 #[derive(Debug, Clone)]
 pub struct Module {
@@ -97,9 +121,15 @@ pub enum Expr {
     /// String literal
     LitString(String),
     /// Interpolated string literal
-    StringTemplate(Vec<TemplatePart>),
+    StringTemplate {
+        parts: Vec<TemplatePart>,
+        provenance: Option<SourceProvenance>,
+    },
     /// Path literal, possibly interpolated
-    PathTemplate(Vec<TemplatePart>),
+    PathTemplate {
+        parts: Vec<TemplatePart>,
+        provenance: Option<SourceProvenance>,
+    },
     /// Unit `()`
     Unit,
 
@@ -111,10 +141,15 @@ pub enum Expr {
         op: BinOp,
         left: Box<Expr>,
         right: Box<Expr>,
+        provenance: Option<SourceProvenance>,
     },
 
     /// Unary operation
-    Unary { op: UnaryOp, operand: Box<Expr> },
+    Unary {
+        op: UnaryOp,
+        operand: Box<Expr>,
+        provenance: Option<SourceProvenance>,
+    },
 
     /// Block expression
     Block(Block),
@@ -124,6 +159,7 @@ pub enum Expr {
         cond: Box<Expr>,
         then_branch: Block,
         else_branch: Block,
+        provenance: Option<SourceProvenance>,
     },
 
     /// Closure literal: `(x, y) => body`
@@ -135,6 +171,7 @@ pub enum Expr {
         args: Vec<Expr>,
         kwargs: Vec<(String, Expr)>,
         kwargs_expr: Option<Box<Expr>>,
+        provenance: Option<SourceProvenance>,
     },
 
     /// Partial application of a call surface.
@@ -143,6 +180,7 @@ pub enum Expr {
         args: Vec<Expr>,
         kwargs: Vec<(String, Expr)>,
         kwargs_expr: Option<Box<Expr>>,
+        provenance: Option<SourceProvenance>,
     },
 
     /// Struct literal: `TypeName { field: value, ... }`
@@ -161,10 +199,17 @@ pub enum Expr {
     Map(Vec<(Expr, Expr)>),
 
     /// Field access: `expr.field`
-    Field { receiver: Box<Expr>, field: String },
+    Field {
+        receiver: Box<Expr>,
+        field: String,
+        provenance: Option<SourceProvenance>,
+    },
 
     /// `fail expr`
-    Fail(Box<Expr>),
+    Fail {
+        message: Box<Expr>,
+        provenance: Option<SourceProvenance>,
+    },
 
     /// `expr?`
     Fallible(Box<Expr>),

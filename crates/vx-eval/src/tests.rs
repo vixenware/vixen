@@ -11,11 +11,11 @@ use std::time::Instant;
 use blake3::hash as blake3_hash;
 use indoc::indoc;
 use tempfile::TempDir;
-use vx_parser::{Pattern as AstPattern, SourceFile, Stmt as AstStmt};
+use vx_parser::{AstNode, Pattern as AstPattern, SourceFile, Stmt as AstStmt};
 use vx_store_proto::{Blake3Hash, BlobRef, ChunkHash, NodeHash};
 
 use crate::exec::ExecArgValue;
-use crate::lower::lower_source_file;
+use crate::lower::{lower_source_file, lower_source_file_with_source_id};
 use crate::poison::PoisonKind;
 use crate::transport::TransportValue;
 use crate::value::{
@@ -30,10 +30,14 @@ fn eval(source: &str, entry: &str) -> Result<Value, crate::poison::PoisonError> 
 }
 
 fn engine(source: &str) -> Engine {
+    engine_with_source_id(source, "<test>")
+}
+
+fn engine_with_source_id(source: &str, source_id: &str) -> Engine {
     let parse = vx_parser::parse(source);
     assert_eq!(parse.errors(), []);
     let root = SourceFile::cast_root(parse.syntax());
-    let module = lower_source_file(&root);
+    let module = lower_source_file_with_source_id(&root, source_id);
     Engine::from_module(&module)
 }
 
@@ -1562,9 +1566,42 @@ fn lowering_keeps_interpolated_path_literals_in_function_bodies() {
     let body = &module.functions[0].body;
 
     match body.stmts.as_slice() {
-        [crate::instr::Stmt::Expr(crate::instr::Expr::PathTemplate(_))] => {}
+        [crate::instr::Stmt::Expr(crate::instr::Expr::PathTemplate { .. })] => {}
         other => panic!("unexpected lowered body: {other:?}"),
     }
+}
+
+#[test]
+fn lowering_keeps_call_provenance_with_source_spans() {
+    let source = indoc! {r#"
+        fn main(tree: Tree) {
+          tree.file("missing.txt").utf8()
+        }
+    "#};
+    let parse = vx_parser::parse(source);
+    assert_eq!(parse.errors(), []);
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        vx_parser::Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let parsed_call = match function.body().expect("function body").statements().next() {
+        Some(vx_parser::Stmt::Expr(vx_parser::Expr::Call(call))) => call,
+        other => panic!("expected parsed call, got {other:?}"),
+    };
+    let expected_range = parsed_call.syntax().text_range();
+    let module = lower_source_file_with_source_id(&file, "fixtures/build.vx");
+    let body = &module.functions[0].body;
+
+    let crate::instr::Stmt::Expr(crate::instr::Expr::Call { provenance, .. }) = &body.stmts[0]
+    else {
+        panic!("expected lowered call expression");
+    };
+    let provenance = provenance.as_ref().expect("call provenance");
+    assert_eq!(provenance.source_id.as_ref(), "fixtures/build.vx");
+    assert_eq!(provenance.label, "call(..)");
+    assert_eq!(provenance.span.start, u32::from(expected_range.start()));
+    assert_eq!(provenance.span.end, u32::from(expected_range.end()));
 }
 
 #[test]
@@ -2272,6 +2309,41 @@ fn deep_demand_chain_respects_the_configured_limit() {
 
     assert_eq!(err.kind, PoisonKind::DemandDepthExceeded);
     assert!(err.message.contains("depth limit of 4"));
+}
+
+#[test]
+fn missing_file_failures_keep_source_provenance_in_demand_chain() {
+    let source = r#"fn main(tree: Tree) { tree.file("missing.txt").utf8() }"#;
+    let parse = vx_parser::parse(source);
+    assert_eq!(parse.errors(), []);
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        vx_parser::Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let parsed_outer_call = match function.body().expect("function body").statements().next() {
+        Some(vx_parser::Stmt::Expr(vx_parser::Expr::Call(call))) => call,
+        other => panic!("expected parsed call, got {other:?}"),
+    };
+    let outer_range = parsed_outer_call.syntax().text_range();
+    let engine = engine_with_source_id(source, "/workspace/build.vx");
+    let tree = Value::Tree(TreeValue::Inline(Arc::from([])));
+    let err = engine.call("main", vec![tree]).unwrap_err();
+
+    assert!(err.message.contains("missing file"));
+    assert!(!err.demand_chain.entries.is_empty());
+
+    let call_entry = err
+        .demand_chain
+        .entries
+        .iter()
+        .find(|entry| entry.description == "call(..)")
+        .expect("call demand entry");
+    let provenance = call_entry.provenance.as_ref().expect("call provenance");
+    assert_eq!(provenance.source_id.as_ref(), "/workspace/build.vx");
+    assert_eq!(provenance.label, "call(..)");
+    assert_eq!(provenance.span.start, u32::from(outer_range.start()));
+    assert_eq!(provenance.span.end, u32::from(outer_range.end()));
 }
 
 #[test]

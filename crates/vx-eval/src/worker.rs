@@ -116,7 +116,7 @@ impl Engine {
     /// Evaluate a top-level function by name at the external forcing boundary.
     pub fn call(&self, name: &str, args: Vec<Value>) -> Result<Value, PoisonError> {
         let function = self.resolve_module_function(name)?;
-        let value = self.build_call(Value::Function(function), args);
+        let value = self.build_call(Value::Function(function), args, None);
         self.force_value(value)
     }
 
@@ -171,7 +171,7 @@ impl Engine {
     #[cfg(test)]
     pub(crate) fn call_unforced(&self, name: &str, args: Vec<Value>) -> Result<Value, PoisonError> {
         let function = self.resolve_module_function(name)?;
-        Ok(self.build_call(Value::Function(function), args))
+        Ok(self.build_call(Value::Function(function), args, None))
     }
 
     #[cfg(test)]
@@ -187,7 +187,7 @@ impl Engine {
     #[cfg(test)]
     pub(crate) fn poison_value(&self, message: &str) -> Value {
         let error = PoisonError::new(PoisonKind::UserFail, message, DemandChain::new());
-        self.pending_value(NodeJob::Poison(error), format!("poison({message})"))
+        self.pending_value(NodeJob::Poison(error), format!("poison({message})"), None)
     }
 
     #[cfg(test)]
@@ -200,6 +200,7 @@ impl Engine {
         self.pending_value(
             NodeJob::Sleep { millis, value },
             format!("sleep({millis}ms)"),
+            None,
         )
     }
 
@@ -469,7 +470,12 @@ impl Engine {
 
     // r[impl eval.pending]
     // r[impl eval.memoization.pending]
-    fn build_call(&self, function: Value, args: Vec<Value>) -> Value {
+    fn build_call(
+        &self,
+        function: Value,
+        args: Vec<Value>,
+        provenance: Option<instr::SourceProvenance>,
+    ) -> Value {
         if let Value::Function(function_value) = &function
             && function_value.key().is_some()
             && args.iter().all(|value| value.key().is_some())
@@ -485,6 +491,7 @@ impl Engine {
                 kwargs_expr: None,
             },
             "call(..)".into(),
+            provenance,
         )
     }
 
@@ -494,9 +501,10 @@ impl Engine {
         args: Vec<Value>,
         kwargs: Vec<(Arc<str>, Value)>,
         kwargs_expr: Option<Value>,
+        provenance: Option<instr::SourceProvenance>,
     ) -> Value {
         if kwargs.is_empty() && kwargs_expr.is_none() {
-            return self.build_call(function, args);
+            return self.build_call(function, args, provenance);
         }
 
         self.pending_value(
@@ -507,6 +515,7 @@ impl Engine {
                 kwargs_expr,
             },
             "call(..)".into(),
+            provenance,
         )
     }
 
@@ -531,6 +540,7 @@ impl Engine {
                         args: Arc::from(args),
                     },
                     "invoke(..)".into(),
+                    None,
                 ));
                 let node_id = node.id;
                 self.nodes.insert(node_id, node.clone());
@@ -540,8 +550,13 @@ impl Engine {
         }
     }
 
-    fn pending_value(&self, job: NodeJob, description: String) -> Value {
-        let node = Arc::new(Node::new(job, description));
+    fn pending_value(
+        &self,
+        job: NodeJob,
+        description: String,
+        provenance: Option<instr::SourceProvenance>,
+    ) -> Value {
+        let node = Arc::new(Node::new(job, description, provenance));
         let node_id = node.id;
         self.nodes.insert(node_id, node);
         Value::Pending(node_id)
@@ -1039,15 +1054,20 @@ impl Engine {
             instr::Expr::LitFloat(n) => BuildResult::Value(Value::F64(*n)),
             instr::Expr::LitBool(b) => BuildResult::Value(Value::Bool(*b)),
             instr::Expr::LitString(s) => BuildResult::Value(Value::String(Arc::from(s.as_str()))),
-            instr::Expr::StringTemplate(parts) => self.eval_template_expr(
+            instr::Expr::StringTemplate { parts, provenance } => self.eval_template_expr(
                 TemplateKind::String,
                 parts,
+                provenance.as_ref(),
                 bindings,
                 current_code_identity,
             ),
-            instr::Expr::PathTemplate(parts) => {
-                self.eval_template_expr(TemplateKind::Path, parts, bindings, current_code_identity)
-            }
+            instr::Expr::PathTemplate { parts, provenance } => self.eval_template_expr(
+                TemplateKind::Path,
+                parts,
+                provenance.as_ref(),
+                bindings,
+                current_code_identity,
+            ),
             instr::Expr::Unit => BuildResult::Value(Value::Unit),
             instr::Expr::Var(name) => {
                 if let Some(value) = bindings.get(name) {
@@ -1064,7 +1084,12 @@ impl Engine {
                     BuildResult::Poisoned(self.unresolved_name(name))
                 }
             }
-            instr::Expr::Binary { op, left, right } => {
+            instr::Expr::Binary {
+                op,
+                left,
+                right,
+                provenance,
+            } => {
                 let left = match self.eval_expr(left, bindings, current_code_identity) {
                     BuildResult::Value(value) => value,
                     other => return other,
@@ -1084,10 +1109,15 @@ impl Engine {
                             right,
                         },
                         format!("binary({op:?})"),
+                        provenance.clone(),
                     ))
                 }
             }
-            instr::Expr::Unary { op, operand } => {
+            instr::Expr::Unary {
+                op,
+                operand,
+                provenance,
+            } => {
                 let operand = match self.eval_expr(operand, bindings, current_code_identity) {
                     BuildResult::Value(value) => value,
                     other => return other,
@@ -1099,6 +1129,7 @@ impl Engine {
                     BuildResult::Value(self.pending_value(
                         NodeJob::Unary { op: *op, operand },
                         format!("unary({op:?})"),
+                        provenance.clone(),
                     ))
                 }
             }
@@ -1108,6 +1139,7 @@ impl Engine {
                 cond,
                 then_branch,
                 else_branch,
+                provenance,
             } => {
                 let cond = match self.eval_expr(cond, bindings, current_code_identity) {
                     BuildResult::Value(value) => value,
@@ -1130,6 +1162,7 @@ impl Engine {
                             scope_identity: Arc::from(current_code_identity),
                         },
                         "if(..)".into(),
+                        provenance.clone(),
                     )),
                     other => BuildResult::Poisoned(self.type_error(&format!(
                         "if condition must be Bool, got {}",
@@ -1151,6 +1184,7 @@ impl Engine {
                 args,
                 kwargs,
                 kwargs_expr,
+                provenance,
             } => {
                 let function = match self.eval_expr(func, bindings, current_code_identity) {
                     BuildResult::Value(value) => value,
@@ -1184,6 +1218,7 @@ impl Engine {
                     arg_values,
                     kwarg_values,
                     kwargs_expr_value,
+                    provenance.clone(),
                 ))
             }
             instr::Expr::PartialCall {
@@ -1191,6 +1226,7 @@ impl Engine {
                 args,
                 kwargs,
                 kwargs_expr,
+                provenance: _,
             } => {
                 let function = match self.eval_expr(func, bindings, current_code_identity) {
                     BuildResult::Value(value) => value,
@@ -1326,7 +1362,11 @@ impl Engine {
                     entries: Arc::from(values),
                 }))
             }
-            instr::Expr::Field { receiver, field } => {
+            instr::Expr::Field {
+                receiver,
+                field,
+                provenance,
+            } => {
                 let receiver = match self.eval_expr(receiver, bindings, current_code_identity) {
                     BuildResult::Value(value) => value,
                     other => return other,
@@ -1339,18 +1379,26 @@ impl Engine {
                             field: Arc::from(field.as_str()),
                         },
                         format!("field(.{field})"),
+                        provenance.clone(),
                     ))
                 } else {
                     BuildResult::from_result(self.select_field(&receiver, field))
                 }
             }
             // r[impl error.fail]
-            instr::Expr::Fail(message) => {
+            instr::Expr::Fail {
+                message,
+                provenance,
+            } => {
                 let message = match self.eval_expr(message, bindings, current_code_identity) {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
-                BuildResult::Value(self.pending_value(NodeJob::Fail { message }, "fail(..)".into()))
+                BuildResult::Value(self.pending_value(
+                    NodeJob::Fail { message },
+                    "fail(..)".into(),
+                    provenance.clone(),
+                ))
             }
             instr::Expr::Fallible(expr) => {
                 match self.eval_expr(expr, bindings, current_code_identity) {
@@ -1390,6 +1438,7 @@ impl Engine {
         &self,
         kind: TemplateKind,
         parts: &[instr::TemplatePart],
+        provenance: Option<&instr::SourceProvenance>,
         bindings: &HashMap<String, Value>,
         current_code_identity: &str,
     ) -> BuildResult {
@@ -1420,6 +1469,7 @@ impl Engine {
                     parts: Arc::from(values),
                 },
                 format!("template({kind:?})"),
+                provenance.cloned(),
             ));
         }
 
@@ -4116,6 +4166,7 @@ impl Engine {
                     entries.push(DemandEntry {
                         node_id,
                         description: node.description.clone(),
+                        provenance: node.provenance.clone(),
                     });
                 }
             }
@@ -4256,7 +4307,7 @@ fn collect_expr_capture_names(
         | instr::Expr::LitBool(_)
         | instr::Expr::LitString(_)
         | instr::Expr::Unit => {}
-        instr::Expr::StringTemplate(parts) | instr::Expr::PathTemplate(parts) => {
+        instr::Expr::StringTemplate { parts, .. } | instr::Expr::PathTemplate { parts, .. } => {
             for part in parts {
                 if let instr::TemplatePart::Expr(expr) = part {
                     collect_expr_capture_names(expr, visible_locals, bindings, captured);
@@ -4268,7 +4319,9 @@ fn collect_expr_capture_names(
             collect_expr_capture_names(right, visible_locals, bindings, captured);
         }
         instr::Expr::Unary { operand, .. }
-        | instr::Expr::Fail(operand)
+        | instr::Expr::Fail {
+            message: operand, ..
+        }
         | instr::Expr::Fallible(operand) => {
             collect_expr_capture_names(operand, visible_locals, bindings, captured);
         }
@@ -4280,6 +4333,7 @@ fn collect_expr_capture_names(
             cond,
             then_branch,
             else_branch,
+            ..
         } => {
             collect_expr_capture_names(cond, visible_locals, bindings, captured);
             let mut then_scope = visible_locals.clone();
@@ -4299,12 +4353,14 @@ fn collect_expr_capture_names(
             args,
             kwargs,
             kwargs_expr,
+            ..
         }
         | instr::Expr::PartialCall {
             func,
             args,
             kwargs,
             kwargs_expr,
+            ..
         } => {
             collect_expr_capture_names(func, visible_locals, bindings, captured);
             for arg in args {
@@ -4751,7 +4807,7 @@ fn collect_expr_callee_names(
         | instr::Expr::LitString(_)
         | instr::Expr::Unit
         | instr::Expr::Var(_) => {}
-        instr::Expr::StringTemplate(parts) | instr::Expr::PathTemplate(parts) => {
+        instr::Expr::StringTemplate { parts, .. } | instr::Expr::PathTemplate { parts, .. } => {
             for part in parts {
                 if let instr::TemplatePart::Expr(expr) = part {
                     collect_expr_callee_names(expr, visible_locals, top_level_names, deps);
@@ -4763,7 +4819,9 @@ fn collect_expr_callee_names(
             collect_expr_callee_names(right, visible_locals, top_level_names, deps);
         }
         instr::Expr::Unary { operand, .. }
-        | instr::Expr::Fail(operand)
+        | instr::Expr::Fail {
+            message: operand, ..
+        }
         | instr::Expr::Fallible(operand) => {
             collect_expr_callee_names(operand, visible_locals, top_level_names, deps);
         }
@@ -4775,6 +4833,7 @@ fn collect_expr_callee_names(
             cond,
             then_branch,
             else_branch,
+            ..
         } => {
             collect_expr_callee_names(cond, visible_locals, top_level_names, deps);
             let mut then_scope = visible_locals.clone();
@@ -4794,12 +4853,14 @@ fn collect_expr_callee_names(
             args,
             kwargs,
             kwargs_expr,
+            ..
         }
         | instr::Expr::PartialCall {
             func,
             args,
             kwargs,
             kwargs_expr,
+            ..
         } => {
             if let instr::Expr::Var(name) = func.as_ref()
                 && !visible_locals.contains(name)

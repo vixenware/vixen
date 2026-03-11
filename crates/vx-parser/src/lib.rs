@@ -37,6 +37,7 @@ mod parsed;
 pub use parsed::{Parsed, parse_source_file};
 
 mod syntax_kind;
+pub use rowan::{TextRange, TextSize};
 pub use syntax_kind::{SyntaxKind, SyntaxToken, VxLanguage};
 
 pub type SyntaxNode = rowan::SyntaxNode<VxLanguage>;

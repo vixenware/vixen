@@ -393,7 +393,7 @@ mod tests {
     use tempfile::TempDir;
     use vx_eval::{
         BlobValue, Engine, HostObservation, PathValue, TransportTree, TreeValue, Value,
-        lower_source_file,
+        lower_source_file_with_source_id,
     };
     use vx_io::spawn::{ServiceBuilder, ServiceHandle};
     use vx_parser::SourceFile;
@@ -727,7 +727,7 @@ mod tests {
         let parse = vx_parser::parse(source);
         assert_eq!(parse.errors(), []);
         let root = SourceFile::cast_root(parse.syntax());
-        let module = lower_source_file(&root);
+        let module = lower_source_file_with_source_id(&root, "<test>");
         Engine::from_module(&module)
     }
 

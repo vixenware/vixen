@@ -29,6 +29,19 @@ pub struct TransportParam {
     pub name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TransportSourceSpan {
+    pub start: u32,
+    pub end: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TransportSourceProvenance {
+    pub source_id: String,
+    pub span: TransportSourceSpan,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Facet)]
 pub struct TransportBlock {
     pub stmts: Vec<TransportStmt>,
@@ -89,24 +102,33 @@ pub enum TransportExpr {
     LitFloat(f64),
     LitBool(bool),
     LitString(String),
-    StringTemplate(Vec<TransportTemplatePart>),
-    PathTemplate(Vec<TransportTemplatePart>),
+    StringTemplate {
+        parts: Vec<TransportTemplatePart>,
+        provenance: Option<TransportSourceProvenance>,
+    },
+    PathTemplate {
+        parts: Vec<TransportTemplatePart>,
+        provenance: Option<TransportSourceProvenance>,
+    },
     Unit,
     Var(String),
     Binary {
         op: TransportBinOp,
         left: Box<TransportExpr>,
         right: Box<TransportExpr>,
+        provenance: Option<TransportSourceProvenance>,
     },
     Unary {
         op: TransportUnaryOp,
         operand: Box<TransportExpr>,
+        provenance: Option<TransportSourceProvenance>,
     },
     Block(TransportBlock),
     If {
         cond: Box<TransportExpr>,
         then_branch: TransportBlock,
         else_branch: TransportBlock,
+        provenance: Option<TransportSourceProvenance>,
     },
     Closure {
         closure_id: usize,
@@ -117,12 +139,14 @@ pub enum TransportExpr {
         args: Vec<TransportExpr>,
         kwargs: Vec<(String, TransportExpr)>,
         kwargs_expr: Option<Box<TransportExpr>>,
+        provenance: Option<TransportSourceProvenance>,
     },
     PartialCall {
         func: Box<TransportExpr>,
         args: Vec<TransportExpr>,
         kwargs: Vec<(String, TransportExpr)>,
         kwargs_expr: Option<Box<TransportExpr>>,
+        provenance: Option<TransportSourceProvenance>,
     },
     StructLit {
         name: String,
@@ -134,8 +158,12 @@ pub enum TransportExpr {
     Field {
         receiver: Box<TransportExpr>,
         field: String,
+        provenance: Option<TransportSourceProvenance>,
     },
-    Fail(Box<TransportExpr>),
+    Fail {
+        value: Box<TransportExpr>,
+        provenance: Option<TransportSourceProvenance>,
+    },
     Fallible(Box<TransportExpr>),
     Tuple(Vec<TransportExpr>),
 }
@@ -328,6 +356,44 @@ impl From<&instr::Param> for TransportParam {
     }
 }
 
+impl From<&instr::SourceSpan> for TransportSourceSpan {
+    fn from(span: &instr::SourceSpan) -> Self {
+        Self {
+            start: span.start,
+            end: span.end,
+        }
+    }
+}
+
+impl From<TransportSourceSpan> for instr::SourceSpan {
+    fn from(span: TransportSourceSpan) -> Self {
+        Self {
+            start: span.start,
+            end: span.end,
+        }
+    }
+}
+
+impl From<&instr::SourceProvenance> for TransportSourceProvenance {
+    fn from(provenance: &instr::SourceProvenance) -> Self {
+        Self {
+            source_id: provenance.source_id.to_string(),
+            span: TransportSourceSpan::from(&provenance.span),
+            label: provenance.label.clone(),
+        }
+    }
+}
+
+impl From<TransportSourceProvenance> for instr::SourceProvenance {
+    fn from(provenance: TransportSourceProvenance) -> Self {
+        Self {
+            source_id: Arc::from(provenance.source_id),
+            span: provenance.span.into(),
+            label: provenance.label,
+        }
+    }
+}
+
 impl From<TransportParam> for instr::Param {
     fn from(param: TransportParam) -> Self {
         Self { name: param.name }
@@ -474,32 +540,47 @@ impl From<&instr::Expr> for TransportExpr {
             instr::Expr::LitFloat(value) => Self::LitFloat(*value),
             instr::Expr::LitBool(value) => Self::LitBool(*value),
             instr::Expr::LitString(value) => Self::LitString(value.clone()),
-            instr::Expr::StringTemplate(parts) => {
-                Self::StringTemplate(parts.iter().map(TransportTemplatePart::from).collect())
-            }
-            instr::Expr::PathTemplate(parts) => {
-                Self::PathTemplate(parts.iter().map(TransportTemplatePart::from).collect())
-            }
+            instr::Expr::StringTemplate { parts, provenance } => Self::StringTemplate {
+                parts: parts.iter().map(TransportTemplatePart::from).collect(),
+                provenance: provenance.as_ref().map(TransportSourceProvenance::from),
+            },
+            instr::Expr::PathTemplate { parts, provenance } => Self::PathTemplate {
+                parts: parts.iter().map(TransportTemplatePart::from).collect(),
+                provenance: provenance.as_ref().map(TransportSourceProvenance::from),
+            },
             instr::Expr::Unit => Self::Unit,
             instr::Expr::Var(name) => Self::Var(name.clone()),
-            instr::Expr::Binary { op, left, right } => Self::Binary {
+            instr::Expr::Binary {
+                op,
+                left,
+                right,
+                provenance,
+            } => Self::Binary {
                 op: TransportBinOp::from(*op),
                 left: Box::new(TransportExpr::from(left.as_ref())),
                 right: Box::new(TransportExpr::from(right.as_ref())),
+                provenance: provenance.as_ref().map(TransportSourceProvenance::from),
             },
-            instr::Expr::Unary { op, operand } => Self::Unary {
+            instr::Expr::Unary {
+                op,
+                operand,
+                provenance,
+            } => Self::Unary {
                 op: TransportUnaryOp::from(*op),
                 operand: Box::new(TransportExpr::from(operand.as_ref())),
+                provenance: provenance.as_ref().map(TransportSourceProvenance::from),
             },
             instr::Expr::Block(block) => Self::Block(TransportBlock::from(block)),
             instr::Expr::If {
                 cond,
                 then_branch,
                 else_branch,
+                provenance,
             } => Self::If {
                 cond: Box::new(TransportExpr::from(cond.as_ref())),
                 then_branch: TransportBlock::from(then_branch),
                 else_branch: TransportBlock::from(else_branch),
+                provenance: provenance.as_ref().map(TransportSourceProvenance::from),
             },
             instr::Expr::Closure { closure_id, def } => Self::Closure {
                 closure_id: *closure_id,
@@ -510,6 +591,7 @@ impl From<&instr::Expr> for TransportExpr {
                 args,
                 kwargs,
                 kwargs_expr,
+                provenance,
             } => Self::Call {
                 func: Box::new(TransportExpr::from(func.as_ref())),
                 args: args.iter().map(TransportExpr::from).collect(),
@@ -520,12 +602,14 @@ impl From<&instr::Expr> for TransportExpr {
                 kwargs_expr: kwargs_expr
                     .as_ref()
                     .map(|expr| Box::new(TransportExpr::from(expr.as_ref()))),
+                provenance: provenance.as_ref().map(TransportSourceProvenance::from),
             },
             instr::Expr::PartialCall {
                 func,
                 args,
                 kwargs,
                 kwargs_expr,
+                provenance,
             } => Self::PartialCall {
                 func: Box::new(TransportExpr::from(func.as_ref())),
                 args: args.iter().map(TransportExpr::from).collect(),
@@ -536,6 +620,7 @@ impl From<&instr::Expr> for TransportExpr {
                 kwargs_expr: kwargs_expr
                     .as_ref()
                     .map(|expr| Box::new(TransportExpr::from(expr.as_ref()))),
+                provenance: provenance.as_ref().map(TransportSourceProvenance::from),
             },
             instr::Expr::StructLit { name, fields } => Self::StructLit {
                 name: name.clone(),
@@ -562,11 +647,22 @@ impl From<&instr::Expr> for TransportExpr {
                     .map(|(key, value)| (TransportExpr::from(key), TransportExpr::from(value)))
                     .collect(),
             ),
-            instr::Expr::Field { receiver, field } => Self::Field {
+            instr::Expr::Field {
+                receiver,
+                field,
+                provenance,
+            } => Self::Field {
                 receiver: Box::new(TransportExpr::from(receiver.as_ref())),
                 field: field.clone(),
+                provenance: provenance.as_ref().map(TransportSourceProvenance::from),
             },
-            instr::Expr::Fail(value) => Self::Fail(Box::new(TransportExpr::from(value.as_ref()))),
+            instr::Expr::Fail {
+                message,
+                provenance,
+            } => Self::Fail {
+                value: Box::new(TransportExpr::from(message.as_ref())),
+                provenance: provenance.as_ref().map(TransportSourceProvenance::from),
+            },
             instr::Expr::Fallible(value) => {
                 Self::Fallible(Box::new(TransportExpr::from(value.as_ref())))
             }
@@ -584,32 +680,47 @@ impl From<TransportExpr> for instr::Expr {
             TransportExpr::LitFloat(value) => Self::LitFloat(value),
             TransportExpr::LitBool(value) => Self::LitBool(value),
             TransportExpr::LitString(value) => Self::LitString(value),
-            TransportExpr::StringTemplate(parts) => {
-                Self::StringTemplate(parts.into_iter().map(Into::into).collect())
-            }
-            TransportExpr::PathTemplate(parts) => {
-                Self::PathTemplate(parts.into_iter().map(Into::into).collect())
-            }
+            TransportExpr::StringTemplate { parts, provenance } => Self::StringTemplate {
+                parts: parts.into_iter().map(Into::into).collect(),
+                provenance: provenance.map(Into::into),
+            },
+            TransportExpr::PathTemplate { parts, provenance } => Self::PathTemplate {
+                parts: parts.into_iter().map(Into::into).collect(),
+                provenance: provenance.map(Into::into),
+            },
             TransportExpr::Unit => Self::Unit,
             TransportExpr::Var(name) => Self::Var(name),
-            TransportExpr::Binary { op, left, right } => Self::Binary {
+            TransportExpr::Binary {
+                op,
+                left,
+                right,
+                provenance,
+            } => Self::Binary {
                 op: op.into(),
                 left: Box::new((*left).into()),
                 right: Box::new((*right).into()),
+                provenance: provenance.map(Into::into),
             },
-            TransportExpr::Unary { op, operand } => Self::Unary {
+            TransportExpr::Unary {
+                op,
+                operand,
+                provenance,
+            } => Self::Unary {
                 op: op.into(),
                 operand: Box::new((*operand).into()),
+                provenance: provenance.map(Into::into),
             },
             TransportExpr::Block(block) => Self::Block(block.into()),
             TransportExpr::If {
                 cond,
                 then_branch,
                 else_branch,
+                provenance,
             } => Self::If {
                 cond: Box::new((*cond).into()),
                 then_branch: then_branch.into(),
                 else_branch: else_branch.into(),
+                provenance: provenance.map(Into::into),
             },
             TransportExpr::Closure { closure_id, def } => Self::Closure {
                 closure_id,
@@ -620,6 +731,7 @@ impl From<TransportExpr> for instr::Expr {
                 args,
                 kwargs,
                 kwargs_expr,
+                provenance,
             } => Self::Call {
                 func: Box::new((*func).into()),
                 args: args.into_iter().map(Into::into).collect(),
@@ -628,12 +740,14 @@ impl From<TransportExpr> for instr::Expr {
                     .map(|(name, value)| (name, value.into()))
                     .collect(),
                 kwargs_expr: kwargs_expr.map(|expr| Box::new((*expr).into())),
+                provenance: provenance.map(Into::into),
             },
             TransportExpr::PartialCall {
                 func,
                 args,
                 kwargs,
                 kwargs_expr,
+                provenance,
             } => Self::PartialCall {
                 func: Box::new((*func).into()),
                 args: args.into_iter().map(Into::into).collect(),
@@ -642,6 +756,7 @@ impl From<TransportExpr> for instr::Expr {
                     .map(|(name, value)| (name, value.into()))
                     .collect(),
                 kwargs_expr: kwargs_expr.map(|expr| Box::new((*expr).into())),
+                provenance: provenance.map(Into::into),
             },
             TransportExpr::StructLit { name, fields } => Self::StructLit {
                 name,
@@ -668,11 +783,19 @@ impl From<TransportExpr> for instr::Expr {
                     .map(|(key, value)| (key.into(), value.into()))
                     .collect(),
             ),
-            TransportExpr::Field { receiver, field } => Self::Field {
+            TransportExpr::Field {
+                receiver,
+                field,
+                provenance,
+            } => Self::Field {
                 receiver: Box::new((*receiver).into()),
                 field,
+                provenance: provenance.map(Into::into),
             },
-            TransportExpr::Fail(value) => Self::Fail(Box::new((*value).into())),
+            TransportExpr::Fail { value, provenance } => Self::Fail {
+                message: Box::new((*value).into()),
+                provenance: provenance.map(Into::into),
+            },
             TransportExpr::Fallible(value) => Self::Fallible(Box::new((*value).into())),
             TransportExpr::Tuple(values) => {
                 Self::Tuple(values.into_iter().map(Into::into).collect())

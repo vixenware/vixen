@@ -15,10 +15,10 @@ pub use exec::{
 };
 
 mod instr;
-pub use instr::{BinOp, Expr, FnDef, Module, Stmt, UnaryOp};
+pub use instr::{BinOp, Expr, FnDef, Module, SourceProvenance, SourceSpan, Stmt, UnaryOp};
 
 mod lower;
-pub use lower::lower_source_file;
+pub use lower::{lower_source_file, lower_source_file_with_source_id};
 
 mod node;
 pub use node::{NodeId, NodeKey};

@@ -7,6 +7,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use crate::instr::SourceProvenance;
 use crate::node::NodeId;
 
 // r[impl error.poison]
@@ -59,6 +60,7 @@ pub struct DemandChain {
 pub struct DemandEntry {
     pub node_id: NodeId,
     pub description: String,
+    pub provenance: Option<SourceProvenance>,
 }
 
 impl DemandChain {
@@ -66,10 +68,16 @@ impl DemandChain {
         Self::default()
     }
 
-    pub fn push(&mut self, node_id: NodeId, description: String) {
+    pub fn push(
+        &mut self,
+        node_id: NodeId,
+        description: String,
+        provenance: Option<SourceProvenance>,
+    ) {
         self.entries.push(DemandEntry {
             node_id,
             description,
+            provenance,
         });
     }
 }

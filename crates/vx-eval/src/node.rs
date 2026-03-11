@@ -132,15 +132,21 @@ pub struct Node {
     pub job: NodeJob,
     /// Human-readable description for diagnostics.
     pub description: String,
+    pub provenance: Option<instr::SourceProvenance>,
 }
 
 impl Node {
-    pub fn new(job: NodeJob, description: String) -> Self {
+    pub fn new(
+        job: NodeJob,
+        description: String,
+        provenance: Option<instr::SourceProvenance>,
+    ) -> Self {
         Self {
             id: NodeId::next(),
             state: Mutex::new(NodeState::Pending),
             job,
             description,
+            provenance,
         }
     }
 

@@ -20,6 +20,7 @@ use crate::instr;
 struct LowerCtx {
     next_closure_id: usize,
     namespace_methods: Vec<Arc<instr::FnDef>>,
+    source_id: Arc<str>,
 }
 
 impl LowerCtx {
@@ -28,11 +29,30 @@ impl LowerCtx {
         self.next_closure_id += 1;
         closure_id
     }
+
+    fn provenance(&self, node: &impl AstNode, label: impl Into<String>) -> instr::SourceProvenance {
+        instr::SourceProvenance {
+            source_id: Arc::clone(&self.source_id),
+            span: instr::SourceSpan::from_text_range(node.syntax().text_range()),
+            label: label.into(),
+        }
+    }
 }
 
 /// Lower a parsed source file into a module.
 pub fn lower_source_file(source: &SourceFile) -> instr::Module {
-    let mut ctx = LowerCtx::default();
+    lower_source_file_with_source_id(source, "<source>")
+}
+
+/// Lower a parsed source file into a module with a stable source identifier.
+pub fn lower_source_file_with_source_id(
+    source: &SourceFile,
+    source_id: impl Into<Arc<str>>,
+) -> instr::Module {
+    let mut ctx = LowerCtx {
+        source_id: source_id.into(),
+        ..LowerCtx::default()
+    };
     let mut functions = Vec::new();
     let mut top_level = Vec::new();
 
@@ -275,10 +295,14 @@ fn lower_interpolated_string(
     ctx: &mut LowerCtx,
 ) -> Option<instr::Expr> {
     let parts = lower_template_parts(expr.parts(), ctx)?;
-    Some(instr::Expr::StringTemplate(parts))
+    Some(instr::Expr::StringTemplate {
+        parts,
+        provenance: Some(ctx.provenance(expr, "string template")),
+    })
 }
 
 fn lower_path_literal(expr: &PathLiteralExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
+    let provenance = Some(ctx.provenance(expr, "path template"));
     let text = expr.syntax().text().to_string();
     let text = text.trim();
     if let Some(inner) = text
@@ -286,13 +310,14 @@ fn lower_path_literal(expr: &PathLiteralExpr, ctx: &mut LowerCtx) -> Option<inst
         .and_then(|inner| inner.strip_suffix(')'))
     {
         let parts = lower_path_template(inner, ctx)?;
-        return Some(instr::Expr::PathTemplate(parts));
+        return Some(instr::Expr::PathTemplate { parts, provenance });
     }
 
     if let Some(inner) = text.strip_prefix('@') {
-        return Some(instr::Expr::PathTemplate(vec![instr::TemplatePart::Text(
-            inner.to_string(),
-        )]));
+        return Some(instr::Expr::PathTemplate {
+            parts: vec![instr::TemplatePart::Text(inner.to_string())],
+            provenance,
+        });
     }
 
     if let Some(literal) = expr.literal() {
@@ -302,14 +327,15 @@ fn lower_path_literal(expr: &PathLiteralExpr, ctx: &mut LowerCtx) -> Option<inst
         }
         let text = token.text();
         let inner = &text[1..text.len() - 1];
-        return Some(instr::Expr::PathTemplate(vec![instr::TemplatePart::Text(
-            unescape_string(inner),
-        )]));
+        return Some(instr::Expr::PathTemplate {
+            parts: vec![instr::TemplatePart::Text(unescape_string(inner))],
+            provenance,
+        });
     }
 
     let interpolated = expr.interpolated()?;
     let parts = lower_template_parts(interpolated.parts(), ctx)?;
-    Some(instr::Expr::PathTemplate(parts))
+    Some(instr::Expr::PathTemplate { parts, provenance })
 }
 
 fn lower_template_parts(
@@ -452,6 +478,7 @@ fn lower_binary(bin: &BinaryExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
         op,
         left: Box::new(lhs),
         right: Box::new(rhs),
+        provenance: Some(ctx.provenance(bin, format!("binary({op:?})"))),
     })
 }
 
@@ -467,6 +494,7 @@ fn lower_pipe(bin: &BinaryExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
             args: vec![lhs],
             kwargs: vec![],
             kwargs_expr: None,
+            provenance: Some(ctx.provenance(bin, "call(..)")),
         })
     }
 }
@@ -483,6 +511,7 @@ fn contains_pipe_placeholder(expr: &instr::Expr) -> bool {
             cond,
             then_branch,
             else_branch,
+            ..
         } => {
             contains_pipe_placeholder(cond)
                 || then_branch.stmts.iter().any(stmt_contains_pipe_placeholder)
@@ -494,12 +523,14 @@ fn contains_pipe_placeholder(expr: &instr::Expr) -> bool {
             args,
             kwargs,
             kwargs_expr,
+            ..
         }
         | instr::Expr::PartialCall {
             func,
             args,
             kwargs,
             kwargs_expr,
+            ..
         } => {
             contains_pipe_placeholder(func)
                 || args.iter().any(contains_pipe_placeholder)
@@ -526,14 +557,15 @@ fn contains_pipe_placeholder(expr: &instr::Expr) -> bool {
             .iter()
             .any(|(key, value)| contains_pipe_placeholder(key) || contains_pipe_placeholder(value)),
         instr::Expr::Field { receiver, .. } => contains_pipe_placeholder(receiver),
-        instr::Expr::Fail(expr) | instr::Expr::Fallible(expr) => contains_pipe_placeholder(expr),
+        instr::Expr::Fail { message, .. } => contains_pipe_placeholder(message),
+        instr::Expr::Fallible(expr) => contains_pipe_placeholder(expr),
         instr::Expr::Tuple(items) => items.iter().any(contains_pipe_placeholder),
         instr::Expr::LitInt(_)
         | instr::Expr::LitFloat(_)
         | instr::Expr::LitBool(_)
         | instr::Expr::LitString(_)
-        | instr::Expr::StringTemplate(_)
-        | instr::Expr::PathTemplate(_)
+        | instr::Expr::StringTemplate { .. }
+        | instr::Expr::PathTemplate { .. }
         | instr::Expr::Unit => false,
     }
 }
@@ -552,14 +584,25 @@ fn stmt_contains_pipe_placeholder(stmt: &instr::Stmt) -> bool {
 fn substitute_pipe_placeholder(expr: instr::Expr, replacement: &instr::Expr) -> instr::Expr {
     match expr {
         instr::Expr::Var(name) if name == "_" => replacement.clone(),
-        instr::Expr::Binary { op, left, right } => instr::Expr::Binary {
+        instr::Expr::Binary {
+            op,
+            left,
+            right,
+            provenance,
+        } => instr::Expr::Binary {
             op,
             left: Box::new(substitute_pipe_placeholder(*left, replacement)),
             right: Box::new(substitute_pipe_placeholder(*right, replacement)),
+            provenance,
         },
-        instr::Expr::Unary { op, operand } => instr::Expr::Unary {
+        instr::Expr::Unary {
+            op,
+            operand,
+            provenance,
+        } => instr::Expr::Unary {
             op,
             operand: Box::new(substitute_pipe_placeholder(*operand, replacement)),
+            provenance,
         },
         instr::Expr::Block(block) => instr::Expr::Block(instr::Block {
             stmts: block
@@ -572,6 +615,7 @@ fn substitute_pipe_placeholder(expr: instr::Expr, replacement: &instr::Expr) -> 
             cond,
             then_branch,
             else_branch,
+            provenance,
         } => instr::Expr::If {
             cond: Box::new(substitute_pipe_placeholder(*cond, replacement)),
             then_branch: instr::Block {
@@ -588,6 +632,7 @@ fn substitute_pipe_placeholder(expr: instr::Expr, replacement: &instr::Expr) -> 
                     .map(|stmt| substitute_pipe_placeholder_in_stmt(stmt, replacement))
                     .collect(),
             },
+            provenance,
         },
         instr::Expr::Closure { closure_id, def } => instr::Expr::Closure { closure_id, def },
         instr::Expr::Call {
@@ -595,6 +640,7 @@ fn substitute_pipe_placeholder(expr: instr::Expr, replacement: &instr::Expr) -> 
             args,
             kwargs,
             kwargs_expr,
+            provenance,
         } => instr::Expr::Call {
             func: Box::new(substitute_pipe_placeholder(*func, replacement)),
             args: args
@@ -607,12 +653,14 @@ fn substitute_pipe_placeholder(expr: instr::Expr, replacement: &instr::Expr) -> 
                 .collect(),
             kwargs_expr: kwargs_expr
                 .map(|expr| Box::new(substitute_pipe_placeholder(*expr, replacement))),
+            provenance,
         },
         instr::Expr::PartialCall {
             func,
             args,
             kwargs,
             kwargs_expr,
+            provenance,
         } => instr::Expr::PartialCall {
             func: Box::new(substitute_pipe_placeholder(*func, replacement)),
             args: args
@@ -625,6 +673,7 @@ fn substitute_pipe_placeholder(expr: instr::Expr, replacement: &instr::Expr) -> 
                 .collect(),
             kwargs_expr: kwargs_expr
                 .map(|expr| Box::new(substitute_pipe_placeholder(*expr, replacement))),
+            provenance,
         },
         instr::Expr::StructLit { name, fields } => instr::Expr::StructLit {
             name,
@@ -671,13 +720,22 @@ fn substitute_pipe_placeholder(expr: instr::Expr, replacement: &instr::Expr) -> 
                 })
                 .collect(),
         ),
-        instr::Expr::Field { receiver, field } => instr::Expr::Field {
+        instr::Expr::Field {
+            receiver,
+            field,
+            provenance,
+        } => instr::Expr::Field {
             receiver: Box::new(substitute_pipe_placeholder(*receiver, replacement)),
             field,
+            provenance,
         },
-        instr::Expr::Fail(expr) => {
-            instr::Expr::Fail(Box::new(substitute_pipe_placeholder(*expr, replacement)))
-        }
+        instr::Expr::Fail {
+            message,
+            provenance,
+        } => instr::Expr::Fail {
+            message: Box::new(substitute_pipe_placeholder(*message, replacement)),
+            provenance,
+        },
         instr::Expr::Fallible(expr) => {
             instr::Expr::Fallible(Box::new(substitute_pipe_placeholder(*expr, replacement)))
         }
@@ -729,6 +787,7 @@ fn lower_prefix(pre: &PrefixExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
     Some(instr::Expr::Unary {
         op,
         operand: Box::new(operand),
+        provenance: Some(ctx.provenance(pre, format!("unary({op:?})"))),
     })
 }
 
@@ -756,6 +815,7 @@ fn lower_if(if_expr: &IfExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
         cond: Box::new(cond),
         then_branch,
         else_branch,
+        provenance: Some(ctx.provenance(if_expr, "if(..)")),
     })
 }
 
@@ -773,6 +833,7 @@ fn lower_call(call: &CallExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
         args,
         kwargs: Vec::new(),
         kwargs_expr: None,
+        provenance: Some(ctx.provenance(call, "call(..)")),
     })
 }
 
@@ -791,6 +852,7 @@ fn lower_where(where_expr: &WhereExpr, ctx: &mut LowerCtx) -> Option<instr::Expr
                 args,
                 kwargs: Vec::new(),
                 kwargs_expr: Some(Box::new(kwargs_expr)),
+                provenance: Some(ctx.provenance(where_expr, "call(..)")),
             })
         }
         callee => {
@@ -800,6 +862,7 @@ fn lower_where(where_expr: &WhereExpr, ctx: &mut LowerCtx) -> Option<instr::Expr
                 args: Vec::new(),
                 kwargs: Vec::new(),
                 kwargs_expr: Some(Box::new(kwargs_expr)),
+                provenance: Some(ctx.provenance(where_expr, "call(..)")),
             })
         }
     }
@@ -812,6 +875,7 @@ fn lower_invoke(invoke: &InvokeExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> 
         args: Vec::new(),
         kwargs: Vec::new(),
         kwargs_expr: None,
+        provenance: Some(ctx.provenance(invoke, "call(..)")),
     })
 }
 
@@ -820,13 +884,17 @@ fn lower_field(field: &FieldExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
     let field_name = field.field_name()?.text().to_string();
     Some(instr::Expr::Field {
         receiver: Box::new(receiver),
-        field: field_name,
+        field: field_name.clone(),
+        provenance: Some(ctx.provenance(field, format!("field(.{field_name})"))),
     })
 }
 
 fn lower_fail(fail: &FailExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
     let message = lower_expr_with_ctx(&fail.message()?, ctx)?;
-    Some(instr::Expr::Fail(Box::new(message)))
+    Some(instr::Expr::Fail {
+        message: Box::new(message),
+        provenance: Some(ctx.provenance(fail, "fail(..)")),
+    })
 }
 
 fn lower_record(record: &RecordExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
@@ -903,6 +971,7 @@ fn lower_closure(closure: &ClosureExpr, ctx: &mut LowerCtx) -> Option<instr::Exp
         .collect::<Vec<_>>();
 
     let mut nested_ctx = LowerCtx::default();
+    nested_ctx.source_id = Arc::clone(&ctx.source_id);
     let body = match closure.body()? {
         AstExpr::Block(block) => lower_block_with_ctx(&block, &mut nested_ctx),
         expr => instr::Block {
@@ -938,6 +1007,7 @@ fn lower_partial(partial: &PartialAppExpr, ctx: &mut LowerCtx) -> Option<instr::
                 args,
                 kwargs: Vec::new(),
                 kwargs_expr: None,
+                provenance: Some(ctx.provenance(&call, "call(..)")),
             })
         }
         AstExpr::Invoke(invoke) => Some(instr::Expr::PartialCall {
@@ -945,12 +1015,14 @@ fn lower_partial(partial: &PartialAppExpr, ctx: &mut LowerCtx) -> Option<instr::
             args: Vec::new(),
             kwargs: Vec::new(),
             kwargs_expr: None,
+            provenance: Some(ctx.provenance(&invoke, "call(..)")),
         }),
         other => Some(instr::Expr::PartialCall {
             func: Box::new(lower_expr_with_ctx(&other, ctx)?),
             args: Vec::new(),
             kwargs: Vec::new(),
             kwargs_expr: None,
+            provenance: Some(ctx.provenance(partial, "call(..)")),
         }),
     }
 }
@@ -969,6 +1041,7 @@ fn lower_partial_where(where_expr: &WhereExpr, ctx: &mut LowerCtx) -> Option<ins
                 args,
                 kwargs: Vec::new(),
                 kwargs_expr: Some(Box::new(kwargs_expr)),
+                provenance: Some(ctx.provenance(where_expr, "call(..)")),
             })
         }
         callee => Some(instr::Expr::PartialCall {
@@ -976,6 +1049,7 @@ fn lower_partial_where(where_expr: &WhereExpr, ctx: &mut LowerCtx) -> Option<ins
             args: Vec::new(),
             kwargs: Vec::new(),
             kwargs_expr: Some(Box::new(kwargs_expr)),
+            provenance: Some(ctx.provenance(where_expr, "call(..)")),
         }),
     }
 }
