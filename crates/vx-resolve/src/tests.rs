@@ -119,13 +119,18 @@ type Id = U64
     let tree = ScopeTree::build(&file);
     let defs = tree.definitions(crate::ScopeId::ROOT);
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-    assert_eq!(names, vec!["greet", "Point", "Shape", "Blake3", "Id"]);
+    assert_eq!(
+        names,
+        vec!["greet", "Point", "Circle", "Rect", "Shape", "Blake3", "Id"]
+    );
 
     assert_eq!(defs[0].kind, DefKind::Function);
     assert_eq!(defs[1].kind, DefKind::Struct);
-    assert_eq!(defs[2].kind, DefKind::Enum);
-    assert_eq!(defs[3].kind, DefKind::Newtype);
-    assert_eq!(defs[4].kind, DefKind::TypeAlias);
+    assert_eq!(defs[2].kind, DefKind::Variant);
+    assert_eq!(defs[3].kind, DefKind::Variant);
+    assert_eq!(defs[4].kind, DefKind::Enum);
+    assert_eq!(defs[5].kind, DefKind::Newtype);
+    assert_eq!(defs[6].kind, DefKind::TypeAlias);
 }
 
 #[test]
@@ -1681,6 +1686,48 @@ fn main(parts: Array[Tree]) {
     let (result, types) = type_check_with_types(src);
     let ty = find_expr_type(&result, src, "parts.merge()");
     assert_eq!(ty, Some(nominal_ty(&types, "Tree")));
+}
+
+#[test]
+fn bare_none_resolves_and_typechecks_in_optional_context() {
+    let src = r#"
+fn main() {
+    let value: String? = None;
+    value
+}
+"#;
+    let file = parse_file(src);
+    let resolution = resolve_with_stdlib(&file);
+    assert!(
+        resolution.errors.is_empty(),
+        "errors: {:?}",
+        resolution.errors
+    );
+
+    let types = collect_types_with_stdlib(&file);
+    let checked = crate::type_check(&file, &resolution, &types);
+    assert!(checked.errors.is_empty(), "errors: {:?}", checked.errors);
+}
+
+#[test]
+fn some_variant_constructor_typechecks_in_optional_context() {
+    let src = r#"
+fn main(s: String) {
+    let value: String? = Some(s);
+    value
+}
+"#;
+    let file = parse_file(src);
+    let resolution = resolve_with_stdlib(&file);
+    assert!(
+        resolution.errors.is_empty(),
+        "errors: {:?}",
+        resolution.errors
+    );
+
+    let types = collect_types_with_stdlib(&file);
+    let checked = crate::type_check(&file, &resolution, &types);
+    assert!(checked.errors.is_empty(), "errors: {:?}", checked.errors);
 }
 
 // r[type.error.arg_mismatch] — host.read(123) gets a type diagnostic

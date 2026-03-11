@@ -23,6 +23,13 @@ type ExecutorClass;
 /// Executor-local host inspection capability.
 type Host;
 
+enum Option[T] {
+  struct Some {
+    value: T,
+  },
+  struct None,
+}
+
 /// Surface values accepted by `exec` arguments and environment entries.
 type ExecInput = String | Path | Blob | Tree | ExecPath;
 

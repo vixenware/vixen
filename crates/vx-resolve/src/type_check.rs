@@ -13,7 +13,7 @@ use vx_parser::{
     PartialAppExpr, Pattern, PrefixExpr, RecordExpr, SourceFile, Stmt, StructLiteralExpr,
     SyntaxKind, WhereExpr, WithExpr,
 };
-use vx_types::{Capability, FnSig, ParamDef, Ty};
+use vx_types::{Capability, FnSig, InferVar, ParamDef, Ty};
 
 use crate::SourceSpan;
 use crate::resolve::NameResolution;
@@ -354,6 +354,22 @@ impl<'a> ExprTyper<'a> {
                 }
                 Ty::Poison
             }
+            DefKind::Variant => self
+                .variant_value_ty(def)
+                .or_else(|| {
+                    self.variant_sig_for_def(def).map(|sig| {
+                        Ty::Function(vx_types::FunctionTy {
+                            params: sig
+                                .positional_params
+                                .into_iter()
+                                .map(|param| param.ty)
+                                .collect(),
+                            ret: Box::new(sig.ret),
+                            capabilities: sig.capabilities,
+                        })
+                    })
+                })
+                .unwrap_or(Ty::Poison),
             _ => Ty::Poison,
         }
     }
@@ -403,6 +419,7 @@ impl<'a> ExprTyper<'a> {
         let def = self.resolved_def_for_name_ref(name_ref)?;
         match def.kind {
             DefKind::Function => self.types.fn_sig_for_def(def).cloned(),
+            DefKind::Variant => self.variant_sig_for_def(def),
             DefKind::Namespace => {
                 let mut sigs = self.constructor_sigs_for_namespace(def);
                 (sigs.len() == 1).then(|| sigs.swap_remove(0))
@@ -432,6 +449,69 @@ impl<'a> ExprTyper<'a> {
             ret: Box::new(sig.ret.clone()),
             capabilities: sig.capabilities.clone(),
         })
+    }
+
+    fn variant_sig_for_def(&self, def: &Definition) -> Option<FnSig> {
+        let variant_id = self.types.type_id_for_def(def)?;
+        let vx_types::TypeDef::Struct(struct_def) = &self.types.env[variant_id] else {
+            return None;
+        };
+        let parent_enum = struct_def.parent_enum?;
+        let ret = if let vx_types::TypeDef::Enum(enum_def) = &self.types.env[parent_enum] {
+            if enum_def.name == "Option" {
+                let inner = struct_def
+                    .fields
+                    .iter()
+                    .find(|field| field.name == "value")
+                    .map(|field| field.ty.clone())
+                    .unwrap_or(Ty::Infer(InferVar(0)));
+                Ty::Optional(Box::new(inner))
+            } else {
+                Ty::Enum(vx_types::EnumTy {
+                    id: parent_enum,
+                    type_args: vec![],
+                })
+            }
+        } else {
+            return None;
+        };
+        Some(FnSig {
+            name: def.name.clone(),
+            type_params: vec![],
+            positional_params: struct_def
+                .fields
+                .iter()
+                .map(|field| ParamDef {
+                    name: field.name.clone(),
+                    ty: field.ty.clone(),
+                    doc: None,
+                })
+                .collect(),
+            keyword_params: vec![],
+            ret,
+            capabilities: vec![],
+        })
+    }
+
+    fn variant_value_ty(&self, def: &Definition) -> Option<Ty> {
+        let variant_id = self.types.type_id_for_def(def)?;
+        let vx_types::TypeDef::Struct(struct_def) = &self.types.env[variant_id] else {
+            return None;
+        };
+        if !struct_def.fields.is_empty() {
+            return None;
+        }
+        let parent_enum = struct_def.parent_enum?;
+        if let vx_types::TypeDef::Enum(enum_def) = &self.types.env[parent_enum] {
+            if enum_def.name == "Option" {
+                return Some(Ty::Optional(Box::new(Ty::Infer(InferVar(0)))));
+            }
+            return Some(Ty::Enum(vx_types::EnumTy {
+                id: parent_enum,
+                type_args: vec![],
+            }));
+        }
+        None
     }
 
     fn constructor_sigs_for_namespace(&self, namespace: &Definition) -> Vec<FnSig> {
@@ -1690,14 +1770,37 @@ fn types_compatible(actual: &Ty, expected: &Ty) -> bool {
         return true;
     }
     match (actual, expected) {
-        (Ty::Array(_), Ty::Array(_)) => true, // element type checking later
-        (Ty::Map(_, _), Ty::Map(_, _)) => true,
-        (Ty::Stream(_), Ty::Stream(_)) => true,
-        (Ty::Function(_), Ty::Function(_)) => true,
-        // For now, be permissive with other combinations
+        (Ty::Optional(actual_inner), Ty::Optional(expected_inner)) => {
+            types_compatible(actual_inner, expected_inner)
+        }
+        (Ty::Array(actual_inner), Ty::Array(expected_inner)) => {
+            types_compatible(actual_inner, expected_inner)
+        }
+        (Ty::Map(actual_key, actual_value), Ty::Map(expected_key, expected_value)) => {
+            types_compatible(actual_key, expected_key)
+                && types_compatible(actual_value, expected_value)
+        }
+        (Ty::Stream(actual_inner), Ty::Stream(expected_inner)) => {
+            types_compatible(actual_inner, expected_inner)
+        }
+        (Ty::Tuple(actual_tuple), Ty::Tuple(expected_tuple)) => {
+            actual_tuple.elements.len() == expected_tuple.elements.len()
+                && actual_tuple
+                    .elements
+                    .iter()
+                    .zip(expected_tuple.elements.iter())
+                    .all(|(actual_elem, expected_elem)| {
+                        types_compatible(actual_elem, expected_elem)
+                    })
+        }
+        (Ty::Function(actual_fn), Ty::Function(expected_fn)) => {
+            actual_fn.params.len() == expected_fn.params.len()
+                && actual_fn.params.iter().zip(expected_fn.params.iter()).all(
+                    |(actual_param, expected_param)| types_compatible(actual_param, expected_param),
+                )
+                && types_compatible(&actual_fn.ret, &expected_fn.ret)
+        }
         _ => {
-            // If both are concrete but different shapes, it's an error
-            // But we're lenient with unknowns
             matches!(
                 (actual, expected),
                 (Ty::Infer(_), _) | (_, Ty::Infer(_)) | (Ty::Param(_), _) | (_, Ty::Param(_))

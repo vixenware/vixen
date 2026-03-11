@@ -11,8 +11,8 @@ use std::collections::{HashMap, HashSet};
 
 use rowan::TextRange;
 use vx_parser::{
-    AstNode, BlockExpr, ClosureExpr, Expr, FnDecl, Item, LetStmt, MatchExpr, Pattern, SourceFile,
-    Stmt, SyntaxKind, SyntaxNode,
+    AstNode, BlockExpr, ClosureExpr, EnumDecl, Expr, FnDecl, Item, LetStmt, MatchExpr, Pattern,
+    SourceFile, Stmt, SyntaxKind, SyntaxNode,
 };
 
 use crate::{ImportGraph, SourceFileRef, SourceId, SourceSpan};
@@ -574,6 +574,7 @@ impl ScopeTreeBuilder {
                 let Some(name_tok) = decl.name() else {
                     return;
                 };
+                self.collect_enum_variant_defs(scope, decl);
                 (
                     name_tok.text().to_string(),
                     DefKind::Enum,
@@ -617,6 +618,21 @@ impl ScopeTreeBuilder {
     ) {
         let def = self.named_definition(scope, name, kind, name_range, full_range);
         self.add_def(scope, def);
+    }
+
+    fn collect_enum_variant_defs(&mut self, scope: ScopeId, decl: &EnumDecl) {
+        for variant in decl.variants() {
+            let Some(name_tok) = variant.name() else {
+                continue;
+            };
+            self.add_named_def(
+                scope,
+                name_tok.text().to_string(),
+                DefKind::Variant,
+                name_tok.text_range(),
+                variant.syntax().text_range(),
+            );
+        }
     }
 
     fn alloc_def_id(&mut self) -> u32 {
@@ -754,6 +770,7 @@ impl ScopeTreeBuilder {
                         decl.syntax().text_range(),
                     );
                 }
+                self.collect_enum_variant_defs(scope, decl);
             }
             Stmt::NewtypeDecl(decl) => {
                 if let Some(name_tok) = decl.name() {
