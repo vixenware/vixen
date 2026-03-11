@@ -657,6 +657,74 @@ printf 'artifact\n' > "$out"
 }
 
 #[test]
+fn cc_version_sketch_returns_stdout_blob_in_output_tree() {
+    let sketch_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cc-version.vx");
+    let source = fs::read_to_string(&sketch_path).expect("read cc-version sketch");
+    let engine = engine(&source);
+
+    let tempdir = TempDir::new().unwrap();
+    let workspace = tempdir.path();
+    let tools_dir = workspace.join("tools");
+    fs::create_dir_all(&tools_dir).unwrap();
+    let cc_script = tools_dir.join("cc");
+    fs::write(
+        &cc_script,
+        r##"#!/bin/sh
+printf 'fake cc 1.0\n'
+"##,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut perms = fs::metadata(&cc_script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&cc_script, perms).unwrap();
+    }
+
+    let _env_guard = ENV_MUTEX.lock().unwrap();
+    let old_path = std::env::var_os("PATH");
+    let mut path_entries = vec![tools_dir.as_os_str().to_os_string()];
+    if let Some(existing) = &old_path {
+        path_entries.extend(std::env::split_paths(existing).map(|p| p.into_os_string()));
+    }
+    let joined = std::env::join_paths(path_entries).unwrap();
+    unsafe {
+        std::env::set_var("PATH", &joined);
+    }
+
+    let value = engine
+        .call_entry(
+            "build",
+            workspace.to_string_lossy(),
+            vec!["build".into()],
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+    match old_path {
+        Some(path) => unsafe {
+            std::env::set_var("PATH", path);
+        },
+        None => unsafe {
+            std::env::remove_var("PATH");
+        },
+    }
+
+    let Value::Tree(TreeValue::Inline(entries)) = value else {
+        panic!("expected tree result");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0.as_ref(), "cc-version.txt");
+    assert_eq!(
+        entries[0].1,
+        Value::Blob(BlobValue::from_string("fake cc 1.0\n"))
+    );
+}
+
+#[test]
 fn lua_sketch_object_merge_returns_tree() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
