@@ -475,11 +475,24 @@ fn render_annotation(
         PlacementMode::BelowSpan => {
             let _ = writeln!(output, "{gutter}{colored}");
             if let Some(message) = annotation.message {
-                for line in wrap_text(message, window.geometry.source_columns.saturating_sub(2)) {
+                let anchor_padding = " ".repeat(annotation.segment.start_column);
+                let continuation_padding = " ".repeat(indent_width(glyphs.branch) + 1);
+                let available = window
+                    .geometry
+                    .source_columns
+                    .saturating_sub(annotation.segment.start_column + 2);
+                for (index, line) in wrap_text(message, available).into_iter().enumerate() {
                     let _ = writeln!(
                         output,
-                        "{gutter}{} {line}",
-                        colorize(glyphs.branch, theme.connector, capabilities.color_level)
+                        "{gutter}{anchor_padding}{}{line}",
+                        if index == 0 {
+                            format!(
+                                "{} ",
+                                colorize(glyphs.branch, theme.connector, capabilities.color_level)
+                            )
+                        } else {
+                            continuation_padding.clone()
+                        }
                     );
                 }
             }

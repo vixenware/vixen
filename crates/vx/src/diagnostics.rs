@@ -351,15 +351,15 @@ impl SyntaxHighlighter {
             if span.start >= span.end {
                 continue;
             }
-            let start_line = line_number(&source.text, u32::try_from(span.start)?)?;
+            let start_line = line_number(&source.text, span.start)?;
             if let Some(relevant_lines) = relevant_lines
                 && !relevant_lines.contains(&start_line)
             {
                 continue;
             }
 
-            let start = byte_offset_to_display_boundary(&source.text, u32::try_from(span.start)?)?;
-            let end = byte_offset_to_display_boundary(&source.text, u32::try_from(span.end)?)?;
+            let start = byte_offset_to_display_boundary(&source.text, span.start)?;
+            let end = byte_offset_to_display_boundary(&source.text, span.end)?;
             annotations.push(Annotation {
                 spans: vec![Span::new(source.source_id.as_str(), start, end)],
                 role: AnnotationRole::SyntaxToken,
@@ -494,15 +494,17 @@ mod tests {
             false,
         )
         .expect("render");
+        let plain = strip_ansi_escapes::strip_str(&rendered);
 
         println!("{rendered}");
         assert!(rendered.contains("build input not found"), "{rendered}");
         assert!(
-            rendered.contains("this path does not exist in the current workspace"),
+            plain.contains("this path does not exist in the current"),
             "{rendered}"
         );
+        assert!(plain.contains("workspace"), "{rendered}");
         assert!(
-            rendered.contains("resolved path: /workspace/zoo/lua-src"),
+            plain.contains("resolved path: /workspace/zoo/lua-src"),
             "{rendered}"
         );
         assert_eq!(rendered.matches("build.vx").count(), 1, "{rendered}");
@@ -569,7 +571,11 @@ mod tests {
             "{rendered}"
         );
         assert!(plain.contains("let src_tree = Tree"), "{rendered}");
-        assert!(plain.contains("this path does not exist in the current workspace"));
+        assert!(
+            plain.contains("this path does not exist in the current"),
+            "{rendered}"
+        );
+        assert!(plain.contains("workspace"), "{rendered}");
     }
 
     #[test]

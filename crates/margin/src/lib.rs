@@ -849,7 +849,7 @@ impl<'a> LineIndex<'a> {
     fn new(source: &'a str, tab_width: usize) -> Self {
         let mut starts = vec![0];
         for (index, byte) in source.bytes().enumerate() {
-            if byte == b'\n' && index + 1 <= source.len() {
+            if byte == b'\n' && index < source.len() {
                 starts.push(index + 1);
             }
         }

@@ -78,6 +78,28 @@ fn render_supports_plaintext_ascii_output() {
     assert!(!rendered.contains("\u{1b}["));
 }
 
+// d[verify label.multiline-message-alignment]
+#[test]
+fn render_below_span_message_stays_anchored_to_the_span() {
+    let rendered = render(
+        &sample_diagnostics(),
+        TerminalCapabilities {
+            width: 28,
+            glyph_mode: GlyphMode::Ascii,
+            color_level: ColorLevel::None,
+            tab_width: 4,
+        },
+    )
+    .unwrap();
+
+    println!("{rendered}");
+    assert!(rendered.contains("  |          ^^^^^^^"), "{rendered}");
+    assert!(
+        rendered.contains("  |          \\- not found"),
+        "{rendered}"
+    );
+}
+
 // d[verify test.width-matrix]
 // d[verify test.capability-matrix]
 // d[verify glyph.unicode-ascii]
