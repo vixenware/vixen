@@ -50,6 +50,12 @@ diagnostics = ["moire/diagnostics"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ariadne = { version = "0.6", features = ["auto-color"] }
+arborium = { path = "/Users/amos/bearcove/arborium/crates/arborium", default-features = false }
+arborium-highlight = { path = "/Users/amos/bearcove/arborium/crates/arborium-highlight" }
+arborium-theme = { path = "/Users/amos/bearcove/arborium/crates/arborium-theme" }
+concolor = { version = "0.1", features = ["api"] }
+tree-sitter-vixen = { path = "/Users/amos/bearcove/tree-sitter-vixen" }
 
 [lints]
 workspace = true

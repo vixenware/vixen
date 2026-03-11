@@ -1,5 +1,13 @@
 use super::*;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use arborium::advanced::{CompiledGrammar, GrammarConfig};
+use arborium::{GrammarStore, Highlighter};
+use arborium_highlight::spans_to_themed;
+use arborium_theme::theme::builtin;
+use ariadne::{Color as AriadneColor, Config as AriadneConfig, Label, Report, ReportKind, Source};
 use camino::Utf8Path;
+use concolor::ColorChoice;
 use std::fs;
 use std::net::TcpListener;
 use tempfile::TempDir;
@@ -12,6 +20,39 @@ use vx_store_proto::{Blake3Hash, BlobRef, ContentHash, DirEntryKind, StoreClient
 /// Create a fresh database for testing
 fn test_db() -> Database {
     Database::new()
+}
+
+static COLOR_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
+
+struct ColorOverrideGuard {
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl ColorOverrideGuard {
+    fn always_ansi() -> Self {
+        let guard = COLOR_OVERRIDE_LOCK.lock().expect("color override lock");
+        concolor::set(ColorChoice::AlwaysAnsi);
+        Self { _guard: guard }
+    }
+}
+
+impl Drop for ColorOverrideGuard {
+    fn drop(&mut self) {
+        concolor::set(ColorChoice::Auto);
+    }
+}
+
+fn vixen_grammar_store() -> Result<Arc<GrammarStore>, Box<dyn std::error::Error>> {
+    let grammar = Arc::new(CompiledGrammar::new(GrammarConfig {
+        language: tree_sitter_vixen::language().into(),
+        highlights_query: tree_sitter_vixen::HIGHLIGHTS_QUERY,
+        injections_query: tree_sitter_vixen::INJECTIONS_QUERY,
+        locals_query: tree_sitter_vixen::LOCALS_QUERY,
+    })?);
+
+    let store = Arc::new(GrammarStore::new());
+    store.insert("vixen", grammar);
+    Ok(store)
 }
 
 #[test]
@@ -86,6 +127,104 @@ fn test_rule_plan_parity_ignores_non_focus_nodes() {
     assert_eq!(diff.rule_plan_focus_count, 0);
     assert!(diff.missing_in_rule_plan.is_empty());
     assert!(diff.extra_in_rule_plan.is_empty());
+}
+
+#[test]
+fn arborium_can_highlight_vixen_via_external_grammar_crate()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut highlighter = Highlighter::with_store(vixen_grammar_store()?);
+    let html = highlighter.highlight(
+        "vixen",
+        r#"fn build(ws: Path) -> Tree (
+  let src_tree = Tree(ws / @zoo/lua-src);
+  src_tree
+)"#,
+    )?;
+    println!("{html}");
+
+    assert!(html.contains("<a-"), "{html}");
+    assert!(html.contains("build"), "{html}");
+    assert!(html.contains("lua-src"), "{html}");
+
+    Ok(())
+}
+
+#[test]
+fn ariadne_can_render_vixen_source_with_arborium_color_labels()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _color = ColorOverrideGuard::always_ansi();
+    let source = r#"fn build(ws: Path) -> Tree (
+  let src_tree = Tree(ws / @zoo/lua-src);
+  src_tree
+)"#;
+    let filename = "build.vx";
+    let semantic_text = "@zoo/lua-src";
+    let semantic_start = source.find(semantic_text).expect("semantic label start");
+    let semantic_range = semantic_start..semantic_start + semantic_text.len();
+
+    let mut highlighter = Highlighter::with_store(vixen_grammar_store()?);
+    let raw_spans = highlighter.highlight_spans("vixen", source)?;
+    let themed_spans = spans_to_themed(raw_spans);
+    let theme = builtin::catppuccin_mocha();
+    let mut syntax_label_count = 0usize;
+
+    let mut report = Report::build(ReportKind::Error, (filename, semantic_range.clone()))
+        .with_config(AriadneConfig::default().with_color(true))
+        .with_message("build input not found");
+
+    for span in themed_spans {
+        if span.start >= span.end {
+            continue;
+        }
+
+        let Some(style) = theme.style(span.theme_index) else {
+            continue;
+        };
+        let Some(fg) = style.fg else {
+            continue;
+        };
+
+        syntax_label_count += 1;
+        report = report.with_label(
+            Label::new((filename, span.start as usize..span.end as usize))
+                .with_color(AriadneColor::Rgb(fg.r, fg.g, fg.b)),
+        );
+    }
+
+    assert!(syntax_label_count > 4, "expected syntax-colored labels");
+
+    let mut out = Vec::new();
+    report
+        .with_label(
+            Label::new((filename, semantic_range))
+                .with_color(AriadneColor::Red)
+                .with_message("this path does not exist in the current workspace"),
+        )
+        .with_note("resolved path: /workspace/zoo/lua-src")
+        .with_note("workspace root: /workspace")
+        .with_note("os error: No such file or directory")
+        .finish()
+        .write((filename, Source::from(source)), &mut out)?;
+
+    assert!(
+        out.iter().any(|byte| *byte == b'\x1b'),
+        "expected ANSI escape codes in forced-color output: {out:?}"
+    );
+
+    let rendered = String::from_utf8(out)?;
+    println!("{rendered}");
+    assert!(rendered.contains("build input not found"), "{rendered}");
+    assert!(
+        rendered.contains("this path does not exist in the current workspace"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("lua-src"), "{rendered}");
+    assert!(
+        rendered.contains("resolved path: /workspace/zoo/lua-src"),
+        "{rendered}"
+    );
+
+    Ok(())
 }
 
 #[test]
