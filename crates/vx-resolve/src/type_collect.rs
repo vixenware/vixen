@@ -307,7 +307,11 @@ fn collect_fn_sig(decl: &FnDecl, resolver: &TypeResolver<'_>, type_params: &[Str
                 .and_then(|st| st.ty())
                 .map(|t| resolver.resolve_type(&t, type_params))
                 .unwrap_or(Ty::Poison);
-            Some(ParamDef { name: pname, ty })
+            Some(ParamDef {
+                name: pname,
+                ty,
+                doc: vx_parser::doc_comment(p.syntax()),
+            })
         })
         .collect();
 
@@ -328,6 +332,7 @@ fn collect_fn_sig(decl: &FnDecl, resolver: &TypeResolver<'_>, type_params: &[Str
                 name: kname,
                 ty,
                 has_default,
+                doc: vx_parser::doc_comment(kp.syntax()),
             })
         })
         .collect();

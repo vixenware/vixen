@@ -52,6 +52,8 @@ pub struct TypeCheckResult {
     pub expr_types: HashMap<TextRange, Ty>,
     /// Types for closure parameters inferred from callback slots.
     pub closure_param_types: HashMap<TextRange, Ty>,
+    /// Documentation inherited from callback slots for closure parameters.
+    pub closure_param_docs: HashMap<TextRange, String>,
     /// Map from binding name ranges to their inferred types.
     pub binding_types: HashMap<TextRange, Ty>,
     /// Type errors found during checking.
@@ -70,6 +72,7 @@ pub fn type_check(
         expr_types: HashMap::new(),
         errors: Vec::new(),
         closure_param_types: HashMap::new(),
+        closure_param_docs: HashMap::new(),
         binding_types: HashMap::new(),
     };
 
@@ -84,6 +87,7 @@ pub fn type_check(
     TypeCheckResult {
         expr_types: checker.expr_types,
         closure_param_types: checker.closure_param_types,
+        closure_param_docs: checker.closure_param_docs,
         binding_types: checker.binding_types,
         errors: checker.errors,
     }
@@ -97,6 +101,8 @@ struct ExprTyper<'a> {
     /// Types for closure parameters, populated when we see a closure in a
     /// known callback slot (e.g., exec observer's proc and tree params).
     closure_param_types: HashMap<TextRange, Ty>,
+    /// Documentation for closure parameters inherited from the callback slot.
+    closure_param_docs: HashMap<TextRange, String>,
     /// Types for let bindings, keyed by the binding's name_range.
     binding_types: HashMap<TextRange, Ty>,
 }
@@ -412,7 +418,12 @@ impl<'a> ExprTyper<'a> {
             if let Some(param) = kw_param
                 && let vx_types::Ty::Function(fn_ty) = &param.ty
             {
-                self.bind_closure_params(&closure, &fn_ty.params);
+                self.bind_closure_params(
+                    &closure,
+                    &fn_ty.params,
+                    param.doc.as_deref(),
+                    &param.name,
+                );
                 continue;
             }
 
@@ -423,7 +434,12 @@ impl<'a> ExprTyper<'a> {
             if let Some(param) = pos_param
                 && let vx_types::Ty::Function(fn_ty) = &param.ty
             {
-                self.bind_closure_params(&closure, &fn_ty.params);
+                self.bind_closure_params(
+                    &closure,
+                    &fn_ty.params,
+                    param.doc.as_deref(),
+                    &param.name,
+                );
             }
         }
     }
@@ -659,7 +675,12 @@ impl<'a> ExprTyper<'a> {
             if let vx_types::Ty::Function(fn_ty) = &param.ty {
                 let arg_expr = arg.expr().map(Self::peel_parens);
                 if let Some(Expr::Closure(closure)) = arg_expr {
-                    self.bind_closure_params(&closure, &fn_ty.params);
+                    self.bind_closure_params(
+                        &closure,
+                        &fn_ty.params,
+                        param.doc.as_deref(),
+                        &param.name,
+                    );
                 }
             }
         }
@@ -677,7 +698,12 @@ impl<'a> ExprTyper<'a> {
             if let vx_types::Ty::Function(fn_ty) = &param.ty {
                 let arg_expr = arg.expr().map(Self::peel_parens);
                 if let Some(Expr::Closure(closure)) = arg_expr {
-                    self.bind_closure_params(&closure, &fn_ty.params);
+                    self.bind_closure_params(
+                        &closure,
+                        &fn_ty.params,
+                        param.doc.as_deref(),
+                        &param.name,
+                    );
                 }
             }
         }
@@ -691,7 +717,12 @@ impl<'a> ExprTyper<'a> {
                 if let vx_types::Ty::Function(fn_ty) = &kw_param.ty {
                     let kw_expr = kw.expr().map(Self::peel_parens);
                     if let Some(Expr::Closure(closure)) = kw_expr {
-                        self.bind_closure_params(&closure, &fn_ty.params);
+                        self.bind_closure_params(
+                            &closure,
+                            &fn_ty.params,
+                            kw_param.doc.as_deref(),
+                            &kw_param.name,
+                        );
                     }
                 }
             }
@@ -704,18 +735,34 @@ impl<'a> ExprTyper<'a> {
                 if let vx_types::Ty::Function(fn_ty) = &pos_param.ty {
                     let kw_expr = kw.expr().map(Self::peel_parens);
                     if let Some(Expr::Closure(closure)) = kw_expr {
-                        self.bind_closure_params(&closure, &fn_ty.params);
+                        self.bind_closure_params(
+                            &closure,
+                            &fn_ty.params,
+                            pos_param.doc.as_deref(),
+                            &pos_param.name,
+                        );
                     }
                 }
             }
         }
     }
 
-    fn bind_closure_params(&mut self, closure: &ClosureExpr, types: &[Ty]) {
+    fn bind_closure_params(
+        &mut self,
+        closure: &ClosureExpr,
+        types: &[Ty],
+        slot_doc: Option<&str>,
+        slot_name: &str,
+    ) {
+        let inherited_doc = slot_doc.map(|doc| format!("`{slot_name}` callback slot.\n\n{doc}"));
         for (param, ty) in closure.parameters().zip(types.iter()) {
             if let Some(name_tok) = param.name() {
                 self.closure_param_types
                     .insert(name_tok.text_range(), ty.clone());
+                if let Some(doc) = inherited_doc.as_ref() {
+                    self.closure_param_docs
+                        .insert(name_tok.text_range(), doc.clone());
+                }
             }
         }
     }
@@ -1397,6 +1444,7 @@ impl<'a> ExprTyper<'a> {
             .map(|param| vx_types::ParamDef {
                 name: param.name.clone(),
                 ty: substitute_bound_type_params(&param.ty, &substitutions),
+                doc: param.doc.clone(),
             })
             .collect();
 
@@ -1410,6 +1458,7 @@ impl<'a> ExprTyper<'a> {
             .map(|param| vx_types::ParamDef {
                 name: param.name.clone(),
                 ty: substitute_bound_type_params(&param.ty, &substitutions),
+                doc: param.doc.clone(),
             })
             .collect();
 

@@ -367,7 +367,11 @@ fn collect_fn_sig(decl: &FnDecl, self_ty: Option<Builtin>) -> FnSig {
                 .and_then(|slot| slot.ty())
                 .map(|ty| lowerer.lower(&ty))
                 .unwrap_or(Ty::Poison);
-            Some(ParamDef { name, ty })
+            Some(ParamDef {
+                name,
+                ty,
+                doc: vx_parser::doc_comment(param.syntax()),
+            })
         })
         .collect();
 
@@ -388,6 +392,7 @@ fn collect_fn_sig(decl: &FnDecl, self_ty: Option<Builtin>) -> FnSig {
                 name,
                 ty,
                 has_default,
+                doc: vx_parser::doc_comment(param.syntax()),
             })
         })
         .collect();
@@ -462,7 +467,11 @@ fn collect_fn_sig_for_scalar(decl: &FnDecl, self_scalar: Scalar) -> FnSig {
                 .and_then(|slot| slot.ty())
                 .map(|ty| lowerer.lower(&ty))
                 .unwrap_or(Ty::Poison);
-            Some(ParamDef { name, ty })
+            Some(ParamDef {
+                name,
+                ty,
+                doc: vx_parser::doc_comment(param.syntax()),
+            })
         })
         .collect();
 
@@ -483,6 +492,7 @@ fn collect_fn_sig_for_scalar(decl: &FnDecl, self_scalar: Scalar) -> FnSig {
                 name,
                 ty,
                 has_default,
+                doc: vx_parser::doc_comment(param.syntax()),
             })
         })
         .collect();
@@ -530,7 +540,11 @@ fn collect_generic_method_sig(
                 .and_then(|slot| slot.ty())
                 .map(|ty| lowerer.lower(&ty))
                 .unwrap_or(Ty::Poison);
-            Some(ParamDef { name, ty })
+            Some(ParamDef {
+                name,
+                ty,
+                doc: vx_parser::doc_comment(param.syntax()),
+            })
         })
         .collect();
     if !params.is_empty() {
@@ -785,6 +799,7 @@ fn fallback_builtin_fn_sig(name: &str) -> Option<FnSig> {
                         },
                     ],
                 }),
+                doc: None,
             }],
             keyword_params: vec![],
             ret: Ty::Param(TypeParam {
@@ -799,6 +814,7 @@ fn fallback_builtin_fn_sig(name: &str) -> Option<FnSig> {
             positional_params: vec![ParamDef {
                 name: "path".into(),
                 ty: Ty::Scalar(Scalar::String),
+                doc: None,
             }],
             keyword_params: vec![],
             ret: Ty::Builtin(Builtin::Blob),
@@ -810,6 +826,7 @@ fn fallback_builtin_fn_sig(name: &str) -> Option<FnSig> {
             positional_params: vec![ParamDef {
                 name: "path".into(),
                 ty: Ty::Scalar(Scalar::String),
+                doc: None,
             }],
             keyword_params: vec![],
             ret: Ty::Array(Box::new(Ty::Scalar(Scalar::String))),
@@ -821,6 +838,7 @@ fn fallback_builtin_fn_sig(name: &str) -> Option<FnSig> {
             positional_params: vec![ParamDef {
                 name: "pattern".into(),
                 ty: Ty::Scalar(Scalar::String),
+                doc: None,
             }],
             keyword_params: vec![],
             ret: Ty::Array(Box::new(Ty::Scalar(Scalar::String))),
@@ -832,6 +850,7 @@ fn fallback_builtin_fn_sig(name: &str) -> Option<FnSig> {
             positional_params: vec![ParamDef {
                 name: "path".into(),
                 ty: Ty::Scalar(Scalar::String),
+                doc: None,
             }],
             keyword_params: vec![],
             ret: Ty::Scalar(Scalar::Bool),
@@ -843,6 +862,7 @@ fn fallback_builtin_fn_sig(name: &str) -> Option<FnSig> {
             positional_params: vec![ParamDef {
                 name: "path".into(),
                 ty: Ty::Scalar(Scalar::String),
+                doc: None,
             }],
             keyword_params: vec![],
             ret: Ty::Map(

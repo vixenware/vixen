@@ -105,6 +105,15 @@ impl DocumentState {
         vx::doc_comment(&node)
     }
 
+    fn documentation_for(&self, def: &vx_resolve::Definition) -> Option<String> {
+        self.doc_comment_for(def).or_else(|| {
+            self.type_check
+                .closure_param_docs
+                .get(&def.name_range)
+                .cloned()
+        })
+    }
+
     fn declaration_node_for(&self, def: &vx_resolve::Definition) -> Option<vx::SyntaxNode> {
         let expected_kind = match def.kind {
             vx_resolve::DefKind::Function => SyntaxKind::FN_DECL,
@@ -554,7 +563,7 @@ impl LanguageServer for VxLanguageServer {
 
                 let kind_label = def_kind_label(def.kind);
                 let snippet = state.declaration_snippet(def);
-                let doc = state.doc_comment_for(def);
+                let doc = state.documentation_for(def);
 
                 let mut markdown = format!("```vx\n{snippet}\n```\n---\n*{kind_label}*");
 
@@ -728,7 +737,7 @@ impl LanguageServer for VxLanguageServer {
                 .visible_at(offset)
                 .into_iter()
                 .map(|def| {
-                    let documentation = state.doc_comment_for(def).map(|doc| {
+                    let documentation = state.documentation_for(def).map(|doc| {
                         Documentation::MarkupContent(MarkupContent {
                             kind: MarkupKind::Markdown,
                             value: doc,
@@ -931,7 +940,7 @@ impl LanguageServer for VxLanguageServer {
                             label_parts.push(format!(" {ret_text}"));
                         }
 
-                        doc = state.doc_comment_for(def);
+                        doc = state.documentation_for(def);
                     } else {
                         return None;
                     }
@@ -2444,5 +2453,29 @@ fn build() {
                 .map(|ty| ty.display_with_env(&state.types.env).to_string()),
             Some(String::from("Tree"))
         );
+    }
+
+    #[test]
+    fn documentation_for_uses_callback_slot_docs() {
+        let text = r#"
+fn build() {
+  exec(["echo"]) where {
+    observer: (proc, tree) => {
+      proc.exit_code
+    },
+  };
+}
+"#;
+
+        let state = DocumentState::new(text.to_string());
+        let proc = definition_named(&state, "proc");
+        let tree = definition_named(&state, "tree");
+
+        let proc_doc = state.documentation_for(proc).unwrap();
+        let tree_doc = state.documentation_for(tree).unwrap();
+
+        assert!(proc_doc.contains("`observer` callback slot."));
+        assert!(proc_doc.contains("Executor-side observer evaluated with sandbox authority."));
+        assert_eq!(proc_doc, tree_doc);
     }
 }

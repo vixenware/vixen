@@ -251,6 +251,7 @@ pub struct FnSig {
 pub struct ParamDef {
     pub name: String,
     pub ty: Ty,
+    pub doc: Option<String>,
 }
 
 /// A keyword parameter in a function signature — has a name and may have a default.
@@ -259,6 +260,7 @@ pub struct KeywordParamDef {
     pub name: String,
     pub ty: Ty,
     pub has_default: bool,
+    pub doc: Option<String>,
 }
 
 /// The type environment: a collection of all named type definitions.
