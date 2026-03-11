@@ -9,8 +9,9 @@ use std::collections::HashMap;
 use rowan::TextRange;
 use vx_parser::{
     ArrayExpr, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr, FallibleExpr,
-    FieldExpr, IfExpr, InvokeExpr, LiteralExpr, MapExpr, MatchExpr, NameRefExpr, Pattern,
-    PrefixExpr, RecordExpr, SourceFile, Stmt, StructLiteralExpr, SyntaxKind, WhereExpr, WithExpr,
+    FieldExpr, IfExpr, InvokeExpr, LetStmt, LiteralExpr, MapExpr, MatchExpr, NameRefExpr,
+    PartialAppExpr, Pattern, PrefixExpr, RecordExpr, SourceFile, Stmt, StructLiteralExpr,
+    SyntaxKind, WhereExpr, WithExpr,
 };
 use vx_types::{Capability, FnSig, ParamDef, Ty};
 
@@ -74,6 +75,7 @@ pub fn type_check(
     types: &TypeCollection,
 ) -> TypeCheckResult {
     let mut checker = ExprTyper {
+        file,
         resolution,
         types,
         expr_types: HashMap::new(),
@@ -81,15 +83,12 @@ pub fn type_check(
         errors: Vec::new(),
         closure_param_types: HashMap::new(),
         closure_param_docs: HashMap::new(),
+        pipe_placeholder_types: HashMap::new(),
         binding_types: HashMap::new(),
     };
 
-    for item in file.items() {
-        if let vx_parser::Item::FnDecl(fn_decl) = item {
-            if let Some(body) = fn_decl.body() {
-                checker.check_block(&body);
-            }
-        }
+    for stmt in file.statements() {
+        checker.check_stmt(&stmt);
     }
 
     TypeCheckResult {
@@ -103,6 +102,7 @@ pub fn type_check(
 }
 
 struct ExprTyper<'a> {
+    file: &'a SourceFile,
     resolution: &'a NameResolution,
     types: &'a TypeCollection,
     expr_types: HashMap<SourceSpan, Ty>,
@@ -113,6 +113,8 @@ struct ExprTyper<'a> {
     closure_param_types: HashMap<SourceSpan, Ty>,
     /// Documentation for closure parameters inherited from the callback slot.
     closure_param_docs: HashMap<SourceSpan, String>,
+    /// Types for `_` placeholders bound by the current pipe stage.
+    pipe_placeholder_types: HashMap<SourceSpan, Ty>,
     /// Types for let bindings, keyed by the binding's name_range.
     binding_types: HashMap<SourceSpan, Ty>,
 }
@@ -206,6 +208,7 @@ impl<'a> ExprTyper<'a> {
                 .expr()
                 .map(|expr| self.infer_expr(&expr))
                 .unwrap_or(Ty::Poison),
+            Expr::PartialApp(partial) => self.infer_partial_app(partial),
             Expr::Call(call) => self.infer_call(call),
             Expr::Where(where_expr) => self.infer_where(where_expr),
             Expr::Invoke(invoke) => self.infer_invoke(invoke),
@@ -263,6 +266,12 @@ impl<'a> ExprTyper<'a> {
     }
 
     fn infer_name_ref(&self, name_ref: &NameRefExpr) -> Ty {
+        if let Some(token) = name_ref.token() {
+            let span = self.span(token.text_range());
+            if let Some(ty) = self.pipe_placeholder_types.get(&span) {
+                return ty.clone();
+            }
+        }
         if let Some(def) = self.resolved_def_for_name_ref(name_ref) {
             if let Some(ty) = self.closure_param_types.get(&def.name_span) {
                 return ty.clone();
@@ -370,6 +379,29 @@ impl<'a> ExprTyper<'a> {
             }
             _ => None,
         }
+    }
+
+    fn sig_for_expr(&self, expr: &Expr) -> Option<FnSig> {
+        match expr {
+            Expr::NameRef(name_ref) => self.sig_for_name_ref(name_ref),
+            Expr::PartialApp(partial) => partial
+                .callee()
+                .and_then(|callee| self.sig_for_expr(&callee)),
+            Expr::Paren(paren) => paren.expr().and_then(|inner| self.sig_for_expr(&inner)),
+            _ => None,
+        }
+    }
+
+    fn function_ty_from_sig(&self, sig: &FnSig) -> Ty {
+        Ty::Function(vx_types::FunctionTy {
+            params: sig
+                .positional_params
+                .iter()
+                .map(|param| param.ty.clone())
+                .collect(),
+            ret: Box::new(sig.ret.clone()),
+            capabilities: sig.capabilities.clone(),
+        })
     }
 
     fn constructor_sigs_for_namespace(&self, namespace: &Definition) -> Vec<FnSig> {
@@ -998,6 +1030,18 @@ impl<'a> ExprTyper<'a> {
         Ty::Poison
     }
 
+    fn infer_partial_app(&mut self, partial: &PartialAppExpr) -> Ty {
+        let Some(callee) = partial.callee() else {
+            return Ty::Poison;
+        };
+
+        if let Some(sig) = self.sig_for_expr(&callee) {
+            return self.function_ty_from_sig(&sig);
+        }
+
+        self.infer_expr(&callee)
+    }
+
     fn infer_block(&mut self, block: &BlockExpr) -> Ty {
         let mut last_ty = Ty::Unit;
         for stmt in block.statements() {
@@ -1064,27 +1108,36 @@ impl<'a> ExprTyper<'a> {
             return Ty::Poison;
         };
 
-        if !matches!(callee, Expr::Call(_))
-            && let Some(Expr::Record(record)) = where_expr.keywords()
-        {
-            let sig = match &callee {
-                Expr::NameRef(name_ref) => self.sig_for_name_ref(name_ref),
-                _ => None,
-            };
-            if let Some(sig) = sig {
-                self.populate_record_callback_param_types(&record, &sig);
-                self.check_record_keyword_args(&record, &sig);
-                return sig.ret.clone();
+        let callee_ty = self.infer_expr(&callee);
+        if let Some(keywords) = where_expr.keywords() {
+            if let Some(sig) = self.where_sig(&callee) {
+                if let Some(record) = self.record_for_keywords_expr(&keywords) {
+                    self.populate_record_callback_param_types(&record, &sig);
+                    self.check_record_keyword_args(&record, &sig);
+                } else {
+                    self.infer_expr(&keywords);
+                }
+            } else {
+                self.infer_expr(&keywords);
             }
         }
-
-        let callee_ty = self.infer_expr(&callee);
-        if !matches!(callee, Expr::Call(_))
-            && let Some(keywords) = where_expr.keywords()
-        {
-            self.infer_expr(&keywords);
-        }
         callee_ty
+    }
+
+    fn where_sig(&mut self, callee: &Expr) -> Option<FnSig> {
+        match callee {
+            Expr::Call(call) => {
+                let root = call.root_callee()?;
+                match root {
+                    Expr::NameRef(name_ref) => self.call_sig_for_name_ref(call, &name_ref),
+                    Expr::Field(field_expr) => {
+                        self.infer_static_namespace_call_sig(call, &field_expr)
+                    }
+                    _ => None,
+                }
+            }
+            _ => self.sig_for_expr(callee),
+        }
     }
 
     fn infer_invoke(&mut self, invoke: &InvokeExpr) -> Ty {
@@ -1286,34 +1339,14 @@ impl<'a> ExprTyper<'a> {
     }
 
     fn infer_binary(&mut self, bin: &BinaryExpr) -> Ty {
+        if binary_operator_kind(bin) == Some(SyntaxKind::PIPE_GT) {
+            return self.infer_pipe(bin);
+        }
+
         let lhs_ty = bin.lhs().map(|e| self.infer_expr(&e)).unwrap_or(Ty::Poison);
         let rhs_ty = bin.rhs().map(|e| self.infer_expr(&e)).unwrap_or(Ty::Poison);
 
-        // Find the operator token
-        let op = bin.syntax().children_with_tokens().find_map(|child| {
-            if let rowan::NodeOrToken::Token(t) = child {
-                match t.kind() {
-                    SyntaxKind::PLUS
-                    | SyntaxKind::MINUS
-                    | SyntaxKind::STAR
-                    | SyntaxKind::SLASH
-                    | SyntaxKind::PERCENT
-                    | SyntaxKind::AMP2
-                    | SyntaxKind::PIPE2
-                    | SyntaxKind::EQ2
-                    | SyntaxKind::BANG_EQ
-                    | SyntaxKind::LT
-                    | SyntaxKind::LT_EQ
-                    | SyntaxKind::GT
-                    | SyntaxKind::GT_EQ => Some(t.kind()),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        });
-
-        match op {
+        match binary_operator_kind(bin) {
             // Comparison and equality operators always produce Bool
             Some(
                 SyntaxKind::EQ2
@@ -1338,6 +1371,49 @@ impl<'a> ExprTyper<'a> {
                 } else {
                     rhs_ty
                 }
+            }
+            _ => Ty::Poison,
+        }
+    }
+
+    fn infer_pipe(&mut self, bin: &BinaryExpr) -> Ty {
+        let Some(lhs) = bin.lhs() else {
+            return Ty::Poison;
+        };
+        let Some(rhs) = bin.rhs() else {
+            return Ty::Poison;
+        };
+
+        let lhs_ty = self.infer_expr(&lhs);
+        let placeholders = collect_pipe_placeholder_spans(self.resolution.source, &rhs);
+        if !placeholders.is_empty() {
+            for span in &placeholders {
+                self.pipe_placeholder_types.insert(*span, lhs_ty.clone());
+            }
+            let rhs_ty = self.infer_expr(&rhs);
+            for span in placeholders {
+                self.pipe_placeholder_types.remove(&span);
+            }
+            return rhs_ty;
+        }
+
+        match self.infer_expr(&rhs) {
+            Ty::Function(function) if !function.params.is_empty() => {
+                let first_param = &function.params[0];
+                if !lhs_ty.is_poison()
+                    && !first_param.is_poison()
+                    && !types_compatible(&lhs_ty, first_param)
+                {
+                    self.push_error(TypeError {
+                        range: lhs.syntax().text_range(),
+                        kind: TypeErrorKind::ArgTypeMismatch {
+                            param_name: "_".to_string(),
+                            expected: first_param.clone(),
+                            found: lhs_ty,
+                        },
+                    });
+                }
+                (*function.ret).clone()
             }
             _ => Ty::Poison,
         }
@@ -1429,10 +1505,43 @@ impl<'a> ExprTyper<'a> {
                     self.infer_expr(&expr);
                 }
             } else if let Some(expr) = field.value() {
+                let expr = Self::peel_parens(expr);
+                if matches!(expr, Expr::Closure(_)) {
+                    continue;
+                }
                 self.infer_expr(&expr);
             }
         }
         Ty::Poison
+    }
+
+    fn record_for_keywords_expr(&self, expr: &Expr) -> Option<RecordExpr> {
+        match Self::peel_parens(expr.clone()) {
+            Expr::Record(record) => Some(record),
+            Expr::NameRef(name_ref) => {
+                let def = self.resolved_def_for_name_ref(&name_ref)?;
+                self.binding_initializer_expr(def)
+                    .and_then(|init| self.record_for_keywords_expr(&init))
+            }
+            _ => None,
+        }
+    }
+
+    fn binding_initializer_expr(&self, def: &Definition) -> Option<Expr> {
+        if def.kind != DefKind::Binding || def.source() != self.resolution.source {
+            return None;
+        }
+
+        self.file
+            .syntax()
+            .descendants()
+            .filter_map(LetStmt::cast)
+            .find_map(|let_stmt| {
+                let name = let_stmt.name()?;
+                (self.span(name.text_range()) == def.name_span)
+                    .then(|| let_stmt.expr())
+                    .flatten()
+            })
     }
 
     fn infer_struct_literal(&mut self, sl: &StructLiteralExpr) -> Ty {
@@ -1517,6 +1626,43 @@ fn types_compatible(actual: &Ty, expected: &Ty) -> bool {
             )
         }
     }
+}
+
+fn binary_operator_kind(binary: &BinaryExpr) -> Option<SyntaxKind> {
+    binary.syntax().children_with_tokens().find_map(|child| {
+        let rowan::NodeOrToken::Token(token) = child else {
+            return None;
+        };
+        match token.kind() {
+            SyntaxKind::PIPE_GT
+            | SyntaxKind::PLUS
+            | SyntaxKind::MINUS
+            | SyntaxKind::STAR
+            | SyntaxKind::SLASH
+            | SyntaxKind::PERCENT
+            | SyntaxKind::AMP2
+            | SyntaxKind::PIPE2
+            | SyntaxKind::EQ2
+            | SyntaxKind::BANG_EQ
+            | SyntaxKind::LT
+            | SyntaxKind::LT_EQ
+            | SyntaxKind::GT
+            | SyntaxKind::GT_EQ => Some(token.kind()),
+            _ => None,
+        }
+    })
+}
+
+fn collect_pipe_placeholder_spans(source: crate::SourceId, expr: &Expr) -> Vec<SourceSpan> {
+    expr.syntax()
+        .descendants()
+        .filter_map(NameRefExpr::cast)
+        .filter_map(|name_ref| {
+            let token = name_ref.token()?;
+            (token.kind() == SyntaxKind::UNDERSCORE)
+                .then(|| SourceSpan::new(source, token.text_range()))
+        })
+        .collect()
 }
 
 fn call_matches(arg_tys: &[Ty], sig: &FnSig) -> bool {

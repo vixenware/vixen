@@ -426,6 +426,31 @@ fn main() {
 }
 
 #[test]
+fn top_level_let_binding_type_is_visible_from_function_body() {
+    let src = r#"
+let paths = ["a.c", "b.c"]
+
+fn blobify(path: String) -> Blob {
+    Blob(path)
+}
+
+fn main() {
+    paths.map(blobify)
+}
+"#;
+    let result = type_check(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let ty = find_expr_type(&result, src, "paths.map(blobify)");
+    assert_eq!(
+        ty,
+        Some(Ty::Array(Box::new(nominal_ty(
+            &collect_types_with_stdlib(&parse_file(src)),
+            "Blob",
+        ))))
+    );
+}
+
+#[test]
 fn top_level_let_is_not_visible_before_definition() {
     let file = parse_file(
         r#"
@@ -1222,6 +1247,23 @@ fn main() {
 }
 
 #[test]
+fn partial_exec_where_binding_types_observer_params() {
+    let src = r#"
+fn main() {
+    let common = {
+        observer: (proc, tree) => tree.subtree(@out),
+    };
+
+    partial exec where common;
+}
+"#;
+    let (result, types) = type_check_with_types(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let ty = find_expr_type(&result, src, "tree.subtree(@out)");
+    assert_eq!(ty, Some(nominal_ty(&types, "Tree")));
+}
+
+#[test]
 fn observer_process_param_uses_stdlib_struct_type() {
     let src = r#"
 fn main() {
@@ -1269,6 +1311,58 @@ fn cc_version_sketch_resolves_and_typechecks() {
         path.display(),
         checked.errors
     );
+}
+
+#[test]
+fn lua_sketch_resolves_and_typechecks() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
+    let file = parse_file_path(&path);
+
+    let resolution = resolve_with_stdlib(&file);
+    assert!(
+        resolution.errors.is_empty(),
+        "resolve errors in {}: {:?}",
+        path.display(),
+        resolution.errors
+    );
+
+    let types = collect_types_with_stdlib(&file);
+    let checked = crate::type_check(&file, &resolution, &types);
+    assert!(
+        checked.errors.is_empty(),
+        "type errors in {}: {:?}",
+        path.display(),
+        checked.errors
+    );
+}
+
+#[test]
+fn pipe_placeholder_does_not_produce_resolve_errors() {
+    let file = parse_file(
+        r#"
+fn demo(value: Blob) {
+    value |> _.utf8()
+}
+"#,
+    );
+    let resolution = resolve_with_stdlib(&file);
+    assert!(
+        resolution.errors.is_empty(),
+        "expected no resolve errors, got: {:?}",
+        resolution.errors
+    );
+}
+
+#[test]
+fn pipe_placeholder_stage_infers_receiver_type() {
+    let src = r#"
+fn demo(value: Blob) {
+    value |> _.utf8()
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, "value |> _.utf8()");
+    assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::String)));
 }
 
 #[test]
