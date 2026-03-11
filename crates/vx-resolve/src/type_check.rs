@@ -479,6 +479,49 @@ impl<'a> ExprTyper<'a> {
         }
     }
 
+    fn specialize_sig_from_record(&mut self, sig: &FnSig, record: &RecordExpr) -> FnSig {
+        if sig.type_params.is_empty() {
+            return sig.clone();
+        }
+
+        let mut substitutions = vec![None; sig.type_params.len()];
+        for field in record.fields() {
+            let Some(name) = field.name().map(|token| token.text().to_string()) else {
+                continue;
+            };
+            let Some(arg_expr) = field.value() else {
+                continue;
+            };
+            let Some(param_ty) = sig
+                .keyword_params
+                .iter()
+                .find(|param| param.name == name)
+                .map(|param| &param.ty)
+                .or_else(|| {
+                    sig.positional_params
+                        .iter()
+                        .find(|param| param.name == name)
+                        .map(|param| &param.ty)
+                })
+            else {
+                continue;
+            };
+
+            let arg_ty = self.infer_expr(&arg_expr);
+            infer_type_params(param_ty, &arg_ty, &mut substitutions);
+        }
+
+        let mut specialized = sig.clone();
+        for param in &mut specialized.positional_params {
+            param.ty = substitute_bound_type_params(&param.ty, &substitutions);
+        }
+        for param in &mut specialized.keyword_params {
+            param.ty = substitute_bound_type_params(&param.ty, &substitutions);
+        }
+        specialized.ret = substitute_bound_type_params(&specialized.ret, &substitutions);
+        specialized
+    }
+
     fn populate_record_callback_param_types(&mut self, record: &RecordExpr, sig: &FnSig) {
         for field in record.fields() {
             let Some(name) = field.name().map(|token| token.text().to_string()) else {
@@ -1144,6 +1187,11 @@ impl<'a> ExprTyper<'a> {
                 if let Some(record) = self.record_for_keywords_expr(&keywords) {
                     self.populate_record_callback_param_types(&record, &sig);
                     self.check_record_keyword_args(&record, &sig);
+                    let specialized_sig = self.specialize_sig_from_record(&sig, &record);
+                    return match callee {
+                        Expr::Call(_) => specialized_sig.ret,
+                        _ => self.function_ty_from_sig(&specialized_sig),
+                    };
                 } else {
                     self.infer_expr(&keywords);
                 }

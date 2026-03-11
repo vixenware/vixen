@@ -1283,6 +1283,42 @@ fn main() {
 }
 
 #[test]
+fn exec_observer_specializes_return_type() {
+    let src = r#"
+fn main() {
+    let output = exec(["echo"]) where {
+        observer: (proc, tree) => tree.subtree(@out),
+    };
+
+    output
+}
+"#;
+    let (result, types) = type_check_with_types(src);
+    let ty = find_last_expr_type(&result, src, "output");
+    assert_eq!(ty, Some(nominal_ty(&types, "Tree")));
+}
+
+#[test]
+fn partial_exec_where_binding_specializes_return_type() {
+    let src = r#"
+fn main() {
+    let common = {
+        observer: (proc, tree) => tree.subtree(@out),
+    };
+    let cexec = partial exec where common;
+
+    cexec
+}
+"#;
+    let (result, types) = type_check_with_types(src);
+    let ty = find_last_expr_type(&result, src, "cexec");
+    let Some(Ty::Function(function)) = ty else {
+        panic!("expected function type, got {ty:?}");
+    };
+    assert_eq!(*function.ret, nominal_ty(&types, "Tree"));
+}
+
+#[test]
 fn observer_process_param_uses_stdlib_struct_type() {
     let src = r#"
 fn main() {
