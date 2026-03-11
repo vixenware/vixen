@@ -48,21 +48,18 @@ fn visible_reports<'a>(
     failure: &'a BuildFailure,
     full_stack: bool,
 ) -> Vec<&'a BuildDiagnosticReport> {
-    if full_stack {
-        return failure.reports.iter().collect();
-    }
-
     let mut visible = Vec::new();
     let mut index = 0usize;
     while index < failure.reports.len() {
         let report = &failure.reports[index];
-        visible.push(report);
-        index += 1;
-
         if report.severity != BuildDiagnosticSeverity::Error {
+            visible.push(report);
+            index += 1;
             continue;
         }
 
+        let error = report;
+        index += 1;
         let mut advice = Vec::new();
         while index < failure.reports.len()
             && failure.reports[index].severity == BuildDiagnosticSeverity::Advice
@@ -71,29 +68,35 @@ fn visible_reports<'a>(
             index += 1;
         }
 
-        if advice.is_empty() {
+        if full_stack {
+            visible.extend(advice.iter().copied());
+            visible.push(error);
             continue;
         }
 
-        if let Some(first_dependency) = advice
-            .iter()
-            .copied()
-            .find(|report| report.message != "while evaluating build entry")
-        {
-            visible.push(first_dependency);
+        if !advice.is_empty() {
+            if let Some(first_dependency) = advice
+                .iter()
+                .copied()
+                .find(|report| report.message != "while evaluating build entry")
+            {
+                visible.push(first_dependency);
+            }
+
+            if let Some(build_entry) = advice
+                .iter()
+                .copied()
+                .rev()
+                .find(|report| report.message == "while evaluating build entry")
+                && visible
+                    .last()
+                    .is_none_or(|last| !std::ptr::eq(*last, build_entry))
+            {
+                visible.push(build_entry);
+            }
         }
 
-        if let Some(build_entry) = advice
-            .iter()
-            .copied()
-            .rev()
-            .find(|report| report.message == "while evaluating build entry")
-            && visible
-                .last()
-                .is_none_or(|last| !std::ptr::eq(*last, build_entry))
-        {
-            visible.push(build_entry);
-        }
+        visible.push(error);
     }
 
     visible
@@ -578,5 +581,85 @@ mod tests {
             2,
             "{full}"
         );
+    }
+
+    #[test]
+    fn render_build_failure_places_terminal_error_after_context() {
+        let source = indoc::indoc! {r#"
+            fn build() {
+              first();
+              second();
+              third();
+            }
+        "#};
+        let source_id = "build.vx";
+        let source_start = source.find("first()").expect("first");
+        let entry_start = source.find("third()").expect("third");
+
+        let failure = BuildFailure {
+            message: "build failed".to_string(),
+            sources: vec![BuildDiagnosticSource {
+                source_id: source_id.to_string(),
+                language: Some("vixen".to_string()),
+                text: source.to_string(),
+            }],
+            reports: vec![
+                BuildDiagnosticReport {
+                    severity: BuildDiagnosticSeverity::Error,
+                    message: "build failed".to_string(),
+                    primary_span: BuildDiagnosticSpan {
+                        source_id: source_id.to_string(),
+                        start: source_start as u32,
+                        end: source_start as u32 + 5,
+                    },
+                    labels: vec![BuildDiagnosticLabel {
+                        span: BuildDiagnosticSpan {
+                            source_id: source_id.to_string(),
+                            start: source_start as u32,
+                            end: source_start as u32 + 5,
+                        },
+                        kind: BuildDiagnosticLabelKind::Primary,
+                        message: Some("this expression failed".to_string()),
+                    }],
+                    notes: Vec::new(),
+                },
+                BuildDiagnosticReport {
+                    severity: BuildDiagnosticSeverity::Advice,
+                    message: "required by this expression".to_string(),
+                    primary_span: BuildDiagnosticSpan {
+                        source_id: source_id.to_string(),
+                        start: source_start as u32,
+                        end: source_start as u32 + 5,
+                    },
+                    labels: vec![],
+                    notes: Vec::new(),
+                },
+                BuildDiagnosticReport {
+                    severity: BuildDiagnosticSeverity::Advice,
+                    message: "while evaluating build entry".to_string(),
+                    primary_span: BuildDiagnosticSpan {
+                        source_id: source_id.to_string(),
+                        start: entry_start as u32,
+                        end: entry_start as u32 + 5,
+                    },
+                    labels: vec![],
+                    notes: Vec::new(),
+                },
+            ],
+        };
+
+        let trimmed = strip_ansi_escapes::strip_str(
+            &render_build_failure(&failure, false).expect("render trimmed"),
+        );
+        let advice_pos = trimmed.find("Advice:").expect("advice position");
+        let error_pos = trimmed.rfind("Error:").expect("error position");
+        assert!(advice_pos < error_pos, "{trimmed}");
+
+        let full = strip_ansi_escapes::strip_str(
+            &render_build_failure(&failure, true).expect("render full"),
+        );
+        let advice_pos = full.find("Advice:").expect("advice position");
+        let error_pos = full.rfind("Error:").expect("error position");
+        assert!(advice_pos < error_pos, "{full}");
     }
 }

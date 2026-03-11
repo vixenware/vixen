@@ -54,33 +54,30 @@ pub(crate) fn from_parse_errors(
 pub(crate) fn from_poison_error(workspace_root: &Utf8Path, error: &PoisonError) -> BuildFailure {
     let leaves = unique_leaf_errors(error);
     let leaf_groups = group_leaf_errors(workspace_root, &leaves);
+    let display_groups = build_display_groups(leaf_groups);
     let mut sources = BTreeMap::new();
     let mut reports = Vec::new();
     let mut summary = None;
 
-    for group in leaf_groups {
-        let Some(primary_provenance) = group_primary_provenance(&group) else {
-            continue;
-        };
-        let presentation = &group.presentation;
-        summary.get_or_insert_with(|| presentation.summary.clone());
+    for group in display_groups {
+        let primary_provenance = &group.primary_provenance;
+        summary.get_or_insert_with(|| display_group_summary(&group));
 
         collect_source(&mut sources, &primary_provenance.source_id);
-        let primary_span = span_from_provenance(&primary_provenance);
+        let primary_span = span_from_provenance(primary_provenance);
         reports.push(BuildDiagnosticReport {
             severity: BuildDiagnosticSeverity::Error,
-            message: presentation.summary.clone(),
+            message: display_group_summary(&group),
             primary_span: primary_span.clone(),
             labels: vec![BuildDiagnosticLabel {
                 span: primary_span,
                 kind: BuildDiagnosticLabelKind::Primary,
-                message: Some(presentation.label_message.clone()),
+                message: Some(display_group_label_message(&group)),
             }],
-            notes: presentation.notes.clone(),
+            notes: display_group_notes(&group),
         });
 
-        let context_frames = group_context_frames(&group, &primary_provenance);
-        for frame in context_frames {
+        for frame in &group.context_frames {
             collect_source(&mut sources, &frame.provenance.source_id);
             let primary_span = span_from_provenance(&frame.provenance);
             reports.push(BuildDiagnosticReport {
@@ -134,6 +131,116 @@ fn group_leaf_errors<'a>(
     }
 
     groups
+}
+
+fn build_display_groups<'a>(leaf_groups: Vec<LeafGroup<'a>>) -> Vec<DisplayGroup<'a>> {
+    let prepared = leaf_groups
+        .into_iter()
+        .filter_map(prepare_leaf_group)
+        .collect::<Vec<_>>();
+    group_for_display(prepared)
+}
+
+fn prepare_leaf_group<'a>(group: LeafGroup<'a>) -> Option<PreparedLeafGroup<'a>> {
+    let primary_provenance = group_primary_provenance(&group)?;
+    let context_frames = group_context_frames(&group, &primary_provenance);
+    let grouping_candidates = grouping_candidates(&context_frames);
+    Some(PreparedLeafGroup {
+        group,
+        primary_provenance,
+        context_frames,
+        grouping_candidates,
+    })
+}
+
+fn group_for_display<'a>(prepared: Vec<PreparedLeafGroup<'a>>) -> Vec<DisplayGroup<'a>> {
+    let mut clusters = Vec::<DisplayCluster<'a>>::new();
+    for group in prepared {
+        let family_key = family_group_key(&group.group.presentation);
+        if let Some(index) = clusters.iter().position(|cluster| {
+            cluster.family_key == family_key && shares_grouping_site(cluster, &group)
+        }) {
+            merge_cluster(&mut clusters[index], group);
+        } else {
+            clusters.push(DisplayCluster {
+                family_key,
+                shared_candidates: group.grouping_candidates.clone(),
+                groups: vec![group],
+            });
+        }
+    }
+
+    clusters.into_iter().map(merge_display_group).collect()
+}
+
+fn family_group_key(presentation: &LeafPresentation) -> String {
+    format!("{:?}:{}", presentation.category, presentation.summary)
+}
+
+fn shares_grouping_site(cluster: &DisplayCluster<'_>, group: &PreparedLeafGroup<'_>) -> bool {
+    !cluster.shared_candidates.is_empty()
+        && cluster
+            .shared_candidates
+            .keys()
+            .any(|key| group.grouping_candidates.contains_key(key))
+}
+
+fn merge_cluster<'a>(cluster: &mut DisplayCluster<'a>, group: PreparedLeafGroup<'a>) {
+    cluster.shared_candidates.retain(|key, provenance| {
+        let Some(candidate) = group.grouping_candidates.get(key) else {
+            return false;
+        };
+        if compare_grouping_anchors(candidate, provenance).is_gt() {
+            *provenance = candidate.clone();
+        }
+        true
+    });
+    cluster.groups.push(group);
+}
+
+fn merge_display_group<'a>(mut cluster: DisplayCluster<'a>) -> DisplayGroup<'a> {
+    let first = cluster.groups.remove(0);
+    if cluster.groups.is_empty() {
+        return DisplayGroup {
+            presentation: first.group.presentation,
+            primary_provenance: first.primary_provenance,
+            context_frames: first.context_frames,
+            leaves: first.group.leaves,
+        };
+    }
+
+    let shared_primary = cluster
+        .shared_candidates
+        .into_values()
+        .max_by(compare_grouping_anchors)
+        .unwrap_or_else(|| first.primary_provenance.clone());
+    let mut context_frames = Vec::new();
+    if !same_provenance_span(&first.primary_provenance, &shared_primary) {
+        context_frames.push(ContextFrame {
+            provenance: first.primary_provenance.clone(),
+            is_build_entry: false,
+        });
+    }
+    context_frames.extend(first.context_frames);
+
+    let mut leaves = first.group.leaves;
+    for group in cluster.groups {
+        if !same_provenance_span(&group.primary_provenance, &shared_primary) {
+            context_frames.push(ContextFrame {
+                provenance: group.primary_provenance,
+                is_build_entry: false,
+            });
+        }
+        context_frames.extend(group.context_frames);
+        leaves.extend(group.group.leaves);
+    }
+
+    DisplayGroup {
+        presentation: first.group.presentation,
+        primary_provenance: shared_primary.clone(),
+        context_frames: coalesce_context_frames(context_frames, &shared_primary),
+        leaves,
+    }
 }
 
 fn leaf_group_key(error: &PoisonError, presentation: &LeafPresentation) -> String {
@@ -330,6 +437,101 @@ fn group_context_frames(
             is_build_entry,
         })
         .collect()
+}
+
+fn grouping_candidates(context_frames: &[ContextFrame]) -> BTreeMap<String, SourceProvenance> {
+    let mut candidates = BTreeMap::new();
+    let mut line_cache = BTreeMap::new();
+
+    for frame in context_frames.iter().filter(|frame| !frame.is_build_entry) {
+        let cluster = context_cluster_key(&frame.provenance, &mut line_cache);
+        let key = format!("{}:{}", cluster.source_id, cluster.line);
+        match candidates.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(frame.provenance.clone());
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if compare_grouping_anchors(&frame.provenance, entry.get()).is_gt() {
+                    entry.insert(frame.provenance.clone());
+                }
+            }
+        }
+    }
+
+    candidates
+}
+
+fn compare_grouping_anchors(left: &SourceProvenance, right: &SourceProvenance) -> Ordering {
+    context_rank(left)
+        .cmp(&context_rank(right))
+        .then_with(|| provenance_span_width(right).cmp(&provenance_span_width(left)))
+        .then_with(|| right.span.start.cmp(&left.span.start))
+}
+
+fn coalesce_context_frames(
+    frames: Vec<ContextFrame>,
+    primary_provenance: &SourceProvenance,
+) -> Vec<ContextFrame> {
+    let mut merged = BTreeMap::<ContextClusterKey, ContextFrame>::new();
+    let mut seen = BTreeSet::new();
+    let mut line_cache = BTreeMap::new();
+
+    for frame in frames {
+        if same_provenance_span(&frame.provenance, primary_provenance) {
+            continue;
+        }
+
+        let key = provenance_key(&frame.provenance);
+        if !seen.insert(key) {
+            continue;
+        }
+
+        let cluster_key = context_cluster_key(&frame.provenance, &mut line_cache);
+        match merged.entry(cluster_key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(frame);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let best = entry.get();
+                if better_display_context_candidate(&frame.provenance, &best.provenance) {
+                    entry.insert(ContextFrame {
+                        provenance: frame.provenance,
+                        is_build_entry: best.is_build_entry || frame.is_build_entry,
+                    });
+                } else if frame.is_build_entry {
+                    entry.get_mut().is_build_entry = true;
+                }
+            }
+        }
+    }
+
+    let mut frames = merged.into_values().collect::<Vec<_>>();
+    let mut line_cache = BTreeMap::new();
+    frames.sort_by(|left, right| {
+        source_line(
+            &left.provenance.source_id,
+            left.provenance.span.start,
+            &mut line_cache,
+        )
+        .unwrap_or(left.provenance.span.start)
+        .cmp(
+            &source_line(
+                &right.provenance.source_id,
+                right.provenance.span.start,
+                &mut line_cache,
+            )
+            .unwrap_or(right.provenance.span.start),
+        )
+        .then_with(|| left.provenance.span.start.cmp(&right.provenance.span.start))
+    });
+    frames
+}
+
+fn better_display_context_candidate(candidate: &SourceProvenance, best: &SourceProvenance) -> bool {
+    context_rank(candidate)
+        .cmp(&context_rank(best))
+        .then_with(|| provenance_span_width(candidate).cmp(&provenance_span_width(best)))
+        .is_gt()
 }
 
 struct ContextFrame {
@@ -622,6 +824,85 @@ fn source_language(source_id: &str) -> Option<String> {
     source_id.ends_with(".vx").then(|| "vixen".to_string())
 }
 
+fn display_group_summary(group: &DisplayGroup<'_>) -> String {
+    if group.presentation.category == LeafCategory::ExecMissingInput && group.leaves.len() > 1 {
+        return "build command inputs not found".to_string();
+    }
+
+    group.presentation.summary.clone()
+}
+
+fn display_group_label_message(group: &DisplayGroup<'_>) -> String {
+    if group.presentation.category == LeafCategory::ExecMissingInput && group.leaves.len() > 1 {
+        return "this source site produced input paths that were not present in the sandbox"
+            .to_string();
+    }
+
+    group.presentation.label_message.clone()
+}
+
+fn display_group_notes(group: &DisplayGroup<'_>) -> Vec<String> {
+    if group.presentation.category == LeafCategory::ExecMissingInput && group.leaves.len() > 1 {
+        return grouped_exec_missing_input_notes(&group.leaves);
+    }
+
+    group.presentation.notes.clone()
+}
+
+fn grouped_exec_missing_input_notes(leaves: &[&PoisonError]) -> Vec<String> {
+    let failures = leaves
+        .iter()
+        .filter_map(|leaf| parse_exec_missing_input_failure(&leaf.message))
+        .collect::<Vec<_>>();
+    if failures.is_empty() {
+        return vec![format!(
+            "{} commands failed with the same missing-input pattern",
+            leaves.len()
+        )];
+    }
+
+    let missing_paths = failures
+        .iter()
+        .map(|failure| failure.path.clone())
+        .collect::<BTreeSet<_>>();
+    let similar_paths = failures
+        .iter()
+        .filter_map(|failure| failure.similar_path.clone())
+        .collect::<BTreeSet<_>>();
+    let example_stderr = failures
+        .iter()
+        .map(|failure| failure.stderr.as_str())
+        .min_by_key(|stderr| stderr.len())
+        .unwrap_or_default();
+
+    let mut notes = vec![format!(
+        "{} commands failed with the same missing-input pattern",
+        failures.len()
+    )];
+    notes.push(format!(
+        "missing process inputs: {}",
+        summarize_paths(&missing_paths)
+    ));
+    if !similar_paths.is_empty() {
+        notes.push(format!(
+            "similar sandbox paths: {}",
+            summarize_paths(&similar_paths)
+        ));
+    }
+    notes.push(format!("process stderr example:\n{example_stderr}"));
+    notes
+}
+
+fn summarize_paths(paths: &BTreeSet<String>) -> String {
+    const MAX_ITEMS: usize = 3;
+
+    let mut summary = paths.iter().take(MAX_ITEMS).cloned().collect::<Vec<_>>();
+    if paths.len() > MAX_ITEMS {
+        summary.push(format!("... ({} total)", paths.len()));
+    }
+    summary.join(", ")
+}
+
 fn span_from_provenance(provenance: &SourceProvenance) -> BuildDiagnosticSpan {
     span_from_range(
         &provenance.source_id,
@@ -643,6 +924,7 @@ fn span_from_range(source_id: &str, start: u32, end: u32) -> BuildDiagnosticSpan
 }
 
 struct LeafPresentation {
+    category: LeafCategory,
     summary: String,
     label_message: String,
     notes: Vec<String>,
@@ -652,6 +934,33 @@ struct LeafPresentation {
 struct LeafGroup<'a> {
     presentation: LeafPresentation,
     leaves: Vec<&'a PoisonError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeafCategory {
+    ExecMissingInput,
+    ReadFailure,
+    Generic,
+}
+
+struct PreparedLeafGroup<'a> {
+    group: LeafGroup<'a>,
+    primary_provenance: SourceProvenance,
+    context_frames: Vec<ContextFrame>,
+    grouping_candidates: BTreeMap<String, SourceProvenance>,
+}
+
+struct DisplayGroup<'a> {
+    presentation: LeafPresentation,
+    primary_provenance: SourceProvenance,
+    context_frames: Vec<ContextFrame>,
+    leaves: Vec<&'a PoisonError>,
+}
+
+struct DisplayCluster<'a> {
+    family_key: String,
+    groups: Vec<PreparedLeafGroup<'a>>,
+    shared_candidates: BTreeMap<String, SourceProvenance>,
 }
 
 fn classify_leaf(workspace_root: &Utf8Path, error: &PoisonError) -> LeafPresentation {
@@ -665,6 +974,7 @@ fn classify_leaf(workspace_root: &Utf8Path, error: &PoisonError) -> LeafPresenta
         }
         notes.push(format!("process stderr:\n{}", exec_missing_input.stderr));
         return LeafPresentation {
+            category: LeafCategory::ExecMissingInput,
             summary: "build command input not found".to_string(),
             label_message:
                 "this command depends on an input file that was not present in the sandbox"
@@ -692,6 +1002,7 @@ fn classify_leaf(workspace_root: &Utf8Path, error: &PoisonError) -> LeafPresenta
         }
         notes.push(format!("os error: {}", read_failure.os_error));
         return LeafPresentation {
+            category: LeafCategory::ReadFailure,
             summary,
             label_message,
             notes,
@@ -708,6 +1019,7 @@ fn classify_leaf(workspace_root: &Utf8Path, error: &PoisonError) -> LeafPresenta
     };
 
     LeafPresentation {
+        category: LeafCategory::Generic,
         summary,
         label_message: human_label_message(&error.kind),
         notes: vec![error.message.clone()],
@@ -960,6 +1272,102 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sibling_exec_missing_inputs_group_by_shared_source_site() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace_root = Utf8Path::from_path(temp_dir.path()).expect("utf8 workspace root");
+        let source_path = workspace_root.join("build.vx");
+        let source = r#"fn compile(file: Path) -> Tree (
+  cexec [
+    cc,
+    @(src/{file}),
+  ]
+)
+
+fn build() -> Tree (
+  let liblua = archive(objects);
+  let lua_exe = link(Tree [compile @lua.c, liblua]);
+  Tree {
+    @bin/lua: lua_exe.file(@bin/lua).executable(),
+    @lib/liblua.a: liblua.file(@liblua.a),
+  }
+)
+"#;
+        fs::write(&source_path, source).expect("write source");
+
+        let lua_leaf = PoisonError::new(
+            PoisonKind::UserFail,
+            "failed to evaluate shipped observer: UserFail: process failed\n  demand chain:\n    -> fail(..)\nsimilar sandbox path: src/src/lua.c\nprocess stderr:\nclang: error: no such file or directory: 'src/lua.c'\nclang: error: no input files\n".to_string(),
+            demand_chain(
+                &source_path,
+                source,
+                &[
+                    ("lua_exe.file(@bin/lua).executable()", "call(..)"),
+                    ("compile(file: Path)", "call(..)"),
+                    ("compile @lua.c", "call(..)"),
+                ],
+            ),
+        );
+        let lapi_leaf = PoisonError::new(
+            PoisonKind::UserFail,
+            "failed to evaluate shipped observer: UserFail: process failed\n  demand chain:\n    -> fail(..)\nsimilar sandbox path: src/src/lapi.c\nprocess stderr:\nclang: error: no such file or directory: 'src/lapi.c'\nclang: error: no input files\n".to_string(),
+            demand_chain(
+                &source_path,
+                source,
+                &[
+                    ("liblua.file(@liblua.a)", "call(..)"),
+                    ("compile(file: Path)", "call(..)"),
+                    ("archive(objects)", "call(..)"),
+                ],
+            ),
+        );
+        let error = PoisonError::aggregate(
+            "forcing dependencies",
+            DemandChain::new(),
+            vec![lua_leaf, lapi_leaf],
+        );
+
+        let failure = from_poison_error(workspace_root, &error);
+        let error_reports = failure
+            .reports
+            .iter()
+            .filter(|report| report.severity == BuildDiagnosticSeverity::Error)
+            .collect::<Vec<_>>();
+
+        assert_eq!(error_reports.len(), 1, "{failure:#?}");
+        assert_eq!(failure.message, "build command inputs not found");
+        assert_eq!(error_reports[0].message, "build command inputs not found");
+        assert_eq!(
+            span_text(source, &error_reports[0].primary_span),
+            "compile(file: Path)"
+        );
+        assert_eq!(
+            error_reports[0].labels[0].message.as_deref(),
+            Some("this source site produced input paths that were not present in the sandbox")
+        );
+        assert!(
+            error_reports[0]
+                .notes
+                .iter()
+                .any(|note| note == "2 commands failed with the same missing-input pattern"),
+            "{failure:#?}"
+        );
+        assert!(
+            error_reports[0]
+                .notes
+                .iter()
+                .any(|note| note == "missing process inputs: src/lapi.c, src/lua.c"),
+            "{failure:#?}"
+        );
+        assert!(
+            error_reports[0]
+                .notes
+                .iter()
+                .any(|note| note == "similar sandbox paths: src/src/lapi.c, src/src/lua.c"),
+            "{failure:#?}"
+        );
+    }
+
     fn provenance(
         source_path: &Utf8Path,
         source: &str,
@@ -973,6 +1381,18 @@ mod tests {
             span: SourceSpan { start, end },
             label: label.to_string(),
         }
+    }
+
+    fn demand_chain(source_path: &Utf8Path, source: &str, entries: &[(&str, &str)]) -> DemandChain {
+        let mut chain = DemandChain::new();
+        for (needle, label) in entries {
+            chain.push(
+                NodeId::next(),
+                (*label).to_string(),
+                Some(provenance(source_path, source, needle, label)),
+            );
+        }
+        chain
     }
 
     fn span_text<'a>(source: &'a str, span: &BuildDiagnosticSpan) -> &'a str {
