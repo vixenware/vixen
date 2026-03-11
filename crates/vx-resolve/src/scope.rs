@@ -7,11 +7,15 @@
 //! are collected first (order-independent), then block-level bindings
 //! are added sequentially.
 
+use std::collections::{HashMap, HashSet};
+
 use rowan::TextRange;
 use vx_parser::{
     AstNode, BlockExpr, ClosureExpr, Expr, FnDecl, Item, LetStmt, MatchExpr, Pattern, SourceFile,
     Stmt, SyntaxKind, SyntaxNode,
 };
+
+use crate::{ImportGraph, SourceFileRef, SourceId};
 
 /// Identifies a scope in the scope tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -61,8 +65,14 @@ pub enum DefKind {
     Variant,
     /// Struct field
     Field,
-    /// A builtin runtime function (not declared in source)
+    /// A runtime-provided name that does not yet have a source declaration.
     Builtin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DefSite {
+    pub source: SourceId,
+    pub range: TextRange,
 }
 
 /// A name definition in a scope.
@@ -72,12 +82,23 @@ pub struct Definition {
     pub name: String,
     /// What kind of definition this is.
     pub kind: DefKind,
+    /// Which source file owns this definition.
+    pub source: SourceId,
     /// Text range of the name token (for go-to-definition).
     pub name_range: TextRange,
     /// Text range of the entire declaration (for highlight).
     pub full_range: TextRange,
     /// The scope this definition belongs to.
     pub scope: ScopeId,
+}
+
+impl Definition {
+    pub fn site(&self) -> DefSite {
+        DefSite {
+            source: self.source,
+            range: self.name_range,
+        }
+    }
 }
 
 /// A single scope node in the tree.
@@ -96,11 +117,27 @@ pub struct ScopeTree {
     scopes: Vec<Scope>,
 }
 
+#[derive(Debug)]
+pub struct ProgramScopes {
+    trees: HashMap<SourceId, ScopeTree>,
+    imports: ImportGraph,
+}
+
 impl ScopeTree {
     /// Build a scope tree from a parsed source file.
     pub fn build(file: &SourceFile) -> Self {
-        let mut builder = ScopeTreeBuilder { scopes: Vec::new() };
-        builder.build_module(file);
+        Self::build_source(SourceFileRef {
+            id: SourceId(0),
+            file: file.clone(),
+        })
+    }
+
+    pub fn build_source(source: SourceFileRef) -> Self {
+        let mut builder = ScopeTreeBuilder {
+            scopes: Vec::new(),
+            source: source.id,
+        };
+        builder.build_module(&source.file);
         ScopeTree {
             scopes: builder.scopes,
         }
@@ -228,7 +265,6 @@ impl ScopeTree {
             }
             scope_id = scope.parent;
         }
-
         result
     }
 
@@ -238,8 +274,129 @@ impl ScopeTree {
     }
 }
 
+impl ProgramScopes {
+    pub fn build(sources: &[SourceFileRef], imports: ImportGraph) -> Self {
+        let trees = sources
+            .iter()
+            .map(|source| (source.id, ScopeTree::build_source(source.clone())))
+            .collect();
+        Self { trees, imports }
+    }
+
+    pub fn tree(&self, source: SourceId) -> Option<&ScopeTree> {
+        self.trees.get(&source)
+    }
+
+    pub fn scope_at(&self, source: SourceId, offset: rowan::TextSize) -> Option<ScopeId> {
+        self.tree(source).map(|tree| tree.scope_at(offset))
+    }
+
+    pub fn scope_kind(&self, source: SourceId, scope: ScopeId) -> Option<ScopeKind> {
+        self.tree(source).map(|tree| tree.scope_kind(scope))
+    }
+
+    pub fn text_range(&self, source: SourceId, scope: ScopeId) -> Option<TextRange> {
+        self.tree(source).map(|tree| tree.text_range(scope))
+    }
+
+    pub fn all_definitions_in(&self, source: SourceId) -> Vec<&Definition> {
+        self.tree(source)
+            .into_iter()
+            .flat_map(ScopeTree::all_definitions)
+            .collect()
+    }
+
+    pub fn lookup_at(
+        &self,
+        source: SourceId,
+        name: &str,
+        from: ScopeId,
+        offset: rowan::TextSize,
+    ) -> Option<&Definition> {
+        if let Some(tree) = self.tree(source)
+            && let Some(def) = tree.lookup_at(name, from, offset)
+        {
+            return Some(def);
+        }
+
+        let mut visited = HashSet::new();
+        self.lookup_imported(source, name, &mut visited)
+    }
+
+    pub fn visible_at(&self, source: SourceId, offset: rowan::TextSize) -> Vec<&Definition> {
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+
+        if let Some(tree) = self.tree(source) {
+            for def in tree.visible_at(offset) {
+                if seen.insert(def.name.as_str()) {
+                    result.push(def);
+                }
+            }
+        }
+
+        let mut visited = HashSet::new();
+        self.collect_imported_visible(source, &mut seen, &mut visited, &mut result);
+        result
+    }
+
+    fn lookup_imported<'a>(
+        &'a self,
+        source: SourceId,
+        name: &str,
+        visited: &mut HashSet<SourceId>,
+    ) -> Option<&'a Definition> {
+        if !visited.insert(source) {
+            return None;
+        }
+
+        for &imported in self.imports.imports_from(source).iter().rev() {
+            if let Some(tree) = self.tree(imported)
+                && let Some(def) = tree
+                    .definitions(ScopeId::ROOT)
+                    .iter()
+                    .rev()
+                    .find(|def| def.name == name)
+            {
+                return Some(def);
+            }
+
+            if let Some(def) = self.lookup_imported(imported, name, visited) {
+                return Some(def);
+            }
+        }
+
+        None
+    }
+
+    fn collect_imported_visible<'a>(
+        &'a self,
+        source: SourceId,
+        seen: &mut HashSet<&'a str>,
+        visited: &mut HashSet<SourceId>,
+        result: &mut Vec<&'a Definition>,
+    ) {
+        if !visited.insert(source) {
+            return;
+        }
+
+        for &imported in self.imports.imports_from(source).iter().rev() {
+            if let Some(tree) = self.tree(imported) {
+                for def in tree.definitions(ScopeId::ROOT).iter().rev() {
+                    if seen.insert(def.name.as_str()) {
+                        result.push(def);
+                    }
+                }
+            }
+
+            self.collect_imported_visible(imported, seen, visited, result);
+        }
+    }
+}
+
 struct ScopeTreeBuilder {
     scopes: Vec<Scope>,
+    source: SourceId,
 }
 
 impl ScopeTreeBuilder {
@@ -362,6 +519,7 @@ impl ScopeTreeBuilder {
             Definition {
                 name,
                 kind,
+                source: self.source,
                 name_range,
                 full_range,
                 scope,
@@ -385,6 +543,7 @@ impl ScopeTreeBuilder {
                     Definition {
                         name: name_tok.text().to_string(),
                         kind: DefKind::Parameter,
+                        source: self.source,
                         name_range: name_tok.text_range(),
                         full_range: param.syntax().text_range(),
                         scope: fn_scope,
@@ -401,6 +560,7 @@ impl ScopeTreeBuilder {
                     Definition {
                         name: name_tok.text().to_string(),
                         kind: DefKind::Parameter,
+                        source: self.source,
                         name_range: name_tok.text_range(),
                         full_range: kw_param.syntax().text_range(),
                         scope: fn_scope,
@@ -576,6 +736,7 @@ impl ScopeTreeBuilder {
                     Definition {
                         name: name_tok.text().to_string(),
                         kind: DefKind::Parameter,
+                        source: self.source,
                         name_range: name_tok.text_range(),
                         full_range: param.syntax().text_range(),
                         scope: closure_scope,
@@ -636,6 +797,7 @@ impl ScopeTreeBuilder {
                 Definition {
                     name: name_tok.text().to_string(),
                     kind: DefKind::Binding,
+                    source: self.source,
                     name_range: name_tok.text_range(),
                     full_range: syntax.text_range(),
                     scope,
@@ -655,6 +817,7 @@ impl ScopeTreeBuilder {
                         Definition {
                             name: name_tok.text().to_string(),
                             kind: DefKind::Binding,
+                            source: self.source,
                             name_range: name_tok.text_range(),
                             full_range: bp.syntax().text_range(),
                             scope,
@@ -678,6 +841,7 @@ impl ScopeTreeBuilder {
                             Definition {
                                 name: name_tok.text().to_string(),
                                 kind: DefKind::Binding,
+                                source: self.source,
                                 name_range: name_tok.text_range(),
                                 full_range: field.syntax().text_range(),
                                 scope,
@@ -698,6 +862,7 @@ impl ScopeTreeBuilder {
                         Definition {
                             name: name_tok.text().to_string(),
                             kind: DefKind::Binding,
+                            source: self.source,
                             name_range: name_tok.text_range(),
                             full_range: rp.syntax().text_range(),
                             scope,
@@ -716,6 +881,7 @@ impl ScopeTreeBuilder {
                                 Definition {
                                     name: name_tok.text().to_string(),
                                     kind: DefKind::Binding,
+                                    source: self.source,
                                     name_range: name_tok.text_range(),
                                     full_range: field.syntax().text_range(),
                                     scope,
@@ -732,6 +898,7 @@ impl ScopeTreeBuilder {
                         Definition {
                             name: name_tok.text().to_string(),
                             kind: DefKind::Binding,
+                            source: self.source,
                             name_range: name_tok.text_range(),
                             full_range: at.syntax().text_range(),
                             scope,
@@ -758,4 +925,9 @@ impl ScopeTreeBuilder {
             Pattern::Wildcard(_) | Pattern::Literal(_) | Pattern::Unit(_) => {}
         }
     }
+}
+
+pub fn top_level_definitions(source: SourceFileRef) -> Vec<Definition> {
+    let tree = ScopeTree::build_source(source);
+    tree.definitions(ScopeId::ROOT).to_vec()
 }

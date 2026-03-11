@@ -13,8 +13,8 @@ use vx_parser::{AstNode, CallExpr, ClosureExpr, Expr, FnDecl, Item, SourceFile, 
 
 use vx_types::{Builtin, Capability};
 
+use crate::ProgramScopes;
 use crate::builtins;
-use crate::scope::ScopeTree;
 use crate::type_collect::TypeCollection;
 
 /// All builtin runtime types, for iterating when we don't know the receiver type.
@@ -144,7 +144,7 @@ pub struct CapCheckResult {
 /// Run capability checking on a parsed source file.
 pub fn check_capabilities(
     file: &SourceFile,
-    scopes: &ScopeTree,
+    scopes: &ProgramScopes,
     types: &TypeCollection,
 ) -> CapCheckResult {
     let mut checker = CapChecker {
@@ -203,7 +203,7 @@ fn caps_from_fn_decl(fn_decl: &FnDecl) -> CapSet {
 
 struct CapChecker<'a> {
     #[allow(dead_code)]
-    scopes: &'a ScopeTree,
+    scopes: &'a ProgramScopes,
     #[allow(dead_code)]
     types: &'a TypeCollection,
     /// Maps function names to their declared capability masks.
@@ -223,13 +223,8 @@ impl<'a> CapChecker<'a> {
     }
 
     fn sig_for_name(&self, name: &str) -> Option<vx_types::FnSig> {
-        builtins::builtin_fn_sig(name).or_else(|| {
-            self.types
-                .range_to_fn_sig
-                .values()
-                .find(|sig| sig.name == name)
-                .cloned()
-        })
+        builtins::builtin_fn_sig(name)
+            .or_else(|| self.types.fn_sigs().find(|sig| sig.name == name).cloned())
     }
 
     fn check_stmts_for_callbacks(&mut self, block: &vx_parser::BlockExpr) {

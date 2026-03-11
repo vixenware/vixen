@@ -4,8 +4,12 @@ use vx_parser::{AstNode, SourceFile, parse};
 
 use crate::cap_check::{CapErrorKind, CapSet};
 use crate::scope::ScopeTree;
-use crate::{DefKind, ScopeKind, resolve};
+use crate::{
+    DefKind, ImportGraph, ScopeKind, SourceFileRef, SourceId, resolve, resolve_in_program,
+};
 use vx_types::{Builtin, Ty};
+
+const TEST_SOURCE_ID: SourceId = SourceId(0);
 
 fn parse_file(src: &str) -> SourceFile {
     let parsed = parse(src);
@@ -21,6 +25,43 @@ fn parse_file_path(path: &Path) -> SourceFile {
     let source = fs::read_to_string(path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     parse_file(&source)
+}
+
+fn stdlib_program(file: &SourceFile) -> (Vec<SourceFileRef>, ImportGraph) {
+    let mut sources = vec![SourceFileRef {
+        id: TEST_SOURCE_ID,
+        file: file.clone(),
+    }];
+    let mut imports = ImportGraph::new();
+
+    for (index, stdlib) in crate::stdlib_sources().iter().enumerate() {
+        let stdlib_file = parse_file(stdlib.text);
+        let source_id = SourceId(index as u32 + 1);
+        sources.push(SourceFileRef {
+            id: source_id,
+            file: stdlib_file,
+        });
+        imports.add_import(TEST_SOURCE_ID, source_id);
+    }
+
+    (sources, imports)
+}
+
+fn resolve_with_stdlib(file: &SourceFile) -> crate::NameResolution {
+    let (sources, imports) = stdlib_program(file);
+    resolve_in_program(
+        SourceFileRef {
+            id: TEST_SOURCE_ID,
+            file: file.clone(),
+        },
+        &sources,
+        imports,
+    )
+}
+
+fn collect_types_with_stdlib(file: &SourceFile) -> crate::TypeCollection {
+    let (sources, _) = stdlib_program(file);
+    crate::collect_types_for_sources(&sources)
 }
 
 #[test]
@@ -408,8 +449,8 @@ fn area(shape: Shape) -> F64 {}
     }
 
     // Function signature should be collected
-    assert_eq!(tc.range_to_fn_sig.len(), 1);
-    let sig = tc.range_to_fn_sig.values().next().unwrap();
+    assert_eq!(tc.def_to_fn_sig.len(), 1);
+    let sig = tc.def_to_fn_sig.values().next().unwrap();
     assert_eq!(sig.name, "area");
     assert_eq!(sig.positional_params.len(), 1);
     assert_eq!(sig.positional_params[0].name, "shape");
@@ -482,8 +523,8 @@ type Name = String
 
 fn check_caps(src: &str) -> crate::CapCheckResult {
     let file = parse_file(src);
-    let resolution = resolve(&file);
-    let types = crate::collect_types(&file);
+    let resolution = resolve_with_stdlib(&file);
+    let types = collect_types_with_stdlib(&file);
     crate::check_capabilities(&file, &resolution.scopes, &types)
 }
 
@@ -742,7 +783,7 @@ fn pure() -> String {}
     );
     let tc = crate::collect_types(&file);
 
-    let sigs: Vec<_> = tc.range_to_fn_sig.values().collect();
+    let sigs: Vec<_> = tc.def_to_fn_sig.values().collect();
 
     let read_sig = sigs.iter().find(|s| s.name == "read_stuff").unwrap();
     assert_eq!(read_sig.capabilities.len(), 1);
@@ -761,8 +802,8 @@ fn pure() -> String {}
 
 fn type_check(src: &str) -> crate::TypeCheckResult {
     let file = parse_file(src);
-    let resolution = resolve(&file);
-    let types = crate::collect_types(&file);
+    let resolution = resolve_with_stdlib(&file);
+    let types = collect_types_with_stdlib(&file);
     crate::type_check(&file, &resolution, &types)
 }
 
@@ -958,7 +999,7 @@ fn cc_version_sketch_resolves_and_typechecks() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cc-version.vx");
     let file = parse_file_path(&path);
 
-    let resolution = resolve(&file);
+    let resolution = resolve_with_stdlib(&file);
     assert!(
         resolution.errors.is_empty(),
         "resolve errors in {}: {:?}",
@@ -966,7 +1007,7 @@ fn cc_version_sketch_resolves_and_typechecks() {
         resolution.errors
     );
 
-    let types = crate::collect_types(&file);
+    let types = collect_types_with_stdlib(&file);
     let checked = crate::type_check(&file, &resolution, &types);
     assert!(
         checked.errors.is_empty(),
@@ -1300,8 +1341,8 @@ fn probe() #discover {
 
 fn type_check_src(src: &str) -> crate::TypeCheckResult {
     let file = parse_file(src);
-    let resolution = resolve(&file);
-    let types = crate::collect_types(&file);
+    let resolution = resolve_with_stdlib(&file);
+    let types = collect_types_with_stdlib(&file);
     crate::type_check(&file, &resolution, &types)
 }
 
@@ -1359,33 +1400,34 @@ fn main() {
 // --- Step 4: builtins resolve properly ---
 
 #[test]
-fn builtin_names_resolve_without_error() {
+fn stdlib_names_resolve_without_error() {
     let file = parse_file(
         r#"
 fn main() {
-    build((path, args, env) => {
-        read_file("foo");
-        glob("*.rs");
-    });
+    let class = executor_class("default");
+    let cc = discover(class, (host) => host.which("cc"));
+    exec(["echo"]) where {
+        observer: (proc, tree) => tree.subtree(@out),
+    };
+    cc
 }
 "#,
     );
-    let resolution = resolve(&file);
-    // No unresolved errors for read_file, glob, or build
+    let resolution = resolve_with_stdlib(&file);
     assert!(
         resolution.errors.is_empty(),
         "expected no resolve errors, got: {:?}",
         resolution.errors
     );
-    // Verify builtins resolve with DefKind::Builtin
-    let builtin_refs: Vec<_> = resolution
+    let stdlib_refs: Vec<_> = resolution
         .refs
         .iter()
-        .filter(|r| r.target.as_ref().is_ok_and(|d| d.kind == DefKind::Builtin))
+        .filter_map(|r| r.target.as_ref().ok())
+        .filter(|def| def.kind == DefKind::Function && def.source != TEST_SOURCE_ID)
         .collect();
     assert!(
-        builtin_refs.len() >= 3,
-        "expected at least 3 builtin refs (build, read_file, glob), got: {builtin_refs:?}"
+        stdlib_refs.len() >= 3,
+        "expected at least 3 stdlib refs (executor_class, discover, exec), got: {stdlib_refs:?}"
     );
 }
 

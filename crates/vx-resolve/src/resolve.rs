@@ -4,7 +4,8 @@ use rowan::TextRange;
 use vx_parser::{AstNode, NameRefExpr, SourceFile, SyntaxKind, SyntaxNode};
 
 use crate::builtins;
-use crate::scope::{DefKind, Definition, ScopeId, ScopeTree};
+use crate::scope::{DefKind, Definition, ScopeId};
+use crate::{ImportGraph, ProgramScopes, SourceFileRef, SourceId};
 
 /// A resolved name reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,8 +28,10 @@ pub enum ResolveError {
 /// The result of name resolution for a source file.
 #[derive(Debug)]
 pub struct NameResolution {
+    /// Which source file these references were resolved from.
+    pub source: SourceId,
     /// The scope tree.
-    pub scopes: ScopeTree,
+    pub scopes: ProgramScopes,
     /// All name references and their resolution results.
     pub refs: Vec<ResolvedRef>,
     /// Just the errors.
@@ -37,16 +40,36 @@ pub struct NameResolution {
 
 /// Run name resolution on a parsed source file.
 pub fn resolve(file: &SourceFile) -> NameResolution {
-    let scopes = ScopeTree::build(file);
+    resolve_in_program(
+        SourceFileRef {
+            id: SourceId(0),
+            file: file.clone(),
+        },
+        &[SourceFileRef {
+            id: SourceId(0),
+            file: file.clone(),
+        }],
+        ImportGraph::new(),
+    )
+}
+
+pub fn resolve_in_program(
+    source: SourceFileRef,
+    sources: &[SourceFileRef],
+    imports: ImportGraph,
+) -> NameResolution {
+    let scopes = ProgramScopes::build(sources, imports);
     let mut collector = RefCollector {
         scopes: &scopes,
+        source: source.id,
         refs: Vec::new(),
         errors: Vec::new(),
     };
-    collector.visit_node(file.syntax());
+    collector.visit_node(source.file.syntax());
     let refs = collector.refs;
     let errors = collector.errors;
     NameResolution {
+        source: source.id,
         scopes,
         refs,
         errors,
@@ -54,7 +77,8 @@ pub fn resolve(file: &SourceFile) -> NameResolution {
 }
 
 struct RefCollector<'a> {
-    scopes: &'a ScopeTree,
+    scopes: &'a ProgramScopes,
+    source: SourceId,
     refs: Vec<ResolvedRef>,
     errors: Vec<ResolveError>,
 }
@@ -85,17 +109,21 @@ impl<'a> RefCollector<'a> {
             return;
         }
 
-        let scope = self.scopes.scope_at(ref_range.start());
-        let target = match self.scopes.lookup_at(&name, scope, ref_range.start()) {
+        let Some(scope) = self.scopes.scope_at(self.source, ref_range.start()) else {
+            return;
+        };
+        let target = match self
+            .scopes
+            .lookup_at(self.source, &name, scope, ref_range.start())
+        {
             Some(def) => Ok(def.clone()),
             None => {
                 // Check if this is a builtin function name
-                if builtins::builtin_fn_sig(&name).is_some()
-                    || builtins::is_builtin_namespace(&name)
-                {
+                if builtins::is_builtin_namespace(&name) {
                     Ok(Definition {
                         name: name.clone(),
                         kind: DefKind::Builtin,
+                        source: self.source,
                         name_range: ref_range,
                         full_range: ref_range,
                         scope: ScopeId::ROOT,

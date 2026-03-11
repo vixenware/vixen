@@ -6,7 +6,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use vx_parser::{self as vx, AstNode, FnDecl, Parsed, SourceFile, SyntaxKind};
-use vx_resolve::NameResolution;
+use vx_resolve::{ImportGraph, NameResolution, SourceFileRef, SourceId};
 
 pub struct VxLanguageServer {
     client: Client,
@@ -14,27 +14,92 @@ pub struct VxLanguageServer {
 }
 
 struct DocumentState {
+    current_source: SourceId,
     text: String,
     parsed: Parsed<SourceFile>,
     line_index: vx::LineIndex,
+    source_docs: HashMap<SourceId, SourceDoc>,
     resolution: NameResolution,
     types: vx_resolve::TypeCollection,
     cap_check: vx_resolve::CapCheckResult,
     type_check: vx_resolve::TypeCheckResult,
 }
 
+struct SourceDoc {
+    uri: Option<Url>,
+    text: String,
+    parsed: Parsed<SourceFile>,
+    line_index: vx::LineIndex,
+}
+
+#[derive(Default)]
+struct SourceCatalog {
+    next_id: u32,
+    docs: HashMap<SourceId, SourceDoc>,
+}
+
+impl SourceCatalog {
+    fn insert(&mut self, uri: Option<Url>, text: String) -> SourceId {
+        let id = SourceId(self.next_id);
+        self.next_id += 1;
+        self.docs.insert(
+            id,
+            SourceDoc {
+                uri,
+                line_index: vx::LineIndex::new(&text),
+                parsed: vx::parse_source_file(&text),
+                text,
+            },
+        );
+        id
+    }
+}
+
 impl DocumentState {
+    #[cfg(test)]
     fn new(text: String) -> Self {
+        Self::new_with_uri(text, None)
+    }
+
+    fn new_with_uri(text: String, current_uri: Option<Url>) -> Self {
         let parsed = vx::parse_source_file(&text);
         let line_index = vx::LineIndex::new(&text);
-        let resolution = vx_resolve::resolve(&parsed.tree());
-        let types = vx_resolve::collect_types(&parsed.tree());
+        let mut catalog = SourceCatalog::default();
+        let current_source = catalog.insert(current_uri.clone(), text.clone());
+        let mut imports = ImportGraph::new();
+
+        for source in vx_resolve::stdlib_sources() {
+            let uri = Url::from_file_path(vx_resolve::source_disk_path(source.logical_path)).ok();
+            let stdlib_source = catalog.insert(uri, source.text.to_string());
+            imports.add_import(current_source, stdlib_source);
+        }
+
+        let source_docs = catalog.docs;
+        let sources: Vec<_> = source_docs
+            .iter()
+            .map(|(&id, doc)| SourceFileRef {
+                id,
+                file: doc.parsed.tree(),
+            })
+            .collect();
+
+        let resolution = vx_resolve::resolve_in_program(
+            SourceFileRef {
+                id: current_source,
+                file: parsed.tree(),
+            },
+            &sources,
+            imports,
+        );
+        let types = vx_resolve::collect_types_for_sources(&sources);
         let cap_check = vx_resolve::check_capabilities(&parsed.tree(), &resolution.scopes, &types);
         let type_check = vx_resolve::type_check(&parsed.tree(), &resolution, &types);
         Self {
+            current_source,
             text,
             parsed,
             line_index,
+            source_docs,
             resolution,
             types,
             cap_check,
@@ -62,7 +127,8 @@ impl DocumentState {
         let def = self
             .resolution
             .scopes
-            .all_definitions()
+            .all_definitions_in(self.current_source)
+            .into_iter()
             .find(|d| d.name_range.contains_inclusive(offset))?;
         Some((def, def.name_range))
     }
@@ -80,7 +146,7 @@ impl DocumentState {
             .iter()
             .filter_map(|r| {
                 let target = r.target.as_ref().ok()?;
-                if target.name_range == def.name_range {
+                if target.site() == def.site() {
                     Some(r.ref_range)
                 } else {
                     None
@@ -89,14 +155,29 @@ impl DocumentState {
             .collect()
     }
 
+    fn source_doc(&self, source: SourceId) -> Option<&SourceDoc> {
+        self.source_docs.get(&source)
+    }
+
+    fn uri_for_source(&self, source: SourceId) -> Option<Url> {
+        self.source_doc(source).and_then(|doc| doc.uri.clone())
+    }
+
     /// Extract a declaration snippet for hover display.
     /// Takes the first line of the full declaration range.
     fn declaration_snippet(&self, def: &vx_resolve::Definition) -> String {
+        let Some(doc) = self.source_doc(def.source) else {
+            return String::new();
+        };
         let start = u32::from(def.full_range.start()) as usize;
         let end = u32::from(def.full_range.end()) as usize;
-        let slice = &self.text[start..end];
-        let first_line = slice.lines().next().unwrap_or(slice);
-        first_line.trim().to_string()
+        let slice = &doc.text[start..end];
+        slice
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with("//"))
+            .unwrap_or(slice.trim())
+            .to_string()
     }
 
     /// Extract the doc comment attached to a definition's syntax node.
@@ -128,7 +209,8 @@ impl DocumentState {
             | vx_resolve::DefKind::Builtin => return None,
         };
 
-        self.parsed
+        self.source_doc(def.source)?
+            .parsed
             .tree()
             .syntax()
             .descendants()
@@ -146,7 +228,7 @@ impl DocumentState {
 
         for resolved_ref in &self.resolution.refs {
             if let Ok(ref target) = resolved_ref.target {
-                if target.name_range == def.name_range {
+                if target.site() == def.site() {
                     if let Some(ty) = self.type_check.expr_types.get(&resolved_ref.ref_range) {
                         return Some(ty.clone());
                     }
@@ -158,8 +240,16 @@ impl DocumentState {
     }
 
     fn to_lsp_range(&self, range: TextRange) -> Range {
-        let start = self.line_index.position(range.start());
-        let end = self.line_index.position(range.end());
+        self.to_lsp_range_in(self.current_source, range)
+    }
+
+    fn to_lsp_range_in(&self, source: SourceId, range: TextRange) -> Range {
+        let line_index = self
+            .source_doc(source)
+            .map(|doc| &doc.line_index)
+            .unwrap_or(&self.line_index);
+        let start = line_index.position(range.start());
+        let end = line_index.position(range.end());
         Range {
             start: Position::new(start.line, start.col),
             end: Position::new(end.line, end.col),
@@ -257,7 +347,7 @@ impl LanguageServer for VxLanguageServer {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
-        let state = DocumentState::new(text);
+        let state = DocumentState::new_with_uri(text, Some(uri.clone()));
         self.publish_diagnostics(&uri, &state).await;
         self.documents.lock().unwrap().insert(uri, state);
     }
@@ -265,7 +355,7 @@ impl LanguageServer for VxLanguageServer {
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
         if let Some(change) = params.content_changes.into_iter().last() {
-            let state = DocumentState::new(change.text);
+            let state = DocumentState::new_with_uri(change.text, Some(uri.clone()));
             self.publish_diagnostics(&uri, &state).await;
             self.documents.lock().unwrap().insert(uri, state);
         }
@@ -325,12 +415,11 @@ impl LanguageServer for VxLanguageServer {
                 .resolution
                 .refs
                 .iter()
-                .filter(|r| {
-                    r.target
-                        .as_ref()
-                        .is_ok_and(|d| d.kind == vx_resolve::DefKind::Builtin)
+                .filter_map(|r| r.target.as_ref().ok().map(|def| (r.ref_range, def)))
+                .filter(|(_, def)| {
+                    def.kind == vx_resolve::DefKind::Builtin || def.source != state.current_source
                 })
-                .map(|r| r.ref_range)
+                .map(|(range, _)| range)
                 .collect();
             encode_semantic_tokens(&tokens, &state.line_index, &builtin_ranges)
         });
@@ -363,9 +452,11 @@ impl LanguageServer for VxLanguageServer {
                 .find(|r| r.ref_range.contains_inclusive(offset))
             {
                 let def = resolved.target.as_ref().ok()?;
-                let range = state.to_lsp_range(def.name_range);
+                let range = state.to_lsp_range_in(def.source, def.name_range);
                 return Some(GotoDefinitionResponse::Scalar(Location {
-                    uri: uri.clone(),
+                    uri: state
+                        .uri_for_source(def.source)
+                        .unwrap_or_else(|| uri.clone()),
                     range,
                 }));
             }
@@ -430,8 +521,10 @@ impl LanguageServer for VxLanguageServer {
 
             if include_declaration {
                 locations.push(Location {
-                    uri: uri.clone(),
-                    range: state.to_lsp_range(def.name_range),
+                    uri: state
+                        .uri_for_source(def.source)
+                        .unwrap_or_else(|| uri.clone()),
+                    range: state.to_lsp_range_in(def.source, def.name_range),
                 });
             }
 
@@ -455,8 +548,11 @@ impl LanguageServer for VxLanguageServer {
             })?;
 
             let def = state.definition_at(offset)?;
+            if def.source != state.current_source {
+                return None;
+            }
             Some(PrepareRenameResponse::RangeWithPlaceholder {
-                range: state.to_lsp_range(def.name_range),
+                range: state.to_lsp_range_in(def.source, def.name_range),
                 placeholder: def.name.clone(),
             })
         });
@@ -476,6 +572,9 @@ impl LanguageServer for VxLanguageServer {
             })?;
 
             let def = state.definition_at(offset)?;
+            if def.source != state.current_source {
+                return None;
+            }
 
             // Collect all edits: the definition site + all references
             let mut edits: Vec<TextEdit> = state
@@ -489,7 +588,7 @@ impl LanguageServer for VxLanguageServer {
 
             // Also rename the definition itself
             edits.push(TextEdit {
-                range: state.to_lsp_range(def.name_range),
+                range: state.to_lsp_range_in(def.source, def.name_range),
                 new_text: new_name.clone(),
             });
 
@@ -568,7 +667,7 @@ impl LanguageServer for VxLanguageServer {
                 let mut markdown = format!("```vx\n{snippet}\n```\n---\n*{kind_label}*");
 
                 // Show type signature for functions
-                if let Some(sig) = state.types.range_to_fn_sig.get(&def.name_range) {
+                if let Some(sig) = state.types.fn_sig_for_def(def) {
                     markdown.push_str(&format!("\n\nReturns `{}`", sig.ret));
                 }
 
@@ -584,7 +683,7 @@ impl LanguageServer for VxLanguageServer {
                 }
 
                 // Show fields for structs
-                if let Some(&type_id) = state.types.range_to_type.get(&def.name_range) {
+                if let Some(type_id) = state.types.type_id_for_def(def) {
                     match &state.types.env[type_id] {
                         vx_types::TypeDef::Struct(s) if !s.fields.is_empty() => {
                             markdown.push_str("\n\n**Fields:**\n");
@@ -734,7 +833,7 @@ impl LanguageServer for VxLanguageServer {
             let mut items: Vec<CompletionItem> = state
                 .resolution
                 .scopes
-                .visible_at(offset)
+                .visible_at(state.current_source, offset)
                 .into_iter()
                 .map(|def| {
                     let documentation = state.documentation_for(def).map(|doc| {
@@ -1065,7 +1164,10 @@ impl LanguageServer for VxLanguageServer {
                             col: diag.range.start.character,
                         });
                         if let Some(offset) = offset {
-                            let visible = state.resolution.scopes.visible_at(offset);
+                            let visible = state
+                                .resolution
+                                .scopes
+                                .visible_at(state.current_source, offset);
                             // Find closest name by edit distance
                             if let Some(suggestion) = closest_name(name, &visible) {
                                 let edit = TextEdit {
@@ -1115,10 +1217,13 @@ impl LanguageServer for VxLanguageServer {
 
             let def = state.definition_at(offset)?;
 
-            let mut highlights = vec![DocumentHighlight {
-                range: state.to_lsp_range(def.name_range),
-                kind: Some(DocumentHighlightKind::WRITE),
-            }];
+            let mut highlights = Vec::new();
+            if def.source == state.current_source {
+                highlights.push(DocumentHighlight {
+                    range: state.to_lsp_range_in(def.source, def.name_range),
+                    kind: Some(DocumentHighlightKind::WRITE),
+                });
+            }
 
             for ref_range in state.references_to(def) {
                 highlights.push(DocumentHighlight {
@@ -1228,7 +1333,8 @@ impl LanguageServer for VxLanguageServer {
                 let caller_def = state
                     .resolution
                     .scopes
-                    .all_definitions()
+                    .all_definitions_in(state.current_source)
+                    .into_iter()
                     .find(|d| d.name_range == caller_name_range)?;
 
                 by_caller
@@ -1339,7 +1445,11 @@ impl LanguageServer for VxLanguageServer {
 
         let mut results = Vec::new();
         for (uri, state) in docs.iter() {
-            for def in state.resolution.scopes.all_definitions() {
+            for def in state
+                .resolution
+                .scopes
+                .all_definitions_in(state.current_source)
+            {
                 // Skip local bindings/parameters — only top-level-ish symbols
                 if matches!(
                     def.kind,
@@ -1356,8 +1466,10 @@ impl LanguageServer for VxLanguageServer {
                         tags: None,
                         deprecated: None,
                         location: Location {
-                            uri: uri.clone(),
-                            range: state.to_lsp_range(def.name_range),
+                            uri: state
+                                .uri_for_source(def.source)
+                                .unwrap_or_else(|| uri.clone()),
+                            range: state.to_lsp_range_in(def.source, def.name_range),
                         },
                         container_name: None,
                     });
@@ -1382,8 +1494,11 @@ impl LanguageServer for VxLanguageServer {
             })?;
 
             let def = state.definition_at(offset)?;
+            if def.source != state.current_source {
+                return None;
+            }
 
-            let mut ranges = vec![state.to_lsp_range(def.name_range)];
+            let mut ranges = vec![state.to_lsp_range_in(def.source, def.name_range)];
             for ref_range in state.references_to(def) {
                 ranges.push(state.to_lsp_range(ref_range));
             }
@@ -1458,16 +1573,20 @@ impl VxLanguageServer {
         // Unused binding/parameter warnings
         {
             use std::collections::HashSet;
-            // Collect all definition name_ranges that have at least one reference
+            // Collect all definition sites that have at least one reference.
             let referenced: HashSet<_> = state
                 .resolution
                 .refs
                 .iter()
                 .filter_map(|r| r.target.as_ref().ok())
-                .map(|def| def.name_range)
+                .map(vx_resolve::Definition::site)
                 .collect();
 
-            for def in state.resolution.scopes.all_definitions() {
+            for def in state
+                .resolution
+                .scopes
+                .all_definitions_in(state.current_source)
+            {
                 if !matches!(
                     def.kind,
                     vx_resolve::DefKind::Binding | vx_resolve::DefKind::Parameter
@@ -1478,9 +1597,9 @@ impl VxLanguageServer {
                 if def.name.starts_with('_') {
                     continue;
                 }
-                if !referenced.contains(&def.name_range) {
+                if !referenced.contains(&def.site()) {
                     diagnostics.push(Diagnostic {
-                        range: state.to_lsp_range(def.name_range),
+                        range: state.to_lsp_range_in(def.source, def.name_range),
                         severity: Some(DiagnosticSeverity::HINT),
                         source: Some("vx-lint".to_string()),
                         message: format!(
@@ -1691,9 +1810,11 @@ fn make_call_hierarchy_item(
         kind: def_kind_to_symbol(def.kind),
         tags: None,
         detail: None,
-        uri: uri.clone(),
-        range: state.to_lsp_range(def.full_range),
-        selection_range: state.to_lsp_range(def.name_range),
+        uri: state
+            .uri_for_source(def.source)
+            .unwrap_or_else(|| uri.clone()),
+        range: state.to_lsp_range_in(def.source, def.full_range),
+        selection_range: state.to_lsp_range_in(def.source, def.name_range),
         data: None,
     }
 }
@@ -1808,8 +1929,8 @@ fn dot_completions(
 
             // If it's an enum, offer variants
             if def.kind == vx_resolve::DefKind::Enum {
-                let type_id = state.types.range_to_type.get(&def.name_range)?;
-                if let vx_types::TypeDef::Enum(e) = &state.types.env[*type_id] {
+                let type_id = state.types.type_id_for_def(def)?;
+                if let vx_types::TypeDef::Enum(e) = &state.types.env[type_id] {
                     let items: Vec<CompletionItem> = e
                         .variants
                         .iter()
@@ -1845,7 +1966,7 @@ fn dot_completions(
 
             // If it's a function, offer completions on the return type
             if def.kind == vx_resolve::DefKind::Function {
-                if let Some(sig) = state.types.range_to_fn_sig.get(&def.name_range) {
+                if let Some(sig) = state.types.fn_sig_for_def(def) {
                     if let Some(items) = completions_for_type(&sig.ret, state) {
                         return Some(items);
                     }
@@ -1871,7 +1992,7 @@ fn resolve_binding_fields(
     state: &DocumentState,
 ) -> Option<Vec<CompletionItem>> {
     // Check if this binding is a function parameter with a type annotation
-    for sig in state.types.range_to_fn_sig.values() {
+    for sig in state.types.fn_sigs() {
         for param in &sig.positional_params {
             if param.name == def.name {
                 // This is a rough match — in a real type checker you'd match by range.
@@ -2332,7 +2453,8 @@ mod tests {
         state
             .resolution
             .scopes
-            .all_definitions()
+            .all_definitions_in(state.current_source)
+            .into_iter()
             .find(|def| def.name == name)
             .unwrap_or_else(|| panic!("missing definition `{name}`"))
     }
@@ -2477,5 +2599,36 @@ fn build() {
         assert!(proc_doc.contains("`observer` callback slot."));
         assert!(proc_doc.contains("Executor-side observer evaluated with sandbox authority."));
         assert_eq!(proc_doc, tree_doc);
+    }
+
+    #[test]
+    fn stdlib_reference_points_at_real_stdlib_definition() {
+        let text = r#"
+fn demo() {
+  executor_class("default")
+}
+"#;
+
+        let state = DocumentState::new(text.to_string());
+        let offset = TextSize::new(text.find("executor_class").unwrap() as u32);
+        let def = state.definition_at(offset).unwrap();
+
+        assert_eq!(def.name, "executor_class");
+        assert_ne!(def.source, state.current_source);
+        assert_eq!(def.kind, vx_resolve::DefKind::Function);
+        assert_eq!(
+            state.declaration_snippet(def),
+            "fn executor_class(label: String) -> ExecutorClass"
+        );
+        assert_eq!(
+            state.doc_comment_for(def).as_deref(),
+            Some("Construct an executor class selector value.")
+        );
+
+        let uri = state.uri_for_source(def.source).unwrap();
+        assert!(
+            uri.path().ends_with("/crates/vx-stdlib/std/build.vx"),
+            "expected stdlib build.vx uri, got {uri}"
+        );
     }
 }

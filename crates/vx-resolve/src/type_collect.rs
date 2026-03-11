@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 
-use rowan::TextRange;
 use vx_parser::{
     AstNode, EnumDecl, FnDecl, NewtypeDecl, SourceFile, StructDecl, SyntaxKind, TypeAliasDecl,
 };
@@ -15,223 +14,286 @@ use vx_types::{
     TypeDef, TypeEnv, TypeId,
 };
 
+use crate::{DefSite, Definition, SourceFileRef, SourceId};
+
 /// Result of type collection: a populated type environment plus lookup tables.
 pub struct TypeCollection {
     /// The type environment containing all type definitions.
     pub env: TypeEnv,
-    /// Map from definition name ranges to their TypeId (for structs, enums, newtypes, aliases).
-    pub range_to_type: HashMap<TextRange, TypeId>,
-    /// Map from definition name ranges to their function signature.
-    pub range_to_fn_sig: HashMap<TextRange, FnSig>,
+    /// Map from definition sites to their TypeId (for structs, enums, newtypes, aliases).
+    pub def_to_type: HashMap<DefSite, TypeId>,
+    /// Map from definition sites to their function signature.
+    pub def_to_fn_sig: HashMap<DefSite, FnSig>,
     /// Map from type names to their TypeId and kind (for resolving type annotations).
     pub(crate) name_to_id: HashMap<String, (TypeId, TypeKind)>,
 }
 
+impl TypeCollection {
+    pub fn type_id_for_def(&self, def: &Definition) -> Option<TypeId> {
+        self.def_to_type.get(&def.site()).copied()
+    }
+
+    pub fn fn_sig_for_def(&self, def: &Definition) -> Option<&FnSig> {
+        self.def_to_fn_sig.get(&def.site())
+    }
+
+    pub fn fn_sigs(&self) -> impl Iterator<Item = &FnSig> {
+        self.def_to_fn_sig.values()
+    }
+}
+
 /// Collect all type declarations from a source file into a [`TypeEnv`].
 pub fn collect_types(file: &SourceFile) -> TypeCollection {
+    collect_types_for_sources(&[SourceFileRef {
+        id: SourceId(0),
+        file: file.clone(),
+    }])
+}
+
+pub fn collect_types_for_sources(sources: &[SourceFileRef]) -> TypeCollection {
     let mut env = TypeEnv::new();
-    let mut range_to_type = HashMap::new();
-    let mut range_to_fn_sig = HashMap::new();
+    let mut def_to_type = HashMap::new();
+    let mut def_to_fn_sig = HashMap::new();
 
     // Maps type names to their TypeId and kind for resolving type references.
     let mut name_to_id: HashMap<String, (TypeId, TypeKind)> = HashMap::new();
 
     // First pass: register all type declarations (so we can resolve forward references).
-    for item in file.items() {
-        let syntax = item.syntax();
-        match syntax.kind() {
-            SyntaxKind::STRUCT_DECL => {
-                if let Some(decl) = StructDecl::cast(syntax.clone())
-                    && let Some(name_token) = decl.name()
-                {
-                    let name = name_token.text().to_string();
-                    let type_params = collect_type_params(syntax);
-                    let id = env.define(
-                        &name,
-                        TypeDef::Struct(StructDef {
-                            name: name.clone(),
-                            parent_enum: None,
-                            type_params,
-                            fields: Vec::new(), // filled in second pass
-                        }),
-                    );
-                    name_to_id.insert(name, (id, TypeKind::Struct));
-                    range_to_type.insert(name_token.text_range(), id);
+    for source in sources {
+        for item in source.file.items() {
+            let syntax = item.syntax();
+            match syntax.kind() {
+                SyntaxKind::STRUCT_DECL => {
+                    if let Some(decl) = StructDecl::cast(syntax.clone())
+                        && let Some(name_token) = decl.name()
+                    {
+                        let name = name_token.text().to_string();
+                        let type_params = collect_type_params(syntax);
+                        let id = env.define(
+                            &name,
+                            TypeDef::Struct(StructDef {
+                                name: name.clone(),
+                                parent_enum: None,
+                                type_params,
+                                fields: Vec::new(), // filled in second pass
+                            }),
+                        );
+                        name_to_id.insert(name, (id, TypeKind::Struct));
+                        def_to_type.insert(
+                            DefSite {
+                                source: source.id,
+                                range: name_token.text_range(),
+                            },
+                            id,
+                        );
+                    }
                 }
-            }
-            SyntaxKind::ENUM_DECL => {
-                if let Some(decl) = EnumDecl::cast(syntax.clone())
-                    && let Some(name_token) = decl.name()
-                {
-                    let name = name_token.text().to_string();
-                    let type_params = collect_type_params(syntax);
-                    let id = env.define(
-                        &name,
-                        TypeDef::Enum(EnumDef {
-                            name: name.clone(),
-                            type_params,
-                            variants: Vec::new(), // filled in second pass
-                        }),
-                    );
-                    name_to_id.insert(name, (id, TypeKind::Enum));
-                    range_to_type.insert(name_token.text_range(), id);
+                SyntaxKind::ENUM_DECL => {
+                    if let Some(decl) = EnumDecl::cast(syntax.clone())
+                        && let Some(name_token) = decl.name()
+                    {
+                        let name = name_token.text().to_string();
+                        let type_params = collect_type_params(syntax);
+                        let id = env.define(
+                            &name,
+                            TypeDef::Enum(EnumDef {
+                                name: name.clone(),
+                                type_params,
+                                variants: Vec::new(), // filled in second pass
+                            }),
+                        );
+                        name_to_id.insert(name, (id, TypeKind::Enum));
+                        def_to_type.insert(
+                            DefSite {
+                                source: source.id,
+                                range: name_token.text_range(),
+                            },
+                            id,
+                        );
+                    }
                 }
-            }
-            SyntaxKind::NEWTYPE_DECL => {
-                if let Some(decl) = NewtypeDecl::cast(syntax.clone())
-                    && let Some(name_token) = decl.name()
-                {
-                    let name = name_token.text().to_string();
-                    let type_params = collect_type_params(syntax);
-                    let id = env.define(
-                        &name,
-                        TypeDef::Newtype(NewtypeDef {
-                            name: name.clone(),
-                            type_params,
-                            inner: Ty::Poison, // filled in second pass
-                        }),
-                    );
-                    name_to_id.insert(name, (id, TypeKind::Newtype));
-                    range_to_type.insert(name_token.text_range(), id);
+                SyntaxKind::NEWTYPE_DECL => {
+                    if let Some(decl) = NewtypeDecl::cast(syntax.clone())
+                        && let Some(name_token) = decl.name()
+                    {
+                        let name = name_token.text().to_string();
+                        let type_params = collect_type_params(syntax);
+                        let id = env.define(
+                            &name,
+                            TypeDef::Newtype(NewtypeDef {
+                                name: name.clone(),
+                                type_params,
+                                inner: Ty::Poison, // filled in second pass
+                            }),
+                        );
+                        name_to_id.insert(name, (id, TypeKind::Newtype));
+                        def_to_type.insert(
+                            DefSite {
+                                source: source.id,
+                                range: name_token.text_range(),
+                            },
+                            id,
+                        );
+                    }
                 }
-            }
-            SyntaxKind::TYPE_ALIAS_DECL => {
-                if let Some(decl) = TypeAliasDecl::cast(syntax.clone())
-                    && let Some(name_token) = decl.name()
-                {
-                    let name = name_token.text().to_string();
-                    let type_params = collect_type_params(syntax);
-                    let id = env.define(
-                        &name,
-                        TypeDef::Alias(AliasDef {
-                            name: name.clone(),
-                            type_params,
-                            target: Ty::Poison, // filled in second pass
-                        }),
-                    );
-                    name_to_id.insert(name, (id, TypeKind::Alias));
-                    range_to_type.insert(name_token.text_range(), id);
+                SyntaxKind::TYPE_ALIAS_DECL => {
+                    if let Some(decl) = TypeAliasDecl::cast(syntax.clone())
+                        && let Some(name_token) = decl.name()
+                    {
+                        let name = name_token.text().to_string();
+                        let type_params = collect_type_params(syntax);
+                        let id = env.define(
+                            &name,
+                            TypeDef::Alias(AliasDef {
+                                name: name.clone(),
+                                type_params,
+                                target: Ty::Poison, // filled in second pass
+                            }),
+                        );
+                        name_to_id.insert(name, (id, TypeKind::Alias));
+                        def_to_type.insert(
+                            DefSite {
+                                source: source.id,
+                                range: name_token.text_range(),
+                            },
+                            id,
+                        );
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
 
     // Second pass: fill in fields, variants, and type references.
     let resolver = TypeResolver::new(&name_to_id);
 
-    for item in file.items() {
-        let syntax = item.syntax();
-        match syntax.kind() {
-            SyntaxKind::STRUCT_DECL => {
-                if let Some(decl) = StructDecl::cast(syntax.clone())
-                    && let Some(name_token) = decl.name()
-                {
-                    let (id, _) = name_to_id[name_token.text()];
-                    let type_params = collect_type_param_names(syntax);
-                    let fields = collect_fields(&decl, &resolver, &type_params);
-                    if let TypeDef::Struct(ref mut s) = env[id] {
-                        s.fields = fields;
-                    }
-                }
-            }
-            SyntaxKind::ENUM_DECL => {
-                if let Some(decl) = EnumDecl::cast(syntax.clone())
-                    && let Some(name_token) = decl.name()
-                {
-                    let (enum_id, _) = name_to_id[name_token.text()];
-                    let type_params = collect_type_param_names(syntax);
-                    let mut variant_ids = Vec::new();
-
-                    for variant in decl.variants() {
-                        if let Some(vname_token) = variant.name() {
-                            let vname = vname_token.text().to_string();
-                            let fields: Vec<FieldDef> = variant
-                                .fields()
-                                .filter_map(|f| {
-                                    let name_tok = f.name()?;
-                                    let name = name_tok.text().to_string();
-                                    let name_range = name_tok.text_range();
-                                    let ty = f
-                                        .slot_type()
-                                        .and_then(|st| st.ty())
-                                        .map(|t| resolver.resolve_type(&t, &type_params))
-                                        .unwrap_or(Ty::Poison);
-                                    Some(FieldDef {
-                                        name,
-                                        ty,
-                                        has_default: false,
-                                        name_range,
-                                    })
-                                })
-                                .collect();
-
-                            let vid = env.define(
-                                &vname,
-                                TypeDef::Struct(StructDef {
-                                    name: vname.clone(),
-                                    parent_enum: Some(enum_id),
-                                    type_params: type_params.clone(),
-                                    fields,
-                                }),
-                            );
-                            variant_ids.push(vid);
-                            range_to_type.insert(vname_token.text_range(), vid);
+    for source in sources {
+        for item in source.file.items() {
+            let syntax = item.syntax();
+            match syntax.kind() {
+                SyntaxKind::STRUCT_DECL => {
+                    if let Some(decl) = StructDecl::cast(syntax.clone())
+                        && let Some(name_token) = decl.name()
+                    {
+                        let (id, _) = name_to_id[name_token.text()];
+                        let type_params = collect_type_param_names(syntax);
+                        let fields = collect_fields(&decl, &resolver, &type_params);
+                        if let TypeDef::Struct(ref mut s) = env[id] {
+                            s.fields = fields;
                         }
                     }
+                }
+                SyntaxKind::ENUM_DECL => {
+                    if let Some(decl) = EnumDecl::cast(syntax.clone())
+                        && let Some(name_token) = decl.name()
+                    {
+                        let (enum_id, _) = name_to_id[name_token.text()];
+                        let type_params = collect_type_param_names(syntax);
+                        let mut variant_ids = Vec::new();
 
-                    if let TypeDef::Enum(ref mut e) = env[enum_id] {
-                        e.variants = variant_ids;
+                        for variant in decl.variants() {
+                            if let Some(vname_token) = variant.name() {
+                                let vname = vname_token.text().to_string();
+                                let fields: Vec<FieldDef> = variant
+                                    .fields()
+                                    .filter_map(|f| {
+                                        let name_tok = f.name()?;
+                                        let name = name_tok.text().to_string();
+                                        let name_range = name_tok.text_range();
+                                        let ty = f
+                                            .slot_type()
+                                            .and_then(|st| st.ty())
+                                            .map(|t| resolver.resolve_type(&t, &type_params))
+                                            .unwrap_or(Ty::Poison);
+                                        Some(FieldDef {
+                                            name,
+                                            ty,
+                                            has_default: false,
+                                            name_range,
+                                        })
+                                    })
+                                    .collect();
+
+                                let vid = env.define(
+                                    &vname,
+                                    TypeDef::Struct(StructDef {
+                                        name: vname.clone(),
+                                        parent_enum: Some(enum_id),
+                                        type_params: type_params.clone(),
+                                        fields,
+                                    }),
+                                );
+                                variant_ids.push(vid);
+                                def_to_type.insert(
+                                    DefSite {
+                                        source: source.id,
+                                        range: vname_token.text_range(),
+                                    },
+                                    vid,
+                                );
+                            }
+                        }
+
+                        if let TypeDef::Enum(ref mut e) = env[enum_id] {
+                            e.variants = variant_ids;
+                        }
                     }
                 }
-            }
-            SyntaxKind::NEWTYPE_DECL => {
-                if let Some(decl) = NewtypeDecl::cast(syntax.clone())
-                    && let Some(name_token) = decl.name()
-                {
-                    let (id, _) = name_to_id[name_token.text()];
-                    let type_params = collect_type_param_names(syntax);
-                    let inner = decl
-                        .inner_type()
-                        .map(|t| resolver.resolve_type(&t, &type_params))
-                        .unwrap_or(Ty::Poison);
-                    if let TypeDef::Newtype(ref mut n) = env[id] {
-                        n.inner = inner;
+                SyntaxKind::NEWTYPE_DECL => {
+                    if let Some(decl) = NewtypeDecl::cast(syntax.clone())
+                        && let Some(name_token) = decl.name()
+                    {
+                        let (id, _) = name_to_id[name_token.text()];
+                        let type_params = collect_type_param_names(syntax);
+                        let inner = decl
+                            .inner_type()
+                            .map(|t| resolver.resolve_type(&t, &type_params))
+                            .unwrap_or(Ty::Poison);
+                        if let TypeDef::Newtype(ref mut n) = env[id] {
+                            n.inner = inner;
+                        }
                     }
                 }
-            }
-            SyntaxKind::TYPE_ALIAS_DECL => {
-                if let Some(decl) = TypeAliasDecl::cast(syntax.clone())
-                    && let Some(name_token) = decl.name()
-                {
-                    let (id, _) = name_to_id[name_token.text()];
-                    let type_params = collect_type_param_names(syntax);
-                    let target = decl
-                        .aliased_type()
-                        .map(|t| resolver.resolve_type(&t, &type_params))
-                        .unwrap_or(Ty::Poison);
-                    if let TypeDef::Alias(ref mut a) = env[id] {
-                        a.target = target;
+                SyntaxKind::TYPE_ALIAS_DECL => {
+                    if let Some(decl) = TypeAliasDecl::cast(syntax.clone())
+                        && let Some(name_token) = decl.name()
+                    {
+                        let (id, _) = name_to_id[name_token.text()];
+                        let type_params = collect_type_param_names(syntax);
+                        let target = decl
+                            .aliased_type()
+                            .map(|t| resolver.resolve_type(&t, &type_params))
+                            .unwrap_or(Ty::Poison);
+                        if let TypeDef::Alias(ref mut a) = env[id] {
+                            a.target = target;
+                        }
                     }
                 }
-            }
-            SyntaxKind::FN_DECL => {
-                if let Some(decl) = FnDecl::cast(syntax.clone())
-                    && let Some(name_token) = decl.name()
-                {
-                    let type_params = collect_type_param_names(syntax);
-                    let sig = collect_fn_sig(&decl, &resolver, &type_params);
-                    range_to_fn_sig.insert(name_token.text_range(), sig);
+                SyntaxKind::FN_DECL => {
+                    if let Some(decl) = FnDecl::cast(syntax.clone())
+                        && let Some(name_token) = decl.name()
+                    {
+                        let type_params = collect_type_param_names(syntax);
+                        let sig = collect_fn_sig(&decl, &resolver, &type_params);
+                        def_to_fn_sig.insert(
+                            DefSite {
+                                source: source.id,
+                                range: name_token.text_range(),
+                            },
+                            sig,
+                        );
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
 
     TypeCollection {
         env,
-        range_to_type,
-        range_to_fn_sig,
+        def_to_type,
+        def_to_fn_sig,
         name_to_id,
     }
 }

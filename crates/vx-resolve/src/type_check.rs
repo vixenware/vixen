@@ -261,9 +261,10 @@ impl<'a> ExprTyper<'a> {
             }
         }
 
-        // Not resolved — might be a builtin function name
+        // Not resolved — the remaining namespace-only runtime names do not yet
+        // participate in ordinary source-based typing.
         let name = token.text();
-        if builtin_fn_sig(name).is_some() || is_builtin_namespace(name) {
+        if is_builtin_namespace(name) {
             return Ty::Poison;
         }
         Ty::Poison
@@ -284,7 +285,7 @@ impl<'a> ExprTyper<'a> {
             }
             DefKind::Function => {
                 // Look up user-declared fn signature
-                if let Some(sig) = self.types.range_to_fn_sig.get(&def.name_range) {
+                if let Some(sig) = self.types.fn_sig_for_def(def) {
                     return Ty::Function(vx_types::FunctionTy {
                         params: sig
                             .positional_params
@@ -312,8 +313,12 @@ impl<'a> ExprTyper<'a> {
         // Walk up the scope chain from the parameter's scope to find its
         // enclosing function scope, then look up the FnSig by matching the
         // function's name range inside the scope's text range.
-        let scope_range = self.resolution.scopes.text_range(def.scope);
-        let scope_kind = self.resolution.scopes.scope_kind(def.scope);
+        let Some(scope_range) = self.resolution.scopes.text_range(def.source, def.scope) else {
+            return None;
+        };
+        let Some(scope_kind) = self.resolution.scopes.scope_kind(def.source, def.scope) else {
+            return None;
+        };
 
         // Parameters can be in Function or Closure scopes
         if scope_kind != crate::scope::ScopeKind::Function {
@@ -321,8 +326,8 @@ impl<'a> ExprTyper<'a> {
         }
 
         // Find the FnSig whose name range is within this function scope's range
-        for (fn_name_range, sig) in &self.types.range_to_fn_sig {
-            if scope_range.contains_range(*fn_name_range) {
+        for (site, sig) in &self.types.def_to_fn_sig {
+            if site.source == def.source && scope_range.contains_range(site.range) {
                 // Match by position in positional params
                 for (i, param) in sig.positional_params.iter().enumerate() {
                     if param.name == def.name {
@@ -361,7 +366,7 @@ impl<'a> ExprTyper<'a> {
             return None;
         }
 
-        self.types.range_to_fn_sig.get(&def.name_range).cloned()
+        self.types.fn_sig_for_def(def).cloned()
     }
 
     fn check_record_keyword_args(&mut self, record: &RecordExpr, sig: &FnSig) {
@@ -493,7 +498,7 @@ impl<'a> ExprTyper<'a> {
                         && let Ok(def) = &resolved.target
                         && def.kind == DefKind::Function
                     {
-                        if let Some(sig) = self.types.range_to_fn_sig.get(&def.name_range) {
+                        if let Some(sig) = self.types.fn_sig_for_def(def) {
                             self.check_call_args(call, sig);
                             self.check_keyword_args(call, sig);
                             self.infer_extra_call_args(call, sig.positional_params.len());
@@ -689,7 +694,7 @@ impl<'a> ExprTyper<'a> {
     /// Populate closure parameter types for callback slots.
     /// Derives parameter types from the FnSig of the callee.
     fn populate_callback_param_types(&mut self, call: &CallExpr, callee_name: &str) {
-        let Some(sig) = builtin_fn_sig(callee_name) else {
+        let Some(sig) = self.sig_for_callee_name(call, callee_name) else {
             return;
         };
 
@@ -745,6 +750,18 @@ impl<'a> ExprTyper<'a> {
                 }
             }
         }
+    }
+
+    fn sig_for_callee_name(&self, call: &CallExpr, callee_name: &str) -> Option<FnSig> {
+        if let Some(sig) = builtin_fn_sig(callee_name) {
+            return Some(sig);
+        }
+
+        let callee = call.callee()?;
+        let Expr::NameRef(name_ref) = callee else {
+            return None;
+        };
+        self.sig_for_name_ref(&name_ref)
     }
 
     fn bind_closure_params(
