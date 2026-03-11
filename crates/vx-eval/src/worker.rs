@@ -2537,6 +2537,7 @@ impl Engine {
         if let Some(discover_handler) = &self.discover_handler {
             let request = DiscoverRequest {
                 class,
+                demand_chain: self.current_demand_chain(None),
                 module: self.transport_module(),
                 probe: self.ship_function(probe)?,
             };
@@ -2722,6 +2723,7 @@ impl Engine {
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             writable_roots: request.writable_roots.clone(),
+            demand_chain: self.current_demand_chain(None),
             module: self.transport_module(),
             observer: self.ship_function(request.observer.clone())?,
             verification_obligations: request.verification_obligations.clone(),

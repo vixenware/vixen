@@ -3,7 +3,7 @@
 //! This module implements compilation using the VFS instead of disk materialization.
 //! Files are served lazily from CAS via the Vixen mount.
 
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use jiff::Zoned;
 use moire::task::FutureExt;
 use std::collections::BTreeSet;
@@ -173,6 +173,142 @@ fn append_process_output(mut message: String, stdout: &str, stderr: &str) -> Str
         message.push_str(stdout);
     }
     message
+}
+
+fn append_similar_missing_input_hint(
+    mut message: String,
+    prefix_path: &Utf8Path,
+    stderr: &str,
+) -> String {
+    let Some(missing_path) = parse_missing_process_input_from_stderr(stderr) else {
+        return message;
+    };
+    let Some(similar_path) = find_similar_sandbox_path(prefix_path, &missing_path) else {
+        return message;
+    };
+    message.push_str("\nsimilar sandbox path: ");
+    message.push_str(&similar_path);
+    message
+}
+
+fn parse_missing_process_input_from_stderr(stderr: &str) -> Option<String> {
+    stderr.lines().find_map(parse_missing_process_input_line)
+}
+
+fn parse_missing_process_input_line(line: &str) -> Option<String> {
+    let (_, value) = line.split_once("no such file or directory: ")?;
+    parse_quoted_path(value.trim())
+}
+
+fn parse_quoted_path(value: &str) -> Option<String> {
+    for quote in ['\'', '"'] {
+        let stripped = value.strip_prefix(quote)?;
+        let (path, _) = stripped.split_once(quote)?;
+        return Some(path.to_string());
+    }
+    None
+}
+
+fn find_similar_sandbox_path(prefix_path: &Utf8Path, missing_path: &str) -> Option<String> {
+    let missing_segments = path_segments(missing_path);
+    let mut best = None;
+    let mut stack = vec![prefix_path.to_path_buf()];
+    let mut scanned_entries = 0usize;
+
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            scanned_entries += 1;
+            if scanned_entries > 4096 {
+                return best.map(|(_, path)| path);
+            }
+
+            let Ok(path) = Utf8PathBuf::from_path_buf(entry.path()) else {
+                continue;
+            };
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if path.file_name() != Some("out") {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let Ok(relative) = path.strip_prefix(prefix_path) else {
+                continue;
+            };
+            let candidate = relative.as_str();
+            if candidate == missing_path {
+                continue;
+            }
+
+            let Some(score) = similarity_score(candidate, &missing_segments) else {
+                continue;
+            };
+
+            if best.as_ref().is_none_or(|(best_score, best_path)| {
+                better_similarity(score, candidate, *best_score, best_path)
+            }) {
+                best = Some((score, candidate.to_string()));
+            }
+        }
+    }
+
+    best.map(|(_, path)| path)
+}
+
+fn path_segments(path: &str) -> Vec<&str> {
+    path.split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
+fn similarity_score(
+    candidate: &str,
+    missing_segments: &[&str],
+) -> Option<(bool, usize, bool, usize, usize)> {
+    let candidate_segments = path_segments(candidate);
+    let suffix_matches = candidate_segments
+        .iter()
+        .rev()
+        .zip(missing_segments.iter().rev())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let same_filename = candidate_segments.last() == missing_segments.last();
+    if suffix_matches == 0 && !same_filename {
+        return None;
+    }
+
+    let exact_suffix = candidate_segments.len() > missing_segments.len()
+        && candidate_segments[candidate_segments.len() - missing_segments.len()..]
+            == *missing_segments;
+    let extra_segments = candidate_segments
+        .len()
+        .saturating_sub(missing_segments.len());
+
+    Some((
+        exact_suffix,
+        suffix_matches,
+        same_filename,
+        usize::MAX - extra_segments,
+        usize::MAX - candidate.len(),
+    ))
+}
+
+fn better_similarity(
+    candidate_score: (bool, usize, bool, usize, usize),
+    candidate_path: &str,
+    best_score: (bool, usize, bool, usize, usize),
+    best_path: &str,
+) -> bool {
+    candidate_score > best_score || (candidate_score == best_score && candidate_path < best_path)
 }
 
 /// Action execution context with all paths and sandbox config.
@@ -1839,11 +1975,23 @@ impl RunnerService {
         let observer_value = match observer_result {
             Ok(observer_value) => observer_value,
             Err(error) => {
-                let message = append_process_output(
-                    format!("failed to evaluate shipped observer: {error}"),
-                    &output.stdout,
-                    &output.stderr,
-                );
+                let message = if output.exit_status.success() {
+                    append_process_output(
+                        format!("failed to evaluate shipped observer: {error}"),
+                        &output.stdout,
+                        &output.stderr,
+                    )
+                } else {
+                    append_process_output(
+                        format!(
+                            "process exited with status {exit_code}; observer reported: {error}"
+                        ),
+                        &output.stdout,
+                        &output.stderr,
+                    )
+                };
+                let message =
+                    append_similar_missing_input_hint(message, &action.prefix_path, &output.stderr);
                 self.remove_action_prefix(&action.prefix_id).await;
                 return run_failure_result_with_kind(
                     start,
@@ -2077,6 +2225,42 @@ mod tests {
                 "out/obj".to_string(),
                 "src".to_string(),
             ],
+        );
+    }
+
+    #[test]
+    fn picks_similar_missing_sandbox_path_with_extra_prefix_segment() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let prefix_path = Utf8Path::from_path(temp_dir.path()).expect("utf8 temp dir");
+        std::fs::create_dir_all(prefix_path.join("src/src")).expect("create src tree");
+        std::fs::create_dir_all(prefix_path.join("deps/src")).expect("create deps tree");
+        std::fs::create_dir_all(prefix_path.join("out/src")).expect("create out tree");
+        std::fs::write(prefix_path.join("src/src/lua.c"), "").expect("write candidate");
+        std::fs::write(prefix_path.join("deps/src/lua.c"), "").expect("write distractor");
+        std::fs::write(prefix_path.join("out/src/lua.c"), "").expect("write output distractor");
+
+        assert_eq!(
+            find_similar_sandbox_path(prefix_path, "src/lua.c"),
+            Some("src/src/lua.c".to_string())
+        );
+    }
+
+    #[test]
+    fn appends_similar_missing_input_hint_from_stderr() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let prefix_path = Utf8Path::from_path(temp_dir.path()).expect("utf8 temp dir");
+        std::fs::create_dir_all(prefix_path.join("src/src")).expect("create src tree");
+        std::fs::write(prefix_path.join("src/src/lua.c"), "").expect("write candidate");
+
+        let message = append_similar_missing_input_hint(
+            "process exited with status 1".to_string(),
+            prefix_path,
+            "clang: error: no such file or directory: 'src/lua.c'\nclang: error: no input files\n",
+        );
+
+        assert!(
+            message.contains("similar sandbox path: src/src/lua.c"),
+            "{message}"
         );
     }
 }

@@ -529,7 +529,7 @@ impl CliContext {
             Ok(())
         } else {
             if let Some(failure) = &result.failure {
-                match diagnostics::render_build_failure(failure) {
+                match diagnostics::render_build_failure(failure, args.full_stack) {
                     Ok(rendered) => eprintln!("{rendered}"),
                     Err(render_error) => {
                         tracing::warn!(error = %render_error, "failed to render build diagnostics");

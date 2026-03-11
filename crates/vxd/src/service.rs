@@ -851,16 +851,18 @@ async fn run_build_vx_exec_via_runner(
     exec: &RunnerClient,
     request: ExecRequest,
 ) -> std::result::Result<Value, PoisonError> {
+    let demand_chain = request.demand_chain.clone();
     let mut args = request.args.into_iter();
     let program = args.next().ok_or_else(|| {
         exec_bridge_poison(
             PoisonKind::UserFail,
             "exec requires at least one program argument",
+            &demand_chain,
         )
     })?;
     let root_mount = store_exec_mounts(store, &request.mounts)
         .await
-        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message))?;
+        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     let progress = roam::Tx::<StoreProgress>::unbound();
 
     let result = exec
@@ -901,7 +903,9 @@ async fn run_build_vx_exec_via_runner(
             progress,
         )
         .await
-        .map_err(|error| exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}")))?;
+        .map_err(|error| {
+            exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}"), &demand_chain)
+        })?;
 
     if !result.success {
         let kind = match result.error_kind {
@@ -911,6 +915,7 @@ async fn run_build_vx_exec_via_runner(
         return Err(exec_bridge_poison(
             kind,
             result.error.unwrap_or(result.stderr),
+            &demand_chain,
         ));
     }
 
@@ -918,11 +923,13 @@ async fn run_build_vx_exec_via_runner(
         exec_bridge_poison(
             PoisonKind::UserFail,
             "runner did not return an observer value",
+            &demand_chain,
         )
     })?;
-    let value = Value::try_from(observer_value)
-        .map_err(|error| exec_bridge_poison(PoisonKind::UserFail, error.to_string()))?;
-    hydrate_exec_value_from_store(store, value).await
+    let value = Value::try_from(observer_value).map_err(|error| {
+        exec_bridge_poison(PoisonKind::UserFail, error.to_string(), &demand_chain)
+    })?;
+    hydrate_exec_value_from_store(store, value, &demand_chain).await
 }
 
 async fn run_build_vx_discover_via_runner(
@@ -930,6 +937,7 @@ async fn run_build_vx_discover_via_runner(
     exec: &RunnerClient,
     request: EvalDiscoverRequest,
 ) -> std::result::Result<Value, PoisonError> {
+    let demand_chain = request.demand_chain.clone();
     let result = exec
         .discover(RunnerDiscoverRequest {
             class: request.class,
@@ -937,20 +945,28 @@ async fn run_build_vx_discover_via_runner(
             probe: request.probe,
         })
         .await
-        .map_err(|error| exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}")))?;
+        .map_err(|error| {
+            exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}"), &demand_chain)
+        })?;
 
-    let value = Value::try_from(result.value)
-        .map_err(|error| exec_bridge_poison(PoisonKind::UserFail, error.to_string()))?;
-    hydrate_exec_value_from_store(store, value).await
+    let value = Value::try_from(result.value).map_err(|error| {
+        exec_bridge_poison(PoisonKind::UserFail, error.to_string(), &demand_chain)
+    })?;
+    hydrate_exec_value_from_store(store, value, &demand_chain).await
 }
 
-fn exec_bridge_poison(kind: PoisonKind, message: impl Into<String>) -> PoisonError {
-    PoisonError::new(kind, message, DemandChain::new())
+fn exec_bridge_poison(
+    kind: PoisonKind,
+    message: impl Into<String>,
+    demand_chain: &DemandChain,
+) -> PoisonError {
+    PoisonError::new(kind, message, demand_chain.clone())
 }
 
 fn hydrate_exec_value_from_store<'a>(
     store: &'a StoreClient,
     value: Value,
+    demand_chain: &'a DemandChain,
 ) -> Pin<Box<dyn Future<Output = std::result::Result<Value, PoisonError>> + 'a>> {
     Box::pin(async move {
         match value {
@@ -960,16 +976,18 @@ fn hydrate_exec_value_from_store<'a>(
             }) => {
                 let bytes = fetch_store_blob_bytes(store, &blob_ref)
                     .await
-                    .map_err(|error| exec_bridge_poison(PoisonKind::Internal, error.to_string()))?;
+                    .map_err(|error| {
+                        exec_bridge_poison(PoisonKind::Internal, error.to_string(), demand_chain)
+                    })?;
                 Ok(Value::Blob(BlobValue::Inline {
                     bytes: Arc::from(bytes),
                     executable,
                 }))
             }
             Value::Tree(TreeValue::Store(root)) => {
-                let directory = load_store_directory(store, root)
-                    .await
-                    .map_err(|error| exec_bridge_poison(PoisonKind::Internal, error.to_string()))?;
+                let directory = load_store_directory(store, root).await.map_err(|error| {
+                    exec_bridge_poison(PoisonKind::Internal, error.to_string(), demand_chain)
+                })?;
                 let mut entries = Vec::with_capacity(directory.entries.len());
                 for entry in directory.entries {
                     let value = match entry.kind {
@@ -988,6 +1006,7 @@ fn hydrate_exec_value_from_store<'a>(
                                     blob_ref,
                                     executable,
                                 }),
+                                demand_chain,
                             )
                             .await?
                         }
@@ -1008,6 +1027,7 @@ fn hydrate_exec_value_from_store<'a>(
                                     blob_ref,
                                     executable,
                                 }),
+                                demand_chain,
                             )
                             .await?
                         }
@@ -1015,6 +1035,7 @@ fn hydrate_exec_value_from_store<'a>(
                             hydrate_exec_value_from_store(
                                 store,
                                 Value::Tree(TreeValue::Store(hash)),
+                                demand_chain,
                             )
                             .await?
                         }
@@ -1024,6 +1045,7 @@ fn hydrate_exec_value_from_store<'a>(
                                 format!(
                                     "store-backed symlink values are not supported in the build.vx evaluator bridge yet (target: {target})"
                                 ),
+                                demand_chain,
                             ));
                         }
                     };
@@ -1032,7 +1054,8 @@ fn hydrate_exec_value_from_store<'a>(
                 Ok(Value::Tree(TreeValue::Inline(Arc::from(entries))))
             }
             Value::Discovered(discovered) => {
-                let inner = hydrate_exec_value_from_store(store, *discovered.value).await?;
+                let inner =
+                    hydrate_exec_value_from_store(store, *discovered.value, demand_chain).await?;
                 Ok(Value::Discovered(DiscoveredValue {
                     value: Box::new(inner),
                     obligations: discovered.obligations,
@@ -1041,14 +1064,18 @@ fn hydrate_exec_value_from_store<'a>(
             Value::Tuple(values) => {
                 let mut hydrated = Vec::with_capacity(values.len());
                 for value in values.iter() {
-                    hydrated.push(hydrate_exec_value_from_store(store, value.clone()).await?);
+                    hydrated.push(
+                        hydrate_exec_value_from_store(store, value.clone(), demand_chain).await?,
+                    );
                 }
                 Ok(Value::Tuple(Arc::from(hydrated)))
             }
             Value::Array(values) => {
                 let mut hydrated = Vec::with_capacity(values.len());
                 for value in values.iter() {
-                    hydrated.push(hydrate_exec_value_from_store(store, value.clone()).await?);
+                    hydrated.push(
+                        hydrate_exec_value_from_store(store, value.clone(), demand_chain).await?,
+                    );
                 }
                 Ok(Value::Array(Arc::from(hydrated)))
             }
@@ -1056,8 +1083,8 @@ fn hydrate_exec_value_from_store<'a>(
                 let mut entries = Vec::with_capacity(map.entries.len());
                 for (key, value) in map.entries.iter() {
                     entries.push((
-                        hydrate_exec_value_from_store(store, key.clone()).await?,
-                        hydrate_exec_value_from_store(store, value.clone()).await?,
+                        hydrate_exec_value_from_store(store, key.clone(), demand_chain).await?,
+                        hydrate_exec_value_from_store(store, value.clone(), demand_chain).await?,
                     ));
                 }
                 Ok(Value::Map(MapValue {
@@ -1069,7 +1096,7 @@ fn hydrate_exec_value_from_store<'a>(
                 for (name, value) in struct_value.fields.iter() {
                     fields.push((
                         name.clone(),
-                        hydrate_exec_value_from_store(store, value.clone()).await?,
+                        hydrate_exec_value_from_store(store, value.clone(), demand_chain).await?,
                     ));
                 }
                 Ok(Value::Struct(StructValue {

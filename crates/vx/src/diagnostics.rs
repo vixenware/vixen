@@ -14,7 +14,7 @@ use vxd_proto::{
 
 const SYNTAX_CONTEXT_RADIUS: i32 = 2;
 
-pub(crate) fn render_build_failure(failure: &BuildFailure) -> Result<String> {
+pub(crate) fn render_build_failure(failure: &BuildFailure, full_stack: bool) -> Result<String> {
     if failure.reports.is_empty() {
         return Ok(failure.message.clone());
     }
@@ -27,19 +27,76 @@ pub(crate) fn render_build_failure(failure: &BuildFailure) -> Result<String> {
     let mut syntax_highlighter = SyntaxHighlighter::new().ok();
     let mut out = Vec::new();
 
-    for (index, report) in failure.reports.iter().enumerate() {
+    let reports = visible_reports(failure, full_stack);
+
+    for (index, report) in reports.iter().enumerate() {
         render_report(
             report,
             &sources_by_id,
             syntax_highlighter.as_mut(),
             &mut out,
         )?;
-        if index + 1 != failure.reports.len() {
+        if index + 1 != reports.len() {
             out.push(b'\n');
         }
     }
 
     String::from_utf8(out).map_err(Into::into)
+}
+
+fn visible_reports<'a>(
+    failure: &'a BuildFailure,
+    full_stack: bool,
+) -> Vec<&'a BuildDiagnosticReport> {
+    if full_stack {
+        return failure.reports.iter().collect();
+    }
+
+    let mut visible = Vec::new();
+    let mut index = 0usize;
+    while index < failure.reports.len() {
+        let report = &failure.reports[index];
+        visible.push(report);
+        index += 1;
+
+        if report.severity != BuildDiagnosticSeverity::Error {
+            continue;
+        }
+
+        let mut advice = Vec::new();
+        while index < failure.reports.len()
+            && failure.reports[index].severity == BuildDiagnosticSeverity::Advice
+        {
+            advice.push(&failure.reports[index]);
+            index += 1;
+        }
+
+        if advice.is_empty() {
+            continue;
+        }
+
+        if let Some(first_dependency) = advice
+            .iter()
+            .copied()
+            .find(|report| report.message != "while evaluating build entry")
+        {
+            visible.push(first_dependency);
+        }
+
+        if let Some(build_entry) = advice
+            .iter()
+            .copied()
+            .rev()
+            .find(|report| report.message == "while evaluating build entry")
+            && visible
+                .last()
+                .is_none_or(|last| !std::ptr::eq(*last, build_entry))
+        {
+            visible.push(build_entry);
+        }
+    }
+
+    visible
 }
 
 fn render_report(
@@ -310,37 +367,42 @@ mod tests {
         let start = source.find(label_text).expect("label start");
         let end = start + label_text.len();
 
-        let rendered = render_build_failure(&BuildFailure {
-            message: "build input not found".to_string(),
-            sources: vec![BuildDiagnosticSource {
-                source_id: source_id.to_string(),
-                language: Some("vixen".to_string()),
-                text: source.to_string(),
-            }],
-            reports: vec![BuildDiagnosticReport {
-                severity: BuildDiagnosticSeverity::Error,
+        let rendered = render_build_failure(
+            &BuildFailure {
                 message: "build input not found".to_string(),
-                primary_span: BuildDiagnosticSpan {
+                sources: vec![BuildDiagnosticSource {
                     source_id: source_id.to_string(),
-                    start: start as u32,
-                    end: end as u32,
-                },
-                labels: vec![BuildDiagnosticLabel {
-                    span: BuildDiagnosticSpan {
+                    language: Some("vixen".to_string()),
+                    text: source.to_string(),
+                }],
+                reports: vec![BuildDiagnosticReport {
+                    severity: BuildDiagnosticSeverity::Error,
+                    message: "build input not found".to_string(),
+                    primary_span: BuildDiagnosticSpan {
                         source_id: source_id.to_string(),
                         start: start as u32,
                         end: end as u32,
                     },
-                    kind: BuildDiagnosticLabelKind::Primary,
-                    message: Some("this path does not exist in the current workspace".to_string()),
+                    labels: vec![BuildDiagnosticLabel {
+                        span: BuildDiagnosticSpan {
+                            source_id: source_id.to_string(),
+                            start: start as u32,
+                            end: end as u32,
+                        },
+                        kind: BuildDiagnosticLabelKind::Primary,
+                        message: Some(
+                            "this path does not exist in the current workspace".to_string(),
+                        ),
+                    }],
+                    notes: vec![
+                        "resolved path: /workspace/zoo/lua-src".to_string(),
+                        "workspace root: /workspace".to_string(),
+                        "os error: No such file or directory".to_string(),
+                    ],
                 }],
-                notes: vec![
-                    "resolved path: /workspace/zoo/lua-src".to_string(),
-                    "workspace root: /workspace".to_string(),
-                    "os error: No such file or directory".to_string(),
-                ],
-            }],
-        })
+            },
+            false,
+        )
         .expect("render");
 
         println!("{rendered}");
@@ -374,33 +436,38 @@ mod tests {
         let start = source.find(label_text).expect("label start");
         let end = start + label_text.len();
 
-        let rendered = render_build_failure(&BuildFailure {
-            message: "build input not found".to_string(),
-            sources: vec![BuildDiagnosticSource {
-                source_id: source_id.to_string(),
-                language: Some("vixen".to_string()),
-                text: source.to_string(),
-            }],
-            reports: vec![BuildDiagnosticReport {
-                severity: BuildDiagnosticSeverity::Error,
+        let rendered = render_build_failure(
+            &BuildFailure {
                 message: "build input not found".to_string(),
-                primary_span: BuildDiagnosticSpan {
+                sources: vec![BuildDiagnosticSource {
                     source_id: source_id.to_string(),
-                    start: start as u32,
-                    end: end as u32,
-                },
-                labels: vec![BuildDiagnosticLabel {
-                    span: BuildDiagnosticSpan {
+                    language: Some("vixen".to_string()),
+                    text: source.to_string(),
+                }],
+                reports: vec![BuildDiagnosticReport {
+                    severity: BuildDiagnosticSeverity::Error,
+                    message: "build input not found".to_string(),
+                    primary_span: BuildDiagnosticSpan {
                         source_id: source_id.to_string(),
                         start: start as u32,
                         end: end as u32,
                     },
-                    kind: BuildDiagnosticLabelKind::Primary,
-                    message: Some("this path does not exist in the current workspace".to_string()),
+                    labels: vec![BuildDiagnosticLabel {
+                        span: BuildDiagnosticSpan {
+                            source_id: source_id.to_string(),
+                            start: start as u32,
+                            end: end as u32,
+                        },
+                        kind: BuildDiagnosticLabelKind::Primary,
+                        message: Some(
+                            "this path does not exist in the current workspace".to_string(),
+                        ),
+                    }],
+                    notes: Vec::new(),
                 }],
-                notes: Vec::new(),
-            }],
-        })
+            },
+            false,
+        )
         .expect("render");
         let plain = strip_ansi_escapes::strip_str(&rendered);
 
@@ -409,5 +476,107 @@ mod tests {
             "{rendered}"
         );
         assert!(plain.contains("let src_tree = Tree"), "{rendered}");
+    }
+
+    #[test]
+    fn render_build_failure_trims_default_stack() {
+        let source = indoc::indoc! {r#"
+            fn build() {
+              first();
+              second();
+              third();
+            }
+        "#};
+        let source_id = "build.vx";
+        let source_start = source.find("first()").expect("first");
+        let entry_start = source.find("third()").expect("third");
+
+        let failure = BuildFailure {
+            message: "build failed".to_string(),
+            sources: vec![BuildDiagnosticSource {
+                source_id: source_id.to_string(),
+                language: Some("vixen".to_string()),
+                text: source.to_string(),
+            }],
+            reports: vec![
+                BuildDiagnosticReport {
+                    severity: BuildDiagnosticSeverity::Error,
+                    message: "build failed".to_string(),
+                    primary_span: BuildDiagnosticSpan {
+                        source_id: source_id.to_string(),
+                        start: source_start as u32,
+                        end: source_start as u32 + 5,
+                    },
+                    labels: vec![BuildDiagnosticLabel {
+                        span: BuildDiagnosticSpan {
+                            source_id: source_id.to_string(),
+                            start: source_start as u32,
+                            end: source_start as u32 + 5,
+                        },
+                        kind: BuildDiagnosticLabelKind::Primary,
+                        message: Some("this expression failed".to_string()),
+                    }],
+                    notes: Vec::new(),
+                },
+                BuildDiagnosticReport {
+                    severity: BuildDiagnosticSeverity::Advice,
+                    message: "required by this expression".to_string(),
+                    primary_span: BuildDiagnosticSpan {
+                        source_id: source_id.to_string(),
+                        start: source_start as u32,
+                        end: source_start as u32 + 5,
+                    },
+                    labels: vec![],
+                    notes: Vec::new(),
+                },
+                BuildDiagnosticReport {
+                    severity: BuildDiagnosticSeverity::Advice,
+                    message: "required by this expression".to_string(),
+                    primary_span: BuildDiagnosticSpan {
+                        source_id: source_id.to_string(),
+                        start: source_start as u32 + 9,
+                        end: source_start as u32 + 15,
+                    },
+                    labels: vec![],
+                    notes: Vec::new(),
+                },
+                BuildDiagnosticReport {
+                    severity: BuildDiagnosticSeverity::Advice,
+                    message: "while evaluating build entry".to_string(),
+                    primary_span: BuildDiagnosticSpan {
+                        source_id: source_id.to_string(),
+                        start: entry_start as u32,
+                        end: entry_start as u32 + 5,
+                    },
+                    labels: vec![],
+                    notes: Vec::new(),
+                },
+            ],
+        };
+
+        let trimmed = strip_ansi_escapes::strip_str(
+            &render_build_failure(&failure, false).expect("render trimmed"),
+        );
+        assert_eq!(trimmed.matches("Advice:").count(), 2, "{trimmed}");
+        assert_eq!(
+            trimmed.matches("required by this expression").count(),
+            1,
+            "{trimmed}"
+        );
+        assert_eq!(
+            trimmed.matches("while evaluating build entry").count(),
+            1,
+            "{trimmed}"
+        );
+
+        let full = strip_ansi_escapes::strip_str(
+            &render_build_failure(&failure, true).expect("render full"),
+        );
+        assert_eq!(full.matches("Advice:").count(), 3, "{full}");
+        assert_eq!(
+            full.matches("required by this expression").count(),
+            2,
+            "{full}"
+        );
     }
 }

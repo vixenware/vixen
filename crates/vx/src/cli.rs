@@ -53,6 +53,10 @@ pub(crate) struct BuildArgs {
     #[facet(args::named, args::short = 'f')]
     pub(crate) file: Option<String>,
 
+    /// Show the full evaluation stack for build failures
+    #[facet(args::named)]
+    pub(crate) full_stack: bool,
+
     /// Build in release mode
     #[facet(args::named, args::short = 'r')]
     pub(crate) release: bool,

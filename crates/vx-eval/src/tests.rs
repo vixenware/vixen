@@ -2376,6 +2376,109 @@ fn missing_file_failures_keep_source_provenance_in_demand_chain() {
 }
 
 #[test]
+fn exec_handlers_receive_source_provenance_in_demand_chain() {
+    let source = r#"
+fn observe(process: Process, tree: Tree) { process.exit_code }
+
+fn build(input: Blob) {
+  exec ["/bin/true", input] where { observer: observe }
+}
+"#;
+    let parse = vx_parser::parse(source);
+    assert_eq!(parse.errors(), []);
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().nth(1).expect("build function item") {
+        vx_parser::Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let outer_range = match function.body().expect("function body").statements().next() {
+        Some(vx_parser::Stmt::Expr(vx_parser::Expr::Where(where_expr))) => {
+            where_expr.syntax().text_range()
+        }
+        other => panic!("expected parsed where expr, got {other:?}"),
+    };
+    let captured = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let engine = engine_with_source_id(source, "/workspace/build.vx").with_exec_handler(Arc::new(
+        move |request| {
+            *sink.lock().unwrap() = Some(request);
+            Ok(Value::U64(0))
+        },
+    ));
+
+    let value = engine
+        .call("build", vec![Value::Blob(BlobValue::from_string("hello"))])
+        .unwrap();
+    assert_eq!(value, Value::U64(0));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("exec request should be captured");
+    let call_entry = request
+        .demand_chain
+        .entries
+        .iter()
+        .find(|entry| entry.description == "call(..)")
+        .expect("call demand entry");
+    let provenance = call_entry.provenance.as_ref().expect("call provenance");
+    assert_eq!(provenance.source_id.as_ref(), "/workspace/build.vx");
+    assert_eq!(provenance.label, "call(..)");
+    assert_eq!(provenance.span.start, u32::from(outer_range.start()));
+    assert_eq!(provenance.span.end, u32::from(outer_range.end()));
+}
+
+#[test]
+fn discover_handlers_receive_source_provenance_in_demand_chain() {
+    let source = r#"
+fn probe() {
+  discover(executor_class("default"), (host) => host.read("/tmp/tool"))
+}
+"#;
+    let parse = vx_parser::parse(source);
+    assert_eq!(parse.errors(), []);
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("probe function item") {
+        vx_parser::Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let parsed_outer_call = match function.body().expect("function body").statements().next() {
+        Some(vx_parser::Stmt::Expr(vx_parser::Expr::Call(call))) => call,
+        other => panic!("expected parsed call, got {other:?}"),
+    };
+    let outer_range = parsed_outer_call.syntax().text_range();
+    let captured = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let engine = engine_with_source_id(source, "/workspace/build.vx").with_discover_handler(
+        Arc::new(move |request| {
+            *sink.lock().unwrap() = Some(request);
+            Ok(Value::Blob(BlobValue::from_string("probe result")))
+        }),
+    );
+
+    let value = engine.call("probe", vec![]).unwrap();
+    assert_eq!(value, Value::Blob(BlobValue::from_string("probe result")));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("discover request should be captured");
+    let call_entry = request
+        .demand_chain
+        .entries
+        .iter()
+        .find(|entry| entry.description == "call(..)")
+        .expect("call demand entry");
+    let provenance = call_entry.provenance.as_ref().expect("call provenance");
+    assert_eq!(provenance.source_id.as_ref(), "/workspace/build.vx");
+    assert_eq!(provenance.label, "call(..)");
+    assert_eq!(provenance.span.start, u32::from(outer_range.start()));
+    assert_eq!(provenance.span.end, u32::from(outer_range.end()));
+}
+
+#[test]
 // r[verify eval.concurrency]
 fn independent_children_are_forced_concurrently() {
     let engine = engine("fn pair(x: U64, y: U64) { Pair { left: x, right: y } }");
