@@ -2218,16 +2218,14 @@ impl Engine {
             ));
         };
 
-        let (first, mut obligations) =
-            self.split_obligations(self.force_value_shallow(first.clone())?);
+        let (first, mut obligations) = self.split_obligations(self.force_value(first.clone())?);
         let Value::Tree(mut merged) = first else {
             return Err(self.type_error("array.merge expects Tree items"));
         };
         obligations.extend(receiver_obligations);
 
         for item in iter {
-            let (item, item_obligations) =
-                self.split_obligations(self.force_value_shallow(item.clone())?);
+            let (item, item_obligations) = self.split_obligations(self.force_value(item.clone())?);
             let Value::Tree(tree) = item else {
                 return Err(self.type_error("array.merge expects Tree items"));
             };

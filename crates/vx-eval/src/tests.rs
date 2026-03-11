@@ -652,10 +652,11 @@ printf 'artifact\n' > "$out"
     let Value::Array(items) = value else {
         panic!("expected Array, got {value:?}");
     };
+    let type_names = items.iter().map(treeish_type_name).collect::<Vec<_>>();
     assert!(
         items.iter().all(is_treeish),
         "expected tree-like items, got {:?}",
-        items.iter().map(treeish_type_name).collect::<Vec<_>>()
+        type_names
     );
 }
 
@@ -736,6 +737,553 @@ printf 'artifact\n' > "$out"
     )
     .unwrap();
     fs::write(&ar_script, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(&ranlib_script, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        for script in [&cc_script, &ar_script, &ranlib_script] {
+            let mut perms = fs::metadata(script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(script, perms).unwrap();
+        }
+    }
+
+    let _env_guard = ENV_MUTEX.lock().unwrap();
+    let old_path = std::env::var_os("PATH");
+    let mut path_entries = vec![tools_dir.as_os_str().to_os_string()];
+    if let Some(existing) = &old_path {
+        path_entries.extend(std::env::split_paths(existing).map(|p| p.into_os_string()));
+    }
+    let joined = std::env::join_paths(path_entries).unwrap();
+    unsafe {
+        std::env::set_var("PATH", &joined);
+    }
+
+    let result = engine.call(
+        "build",
+        vec![
+            Value::Path(PathValue::new(workspace.to_string_lossy())),
+            Value::Array(Arc::from([Value::String(Arc::from("build"))])),
+            Value::Map(MapValue {
+                entries: Arc::from([]),
+            }),
+        ],
+    );
+
+    match old_path {
+        Some(path) => unsafe {
+            std::env::set_var("PATH", path);
+        },
+        None => unsafe {
+            std::env::remove_var("PATH");
+        },
+    }
+
+    let value = result.unwrap();
+    assert!(
+        matches!(value, Value::Tree(_)),
+        "expected Tree, got {value:?}"
+    );
+}
+
+#[test]
+fn lua_sketch_archive_returns_tree() {
+    let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
+    let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
+    let source = source.replace(
+        "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree {\n    @bin/lua: lua_exe,\n    @lib/liblua.a: liblua,\n  }\n",
+        "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n  liblua\n",
+    );
+    let engine = engine(&source);
+
+    let tempdir = TempDir::new().unwrap();
+    let workspace = tempdir.path();
+    let src_dir = workspace.join("zoo/lua-src");
+    fs::create_dir_all(&src_dir).unwrap();
+
+    let sources = [
+        "lapi.c",
+        "lcode.c",
+        "lctype.c",
+        "ldebug.c",
+        "ldo.c",
+        "ldump.c",
+        "lfunc.c",
+        "lgc.c",
+        "llex.c",
+        "lmem.c",
+        "lobject.c",
+        "lopcodes.c",
+        "lparser.c",
+        "lstate.c",
+        "lstring.c",
+        "ltable.c",
+        "ltm.c",
+        "lundump.c",
+        "lvm.c",
+        "lzio.c",
+        "ltests.c",
+        "lauxlib.c",
+        "lbaselib.c",
+        "ldblib.c",
+        "liolib.c",
+        "lmathlib.c",
+        "loslib.c",
+        "ltablib.c",
+        "lstrlib.c",
+        "lutf8lib.c",
+        "loadlib.c",
+        "lcorolib.c",
+        "linit.c",
+    ];
+    for file in sources {
+        let stem = file.trim_end_matches(".c");
+        fs::write(src_dir.join(file), format!("int {stem}_dummy = 0;\n")).unwrap();
+    }
+
+    let tools_dir = workspace.join("tools");
+    fs::create_dir_all(&tools_dir).unwrap();
+    let cc_script = tools_dir.join("cc");
+    let ar_script = tools_dir.join("ar");
+    let ranlib_script = tools_dir.join("ranlib");
+    fs::write(
+        &cc_script,
+        r#"#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+printf 'artifact\n' > "$out"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &ar_script,
+        r#"#!/bin/sh
+out="$2"
+mkdir -p "$(dirname "$out")"
+printf 'archive\n' > "$out"
+"#,
+    )
+    .unwrap();
+    fs::write(&ranlib_script, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        for script in [&cc_script, &ar_script, &ranlib_script] {
+            let mut perms = fs::metadata(script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(script, perms).unwrap();
+        }
+    }
+
+    let _env_guard = ENV_MUTEX.lock().unwrap();
+    let old_path = std::env::var_os("PATH");
+    let mut path_entries = vec![tools_dir.as_os_str().to_os_string()];
+    if let Some(existing) = &old_path {
+        path_entries.extend(std::env::split_paths(existing).map(|p| p.into_os_string()));
+    }
+    let joined = std::env::join_paths(path_entries).unwrap();
+    unsafe {
+        std::env::set_var("PATH", &joined);
+    }
+
+    let result = engine.call(
+        "build",
+        vec![
+            Value::Path(PathValue::new(workspace.to_string_lossy())),
+            Value::Array(Arc::from([Value::String(Arc::from("build"))])),
+            Value::Map(MapValue {
+                entries: Arc::from([]),
+            }),
+        ],
+    );
+
+    match old_path {
+        Some(path) => unsafe {
+            std::env::set_var("PATH", path);
+        },
+        None => unsafe {
+            std::env::remove_var("PATH");
+        },
+    }
+
+    let value = result.unwrap();
+    assert!(
+        matches!(value, Value::Tree(_)),
+        "expected Tree, got {value:?}"
+    );
+}
+
+#[test]
+fn lua_sketch_link_input_array_contains_tree_items() {
+    let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
+    let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
+    let source = source.replace(
+        "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree {\n    @bin/lua: lua_exe,\n    @lib/liblua.a: liblua,\n  }\n",
+        "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n  [compile @lua.c, liblua]\n",
+    );
+    let engine = engine(&source);
+
+    let tempdir = TempDir::new().unwrap();
+    let workspace = tempdir.path();
+    let src_dir = workspace.join("zoo/lua-src");
+    fs::create_dir_all(&src_dir).unwrap();
+
+    let sources = [
+        "lapi.c",
+        "lcode.c",
+        "lctype.c",
+        "ldebug.c",
+        "ldo.c",
+        "ldump.c",
+        "lfunc.c",
+        "lgc.c",
+        "llex.c",
+        "lmem.c",
+        "lobject.c",
+        "lopcodes.c",
+        "lparser.c",
+        "lstate.c",
+        "lstring.c",
+        "ltable.c",
+        "ltm.c",
+        "lundump.c",
+        "lvm.c",
+        "lzio.c",
+        "ltests.c",
+        "lauxlib.c",
+        "lbaselib.c",
+        "ldblib.c",
+        "liolib.c",
+        "lmathlib.c",
+        "loslib.c",
+        "ltablib.c",
+        "lstrlib.c",
+        "lutf8lib.c",
+        "loadlib.c",
+        "lcorolib.c",
+        "linit.c",
+        "lua.c",
+    ];
+    for file in sources {
+        let stem = file.trim_end_matches(".c");
+        fs::write(src_dir.join(file), format!("int {stem}_dummy = 0;\n")).unwrap();
+    }
+
+    let tools_dir = workspace.join("tools");
+    fs::create_dir_all(&tools_dir).unwrap();
+    let cc_script = tools_dir.join("cc");
+    let ar_script = tools_dir.join("ar");
+    let ranlib_script = tools_dir.join("ranlib");
+    fs::write(
+        &cc_script,
+        r#"#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+printf 'artifact\n' > "$out"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &ar_script,
+        r#"#!/bin/sh
+out="$2"
+mkdir -p "$(dirname "$out")"
+printf 'archive\n' > "$out"
+"#,
+    )
+    .unwrap();
+    fs::write(&ranlib_script, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        for script in [&cc_script, &ar_script, &ranlib_script] {
+            let mut perms = fs::metadata(script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(script, perms).unwrap();
+        }
+    }
+
+    let _env_guard = ENV_MUTEX.lock().unwrap();
+    let old_path = std::env::var_os("PATH");
+    let mut path_entries = vec![tools_dir.as_os_str().to_os_string()];
+    if let Some(existing) = &old_path {
+        path_entries.extend(std::env::split_paths(existing).map(|p| p.into_os_string()));
+    }
+    let joined = std::env::join_paths(path_entries).unwrap();
+    unsafe {
+        std::env::set_var("PATH", &joined);
+    }
+
+    let result = engine.call(
+        "build",
+        vec![
+            Value::Path(PathValue::new(workspace.to_string_lossy())),
+            Value::Array(Arc::from([Value::String(Arc::from("build"))])),
+            Value::Map(MapValue {
+                entries: Arc::from([]),
+            }),
+        ],
+    );
+
+    match old_path {
+        Some(path) => unsafe {
+            std::env::set_var("PATH", path);
+        },
+        None => unsafe {
+            std::env::remove_var("PATH");
+        },
+    }
+
+    let value = result.unwrap();
+    let Value::Array(items) = value else {
+        panic!("expected Array, got {value:?}");
+    };
+    assert!(
+        items.iter().all(is_treeish),
+        "expected tree-like items, got {:?}",
+        items.iter().map(treeish_type_name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn lua_sketch_tree_constructor_over_link_inputs_returns_tree() {
+    let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
+    let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
+    let source = source.replace(
+        "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree {\n    @bin/lua: lua_exe,\n    @lib/liblua.a: liblua,\n  }\n",
+        "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n  Tree [compile @lua.c, liblua]\n",
+    );
+    let engine = engine(&source);
+
+    let tempdir = TempDir::new().unwrap();
+    let workspace = tempdir.path();
+    let src_dir = workspace.join("zoo/lua-src");
+    fs::create_dir_all(&src_dir).unwrap();
+
+    let sources = [
+        "lapi.c",
+        "lcode.c",
+        "lctype.c",
+        "ldebug.c",
+        "ldo.c",
+        "ldump.c",
+        "lfunc.c",
+        "lgc.c",
+        "llex.c",
+        "lmem.c",
+        "lobject.c",
+        "lopcodes.c",
+        "lparser.c",
+        "lstate.c",
+        "lstring.c",
+        "ltable.c",
+        "ltm.c",
+        "lundump.c",
+        "lvm.c",
+        "lzio.c",
+        "ltests.c",
+        "lauxlib.c",
+        "lbaselib.c",
+        "ldblib.c",
+        "liolib.c",
+        "lmathlib.c",
+        "loslib.c",
+        "ltablib.c",
+        "lstrlib.c",
+        "lutf8lib.c",
+        "loadlib.c",
+        "lcorolib.c",
+        "linit.c",
+        "lua.c",
+    ];
+    for file in sources {
+        let stem = file.trim_end_matches(".c");
+        fs::write(src_dir.join(file), format!("int {stem}_dummy = 0;\n")).unwrap();
+    }
+
+    let tools_dir = workspace.join("tools");
+    fs::create_dir_all(&tools_dir).unwrap();
+    let cc_script = tools_dir.join("cc");
+    let ar_script = tools_dir.join("ar");
+    let ranlib_script = tools_dir.join("ranlib");
+    fs::write(
+        &cc_script,
+        r#"#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+printf 'artifact\n' > "$out"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &ar_script,
+        r#"#!/bin/sh
+out="$2"
+mkdir -p "$(dirname "$out")"
+printf 'archive\n' > "$out"
+"#,
+    )
+    .unwrap();
+    fs::write(&ranlib_script, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        for script in [&cc_script, &ar_script, &ranlib_script] {
+            let mut perms = fs::metadata(script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(script, perms).unwrap();
+        }
+    }
+
+    let _env_guard = ENV_MUTEX.lock().unwrap();
+    let old_path = std::env::var_os("PATH");
+    let mut path_entries = vec![tools_dir.as_os_str().to_os_string()];
+    if let Some(existing) = &old_path {
+        path_entries.extend(std::env::split_paths(existing).map(|p| p.into_os_string()));
+    }
+    let joined = std::env::join_paths(path_entries).unwrap();
+    unsafe {
+        std::env::set_var("PATH", &joined);
+    }
+
+    let result = engine.call(
+        "build",
+        vec![
+            Value::Path(PathValue::new(workspace.to_string_lossy())),
+            Value::Array(Arc::from([Value::String(Arc::from("build"))])),
+            Value::Map(MapValue {
+                entries: Arc::from([]),
+            }),
+        ],
+    );
+
+    match old_path {
+        Some(path) => unsafe {
+            std::env::set_var("PATH", path);
+        },
+        None => unsafe {
+            std::env::remove_var("PATH");
+        },
+    }
+
+    let value = result.unwrap();
+    assert!(
+        matches!(value, Value::Tree(_)),
+        "expected Tree, got {value:?}"
+    );
+}
+
+#[test]
+fn lua_sketch_link_returns_tree() {
+    let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
+    let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
+    let source = source.replace(
+        "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree {\n    @bin/lua: lua_exe,\n    @lib/liblua.a: liblua,\n  }\n",
+        "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n  lua_exe\n",
+    );
+    let engine = engine(&source);
+
+    let tempdir = TempDir::new().unwrap();
+    let workspace = tempdir.path();
+    let src_dir = workspace.join("zoo/lua-src");
+    fs::create_dir_all(&src_dir).unwrap();
+
+    let sources = [
+        "lapi.c",
+        "lcode.c",
+        "lctype.c",
+        "ldebug.c",
+        "ldo.c",
+        "ldump.c",
+        "lfunc.c",
+        "lgc.c",
+        "llex.c",
+        "lmem.c",
+        "lobject.c",
+        "lopcodes.c",
+        "lparser.c",
+        "lstate.c",
+        "lstring.c",
+        "ltable.c",
+        "ltm.c",
+        "lundump.c",
+        "lvm.c",
+        "lzio.c",
+        "ltests.c",
+        "lauxlib.c",
+        "lbaselib.c",
+        "ldblib.c",
+        "liolib.c",
+        "lmathlib.c",
+        "loslib.c",
+        "ltablib.c",
+        "lstrlib.c",
+        "lutf8lib.c",
+        "loadlib.c",
+        "lcorolib.c",
+        "linit.c",
+        "lua.c",
+    ];
+    for file in sources {
+        let stem = file.trim_end_matches(".c");
+        fs::write(src_dir.join(file), format!("int {stem}_dummy = 0;\n")).unwrap();
+    }
+
+    let tools_dir = workspace.join("tools");
+    fs::create_dir_all(&tools_dir).unwrap();
+    let cc_script = tools_dir.join("cc");
+    let ar_script = tools_dir.join("ar");
+    let ranlib_script = tools_dir.join("ranlib");
+    fs::write(
+        &cc_script,
+        r#"#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
+mkdir -p "$(dirname "$out")"
+printf 'artifact\n' > "$out"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &ar_script,
+        r#"#!/bin/sh
+out="$2"
+mkdir -p "$(dirname "$out")"
+printf 'archive\n' > "$out"
+"#,
+    )
+    .unwrap();
     fs::write(&ranlib_script, "#!/bin/sh\nexit 0\n").unwrap();
     #[cfg(unix)]
     {
