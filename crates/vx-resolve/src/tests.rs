@@ -1397,6 +1397,29 @@ fn lua_sketch_resolves_and_typechecks() {
 }
 
 #[test]
+fn cargo_resolve_sketch_resolves_and_typechecks() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cargo-resolve.vx");
+    let file = parse_file_path(&path);
+
+    let resolution = resolve_with_stdlib(&file);
+    assert!(
+        resolution.errors.is_empty(),
+        "resolve errors in {}: {:?}",
+        path.display(),
+        resolution.errors
+    );
+
+    let types = collect_types_with_stdlib(&file);
+    let checked = crate::type_check(&file, &resolution, &types);
+    assert!(
+        checked.errors.is_empty(),
+        "type errors in {}: {:?}",
+        path.display(),
+        checked.errors
+    );
+}
+
+#[test]
 fn pipe_placeholder_does_not_produce_resolve_errors() {
     let file = parse_file(
         r#"
@@ -1728,6 +1751,69 @@ fn main(s: String) {
     let types = collect_types_with_stdlib(&file);
     let checked = crate::type_check(&file, &resolution, &types);
     assert!(checked.errors.is_empty(), "errors: {:?}", checked.errors);
+}
+
+#[test]
+fn option_unwrap_or_returns_inner_type() {
+    let src = r#"
+fn main(name: String?) {
+    name.unwrap_or("fallback")
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, r#"name.unwrap_or("fallback")"#);
+    assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::String)));
+}
+
+#[test]
+fn string_slice_accepts_range_argument() {
+    let src = r#"
+fn main(name: String) {
+    name.slice(0..1)
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, "name.slice(0..1)");
+    assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::String)));
+}
+
+#[test]
+fn tuple_destructuring_let_binds_element_types() {
+    let src = r#"
+fn main(pair: (String, String)) {
+    let (dep, feat) = pair;
+    dep.ends_with("?");
+    feat.len()
+}
+"#;
+    let result = type_check(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let ends_with_ty = find_expr_type(&result, src, r#"dep.ends_with("?")"#);
+    assert_eq!(ends_with_ty, Some(Ty::Scalar(vx_types::Scalar::Bool)));
+
+    let feat_len_ty = find_expr_type(&result, src, "feat.len()");
+    assert_eq!(feat_len_ty, Some(Ty::Scalar(vx_types::Scalar::U64)));
+}
+
+#[test]
+fn array_filter_map_any_group_by_and_reduce_typecheck() {
+    let src = r#"
+struct Item {
+    key: String,
+    value: String,
+}
+
+fn main(items: Array[Item]) {
+    let filtered = items.filter_map((item) => Some(item.value)).to_array();
+    let present = items.any((item) => item.key == "dep");
+    let grouped = items.group_by((item) => item.key);
+    let reduced = grouped.map((key, group) => group.reduce((left, right) => left)).to_array();
+    (filtered, present, reduced)
+}
+"#;
+    let result = type_check(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 }
 
 // r[type.error.arg_mismatch] — host.read(123) gets a type diagnostic

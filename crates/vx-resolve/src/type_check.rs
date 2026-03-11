@@ -170,13 +170,17 @@ impl<'a> ExprTyper<'a> {
                     // Prefer the annotation type if present, otherwise use inferred
                     let ty = annotation_ty.unwrap_or(inferred_ty);
                     if !ty.is_poison() {
-                        if let Some(name_tok) = let_stmt.name() {
+                        if let Some(pattern) = let_stmt.pattern() {
+                            self.type_pattern(&pattern, &ty);
+                        } else if let Some(name_tok) = let_stmt.name() {
                             self.binding_types
                                 .insert(self.span(name_tok.text_range()), ty);
                         }
                     }
                 } else if let Some(ty) = annotation_ty {
-                    if let Some(name_tok) = let_stmt.name() {
+                    if let Some(pattern) = let_stmt.pattern() {
+                        self.type_pattern(&pattern, &ty);
+                    } else if let Some(name_tok) = let_stmt.name() {
                         self.binding_types
                             .insert(self.span(name_tok.text_range()), ty);
                     }

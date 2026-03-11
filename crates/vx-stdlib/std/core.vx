@@ -6,6 +6,8 @@ type Path;
 type Blob;
 /// Raw bytes not yet committed or interpreted as a file.
 type Bytes;
+/// A slice/range descriptor for collection and string operations.
+type Range;
 /// Opaque directory content.
 type Tree;
 /// A path-like exec argument carrying implicit mount provenance.
@@ -28,6 +30,11 @@ enum Option[T] {
     value: T,
   },
   struct None,
+}
+
+namespace Option[T] {
+  /// Return the inner value, or `default` if the option is empty.
+  fn unwrap_or(self, default: T) -> T;
 }
 
 /// Surface values accepted by `exec` arguments and environment entries.
@@ -84,12 +91,20 @@ namespace Array[T] {
   fn map[U](self, f: Fn(T) -> U) -> Array[U];
   /// Keep the elements for which `pred` returns true.
   fn filter(self, pred: Fn(T) -> Bool) -> Array[T];
+  /// Map and skip empty results in one pass.
+  fn filter_map[U](self, f: Fn(T) -> Option[U]) -> Array[U];
   /// Return the first element for which `pred` returns true.
   fn find(self, pred: Fn(T) -> Bool) -> Option[T];
+  /// Return true if any element satisfies `pred`.
+  fn any(self, pred: Fn(T) -> Bool) -> Bool;
   /// Materialize an array-shaped collection as an array.
   fn to_array(self) -> Array[T];
   /// Build a map by using each element as the key.
   fn to_map[V](self, f: Fn(T) -> V) -> Map[T, V];
+  /// Group elements by a derived key.
+  fn group_by[K](self, f: Fn(T) -> K) -> Map[K, Array[T]];
+  /// Reduce the array using the first element as the initial accumulator.
+  fn reduce(self, f: Fn(T, T) -> T) -> T;
   /// Flatten one level of nested arrays.
   fn flatten(self) -> T;
   /// Merge a list of trees or tree-like fragments into one tree.
