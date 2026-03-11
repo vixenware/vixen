@@ -46,8 +46,6 @@ pub(crate) fn render_build_failure(failure: &BuildFailure, full_stack: bool) -> 
     ))
 }
 
-<<<<<<< HEAD
-    let workspace_root = workspace_root_note(failure);
 fn build_failure_to_diagnostics(failure: &BuildFailure, full_stack: bool) -> Result<Diagnostics> {
     let workspace_root = workspace_root_note(failure);
     let sources = failure
@@ -93,10 +91,7 @@ fn build_failure_to_diagnostics(failure: &BuildFailure, full_stack: bool) -> Res
     Ok(Diagnostics { sources, reports })
 }
 
-fn visible_reports<'a>(
-    failure: &'a BuildFailure,
-    full_stack: bool,
-) -> Vec<&'a BuildDiagnosticReport> {
+fn visible_reports(failure: &BuildFailure, full_stack: bool) -> Vec<&BuildDiagnosticReport> {
     let mut visible = Vec::new();
     let mut index = 0usize;
     while index < failure.reports.len() {
@@ -731,7 +726,7 @@ mod tests {
         };
 
         let trimmed = strip_ansi_escapes::strip_str(
-            &render_build_failure(&failure, false).expect("render trimmed"),
+            render_build_failure(&failure, false).expect("render trimmed"),
         );
         assert_eq!(trimmed.matches("advice:").count(), 2, "{trimmed}");
         assert_eq!(
@@ -746,7 +741,7 @@ mod tests {
         );
 
         let full = strip_ansi_escapes::strip_str(
-            &render_build_failure(&failure, true).expect("render full"),
+            render_build_failure(&failure, true).expect("render full"),
         );
         assert_eq!(full.matches("advice:").count(), 3, "{full}");
         assert_eq!(
@@ -822,14 +817,14 @@ mod tests {
         };
 
         let trimmed = strip_ansi_escapes::strip_str(
-            &render_build_failure(&failure, false).expect("render trimmed"),
+            render_build_failure(&failure, false).expect("render trimmed"),
         );
         let advice_pos = trimmed.find("advice:").expect("advice position");
         let error_pos = trimmed.rfind("error:").expect("error position");
         assert!(advice_pos < error_pos, "{trimmed}");
 
         let full = strip_ansi_escapes::strip_str(
-            &render_build_failure(&failure, true).expect("render full"),
+            render_build_failure(&failure, true).expect("render full"),
         );
         let advice_pos = full.find("advice:").expect("advice position");
         let error_pos = full.rfind("error:").expect("error position");
