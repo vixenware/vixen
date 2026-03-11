@@ -70,6 +70,22 @@ namespace String {
   fn slice(self, range: Range) -> String;
 }
 
+namespace Array[T] {
+  /// Apply `f` to each element.
+  fn map[U](self, f: Fn(T) -> U) -> Array[U];
+  /// Build a map by using each element as the key.
+  fn to_map[V](self, f: Fn(T) -> V) -> Map[T, V];
+  /// Flatten one level of nested arrays.
+  fn flatten(self) -> T;
+  /// Merge a list of trees or tree-like fragments into one tree.
+  fn merge(self) -> Tree;
+}
+
+namespace Map[K, V] {
+  /// Apply `f` to each value while preserving keys.
+  fn map_values[U](self, f: Fn(V) -> U) -> Map[K, U];
+}
+
 namespace Path {
   /// Parse and normalize a path string.
   fn Path(s: String) -> Self;

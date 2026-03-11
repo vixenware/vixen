@@ -15,7 +15,7 @@ use vx_parser::{
 use vx_types::{FnSig, Ty};
 
 use crate::builtins::{
-    builtin_fn_sig, builtin_fn_sigs, builtin_method, builtin_scalar_method,
+    builtin_fn_sig, builtin_fn_sigs, builtin_generic_method, builtin_method, builtin_scalar_method,
     builtin_static_method_sigs, is_builtin_namespace,
 };
 use crate::resolve::NameResolution;
@@ -23,14 +23,14 @@ use crate::scope::{DefKind, Definition};
 use crate::type_collect::TypeCollection;
 
 /// A type error found during expression typing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeError {
     pub range: TextRange,
     pub kind: TypeErrorKind,
 }
 
 /// The kind of type error.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeErrorKind {
     /// Argument type doesn't match parameter type.
     ArgTypeMismatch {
@@ -99,6 +99,12 @@ struct ExprTyper<'a> {
 }
 
 impl<'a> ExprTyper<'a> {
+    fn push_error(&mut self, error: TypeError) {
+        if !self.errors.contains(&error) {
+            self.errors.push(error);
+        }
+    }
+
     fn peel_parens(expr: Expr) -> Expr {
         let mut current = expr;
         while let Expr::Paren(ref paren) = current {
@@ -270,7 +276,15 @@ impl<'a> ExprTyper<'a> {
             DefKind::Function => {
                 // Look up user-declared fn signature
                 if let Some(sig) = self.types.range_to_fn_sig.get(&def.name_range) {
-                    return sig.ret.clone();
+                    return Ty::Function(vx_types::FunctionTy {
+                        params: sig
+                            .positional_params
+                            .iter()
+                            .map(|param| param.ty.clone())
+                            .collect(),
+                        ret: Box::new(sig.ret.clone()),
+                        capabilities: sig.capabilities.clone(),
+                    });
                 }
                 Ty::Poison
             }
@@ -367,7 +381,7 @@ impl<'a> ExprTyper<'a> {
             let arg_ty = self.infer_expr(&arg_expr);
             if !arg_ty.is_poison() && !param_ty.is_poison() && !types_compatible(&arg_ty, param_ty)
             {
-                self.errors.push(TypeError {
+                self.push_error(TypeError {
                     range: arg_expr.syntax().text_range(),
                     kind: TypeErrorKind::ArgTypeMismatch {
                         param_name: name,
@@ -493,6 +507,7 @@ impl<'a> ExprTyper<'a> {
 
                 if let Ty::Builtin(ref builtin) = receiver_ty {
                     if let Some(method_sig) = builtin_method(builtin, &method_name) {
+                        self.populate_method_callback_param_types(call, &method_sig.params);
                         // Type-check method arguments
                         self.check_method_args(call, &method_sig.params, &method_name);
                         self.infer_extra_call_args(call, method_sig.params.len());
@@ -502,13 +517,22 @@ impl<'a> ExprTyper<'a> {
                 } else if let Ty::Scalar(ref scalar) = receiver_ty
                     && let Some(method_sig) = builtin_scalar_method(scalar, &method_name)
                 {
+                    self.populate_method_callback_param_types(call, &method_sig.params);
                     self.check_method_args(call, &method_sig.params, &method_name);
                     self.infer_extra_call_args(call, method_sig.params.len());
                     self.infer_all_keyword_arg_exprs(call);
                     return method_sig.ret.clone();
+                } else if let Some(method_sig) =
+                    self.infer_generic_method_call_sig(&receiver_ty, &method_name, call)
+                {
+                    self.populate_method_callback_param_types(call, &method_sig.params);
+                    self.check_method_args(call, &method_sig.params, &method_name);
+                    self.infer_extra_call_args(call, method_sig.params.len());
+                    self.infer_all_keyword_arg_exprs(call);
+                    return method_sig.ret;
                 }
 
-                self.errors.push(TypeError {
+                self.push_error(TypeError {
                     range: field_expr.syntax().text_range(),
                     kind: TypeErrorKind::NoSuchMethod {
                         receiver_ty: receiver_ty.clone(),
@@ -623,6 +647,21 @@ impl<'a> ExprTyper<'a> {
         }
     }
 
+    fn populate_method_callback_param_types(
+        &mut self,
+        call: &CallExpr,
+        params: &[vx_types::ParamDef],
+    ) {
+        for (arg, param) in call.args().zip(params.iter()) {
+            if let vx_types::Ty::Function(fn_ty) = &param.ty {
+                let arg_expr = arg.expr().map(Self::peel_parens);
+                if let Some(Expr::Closure(closure)) = arg_expr {
+                    self.bind_closure_params(&closure, &fn_ty.params);
+                }
+            }
+        }
+    }
+
     /// Populate closure parameter types for callback slots.
     /// Derives parameter types from the FnSig of the callee.
     fn populate_callback_param_types(&mut self, call: &CallExpr, callee_name: &str) {
@@ -684,7 +723,7 @@ impl<'a> ExprTyper<'a> {
                 let arg_ty = self.infer_expr(&arg_expr);
                 if !arg_ty.is_poison() && !param.ty.is_poison() {
                     if !types_compatible(&arg_ty, &param.ty) {
-                        self.errors.push(TypeError {
+                        self.push_error(TypeError {
                             range: arg_expr.syntax().text_range(),
                             kind: TypeErrorKind::ArgTypeMismatch {
                                 param_name: param.name.clone(),
@@ -713,7 +752,7 @@ impl<'a> ExprTyper<'a> {
             let arg_ty = self.infer_expr(&arg_expr);
             if !arg_ty.is_poison() && !param.ty.is_poison() && !types_compatible(&arg_ty, &param.ty)
             {
-                self.errors.push(TypeError {
+                self.push_error(TypeError {
                     range: arg_expr.syntax().text_range(),
                     kind: TypeErrorKind::ArgTypeMismatch {
                         param_name: param.name.clone(),
@@ -736,7 +775,7 @@ impl<'a> ExprTyper<'a> {
                 let arg_ty = self.infer_expr(&arg_expr);
                 if !arg_ty.is_poison() && !param.ty.is_poison() {
                     if !types_compatible(&arg_ty, &param.ty) {
-                        self.errors.push(TypeError {
+                        self.push_error(TypeError {
                             range: arg_expr.syntax().text_range(),
                             kind: TypeErrorKind::ArgTypeMismatch {
                                 param_name: param.name.clone(),
@@ -786,6 +825,17 @@ impl<'a> ExprTyper<'a> {
         if let Ty::Scalar(ref scalar) = receiver_ty
             && let Some(method_sig) = builtin_scalar_method(scalar, field_name)
         {
+            return Ty::Function(vx_types::FunctionTy {
+                params: method_sig
+                    .params
+                    .into_iter()
+                    .map(|param| param.ty)
+                    .collect(),
+                ret: Box::new(method_sig.ret),
+                capabilities: method_sig.capabilities,
+            });
+        }
+        if let Some(method_sig) = self.instantiate_generic_method(&receiver_ty, field_name, &[]) {
             return Ty::Function(vx_types::FunctionTy {
                 params: method_sig
                     .params
@@ -846,10 +896,24 @@ impl<'a> ExprTyper<'a> {
     }
 
     fn infer_closure(&mut self, closure: &ClosureExpr) -> Ty {
-        if let Some(body) = closure.body() {
-            self.infer_expr(&body);
-        }
-        Ty::Poison
+        let params: Vec<Ty> = closure
+            .parameters()
+            .map(|param| {
+                param
+                    .name()
+                    .and_then(|name| self.closure_param_types.get(&name.text_range()).cloned())
+                    .unwrap_or(Ty::Poison)
+            })
+            .collect();
+        let ret = closure
+            .body()
+            .map(|body| self.infer_expr(&body))
+            .unwrap_or(Ty::Poison);
+        Ty::Function(vx_types::FunctionTy {
+            params,
+            ret: Box::new(ret),
+            capabilities: vec![],
+        })
     }
 
     fn infer_where(&mut self, where_expr: &WhereExpr) -> Ty {
@@ -904,6 +968,12 @@ impl<'a> ExprTyper<'a> {
                 }
                 if let Ty::Scalar(ref scalar) = receiver_ty
                     && let Some(method_sig) = builtin_scalar_method(scalar, &method_name)
+                    && method_sig.params.is_empty()
+                {
+                    return method_sig.ret;
+                }
+                if let Some(method_sig) =
+                    self.instantiate_generic_method(&receiver_ty, &method_name, &[])
                     && method_sig.params.is_empty()
                 {
                     return method_sig.ret;
@@ -1288,6 +1358,65 @@ impl<'a> ExprTyper<'a> {
             capabilities: sig.capabilities,
         }))
     }
+
+    fn infer_generic_method_call_sig(
+        &mut self,
+        receiver_ty: &Ty,
+        method_name: &str,
+        call: &CallExpr,
+    ) -> Option<crate::builtins::MethodSig> {
+        let receiver_bound = self.instantiate_generic_method(receiver_ty, method_name, &[])?;
+        self.populate_method_callback_param_types(call, &receiver_bound.params);
+
+        let arg_tys: Vec<Ty> = call
+            .args()
+            .filter_map(|arg| arg.expr())
+            .map(|arg| self.infer_expr(&arg))
+            .collect();
+
+        self.instantiate_generic_method(receiver_ty, method_name, &arg_tys)
+            .or(Some(receiver_bound))
+    }
+
+    fn instantiate_generic_method(
+        &self,
+        receiver_ty: &Ty,
+        method_name: &str,
+        arg_tys: &[Ty],
+    ) -> Option<crate::builtins::MethodSig> {
+        let template = builtin_generic_method(receiver_ty, method_name)?;
+        let mut substitutions = vec![None; template.type_params.len()];
+        bind_type_params(&template.receiver, receiver_ty, &mut substitutions);
+
+        let mut params: Vec<vx_types::ParamDef> = template
+            .params
+            .iter()
+            .map(|param| vx_types::ParamDef {
+                name: param.name.clone(),
+                ty: substitute_bound_type_params(&param.ty, &substitutions),
+            })
+            .collect();
+
+        for (param, arg_ty) in params.iter().zip(arg_tys.iter()) {
+            infer_type_params(&param.ty, arg_ty, &mut substitutions);
+        }
+
+        params = template
+            .params
+            .iter()
+            .map(|param| vx_types::ParamDef {
+                name: param.name.clone(),
+                ty: substitute_bound_type_params(&param.ty, &substitutions),
+            })
+            .collect();
+
+        Some(crate::builtins::MethodSig {
+            name: template.name,
+            params,
+            ret: substitute_bound_type_params(&template.ret, &substitutions),
+            capabilities: template.capabilities,
+        })
+    }
 }
 
 fn builtin_property_ty(receiver_ty: &Ty, field_name: &str) -> Option<Ty> {
@@ -1296,10 +1425,10 @@ fn builtin_property_ty(receiver_ty: &Ty, field_name: &str) -> Option<Ty> {
             Some(Ty::Scalar(vx_types::Scalar::U64))
         }
         (Ty::Builtin(vx_types::Builtin::Process), "stdout") => {
-            Some(Ty::Builtin(vx_types::Builtin::Blob))
+            Some(Ty::Stream(Box::new(Ty::Builtin(vx_types::Builtin::Blob))))
         }
         (Ty::Builtin(vx_types::Builtin::Process), "stderr") => {
-            Some(Ty::Builtin(vx_types::Builtin::Blob))
+            Some(Ty::Stream(Box::new(Ty::Builtin(vx_types::Builtin::Blob))))
         }
         _ => None,
     }
@@ -1370,4 +1499,96 @@ fn substitute_type_params(ty: &Ty, substitutions: &[Ty]) -> Ty {
         }),
         _ => ty.clone(),
     }
+}
+
+fn substitute_bound_type_params(ty: &Ty, substitutions: &[Option<Ty>]) -> Ty {
+    match ty {
+        Ty::Param(param) => substitutions
+            .get(param.index as usize)
+            .and_then(|ty| ty.clone())
+            .unwrap_or_else(|| ty.clone()),
+        Ty::Optional(inner) => {
+            Ty::Optional(Box::new(substitute_bound_type_params(inner, substitutions)))
+        }
+        Ty::Array(inner) => Ty::Array(Box::new(substitute_bound_type_params(inner, substitutions))),
+        Ty::Map(key, value) => Ty::Map(
+            Box::new(substitute_bound_type_params(key, substitutions)),
+            Box::new(substitute_bound_type_params(value, substitutions)),
+        ),
+        Ty::Stream(inner) => {
+            Ty::Stream(Box::new(substitute_bound_type_params(inner, substitutions)))
+        }
+        Ty::Tuple(tuple) => Ty::Tuple(vx_types::TupleTy {
+            elements: tuple
+                .elements
+                .iter()
+                .map(|element| substitute_bound_type_params(element, substitutions))
+                .collect(),
+        }),
+        Ty::Function(function) => Ty::Function(vx_types::FunctionTy {
+            params: function
+                .params
+                .iter()
+                .map(|param| substitute_bound_type_params(param, substitutions))
+                .collect(),
+            ret: Box::new(substitute_bound_type_params(&function.ret, substitutions)),
+            capabilities: function.capabilities.clone(),
+        }),
+        _ => ty.clone(),
+    }
+}
+
+fn bind_type_params(expected: &Ty, actual: &Ty, substitutions: &mut [Option<Ty>]) {
+    match expected {
+        Ty::Param(param) => {
+            let slot = &mut substitutions[param.index as usize];
+            if slot.is_none() {
+                *slot = Some(actual.clone());
+            }
+        }
+        Ty::Optional(inner) => {
+            if let Ty::Optional(actual_inner) = actual {
+                bind_type_params(inner, actual_inner, substitutions);
+            }
+        }
+        Ty::Array(inner) => {
+            if let Ty::Array(actual_inner) = actual {
+                bind_type_params(inner, actual_inner, substitutions);
+            }
+        }
+        Ty::Map(expected_key, expected_value) => {
+            if let Ty::Map(actual_key, actual_value) = actual {
+                bind_type_params(expected_key, actual_key, substitutions);
+                bind_type_params(expected_value, actual_value, substitutions);
+            }
+        }
+        Ty::Stream(inner) => {
+            if let Ty::Stream(actual_inner) = actual {
+                bind_type_params(inner, actual_inner, substitutions);
+            }
+        }
+        Ty::Tuple(expected_tuple) => {
+            if let Ty::Tuple(actual_tuple) = actual {
+                for (expected, actual) in expected_tuple.elements.iter().zip(&actual_tuple.elements)
+                {
+                    bind_type_params(expected, actual, substitutions);
+                }
+            }
+        }
+        Ty::Function(expected_function) => {
+            if let Ty::Function(actual_function) = actual {
+                for (expected, actual) in
+                    expected_function.params.iter().zip(&actual_function.params)
+                {
+                    bind_type_params(expected, actual, substitutions);
+                }
+                bind_type_params(&expected_function.ret, &actual_function.ret, substitutions);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn infer_type_params(expected: &Ty, actual: &Ty, substitutions: &mut [Option<Ty>]) {
+    bind_type_params(expected, actual, substitutions);
 }

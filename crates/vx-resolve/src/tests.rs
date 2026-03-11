@@ -768,7 +768,19 @@ fn type_check(src: &str) -> crate::TypeCheckResult {
 
 fn find_expr_type(result: &crate::TypeCheckResult, src: &str, needle: &str) -> Option<Ty> {
     let offset = src.find(needle)? as u32;
-    let needle_len = needle.len() as u32;
+    find_expr_type_at_offset(result, offset, needle.len() as u32)
+}
+
+fn find_last_expr_type(result: &crate::TypeCheckResult, src: &str, needle: &str) -> Option<Ty> {
+    let offset = src.rfind(needle)? as u32;
+    find_expr_type_at_offset(result, offset, needle.len() as u32)
+}
+
+fn find_expr_type_at_offset(
+    result: &crate::TypeCheckResult,
+    offset: u32,
+    needle_len: u32,
+) -> Option<Ty> {
     // Find the smallest expr_type whose range covers this needle
     result
         .expr_types
@@ -875,6 +887,38 @@ fn main() {
     let result = type_check(src);
     let ty = find_expr_type(&result, src, "proc.exit_code");
     assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::U64)));
+}
+
+#[test]
+fn process_stdout_field_returns_stream_blob() {
+    let src = r#"
+fn main() {
+    exec(["echo"]) where {
+        observer: (proc, tree) => {
+            proc.stdout
+        },
+    };
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, "proc.stdout");
+    assert_eq!(ty, Some(Ty::Stream(Box::new(Ty::Builtin(Builtin::Blob)))));
+}
+
+#[test]
+fn process_stderr_field_returns_stream_blob() {
+    let src = r#"
+fn main() {
+    exec(["echo"]) where {
+        observer: (proc, tree) => {
+            proc.stderr
+        },
+    };
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, "proc.stderr");
+    assert_eq!(ty, Some(Ty::Stream(Box::new(Ty::Builtin(Builtin::Blob)))));
 }
 
 // r[type.builtin.blob] — blob.utf8() returns String
@@ -1004,6 +1048,116 @@ fn main(s: String) {
     let result = type_check(src);
     let ty = find_expr_type(&result, src, "s.len()");
     assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::U64)));
+}
+
+#[test]
+fn function_name_ref_is_a_function_value() {
+    let src = r#"
+fn compile(path: Path) -> Tree {
+    Tree(path)
+}
+
+fn main() {
+    let f = compile;
+    f
+}
+"#;
+    let result = type_check(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let ty = find_last_expr_type(&result, src, "compile");
+    assert!(matches!(ty, Some(Ty::Function(_))), "got: {ty:?}");
+}
+
+#[test]
+fn array_map_with_named_function_returns_mapped_array() {
+    let src = r#"
+fn compile(path: Path) -> Tree {
+    Tree(path)
+}
+
+fn main(paths: Array[Path]) {
+    paths.map(compile)
+}
+"#;
+    let result = type_check(src);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let compile_ty = find_last_expr_type(&result, src, "compile");
+    assert!(
+        matches!(compile_ty, Some(Ty::Function(_))),
+        "got: {compile_ty:?}"
+    );
+    let ty = find_expr_type(&result, src, "paths.map(compile)");
+    assert_eq!(ty, Some(Ty::Array(Box::new(Ty::Builtin(Builtin::Tree)))));
+}
+
+#[test]
+fn array_to_map_accepts_bound_method_value() {
+    let src = r#"
+fn main() {
+    discover(executor_class("default"), (host) => {
+        ["gcc"].to_map(host.which)
+    })
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, r#"["gcc"].to_map(host.which)"#);
+    assert_eq!(
+        ty,
+        Some(Ty::Map(
+            Box::new(Ty::Scalar(vx_types::Scalar::String)),
+            Box::new(Ty::Scalar(vx_types::Scalar::String)),
+        ))
+    );
+}
+
+#[test]
+fn map_values_closure_param_is_typed_from_value_type() {
+    let src = r#"
+struct Tool {
+    len: U64,
+}
+
+fn main(values: Map[String, String]) {
+    values.map_values((path) => Tool { len: path.len() })
+}
+"#;
+    let result = type_check(src);
+    let path_len_ty = find_expr_type(&result, src, "path.len()");
+    assert_eq!(path_len_ty, Some(Ty::Scalar(vx_types::Scalar::U64)));
+
+    let map_ty = find_expr_type(
+        &result,
+        src,
+        "values.map_values((path) => Tool { len: path.len() })",
+    );
+    assert!(matches!(map_ty, Some(Ty::Map(_, _))), "got: {map_ty:?}");
+}
+
+#[test]
+fn array_flatten_returns_inner_array_type() {
+    let src = r#"
+fn main(parts: Array[Array[String]]) {
+    parts.flatten()
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, "parts.flatten()");
+    assert_eq!(
+        ty,
+        Some(Ty::Array(Box::new(Ty::Scalar(vx_types::Scalar::String))))
+    );
+}
+
+#[test]
+fn array_merge_returns_tree() {
+    let src = r#"
+fn main(parts: Array[Tree]) {
+    parts.merge()
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, "parts.merge()");
+    assert_eq!(ty, Some(Ty::Builtin(Builtin::Tree)));
 }
 
 // r[type.error.arg_mismatch] — host.read(123) gets a type diagnostic

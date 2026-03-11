@@ -29,11 +29,30 @@ pub struct MethodSig {
     pub capabilities: Vec<Capability>,
 }
 
+/// A generic method signature loaded from a stdlib namespace like `Array[T]`.
+#[derive(Clone, Debug)]
+pub struct GenericMethodSig {
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub receiver: Ty,
+    pub params: Vec<ParamDef>,
+    pub ret: Ty,
+    pub capabilities: Vec<Capability>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ContainerKind {
+    Array,
+    Map,
+    Stream,
+}
+
 #[derive(Default)]
 struct BuiltinRegistry {
     fns: HashMap<String, Vec<FnSig>>,
     methods: HashMap<(Builtin, String), MethodSig>,
     scalar_methods: HashMap<(Scalar, String), MethodSig>,
+    generic_methods: HashMap<(ContainerKind, String), GenericMethodSig>,
     static_methods: HashMap<(String, String), Vec<FnSig>>,
     fn_names: Vec<String>,
     method_names: HashMap<Builtin, Vec<String>>,
@@ -118,6 +137,21 @@ pub fn builtin_scalar_method(receiver: &Scalar, method_name: &str) -> Option<Met
         .cloned()
 }
 
+/// Look up a generic method template on a collection type.
+pub fn builtin_generic_method(receiver: &Ty, method_name: &str) -> Option<GenericMethodSig> {
+    let kind = match receiver {
+        Ty::Array(_) => ContainerKind::Array,
+        Ty::Map(_, _) => ContainerKind::Map,
+        Ty::Stream(_) => ContainerKind::Stream,
+        _ => return None,
+    };
+
+    registry()
+        .generic_methods
+        .get(&(kind, method_name.to_string()))
+        .cloned()
+}
+
 /// Check whether a name resolves to a builtin namespace.
 pub fn is_builtin_namespace(name: &str) -> bool {
     registry()
@@ -172,6 +206,7 @@ impl BuiltinRegistry {
         let namespace_name = namespace_name(namespace);
         self.namespace_names.push(namespace_name.clone());
         let receiver = namespace_receiver(namespace);
+        let generic_receiver = namespace_generic_receiver(namespace);
         let Some(body) = namespace.body() else {
             return;
         };
@@ -204,6 +239,17 @@ impl BuiltinRegistry {
                     let sig = collect_method_sig_for_scalar(&fn_decl, receiver);
                     self.scalar_methods
                         .entry((receiver, sig.name.clone()))
+                        .or_insert(sig);
+                } else if let Some((kind, namespace_type_params, receiver_ty)) =
+                    generic_receiver.as_ref()
+                {
+                    let sig = collect_generic_method_sig(
+                        &fn_decl,
+                        receiver_ty.clone(),
+                        namespace_type_params,
+                    );
+                    self.generic_methods
+                        .entry((*kind, sig.name.clone()))
                         .or_insert(sig);
                 }
                 continue;
@@ -281,12 +327,35 @@ fn namespace_scalar_receiver(name: &str) -> Option<Scalar> {
     }
 }
 
+fn namespace_generic_receiver(
+    namespace: &NamespaceDecl,
+) -> Option<(ContainerKind, Vec<String>, Ty)> {
+    let target = namespace.target()?;
+    let name = target.segments().next()?.text().to_string();
+    let type_params = target
+        .type_args()?
+        .types()
+        .map(type_arg_param_name)
+        .collect::<Option<Vec<_>>>()?;
+    let lowerer = TypeLowerer {
+        type_params: &type_params,
+        self_ty: None,
+    };
+    let receiver = lowerer.lower_type_path(&target);
+    let kind = match name.as_str() {
+        "Array" => ContainerKind::Array,
+        "Map" => ContainerKind::Map,
+        "Stream" => ContainerKind::Stream,
+        _ => return None,
+    };
+    Some((kind, type_params, receiver))
+}
+
 fn collect_fn_sig(decl: &FnDecl, self_ty: Option<Builtin>) -> FnSig {
     let type_params = collect_type_param_names(decl.syntax());
     let lowerer = TypeLowerer {
         type_params: &type_params,
-        self_ty,
-        self_scalar: None,
+        self_ty: self_ty.map(Ty::Builtin),
     };
 
     let positional_params = decl
@@ -381,8 +450,7 @@ fn collect_fn_sig_for_scalar(decl: &FnDecl, self_scalar: Scalar) -> FnSig {
     let type_params = collect_type_param_names(decl.syntax());
     let lowerer = TypeLowerer {
         type_params: &type_params,
-        self_ty: None,
-        self_scalar: Some(self_scalar),
+        self_ty: Some(Ty::Scalar(self_scalar)),
     };
 
     let positional_params = decl
@@ -440,6 +508,54 @@ fn collect_fn_sig_for_scalar(decl: &FnDecl, self_scalar: Scalar) -> FnSig {
     }
 }
 
+fn collect_generic_method_sig(
+    decl: &FnDecl,
+    receiver: Ty,
+    namespace_type_params: &[String],
+) -> GenericMethodSig {
+    let fn_type_params = collect_type_param_names(decl.syntax());
+    let mut type_params = namespace_type_params.to_vec();
+    type_params.extend(fn_type_params);
+    let lowerer = TypeLowerer {
+        type_params: &type_params,
+        self_ty: Some(receiver.clone()),
+    };
+
+    let mut params: Vec<ParamDef> = decl
+        .parameters()
+        .filter_map(|param| {
+            let name = param.name()?.text().to_string();
+            let ty = param
+                .slot_type()
+                .and_then(|slot| slot.ty())
+                .map(|ty| lowerer.lower(&ty))
+                .unwrap_or(Ty::Poison);
+            Some(ParamDef { name, ty })
+        })
+        .collect();
+    if !params.is_empty() {
+        params.remove(0);
+    }
+
+    let ret = decl
+        .return_type()
+        .and_then(|ret| ret.ty())
+        .map(|ty| lowerer.lower(&ty))
+        .unwrap_or(Ty::Unit);
+
+    GenericMethodSig {
+        name: decl
+            .name()
+            .map(|name| name.text().to_string())
+            .unwrap_or_default(),
+        type_params,
+        receiver,
+        params,
+        ret,
+        capabilities: collect_capabilities(decl),
+    }
+}
+
 fn collect_type_param_names(node: &vx_parser::SyntaxNode) -> Vec<String> {
     node.children()
         .find(|child| child.kind() == SyntaxKind::TYPE_PARAM_LIST)
@@ -451,6 +567,18 @@ fn collect_type_param_names(node: &vx_parser::SyntaxNode) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn type_arg_param_name(ty: vx_parser::Type) -> Option<String> {
+    let vx_parser::Type::Path(path) = ty else {
+        return None;
+    };
+    let mut segments = path.segments();
+    let first = segments.next()?;
+    if segments.next().is_some() || path.type_args().is_some() {
+        return None;
+    }
+    Some(first.text().to_string())
 }
 
 fn collect_capabilities(decl: &FnDecl) -> Vec<Capability> {
@@ -469,8 +597,7 @@ fn collect_capabilities(decl: &FnDecl) -> Vec<Capability> {
 
 struct TypeLowerer<'a> {
     type_params: &'a [String],
-    self_ty: Option<Builtin>,
-    self_scalar: Option<Scalar>,
+    self_ty: Option<Ty>,
 }
 
 impl TypeLowerer<'_> {
@@ -548,14 +675,9 @@ impl TypeLowerer<'_> {
         };
 
         if name == "Self"
-            && let Some(self_ty) = self.self_ty
+            && let Some(self_ty) = &self.self_ty
         {
-            return Ty::Builtin(self_ty);
-        }
-        if name == "Self"
-            && let Some(self_scalar) = self.self_scalar
-        {
-            return Ty::Scalar(self_scalar);
+            return self_ty.clone();
         }
 
         if let Some(index) = self.type_params.iter().position(|param| param == name) {
@@ -631,7 +753,6 @@ fn fallback_builtin_fn_names() -> &'static [&'static str] {
 
 fn fallback_builtin_method_names(receiver: &Builtin) -> &'static [&'static str] {
     match receiver {
-        Builtin::Process => &["exit_code", "stdout", "stderr"],
         _ => &[],
     }
 }
@@ -736,24 +857,6 @@ fn fallback_builtin_fn_sig(name: &str) -> Option<FnSig> {
 
 fn fallback_builtin_method(receiver: &Builtin, method_name: &str) -> Option<MethodSig> {
     match (receiver, method_name) {
-        (Builtin::Process, "exit_code") => Some(MethodSig {
-            name: "exit_code".into(),
-            params: vec![],
-            ret: Ty::Scalar(Scalar::U64),
-            capabilities: vec![],
-        }),
-        (Builtin::Process, "stdout") => Some(MethodSig {
-            name: "stdout".into(),
-            params: vec![],
-            ret: Ty::Builtin(Builtin::Blob),
-            capabilities: vec![],
-        }),
-        (Builtin::Process, "stderr") => Some(MethodSig {
-            name: "stderr".into(),
-            params: vec![],
-            ret: Ty::Builtin(Builtin::Blob),
-            capabilities: vec![],
-        }),
         _ => None,
     }
 }
@@ -763,8 +866,8 @@ mod tests {
     use vx_types::Scalar;
 
     use super::{
-        builtin_fn_sig, builtin_fn_sigs, builtin_method, builtin_scalar_method,
-        builtin_static_method_sigs, is_builtin_namespace,
+        builtin_fn_sig, builtin_fn_sigs, builtin_generic_method, builtin_method,
+        builtin_scalar_method, builtin_static_method_sigs, is_builtin_namespace,
     };
 
     #[test]
@@ -792,6 +895,38 @@ mod tests {
 
         let len = builtin_scalar_method(&Scalar::String, "len").expect("string.len");
         assert_eq!(len.ret, vx_types::Ty::Scalar(Scalar::U64));
+    }
+
+    #[test]
+    fn stdlib_collection_methods_are_loaded() {
+        let array_map = builtin_generic_method(
+            &vx_types::Ty::Array(Box::new(vx_types::Ty::Scalar(Scalar::String))),
+            "map",
+        )
+        .expect("array.map");
+        assert_eq!(array_map.type_params, vec!["T", "U"]);
+        assert!(matches!(
+            array_map.params[0].ty,
+            vx_types::Ty::Function(vx_types::FunctionTy { .. })
+        ));
+        assert!(matches!(
+            array_map.ret,
+            vx_types::Ty::Array(inner) if matches!(*inner, vx_types::Ty::Param(_))
+        ));
+
+        let map_values = builtin_generic_method(
+            &vx_types::Ty::Map(
+                Box::new(vx_types::Ty::Scalar(Scalar::String)),
+                Box::new(vx_types::Ty::Scalar(Scalar::String)),
+            ),
+            "map_values",
+        )
+        .expect("map.map_values");
+        assert_eq!(map_values.type_params, vec!["K", "V", "U"]);
+        assert!(matches!(
+            map_values.ret,
+            vx_types::Ty::Map(_, value) if matches!(*value, vx_types::Ty::Param(_))
+        ));
     }
 
     #[test]

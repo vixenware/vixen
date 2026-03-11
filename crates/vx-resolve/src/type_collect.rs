@@ -481,6 +481,13 @@ impl<'a> TypeResolver<'a> {
             "Bool" => return Ty::Scalar(vx_types::Scalar::Bool),
             "String" => return Ty::Scalar(vx_types::Scalar::String),
             "Unit" => return Ty::Unit,
+            "Path" => return Ty::Builtin(vx_types::Builtin::Path),
+            "Blob" => return Ty::Builtin(vx_types::Builtin::Blob),
+            "Tree" => return Ty::Builtin(vx_types::Builtin::Tree),
+            "ExecPath" => return Ty::Builtin(vx_types::Builtin::ExecPath),
+            "Process" => return Ty::Builtin(vx_types::Builtin::Process),
+            "Host" => return Ty::Builtin(vx_types::Builtin::Host),
+            "ExecutorClass" => return Ty::Builtin(vx_types::Builtin::ExecutorClass),
             _ => {}
         }
 
@@ -496,6 +503,10 @@ impl<'a> TypeResolver<'a> {
 
         // Check special built-in generic types
         match name.as_str() {
+            "Option" => {
+                let inner = type_args.into_iter().next().unwrap_or(Ty::Poison);
+                return Ty::Optional(Box::new(inner));
+            }
             "Array" => {
                 let inner = type_args.into_iter().next().unwrap_or(Ty::Poison);
                 return Ty::Array(Box::new(inner));
