@@ -2,20 +2,28 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+mod integration;
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     match args.first().map(|s| s.as_str()) {
         Some("install") => install(),
         Some("bump-roam") => bump_roam(args.get(1).map(|s| s.as_str())),
+        Some("integration") => {
+            if let Err(error) = integration::run(&args[1..]) {
+                eprintln!("{error:#}");
+                std::process::exit(1);
+            }
+        }
         Some(cmd) => {
             eprintln!("Unknown command: {}", cmd);
-            eprintln!("Available commands: install, bump-roam");
+            eprintln!("Available commands: install, bump-roam, integration");
             std::process::exit(1);
         }
         None => {
             eprintln!("Usage: cargo xtask <command>");
-            eprintln!("Available commands: install, bump-roam");
+            eprintln!("Available commands: install, bump-roam, integration");
             std::process::exit(1);
         }
     }
@@ -175,7 +183,7 @@ fn bump_roam(rev: Option<&str>) {
 
 /// Find the workspace root by walking up from the current directory
 /// looking for a Cargo.toml with `[workspace]`.
-fn find_workspace_root() -> Option<PathBuf> {
+pub(crate) fn find_workspace_root() -> Option<PathBuf> {
     let mut dir = std::env::current_dir().ok()?;
 
     loop {

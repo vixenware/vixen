@@ -72,6 +72,23 @@ vixen explicitly rejects (with clear errors):
 RUST_LOG=vx_daemon=debug vx build
 ```
 
+## Tests
+
+Ordinary Rust tests still run in nextest:
+
+```bash
+cargo nextest run
+```
+
+Full-stack daemon/VFS scenarios run through `xtask` instead of nextest:
+
+```bash
+cargo run -p xtask -- integration lua
+```
+
+On failure, the scenario runner prints and retains its temp/artifact directory so
+logs can be inspected after teardown.
+
 ## Co-developed with LLMs
 
 This project was co-developed with LLMs such as Claude, Codex, etc. Human
