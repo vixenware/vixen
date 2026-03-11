@@ -31,7 +31,7 @@ pub struct MethodSig {
 
 #[derive(Default)]
 struct BuiltinRegistry {
-    fns: HashMap<String, FnSig>,
+    fns: HashMap<String, Vec<FnSig>>,
     methods: HashMap<(Builtin, String), MethodSig>,
     fn_names: Vec<String>,
     method_names: HashMap<Builtin, Vec<String>>,
@@ -90,7 +90,12 @@ pub fn builtin_methods_for(receiver: &Builtin) -> Vec<String> {
 
 /// Look up a builtin free function signature by name.
 pub fn builtin_fn_sig(name: &str) -> Option<FnSig> {
-    fallback_builtin_fn_sig(name).or_else(|| registry().fns.get(name).cloned())
+    fallback_builtin_fn_sig(name).or_else(|| builtin_fn_sigs(name).into_iter().next())
+}
+
+/// Look up all builtin free-function signatures by name.
+pub fn builtin_fn_sigs(name: &str) -> Vec<FnSig> {
+    registry().fns.get(name).cloned().unwrap_or_default()
 }
 
 /// Look up a method signature on a builtin type.
@@ -148,23 +153,34 @@ impl BuiltinRegistry {
                 continue;
             };
 
+            let fn_name = fn_decl
+                .name()
+                .map(|name| name.text().to_string())
+                .unwrap_or_default();
+
             let Some(first_param) = fn_decl.parameters().next() else {
+                if fn_name == namespace_name(namespace) {
+                    self.insert_fn(collect_fn_sig(&fn_decl, Some(receiver)));
+                }
                 continue;
             };
             let is_instance_method = first_param.name().is_some_and(|name| name.text() == "self");
-            if !is_instance_method {
+            if is_instance_method {
+                let sig = collect_method_sig(&fn_decl, receiver);
+                self.methods
+                    .entry((receiver, sig.name.clone()))
+                    .or_insert(sig);
                 continue;
             }
 
-            let sig = collect_method_sig(&fn_decl, receiver);
-            self.methods
-                .entry((receiver, sig.name.clone()))
-                .or_insert(sig);
+            if fn_name == namespace_name(namespace) {
+                self.insert_fn(collect_fn_sig(&fn_decl, Some(receiver)));
+            }
         }
     }
 
     fn insert_fn(&mut self, sig: FnSig) {
-        self.fns.entry(sig.name.clone()).or_insert(sig);
+        self.fns.entry(sig.name.clone()).or_default().push(sig);
     }
 
     fn rebuild_name_indexes(&mut self) {
@@ -202,6 +218,13 @@ fn namespace_receiver(namespace: &NamespaceDecl) -> Option<Builtin> {
                 .name()
                 .and_then(|name| builtin_from_name(name.text()))
         })
+}
+
+fn namespace_name(namespace: &NamespaceDecl) -> String {
+    namespace
+        .name()
+        .map(|name| name.text().to_string())
+        .unwrap_or_default()
 }
 
 fn collect_fn_sig(decl: &FnDecl, self_ty: Option<Builtin>) -> FnSig {
@@ -601,7 +624,7 @@ fn fallback_builtin_method(receiver: &Builtin, method_name: &str) -> Option<Meth
 mod tests {
     use vx_types::Scalar;
 
-    use super::{builtin_fn_sig, builtin_method};
+    use super::{builtin_fn_sig, builtin_fn_sigs, builtin_method};
 
     #[test]
     fn stdlib_host_methods_are_loaded() {
@@ -618,6 +641,18 @@ mod tests {
     fn stdlib_tree_methods_are_loaded() {
         let merge = builtin_method(&vx_types::Builtin::Tree, "merge").expect("tree.merge");
         assert_eq!(merge.ret, vx_types::Ty::Builtin(vx_types::Builtin::Tree));
+    }
+
+    #[test]
+    fn stdlib_tree_constructors_are_loaded() {
+        let constructors = builtin_fn_sigs("Tree");
+        assert_eq!(constructors.len(), 3);
+        assert!(
+            constructors
+                .iter()
+                .any(|sig| sig.ret == vx_types::Ty::Builtin(vx_types::Builtin::Tree))
+        );
+        assert!(builtin_fn_sig("Tree").is_some());
     }
 
     #[test]

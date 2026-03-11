@@ -14,7 +14,7 @@ use vx_parser::{
 };
 use vx_types::{FnSig, Ty};
 
-use crate::builtins::{builtin_fn_sig, builtin_method};
+use crate::builtins::{builtin_fn_sig, builtin_fn_sigs, builtin_method};
 use crate::resolve::NameResolution;
 use crate::scope::{DefKind, Definition};
 use crate::type_collect::TypeCollection;
@@ -424,7 +424,8 @@ impl<'a> ExprTyper<'a> {
                 self.populate_callback_param_types(call, &callee_name);
 
                 // Check for builtin function
-                if let Some(sig) = builtin_fn_sig(&callee_name) {
+                let builtin_sigs = builtin_fn_sigs(&callee_name);
+                if let Some(sig) = self.select_builtin_fn_sig(call, &builtin_sigs) {
                     // Type-check positional arguments
                     self.check_call_args(call, &sig);
                     self.check_keyword_args(call, &sig);
@@ -434,6 +435,11 @@ impl<'a> ExprTyper<'a> {
                     {
                         return discovered_ty;
                     }
+                    return sig.ret.clone();
+                } else if let Some(sig) = builtin_fn_sig(&callee_name) {
+                    self.check_call_args(call, &sig);
+                    self.check_keyword_args(call, &sig);
+                    self.infer_extra_call_args(call, sig.positional_params.len());
                     return sig.ret.clone();
                 }
 
@@ -522,6 +528,26 @@ impl<'a> ExprTyper<'a> {
             }
         }
         self.infer_all_keyword_arg_exprs(call);
+    }
+
+    fn select_builtin_fn_sig(&mut self, call: &CallExpr, sigs: &[FnSig]) -> Option<FnSig> {
+        if sigs.is_empty() {
+            return None;
+        }
+
+        let arg_tys: Vec<Ty> = call
+            .args()
+            .filter_map(|arg| arg.expr())
+            .map(|arg| self.infer_expr(&arg))
+            .collect();
+
+        sigs.iter()
+            .find(|sig| builtin_call_matches(&arg_tys, sig))
+            .cloned()
+            .or_else(|| {
+                (sigs.len() == 1 && arg_tys.len() == sigs[0].positional_params.len())
+                    .then(|| sigs[0].clone())
+            })
     }
 
     fn infer_extra_call_args(&mut self, call: &CallExpr, checked_positional: usize) {
@@ -1203,4 +1229,12 @@ fn types_compatible(actual: &Ty, expected: &Ty) -> bool {
             )
         }
     }
+}
+
+fn builtin_call_matches(arg_tys: &[Ty], sig: &FnSig) -> bool {
+    arg_tys.len() == sig.positional_params.len()
+        && arg_tys
+            .iter()
+            .zip(sig.positional_params.iter())
+            .all(|(arg_ty, param)| types_compatible(arg_ty, &param.ty))
 }

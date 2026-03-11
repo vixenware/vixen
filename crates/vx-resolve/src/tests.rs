@@ -932,6 +932,30 @@ fn cc_version_sketch_resolves_and_typechecks() {
     );
 }
 
+#[test]
+fn tree_constructor_from_stdlib_returns_tree() {
+    let src = r#"
+fn main(ws: Path) {
+    Tree(ws)
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, "Tree(ws)");
+    assert_eq!(ty, Some(Ty::Builtin(Builtin::Tree)));
+}
+
+#[test]
+fn tree_array_constructor_from_stdlib_returns_tree() {
+    let src = r#"
+fn main(other: Tree) {
+    Tree([other])
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, "Tree([other])");
+    assert_eq!(ty, Some(Ty::Builtin(Builtin::Tree)));
+}
+
 // r[type.error.arg_mismatch] — host.read(123) gets a type diagnostic
 #[test]
 fn host_read_int_arg_type_error() {
