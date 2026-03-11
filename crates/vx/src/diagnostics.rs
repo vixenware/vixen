@@ -3,6 +3,7 @@
 // d[impl integration.no-format-lockin]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::IsTerminal;
 use std::sync::Arc;
 
 use arborium::advanced::{CompiledGrammar, GrammarConfig};
@@ -30,20 +31,95 @@ pub(crate) fn render_build_failure(failure: &BuildFailure, full_stack: bool) -> 
         return Ok(failure.message.clone());
     }
 
+    render_build_failure_with_capabilities(failure, full_stack, terminal_capabilities())
+}
+
+fn render_build_failure_with_capabilities(
+    failure: &BuildFailure,
+    full_stack: bool,
+    capabilities: TerminalCapabilities,
+) -> Result<String> {
     let diagnostics = build_failure_to_diagnostics(failure, full_stack)?;
-    let capabilities = TerminalCapabilities {
-        width: 80,
-        glyph_mode: GlyphMode::Unicode,
-        color_level: ColorLevel::Rgb24,
-        hyperlink_mode: HyperlinkMode::Osc8,
-        tab_width: 4,
-    };
     let plan = margin_term::layout(&diagnostics, capabilities)?;
     Ok(margin_term::render_plan_with_theme(
         &plan,
         capabilities,
         TerminalTheme::from_arborium(&arborium_theme::builtin::catppuccin_mocha()),
     ))
+}
+
+fn terminal_capabilities() -> TerminalCapabilities {
+    let is_terminal = std::io::stderr().is_terminal();
+    TerminalCapabilities {
+        width: terminal_width(),
+        glyph_mode: GlyphMode::Unicode,
+        color_level: detected_color_level(is_terminal),
+        hyperlink_mode: detected_hyperlink_mode(is_terminal),
+        tab_width: 4,
+    }
+}
+
+fn terminal_width() -> usize {
+    if let Ok(cols) = std::env::var("COLUMNS")
+        && let Ok(width) = cols.parse::<usize>()
+        && width > 0
+    {
+        return width;
+    }
+
+    #[cfg(unix)]
+    {
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        let ret = unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut ws) };
+        if ret == 0 && ws.ws_col > 0 {
+            return ws.ws_col as usize;
+        }
+    }
+
+    80
+}
+
+fn detected_color_level(is_terminal: bool) -> ColorLevel {
+    if !is_terminal || std::env::var_os("NO_COLOR").is_some() {
+        return ColorLevel::None;
+    }
+
+    if std::env::var("TERM").is_ok_and(|term| term == "dumb") {
+        return ColorLevel::None;
+    }
+
+    if std::env::var("COLORTERM")
+        .map(|value| matches!(value.as_str(), "truecolor" | "24bit"))
+        .unwrap_or(false)
+    {
+        return ColorLevel::Rgb24;
+    }
+
+    ColorLevel::Ansi16
+}
+
+fn detected_hyperlink_mode(is_terminal: bool) -> HyperlinkMode {
+    if !is_terminal {
+        return HyperlinkMode::None;
+    }
+
+    if std::env::var("TERM").is_ok_and(|term| term == "dumb") {
+        return HyperlinkMode::None;
+    }
+
+    let supported = std::env::var_os("WT_SESSION").is_some()
+        || std::env::var_os("KITTY_WINDOW_ID").is_some()
+        || std::env::var_os("KONSOLE_VERSION").is_some()
+        || std::env::var_os("VTE_VERSION").is_some()
+        || std::env::var("TERM_PROGRAM")
+            .map(|program| matches!(program.as_str(), "WezTerm" | "iTerm.app"))
+            .unwrap_or(false);
+
+    if supported {
+        HyperlinkMode::Osc8
+    } else {
+        HyperlinkMode::None
+    }
 }
 
 fn build_failure_to_diagnostics(failure: &BuildFailure, full_stack: bool) -> Result<Diagnostics> {
@@ -456,6 +532,7 @@ mod tests {
     };
 
     static COLOR_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct ColorOverrideGuard {
         _guard: MutexGuard<'static, ()>,
@@ -473,6 +550,30 @@ mod tests {
         fn drop(&mut self) {
             concolor::set(ColorChoice::Auto);
         }
+    }
+
+    fn test_capabilities() -> TerminalCapabilities {
+        TerminalCapabilities {
+            width: 80,
+            glyph_mode: GlyphMode::Unicode,
+            color_level: ColorLevel::Rgb24,
+            hyperlink_mode: HyperlinkMode::Osc8,
+            tab_width: 4,
+        }
+    }
+
+    fn with_env_var<T>(key: &str, value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let previous = std::env::var_os(key);
+        match value {
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+        let result = f();
+        match previous {
+            Some(previous) => unsafe { std::env::set_var(key, previous) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+        result
     }
 
     fn strip_osc8_hyperlinks(text: &str) -> String {
@@ -523,7 +624,7 @@ mod tests {
         let start = source.find(label_text).expect("label start");
         let end = start + label_text.len();
 
-        let rendered = render_build_failure(
+        let rendered = render_build_failure_with_capabilities(
             &BuildFailure {
                 message: "build input not found".to_string(),
                 sources: vec![BuildDiagnosticSource {
@@ -558,6 +659,7 @@ mod tests {
                 }],
             },
             false,
+            test_capabilities(),
         )
         .expect("render");
         let visible = strip_osc8_hyperlinks(&rendered);
@@ -601,7 +703,7 @@ mod tests {
         let start = source.find(label_text).expect("label start");
         let end = start + label_text.len();
 
-        let rendered = render_build_failure(
+        let rendered = render_build_failure_with_capabilities(
             &BuildFailure {
                 message: "build input not found".to_string(),
                 sources: vec![BuildDiagnosticSource {
@@ -632,6 +734,7 @@ mod tests {
                 }],
             },
             false,
+            test_capabilities(),
         )
         .expect("render");
         let plain = strip_ansi_escapes::strip_str(&rendered);
@@ -726,7 +829,8 @@ mod tests {
         };
 
         let trimmed = strip_ansi_escapes::strip_str(
-            render_build_failure(&failure, false).expect("render trimmed"),
+            render_build_failure_with_capabilities(&failure, false, test_capabilities())
+                .expect("render trimmed"),
         );
         assert_eq!(trimmed.matches("advice:").count(), 2, "{trimmed}");
         assert_eq!(
@@ -741,7 +845,8 @@ mod tests {
         );
 
         let full = strip_ansi_escapes::strip_str(
-            render_build_failure(&failure, true).expect("render full"),
+            render_build_failure_with_capabilities(&failure, true, test_capabilities())
+                .expect("render full"),
         );
         assert_eq!(full.matches("advice:").count(), 3, "{full}");
         assert_eq!(
@@ -817,17 +922,108 @@ mod tests {
         };
 
         let trimmed = strip_ansi_escapes::strip_str(
-            render_build_failure(&failure, false).expect("render trimmed"),
+            render_build_failure_with_capabilities(&failure, false, test_capabilities())
+                .expect("render trimmed"),
         );
         let advice_pos = trimmed.find("advice:").expect("advice position");
         let error_pos = trimmed.rfind("error:").expect("error position");
         assert!(advice_pos < error_pos, "{trimmed}");
 
         let full = strip_ansi_escapes::strip_str(
-            render_build_failure(&failure, true).expect("render full"),
+            render_build_failure_with_capabilities(&failure, true, test_capabilities())
+                .expect("render full"),
         );
         let advice_pos = full.find("advice:").expect("advice position");
         let error_pos = full.rfind("error:").expect("error position");
         assert!(advice_pos < error_pos, "{full}");
+    }
+
+    #[test]
+    fn render_build_failure_multiline_primary_message_only_once() {
+        let _color = ColorOverrideGuard::always_ansi();
+        let source = indoc::indoc! {r#"
+            fn compile(file: Path) -> Tree (
+              cexec [
+                cc,
+                @(src/{file}),
+              ]
+            )
+        "#};
+        let source_id = "build.vx";
+        let start = source.find("fn compile").expect("compile start");
+        let end = source.rfind(")").expect("compile end") + 1;
+
+        let rendered = render_build_failure_with_capabilities(
+            &BuildFailure {
+                message: "build command inputs not found".to_string(),
+                sources: vec![BuildDiagnosticSource {
+                    source_id: source_id.to_string(),
+                    language: Some("vixen".to_string()),
+                    text: source.to_string(),
+                }],
+                reports: vec![BuildDiagnosticReport {
+                    severity: BuildDiagnosticSeverity::Error,
+                    message: "build command inputs not found".to_string(),
+                    primary_span: BuildDiagnosticSpan {
+                        source_id: source_id.to_string(),
+                        start: start as u32,
+                        end: end as u32,
+                    },
+                    labels: vec![BuildDiagnosticLabel {
+                        span: BuildDiagnosticSpan {
+                            source_id: source_id.to_string(),
+                            start: start as u32,
+                            end: end as u32,
+                        },
+                        kind: BuildDiagnosticLabelKind::Primary,
+                        message: Some(
+                            "this source site produced input paths that were not present in the sandbox"
+                                .to_string(),
+                        ),
+                    }],
+                    notes: Vec::new(),
+                }],
+            },
+            false,
+            test_capabilities(),
+        )
+        .expect("render");
+        let plain = strip_ansi_escapes::strip_str(&strip_osc8_hyperlinks(&rendered));
+
+        println!("{rendered}");
+        assert_eq!(
+            plain
+                .matches("this source site produced input paths")
+                .count(),
+            1,
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn terminal_width_prefers_columns_env_var() {
+        let _env = ENV_LOCK.lock().expect("env lock");
+        with_env_var("COLUMNS", Some("123"), || {
+            assert_eq!(terminal_width(), 123);
+        });
+    }
+
+    #[test]
+    fn detected_terminal_capabilities_respect_env() {
+        let _env = ENV_LOCK.lock().expect("env lock");
+        with_env_var("NO_COLOR", None, || {
+            with_env_var("TERM", Some("xterm-256color"), || {
+                with_env_var("COLORTERM", Some("truecolor"), || {
+                    with_env_var("WT_SESSION", Some("1"), || {
+                        assert_eq!(detected_color_level(true), ColorLevel::Rgb24);
+                        assert_eq!(detected_hyperlink_mode(true), HyperlinkMode::Osc8);
+                    })
+                })
+            })
+        });
+
+        with_env_var("NO_COLOR", Some("1"), || {
+            assert_eq!(detected_color_level(true), ColorLevel::None);
+        });
     }
 }

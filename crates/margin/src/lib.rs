@@ -66,7 +66,7 @@ use std::fmt::{Display, Formatter};
 use std::ops::Range;
 
 use facet::Facet;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[cfg(test)]
 mod tests;
@@ -728,7 +728,7 @@ fn choose_placement(
         .source_columns
         .saturating_sub(anchor.start_column)
         .saturating_sub(1);
-    let message_width = message.chars().count();
+    let message_width = UnicodeWidthStr::width(message);
     let used_slots = crowded_lines.entry(anchor.line_number).or_default();
 
     if message_width <= side_budget && *used_slots == 0 {

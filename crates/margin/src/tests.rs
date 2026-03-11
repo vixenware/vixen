@@ -342,3 +342,46 @@ fn plan_coalesces_annotations_and_respects_priority_lattice() {
             .all(|annotation| annotation.role != AnnotationRole::SyntaxToken)
     );
 }
+
+#[test]
+fn plan_uses_display_width_for_message_placement() {
+    let diagnostics = Diagnostics {
+        sources: vec![Source {
+            id: SourceId("main".to_string()),
+            name: "src/main.vx".to_string(),
+            hyperlink: None,
+            text: "emoji\n".to_string(),
+        }],
+        reports: vec![Report {
+            severity: Severity::Error,
+            title: "wide".to_string(),
+            annotations: vec![Annotation {
+                spans: vec![Span::new("main", 0, 5)],
+                role: AnnotationRole::PrimaryLabel,
+                syntax_class: None,
+                message: Some("界界界界".to_string()),
+                priority: 100,
+            }],
+            notes: Vec::new(),
+            sections: Vec::new(),
+        }],
+    };
+
+    let plan = plan(
+        &diagnostics,
+        &LayoutOptions {
+            width: 13,
+            primary_context_lines: 0,
+            secondary_context_lines: 0,
+            merge_distance_lines: 0,
+            tab_width: 4,
+            long_line_mode: super::LongLineMode::Clip,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.reports[0].windows[0].annotations[0].placement,
+        super::PlacementMode::BelowSpan
+    );
+}

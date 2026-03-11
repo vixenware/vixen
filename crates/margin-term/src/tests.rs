@@ -350,3 +350,89 @@ fn render_expands_tabs_and_keeps_unicode_text_stable() {
     assert!(rendered.contains("accented"), "{rendered}");
     assert!(rendered.contains("Cafe\u{301}"), "{rendered}");
 }
+
+#[test]
+fn render_multiline_annotations_emit_the_message_once() {
+    let diagnostics = Diagnostics {
+        sources: vec![Source {
+            id: SourceId("main".to_string()),
+            name: "src/main.vx".to_string(),
+            hyperlink: None,
+            text: "fn compile() {\n  line_one();\n  line_two();\n}\n".to_string(),
+        }],
+        reports: vec![Report {
+            severity: Severity::Error,
+            title: "grouped".to_string(),
+            annotations: vec![Annotation {
+                spans: vec![Span::new("main", 0, 43)],
+                role: AnnotationRole::PrimaryLabel,
+                syntax_class: None,
+                message: Some("shared message".to_string()),
+                priority: 100,
+            }],
+            notes: Vec::new(),
+            sections: Vec::new(),
+        }],
+    };
+
+    let rendered = render(
+        &diagnostics,
+        TerminalCapabilities {
+            width: 52,
+            glyph_mode: GlyphMode::Unicode,
+            color_level: ColorLevel::None,
+            hyperlink_mode: HyperlinkMode::None,
+            tab_width: 4,
+        },
+    )
+    .unwrap();
+
+    println!("{rendered}");
+    assert_eq!(rendered.matches("shared message").count(), 1, "{rendered}");
+}
+
+#[test]
+fn render_wraps_long_unbroken_tokens() {
+    let diagnostics = Diagnostics {
+        sources: vec![Source {
+            id: SourceId("main".to_string()),
+            name: "src/main.vx".to_string(),
+            hyperlink: None,
+            text: "value\n".to_string(),
+        }],
+        reports: vec![Report {
+            severity: Severity::Error,
+            title: "path".to_string(),
+            annotations: vec![Annotation {
+                spans: vec![Span::new("main", 0, 5)],
+                role: AnnotationRole::PrimaryLabel,
+                syntax_class: None,
+                message: Some("/very/long/path/without/spaces/or-breaks".to_string()),
+                priority: 100,
+            }],
+            notes: Vec::new(),
+            sections: Vec::new(),
+        }],
+    };
+
+    let rendered = render(
+        &diagnostics,
+        TerminalCapabilities {
+            width: 24,
+            glyph_mode: GlyphMode::Ascii,
+            color_level: ColorLevel::None,
+            hyperlink_mode: HyperlinkMode::None,
+            tab_width: 4,
+        },
+    )
+    .unwrap();
+
+    println!("{rendered}");
+    assert!(
+        rendered.contains("/very/long/path/w")
+            && rendered.contains("ithout/spaces/or-")
+            && rendered.contains("breaks"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("  |    \n"), "{rendered}");
+}

@@ -550,9 +550,12 @@ fn annotations_for_line<'a>(
                 .segments
                 .iter()
                 .copied()
-                .filter(move |segment| segment.line_number == line_number)
-                .map(move |segment| RenderableAnnotation {
-                    message: annotation.message.as_deref(),
+                .enumerate()
+                .filter(move |(_, segment)| segment.line_number == line_number)
+                .map(move |(index, segment)| RenderableAnnotation {
+                    message: (index == 0)
+                        .then_some(annotation.message.as_deref())
+                        .flatten(),
                     placement: annotation.placement,
                     role: annotation.role,
                     severity: severity_for_role(annotation.role),
@@ -626,7 +629,18 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     for paragraph in text.split('\n') {
         let mut current = String::new();
+        let mut saw_content = false;
         for word in paragraph.split_whitespace() {
+            saw_content = true;
+            if UnicodeWidthStr::width(word) > width {
+                if !current.is_empty() {
+                    lines.push(current);
+                    current = String::new();
+                }
+                lines.extend(wrap_long_token(word, width));
+                continue;
+            }
+
             let candidate = if current.is_empty() {
                 word.to_string()
             } else {
@@ -639,12 +653,38 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
                 current = candidate;
             }
         }
-        if current.is_empty() {
+        if current.is_empty() && !saw_content {
             lines.push(String::new());
-        } else {
+        } else if !current.is_empty() {
             lines.push(current);
         }
     }
+    lines
+}
+
+fn wrap_long_token(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut used = 0;
+
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > width && !current.is_empty() {
+            lines.push(current);
+            current = String::new();
+            used = 0;
+        }
+
+        current.push(ch);
+        used += ch_width;
+    }
+
+    if current.is_empty() {
+        lines.push(String::new());
+    } else {
+        lines.push(current);
+    }
+
     lines
 }
 
