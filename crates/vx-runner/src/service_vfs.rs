@@ -111,6 +111,19 @@ fn uses_toolchain_placeholder(value: &RunArg) -> bool {
     value.as_str().contains("${VX_TOOLCHAIN}")
 }
 
+fn summarize_list(items: &[String], limit: usize) -> String {
+    if items.is_empty() {
+        return "-".to_string();
+    }
+    if items.len() <= limit {
+        return items.join(", ");
+    }
+
+    let mut summary = items[..limit].join(", ");
+    summary.push_str(format!(", ... (+{} more)", items.len() - limit).as_str());
+    summary
+}
+
 fn run_failure_result(
     start: Instant,
     exit_code: i32,
@@ -1455,6 +1468,12 @@ impl RunnerService {
         progress: roam::Tx<StoreProgress>,
     ) -> RunResult {
         let start = Instant::now();
+        let command_name = request
+            .program
+            .as_ref()
+            .map(RunArg::as_str)
+            .unwrap_or(&request.program_rel)
+            .to_string();
 
         let mut action = self
             .create_action_context()
@@ -1472,6 +1491,19 @@ impl RunnerService {
                 .env
                 .iter()
                 .any(|(_, value)| uses_toolchain_placeholder(value));
+
+        info!(
+            action.prefix_id = %action.prefix_id,
+            action.prefix_path = %action.prefix_path,
+            command = %command_name,
+            cwd = request.cwd.as_deref().unwrap_or("."),
+            tree_mounts = request.tree_mounts.len(),
+            file_mounts = request.file_mounts.len(),
+            writable_roots = request.writable_roots.len(),
+            outputs = request.outputs.len(),
+            needs_toolchain,
+            "preparing VFS run action"
+        );
 
         let toolchain_path = if needs_toolchain {
             let toolchain_prefix_id = match self
@@ -1497,6 +1529,7 @@ impl RunnerService {
         let toolchain_path_str = toolchain_path
             .as_ref()
             .map(|path| path.as_str().to_string());
+        let mount_start = Instant::now();
 
         for mount in &request.tree_mounts {
             if !is_tree_mount_path(&mount.mount) {
@@ -1705,6 +1738,30 @@ impl RunnerService {
             self.vfs.add_dir_to_prefix(&action.prefix_id, &dir).await;
         }
 
+        info!(
+            action.prefix_id = %action.prefix_id,
+            tree_mounts = %summarize_list(
+                &request
+                    .tree_mounts
+                    .iter()
+                    .map(|mount| mount.mount.clone())
+                    .collect::<Vec<_>>(),
+                6
+            ),
+            file_mounts = %summarize_list(
+                &request
+                    .file_mounts
+                    .iter()
+                    .map(|mount| mount.path.clone())
+                    .collect::<Vec<_>>(),
+                6
+            ),
+            writable_roots = %summarize_list(&request.writable_roots, 6),
+            parent_dirs = %summarize_list(&parent_dirs_for_request(&request), 6),
+            elapsed_secs = mount_start.elapsed().as_secs_f32(),
+            "prepared VFS inputs"
+        );
+
         if !outputs_stay_within_writable_roots(&request.outputs, &request.writable_roots) {
             let offending = request
                 .outputs
@@ -1812,8 +1869,13 @@ impl RunnerService {
             }
         };
         let mut cmd = crate::sandbox::sandboxed_command(&program_path, &action);
-        for arg in &request.args {
-            cmd.arg(Self::expand_run_arg(arg, toolchain_path_str.as_deref()));
+        let expanded_args = request
+            .args
+            .iter()
+            .map(|arg| Self::expand_run_arg(arg, toolchain_path_str.as_deref()))
+            .collect::<Vec<_>>();
+        for arg in &expanded_args {
+            cmd.arg(arg);
         }
 
         let cwd = request
@@ -1827,6 +1889,16 @@ impl RunnerService {
             action.hermetic_env(&mut cmd);
         }
 
+        let expanded_env = request
+            .env
+            .iter()
+            .map(|(key, value)| {
+                format!(
+                    "{key}={}",
+                    Self::expand_run_arg(value, toolchain_path_str.as_deref())
+                )
+            })
+            .collect::<Vec<_>>();
         for (k, v) in &request.env {
             cmd.env(k, Self::expand_run_arg(v, toolchain_path_str.as_deref()));
         }
@@ -1861,6 +1933,18 @@ impl RunnerService {
             .cloned()
             .map(|eval| spawn_blocking(move || evaluate_shipped_verification(&eval)));
 
+        info!(
+            action.prefix_id = %action.prefix_id,
+            action_desc,
+            program = %program_path,
+            cwd = %cwd,
+            argv = %summarize_list(&expanded_args, 12),
+            env = %summarize_list(&expanded_env, 8),
+            clear_env = request.clear_env,
+            "executing sandboxed command"
+        );
+        let command_start = Instant::now();
+
         let output = match crate::sandbox::run_sandboxed_command(
             cmd,
             &action_kind,
@@ -1873,6 +1957,13 @@ impl RunnerService {
         {
             Ok(o) => o,
             Err(CommandError::SpawnFailed(e)) => {
+                info!(
+                    action.prefix_id = %action.prefix_id,
+                    action_desc,
+                    error = %e,
+                    elapsed_secs = command_start.elapsed().as_secs_f32(),
+                    "sandboxed command failed to start"
+                );
                 self.remove_action_prefix(&action.prefix_id).await;
                 return run_failure_result(
                     start,
@@ -1888,6 +1979,14 @@ impl RunnerService {
                 partial_output,
                 ..
             }) => {
+                info!(
+                    action.prefix_id = %action.prefix_id,
+                    action_desc,
+                    timeout_secs = timeout.as_secs_f32(),
+                    partial_output_len = partial_output.len(),
+                    elapsed_secs = command_start.elapsed().as_secs_f32(),
+                    "sandboxed command timed out"
+                );
                 self.remove_action_prefix(&action.prefix_id).await;
                 return run_failure_result(
                     start,
@@ -1906,6 +2005,13 @@ impl RunnerService {
                 action_desc,
                 partial_output,
             }) => {
+                info!(
+                    action.prefix_id = %action.prefix_id,
+                    action_desc,
+                    partial_output_len = partial_output.len(),
+                    elapsed_secs = command_start.elapsed().as_secs_f32(),
+                    "sandboxed command cancelled"
+                );
                 self.remove_action_prefix(&action.prefix_id).await;
                 return run_failure_result(
                     start,
@@ -1916,6 +2022,15 @@ impl RunnerService {
                 );
             }
         };
+        info!(
+            action.prefix_id = %action.prefix_id,
+            action_desc,
+            exit_code = output.exit_status.code().unwrap_or(-1),
+            stdout_bytes = output.stdout.len(),
+            stderr_bytes = output.stderr.len(),
+            elapsed_secs = command_start.elapsed().as_secs_f32(),
+            "sandboxed command finished"
+        );
 
         let exit_code = output.exit_status.code().unwrap_or(-1);
         // r[impl exec.errors]

@@ -252,6 +252,7 @@ async fn boot_runner(
             "--store",
             &store_endpoint.display(),
         ])
+        .log_path(vx_home.join("vfsd.log"))
         .env("VX_HOME", vx_home.as_str());
 
     // Connect to store and spawn vfsd in parallel.

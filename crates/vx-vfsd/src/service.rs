@@ -191,6 +191,7 @@ impl VfsdService {
     }
 
     async fn mount(&self, path: String, tree_hash: Blake3Hash) -> Result<(), String> {
+        tracing::info!(%path, %tree_hash, "mounting tree into VFS");
         tracing::debug!(%path, %tree_hash, "mount");
 
         let (prefix_id, rel_path) = Self::parse_path(&path)?;
