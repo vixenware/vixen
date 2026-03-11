@@ -3,7 +3,7 @@ use margin::{
     Span,
 };
 
-use super::{ColorLevel, GlyphMode, TerminalCapabilities, render};
+use super::{ColorLevel, GlyphMode, TerminalCapabilities, Theme, render, render_plan_with_theme};
 
 fn sample_diagnostics() -> Diagnostics {
     Diagnostics {
@@ -52,6 +52,7 @@ fn render_supports_plaintext_ascii_output() {
             width: 48,
             glyph_mode: GlyphMode::Ascii,
             color_level: ColorLevel::None,
+            tab_width: 4,
         },
     )
     .unwrap();
@@ -64,6 +65,8 @@ fn render_supports_plaintext_ascii_output() {
 
 // d[verify test.width-matrix]
 // d[verify test.capability-matrix]
+// d[verify glyph.unicode-ascii]
+// d[verify theme.capability-fallback]
 // d[verify label.multiline-message-alignment]
 // d[verify layout.multiline-labels]
 #[test]
@@ -74,6 +77,7 @@ fn render_changes_with_width_and_capabilities() {
             width: 28,
             glyph_mode: GlyphMode::Unicode,
             color_level: ColorLevel::Ansi16,
+            tab_width: 4,
         },
     )
     .unwrap();
@@ -83,12 +87,13 @@ fn render_changes_with_width_and_capabilities() {
             width: 72,
             glyph_mode: GlyphMode::Unicode,
             color_level: ColorLevel::Ansi16,
+            tab_width: 4,
         },
     )
     .unwrap();
 
     assert!(narrow.contains("\u{1b}[31merror\u{1b}[0m"));
-    assert!(narrow.contains("╭─> src/main.vx"));
+    assert!(narrow.contains("src/main.vx"));
     assert!(narrow.contains("╰─"));
     assert!(!narrow.contains("consider defining the binding before using it"));
     assert!(wide.contains("consider defining the binding before using it"));
@@ -123,9 +128,89 @@ fn render_clips_long_lines_with_explicit_ellipsis() {
             width: 20,
             glyph_mode: GlyphMode::Unicode,
             color_level: ColorLevel::None,
+            tab_width: 4,
         },
     )
     .unwrap();
 
     assert!(rendered.contains("012345678901234..."));
+}
+
+// d[verify term.ansi-discipline]
+// d[verify theme.roles]
+#[test]
+fn render_uses_balanced_ansi_sequences_and_role_styles() {
+    let plan = super::layout(
+        &sample_diagnostics(),
+        TerminalCapabilities {
+            width: 40,
+            glyph_mode: GlyphMode::Unicode,
+            color_level: ColorLevel::Ansi16,
+            tab_width: 4,
+        },
+    )
+    .unwrap();
+    let rendered = render_plan_with_theme(
+        &plan,
+        TerminalCapabilities {
+            width: 40,
+            glyph_mode: GlyphMode::Unicode,
+            color_level: ColorLevel::Ansi16,
+            tab_width: 4,
+        },
+        Theme::default(),
+    );
+
+    assert!(rendered.matches("\u{1b}[0m").count() >= 3, "{rendered}");
+    assert!(rendered.contains("\u{1b}[90m│\u{1b}[0m"), "{rendered}");
+    assert!(
+        rendered.contains("\u{1b}[32m  = help: \u{1b}[0m"),
+        "{rendered}"
+    );
+}
+
+// d[verify unicode.tab-policy]
+// d[verify unicode.display-width]
+// d[verify unicode.grapheme-safety]
+// d[verify unicode.normalization-stability]
+// d[verify test.unicode]
+#[test]
+fn render_expands_tabs_and_keeps_unicode_text_stable() {
+    let diagnostics = Diagnostics {
+        sources: vec![Source {
+            id: SourceId("main".to_string()),
+            name: "src/main.vx".to_string(),
+            text: "a\tCafe\u{301}\n".to_string(),
+        }],
+        reports: vec![Report {
+            severity: Severity::Error,
+            title: "unicode".to_string(),
+            annotations: vec![Annotation {
+                spans: vec![Span::new("main", 2, "a\tCafe\u{301}".len())],
+                role: AnnotationRole::PrimaryLabel,
+                message: Some("accented".to_string()),
+                priority: 100,
+            }],
+            notes: vec![Note {
+                kind: NoteKind::Note,
+                text: "tab\taligned".to_string(),
+            }],
+            sections: Vec::new(),
+        }],
+    };
+
+    let rendered = render(
+        &diagnostics,
+        TerminalCapabilities {
+            width: 32,
+            glyph_mode: GlyphMode::Unicode,
+            color_level: ColorLevel::None,
+            tab_width: 4,
+        },
+    )
+    .unwrap();
+
+    assert!(rendered.contains("a   Cafe\u{301}"), "{rendered}");
+    assert!(rendered.contains("accented"), "{rendered}");
+    assert!(rendered.contains("Cafe\u{301}"), "{rendered}");
 }

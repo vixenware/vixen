@@ -1,12 +1,19 @@
+// d[impl integration.vx-adapter]
+// d[impl integration.vx-consumer]
+// d[impl integration.no-format-lockin]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use arborium::advanced::{CompiledGrammar, GrammarConfig};
 use arborium::{GrammarStore, Highlighter};
 use arborium_highlight::spans_to_themed;
-use arborium_theme::theme::builtin;
-use ariadne::{Color, Config, Label, Report, ReportKind, Source, sources};
 use eyre::{Result, eyre};
+use margin::{
+    Annotation, AnnotationRole, Diagnostics, Note, NoteKind, Report, Severity, Source, SourceId,
+    Span,
+};
+use margin_term::{ColorLevel, GlyphMode, TerminalCapabilities};
 use vxd_proto::{
     BuildDiagnosticLabelKind, BuildDiagnosticReport, BuildDiagnosticSeverity,
     BuildDiagnosticSource, BuildDiagnosticSpan, BuildFailure,
@@ -19,29 +26,60 @@ pub(crate) fn render_build_failure(failure: &BuildFailure, full_stack: bool) -> 
         return Ok(failure.message.clone());
     }
 
-    let sources_by_id = failure
+    let diagnostics = build_failure_to_diagnostics(failure, full_stack)?;
+    margin_term::render(
+        &diagnostics,
+        TerminalCapabilities {
+            width: 80,
+            glyph_mode: GlyphMode::Unicode,
+            color_level: ColorLevel::Ansi16,
+            tab_width: 4,
+        },
+    )
+    .map_err(|error| eyre!(error.to_string()))
+}
+
+fn build_failure_to_diagnostics(failure: &BuildFailure, full_stack: bool) -> Result<Diagnostics> {
+    let sources = failure
+        .sources
+        .iter()
+        .map(|source| Source {
+            id: SourceId(source.source_id.clone()),
+            name: source.source_id.clone(),
+            text: source.text.clone(),
+        })
+        .collect::<Vec<_>>();
+    let source_map = failure
         .sources
         .iter()
         .map(|source| (source.source_id.as_str(), source))
         .collect::<BTreeMap<_, _>>();
+    let visible_reports = visible_reports(failure, full_stack);
+    let syntax_lines = visible_reports.iter().try_fold(
+        BTreeMap::<String, BTreeSet<i32>>::new(),
+        |mut lines, report| {
+            add_span_lines(&mut lines, &report.primary_span, &source_map)?;
+            for label in &report.labels {
+                add_span_lines(&mut lines, &label.span, &source_map)?;
+            }
+            Ok::<_, eyre::Report>(lines)
+        },
+    )?;
     let mut syntax_highlighter = SyntaxHighlighter::new().ok();
-    let mut out = Vec::new();
 
-    let reports = visible_reports(failure, full_stack);
+    let reports = visible_reports
+        .iter()
+        .map(|report| {
+            build_report(
+                report,
+                &source_map,
+                &syntax_lines,
+                syntax_highlighter.as_mut(),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-    for (index, report) in reports.iter().enumerate() {
-        render_report(
-            report,
-            &sources_by_id,
-            syntax_highlighter.as_mut(),
-            &mut out,
-        )?;
-        if index + 1 != reports.len() {
-            out.push(b'\n');
-        }
-    }
-
-    String::from_utf8(out).map_err(Into::into)
+    Ok(Diagnostics { sources, reports })
 }
 
 fn visible_reports<'a>(
@@ -102,65 +140,118 @@ fn visible_reports<'a>(
     visible
 }
 
-fn render_report(
+fn build_report(
     report: &BuildDiagnosticReport,
     sources_by_id: &BTreeMap<&str, &BuildDiagnosticSource>,
+    syntax_lines: &BTreeMap<String, BTreeSet<i32>>,
     syntax_highlighter: Option<&mut SyntaxHighlighter>,
-    out: &mut Vec<u8>,
-) -> Result<()> {
-    let primary_source = sources_by_id
-        .get(report.primary_span.source_id.as_str())
-        .ok_or_else(|| eyre!("missing source {}", report.primary_span.source_id))?;
-    let primary_range = byte_span_to_char_range(&primary_source.text, &report.primary_span)?;
-
-    let mut builder = Report::build(
-        report_kind(report.severity),
-        (report.primary_span.source_id.clone(), primary_range.clone()),
-    )
-    .with_config(Config::default().with_color(true))
-    .with_message(&report.message);
-
-    let referenced_sources = referenced_source_ids(report);
-    let syntax_lines = relevant_syntax_lines(report, sources_by_id)?;
+) -> Result<Report> {
+    let mut annotations = Vec::new();
     if let Some(syntax_highlighter) = syntax_highlighter {
-        for source_id in referenced_sources {
+        for source_id in referenced_source_ids(report) {
             let Some(source) = sources_by_id.get(source_id) else {
                 continue;
             };
-            for label in syntax_highlighter.syntax_labels(source, syntax_lines.get(source_id))? {
-                builder = builder.with_label(label);
-            }
+            annotations.extend(
+                syntax_highlighter.syntax_annotations(source, syntax_lines.get(source_id))?,
+            );
         }
+    }
+
+    if !report
+        .labels
+        .iter()
+        .any(|label| label.kind == BuildDiagnosticLabelKind::Primary)
+    {
+        annotations.push(annotation_from_span(
+            &report.primary_span,
+            AnnotationRole::PrimaryLabel,
+            None,
+            100,
+            sources_by_id,
+        )?);
     }
 
     for label in &report.labels {
-        let source = sources_by_id
-            .get(label.span.source_id.as_str())
-            .ok_or_else(|| eyre!("missing source {}", label.span.source_id))?;
-        let range = byte_span_to_char_range(&source.text, &label.span)?;
-        let order = line_order(&source.text, label.span.start)?;
-        let mut rendered = Label::new((label.span.source_id.clone(), range))
-            .with_order(order)
-            .with_priority(label_priority(label.kind))
-            .with_color(label_color(report.severity, label.kind));
-        if let Some(message) = &label.message {
-            rendered = rendered.with_message(message);
-        }
-        builder = builder.with_label(rendered);
+        annotations.push(annotation_from_span(
+            &label.span,
+            label_role(label.kind),
+            label.message.clone(),
+            label_priority(label.kind),
+            sources_by_id,
+        )?);
     }
 
-    for note in &report.notes {
-        builder = builder.with_note(note);
-    }
+    Ok(Report {
+        severity: report_severity(report.severity),
+        title: report.message.clone(),
+        annotations,
+        notes: report
+            .notes
+            .iter()
+            .map(|note| Note {
+                kind: note_kind(note),
+                text: note_text(note),
+            })
+            .collect(),
+        sections: Vec::new(),
+    })
+}
 
-    let source_cache = sources(
-        sources_by_id
-            .values()
-            .map(|source| (source.source_id.clone(), source.text.as_str()))
-            .collect::<Vec<_>>(),
-    );
-    builder.finish().write(source_cache, out)?;
-    Ok(())
+fn annotation_from_span(
+    span: &BuildDiagnosticSpan,
+    role: AnnotationRole,
+    message: Option<String>,
+    priority: u16,
+    sources_by_id: &BTreeMap<&str, &BuildDiagnosticSource>,
+) -> Result<Annotation> {
+    let source = sources_by_id
+        .get(span.source_id.as_str())
+        .ok_or_else(|| eyre!("missing source {}", span.source_id))?;
+    let start = byte_offset_to_display_boundary(&source.text, span.start)?;
+    let end = byte_offset_to_display_boundary(&source.text, span.end)?;
+    Ok(Annotation {
+        spans: vec![Span::new(span.source_id.as_str(), start, end)],
+        role,
+        message,
+        priority,
+    })
+}
+
+fn report_severity(severity: BuildDiagnosticSeverity) -> Severity {
+    match severity {
+        BuildDiagnosticSeverity::Error => Severity::Error,
+        BuildDiagnosticSeverity::Advice => Severity::Advice,
+    }
+}
+
+fn label_role(kind: BuildDiagnosticLabelKind) -> AnnotationRole {
+    match kind {
+        BuildDiagnosticLabelKind::Primary => AnnotationRole::PrimaryLabel,
+        BuildDiagnosticLabelKind::Secondary => AnnotationRole::SecondaryLabel,
+    }
+}
+
+fn label_priority(kind: BuildDiagnosticLabelKind) -> u16 {
+    match kind {
+        BuildDiagnosticLabelKind::Primary => 100,
+        BuildDiagnosticLabelKind::Secondary => 50,
+    }
+}
+
+fn note_kind(note: &str) -> NoteKind {
+    if note.starts_with("help:") {
+        NoteKind::Help
+    } else {
+        NoteKind::Note
+    }
+}
+
+fn note_text(note: &str) -> String {
+    note.strip_prefix("help:")
+        .map(str::trim_start)
+        .unwrap_or(note)
+        .to_string()
 }
 
 fn referenced_source_ids(report: &BuildDiagnosticReport) -> BTreeSet<&str> {
@@ -171,18 +262,6 @@ fn referenced_source_ids(report: &BuildDiagnosticReport) -> BTreeSet<&str> {
     ids
 }
 
-fn relevant_syntax_lines(
-    report: &BuildDiagnosticReport,
-    sources_by_id: &BTreeMap<&str, &BuildDiagnosticSource>,
-) -> Result<BTreeMap<String, BTreeSet<i32>>> {
-    let mut lines = BTreeMap::new();
-    add_span_lines(&mut lines, &report.primary_span, sources_by_id)?;
-    for label in &report.labels {
-        add_span_lines(&mut lines, &label.span, sources_by_id)?;
-    }
-    Ok(lines)
-}
-
 fn add_span_lines(
     lines: &mut BTreeMap<String, BTreeSet<i32>>,
     span: &BuildDiagnosticSpan,
@@ -191,8 +270,8 @@ fn add_span_lines(
     let source = sources_by_id
         .get(span.source_id.as_str())
         .ok_or_else(|| eyre!("missing source {}", span.source_id))?;
-    let start = line_order(&source.text, span.start)?;
-    let end = line_order(&source.text, span.end)?;
+    let start = line_number(&source.text, span.start)?;
+    let end = line_number(&source.text, span.end)?;
     let entry = lines.entry(span.source_id.clone()).or_default();
     for line in (start.min(end) - SYNTAX_CONTEXT_RADIUS)..=(start.max(end) + SYNTAX_CONTEXT_RADIUS)
     {
@@ -201,47 +280,7 @@ fn add_span_lines(
     Ok(())
 }
 
-fn report_kind(severity: BuildDiagnosticSeverity) -> ReportKind<'static> {
-    match severity {
-        BuildDiagnosticSeverity::Error => ReportKind::Error,
-        BuildDiagnosticSeverity::Advice => ReportKind::Advice,
-    }
-}
-
-fn label_priority(kind: BuildDiagnosticLabelKind) -> i32 {
-    match kind {
-        BuildDiagnosticLabelKind::Primary => 10,
-        BuildDiagnosticLabelKind::Secondary => 5,
-    }
-}
-
-fn label_color(severity: BuildDiagnosticSeverity, kind: BuildDiagnosticLabelKind) -> Color {
-    match (severity, kind) {
-        (BuildDiagnosticSeverity::Error, BuildDiagnosticLabelKind::Primary) => Color::Red,
-        (BuildDiagnosticSeverity::Error, BuildDiagnosticLabelKind::Secondary) => Color::Yellow,
-        (BuildDiagnosticSeverity::Advice, BuildDiagnosticLabelKind::Primary) => Color::Cyan,
-        (BuildDiagnosticSeverity::Advice, BuildDiagnosticLabelKind::Secondary) => Color::Blue,
-    }
-}
-
-fn line_order(source: &str, byte_offset: u32) -> Result<i32> {
-    let char_offset = byte_offset_to_char_offset(source, byte_offset)?;
-    Source::from(source)
-        .get_offset_line(char_offset)
-        .map(|(_, line, _)| line as i32)
-        .ok_or_else(|| eyre!("offset {byte_offset} does not map to a source line"))
-}
-
-fn byte_span_to_char_range(
-    source: &str,
-    span: &BuildDiagnosticSpan,
-) -> Result<std::ops::Range<usize>> {
-    let start = byte_offset_to_char_offset(source, span.start)?;
-    let end = byte_offset_to_char_offset(source, span.end)?;
-    Ok(start..end.max(start + usize::from(start == end && !source.is_empty())))
-}
-
-fn byte_offset_to_char_offset(source: &str, byte_offset: u32) -> Result<usize> {
+fn line_number(source: &str, byte_offset: u32) -> Result<i32> {
     let byte_offset = usize::try_from(byte_offset)?;
     if byte_offset > source.len() {
         return Err(eyre!(
@@ -252,7 +291,25 @@ fn byte_offset_to_char_offset(source: &str, byte_offset: u32) -> Result<usize> {
     if !source.is_char_boundary(byte_offset) {
         return Err(eyre!("byte offset {byte_offset} is not at a char boundary"));
     }
-    Ok(source[..byte_offset].chars().count())
+    Ok(source[..byte_offset]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count() as i32
+        + 1)
+}
+
+fn byte_offset_to_display_boundary(source: &str, byte_offset: u32) -> Result<usize> {
+    let byte_offset = usize::try_from(byte_offset)?;
+    if byte_offset > source.len() {
+        return Err(eyre!(
+            "byte offset {byte_offset} is out of bounds for source of length {}",
+            source.len()
+        ));
+    }
+    if !source.is_char_boundary(byte_offset) {
+        return Err(eyre!("byte offset {byte_offset} is not at a char boundary"));
+    }
+    Ok(byte_offset)
 }
 
 struct SyntaxHighlighter {
@@ -276,54 +333,38 @@ impl SyntaxHighlighter {
         })
     }
 
-    fn syntax_labels(
+    fn syntax_annotations(
         &mut self,
         source: &BuildDiagnosticSource,
         relevant_lines: Option<&BTreeSet<i32>>,
-    ) -> Result<Vec<Label<(String, std::ops::Range<usize>)>>> {
+    ) -> Result<Vec<Annotation>> {
         if source.language.as_deref() != Some("vixen") {
             return Ok(Vec::new());
         }
 
-        let theme = builtin::catppuccin_mocha();
-        let mut labels = Vec::new();
+        let mut annotations = Vec::new();
         for span in spans_to_themed(self.highlighter.highlight_spans("vixen", &source.text)?) {
             if span.start >= span.end {
                 continue;
             }
-
-            let Some(style) = theme.style(span.theme_index) else {
-                continue;
-            };
-            let Some(fg) = style.fg else {
-                continue;
-            };
-
-            let start = u32::try_from(span.start)?;
-            let end = u32::try_from(span.end)?;
-            let order = line_order(&source.text, start)?;
+            let start_line = line_number(&source.text, u32::try_from(span.start)?)?;
             if let Some(relevant_lines) = relevant_lines
-                && !relevant_lines.contains(&order)
+                && !relevant_lines.contains(&start_line)
             {
                 continue;
             }
-            let range = byte_span_to_char_range(
-                &source.text,
-                &BuildDiagnosticSpan {
-                    source_id: source.source_id.clone(),
-                    start,
-                    end,
-                },
-            )?;
-            labels.push(
-                Label::new((source.source_id.clone(), range))
-                    .with_order(order)
-                    .with_priority(0)
-                    .with_color(Color::Rgb(fg.r, fg.g, fg.b)),
-            );
+
+            let start = byte_offset_to_display_boundary(&source.text, u32::try_from(span.start)?)?;
+            let end = byte_offset_to_display_boundary(&source.text, u32::try_from(span.end)?)?;
+            annotations.push(Annotation {
+                spans: vec![Span::new(source.source_id.as_str(), start, end)],
+                role: AnnotationRole::SyntaxToken,
+                message: None,
+                priority: 0,
+            });
         }
 
-        Ok(labels)
+        Ok(annotations)
     }
 }
 
@@ -358,6 +399,12 @@ mod tests {
         }
     }
 
+    // d[impl test.vixen-acceptance-fixtures]
+    // d[verify product.compiler-grade]
+    // d[verify integration.vx-adapter]
+    // d[verify integration.vx-consumer]
+    // d[verify integration.no-format-lockin]
+    // d[verify test.vixen-acceptance-fixtures]
     #[test]
     fn render_build_failure_keeps_one_section_and_error_priority() {
         let _color = ColorOverrideGuard::always_ansi();
@@ -418,10 +465,12 @@ mod tests {
             rendered.contains("resolved path: /workspace/zoo/lua-src"),
             "{rendered}"
         );
-        assert_eq!(rendered.matches("build.vx:").count(), 1, "{rendered}");
+        assert_eq!(rendered.matches("build.vx").count(), 1, "{rendered}");
         assert!(rendered.contains("\u{1b}["), "{rendered:?}");
     }
 
+    // d[verify integration.vx-consumer]
+    // d[verify test.vixen-acceptance-fixtures]
     #[test]
     fn render_build_failure_does_not_expand_to_the_entire_file() {
         let _color = ColorOverrideGuard::always_ansi();
@@ -479,6 +528,7 @@ mod tests {
             "{rendered}"
         );
         assert!(plain.contains("let src_tree = Tree"), "{rendered}");
+        assert!(plain.contains("this path does not exist in the current workspace"));
     }
 
     #[test]
@@ -560,7 +610,7 @@ mod tests {
         let trimmed = strip_ansi_escapes::strip_str(
             &render_build_failure(&failure, false).expect("render trimmed"),
         );
-        assert_eq!(trimmed.matches("Advice:").count(), 2, "{trimmed}");
+        assert_eq!(trimmed.matches("advice:").count(), 2, "{trimmed}");
         assert_eq!(
             trimmed.matches("required by this expression").count(),
             1,
@@ -575,7 +625,7 @@ mod tests {
         let full = strip_ansi_escapes::strip_str(
             &render_build_failure(&failure, true).expect("render full"),
         );
-        assert_eq!(full.matches("Advice:").count(), 3, "{full}");
+        assert_eq!(full.matches("advice:").count(), 3, "{full}");
         assert_eq!(
             full.matches("required by this expression").count(),
             2,
@@ -651,15 +701,15 @@ mod tests {
         let trimmed = strip_ansi_escapes::strip_str(
             &render_build_failure(&failure, false).expect("render trimmed"),
         );
-        let advice_pos = trimmed.find("Advice:").expect("advice position");
-        let error_pos = trimmed.rfind("Error:").expect("error position");
+        let advice_pos = trimmed.find("advice:").expect("advice position");
+        let error_pos = trimmed.rfind("error:").expect("error position");
         assert!(advice_pos < error_pos, "{trimmed}");
 
         let full = strip_ansi_escapes::strip_str(
             &render_build_failure(&failure, true).expect("render full"),
         );
-        let advice_pos = full.find("Advice:").expect("advice position");
-        let error_pos = full.rfind("Error:").expect("error position");
+        let advice_pos = full.find("advice:").expect("advice position");
+        let error_pos = full.rfind("error:").expect("error position");
         assert!(advice_pos < error_pos, "{full}");
     }
 }

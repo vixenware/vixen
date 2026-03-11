@@ -10,6 +10,7 @@
 // d[impl api.layout-render-separation]
 // d[impl api.explicit-layout-artifact]
 // d[impl api.stable-fixtures]
+// d[impl product.compiler-grade]
 // d[impl model.report]
 // d[impl model.source]
 // d[impl model.annotation]
@@ -25,6 +26,10 @@
 // d[impl span.unicode-correct]
 // d[impl span.zero-width]
 // d[impl span.line-breaks]
+// d[impl unicode.display-width]
+// d[impl unicode.grapheme-safety]
+// d[impl unicode.normalization-stability]
+// d[impl unicode.tab-policy]
 // d[impl label.clustered]
 // d[impl label.multispan]
 // d[impl label.priority]
@@ -61,6 +66,7 @@ use std::fmt::{Display, Formatter};
 use std::ops::Range;
 
 use facet::Facet;
+use unicode_width::UnicodeWidthChar;
 
 #[cfg(test)]
 mod tests;
@@ -391,7 +397,7 @@ fn group_annotations_by_source<'a>(
                 .ok_or_else(|| LayoutError::MissingSource(source_id.0.clone()))?;
             span.validate(source)?;
             let context = annotation_context(annotation.role, options);
-            let segments = resolve_span(source, span.clone())?;
+            let segments = resolve_span(source, span.clone(), options.tab_width)?;
             let line_range = segments
                 .iter()
                 .map(|segment| segment.line_number)
@@ -434,11 +440,19 @@ fn build_windows(
         .copied()
         .ok_or_else(|| LayoutError::MissingSource(source_id.0.clone()))?;
     let source_lines = split_lines(&source.text);
+    let driving_annotations = annotations
+        .iter()
+        .filter(|annotation| annotation.annotation.role != AnnotationRole::SyntaxToken)
+        .collect::<Vec<_>>();
     let ranges = merge_line_ranges(
-        annotations
-            .iter()
-            .map(|annotation| (annotation.line_start.max(1), annotation.line_end.max(1)))
-            .collect(),
+        if driving_annotations.is_empty() {
+            annotations.iter().collect()
+        } else {
+            driving_annotations
+        }
+        .into_iter()
+        .map(|annotation| (annotation.line_start.max(1), annotation.line_end.max(1)))
+        .collect(),
         options.merge_distance_lines,
     );
 
@@ -457,7 +471,12 @@ fn build_windows(
                 .map(|(index, line)| WindowLine {
                     line_number: index + 1,
                     text: (*line).to_string(),
-                    clipped: is_line_clipped(line, &geometry, options.long_line_mode),
+                    clipped: is_line_clipped(
+                        line,
+                        &geometry,
+                        options.long_line_mode,
+                        options.tab_width,
+                    ),
                 })
                 .collect::<Vec<_>>();
 
@@ -696,15 +715,24 @@ fn compute_geometry(last_line_number: usize, width: usize) -> GutterGeometry {
     }
 }
 
-fn is_line_clipped(line: &str, geometry: &GutterGeometry, long_line_mode: LongLineMode) -> bool {
+fn is_line_clipped(
+    line: &str,
+    geometry: &GutterGeometry,
+    long_line_mode: LongLineMode,
+    tab_width: usize,
+) -> bool {
     match long_line_mode {
-        LongLineMode::Clip => line.chars().count() > geometry.source_columns,
+        LongLineMode::Clip => display_width(line, tab_width) > geometry.source_columns,
     }
 }
 
-fn resolve_span(source: &Source, span: Span) -> Result<Vec<ResolvedSpan>, LayoutError> {
+fn resolve_span(
+    source: &Source,
+    span: Span,
+    tab_width: usize,
+) -> Result<Vec<ResolvedSpan>, LayoutError> {
     span.validate(source)?;
-    let line_index = LineIndex::new(&source.text);
+    let line_index = LineIndex::new(&source.text, tab_width);
     let start = line_index.resolve(span.start);
     let end = line_index.resolve(span.end);
 
@@ -726,7 +754,7 @@ fn resolve_span(source: &Source, span: Span) -> Result<Vec<ResolvedSpan>, Layout
             end.column
                 .max(segment_start + usize::from(span.start == span.end))
         } else {
-            source.text[line_range].chars().count()
+            display_width(&source.text[line_range], tab_width)
         };
         segments.push(ResolvedSpan {
             line_number: line,
@@ -736,6 +764,20 @@ fn resolve_span(source: &Source, span: Span) -> Result<Vec<ResolvedSpan>, Layout
     }
 
     Ok(segments)
+}
+
+pub(crate) fn display_width(text: &str, tab_width: usize) -> usize {
+    let mut width = 0;
+    for ch in text.chars() {
+        if ch == '\t' {
+            let next_tab = tab_width.max(1);
+            let offset = width % next_tab;
+            width += next_tab - offset;
+        } else {
+            width += UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+    width
 }
 
 fn split_lines(text: &str) -> Vec<&str> {
@@ -761,17 +803,22 @@ struct PendingAnnotation<'a> {
 struct LineIndex<'a> {
     source: &'a str,
     starts: Vec<usize>,
+    tab_width: usize,
 }
 
 impl<'a> LineIndex<'a> {
-    fn new(source: &'a str) -> Self {
+    fn new(source: &'a str, tab_width: usize) -> Self {
         let mut starts = vec![0];
         for (index, byte) in source.bytes().enumerate() {
             if byte == b'\n' && index + 1 <= source.len() {
                 starts.push(index + 1);
             }
         }
-        Self { source, starts }
+        Self {
+            source,
+            starts,
+            tab_width,
+        }
     }
 
     fn resolve(&self, offset: usize) -> LineColumn {
@@ -780,7 +827,7 @@ impl<'a> LineIndex<'a> {
             .partition_point(|start| *start <= offset)
             .saturating_sub(1);
         let line_start = self.starts[line_index];
-        let column = self.source[line_start..offset].chars().count();
+        let column = display_width(&self.source[line_start..offset], self.tab_width);
         LineColumn {
             line: line_index + 1,
             column,

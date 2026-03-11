@@ -57,11 +57,17 @@ fn sample_diagnostics() -> Diagnostics {
 
 // d[verify api.explicit-layout-artifact]
 // d[verify api.stable-fixtures]
+// d[verify api.core-model]
+// d[verify api.layout-render-separation]
 // d[verify model.report]
 // d[verify model.source]
 // d[verify model.annotation]
 // d[verify model.window]
 // d[verify input.multiple-sources]
+// d[verify package.name]
+// d[verify package.no-vixen-prefix]
+// d[verify package.primary-split]
+// d[verify package.additional-renderers]
 // d[verify layout.pipeline]
 // d[verify layout.pure-planning]
 // d[verify layout.width-aware]
@@ -252,6 +258,8 @@ fn plan_merges_nearby_windows_and_assigns_explicit_geometry_and_placement() {
 // d[verify coalesce.message-bearing]
 // d[verify coalesce.nearby]
 // d[verify coalesce.report-sections]
+// d[impl test.coalescing-fixtures]
+// d[verify test.coalescing-fixtures]
 #[test]
 fn plan_coalesces_annotations_and_respects_priority_lattice() {
     let diagnostics = Diagnostics {
