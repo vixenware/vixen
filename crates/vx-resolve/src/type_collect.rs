@@ -379,6 +379,7 @@ fn collect_fn_sig(
                 .slot_type()
                 .and_then(|st| st.ty())
                 .map(|t| resolver.resolve_type_in_context(&t, type_params, self_ty))
+                .or_else(|| (pname == "self").then(|| self_ty.cloned()).flatten())
                 .unwrap_or(Ty::Poison);
             Some(ParamDef {
                 name: pname,

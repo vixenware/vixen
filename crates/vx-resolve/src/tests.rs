@@ -201,6 +201,46 @@ namespace Array[T] {
 }
 
 #[test]
+fn implicit_self_uses_namespace_self_type() {
+    let file = parse_file(
+        r#"
+namespace Array[T] {
+    fn flatten(self) -> T;
+}
+"#,
+    );
+    let tree = ScopeTree::build(&file);
+    let array_namespace = tree
+        .definitions(crate::ScopeId::ROOT)
+        .iter()
+        .find(|def| def.name == "Array")
+        .expect("Array namespace");
+    let scope = tree.owned_scope(array_namespace).expect("namespace scope");
+    let flatten = tree
+        .definitions(scope)
+        .iter()
+        .find(|def| def.name == "flatten")
+        .expect("flatten member");
+
+    let types = crate::collect_types(&file);
+    let sig = types.fn_sig_for_def(flatten).expect("flatten signature");
+    assert_eq!(
+        sig.positional_params[0].ty,
+        Ty::Array(Box::new(Ty::Param(vx_types::TypeParam {
+            name: "T".to_string(),
+            index: 0,
+        })))
+    );
+    assert_eq!(
+        sig.ret,
+        Ty::Param(vx_types::TypeParam {
+            name: "T".to_string(),
+            index: 0,
+        })
+    );
+}
+
+#[test]
 fn fn_params_visible_in_body() {
     let file = parse_file(
         r#"

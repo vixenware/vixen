@@ -12,10 +12,9 @@ use vx_parser::{
     FieldExpr, IfExpr, InvokeExpr, LiteralExpr, MapExpr, MatchExpr, NameRefExpr, Pattern,
     PrefixExpr, RecordExpr, SourceFile, Stmt, StructLiteralExpr, SyntaxKind, WhereExpr, WithExpr,
 };
-use vx_types::{FnSig, Ty};
+use vx_types::{Capability, FnSig, ParamDef, Ty};
 
 use crate::SourceSpan;
-use crate::builtins::builtin_generic_method;
 use crate::resolve::NameResolution;
 use crate::scope::{DefKind, Definition};
 use crate::type_collect::TypeCollection;
@@ -59,6 +58,13 @@ pub struct TypeCheckResult {
     pub binding_types: HashMap<SourceSpan, Ty>,
     /// Type errors found during checking.
     pub errors: Vec<TypeError>,
+}
+
+#[derive(Clone)]
+struct BoundMethodSig {
+    params: Vec<ParamDef>,
+    ret: Ty,
+    capabilities: Vec<Capability>,
 }
 
 /// Run expression typing on a parsed source file.
@@ -498,23 +504,14 @@ impl<'a> ExprTyper<'a> {
 
                 if let Some(member_def) = self.resolve_method_member_def(field_expr, &receiver_ty) {
                     self.record_member_def(field_expr, member_def.clone());
-                    if let Some(method_sig) = self.method_sig_for_def(&receiver_ty, &member_def) {
-                        self.populate_method_callback_param_types(call, &method_sig.params);
+                    if let Some(method_sig) =
+                        self.bound_method_sig_for_call(&receiver_ty, &member_def, call)
+                    {
                         self.check_method_args(call, &method_sig.params, &method_name);
                         self.infer_extra_call_args(call, method_sig.params.len());
                         self.infer_all_keyword_arg_exprs(call);
                         return method_sig.ret.clone();
                     }
-                }
-
-                if let Some(method_sig) =
-                    self.infer_generic_method_call_sig(&receiver_ty, &method_name, call)
-                {
-                    self.populate_method_callback_param_types(call, &method_sig.params);
-                    self.check_method_args(call, &method_sig.params, &method_name);
-                    self.infer_extra_call_args(call, method_sig.params.len());
-                    self.infer_all_keyword_arg_exprs(call);
-                    return method_sig.ret;
                 }
 
                 self.push_error(TypeError {
@@ -802,28 +799,67 @@ impl<'a> ExprTyper<'a> {
         )
     }
 
-    fn method_sig_for_def(
+    fn instantiate_method_sig(
         &self,
         receiver_ty: &Ty,
         def: &Definition,
-    ) -> Option<crate::builtins::MethodSig> {
-        if matches!(receiver_ty, Ty::Array(_) | Ty::Map(_, _) | Ty::Stream(_)) {
-            return None;
-        }
+        arg_tys: &[Ty],
+    ) -> Option<BoundMethodSig> {
         let sig = self.types.fn_sig_for_def(def)?.clone();
         let (self_param, params) = sig.positional_params.split_first()?;
-        if self_param.name != "self"
-            || sig.ret.is_poison()
-            || params.iter().any(|param| param.ty.is_poison())
-        {
+        if self_param.name != "self" || sig.ret.is_poison() {
             return None;
         }
-        Some(crate::builtins::MethodSig {
-            name: sig.name,
-            params: params.to_vec(),
-            ret: sig.ret,
+        let mut substitutions = vec![None; sig.type_params.len()];
+        bind_type_params(&self_param.ty, receiver_ty, &mut substitutions);
+
+        let mut bound_params: Vec<ParamDef> = params
+            .iter()
+            .map(|param| ParamDef {
+                name: param.name.clone(),
+                ty: substitute_bound_type_params(&param.ty, &substitutions),
+                doc: param.doc.clone(),
+            })
+            .collect();
+        for (param, arg_ty) in bound_params.iter().zip(arg_tys.iter()) {
+            infer_type_params(&param.ty, arg_ty, &mut substitutions);
+        }
+        bound_params = params
+            .iter()
+            .map(|param| ParamDef {
+                name: param.name.clone(),
+                ty: substitute_bound_type_params(&param.ty, &substitutions),
+                doc: param.doc.clone(),
+            })
+            .collect();
+        let ret = substitute_bound_type_params(&sig.ret, &substitutions);
+        if ret.is_poison() || bound_params.iter().any(|param| param.ty.is_poison()) {
+            return None;
+        }
+        Some(BoundMethodSig {
+            params: bound_params,
+            ret,
             capabilities: sig.capabilities,
         })
+    }
+
+    fn bound_method_sig_for_call(
+        &mut self,
+        receiver_ty: &Ty,
+        def: &Definition,
+        call: &CallExpr,
+    ) -> Option<BoundMethodSig> {
+        let receiver_bound = self.instantiate_method_sig(receiver_ty, def, &[])?;
+        self.populate_method_callback_param_types(call, &receiver_bound.params);
+
+        let arg_tys: Vec<Ty> = call
+            .args()
+            .filter_map(|arg| arg.expr())
+            .map(|arg| self.infer_expr(&arg))
+            .collect();
+
+        self.instantiate_method_sig(receiver_ty, def, &arg_tys)
+            .or(Some(receiver_bound))
     }
 
     fn bind_closure_params(
@@ -936,7 +972,7 @@ impl<'a> ExprTyper<'a> {
         // Check namespace methods/fields exposed as callable members.
         if let Some(member_def) = self.resolve_method_member_def(field, &receiver_ty) {
             self.record_member_def(field, member_def.clone());
-            if let Some(method_sig) = self.method_sig_for_def(&receiver_ty, &member_def) {
+            if let Some(method_sig) = self.instantiate_method_sig(&receiver_ty, &member_def, &[]) {
                 return Ty::Function(vx_types::FunctionTy {
                     params: method_sig
                         .params
@@ -947,18 +983,6 @@ impl<'a> ExprTyper<'a> {
                     capabilities: method_sig.capabilities,
                 });
             }
-        }
-
-        if let Some(method_sig) = self.instantiate_generic_method(&receiver_ty, field_name, &[]) {
-            return Ty::Function(vx_types::FunctionTy {
-                params: method_sig
-                    .params
-                    .into_iter()
-                    .map(|param| param.ty)
-                    .collect(),
-                ret: Box::new(method_sig.ret),
-                capabilities: method_sig.capabilities,
-            });
         }
 
         // Check struct fields from type environment
@@ -1073,19 +1097,13 @@ impl<'a> ExprTyper<'a> {
                     .receiver()
                     .map(|expr| self.infer_expr(&expr))
                     .unwrap_or(Ty::Poison);
-                let Some(method_name) = field.field_name().map(|token| token.text().to_string())
-                else {
+                if field.field_name().is_none() {
                     return Ty::Poison;
-                };
+                }
 
                 if let Some(member_def) = self.resolve_method_member_def(field, &receiver_ty)
-                    && let Some(method_sig) = self.method_sig_for_def(&receiver_ty, &member_def)
-                    && method_sig.params.is_empty()
-                {
-                    return method_sig.ret;
-                }
-                if let Some(method_sig) =
-                    self.instantiate_generic_method(&receiver_ty, &method_name, &[])
+                    && let Some(method_sig) =
+                        self.instantiate_method_sig(&receiver_ty, &member_def, &[])
                     && method_sig.params.is_empty()
                 {
                     return method_sig.ret;
@@ -1471,67 +1489,6 @@ impl<'a> ExprTyper<'a> {
             }
         }
         None
-    }
-
-    fn infer_generic_method_call_sig(
-        &mut self,
-        receiver_ty: &Ty,
-        method_name: &str,
-        call: &CallExpr,
-    ) -> Option<crate::builtins::MethodSig> {
-        let receiver_bound = self.instantiate_generic_method(receiver_ty, method_name, &[])?;
-        self.populate_method_callback_param_types(call, &receiver_bound.params);
-
-        let arg_tys: Vec<Ty> = call
-            .args()
-            .filter_map(|arg| arg.expr())
-            .map(|arg| self.infer_expr(&arg))
-            .collect();
-
-        self.instantiate_generic_method(receiver_ty, method_name, &arg_tys)
-            .or(Some(receiver_bound))
-    }
-
-    fn instantiate_generic_method(
-        &self,
-        receiver_ty: &Ty,
-        method_name: &str,
-        arg_tys: &[Ty],
-    ) -> Option<crate::builtins::MethodSig> {
-        let template = builtin_generic_method(receiver_ty, method_name)?;
-        let mut substitutions = vec![None; template.type_params.len()];
-        bind_type_params(&template.receiver, receiver_ty, &mut substitutions);
-
-        let mut params: Vec<vx_types::ParamDef> = template
-            .params
-            .iter()
-            .map(|param| vx_types::ParamDef {
-                name: param.name.clone(),
-                ty: substitute_bound_type_params(&param.ty, &substitutions),
-                doc: param.doc.clone(),
-            })
-            .collect();
-
-        for (param, arg_ty) in params.iter().zip(arg_tys.iter()) {
-            infer_type_params(&param.ty, arg_ty, &mut substitutions);
-        }
-
-        params = template
-            .params
-            .iter()
-            .map(|param| vx_types::ParamDef {
-                name: param.name.clone(),
-                ty: substitute_bound_type_params(&param.ty, &substitutions),
-                doc: param.doc.clone(),
-            })
-            .collect();
-
-        Some(crate::builtins::MethodSig {
-            name: template.name,
-            params,
-            ret: substitute_bound_type_params(&template.ret, &substitutions),
-            capabilities: template.capabilities,
-        })
     }
 }
 
