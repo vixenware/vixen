@@ -38,6 +38,8 @@ fn engine(source: &str) -> Engine {
 
 static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+const LUA_SKETCH_TAIL: &str = "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree {\n    @bin/lua: lua_exe.file(@bin/lua),\n    @lib/liblua.a: liblua.file(@liblua.a),\n  }\n";
+
 fn collect_tree_leaf_paths(value: &Value) -> Vec<String> {
     fn walk_value(value: &Value, prefix: &str, out: &mut Vec<String>) {
         match value {
@@ -439,10 +441,7 @@ exit 0
 fn lua_sketch_compile_single_file_returns_tree() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
-    let source = source.replace(
-        "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree {\n    @bin/lua: lua_exe,\n    @lib/liblua.a: liblua,\n  }\n",
-        "  compile(@lapi.c)\n",
-    );
+    let source = source.replace(LUA_SKETCH_TAIL, "  compile(@lapi.c)\n");
     let engine = engine(&source);
 
     let tempdir = TempDir::new().unwrap();
@@ -532,10 +531,7 @@ printf 'artifact\n' > "$out"
 fn lua_sketch_compile_map_returns_tree_items() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
-    let source = source.replace(
-        "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree {\n    @bin/lua: lua_exe,\n    @lib/liblua.a: liblua,\n  }\n",
-        "  all_lib_sources.map(compile)\n",
-    );
+    let source = source.replace(LUA_SKETCH_TAIL, "  all_lib_sources.map(compile)\n");
     let engine = engine(&source);
 
     let tempdir = TempDir::new().unwrap();
@@ -665,7 +661,7 @@ fn lua_sketch_object_merge_returns_tree() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
     let source = source.replace(
-        "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree {\n    @bin/lua: lua_exe,\n    @lib/liblua.a: liblua,\n  }\n",
+        LUA_SKETCH_TAIL,
         "  let objects = (all_lib_sources.map(compile)).merge();\n  objects\n",
     );
     let engine = engine(&source);
@@ -792,7 +788,7 @@ fn lua_sketch_archive_returns_tree() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
     let source = source.replace(
-        "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree {\n    @bin/lua: lua_exe,\n    @lib/liblua.a: liblua,\n  }\n",
+        LUA_SKETCH_TAIL,
         "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n  liblua\n",
     );
     let engine = engine(&source);
@@ -927,7 +923,7 @@ fn lua_sketch_link_input_array_contains_tree_items() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
     let source = source.replace(
-        "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree {\n    @bin/lua: lua_exe,\n    @lib/liblua.a: liblua,\n  }\n",
+        LUA_SKETCH_TAIL,
         "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n  [compile @lua.c, liblua]\n",
     );
     let engine = engine(&source);
@@ -1067,7 +1063,7 @@ fn lua_sketch_tree_constructor_over_link_inputs_returns_tree() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
     let source = source.replace(
-        "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree {\n    @bin/lua: lua_exe,\n    @lib/liblua.a: liblua,\n  }\n",
+        LUA_SKETCH_TAIL,
         "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n  Tree [compile @lua.c, liblua]\n",
     );
     let engine = engine(&source);
@@ -1203,7 +1199,7 @@ fn lua_sketch_link_returns_tree() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
     let source = source.replace(
-        "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n\n  Tree {\n    @bin/lua: lua_exe,\n    @lib/liblua.a: liblua,\n  }\n",
+        LUA_SKETCH_TAIL,
         "  let objects = (all_lib_sources.map(compile)).merge();\n  let liblua = archive(objects);\n  let lua_exe = link(Tree [compile @lua.c, liblua]);\n  lua_exe\n",
     );
     let engine = engine(&source);
