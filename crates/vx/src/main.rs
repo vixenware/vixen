@@ -377,6 +377,14 @@ impl CliContext {
 
     async fn cmd_build(&mut self, args: BuildArgs) -> Result<()> {
         let cwd = Utf8PathBuf::try_from(std::env::current_dir()?)?;
+        let build_file_path = args.file.as_ref().map(|file| {
+            let path = Utf8PathBuf::from(file);
+            if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            }
+        });
 
         // Emit indeterminate OSC 9;4 progress while connecting to daemon
         // (TUI mode emits this from its display task; Text mode needs it here)
@@ -398,6 +406,7 @@ impl CliContext {
 
         let request = BuildRequest {
             project_path: cwd.clone(),
+            build_file_path,
             release: args.release,
         };
 

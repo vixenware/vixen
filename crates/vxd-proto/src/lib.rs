@@ -14,13 +14,15 @@ use vx_store_proto::CacheKey;
 
 /// Daemon protocol version.
 /// Bump this when making breaking changes to the daemon RPC interface.
-pub const VXD_PROTOCOL_VERSION: u32 = 3;
+pub const VXD_PROTOCOL_VERSION: u32 = 4;
 
 /// Request to build a project
 #[derive(Debug, Clone, Facet)]
 pub struct BuildRequest {
     /// Path to the project directory (containing Cargo.toml)
     pub project_path: Utf8PathBuf,
+    /// Optional explicit build file to evaluate instead of `build.vx`
+    pub build_file_path: Option<Utf8PathBuf>,
     /// Build in release mode
     pub release: bool,
 }
@@ -195,6 +197,7 @@ mod tests {
     fn test_build_request_roundtrip() {
         let request = BuildRequest {
             project_path: Utf8PathBuf::from("/home/user/project"),
+            build_file_path: Some(Utf8PathBuf::from("/home/user/project/lua.vx")),
             release: true,
         };
 
@@ -203,6 +206,7 @@ mod tests {
 
         let decoded: BuildRequest = from_slice(&bytes).expect("deserialize");
         assert_eq!(decoded.project_path, request.project_path);
+        assert_eq!(decoded.build_file_path, request.build_file_path);
         assert_eq!(decoded.release, request.release);
     }
 

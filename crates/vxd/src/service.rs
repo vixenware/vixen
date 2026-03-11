@@ -1577,9 +1577,13 @@ impl VxdService {
         build_vx_path: Utf8PathBuf,
         total_start: std::time::Instant,
     ) -> Result<BuildResult> {
+        let build_label = build_vx_path
+            .file_name()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| "build.vx".to_string());
         self.report_set_total(1).await;
         let action_id = self
-            .report_start_action(ActionType::Run("build.vx".to_string()))
+            .report_start_action(ActionType::Run(build_label.clone()))
             .await;
 
         let result = async {
@@ -1599,7 +1603,7 @@ impl VxdService {
                         .collect::<Vec<_>>()
                         .join("; ");
                     return Err(VxdError::InvalidManifest(format!(
-                        "failed to parse build.vx: {message}"
+                        "failed to parse {build_label}: {message}"
                     )));
                 }
 
@@ -1637,7 +1641,7 @@ impl VxdService {
                         Default::default(),
                     )
                     .map_err(|error| VxdError::Compilation {
-                        crate_name: "build.vx".to_string(),
+                        crate_name: build_label.clone(),
                         message: error.to_string(),
                     })?;
 
@@ -1645,7 +1649,7 @@ impl VxdService {
                     Value::Tree(tree) => tree,
                     other => {
                         return Err(VxdError::Compilation {
-                            crate_name: "build.vx".to_string(),
+                            crate_name: build_label.clone(),
                             message: format!(
                                 "build entry must return Tree for `vx build`, got {}",
                                 other.type_name()
@@ -1665,7 +1669,7 @@ impl VxdService {
             let duration = total_start.elapsed();
             Ok(BuildResult {
                 success: true,
-                message: "build.vx completed".to_string(),
+                message: format!("{build_label} completed"),
                 cached: false,
                 duration_ms: duration.as_millis() as u64,
                 output_path: None,
@@ -2144,12 +2148,23 @@ impl VxdService {
             return self.build_from_vx_styx(request, vx_styx_path).await;
         }
 
-        let build_vx_path = project_path.join("build.vx");
+        let build_vx_path = request
+            .build_file_path
+            .clone()
+            .unwrap_or_else(|| project_path.join("build.vx"));
         if build_vx_path.exists() {
-            info!("Found build.vx, evaluating build entry");
+            info!(path = %build_vx_path, "Found build file, evaluating build entry");
             return self
                 .build_from_build_vx(request, build_vx_path, total_start)
                 .await;
+        }
+
+        if request.build_file_path.is_some() {
+            return Err(VxdError::InvalidManifest(format!(
+                "expected build file at {}",
+                build_vx_path
+            ))
+            .into());
         }
 
         let cargo_manifest_path = project_path.join("Cargo.toml");

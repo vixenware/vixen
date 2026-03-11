@@ -49,6 +49,10 @@ pub(crate) enum CliCommand {
 /// Arguments for the `build` subcommand
 #[derive(Facet, Debug)]
 pub(crate) struct BuildArgs {
+    /// Build file to evaluate instead of `build.vx`
+    #[facet(args::named, args::short = 'f')]
+    pub(crate) file: Option<String>,
+
     /// Build in release mode
     #[facet(args::named, args::short = 'r')]
     pub(crate) release: bool,
