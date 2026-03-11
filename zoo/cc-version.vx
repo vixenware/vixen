@@ -1,8 +1,7 @@
-// Reduced Lua-flavored build sketch for the current resolver/evaluator lane.
+// Minimal cc-version build sketch for the current resolver/evaluator lane.
 //
-// This is intentionally smaller than `zoo/lua.vx`: it keeps the discovery and
-// observer shape, but only uses surface area that the current implementation
-// already understands end-to-end.
+// This is intentionally separate from `zoo/lua.vx`: it exercises a small,
+// currently supported discovery/exec shape without pretending to model Lua.
 
 fn build(ws: Path, args: Array[String], env: Map[String, String]) #discover -> Tree (
   let class = executor_class("default");

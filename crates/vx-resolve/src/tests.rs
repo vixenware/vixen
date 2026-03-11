@@ -910,8 +910,8 @@ fn main() {
 }
 
 #[test]
-fn lua_simple_sketch_resolves_and_typechecks() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua-simple.vx");
+fn cc_version_sketch_resolves_and_typechecks() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/cc-version.vx");
     let file = parse_file_path(&path);
 
     let resolution = resolve(&file);
