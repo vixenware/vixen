@@ -11,6 +11,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 vx-tracing = { workspace = true }
 facet = { workspace = true }
+facet-postcard = { workspace = true }
 figue = { workspace = true }
 picante = { workspace = true }
 roam = { workspace = true }

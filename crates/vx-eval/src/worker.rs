@@ -26,7 +26,7 @@ use tempfile::TempDir;
 use crate::exec::{
     AcquireRequest, DiscoverRequest, ExecArgValue, ExecMount, ExecRequest, RenderRequest,
     SharedAcquireHandler, SharedDiscoverHandler, SharedExecHandler, SharedRenderHandler,
-    SharedStoreHydrationHandler, StoreHydrationRequest,
+    SharedStabilizeHandler, SharedStoreHydrationHandler, StabilizeRequest, StoreHydrationRequest,
 };
 use crate::instr::{self, BinOp, UnaryOp};
 use crate::node::{
@@ -98,6 +98,7 @@ pub struct Engine {
     function_identities: HashMap<usize, Arc<str>>,
     max_demand_depth: usize,
     acquire_handler: Option<SharedAcquireHandler>,
+    stabilize_handler: Option<SharedStabilizeHandler>,
     render_handler: Option<SharedRenderHandler>,
     exec_handler: Option<SharedExecHandler>,
     discover_handler: Option<SharedDiscoverHandler>,
@@ -124,6 +125,7 @@ impl Engine {
             function_identities,
             max_demand_depth: DEFAULT_MAX_DEMAND_DEPTH,
             acquire_handler: None,
+            stabilize_handler: None,
             render_handler: None,
             exec_handler: None,
             discover_handler: None,
@@ -144,6 +146,11 @@ impl Engine {
 
     pub fn with_render_handler(mut self, render_handler: SharedRenderHandler) -> Self {
         self.render_handler = Some(render_handler);
+        self
+    }
+
+    pub fn with_stabilize_handler(mut self, stabilize_handler: SharedStabilizeHandler) -> Self {
+        self.stabilize_handler = Some(stabilize_handler);
         self
     }
 
@@ -188,6 +195,18 @@ impl Engine {
             return Err(self.type_error("shipped callbacks must be functions"));
         };
         ShippedFunction::try_from(&function).map_err(|message| self.type_error(&message))
+    }
+
+    pub fn call_shipped(
+        &self,
+        function: &ShippedFunction,
+        args: Vec<Value>,
+    ) -> Result<Value, PoisonError> {
+        let function = function
+            .to_runtime()
+            .map_err(|message| self.type_error(&message))?;
+        let value = self.build_call(Value::Function(function), args, None);
+        self.resolve_boundary_value(value)
     }
 
     pub fn invoke_shipped(
@@ -799,6 +818,11 @@ impl Engine {
             Value::Discovered(discovered) => {
                 self.collect_pending_shallow_inner(*discovered.value, visiting)
             }
+            Value::Builtin(_) => {
+                let mut deps = Vec::new();
+                value.collect_pending(&mut deps);
+                Ok(Self::dedup_node_ids(deps))
+            }
             _ => Ok(Vec::new()),
         }
     }
@@ -993,6 +1017,7 @@ impl Engine {
                     }
                 }
                 BuiltinValue::Function(BuiltinFunction::Acquire)
+                | BuiltinValue::Function(BuiltinFunction::Stabilize)
                 | BuiltinValue::Function(BuiltinFunction::Render)
                 | BuiltinValue::Function(BuiltinFunction::Exec)
                 | BuiltinValue::Function(BuiltinFunction::Discover)
@@ -3429,6 +3454,9 @@ impl Engine {
             BuiltinValue::Function(BuiltinFunction::Acquire) => {
                 self.acquire_builtin(args, kwargs, kwargs_expr)
             }
+            BuiltinValue::Function(BuiltinFunction::Stabilize) => {
+                self.stabilize_builtin(args, kwargs, kwargs_expr)
+            }
             BuiltinValue::Function(BuiltinFunction::Render) => {
                 self.render_builtin(args, kwargs, kwargs_expr)
             }
@@ -4254,6 +4282,37 @@ impl Engine {
             }),
             obligations.into_values(),
         )
+    }
+
+    fn stabilize_builtin(
+        &self,
+        args: &[Value],
+        kwargs: &[(Arc<str>, Value)],
+        kwargs_expr: Option<Value>,
+    ) -> Result<Value, PoisonError> {
+        self.require_no_kwargs("stabilize", kwargs)?;
+        if kwargs_expr.is_some() {
+            return Err(self.type_error("stabilize does not accept keyword arguments"));
+        }
+        self.check_arity("stabilize", args, 2)?;
+
+        let witness = self.materialize_value_deep(args[0].clone(), "forcing stabilize witness")?;
+        let witness_value = self.resolve_boundary_value(self.build_call(witness, vec![], None))?;
+        let witness_value = self.snapshot_value(witness_value)?;
+
+        let resolve = self.materialize_value_deep(args[1].clone(), "forcing stabilize resolve")?;
+        let resolve = self.ship_function(resolve)?;
+
+        let Some(stabilize_handler) = &self.stabilize_handler else {
+            return Err(self.type_error("stabilize requires a stabilize handler"));
+        };
+
+        stabilize_handler(StabilizeRequest {
+            witness: witness_value,
+            module: self.transport_module(),
+            resolve,
+            demand_chain: self.current_demand_chain(None),
+        })
     }
 
     fn exec_builtin(
@@ -6243,6 +6302,7 @@ fn collect_expr_capture_names(
 fn builtin_namespace(name: &str) -> Option<BuiltinValue> {
     match name {
         "acquire" => Some(BuiltinValue::Function(BuiltinFunction::Acquire)),
+        "stabilize" => Some(BuiltinValue::Function(BuiltinFunction::Stabilize)),
         "render" => Some(BuiltinValue::Function(BuiltinFunction::Render)),
         "exec" => Some(BuiltinValue::Function(BuiltinFunction::Exec)),
         "discover" => Some(BuiltinValue::Function(BuiltinFunction::Discover)),

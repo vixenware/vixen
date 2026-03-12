@@ -271,6 +271,7 @@ pub enum TransportBuiltinValue {
     BytesNamespace,
     TreeNamespace,
     AcquireFunction,
+    StabilizeFunction,
     RenderFunction,
     ExecFunction,
     DiscoverFunction,
@@ -1245,6 +1246,7 @@ impl TryFrom<&BuiltinValue> for TransportBuiltinValue {
             BuiltinValue::Namespace(BuiltinNamespace::Bytes) => Ok(Self::BytesNamespace),
             BuiltinValue::Namespace(BuiltinNamespace::Tree) => Ok(Self::TreeNamespace),
             BuiltinValue::Function(BuiltinFunction::Acquire) => Ok(Self::AcquireFunction),
+            BuiltinValue::Function(BuiltinFunction::Stabilize) => Ok(Self::StabilizeFunction),
             BuiltinValue::Function(BuiltinFunction::Render) => Ok(Self::RenderFunction),
             BuiltinValue::Function(BuiltinFunction::Exec) => Ok(Self::ExecFunction),
             BuiltinValue::Function(BuiltinFunction::Discover) => Ok(Self::DiscoverFunction),
@@ -1342,6 +1344,9 @@ impl TryFrom<TransportBuiltinValue> for BuiltinValue {
             TransportBuiltinValue::BytesNamespace => Ok(Self::Namespace(BuiltinNamespace::Bytes)),
             TransportBuiltinValue::TreeNamespace => Ok(Self::Namespace(BuiltinNamespace::Tree)),
             TransportBuiltinValue::AcquireFunction => Ok(Self::Function(BuiltinFunction::Acquire)),
+            TransportBuiltinValue::StabilizeFunction => {
+                Ok(Self::Function(BuiltinFunction::Stabilize))
+            }
             TransportBuiltinValue::RenderFunction => Ok(Self::Function(BuiltinFunction::Render)),
             TransportBuiltinValue::ExecFunction => Ok(Self::Function(BuiltinFunction::Exec)),
             TransportBuiltinValue::DiscoverFunction => {

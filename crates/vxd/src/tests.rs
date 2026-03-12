@@ -5,7 +5,7 @@ use moire::sync::SyncMutex;
 use sha2::{Digest as _, Sha256};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use tar::Builder as TarBuilder;
 
@@ -17,7 +17,10 @@ use ariadne::{Color as AriadneColor, Config as AriadneConfig, Label, Report, Rep
 use camino::Utf8Path;
 use concolor::ColorChoice;
 use std::fs;
+use std::fs::OpenOptions;
 use std::net::TcpListener;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use tempfile::TempDir;
 use tokio_test_lite::test as vx_test;
 use vx_eval::{
@@ -39,6 +42,7 @@ fn test_db() -> Database {
 }
 
 static COLOR_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
+static TEST_SERVICE_BINARIES_READY: OnceLock<()> = OnceLock::new();
 
 struct ColorOverrideGuard {
     _guard: MutexGuard<'static, ()>,
@@ -56,6 +60,115 @@ impl Drop for ColorOverrideGuard {
     fn drop(&mut self) {
         concolor::set(ColorChoice::Auto);
     }
+}
+
+fn ensure_test_service_binaries_built() {
+    TEST_SERVICE_BINARIES_READY.get_or_init(|| {
+        let _lock = lock_test_service_binary_build();
+        let mut command = std::process::Command::new("cargo");
+        command.args([
+            "build",
+            "-p",
+            "vx-store",
+            "-p",
+            "vx-runner",
+            "-p",
+            "vx-vfsd",
+        ]);
+        #[cfg(target_os = "macos")]
+        command.args(["-p", "vx-reaper"]);
+        let status = command
+            .status()
+            .expect("failed to build vx-store/vx-runner/vx-vfsd test service binaries");
+        assert!(
+            status.success(),
+            "test service binary build failed with {status}"
+        );
+    });
+}
+
+fn lock_test_service_binary_build() -> TestFileLock {
+    lock_test_file("service-binaries")
+}
+
+struct TestFileLock {
+    file: std::fs::File,
+}
+
+impl Drop for TestFileLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+fn lock_test_file(name: &str) -> TestFileLock {
+    let lock_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../../target/debug/.vxd-test-{name}.lock"));
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap_or_else(|error| panic!("failed to open {}: {error}", lock_path.display()));
+    #[cfg(unix)]
+    unsafe {
+        if libc::flock(file.as_raw_fd(), libc::LOCK_EX) != 0 {
+            let error = std::io::Error::last_os_error();
+            panic!("failed to lock {}: {error}", lock_path.display());
+        }
+    }
+    TestFileLock { file }
+}
+
+struct TestServiceBinaries {
+    _dir: TempDir,
+    store: String,
+    runner: String,
+    bin_dir: String,
+}
+
+fn copy_test_service_binaries() -> TestServiceBinaries {
+    ensure_test_service_binaries_built();
+    let dir = TempDir::new().expect("failed to create test service binary tempdir");
+    let bin_dir = dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("create test service binary dir");
+
+    let store = copy_test_service_binary(&resolve_vx_store_binary(), &bin_dir, "vx-store");
+    let runner = copy_test_service_binary(&resolve_vx_runner_binary(), &bin_dir, "vx-runner");
+    copy_test_service_binary(&resolve_vx_vfsd_binary(), &bin_dir, "vx-vfsd");
+    #[cfg(target_os = "macos")]
+    copy_test_service_binary(&resolve_vx_reaper_binary(), &bin_dir, "vx-reaper");
+
+    TestServiceBinaries {
+        _dir: dir,
+        store,
+        runner,
+        bin_dir: bin_dir.to_string_lossy().into_owned(),
+    }
+}
+
+fn copy_test_service_binary(source: &str, bin_dir: &std::path::Path, name: &str) -> String {
+    let destination = bin_dir.join(name);
+    fs::copy(source, &destination).unwrap_or_else(|error| {
+        panic!(
+            "failed to copy {source} to {}: {error}",
+            destination.display()
+        )
+    });
+    let permissions = fs::metadata(source)
+        .unwrap_or_else(|error| panic!("failed to stat {source}: {error}"))
+        .permissions();
+    fs::set_permissions(&destination, permissions).unwrap_or_else(|error| {
+        panic!(
+            "failed to set permissions on {}: {error}",
+            destination.display()
+        )
+    });
+    destination.to_string_lossy().into_owned()
 }
 
 fn vixen_grammar_store() -> Result<Arc<GrammarStore>, Box<dyn std::error::Error>> {
@@ -1131,19 +1244,20 @@ async fn test_store_backed_build_vx_trees_preserve_executable_bits() {
 struct StoreTestEnv {
     _root: TempDir,
     _vx_home: TempDir,
+    _binaries: TestServiceBinaries,
     _service: ServiceHandle,
     client: StoreClient,
 }
 
 impl StoreTestEnv {
     async fn new() -> Self {
+        let binaries = copy_test_service_binaries();
         let root = TempDir::new().expect("failed to create store root tempdir");
         let vx_home = TempDir::new().expect("failed to create vx_home tempdir");
         let endpoint = free_local_endpoint();
-        let binary_path = resolve_vx_store_binary();
         let root_str = root.path().to_string_lossy().into_owned();
 
-        let service = ServiceBuilder::new(binary_path, endpoint)
+        let service = ServiceBuilder::new(&binaries.store, endpoint)
             .caller_name("vxd-store-materialize-tests")
             .args(&["--root", &root_str])
             .env("VX_TEST", "1")
@@ -1160,6 +1274,7 @@ impl StoreTestEnv {
         Self {
             _root: root,
             _vx_home: vx_home,
+            _binaries: binaries,
             _service: service,
             client: StoreClient::new(virtual_handle),
         }
@@ -1169,6 +1284,8 @@ impl StoreTestEnv {
 struct BuildServiceTestEnv {
     _store_root: TempDir,
     _vx_home: TempDir,
+    _binaries: TestServiceBinaries,
+    _lock: TestFileLock,
     _store_handle: Arc<ServiceHandle>,
     _runner_handle: Arc<ServiceHandle>,
     service: VxdService,
@@ -1176,17 +1293,21 @@ struct BuildServiceTestEnv {
 
 impl BuildServiceTestEnv {
     async fn new() -> Self {
+        Self::with_runner_path_prefix(None).await
+    }
+
+    async fn with_runner_path_prefix(path_prefix: Option<&Utf8Path>) -> Self {
+        let lock = lock_test_file("build-service");
+        let binaries = copy_test_service_binaries();
         let store_root = TempDir::new().expect("failed to create store root tempdir");
         let vx_home = TempDir::new().expect("failed to create vx_home tempdir");
         let store_endpoint = free_local_endpoint();
         let runner_endpoint = free_local_endpoint();
         let vfsd_endpoint = free_local_endpoint();
-        let store_binary = resolve_vx_store_binary();
-        let runner_binary = resolve_vx_runner_binary();
         let store_root_str = store_root.path().to_string_lossy().into_owned();
         let vx_home_str = vx_home.path().to_string_lossy().into_owned();
 
-        let store_handle = ServiceBuilder::new(store_binary, store_endpoint.clone())
+        let store_handle = ServiceBuilder::new(&binaries.store, store_endpoint.clone())
             .caller_name("vxd-build-vx-tests")
             .args(&["--root", &store_root_str])
             .env("VX_TEST", "1")
@@ -1195,7 +1316,7 @@ impl BuildServiceTestEnv {
             .await
             .expect("failed to spawn/connect vx-store");
 
-        let runner_handle = ServiceBuilder::new(runner_binary, runner_endpoint.clone())
+        let mut runner_builder = ServiceBuilder::new(&binaries.runner, runner_endpoint.clone())
             .caller_name("vxd-build-vx-tests")
             .args(&[
                 "--store",
@@ -1207,7 +1328,18 @@ impl BuildServiceTestEnv {
             ])
             .env("VX_TEST", "1")
             .env("VX_HOME", &vx_home_str)
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(30));
+        let path = std::env::var("PATH").unwrap_or_default();
+        let mut path_entries = Vec::new();
+        if let Some(path_prefix) = path_prefix {
+            path_entries.push(path_prefix.as_str().to_string());
+        }
+        path_entries.push(binaries.bin_dir.clone());
+        if !path.is_empty() {
+            path_entries.push(path);
+        }
+        runner_builder = runner_builder.env("PATH", path_entries.join(":"));
+        let runner_handle = runner_builder
             .connect()
             .await
             .expect("failed to spawn/connect vx-runner");
@@ -1240,10 +1372,24 @@ impl BuildServiceTestEnv {
         Self {
             _store_root: store_root,
             _vx_home: vx_home,
+            _binaries: binaries,
+            _lock: lock,
             _store_handle: store_handle,
             _runner_handle: runner_handle,
             service,
         }
+    }
+}
+
+fn write_executable_script(path: &std::path::Path, body: &str) {
+    fs::write(path, body).expect("write script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut perms = fs::metadata(path).expect("script metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("set script permissions");
     }
 }
 
@@ -1366,7 +1512,50 @@ async fn render_uses_workspace_relative_templates_and_refreshes_on_content_chang
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn libpng_build_vx_runs_end_to_end_with_local_archives() {
-    let env = BuildServiceTestEnv::new().await;
+    let fake_tools = TempDir::new().expect("fake tool tempdir");
+    write_executable_script(
+        &fake_tools.path().join("cc"),
+        r#"#!/bin/sh
+if [ "$1" = "-dumpmachine" ]; then
+  echo x86_64-unknown-linux-gnu
+  exit 0
+fi
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-o" ]; then
+    out="$arg"
+    break
+  fi
+  prev="$arg"
+done
+if [ -z "$out" ]; then
+  echo "missing -o output" >&2
+  exit 1
+fi
+mkdir -p "$(dirname "$out")"
+printf 'artifact\n' > "$out"
+exit 0
+"#,
+    );
+    write_executable_script(
+        &fake_tools.path().join("ar"),
+        r#"#!/bin/sh
+out="$2"
+if [ -z "$out" ]; then
+  echo "missing archive output" >&2
+  exit 1
+fi
+mkdir -p "$(dirname "$out")"
+printf 'archive\n' > "$out"
+exit 0
+"#,
+    );
+
+    let env = BuildServiceTestEnv::with_runner_path_prefix(Some(
+        Utf8Path::from_path(fake_tools.path()).expect("fake tool path should be valid UTF-8"),
+    ))
+    .await;
     let workspace = TempDir::new().expect("workspace tempdir");
     let workspace_root =
         Utf8Path::from_path(workspace.path()).expect("workspace path should be valid UTF-8");
@@ -1489,6 +1678,79 @@ async fn libpng_build_vx_runs_end_to_end_with_local_archives() {
             "zlib/lib/libz.a".to_string(),
             "zlib/lib/libz.so".to_string(),
         ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stabilize_reuses_resolve_output_until_witness_changes() {
+    let env = BuildServiceTestEnv::new().await;
+    let workspace = TempDir::new().expect("workspace");
+    let workspace_root = Utf8Path::from_path(workspace.path()).expect("utf8 workspace");
+
+    fs::write(
+        workspace.path().join("build.vx"),
+        r#"
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) -> Tree (
+  Tree({
+    @out.txt: stabilize(
+      () => Tree.from_path(workspace).file(@input.txt).utf8(),
+      (value) => render(@template.txt) where {
+        bindings: {
+          VALUE: value,
+        },
+      },
+    ),
+  })
+)
+"#,
+    )
+    .expect("write build.vx");
+    fs::write(workspace.path().join("input.txt"), "world\n").expect("write input");
+    fs::write(workspace.path().join("template.txt"), "hello {{VALUE}}").expect("write template");
+
+    let request = BuildRequest {
+        project_path: workspace_root.to_owned(),
+        build_file_path: None,
+        release: false,
+    };
+
+    let first = env
+        .service
+        .do_build(request.clone())
+        .await
+        .expect("first stabilize build should succeed");
+    assert!(first.success, "first build failed: {:?}", first.failure);
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(".vx/build/out.txt")).expect("first output"),
+        "hello world\n"
+    );
+
+    fs::write(workspace.path().join("template.txt"), "goodbye {{VALUE}}")
+        .expect("rewrite template");
+
+    let second = env
+        .service
+        .do_build(request.clone())
+        .await
+        .expect("second stabilize build should succeed");
+    assert!(second.success, "second build failed: {:?}", second.failure);
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(".vx/build/out.txt")).expect("second output"),
+        "hello world\n",
+        "template-only changes should not invalidate stabilize"
+    );
+
+    fs::write(workspace.path().join("input.txt"), "mars\n").expect("rewrite input");
+
+    let third = env
+        .service
+        .do_build(request)
+        .await
+        .expect("third stabilize build should succeed");
+    assert!(third.success, "third build failed: {:?}", third.failure);
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(".vx/build/out.txt")).expect("third output"),
+        "goodbye mars\n"
     );
 }
 
@@ -1677,6 +1939,21 @@ fn resolve_vx_store_binary() -> String {
 fn resolve_vx_runner_binary() -> String {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/debug/vx-runner")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn resolve_vx_vfsd_binary() -> String {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/debug/vx-vfsd")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_vx_reaper_binary() -> String {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/debug/vx-reaper")
         .to_string_lossy()
         .into_owned()
 }

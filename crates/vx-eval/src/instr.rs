@@ -43,6 +43,7 @@ pub struct Module {
 pub struct FnDef {
     pub name: String,
     pub params: Vec<Param>,
+    pub keyword_params: Vec<KeywordParam>,
     pub body: Block,
 }
 
@@ -56,6 +57,12 @@ pub struct StructDecl {
 #[derive(Debug, Clone)]
 pub struct Param {
     pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct KeywordParam {
+    pub name: String,
+    pub default: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +86,12 @@ pub enum ArrayItem {
 #[derive(Debug, Clone)]
 pub enum RecordItem {
     Field { name: String, value: Expr },
+    Spread(Expr),
+}
+
+#[derive(Debug, Clone)]
+pub enum MapItem {
+    Entry { key: Expr, value: Expr },
     Spread(Expr),
 }
 
@@ -196,7 +209,7 @@ pub enum Expr {
     Array(Vec<ArrayItem>),
 
     /// Map literal: `%{ key => value, ... }`
-    Map(Vec<(Expr, Expr)>),
+    Map(Vec<MapItem>),
 
     /// Field access: `expr.field`
     Field {

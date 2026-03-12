@@ -2033,6 +2033,12 @@ impl RunnerService {
 
         let exit_code = output.exit_status.code().unwrap_or(-1);
         // r[impl exec.errors]
+        info!(
+            action.prefix_id = %action.prefix_id,
+            action_desc,
+            has_eval = request.eval.is_some(),
+            "starting shipped observer evaluation"
+        );
         let observer_result: Result<Option<TransportValue>, String> = match request.eval.as_ref() {
             Some(eval) => match evaluate_shipped_observer(
                 self.cas.as_ref(),
@@ -2049,6 +2055,12 @@ impl RunnerService {
             },
             None => Ok(None),
         };
+        info!(
+            action.prefix_id = %action.prefix_id,
+            action_desc,
+            observer_ok = observer_result.is_ok(),
+            "finished shipped observer evaluation"
+        );
 
         let verification_error = match verification_task {
             Some(task) => match task.await {
@@ -2119,14 +2131,31 @@ impl RunnerService {
         };
 
         if !output.exit_status.success() && observer_value.is_none() {
+            info!(
+                action.prefix_id = %action.prefix_id,
+                action_desc,
+                "skipping output flush because process failed without observer value"
+            );
             self.remove_action_prefix(&action.prefix_id).await;
             return run_failure_result(start, exit_code, output.stdout, output.stderr, None);
         }
 
+        info!(
+            action.prefix_id = %action.prefix_id,
+            action_desc,
+            outputs = request.outputs.len(),
+            "flushing VFS outputs"
+        );
         let flushed = self
             .flush_prefix_outputs(&action.prefix_id)
             .named("runner.run_vfs.flush_prefix_outputs")
             .await;
+        info!(
+            action.prefix_id = %action.prefix_id,
+            action_desc,
+            flushed_entries = flushed.len(),
+            "finished flushing VFS outputs"
+        );
 
         let mut outputs = Vec::new();
         for out in &request.outputs {
@@ -2190,7 +2219,17 @@ impl RunnerService {
             );
         }
 
+        info!(
+            action.prefix_id = %action.prefix_id,
+            action_desc,
+            "removing action prefix"
+        );
         self.remove_action_prefix(&action.prefix_id).await;
+        info!(
+            action.prefix_id = %action.prefix_id,
+            action_desc,
+            "removed action prefix"
+        );
 
         run_success_result(
             start,

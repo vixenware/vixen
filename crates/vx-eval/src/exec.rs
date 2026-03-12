@@ -71,6 +71,30 @@ pub type AcquireHandler =
 pub type SharedAcquireHandler = Arc<AcquireHandler>;
 
 #[derive(Debug, Clone)]
+pub struct StabilizeRequest {
+    pub witness: Value,
+    pub module: TransportModule,
+    pub resolve: ShippedFunction,
+    pub demand_chain: DemandChain,
+}
+
+pub type StabilizeHandler =
+    dyn Fn(StabilizeRequest) -> Result<Value, PoisonError> + Send + Sync + 'static;
+
+pub type SharedStabilizeHandler = Arc<StabilizeHandler>;
+
+#[derive(Debug, Clone)]
+pub struct StoreHydrationRequest {
+    pub value: Value,
+    pub demand_chain: DemandChain,
+}
+
+pub type StoreHydrationHandler =
+    dyn Fn(StoreHydrationRequest) -> Result<Value, PoisonError> + Send + Sync + 'static;
+
+pub type SharedStoreHydrationHandler = Arc<StoreHydrationHandler>;
+
+#[derive(Debug, Clone)]
 pub struct RenderRequest {
     pub template: String,
     pub bindings: Value,

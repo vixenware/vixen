@@ -14,7 +14,7 @@ use tempfile::TempDir;
 use vx_parser::{AstNode, Pattern as AstPattern, SourceFile, Stmt as AstStmt};
 use vx_store_proto::{Blake3Hash, BlobRef, ChunkHash, NodeHash};
 
-use crate::exec::{AcquireRequest, ExecArgValue, RenderRequest};
+use crate::exec::{AcquireRequest, ExecArgValue, RenderRequest, StabilizeRequest};
 use crate::instr::{Block, FnDef};
 use crate::lower::{lower_source_file, lower_source_file_with_source_id};
 use crate::node::{NodeId, NodeJob, TemplateKind, TemplatePartValue};
@@ -4697,6 +4697,56 @@ fn render_header() {
     assert_eq!(provenance.label, "call(..)");
     assert_eq!(provenance.span.start, u32::from(outer_range.start()));
     assert_eq!(provenance.span.end, u32::from(outer_range.end()));
+}
+
+#[test]
+fn stabilize_handlers_receive_snapshotted_witness_and_shipped_resolve() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("input.txt"), "hello stabilize\n").unwrap();
+
+    let source = r#"
+fn build(workspace: Path) {
+  stabilize(
+    () => Tree.from_path(workspace).file(@input.txt),
+    (input) => input.utf8(),
+  )
+}
+"#;
+
+    let captured = Arc::new(Mutex::new(None::<StabilizeRequest>));
+    let sink = Arc::clone(&captured);
+    let engine = engine_with_source_id(source, "/workspace/build.vx").with_stabilize_handler(
+        Arc::new(move |request| {
+            let resolved = Engine::invoke_shipped(
+                &request.module,
+                &request.resolve,
+                vec![request.witness.clone()],
+            )?;
+            *sink.lock().unwrap() = Some(request);
+            Ok(resolved)
+        }),
+    );
+
+    let value = engine
+        .call(
+            "build",
+            vec![Value::Path(PathValue::new(
+                workspace.path().to_string_lossy().as_ref(),
+            ))],
+        )
+        .unwrap();
+    assert_eq!(value, Value::String(Arc::from("hello stabilize\n")));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("stabilize request should be captured");
+    let Value::Blob(BlobValue::Inline { bytes, .. }) = request.witness else {
+        panic!("expected snapshotted inline blob witness");
+    };
+    assert_eq!(bytes.as_ref(), b"hello stabilize\n");
+    assert!(!request.resolve.code_identity.is_empty());
 }
 
 #[test]

@@ -647,6 +647,69 @@ mod tests {
         assert!(executable, "expected executable bit on committed file");
     }
 
+    #[tokio::test]
+    async fn shipped_inline_closure_observer_can_return_bool() {
+        let env = StoreTestEnv::new().await;
+        let engine = shipped_function_engine(
+            r#"fn make() {
+                   (process, _tree) => process.exit_code == 0
+                 }"#,
+        );
+        let eval = RunEvalPayload {
+            module: engine.transport_module(),
+            observer: Some(
+                engine
+                    .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
+                    .expect("observer should ship"),
+            ),
+            verification_obligations: Vec::new(),
+        };
+
+        let observed =
+            evaluate_shipped_observer(&env.client, &eval, 0, "", "", &PathValue::new("."))
+                .await
+                .expect("observer should evaluate")
+                .expect("observer value should be present");
+
+        assert_eq!(observed, vx_eval::TransportValue::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn shipped_nested_inline_closure_observer_can_return_bool() {
+        let env = StoreTestEnv::new().await;
+        let engine = shipped_function_engine(
+            r#"fn make(flag: Bool) {
+                   let suffix = if flag ("") else ("!");
+                   fn probe_suffix(_value: String) { suffix }
+                   (process, _tree) => {
+                     let _ = probe_suffix(process.stdout.utf8_lossy());
+                     process.exit_code == 0
+                   }
+                 }"#,
+        );
+        let eval = RunEvalPayload {
+            module: engine.transport_module(),
+            observer: Some(
+                engine
+                    .ship_function(
+                        engine
+                            .call("make", vec![Value::Bool(true)])
+                            .expect("make should evaluate"),
+                    )
+                    .expect("observer should ship"),
+            ),
+            verification_obligations: Vec::new(),
+        };
+
+        let observed =
+            evaluate_shipped_observer(&env.client, &eval, 0, "", "", &PathValue::new("."))
+                .await
+                .expect("observer should evaluate")
+                .expect("observer value should be present");
+
+        assert_eq!(observed, vx_eval::TransportValue::Bool(true));
+    }
+
     #[test]
     fn shipped_verification_reports_changed_host_files() {
         let tempdir = TempDir::new().expect("failed to create host tempdir");

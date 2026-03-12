@@ -172,6 +172,7 @@ pub enum BuiltinNamespace {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltinFunction {
     Acquire,
+    Stabilize,
     Render,
     Exec,
     Discover,
@@ -589,6 +590,7 @@ impl BuiltinValue {
         match self {
             BuiltinValue::Namespace(_)
             | BuiltinValue::Function(BuiltinFunction::Acquire)
+            | BuiltinValue::Function(BuiltinFunction::Stabilize)
             | BuiltinValue::Function(BuiltinFunction::Render)
             | BuiltinValue::Function(BuiltinFunction::Exec)
             | BuiltinValue::Function(BuiltinFunction::Discover)
@@ -635,6 +637,7 @@ impl BuiltinValue {
         match self {
             BuiltinValue::Namespace(_)
             | BuiltinValue::Function(BuiltinFunction::Acquire)
+            | BuiltinValue::Function(BuiltinFunction::Stabilize)
             | BuiltinValue::Function(BuiltinFunction::Render)
             | BuiltinValue::Function(BuiltinFunction::Exec)
             | BuiltinValue::Function(BuiltinFunction::Discover)
@@ -683,6 +686,7 @@ impl BuiltinValue {
             BuiltinValue::Namespace(BuiltinNamespace::Bytes) => Some("builtin:Bytes".into()),
             BuiltinValue::Namespace(BuiltinNamespace::Tree) => Some("builtin:Tree".into()),
             BuiltinValue::Function(BuiltinFunction::Acquire) => Some("builtin:acquire".into()),
+            BuiltinValue::Function(BuiltinFunction::Stabilize) => Some("builtin:stabilize".into()),
             BuiltinValue::Function(BuiltinFunction::Render) => Some("builtin:render".into()),
             BuiltinValue::Function(BuiltinFunction::Exec) => Some("builtin:exec".into()),
             BuiltinValue::Function(BuiltinFunction::Discover) => Some("builtin:discover".into()),
@@ -1180,6 +1184,7 @@ impl fmt::Display for BuiltinValue {
             BuiltinValue::Namespace(BuiltinNamespace::Bytes) => write!(f, "Bytes"),
             BuiltinValue::Namespace(BuiltinNamespace::Tree) => write!(f, "Tree"),
             BuiltinValue::Function(BuiltinFunction::Acquire) => write!(f, "acquire"),
+            BuiltinValue::Function(BuiltinFunction::Stabilize) => write!(f, "stabilize"),
             BuiltinValue::Function(BuiltinFunction::Render) => write!(f, "render"),
             BuiltinValue::Function(BuiltinFunction::Exec) => write!(f, "exec"),
             BuiltinValue::Function(BuiltinFunction::Discover) => write!(f, "discover"),

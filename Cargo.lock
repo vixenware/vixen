@@ -3989,6 +3989,7 @@ dependencies = [
  "concolor",
  "eyre",
  "facet",
+ "facet-postcard",
  "figue",
  "flate2",
  "hex",

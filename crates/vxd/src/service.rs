@@ -15,6 +15,7 @@ use crate::inputs::*;
 use ::moire::sync::SyncMutex;
 use camino::{Utf8Path, Utf8PathBuf};
 use facet::trace;
+use facet_postcard::{from_slice, to_vec};
 use moire::task::FutureExt;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
@@ -34,8 +35,9 @@ use tracing::{debug, info, warn};
 use vx_eval::{
     AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain,
     DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, ExecArgValue, ExecMount,
-    ExecRequest, MapValue, PathValue, PoisonError, PoisonKind, RenderRequest as EvalRenderRequest,
-    StructValue, TreeValue, Value, lower_source_file_with_source_id,
+    ExecRequest, MapValue, Module as EvalModule, PathValue, PoisonError, PoisonKind,
+    RenderRequest as EvalRenderRequest, StabilizeRequest as EvalStabilizeRequest, StructValue,
+    TransportValue, TreeValue, Value, lower_source_file_with_source_id,
 };
 use vx_io::spawn::ServiceHandle;
 use vx_parser::SourceFile;
@@ -1543,6 +1545,22 @@ pub(crate) fn summarize_build_vx_render_request(request: &EvalRenderRequest) -> 
     format!("build.vx render: template={}", request.template)
 }
 
+pub(crate) fn summarize_build_vx_stabilize_request(request: &EvalStabilizeRequest) -> String {
+    format!(
+        "build.vx stabilize: resolve={} witness_type={}",
+        request.resolve.code_identity,
+        request.witness.type_name(),
+    )
+}
+
+#[derive(Clone)]
+struct BuildVxRuntime {
+    store: Arc<StoreClient>,
+    exec: Arc<RunnerClient>,
+    workspace_root: Utf8PathBuf,
+    progress_listener: Option<Arc<ProgressListenerClient>>,
+}
+
 fn block_on_runtime<T>(runtime: &Handle, future: impl Future<Output = T>) -> T {
     if Handle::try_current().is_ok() {
         block_in_place(|| runtime.block_on(future))
@@ -1558,6 +1576,221 @@ fn emit_build_vx_boundary_log(
 ) {
     if let Some(listener) = listener {
         let _ = block_on_runtime(runtime, listener.log_message(message.to_string()));
+    }
+}
+
+fn stabilize_cache_key(resolve: &[u8], witness: &[u8]) -> Blake3Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"stabilize-cache-v1\n");
+    hasher.update(b"resolve:");
+    hasher.update(resolve);
+    hasher.update(b"\n");
+    hasher.update(b"witness:");
+    hasher.update(witness);
+    hasher.update(b"\n");
+    Blake3Hash(*hasher.finalize().as_bytes())
+}
+
+async fn load_stabilized_value_from_manifest(
+    store: &StoreClient,
+    manifest_hash: NodeHash,
+) -> std::result::Result<Value, String> {
+    let node_bytes = store
+        .get_node(manifest_hash)
+        .await
+        .map_err(|error| format!("failed to load stabilize manifest: {error:?}"))?
+        .ok_or_else(|| format!("stabilize manifest {manifest_hash} not found"))?;
+    let node = CasNode::from_bytes(&node_bytes)
+        .map_err(|error| format!("failed to decode stabilize manifest {manifest_hash}: {error}"))?;
+    let CasNode::Manifest(manifest) = node else {
+        return Err(format!(
+            "stabilize cache entry {manifest_hash} is not a value manifest"
+        ));
+    };
+    let [output] = manifest.outputs.as_slice() else {
+        return Err(format!(
+            "stabilize manifest {manifest_hash} must contain exactly one output"
+        ));
+    };
+    let bytes = fetch_store_blob_bytes(store, &blob_ref_from_output_blob_ref(&output.blob))
+        .await
+        .map_err(|error| format!("failed to load stabilized value blob: {error}"))?;
+    let transport = from_slice::<TransportValue>(&bytes)
+        .map_err(|error| format!("failed to deserialize stabilized value: {error}"))?;
+    Value::try_from(transport)
+        .map_err(|error| format!("failed to decode stabilized value: {error}"))
+}
+
+impl BuildVxRuntime {
+    fn build_engine(&self, module: &EvalModule) -> Engine {
+        let runtime = Handle::current();
+        let hydration_store = Arc::clone(&self.store);
+        let hydration_runtime = runtime.clone();
+        let acquire_runtime_state = self.clone();
+        let acquire_runtime = runtime.clone();
+        let render_runtime_state = self.clone();
+        let render_runtime = runtime.clone();
+        let stabilize_runtime_state = self.clone();
+        let stabilize_runtime = runtime.clone();
+        let exec_store = Arc::clone(&self.store);
+        let exec_runner = Arc::clone(&self.exec);
+        let exec_runtime = runtime.clone();
+        let discover_store = Arc::clone(&self.store);
+        let discover_exec = Arc::clone(&self.exec);
+        let discover_runtime = runtime;
+        let progress_listener = self.progress_listener.clone();
+        let acquire_listener = progress_listener.clone();
+        let render_listener = progress_listener.clone();
+        let stabilize_listener = progress_listener.clone();
+        let exec_listener = progress_listener.clone();
+        let discover_listener = progress_listener;
+
+        Engine::from_module(module)
+            .with_store_hydration_handler(Arc::new(move |request| {
+                let store = Arc::clone(&hydration_store);
+                let runtime = hydration_runtime.clone();
+                block_on_runtime(
+                    &runtime,
+                    hydrate_exec_value_from_store(&store, request.value, &request.demand_chain),
+                )
+            }))
+            .with_acquire_handler(Arc::new(move |request| {
+                let summary = summarize_build_vx_acquire_request(&request);
+                let runtime = acquire_runtime.clone();
+                emit_build_vx_boundary_log(&runtime, &acquire_listener, &summary);
+                block_on_runtime(
+                    &runtime,
+                    run_build_vx_acquire_via_store(&acquire_runtime_state.store, request),
+                )
+                .map_err(|error| error.with_context(summary))
+            }))
+            .with_render_handler(Arc::new(move |request| {
+                let summary = summarize_build_vx_render_request(&request);
+                let runtime = render_runtime.clone();
+                emit_build_vx_boundary_log(&runtime, &render_listener, &summary);
+                block_on_runtime(
+                    &runtime,
+                    run_build_vx_render_via_store(
+                        &render_runtime_state.store,
+                        &render_runtime_state.workspace_root,
+                        request,
+                    ),
+                )
+                .map_err(|error| error.with_context(summary))
+            }))
+            .with_stabilize_handler(Arc::new(move |request| {
+                let summary = summarize_build_vx_stabilize_request(&request);
+                let runtime = stabilize_runtime.clone();
+                emit_build_vx_boundary_log(&runtime, &stabilize_listener, &summary);
+                block_on_runtime(
+                    &runtime,
+                    stabilize_runtime_state.run_stabilize_via_store(request),
+                )
+                .map_err(|error| error.with_context(summary))
+            }))
+            .with_exec_handler(Arc::new(move |request| {
+                let summary = summarize_build_vx_exec_request(&request);
+                let runtime = exec_runtime.clone();
+                emit_build_vx_boundary_log(&runtime, &exec_listener, &summary);
+                block_on_runtime(
+                    &runtime,
+                    run_build_vx_exec_via_runner(&exec_store, &exec_runner, request),
+                )
+                .map_err(|error| error.with_context(summary))
+            }))
+            .with_discover_handler(Arc::new(move |request| {
+                let summary = summarize_build_vx_discover_request(&request);
+                let runtime = discover_runtime.clone();
+                emit_build_vx_boundary_log(&runtime, &discover_listener, &summary);
+                block_on_runtime(
+                    &runtime,
+                    run_build_vx_discover_via_runner(&discover_store, &discover_exec, request),
+                )
+                .map_err(|error| error.with_context(summary))
+            }))
+    }
+
+    async fn run_stabilize_via_store(
+        &self,
+        request: EvalStabilizeRequest,
+    ) -> std::result::Result<Value, PoisonError> {
+        let demand_chain = request.demand_chain.clone();
+        let witness = TransportValue::try_from(&request.witness).map_err(|message| {
+            exec_bridge_poison(
+                PoisonKind::TypeError,
+                format!("stabilize witness must be transportable: {message}"),
+                &demand_chain,
+            )
+        })?;
+        let witness_bytes = to_vec(&witness).map_err(|error| {
+            exec_bridge_poison(
+                PoisonKind::Internal,
+                format!("failed to serialize stabilize witness: {error}"),
+                &demand_chain,
+            )
+        })?;
+        let resolve_bytes = to_vec(&request.resolve).map_err(|error| {
+            exec_bridge_poison(
+                PoisonKind::Internal,
+                format!("failed to serialize stabilize resolve callback: {error}"),
+                &demand_chain,
+            )
+        })?;
+        let cache_key = stabilize_cache_key(&resolve_bytes, &witness_bytes);
+
+        if let Some(cached) = self.store.lookup(cache_key).await.map_err(|error| {
+            exec_bridge_poison(PoisonKind::Internal, format!("{error:?}"), &demand_chain)
+        })? {
+            return load_stabilized_value_from_manifest(&self.store, cached)
+                .await
+                .map_err(|message| {
+                    exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
+                });
+        }
+
+        let module: EvalModule = request.module.clone().into();
+        let engine = self.build_engine(&module);
+        let value = engine.call_shipped(&request.resolve, vec![request.witness])?;
+        let transport = TransportValue::try_from(&value).map_err(|message| {
+            exec_bridge_poison(
+                PoisonKind::TypeError,
+                format!("stabilize resolve result must be transportable: {message}"),
+                &demand_chain,
+            )
+        })?;
+        let bytes = to_vec(&transport).map_err(|error| {
+            exec_bridge_poison(
+                PoisonKind::Internal,
+                format!("failed to serialize stabilized value: {error}"),
+                &demand_chain,
+            )
+        })?;
+        let prepared = prepare_blob(&bytes);
+        let blob_ref = store_prepared_blob(&self.store, &prepared, &bytes)
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::Internal, message, &demand_chain))?;
+        let manifest = NodeManifest {
+            node_id: NodeId("stabilize:value".to_string()),
+            cache_key,
+            produced_at: String::new(),
+            outputs: vec![OutputEntry {
+                logical: "value".to_string(),
+                filename: "stabilized".to_string(),
+                blob: output_blob_ref_from_blob_ref(&blob_ref),
+                executable: false,
+            }],
+        };
+        let (node_bytes, manifest_hash) = CasNode::Manifest(manifest).to_bytes_and_hash();
+        self.store
+            .put_node(manifest_hash, node_bytes)
+            .await
+            .map_err(|error| {
+                exec_bridge_poison(PoisonKind::Internal, format!("{error:?}"), &demand_chain)
+            })?;
+        publish_acquire_cache_entry(&self.store, cache_key, manifest_hash)
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::Internal, message, &demand_chain))?;
+        Ok(value)
     }
 }
 
@@ -2229,81 +2462,13 @@ impl VxdService {
 
                 let root = SourceFile::cast_root(parse.syntax());
                 let module = lower_source_file_with_source_id(&root, build_vx_path.to_string());
-                let store = Arc::clone(&self.store);
-                let exec = Arc::clone(&self.exec);
-                let runtime = Handle::current();
-                let hydration_store = Arc::clone(&self.store);
-                let hydration_runtime = runtime.clone();
-                let acquire_store = Arc::clone(&self.store);
-                let acquire_runtime = runtime.clone();
-                let render_store = Arc::clone(&self.store);
-                let render_runtime = runtime.clone();
-                let render_workspace = request.project_path.clone();
-                let discover_store = Arc::clone(&self.store);
-                let discover_exec = Arc::clone(&self.exec);
-                let discover_runtime = runtime.clone();
-                let progress_listener = self.progress_listener.lock().clone();
-                let acquire_listener = progress_listener.clone();
-                let render_listener = progress_listener.clone();
-                let exec_listener = progress_listener.clone();
-                let discover_listener = progress_listener;
-                let engine = Engine::from_module(&module)
-                    .with_store_hydration_handler(Arc::new(move |request| {
-                        let store = Arc::clone(&hydration_store);
-                        let runtime = hydration_runtime.clone();
-                        block_on_runtime(
-                            &runtime,
-                            hydrate_exec_value_from_store(
-                                &store,
-                                request.value,
-                                &request.demand_chain,
-                            ),
-                        )
-                    }))
-                    .with_acquire_handler(Arc::new(move |request| {
-                        let summary = summarize_build_vx_acquire_request(&request);
-                        let store = Arc::clone(&acquire_store);
-                        let runtime = acquire_runtime.clone();
-                        emit_build_vx_boundary_log(&runtime, &acquire_listener, &summary);
-                        block_on_runtime(&runtime, run_build_vx_acquire_via_store(&store, request))
-                            .map_err(|error| error.with_context(summary))
-                    }))
-                    .with_render_handler(Arc::new(move |request| {
-                        let summary = summarize_build_vx_render_request(&request);
-                        let store = Arc::clone(&render_store);
-                        let runtime = render_runtime.clone();
-                        let workspace = render_workspace.clone();
-                        emit_build_vx_boundary_log(&runtime, &render_listener, &summary);
-                        block_on_runtime(
-                            &runtime,
-                            run_build_vx_render_via_store(&store, &workspace, request),
-                        )
-                        .map_err(|error| error.with_context(summary))
-                    }))
-                    .with_exec_handler(Arc::new(move |request| {
-                        let summary = summarize_build_vx_exec_request(&request);
-                        let store = Arc::clone(&store);
-                        let exec = Arc::clone(&exec);
-                        let runtime = runtime.clone();
-                        emit_build_vx_boundary_log(&runtime, &exec_listener, &summary);
-                        block_on_runtime(
-                            &runtime,
-                            run_build_vx_exec_via_runner(&store, &exec, request),
-                        )
-                        .map_err(|error| error.with_context(summary))
-                    }))
-                    .with_discover_handler(Arc::new(move |request| {
-                        let summary = summarize_build_vx_discover_request(&request);
-                        let store = Arc::clone(&discover_store);
-                        let exec = Arc::clone(&discover_exec);
-                        let runtime = discover_runtime.clone();
-                        emit_build_vx_boundary_log(&runtime, &discover_listener, &summary);
-                        block_on_runtime(
-                            &runtime,
-                            run_build_vx_discover_via_runner(&store, &exec, request),
-                        )
-                        .map_err(|error| error.with_context(summary))
-                    }));
+                let build_runtime = BuildVxRuntime {
+                    store: Arc::clone(&self.store),
+                    exec: Arc::clone(&self.exec),
+                    workspace_root: request.project_path.clone(),
+                    progress_listener: self.progress_listener.lock().clone(),
+                };
+                let engine = build_runtime.build_engine(&module);
                 let output = engine
                     .call_entry(
                         "build",

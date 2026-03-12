@@ -19,7 +19,8 @@ pub const CC_CACHE_KEY_VERSION: u32 = 2;
 
 /// Current cache key schema version for generic tool execution.
 /// Version 5: Added direct program hashing for executor-side exec requests.
-pub const RUN_CACHE_KEY_VERSION: u32 = 5;
+/// Version 6: Hash shipped observers directly instead of serializing whole modules.
+pub const RUN_CACHE_KEY_VERSION: u32 = 6;
 
 /// Compute a cache key for a Rust compile request.
 ///
@@ -262,9 +263,22 @@ pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
     hasher.update(b"\n");
 
     if let Some(eval) = &request.eval {
-        let eval_bytes = to_vec(eval).expect("run evaluator payload must serialize");
         hasher.update(b"eval:");
-        hasher.update(&eval_bytes);
+        if let Some(observer) = &eval.observer {
+            hasher.update(b"observer:");
+            let observer_bytes = to_vec(observer).expect("shipped observer must serialize");
+            hasher.update(&observer_bytes);
+        } else {
+            hasher.update(b"module:");
+            let module_bytes = to_vec(&eval.module).expect("transport module must serialize");
+            hasher.update(&module_bytes);
+        }
+        hasher.update(b"\n");
+
+        hasher.update(b"verify:");
+        let verification_bytes = to_vec(&eval.verification_obligations)
+            .expect("verification obligations must serialize");
+        hasher.update(&verification_bytes);
         hasher.update(b"\n");
     }
 
@@ -350,8 +364,8 @@ pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
 mod tests {
     use super::*;
     use vx_runner_proto::{
-        RunArg, RunEvalPayload, RunRequest, RustDep, TransportBlock, TransportExpr, TransportFnDef,
-        TransportModule, TransportStmt,
+        RunArg, RunEvalPayload, RunRequest, RustDep, ShippedFunction, TransportBlock,
+        TransportExpr, TransportFnDef, TransportModule, TransportParam, TransportStmt,
     };
 
     #[test]
@@ -467,6 +481,7 @@ mod tests {
                 functions: vec![TransportFnDef {
                     name: "observe".to_string(),
                     params: vec![],
+                    keyword_params: vec![],
                     body: TransportBlock {
                         stmts: vec![TransportStmt::Expr(TransportExpr::LitInt(1))],
                     },
@@ -481,6 +496,7 @@ mod tests {
                 functions: vec![TransportFnDef {
                     name: "observe".to_string(),
                     params: vec![],
+                    keyword_params: vec![],
                     body: TransportBlock {
                         stmts: vec![TransportStmt::Expr(TransportExpr::LitInt(2))],
                     },
@@ -529,5 +545,69 @@ mod tests {
         };
 
         assert_ne!(run_cache_key(&request), run_cache_key(&direct_request));
+    }
+
+    #[test]
+    fn run_cache_key_handles_shipped_observer_payloads() {
+        let request = RunRequest {
+            toolchain_manifest: Blake3Hash([1; 32]),
+            program_rel: String::new(),
+            program: Some(RunArg::literal("/usr/bin/cc")),
+            args: vec![
+                RunArg::literal("-x"),
+                RunArg::literal("c"),
+                RunArg::path("probe.c"),
+                RunArg::literal("-c"),
+                RunArg::literal("-o"),
+                RunArg::path("out/probe.o"),
+            ],
+            tree_mounts: vec![],
+            file_mounts: vec![],
+            outputs: vec![],
+            writable_roots: vec!["out".to_string()],
+            cwd: None,
+            env: vec![],
+            clear_env: false,
+            eval: Some(RunEvalPayload {
+                module: TransportModule {
+                    functions: vec![],
+                    top_level: TransportBlock { stmts: vec![] },
+                },
+                observer: Some(ShippedFunction {
+                    code_identity: "observe:probe".to_string(),
+                    def: TransportFnDef {
+                        name: "observe".to_string(),
+                        params: vec![
+                            TransportParam {
+                                name: "process".to_string(),
+                            },
+                            TransportParam {
+                                name: "_tree".to_string(),
+                            },
+                        ],
+                        keyword_params: vec![],
+                        body: TransportBlock {
+                            stmts: vec![TransportStmt::Expr(TransportExpr::Binary {
+                                op: vx_runner_proto::TransportBinOp::Eq,
+                                left: Box::new(TransportExpr::Field {
+                                    receiver: Box::new(TransportExpr::Var("process".to_string())),
+                                    field: "exit_code".to_string(),
+                                    provenance: None,
+                                }),
+                                right: Box::new(TransportExpr::LitInt(0)),
+                                provenance: None,
+                            })],
+                        },
+                    },
+                    captures: vec![],
+                }),
+                verification_obligations: vec![],
+            }),
+            macos_commandlinetools_version: None,
+        };
+
+        let first = run_cache_key(&request);
+        let second = run_cache_key(&request);
+        assert_eq!(first, second);
     }
 }

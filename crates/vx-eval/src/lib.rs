@@ -12,7 +12,9 @@ mod exec;
 pub use exec::{
     AcquireHandler, AcquireRequest, DiscoverHandler, DiscoverRequest, ExecArgValue, ExecHandler,
     ExecMount, ExecRequest, RenderHandler, RenderRequest, SharedAcquireHandler,
-    SharedDiscoverHandler, SharedExecHandler, SharedRenderHandler,
+    SharedDiscoverHandler, SharedExecHandler, SharedRenderHandler, SharedStabilizeHandler,
+    SharedStoreHydrationHandler, StabilizeHandler, StabilizeRequest, StoreHydrationHandler,
+    StoreHydrationRequest,
 };
 
 mod instr;

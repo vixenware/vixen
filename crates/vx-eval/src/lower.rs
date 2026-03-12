@@ -8,10 +8,10 @@ use std::sync::Arc;
 use vx_parser::{
     ArrayExpr, ArrayItem as AstArrayItem, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr,
     Expr as AstExpr, FailExpr, FieldExpr, FnDecl, IfExpr, InterpolatedStringExpr, InvokeExpr,
-    LiteralExpr, MapExpr, NamespaceDecl, Parameter, PartialAppExpr, PathLiteralExpr,
-    Pattern as AstPattern, PrefixExpr, RecordExpr, SourceFile, Stmt as AstStmt, StringPart,
-    StructDecl as AstStructDecl, StructLiteralExpr, StructLiteralField, SyntaxKind, TupleExpr,
-    WhereExpr,
+    LiteralExpr, LiteralPattern, MapExpr, MatchExpr, NamespaceDecl, Parameter, PartialAppExpr,
+    PathLiteralExpr, Pattern as AstPattern, PrefixExpr, RecordExpr, SourceFile, Stmt as AstStmt,
+    StringPart, StructDecl as AstStructDecl, StructLiteralExpr, StructLiteralField, SyntaxKind,
+    TupleExpr, WhereExpr,
 };
 
 use crate::instr;
@@ -19,6 +19,7 @@ use crate::instr;
 #[derive(Default)]
 struct LowerCtx {
     next_closure_id: usize,
+    next_temp_id: usize,
     namespace_methods: Vec<Arc<instr::FnDef>>,
     source_id: Arc<str>,
 }
@@ -28,6 +29,12 @@ impl LowerCtx {
         let closure_id = self.next_closure_id;
         self.next_closure_id += 1;
         closure_id
+    }
+
+    fn alloc_temp_name(&mut self, prefix: &str) -> String {
+        let temp_id = self.next_temp_id;
+        self.next_temp_id += 1;
+        format!("${prefix}{temp_id}")
     }
 
     fn provenance(&self, node: &impl AstNode, label: impl Into<String>) -> instr::SourceProvenance {
@@ -93,6 +100,20 @@ fn lower_fn_decl_named(f: &FnDecl, name: &str, ctx: &mut LowerCtx) -> Option<ins
             })
         })
         .collect();
+    let keyword_params = f
+        .keyword_parameters()
+        .map(|param| {
+            let default = param
+                .syntax()
+                .children()
+                .find_map(AstExpr::cast)
+                .and_then(|expr| lower_expr_with_ctx(&expr, ctx));
+            Some(instr::KeywordParam {
+                name: param.name()?.text().to_string(),
+                default,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
     let body = match f.body_expr() {
         Some(AstExpr::Block(block)) => lower_block_with_ctx(&block, ctx),
         Some(expr) => instr::Block {
@@ -104,6 +125,7 @@ fn lower_fn_decl_named(f: &FnDecl, name: &str, ctx: &mut LowerCtx) -> Option<ins
     Some(instr::FnDef {
         name: name.to_string(),
         params,
+        keyword_params,
         body,
     })
 }
@@ -210,6 +232,7 @@ fn lower_expr_with_ctx(expr: &AstExpr, ctx: &mut LowerCtx) -> Option<instr::Expr
         AstExpr::Prefix(pre) => lower_prefix(pre, ctx),
         AstExpr::Block(block) => Some(instr::Expr::Block(lower_block_with_ctx(block, ctx))),
         AstExpr::If(if_expr) => lower_if(if_expr, ctx),
+        AstExpr::Match(match_expr) => lower_match(match_expr, ctx),
         AstExpr::Tuple(tuple) => lower_tuple(tuple, ctx),
         AstExpr::Paren(paren) => paren
             .expr()
@@ -229,11 +252,7 @@ fn lower_expr_with_ctx(expr: &AstExpr, ctx: &mut LowerCtx) -> Option<instr::Expr
             ctx,
         )?))),
         AstExpr::PartialApp(partial) => lower_partial(partial, ctx),
-        AstExpr::Index(_)
-        | AstExpr::Match(_)
-        | AstExpr::Range(_)
-        | AstExpr::TypeOp(_)
-        | AstExpr::With(_) => None,
+        AstExpr::Index(_) | AstExpr::Range(_) | AstExpr::TypeOp(_) | AstExpr::With(_) => None,
     }
 }
 
@@ -557,9 +576,12 @@ fn contains_pipe_placeholder(expr: &instr::Expr) -> bool {
                 contains_pipe_placeholder(expr)
             }
         }),
-        instr::Expr::Map(entries) => entries
-            .iter()
-            .any(|(key, value)| contains_pipe_placeholder(key) || contains_pipe_placeholder(value)),
+        instr::Expr::Map(entries) => entries.iter().any(|entry| match entry {
+            instr::MapItem::Entry { key, value } => {
+                contains_pipe_placeholder(key) || contains_pipe_placeholder(value)
+            }
+            instr::MapItem::Spread(expr) => contains_pipe_placeholder(expr),
+        }),
         instr::Expr::Field { receiver, .. } => contains_pipe_placeholder(receiver),
         instr::Expr::Fail { message, .. } => contains_pipe_placeholder(message),
         instr::Expr::Fallible(expr) => contains_pipe_placeholder(expr),
@@ -716,11 +738,14 @@ fn substitute_pipe_placeholder(expr: instr::Expr, replacement: &instr::Expr) -> 
         instr::Expr::Map(entries) => instr::Expr::Map(
             entries
                 .into_iter()
-                .map(|(key, value)| {
-                    (
-                        substitute_pipe_placeholder(key, replacement),
-                        substitute_pipe_placeholder(value, replacement),
-                    )
+                .map(|entry| match entry {
+                    instr::MapItem::Entry { key, value } => instr::MapItem::Entry {
+                        key: substitute_pipe_placeholder(key, replacement),
+                        value: substitute_pipe_placeholder(value, replacement),
+                    },
+                    instr::MapItem::Spread(expr) => {
+                        instr::MapItem::Spread(substitute_pipe_placeholder(expr, replacement))
+                    }
                 })
                 .collect(),
         ),
@@ -821,6 +846,127 @@ fn lower_if(if_expr: &IfExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
         else_branch,
         provenance: Some(ctx.provenance(if_expr, "if(..)")),
     })
+}
+
+fn lower_match(match_expr: &MatchExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
+    let scrutinee_expr = match_expr.syntax().children().find_map(AstExpr::cast)?;
+    let scrutinee = lower_expr_with_ctx(&scrutinee_expr, ctx)?;
+    let scrutinee_name = ctx.alloc_temp_name("match");
+    let scrutinee_var = instr::Expr::Var(scrutinee_name.clone());
+
+    let mut lowered_arms = Vec::new();
+    for arm in match_expr.arms() {
+        let arm_expr = lower_expr_with_ctx(&arm.expr()?, ctx)?;
+        let (condition, binding) =
+            lower_match_pattern(arm.pattern().as_ref()?, &scrutinee_var, ctx)?;
+        lowered_arms.push((condition, binding, arm_expr));
+    }
+
+    let mut expr = instr::Expr::Unit;
+    for (condition, binding, arm_expr) in lowered_arms.into_iter().rev() {
+        let then_branch = lower_match_arm_block(binding, &scrutinee_name, arm_expr);
+        expr = match condition {
+            Some(cond) => instr::Expr::If {
+                cond: Box::new(cond),
+                then_branch,
+                else_branch: instr::Block {
+                    stmts: vec![instr::Stmt::Expr(expr)],
+                },
+                provenance: Some(ctx.provenance(match_expr, "if")),
+            },
+            None => instr::Expr::Block(then_branch),
+        };
+    }
+
+    Some(instr::Expr::Block(instr::Block {
+        stmts: vec![
+            instr::Stmt::Let {
+                name: scrutinee_name,
+                value: scrutinee,
+            },
+            instr::Stmt::Expr(expr),
+        ],
+    }))
+}
+
+fn lower_match_pattern(
+    pattern: &AstPattern,
+    scrutinee: &instr::Expr,
+    ctx: &mut LowerCtx,
+) -> Option<(Option<instr::Expr>, Option<instr::Pattern>)> {
+    match pattern {
+        AstPattern::Binding(_) => Some((None, Some(lower_pattern(pattern)?))),
+        AstPattern::Wildcard(_) => Some((None, None)),
+        AstPattern::Literal(literal) => Some((
+            Some(instr::Expr::Binary {
+                op: instr::BinOp::Eq,
+                left: Box::new(scrutinee.clone()),
+                right: Box::new(lower_literal_pattern(literal)?),
+                provenance: Some(ctx.provenance(pattern, "binary(Eq)")),
+            }),
+            None,
+        )),
+        AstPattern::Paren(paren) => lower_match_pattern(&paren.inner()?, scrutinee, ctx),
+        AstPattern::Or(or) => {
+            let mut condition = None;
+            for alternative in or.patterns() {
+                let (alt_condition, alt_binding) =
+                    lower_match_pattern(&alternative, scrutinee, ctx)?;
+                if alt_binding.is_some() {
+                    return None;
+                }
+                let alt_condition = alt_condition?;
+                condition = Some(match condition {
+                    Some(prev) => instr::Expr::Binary {
+                        op: instr::BinOp::Or,
+                        left: Box::new(prev),
+                        right: Box::new(alt_condition),
+                        provenance: Some(ctx.provenance(pattern, "binary(Or)")),
+                    },
+                    None => alt_condition,
+                });
+            }
+            Some((condition, None))
+        }
+        _ => None,
+    }
+}
+
+fn lower_literal_pattern(pattern: &LiteralPattern) -> Option<instr::Expr> {
+    let token = pattern.token()?;
+    match token.kind() {
+        SyntaxKind::INT => Some(instr::Expr::LitInt(token.text().parse().ok()?)),
+        SyntaxKind::FLOAT => Some(instr::Expr::LitFloat(token.text().parse().ok()?)),
+        SyntaxKind::STRING => Some(instr::Expr::LitString(unescape_string(
+            token.text().trim_matches('"'),
+        ))),
+        SyntaxKind::TRUE_KW => Some(instr::Expr::LitBool(true)),
+        SyntaxKind::FALSE_KW => Some(instr::Expr::LitBool(false)),
+        _ => None,
+    }
+}
+
+fn lower_match_arm_block(
+    binding: Option<instr::Pattern>,
+    scrutinee_name: &str,
+    arm_expr: instr::Expr,
+) -> instr::Block {
+    let mut stmts = Vec::new();
+    if let Some(binding) = binding {
+        let scrutinee = instr::Expr::Var(scrutinee_name.to_string());
+        match binding {
+            instr::Pattern::Binding(name) => stmts.push(instr::Stmt::Let {
+                name,
+                value: scrutinee,
+            }),
+            pattern => stmts.push(instr::Stmt::LetPattern {
+                pattern,
+                value: scrutinee,
+            }),
+        }
+    }
+    stmts.push(instr::Stmt::Expr(arm_expr));
+    instr::Block { stmts }
 }
 
 fn lower_call(call: &CallExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
@@ -956,13 +1102,21 @@ fn lower_array(array: &ArrayExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
 fn lower_map(map: &MapExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
     let mut entries = Vec::new();
     for entry in map.entries() {
+        if let Some(spread) = entry.spread() {
+            entries.push(instr::MapItem::Spread(lower_expr_with_ctx(
+                &spread.expr()?,
+                ctx,
+            )?));
+            continue;
+        }
+
         let key = if let Some(name) = entry.name() {
             instr::Expr::LitString(name.text().to_string())
         } else {
             lower_expr_with_ctx(&entry.key()?, ctx)?
         };
         let value = lower_expr_with_ctx(&entry.value()?, ctx)?;
-        entries.push((key, value));
+        entries.push(instr::MapItem::Entry { key, value });
     }
     Some(instr::Expr::Map(entries))
 }
@@ -997,6 +1151,7 @@ fn lower_closure(closure: &ClosureExpr, ctx: &mut LowerCtx) -> Option<instr::Exp
         def: Arc::new(instr::FnDef {
             name: format!("<closure#{closure_id}>"),
             params,
+            keyword_params: Vec::new(),
             body,
         }),
     })
