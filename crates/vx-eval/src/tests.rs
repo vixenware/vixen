@@ -2793,6 +2793,42 @@ fn array_merge_forces_tree_items_concurrently() {
 }
 
 #[test]
+fn tree_constructor_schedules_map_key_resolution_concurrently() {
+    let engine = engine("fn main(entries: Map) { Tree(entries) }");
+    let entries = Value::Map(MapValue {
+        entries: Arc::from([
+            (
+                engine.sleep_value(200, Value::Path(PathValue::new("left.txt"))),
+                Value::Blob(BlobValue::from_string("left")),
+            ),
+            (
+                engine.sleep_value(200, Value::Path(PathValue::new("right.txt"))),
+                Value::Blob(BlobValue::from_string("right")),
+            ),
+        ]),
+    });
+
+    let start = Instant::now();
+    let value = engine.call("main", vec![entries]).unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        value,
+        Value::Tree(TreeValue::Inline(Arc::from([
+            (
+                Arc::from("left.txt"),
+                Value::Blob(BlobValue::from_string("left")),
+            ),
+            (
+                Arc::from("right.txt"),
+                Value::Blob(BlobValue::from_string("right")),
+            ),
+        ])))
+    );
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[test]
 // r[verify fn.identity]
 // r[verify eval.memoization]
 fn transitive_callee_changes_update_the_caller_identity() {

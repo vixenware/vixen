@@ -768,6 +768,40 @@ impl Engine {
                 Ok(Self::dedup_node_ids(deps))
             }
             Value::Builtin(builtin) => match builtin {
+                BuiltinValue::Namespace(BuiltinNamespace::Blob)
+                | BuiltinValue::Namespace(BuiltinNamespace::Bytes) => Ok(Self::dedup_node_ids(
+                    self.scheduler_pending_deep(args[0].clone())?,
+                )),
+                BuiltinValue::Namespace(BuiltinNamespace::Tree) => {
+                    let mut deps = self.scheduler_pending_shallow(args[0].clone())?;
+                    if !deps.is_empty() {
+                        return Ok(Self::dedup_node_ids(deps));
+                    }
+
+                    let value = self.materialize_scheduled_value_shallow(
+                        args[0].clone(),
+                        "forcing Tree input",
+                    )?;
+                    let (value, _) = self.split_obligations(value);
+                    match value {
+                        Value::Map(map) => {
+                            for (key, _) in map.entries.iter() {
+                                deps.extend(self.scheduler_pending_deep(key.clone())?);
+                            }
+                        }
+                        Value::Array(items) => {
+                            for item in items.iter() {
+                                deps.extend(self.scheduler_pending_deep(item.clone())?);
+                            }
+                        }
+                        Value::Path(_) | Value::String(_) => {}
+                        _ => {}
+                    }
+                    Ok(Self::dedup_node_ids(deps))
+                }
+                BuiltinValue::Function(BuiltinFunction::StructConstructor { .. }) => Ok(
+                    Self::dedup_node_ids(self.scheduler_pending_shallow(args[0].clone())?),
+                ),
                 BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver }) => {
                     let receiver = self.materialize_scheduled_value_shallow(
                         *receiver,
@@ -799,6 +833,66 @@ impl Engine {
                         deps.extend(self.scheduler_pending_deep(item.clone())?);
                     }
                     Ok(Self::dedup_node_ids(deps))
+                }
+                BuiltinValue::Method(BuiltinMethod::BlobFromString)
+                | BuiltinValue::Method(BuiltinMethod::BytesFromString)
+                | BuiltinValue::Method(BuiltinMethod::TreeFromPath)
+                | BuiltinValue::Method(BuiltinMethod::HostRead { .. })
+                | BuiltinValue::Method(BuiltinMethod::HostHash { .. })
+                | BuiltinValue::Method(BuiltinMethod::HostWhich { .. }) => Ok(
+                    Self::dedup_node_ids(self.scheduler_pending_deep(args[0].clone())?),
+                ),
+                BuiltinValue::Method(BuiltinMethod::TreeOf) => {
+                    let mut deps = self.scheduler_pending_shallow(args[0].clone())?;
+                    if !deps.is_empty() {
+                        return Ok(Self::dedup_node_ids(deps));
+                    }
+
+                    let value = self.materialize_scheduled_value_shallow(
+                        args[0].clone(),
+                        "forcing Tree.of input",
+                    )?;
+                    let (value, _) = self.split_obligations(value);
+                    let Value::Map(map) = value else {
+                        return Ok(Vec::new());
+                    };
+                    for (key, _) in map.entries.iter() {
+                        deps.extend(self.scheduler_pending_deep(key.clone())?);
+                    }
+                    Ok(Self::dedup_node_ids(deps))
+                }
+                BuiltinValue::Method(BuiltinMethod::TreeEmpty)
+                | BuiltinValue::Method(BuiltinMethod::BlobToString { .. })
+                | BuiltinValue::Method(BuiltinMethod::BlobExecutable { .. })
+                | BuiltinValue::Method(BuiltinMethod::BlobUtf8 { .. })
+                | BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy { .. })
+                | BuiltinValue::Method(BuiltinMethod::BytesUtf8 { .. })
+                | BuiltinValue::Method(BuiltinMethod::BytesUtf8Lossy { .. })
+                | BuiltinValue::Method(BuiltinMethod::BytesBlob { .. })
+                | BuiltinValue::Method(BuiltinMethod::StreamCollect { .. }) => Ok(Vec::new()),
+                BuiltinValue::Method(BuiltinMethod::TreeFile { .. })
+                | BuiltinValue::Method(BuiltinMethod::TreeSubtree { .. }) => Ok(
+                    Self::dedup_node_ids(self.scheduler_pending_deep(args[0].clone())?),
+                ),
+                BuiltinValue::Method(BuiltinMethod::TreeMerge { .. }) => Ok(Self::dedup_node_ids(
+                    self.scheduler_pending_shallow(args[0].clone())?,
+                )),
+                BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver }) => {
+                    let receiver = self.materialize_scheduled_value_shallow(
+                        *receiver,
+                        "forcing option.unwrap_or receiver",
+                    )?;
+                    let (receiver, _) = self.split_obligations(receiver);
+                    let Value::Struct(option) = receiver else {
+                        return Ok(Vec::new());
+                    };
+                    match option.type_name.as_ref() {
+                        "Some" => Ok(Vec::new()),
+                        "None" => Ok(Self::dedup_node_ids(
+                            self.scheduler_pending_deep(args[0].clone())?,
+                        )),
+                        _ => Ok(Vec::new()),
+                    }
                 }
                 BuiltinValue::Function(BuiltinFunction::Exec)
                 | BuiltinValue::Function(BuiltinFunction::Discover)
@@ -3605,6 +3699,43 @@ impl Engine {
         kwargs_expr: Option<Value>,
     ) -> Result<Value, PoisonError> {
         match builtin {
+            BuiltinValue::Namespace(BuiltinNamespace::Blob) => {
+                self.require_no_kwargs("Blob", kwargs)?;
+                self.check_arity("Blob", args, 1)?;
+                let value =
+                    self.materialize_scheduled_value_deep(args[0].clone(), "forcing Blob value")?;
+                let text = self.stringify_scalar(&value)?;
+                Ok(Value::Blob(BlobValue::from_string(text)))
+            }
+            BuiltinValue::Namespace(BuiltinNamespace::Bytes) => {
+                self.require_no_kwargs("Bytes", kwargs)?;
+                self.check_arity("Bytes", args, 1)?;
+                let value =
+                    self.materialize_scheduled_value_deep(args[0].clone(), "forcing Bytes value")?;
+                let text = self.stringify_scalar(&value)?;
+                Ok(Value::Bytes(Arc::from(text.as_bytes().to_vec())))
+            }
+            BuiltinValue::Namespace(BuiltinNamespace::Tree) => {
+                self.require_no_kwargs("Tree", kwargs)?;
+                self.check_arity("Tree", args, 1)?;
+                let (value, _) =
+                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                        args[0].clone(),
+                        "forcing Tree input",
+                    )?);
+                match value {
+                    Value::Map(map) => self.tree_from_map_scheduled(&map),
+                    Value::Array(_) => self.array_merge_scheduled(&value),
+                    Value::Path(path) => Ok(Value::Tree(TreeValue::FsDir(path))),
+                    Value::String(path) => {
+                        Ok(Value::Tree(TreeValue::FsDir(PathValue::new(path.as_ref()))))
+                    }
+                    other => Err(self.type_error(&format!(
+                        "Tree expects Map, Array, or Path/String, got {}",
+                        other.type_name()
+                    ))),
+                }
+            }
             BuiltinValue::Function(BuiltinFunction::Exec) => {
                 self.exec_builtin_scheduled(args, kwargs, kwargs_expr)
             }
@@ -3613,6 +3744,88 @@ impl Engine {
             }
             BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
                 self.executor_class_builtin_scheduled(args, kwargs, kwargs_expr)
+            }
+            BuiltinValue::Function(BuiltinFunction::StructConstructor { type_name, fields }) => {
+                self.require_no_kwargs(type_name.as_ref(), kwargs)?;
+                self.check_arity(type_name.as_ref(), args, 1)?;
+                let (value, _) = self.split_obligations(self.materialize_scheduled_value_shallow(
+                    args[0].clone(),
+                    &format!("forcing {type_name} payload"),
+                )?);
+                let Value::Map(map) = value else {
+                    return Err(self.type_error(&format!(
+                        "{} expects a record/map payload, got {}",
+                        type_name,
+                        value.type_name()
+                    )));
+                };
+                let mut values = Vec::with_capacity(fields.len());
+                for field in fields.iter() {
+                    let field_value = map
+                        .entries
+                        .iter()
+                        .find_map(|(key, value)| match key {
+                            Value::String(name) if name.as_ref() == field.as_ref() => {
+                                Some(value.clone())
+                            }
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            self.type_error(&format!("{} requires field '{}'", type_name, field))
+                        })?;
+                    values.push((Arc::<str>::clone(field), field_value));
+                }
+                Ok(Value::Struct(StructValue {
+                    type_name: Arc::clone(type_name),
+                    fields: Arc::from(values),
+                }))
+            }
+            BuiltinValue::Method(BuiltinMethod::BlobFromString) => {
+                self.require_no_kwargs("Blob.from_string", kwargs)?;
+                self.check_arity("Blob.from_string", args, 1)?;
+                let value = self.materialize_scheduled_value_deep(
+                    args[0].clone(),
+                    "forcing Blob.from_string value",
+                )?;
+                let text = self.stringify_scalar(&value)?;
+                Ok(Value::Blob(BlobValue::from_string(text)))
+            }
+            BuiltinValue::Method(BuiltinMethod::BytesFromString) => {
+                self.require_no_kwargs("Bytes", kwargs)?;
+                self.check_arity("Bytes", args, 1)?;
+                let value = self.materialize_scheduled_value_deep(
+                    args[0].clone(),
+                    "forcing Bytes.from_string value",
+                )?;
+                let text = self.stringify_scalar(&value)?;
+                Ok(Value::Bytes(Arc::from(text.as_bytes().to_vec())))
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeOf) => {
+                self.require_no_kwargs("Tree.of", kwargs)?;
+                self.check_arity("Tree.of", args, 1)?;
+                let (value, _) = self.split_obligations(self.materialize_scheduled_value_shallow(
+                    args[0].clone(),
+                    "forcing Tree.of input",
+                )?);
+                let Value::Map(map) = value else {
+                    return Err(
+                        self.type_error(&format!("Tree.of expects Map, got {}", value.type_name()))
+                    );
+                };
+                self.tree_from_map_scheduled(&map)
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeEmpty) => {
+                self.require_no_kwargs("Tree.empty", kwargs)?;
+                self.check_arity("Tree.empty", args, 0)?;
+                Ok(Value::Tree(TreeValue::Inline(Arc::from([]))))
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeFromPath) => {
+                self.require_no_kwargs("Tree.from_path", kwargs)?;
+                self.check_arity("Tree.from_path", args, 1)?;
+                let path = self
+                    .materialize_scheduled_value_deep(args[0].clone(), "forcing Tree.from_path")?;
+                let path = self.expect_path_value(&path, "Tree.from_path path")?;
+                Ok(Value::Tree(TreeValue::FsDir(path)))
             }
             BuiltinValue::Method(BuiltinMethod::ArrayMap { receiver }) => {
                 self.require_no_kwargs("array.map", kwargs)?;
@@ -3638,6 +3851,291 @@ impl Engine {
                 self.require_no_kwargs("array.merge", kwargs)?;
                 self.check_arity("array.merge", args, 0)?;
                 self.array_merge_scheduled(receiver)
+            }
+            BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
+                self.require_no_kwargs("blob.to_string", kwargs)?;
+                self.check_arity("blob.to_string", args, 0)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing blob.to_string receiver",
+                    )?);
+                let Value::Blob(blob) = receiver else {
+                    return Err(self.type_error("blob.to_string receiver must be Blob"));
+                };
+                let text = blob.to_utf8_string().map_err(|message| {
+                    PoisonError::new(
+                        PoisonKind::TypeError,
+                        message,
+                        self.current_demand_chain(None),
+                    )
+                })?;
+                Ok(self.attach_obligations(Value::String(text), obligations))
+            }
+            BuiltinValue::Method(BuiltinMethod::BlobExecutable { receiver }) => {
+                self.require_no_kwargs("blob.executable", kwargs)?;
+                self.check_arity("blob.executable", args, 0)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing blob.executable receiver",
+                    )?);
+                let Value::Blob(blob) = receiver else {
+                    return Err(self.type_error("blob.executable receiver must be Blob"));
+                };
+                let blob = match blob {
+                    BlobValue::Inline { bytes, .. } => BlobValue::Inline {
+                        bytes,
+                        executable: true,
+                    },
+                    BlobValue::FsFile { path, .. } => BlobValue::FsFile {
+                        path,
+                        executable: true,
+                    },
+                    BlobValue::Store { blob_ref, .. } => BlobValue::Store {
+                        blob_ref,
+                        executable: true,
+                    },
+                };
+                Ok(self.attach_obligations(Value::Blob(blob), obligations))
+            }
+            BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver }) => {
+                self.require_no_kwargs("blob.utf8", kwargs)?;
+                self.check_arity("blob.utf8", args, 0)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing blob.utf8 receiver",
+                    )?);
+                let Value::Blob(blob) = receiver else {
+                    return Err(self.type_error("blob.utf8 receiver must be Blob"));
+                };
+                let text = blob.to_utf8_string().map_err(|message| {
+                    PoisonError::new(
+                        PoisonKind::TypeError,
+                        message,
+                        self.current_demand_chain(None),
+                    )
+                })?;
+                Ok(self.attach_obligations(Value::String(text), obligations))
+            }
+            BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy { receiver }) => {
+                self.require_no_kwargs("blob.utf8_lossy", kwargs)?;
+                self.check_arity("blob.utf8_lossy", args, 0)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing blob.utf8_lossy receiver",
+                    )?);
+                let Value::Blob(blob) = receiver else {
+                    return Err(self.type_error("blob.utf8_lossy receiver must be Blob"));
+                };
+                let text = match blob {
+                    BlobValue::Inline { bytes, .. } => {
+                        String::from_utf8_lossy(bytes.as_ref()).into_owned()
+                    }
+                    BlobValue::FsFile { path, .. } => {
+                        let bytes = std::fs::read(path.as_str()).map_err(|error| {
+                            self.type_error(&format!("failed to read {}: {error}", path.as_str()))
+                        })?;
+                        String::from_utf8_lossy(&bytes).into_owned()
+                    }
+                    BlobValue::Store { blob_ref, .. } => {
+                        return Err(self.type_error(&format!(
+                            "store-backed blob {:?} requires an external store resolver",
+                            blob_ref
+                        )));
+                    }
+                };
+                Ok(self.attach_obligations(Value::String(Arc::from(text)), obligations))
+            }
+            BuiltinValue::Method(BuiltinMethod::BytesUtf8 { receiver }) => {
+                self.require_no_kwargs("bytes.utf8", kwargs)?;
+                self.check_arity("bytes.utf8", args, 0)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing bytes.utf8 receiver",
+                    )?);
+                let Value::Bytes(bytes) = receiver else {
+                    return Err(self.type_error("bytes.utf8 receiver must be Bytes"));
+                };
+                let text = String::from_utf8(bytes.as_ref().to_vec()).map_err(|error| {
+                    PoisonError::new(
+                        PoisonKind::TypeError,
+                        format!("bytes are not UTF-8: {error}"),
+                        self.current_demand_chain(None),
+                    )
+                })?;
+                Ok(self.attach_obligations(Value::String(Arc::from(text)), obligations))
+            }
+            BuiltinValue::Method(BuiltinMethod::BytesUtf8Lossy { receiver }) => {
+                self.require_no_kwargs("bytes.utf8_lossy", kwargs)?;
+                self.check_arity("bytes.utf8_lossy", args, 0)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing bytes.utf8_lossy receiver",
+                    )?);
+                let Value::Bytes(bytes) = receiver else {
+                    return Err(self.type_error("bytes.utf8_lossy receiver must be Bytes"));
+                };
+                let text = String::from_utf8_lossy(bytes.as_ref()).into_owned();
+                Ok(self.attach_obligations(Value::String(Arc::from(text)), obligations))
+            }
+            BuiltinValue::Method(BuiltinMethod::BytesBlob { receiver }) => {
+                self.require_no_kwargs("bytes.blob", kwargs)?;
+                self.check_arity("bytes.blob", args, 0)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing bytes.blob receiver",
+                    )?);
+                let Value::Bytes(bytes) = receiver else {
+                    return Err(self.type_error("bytes.blob receiver must be Bytes"));
+                };
+                Ok(self.attach_obligations(
+                    Value::Blob(BlobValue::Inline {
+                        bytes,
+                        executable: false,
+                    }),
+                    obligations,
+                ))
+            }
+            BuiltinValue::Method(BuiltinMethod::StreamCollect { receiver }) => {
+                self.require_no_kwargs("stream.collect", kwargs)?;
+                self.check_arity("stream.collect", args, 0)?;
+                self.materialize_scheduled_value_deep(
+                    receiver.as_ref().clone(),
+                    "forcing stream.collect receiver",
+                )
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => {
+                self.require_no_kwargs("tree.file", kwargs)?;
+                self.check_arity("tree.file", args, 1)?;
+                let path = self
+                    .materialize_scheduled_value_deep(args[0].clone(), "forcing tree.file path")?;
+                let path = self.expect_relative_path(&path, "tree.file path")?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing tree.file receiver",
+                    )?);
+                let Value::Tree(tree) = receiver else {
+                    return Err(self.type_error("tree.file receiver must be Tree"));
+                };
+                let result = self.tree_file(&tree, path)?;
+                Ok(self.attach_obligations(result, obligations))
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeMerge { receiver }) => {
+                self.require_no_kwargs("tree.merge", kwargs)?;
+                self.check_arity("tree.merge", args, 1)?;
+                let (other, other_obligations) =
+                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                        args[0].clone(),
+                        "forcing tree.merge other",
+                    )?);
+                let Value::Tree(other) = other else {
+                    return Err(self.type_error("tree.merge expects Tree"));
+                };
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing tree.merge receiver",
+                    )?);
+                let Value::Tree(receiver) = receiver else {
+                    return Err(self.type_error("tree.merge receiver must be Tree"));
+                };
+                let result = self.tree_merge(&receiver, &other)?;
+                Ok(self
+                    .attach_obligations(result, obligations.into_iter().chain(other_obligations)))
+            }
+            BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver }) => {
+                self.require_no_kwargs("tree.subtree", kwargs)?;
+                self.check_arity("tree.subtree", args, 1)?;
+                let path = self.materialize_scheduled_value_deep(
+                    args[0].clone(),
+                    "forcing tree.subtree path",
+                )?;
+                let path = self.expect_relative_path(&path, "tree.subtree path")?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing tree.subtree receiver",
+                    )?);
+                let Value::Tree(tree) = receiver else {
+                    return Err(self.type_error("tree.subtree receiver must be Tree"));
+                };
+                let result = self.tree_subtree(&tree, path)?;
+                Ok(self.attach_obligations(result, obligations))
+            }
+            BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver }) => {
+                self.require_no_kwargs("option.unwrap_or", kwargs)?;
+                self.check_arity("option.unwrap_or", args, 1)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing option.unwrap_or receiver",
+                    )?);
+                let Value::Struct(option) = receiver else {
+                    return Err(self.type_error("option.unwrap_or receiver must be Option"));
+                };
+                let result = match option.type_name.as_ref() {
+                    "Some" => option
+                        .fields
+                        .iter()
+                        .find(|(name, _)| name.as_ref() == "value")
+                        .map(|(_, value)| value.clone())
+                        .ok_or_else(|| self.type_error("Some.unwrap_or requires a value field")),
+                    "None" => Ok(args[0].clone()),
+                    _ => Err(self.type_error("option.unwrap_or receiver must be Option")),
+                }?;
+                Ok(self.attach_obligations(result, obligations))
+            }
+            BuiltinValue::Method(BuiltinMethod::HostRead { receiver }) => {
+                self.require_no_kwargs("host.read", kwargs)?;
+                self.check_arity("host.read", args, 1)?;
+                let path =
+                    self.materialize_scheduled_value_deep(args[0].clone(), "forcing host.read")?;
+                let path = self.expect_host_path(&path, "host.read path")?;
+                let receiver = self.materialize_scheduled_value_shallow(
+                    receiver.as_ref().clone(),
+                    "forcing host.read receiver",
+                )?;
+                let Value::Host(_) = receiver else {
+                    return Err(self.type_error("host.read receiver must be Host"));
+                };
+                self.host_read(&path)
+            }
+            BuiltinValue::Method(BuiltinMethod::HostHash { receiver }) => {
+                self.require_no_kwargs("host.hash", kwargs)?;
+                self.check_arity("host.hash", args, 1)?;
+                let path =
+                    self.materialize_scheduled_value_deep(args[0].clone(), "forcing host.hash")?;
+                let path = self.expect_host_path(&path, "host.hash path")?;
+                let receiver = self.materialize_scheduled_value_shallow(
+                    receiver.as_ref().clone(),
+                    "forcing host.hash receiver",
+                )?;
+                let Value::Host(_) = receiver else {
+                    return Err(self.type_error("host.hash receiver must be Host"));
+                };
+                self.host_hash(&path)
+            }
+            BuiltinValue::Method(BuiltinMethod::HostWhich { receiver }) => {
+                self.require_no_kwargs("host.which", kwargs)?;
+                self.check_arity("host.which", args, 1)?;
+                let name =
+                    self.materialize_scheduled_value_deep(args[0].clone(), "forcing host.which")?;
+                let name = self.expect_host_path(&name, "host.which name")?;
+                let receiver = self.materialize_scheduled_value_shallow(
+                    receiver.as_ref().clone(),
+                    "forcing host.which receiver",
+                )?;
+                let Value::Host(_) = receiver else {
+                    return Err(self.type_error("host.which receiver must be Host"));
+                };
+                self.host_which(&name)
             }
             _ => self.invoke_builtin(builtin, args, kwargs, kwargs_expr),
         }
@@ -3696,6 +4194,74 @@ impl Engine {
         let mut nested = BTreeMap::<Arc<str>, Value>::new();
         for (key, value) in map.entries.iter() {
             let key = self.force_value(key.clone())?;
+            let path = self.expect_relative_path(&key, "Tree entry path")?;
+            let raw = path.as_str();
+            if raw.is_empty() || raw == "." {
+                return Err(self.type_error("Tree entry path cannot be empty"));
+            }
+            let segments = raw.split('/').collect::<Vec<_>>();
+            insert_tree_path(self, &mut nested, &segments, value.clone())?;
+        }
+        self.validate_tree_entries(&nested.values().cloned().collect::<Vec<_>>())?;
+        Ok(Value::Tree(TreeValue::Inline(Arc::from(
+            nested.into_iter().collect::<Vec<_>>(),
+        ))))
+    }
+
+    fn tree_from_map_scheduled(&self, map: &MapValue) -> Result<Value, PoisonError> {
+        fn insert_tree_path(
+            engine: &Engine,
+            entries: &mut BTreeMap<Arc<str>, Value>,
+            segments: &[&str],
+            value: Value,
+        ) -> Result<(), PoisonError> {
+            let Some((head, tail)) = segments.split_first() else {
+                return Err(engine.type_error("Tree entry path cannot be empty"));
+            };
+            if tail.is_empty() {
+                if entries.contains_key(*head) {
+                    return Err(engine.type_error(&format!(
+                        "Tree contains duplicate entry '{}'",
+                        segments.join("/")
+                    )));
+                }
+                entries.insert(Arc::from(*head), value);
+                return Ok(());
+            }
+
+            let child = entries
+                .entry(Arc::from(*head))
+                .or_insert_with(|| Value::Tree(TreeValue::Inline(Arc::from([]))));
+            match child {
+                Value::Tree(TreeValue::Inline(existing)) => {
+                    let mut nested = existing
+                        .iter()
+                        .cloned()
+                        .collect::<BTreeMap<Arc<str>, Value>>();
+                    insert_tree_path(engine, &mut nested, tail, value)?;
+                    *child = Value::Tree(TreeValue::Inline(Arc::from(
+                        nested.into_iter().collect::<Vec<_>>(),
+                    )));
+                    Ok(())
+                }
+                Value::Tree(TreeValue::FsDir(_))
+                | Value::Tree(TreeValue::Store(_))
+                | Value::Blob(_)
+                | Value::Pending(_) => Err(engine.type_error(&format!(
+                    "Tree entry path '{}' collides with an existing non-inline tree entry",
+                    segments.join("/")
+                ))),
+                other => Err(engine.type_error(&format!(
+                    "tree entries must be Blob or Tree, got {}",
+                    other.type_name()
+                ))),
+            }
+        }
+
+        let mut nested = BTreeMap::<Arc<str>, Value>::new();
+        for (key, value) in map.entries.iter() {
+            let key =
+                self.materialize_scheduled_value_deep(key.clone(), "forcing Tree entry path")?;
             let path = self.expect_relative_path(&key, "Tree entry path")?;
             let raw = path.as_str();
             if raw.is_empty() || raw == "." {
