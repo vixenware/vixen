@@ -2618,6 +2618,35 @@ fn independent_children_are_forced_concurrently() {
 }
 
 #[test]
+fn call_boundary_forces_independent_children_concurrently() {
+    let engine = engine("fn pair(x: U64, y: U64) { Pair { left: x, right: y } }");
+
+    let start = Instant::now();
+    let value = engine
+        .call(
+            "pair",
+            vec![
+                engine.sleep_value(200, Value::U64(1)),
+                engine.sleep_value(200, Value::U64(2)),
+            ],
+        )
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        value,
+        Value::Struct(StructValue {
+            type_name: Arc::from("Pair"),
+            fields: Arc::from([
+                (Arc::from("left"), Value::U64(1)),
+                (Arc::from("right"), Value::U64(2)),
+            ]),
+        })
+    );
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[test]
 fn array_merge_forces_tree_items_concurrently() {
     let engine = engine("fn main(items: Array) { items.merge() }");
     let left = Value::Tree(TreeValue::Inline(Arc::from([(

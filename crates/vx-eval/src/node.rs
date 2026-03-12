@@ -27,7 +27,7 @@ pub enum TemplatePartValue {
 }
 
 /// A unique identifier for a node in the dataflow graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId(pub u64);
 
 static NEXT_NODE_ID: AtomicU64 = AtomicU64::new(0);

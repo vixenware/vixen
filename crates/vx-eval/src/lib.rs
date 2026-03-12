@@ -26,6 +26,8 @@ pub use node::{NodeId, NodeKey};
 mod poison;
 pub use poison::{DemandChain, PoisonError, PoisonKind};
 
+mod scheduler;
+
 mod transport;
 pub use transport::{
     ShippedFunction, TransportBinOp, TransportBlob, TransportBlock, TransportBuiltinValue,

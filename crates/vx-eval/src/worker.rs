@@ -27,9 +27,10 @@ use crate::exec::{
 };
 use crate::instr::{self, BinOp, UnaryOp};
 use crate::node::{
-    Node, NodeId, NodeJob, NodeKey, Outcome, TemplateKind, TemplatePartValue, Waiter,
+    Node, NodeId, NodeJob, NodeKey, NodeState, Outcome, TemplateKind, TemplatePartValue, Waiter,
 };
 use crate::poison::{DemandChain, DemandEntry, PoisonError, PoisonKind};
+use crate::scheduler::Scheduler;
 use crate::transport::{ShippedFunction, TransportModule, TransportValue};
 use crate::value::{
     BlobValue, BuiltinFunction, BuiltinMethod, BuiltinNamespace, BuiltinValue, DiscoveredValue,
@@ -48,6 +49,28 @@ const IMPLICIT_EXEC_MOUNT_PREFIX: &str = ".vx/implicit";
 enum BuildResult {
     Value(Value),
     Returned(Value),
+    Poisoned(PoisonError),
+}
+
+pub(crate) struct InspectedValue {
+    pub value: Value,
+    pub pending: BTreeSet<NodeId>,
+    pub errors: Vec<PoisonError>,
+}
+
+impl InspectedValue {
+    fn resolved(value: Value) -> Self {
+        Self {
+            value,
+            pending: BTreeSet::new(),
+            errors: Vec::new(),
+        }
+    }
+}
+
+pub(crate) enum SchedulerNodeState {
+    Pending,
+    Resolved(Value),
     Poisoned(PoisonError),
 }
 
@@ -118,7 +141,7 @@ impl Engine {
     pub fn call(&self, name: &str, args: Vec<Value>) -> Result<Value, PoisonError> {
         let function = self.resolve_module_function(name)?;
         let value = self.build_call(Value::Function(function), args, None);
-        self.force_value(value)
+        self.resolve_boundary_value(value)
     }
 
     pub fn transport_module(&self) -> TransportModule {
@@ -126,12 +149,12 @@ impl Engine {
     }
 
     pub fn ship_value(&self, value: Value) -> Result<TransportValue, PoisonError> {
-        let value = self.force_value(value)?;
+        let value = self.resolve_boundary_value(value)?;
         TransportValue::try_from(&value).map_err(|message| self.type_error(&message))
     }
 
     pub fn ship_function(&self, value: Value) -> Result<ShippedFunction, PoisonError> {
-        let value = self.force_value(value)?;
+        let value = self.resolve_boundary_value(value)?;
         let Value::Function(function) = value else {
             return Err(self.type_error("shipped callbacks must be functions"));
         };
@@ -154,7 +177,7 @@ impl Engine {
             Arc::from([]),
             None,
         )?;
-        engine.force_value(value)
+        engine.resolve_boundary_value(value)
     }
 
     pub fn invoke_shipped_discover(
@@ -167,6 +190,10 @@ impl Engine {
             .to_runtime()
             .map_err(|message| engine.type_error(&message))?;
         engine.invoke_discover_probe(Value::Function(function))
+    }
+
+    fn resolve_boundary_value(&self, value: Value) -> Result<Value, PoisonError> {
+        Scheduler::new(self).resolve_value(value)
     }
 
     #[cfg(test)]
@@ -563,6 +590,268 @@ impl Engine {
         Value::Pending(node_id)
     }
 
+    pub(crate) fn scheduler_max_demand_depth(&self) -> usize {
+        self.max_demand_depth
+    }
+
+    pub(crate) fn scheduler_node_state(
+        &self,
+        node_id: NodeId,
+    ) -> Result<SchedulerNodeState, PoisonError> {
+        let node = self.scheduler_node(node_id)?;
+        let state = node.state.lock();
+        match &*state {
+            NodeState::Pending | NodeState::Evaluating { .. } => Ok(SchedulerNodeState::Pending),
+            NodeState::Resolved(value) => Ok(SchedulerNodeState::Resolved(value.clone())),
+            NodeState::Poisoned(error) => Ok(SchedulerNodeState::Poisoned(error.clone())),
+        }
+    }
+
+    pub(crate) fn scheduler_node_deps(&self, node_id: NodeId) -> Result<Vec<NodeId>, PoisonError> {
+        let node = self.scheduler_node(node_id)?;
+        let deps = match &node.job {
+            NodeJob::Binary { left, right, .. } => {
+                let mut deps = self.scheduler_pending_deep(left.clone())?;
+                deps.extend(self.scheduler_pending_deep(right.clone())?);
+                deps
+            }
+            NodeJob::Unary { operand, .. } => self.scheduler_pending_deep(operand.clone())?,
+            NodeJob::Template { parts, .. } => {
+                let mut deps = Vec::new();
+                for part in parts.iter() {
+                    if let TemplatePartValue::Expr(value) = part {
+                        deps.extend(self.scheduler_pending_deep(value.clone())?);
+                    }
+                }
+                deps
+            }
+            NodeJob::If { cond, .. } => self.scheduler_pending_deep(cond.clone())?,
+            NodeJob::Fail { message } => self.scheduler_pending_deep(message.clone())?,
+            NodeJob::Call {
+                function,
+                kwargs_expr,
+                ..
+            } => {
+                let mut deps = self.scheduler_callable_pending(function.clone())?;
+                if let Some(kwargs_expr) = kwargs_expr {
+                    deps.extend(self.scheduler_pending_shallow(kwargs_expr.clone())?);
+                }
+                deps
+            }
+            NodeJob::Invoke { .. } => Vec::new(),
+            NodeJob::Field { receiver, .. } => self.scheduler_pending_shallow(receiver.clone())?,
+            #[cfg(test)]
+            NodeJob::Sleep { .. } | NodeJob::Poison(_) => Vec::new(),
+        };
+        Ok(Self::dedup_node_ids(deps))
+    }
+
+    fn scheduler_pending_deep(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
+        Ok(self
+            .inspect_scheduled_value(value)?
+            .pending
+            .into_iter()
+            .collect())
+    }
+
+    fn scheduler_pending_shallow(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
+        self.scheduler_pending_shallow_inner(value, &mut Vec::new())
+    }
+
+    fn scheduler_pending_shallow_inner(
+        &self,
+        value: Value,
+        visiting: &mut Vec<NodeId>,
+    ) -> Result<Vec<NodeId>, PoisonError> {
+        match value {
+            Value::Pending(node_id) => match self.scheduler_node_state(node_id)? {
+                SchedulerNodeState::Pending => Ok(vec![node_id]),
+                SchedulerNodeState::Resolved(value) => {
+                    if visiting.contains(&node_id) {
+                        return Err(self.scheduler_circular_dependency(visiting, node_id));
+                    }
+                    visiting.push(node_id);
+                    let result = self.scheduler_pending_shallow_inner(value, visiting);
+                    let popped = visiting.pop();
+                    debug_assert_eq!(popped, Some(node_id));
+                    result
+                }
+                SchedulerNodeState::Poisoned(_) => Ok(Vec::new()),
+            },
+            Value::Discovered(discovered) => {
+                self.scheduler_pending_shallow_inner(*discovered.value, visiting)
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn scheduler_callable_pending(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
+        self.scheduler_callable_pending_inner(value, &mut Vec::new())
+    }
+
+    fn scheduler_callable_pending_inner(
+        &self,
+        value: Value,
+        visiting: &mut Vec<NodeId>,
+    ) -> Result<Vec<NodeId>, PoisonError> {
+        match value {
+            Value::Pending(node_id) => match self.scheduler_node_state(node_id)? {
+                SchedulerNodeState::Pending => Ok(vec![node_id]),
+                SchedulerNodeState::Resolved(value) => {
+                    if visiting.contains(&node_id) {
+                        return Err(self.scheduler_circular_dependency(visiting, node_id));
+                    }
+                    visiting.push(node_id);
+                    let result = self.scheduler_callable_pending_inner(value, visiting);
+                    let popped = visiting.pop();
+                    debug_assert_eq!(popped, Some(node_id));
+                    result
+                }
+                SchedulerNodeState::Poisoned(_) => Ok(Vec::new()),
+            },
+            Value::Discovered(discovered) => {
+                self.scheduler_callable_pending_inner(*discovered.value, visiting)
+            }
+            Value::Partial(partial) => {
+                self.scheduler_callable_pending_inner(partial.function.clone(), visiting)
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn dedup_node_ids(ids: Vec<NodeId>) -> Vec<NodeId> {
+        ids.into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) fn scheduler_execute_pending_node_with_chain(
+        &self,
+        node_id: NodeId,
+        chain: &[NodeId],
+    ) -> Result<Value, PoisonError> {
+        let node = self.scheduler_node(node_id)?;
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+
+        match node.try_start_or_wait(Waiter { sender }) {
+            Ok(()) => {
+                let result = self.with_scheduler_demand_chain(chain, node_id, || {
+                    self.execute_node_scheduled(&node)
+                });
+                match result {
+                    Ok(value) => {
+                        node.resolve(value.clone());
+                        Ok(value)
+                    }
+                    Err(error) => {
+                        node.poison(error.clone());
+                        Err(error)
+                    }
+                }
+            }
+            Err(Some(Outcome::Value(value))) => Ok(value),
+            Err(Some(Outcome::Poison(error))) => Err(error),
+            Err(None) => match receiver.recv() {
+                Ok((_node_id, Outcome::Value(value))) => Ok(value),
+                Ok((_node_id, Outcome::Poison(error))) => Err(error),
+                Err(_) => Err(self.internal_error("all scheduler waiters dropped")),
+            },
+        }
+    }
+
+    fn with_scheduler_demand_chain<T>(
+        &self,
+        chain: &[NodeId],
+        node_id: NodeId,
+        f: impl FnOnce() -> Result<T, PoisonError>,
+    ) -> Result<T, PoisonError> {
+        DEMAND_STACK.with(|stack| stack.borrow_mut().extend(chain.iter().copied()));
+        let result = self.with_demand(node_id, f);
+        DEMAND_STACK.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            for expected in chain.iter().rev() {
+                let popped = stack.pop();
+                debug_assert_eq!(popped, Some(*expected));
+            }
+        });
+        result
+    }
+
+    pub(crate) fn scheduler_demand_chain(
+        &self,
+        stack: &[NodeId],
+        next: Option<NodeId>,
+    ) -> DemandChain {
+        let mut entries = Vec::new();
+        for node_id in stack.iter().copied().chain(next) {
+            if let Some(node) = self.nodes.get(&node_id) {
+                entries.push(DemandEntry {
+                    node_id,
+                    description: node.description.clone(),
+                    provenance: node.provenance.clone(),
+                });
+            }
+        }
+        DemandChain { entries }
+    }
+
+    pub(crate) fn scheduler_circular_dependency(
+        &self,
+        stack: &[NodeId],
+        node_id: NodeId,
+    ) -> PoisonError {
+        PoisonError::new(
+            PoisonKind::CircularDependency,
+            format!("circular dependency while demanding node {}", node_id.0),
+            self.scheduler_demand_chain(stack, Some(node_id)),
+        )
+    }
+
+    pub(crate) fn scheduler_demand_depth_exceeded(
+        &self,
+        stack: &[NodeId],
+        node_id: NodeId,
+    ) -> PoisonError {
+        PoisonError::new(
+            PoisonKind::DemandDepthExceeded,
+            format!(
+                "demand chain exceeded configured depth limit of {}",
+                self.max_demand_depth
+            ),
+            self.scheduler_demand_chain(stack, Some(node_id)),
+        )
+    }
+
+    pub(crate) fn scheduler_stalled(&self, stack: &[NodeId], pending: &[NodeId]) -> PoisonError {
+        let list = pending
+            .iter()
+            .map(|node_id| node_id.0.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        PoisonError::new(
+            PoisonKind::Internal,
+            format!("scheduler stalled while resolving pending nodes [{list}]"),
+            self.scheduler_demand_chain(stack, None),
+        )
+    }
+
+    pub(crate) fn scheduler_aggregate_poison_errors(
+        &self,
+        context: &str,
+        stack: &[NodeId],
+        errors: Vec<PoisonError>,
+    ) -> PoisonError {
+        PoisonError::aggregate(context, self.scheduler_demand_chain(stack, None), errors)
+    }
+
+    fn scheduler_node(&self, node_id: NodeId) -> Result<Arc<Node>, PoisonError> {
+        self.nodes
+            .get(&node_id)
+            .map(|entry| entry.clone())
+            .ok_or_else(|| self.internal_error(&format!("missing node {}", node_id.0)))
+    }
+
     fn force_value_shallow(&self, value: Value) -> Result<Value, PoisonError> {
         match value {
             Value::Pending(node_id) => self.force_pending_shallow(node_id),
@@ -849,6 +1138,773 @@ impl Engine {
             #[cfg(test)]
             NodeJob::Poison(error) => Err(error.clone()),
         }
+    }
+
+    pub(crate) fn inspect_scheduled_value(
+        &self,
+        value: Value,
+    ) -> Result<InspectedValue, PoisonError> {
+        self.inspect_scheduled_value_inner(value, &mut Vec::new())
+    }
+
+    fn inspect_scheduled_value_inner(
+        &self,
+        value: Value,
+        visiting: &mut Vec<NodeId>,
+    ) -> Result<InspectedValue, PoisonError> {
+        match value {
+            Value::Pending(node_id) => match self.scheduler_node_state(node_id)? {
+                SchedulerNodeState::Pending => {
+                    let mut pending = BTreeSet::new();
+                    pending.insert(node_id);
+                    Ok(InspectedValue {
+                        value: Value::Pending(node_id),
+                        pending,
+                        errors: Vec::new(),
+                    })
+                }
+                SchedulerNodeState::Resolved(value) => {
+                    if visiting.contains(&node_id) {
+                        return Err(self.scheduler_circular_dependency(visiting, node_id));
+                    }
+                    if visiting.len() + 1 > self.max_demand_depth {
+                        return Err(self.scheduler_demand_depth_exceeded(visiting, node_id));
+                    }
+                    visiting.push(node_id);
+                    let result = self.inspect_scheduled_value_inner(value, visiting);
+                    let popped = visiting.pop();
+                    debug_assert_eq!(popped, Some(node_id));
+                    result
+                }
+                SchedulerNodeState::Poisoned(error) => Ok(InspectedValue {
+                    value: Value::Pending(node_id),
+                    pending: BTreeSet::new(),
+                    errors: vec![error],
+                }),
+            },
+            Value::Discovered(discovered) => {
+                let inspected = self.inspect_scheduled_value_inner(*discovered.value, visiting)?;
+                Ok(InspectedValue {
+                    value: self.attach_obligations(
+                        inspected.value,
+                        discovered.obligations.iter().cloned(),
+                    ),
+                    pending: inspected.pending,
+                    errors: inspected.errors,
+                })
+            }
+            Value::Tuple(elems) => {
+                let (elems, pending, errors) =
+                    self.inspect_scheduled_list(elems.iter().cloned(), visiting)?;
+                Ok(InspectedValue {
+                    value: Value::Tuple(Arc::from(elems)),
+                    pending,
+                    errors,
+                })
+            }
+            Value::Array(items) => {
+                let (items, pending, errors) =
+                    self.inspect_scheduled_list(items.iter().cloned(), visiting)?;
+                Ok(InspectedValue {
+                    value: Value::Array(Arc::from(items)),
+                    pending,
+                    errors,
+                })
+            }
+            Value::Map(map) => {
+                let mut entries = Vec::with_capacity(map.entries.len());
+                let mut pending = BTreeSet::new();
+                let mut errors = Vec::new();
+                for (key, value) in map.entries.iter() {
+                    let key = self.inspect_scheduled_value_inner(key.clone(), visiting)?;
+                    let value = self.inspect_scheduled_value_inner(value.clone(), visiting)?;
+                    pending.extend(key.pending);
+                    pending.extend(value.pending);
+                    errors.extend(key.errors);
+                    errors.extend(value.errors);
+                    entries.push((key.value, value.value));
+                }
+                Ok(InspectedValue {
+                    value: Value::Map(MapValue {
+                        entries: Arc::from(entries),
+                    }),
+                    pending,
+                    errors,
+                })
+            }
+            Value::ExecPath(path) => match path {
+                ExecPathValue::InTree { tree, suffix } => {
+                    let tree = self.inspect_scheduled_tree(tree, visiting)?;
+                    Ok(InspectedValue {
+                        value: Value::ExecPath(ExecPathValue::InTree {
+                            tree: match tree.value {
+                                Value::Tree(tree) => tree,
+                                other => {
+                                    return Err(self.internal_error(&format!(
+                                        "expected Tree while inspecting ExecPath, got {}",
+                                        other.type_name()
+                                    )));
+                                }
+                            },
+                            suffix,
+                        }),
+                        pending: tree.pending,
+                        errors: tree.errors,
+                    })
+                }
+                ExecPathValue::InBlob { blob, leaf } => Ok(InspectedValue::resolved(
+                    Value::ExecPath(ExecPathValue::InBlob { blob, leaf }),
+                )),
+            },
+            Value::Tree(tree) => self.inspect_scheduled_tree(tree, visiting),
+            Value::Struct(struct_value) => {
+                let mut fields = Vec::with_capacity(struct_value.fields.len());
+                let mut pending = BTreeSet::new();
+                let mut errors = Vec::new();
+                for (name, value) in struct_value.fields.iter() {
+                    let value = self.inspect_scheduled_value_inner(value.clone(), visiting)?;
+                    pending.extend(value.pending);
+                    errors.extend(value.errors);
+                    fields.push((name.clone(), value.value));
+                }
+                Ok(InspectedValue {
+                    value: Value::Struct(StructValue {
+                        type_name: struct_value.type_name,
+                        fields: Arc::from(fields),
+                    }),
+                    pending,
+                    errors,
+                })
+            }
+            Value::Function(function) => {
+                let mut captures = Vec::with_capacity(function.captures.len());
+                let mut pending = BTreeSet::new();
+                let mut errors = Vec::new();
+                for (name, value) in function.captures.iter() {
+                    let value = self.inspect_scheduled_value_inner(value.clone(), visiting)?;
+                    pending.extend(value.pending);
+                    errors.extend(value.errors);
+                    captures.push((name.clone(), value.value));
+                }
+                Ok(InspectedValue {
+                    value: Value::Function(FunctionValue {
+                        def: function.def,
+                        code_identity: function.code_identity,
+                        captures: Arc::from(captures),
+                    }),
+                    pending,
+                    errors,
+                })
+            }
+            Value::Partial(partial) => {
+                let function =
+                    self.inspect_scheduled_value_inner(partial.function.clone(), visiting)?;
+                let (args, mut pending, mut errors) =
+                    self.inspect_scheduled_list(partial.args.iter().cloned(), visiting)?;
+                pending.extend(function.pending);
+                errors.extend(function.errors);
+                let mut kwargs = Vec::with_capacity(partial.kwargs.len());
+                for (name, value) in partial.kwargs.iter() {
+                    let value = self.inspect_scheduled_value_inner(value.clone(), visiting)?;
+                    pending.extend(value.pending);
+                    errors.extend(value.errors);
+                    kwargs.push((name.clone(), value.value));
+                }
+                let kwargs_expr = match &partial.kwargs_expr {
+                    Some(kwargs_expr) => {
+                        let value =
+                            self.inspect_scheduled_value_inner((**kwargs_expr).clone(), visiting)?;
+                        pending.extend(value.pending);
+                        errors.extend(value.errors);
+                        Some(Box::new(value.value))
+                    }
+                    None => None,
+                };
+                Ok(InspectedValue {
+                    value: Value::Partial(Arc::new(PartialValue {
+                        function: function.value,
+                        args: Arc::from(args),
+                        kwargs: Arc::from(kwargs),
+                        kwargs_expr,
+                    })),
+                    pending,
+                    errors,
+                })
+            }
+            Value::Builtin(builtin) => {
+                let (builtin, pending, errors) =
+                    self.inspect_scheduled_builtin(builtin, visiting)?;
+                Ok(InspectedValue {
+                    value: Value::Builtin(builtin),
+                    pending,
+                    errors,
+                })
+            }
+            other => Ok(InspectedValue::resolved(other)),
+        }
+    }
+
+    fn inspect_scheduled_list(
+        &self,
+        values: impl IntoIterator<Item = Value>,
+        visiting: &mut Vec<NodeId>,
+    ) -> Result<(Vec<Value>, BTreeSet<NodeId>, Vec<PoisonError>), PoisonError> {
+        let mut out = Vec::new();
+        let mut pending = BTreeSet::new();
+        let mut errors = Vec::new();
+        for value in values {
+            let inspected = self.inspect_scheduled_value_inner(value, visiting)?;
+            out.push(inspected.value);
+            pending.extend(inspected.pending);
+            errors.extend(inspected.errors);
+        }
+        Ok((out, pending, errors))
+    }
+
+    fn inspect_scheduled_tree(
+        &self,
+        tree: TreeValue,
+        visiting: &mut Vec<NodeId>,
+    ) -> Result<InspectedValue, PoisonError> {
+        match tree {
+            TreeValue::Inline(entries) => {
+                let mut out = Vec::with_capacity(entries.len());
+                let mut pending = BTreeSet::new();
+                let mut errors = Vec::new();
+                for (name, value) in entries.iter() {
+                    let value = self.inspect_scheduled_value_inner(value.clone(), visiting)?;
+                    pending.extend(value.pending);
+                    errors.extend(value.errors);
+                    out.push((name.clone(), value.value));
+                }
+                Ok(InspectedValue {
+                    value: Value::Tree(TreeValue::Inline(Arc::from(out))),
+                    pending,
+                    errors,
+                })
+            }
+            TreeValue::FsDir(path) => Ok(InspectedValue::resolved(Value::Tree(TreeValue::FsDir(
+                path,
+            )))),
+            TreeValue::Store(root) => Ok(InspectedValue::resolved(Value::Tree(TreeValue::Store(
+                root,
+            )))),
+        }
+    }
+
+    fn inspect_scheduled_builtin(
+        &self,
+        builtin: BuiltinValue,
+        visiting: &mut Vec<NodeId>,
+    ) -> Result<(BuiltinValue, BTreeSet<NodeId>, Vec<PoisonError>), PoisonError> {
+        let inspect_receiver =
+            |receiver: Box<Value>,
+             visiting: &mut Vec<NodeId>|
+             -> Result<(Value, BTreeSet<NodeId>, Vec<PoisonError>), PoisonError> {
+                let inspected = self.inspect_scheduled_value_inner(*receiver, visiting)?;
+                Ok((inspected.value, inspected.pending, inspected.errors))
+            };
+
+        match builtin {
+            BuiltinValue::Namespace(namespace) => Ok((
+                BuiltinValue::Namespace(namespace),
+                BTreeSet::new(),
+                Vec::new(),
+            )),
+            BuiltinValue::Function(function) => Ok((
+                BuiltinValue::Function(function),
+                BTreeSet::new(),
+                Vec::new(),
+            )),
+            BuiltinValue::Method(method) => match method {
+                BuiltinMethod::BlobFromString => Ok((
+                    BuiltinValue::Method(BuiltinMethod::BlobFromString),
+                    BTreeSet::new(),
+                    Vec::new(),
+                )),
+                BuiltinMethod::BytesFromString => Ok((
+                    BuiltinValue::Method(BuiltinMethod::BytesFromString),
+                    BTreeSet::new(),
+                    Vec::new(),
+                )),
+                BuiltinMethod::TreeOf => Ok((
+                    BuiltinValue::Method(BuiltinMethod::TreeOf),
+                    BTreeSet::new(),
+                    Vec::new(),
+                )),
+                BuiltinMethod::TreeEmpty => Ok((
+                    BuiltinValue::Method(BuiltinMethod::TreeEmpty),
+                    BTreeSet::new(),
+                    Vec::new(),
+                )),
+                BuiltinMethod::TreeFromPath => Ok((
+                    BuiltinValue::Method(BuiltinMethod::TreeFromPath),
+                    BTreeSet::new(),
+                    Vec::new(),
+                )),
+                BuiltinMethod::ArrayMap { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::ArrayMap {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::ArrayToMap { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::ArrayToMap {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::ArrayFlatten { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::ArrayFlatten {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::ArrayMerge { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::ArrayMerge {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::MapMapValues { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::MapMapValues {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::BlobToString { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::BlobToString {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::BlobExecutable { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::BlobExecutable {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::BlobUtf8 { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::BlobUtf8 {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::BlobUtf8Lossy { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::BytesUtf8 { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::BytesUtf8 {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::BytesUtf8Lossy { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::BytesUtf8Lossy {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::BytesBlob { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::BytesBlob {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::StreamCollect { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::StreamCollect {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::TreeFile { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::TreeFile {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::TreeMerge { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::TreeMerge {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::TreeSubtree { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::TreeSubtree {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::OptionUnwrapOr { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::FallibleCall { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::FallibleCall {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::HostRead { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::HostRead {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::HostHash { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::HostHash {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::HostWhich { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::HostWhich {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+            },
+        }
+    }
+
+    fn materialize_scheduled_value_deep(
+        &self,
+        value: Value,
+        context: &str,
+    ) -> Result<Value, PoisonError> {
+        let inspected = self.inspect_scheduled_value(value)?;
+        if !inspected.errors.is_empty() {
+            return Err(self.scheduler_aggregate_poison_errors(context, &[], inspected.errors));
+        }
+        if !inspected.pending.is_empty() {
+            return Err(self.internal_error(&format!(
+                "{context} still had unresolved pending values: {}",
+                inspected
+                    .pending
+                    .iter()
+                    .map(|node_id| node_id.0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        Ok(inspected.value)
+    }
+
+    fn materialize_scheduled_many_deep(
+        &self,
+        values: Vec<Value>,
+        context: &str,
+    ) -> Result<Vec<Value>, PoisonError> {
+        let mut materialized = Vec::with_capacity(values.len());
+        let mut pending = BTreeSet::new();
+        let mut errors = Vec::new();
+        for value in values {
+            let inspected = self.inspect_scheduled_value(value)?;
+            materialized.push(inspected.value);
+            pending.extend(inspected.pending);
+            errors.extend(inspected.errors);
+        }
+        if !errors.is_empty() {
+            return Err(self.scheduler_aggregate_poison_errors(context, &[], errors));
+        }
+        if !pending.is_empty() {
+            return Err(self.internal_error(&format!(
+                "{context} still had unresolved pending values: {}",
+                pending
+                    .iter()
+                    .map(|node_id| node_id.0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        Ok(materialized)
+    }
+
+    fn materialize_scheduled_value_shallow(
+        &self,
+        value: Value,
+        context: &str,
+    ) -> Result<Value, PoisonError> {
+        match value {
+            Value::Pending(node_id) => match self.scheduler_node_state(node_id)? {
+                SchedulerNodeState::Pending => Err(self.internal_error(&format!(
+                    "{context} still had unresolved pending node {}",
+                    node_id.0
+                ))),
+                SchedulerNodeState::Resolved(value) => {
+                    self.materialize_scheduled_value_shallow(value, context)
+                }
+                SchedulerNodeState::Poisoned(error) => Err(error),
+            },
+            Value::Discovered(discovered) => Ok(self.attach_obligations(
+                self.materialize_scheduled_value_shallow(*discovered.value, context)?,
+                discovered.obligations.iter().cloned(),
+            )),
+            other => Ok(other),
+        }
+    }
+
+    fn materialize_scheduled_template_parts(
+        &self,
+        parts: &[TemplatePartValue],
+    ) -> Result<Vec<TemplatePartValue>, PoisonError> {
+        let values = parts
+            .iter()
+            .filter_map(|part| match part {
+                TemplatePartValue::Text(_) => None,
+                TemplatePartValue::Expr(value) => Some(value.clone()),
+            })
+            .collect::<Vec<_>>();
+        let forced = self.materialize_scheduled_many_deep(values, "forcing dependencies")?;
+        let mut forced_iter = forced.into_iter();
+        Ok(parts
+            .iter()
+            .map(|part| match part {
+                TemplatePartValue::Text(text) => TemplatePartValue::Text(text.clone()),
+                TemplatePartValue::Expr(_) => TemplatePartValue::Expr(
+                    forced_iter.next().expect("materialized value for template"),
+                ),
+            })
+            .collect())
+    }
+
+    fn execute_node_scheduled(&self, node: &Arc<Node>) -> Result<Value, PoisonError> {
+        match &node.job {
+            NodeJob::Binary { op, left, right } => {
+                let mut values = self.materialize_scheduled_many_deep(
+                    vec![left.clone(), right.clone()],
+                    "forcing dependencies",
+                )?;
+                let right = values.pop().expect("pair has two values");
+                let left = values.pop().expect("pair has two values");
+                self.compute_binary(*op, &left, &right)
+            }
+            NodeJob::Unary { op, operand } => {
+                let operand =
+                    self.materialize_scheduled_value_deep(operand.clone(), "forcing dependency")?;
+                self.compute_unary(*op, &operand)
+            }
+            NodeJob::Template { kind, parts } => {
+                let values = self.materialize_scheduled_template_parts(parts)?;
+                match kind {
+                    TemplateKind::String => self.interpolate_string_parts(&values),
+                    TemplateKind::Path => self.interpolate_path_parts(&values),
+                }
+            }
+            NodeJob::If {
+                cond,
+                then_branch,
+                else_branch,
+                bindings,
+                scope_identity,
+            } => {
+                let cond =
+                    self.materialize_scheduled_value_deep(cond.clone(), "forcing dependency")?;
+                match cond {
+                    Value::Bool(true) => self
+                        .eval_block(then_branch, bindings.as_ref(), scope_identity.as_ref())
+                        .into_value(),
+                    Value::Bool(false) => self
+                        .eval_block(else_branch, bindings.as_ref(), scope_identity.as_ref())
+                        .into_value(),
+                    other => Err(self.type_error(&format!(
+                        "if condition must be Bool, got {}",
+                        other.type_name()
+                    ))),
+                }
+            }
+            NodeJob::Call {
+                function,
+                args,
+                kwargs,
+                kwargs_expr,
+            } => self.execute_call_scheduled(
+                function.clone(),
+                args.clone(),
+                kwargs.clone(),
+                kwargs_expr.clone(),
+            ),
+            NodeJob::Invoke { function, args } => self.invoke_function(function, args.clone()),
+            NodeJob::Field { receiver, field } => {
+                let receiver = self.materialize_scheduled_value_shallow(
+                    receiver.clone(),
+                    "forcing selector receiver",
+                )?;
+                self.select_field(&receiver, field)
+            }
+            NodeJob::Fail { message } => {
+                let message =
+                    self.materialize_scheduled_value_deep(message.clone(), "forcing dependency")?;
+                Err(PoisonError::new(
+                    PoisonKind::UserFail,
+                    message.to_string(),
+                    self.current_demand_chain(None),
+                ))
+            }
+            #[cfg(test)]
+            NodeJob::Sleep { millis, value } => {
+                thread::sleep(Duration::from_millis(*millis));
+                Ok(value.clone())
+            }
+            #[cfg(test)]
+            NodeJob::Poison(error) => Err(error.clone()),
+        }
+    }
+
+    fn execute_call_scheduled(
+        &self,
+        function: Value,
+        args: Arc<[Value]>,
+        kwargs: Arc<[(Arc<str>, Value)]>,
+        kwargs_expr: Option<Value>,
+    ) -> Result<Value, PoisonError> {
+        let (function, function_obligations) = self.split_obligations(
+            self.materialize_scheduled_value_shallow(function, "forcing callable surface")?,
+        );
+        match function {
+            Value::Function(function) => self.finish_execute_call_scheduled(
+                function,
+                args,
+                kwargs,
+                kwargs_expr,
+                function_obligations,
+            ),
+            Value::Partial(partial) => {
+                let mut merged_args = partial.args.iter().cloned().collect::<Vec<_>>();
+                merged_args.extend(args.iter().cloned());
+                let mut merged_kwargs = partial.kwargs.iter().cloned().collect::<Vec<_>>();
+                merged_kwargs.extend(kwargs.iter().cloned());
+                let merged_kwargs_expr = match (partial.kwargs_expr.as_ref(), kwargs_expr) {
+                    (Some(left), Some(right)) => {
+                        Some(self.merge_keyword_records((**left).clone(), right)?)
+                    }
+                    (Some(value), None) => Some((**value).clone()),
+                    (None, value) => value,
+                };
+                let result = self.execute_call_scheduled(
+                    partial.function.clone(),
+                    Arc::from(merged_args),
+                    Arc::from(merged_kwargs),
+                    merged_kwargs_expr,
+                )?;
+                Ok(self.attach_obligations(result, function_obligations))
+            }
+            Value::Builtin(builtin) => {
+                let result = self.invoke_builtin(&builtin, &args, &kwargs, kwargs_expr)?;
+                Ok(self.attach_obligations(result, function_obligations))
+            }
+            other => Err(self.type_error(&format!("cannot call {}", other.type_name()))),
+        }
+    }
+
+    fn finish_execute_call_scheduled(
+        &self,
+        function: FunctionValue,
+        args: Arc<[Value]>,
+        kwargs: Arc<[(Arc<str>, Value)]>,
+        kwargs_expr: Option<Value>,
+        function_obligations: Vec<HostObservation>,
+    ) -> Result<Value, PoisonError> {
+        if !kwargs.is_empty() || kwargs_expr.is_some() {
+            return Err(self.type_error("keyword arguments are only supported for builtins"));
+        }
+
+        if function.key().is_some() && args.iter().all(|value| value.key().is_some()) {
+            let node_id = self.memoized_invoke_node(function, args.iter().cloned().collect());
+            return Ok(self.attach_obligations(Value::Pending(node_id), function_obligations));
+        }
+
+        let result = self.invoke_function(&function, args)?;
+        Ok(self.attach_obligations(result, function_obligations))
     }
 
     // r[impl eval.enter-functions]
