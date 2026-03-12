@@ -1549,6 +1549,9 @@ impl VxLanguageServer {
                 } => {
                     format!("no method `{method_name}` on type `{receiver_ty}`")
                 }
+                vx_resolve::TypeErrorKind::UnusedExprStatement => {
+                    "unused expression statement".to_string()
+                }
             };
             diagnostics.push(Diagnostic {
                 range: state.to_lsp_range(err.range),

@@ -133,22 +133,17 @@ Key builtins to fix:
 already-resolved values. Gradually replace `force_value(x)` with `assert
 resolved + use x directly`.
 
-## Step 6: Handle eval_block non-last expression forcing
+## Step 6: Reject unused expression statements
 
-Line 1024: `eval_block` forces non-last `Stmt::Expr` values. This is for
-side-effect expressions (e.g., a bare `exec(...)` call whose result is
-discarded). Under the scheduler model, these values still need to be demanded
-but not forced inline.
+The old evaluator forces non-tail `Stmt::Expr` values to preserve an
+imperative "statement for effects" model. That is inconsistent with the
+language design. A bare expression is only valid when it is the tail value of
+the block; any other expression statement is a frontend error.
 
-Options:
-- Track "must-demand" values in the block's result and let the scheduler
-  resolve them alongside the block's return value
-- Add a `Value::Demanded` wrapper that the scheduler knows to resolve
-
-This needs careful thought — a bare expression statement that's pending means
-its side effects haven't happened. The scheduler must ensure it resolves before
-the block's final value is used (since later statements may depend on those
-side effects through the environment, not through value dependencies).
+That means the scheduler does not need special support for discarded block
+expressions. The frontend should reject them before lowering, and discovery
+obligations should only arise from demanded values that actually flow into the
+returned result.
 
 ## Step 7: Handle spread forcing
 

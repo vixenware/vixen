@@ -118,15 +118,16 @@ insert_anchor_links = "heading"
 >
 > Semicolons separate statements inside blocks. A trailing semicolon
 > after the last statement is permitted but not required. In blocks, the
-> last expression (without a trailing semicolon) is the block's value; a
-> trailing semicolon turns it into a statement and the block evaluates
-> to `()`.
+> last expression (without a trailing semicolon) is the block's value.
+> A bare expression in any other statement position is an unused
+> expression statement and is a static error; adding a trailing semicolon
+> to the tail expression has the same effect.
 >
 > At file scope, Vixen uses the same statement-list shape as a block,
 > except a source file has no resulting value. Top-level `let`
 > bindings and declarations contribute exported names. Top-level
-> expression statements are allowed, but their values are discarded and
-> they do not export names. `return` remains function-only.
+> bare expressions are therefore invalid. `return` remains
+> function-only.
 >
 > Semicolons do not separate positional from keyword arguments. Keyword
 > application uses `where`, as described in `r[expr.call.where]`.
@@ -418,7 +419,7 @@ insert_anchor_links = "heading"
 >
 > A source file is a statement list with module export semantics.
 > Blocks are statement lists with expression semantics. In both places,
-> declarations and bindings may appear alongside expression statements.
+> declarations and bindings may appear alongside tail expressions.
 >
 > Nested type declarations are allowed in statement position. They are
 > scoped to the enclosing block, and when nested inside a named
@@ -913,16 +914,19 @@ insert_anchor_links = "heading"
 > Assignment (`name = expr`, `name: Type = expr`) and compound update
 > (`name with= { ... }`) are statements, not expressions. Declarations
 > (`fn`, `struct`, `enum`, `newtype`, `type`) are also statements.
+>
+> A bare expression is only valid in tail position of a block, where it
+> becomes the block's value. Any other expression statement is a static
+> error.
 
 ## Modules
 
 > r[lang.modules]
 >
 > A `.vx` file is a module. Its top-level statement list may contain
-> bindings, declarations, and expression statements. Top-level bindings
-> and declarations are the module's exports. Top-level expression
-> statements evaluate for their effects and exported dependencies but do
-> not introduce names.
+> bindings and declarations. Top-level bindings and declarations are the
+> module's exports. Top-level bare expressions are invalid because a
+> module has no resulting value position for them to flow into.
 
 > r[lang.modules.namespace]
 >
@@ -1212,8 +1216,10 @@ insert_anchor_links = "heading"
 > r[control.block]
 >
 > A block `( ... )` is an expression. The last expression in the block is
-> its value. Bindings inside a block are scoped to that block. Blocks
-> replace `let`/`in` and `where` clauses from other languages.
+> its value. Bindings inside a block are scoped to that block. A bare
+> expression that does not become the block's value is an unused
+> expression statement and is therefore invalid. Blocks replace `let`/`in`
+> and `where` clauses from other languages.
 
 ## Pattern grammar
 

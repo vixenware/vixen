@@ -1801,21 +1801,6 @@ fn main() { greeting }
 }
 
 #[test]
-fn top_level_expression_statements_run_before_entry_calls() {
-    let err = eval(
-        r#"
-fail "boom";
-fn main() { 42 }
-"#,
-        "main",
-    )
-    .unwrap_err();
-
-    assert_eq!(err.kind, PoisonKind::UserFail);
-    assert!(err.message.contains("boom"));
-}
-
-#[test]
 fn let_binding() {
     let val = eval("fn main() { let x = 10; let y = 20; x + y }", "main").unwrap();
     assert_eq!(val, Value::U64(30));
@@ -2781,26 +2766,6 @@ fn exec_schedules_argument_resolution_concurrently() {
 }
 
 #[test]
-fn discarded_expression_statements_are_demanded_concurrently() {
-    let engine = engine("fn main(x: U64, y: U64) { x; y; 42 }");
-
-    let start = Instant::now();
-    let value = engine
-        .call(
-            "main",
-            vec![
-                engine.sleep_value(200, Value::U64(1)),
-                engine.sleep_value(200, Value::U64(2)),
-            ],
-        )
-        .unwrap();
-    let elapsed = start.elapsed();
-
-    assert_eq!(value, Value::U64(42));
-    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
-}
-
-#[test]
 fn array_merge_forces_tree_items_concurrently() {
     let engine = engine("fn main(items: Array) { items.merge() }");
     let left = Value::Tree(TreeValue::Inline(Arc::from([(
@@ -3383,7 +3348,7 @@ fn exec_rejects_raw_path_mount_values() {
 }
 
 #[test]
-fn discover_records_host_obligations_locally() {
+fn discover_records_host_obligations_for_demanded_values() {
     let tempdir = TempDir::new().unwrap();
     let tool_path = tempdir.path().join("tool.sh");
     let tool_script = "#!/bin/sh\nprintf toolchain-v1\n";
@@ -3397,13 +3362,10 @@ fn discover_records_host_obligations_locally() {
         fs::set_permissions(&tool_path, perms).unwrap();
     }
     let expected_hash = blake3_hash(tool_script.as_bytes()).to_hex().to_string();
-    let tool_str = tool_path.to_string_lossy().to_string();
     let source = format!(
         r#"fn probe() #discover {{
                discover(executor_class("default"), (host) => {{
-                 host.read({path:?});
-                 host.hash({path:?});
-                 host.which({path:?})
+                 host.hash(host.which({path:?}))
                }})
              }}"#,
         path = tool_path.to_string_lossy(),
@@ -3414,17 +3376,16 @@ fn discover_records_host_obligations_locally() {
     let Value::Discovered(discovered) = value else {
         panic!("expected discovered value");
     };
-    assert_eq!(*discovered.value, Value::String(Arc::from(tool_str)));
+    assert_eq!(
+        *discovered.value,
+        Value::Blob(BlobValue::from_string(expected_hash.clone()))
+    );
     assert_eq!(
         discovered.obligations.as_ref(),
         &[
             HostObservation::Hash {
                 path: tool_path.to_string_lossy().to_string(),
                 content_hash: expected_hash.clone(),
-            },
-            HostObservation::Read {
-                path: tool_path.to_string_lossy().to_string(),
-                content_hash: expected_hash,
             },
             HostObservation::Which {
                 name: tool_path.to_string_lossy().to_string(),
@@ -3449,7 +3410,7 @@ fn host_which_poisons_by_default_and_fallible_calls_return_options() {
         fs::set_permissions(&tool_path, perms).unwrap();
     }
 
-    let missing = tempdir.path().join("missing.sh");
+    let missing_path = tempdir.path().join("missing.sh");
     let source = format!(
         r##"fn found() #discover {{
                discover(executor_class("default"), (host) => host.which({tool_path:?})?)
@@ -3463,7 +3424,7 @@ fn host_which_poisons_by_default_and_fallible_calls_return_options() {
                discover(executor_class("default"), (host) => host.which({missing:?})?)
              }}"##,
         tool_path = tool_path.to_string_lossy(),
-        missing = missing.to_string_lossy(),
+        missing = missing_path.to_string_lossy(),
     );
     let engine = engine(&source);
 
@@ -3481,21 +3442,35 @@ fn host_which_poisons_by_default_and_fallible_calls_return_options() {
             )]),
         })
     );
+    assert_eq!(
+        found.obligations.as_ref(),
+        &[HostObservation::Which {
+            name: tool_path.to_string_lossy().to_string(),
+            expected_path: Some(tool_path.to_string_lossy().to_string()),
+        }]
+    );
 
     let err = engine.call("missing", vec![]).unwrap_err();
     assert_eq!(err.kind, PoisonKind::UserFail);
     assert!(err.message.contains("host.which could not find"));
 
-    let missing = engine.call("missing_fallible", vec![]).unwrap();
-    let Value::Discovered(missing) = missing else {
+    let missing_value = engine.call("missing_fallible", vec![]).unwrap();
+    let Value::Discovered(missing_value) = missing_value else {
         panic!("expected discovered value");
     };
     assert_eq!(
-        *missing.value,
+        *missing_value.value,
         Value::Struct(StructValue {
             type_name: Arc::from("None"),
             fields: Arc::from([]),
         })
+    );
+    assert_eq!(
+        missing_value.obligations.as_ref(),
+        &[HostObservation::Which {
+            name: missing_path.to_string_lossy().to_string(),
+            expected_path: None,
+        }]
     );
 }
 

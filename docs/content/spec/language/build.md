@@ -334,10 +334,15 @@ insert_anchor_links = "heading"
 
 > r[exec.verifier.compose]
 >
-> When a discovery closure performs multiple host observations, the
-> returned value carries the union of their obligations. There is no
-> separate user-written composition step — obligation tracking follows
-> the values produced by discovery.
+> When demanded discovery evaluation performs multiple host observations,
+> the returned value carries the union of the obligations attached to the
+> values that flow into that result. There is no separate user-written
+> composition step — obligation tracking follows the values produced by
+> discovery.
+>
+> Observations from expressions that do not flow into the returned value
+> do not contribute obligations. Such unused expression statements are a
+> static error.
 
 > r[exec.executor-class]
 >
@@ -376,8 +381,11 @@ insert_anchor_links = "heading"
 > `host.read`, and future host-observation primitives.
 >
 > Those recorded observations become hidden verification obligations
-> attached to the values returned by `discover`. The runtime, not user
-> code, derives later verification from that observation trace.
+> attached to the values that flow out of `discover`. The runtime, not
+> user code, derives later verification from that observation trace.
+> Recoverable fallible conversion preserves those observations: if
+> `host.which(name)?` yields `None`, the returned `Option` still carries
+> the recorded `Which { expected_path: None }` obligation.
 
 > r[exec.discover.reuse]
 >

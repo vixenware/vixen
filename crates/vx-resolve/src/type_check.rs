@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use rowan::TextRange;
+use rowan::{NodeOrToken, TextRange};
 use vx_parser::{
     ArrayExpr, AstNode, BinaryExpr, BlockExpr, CallExpr, ClosureExpr, Expr, FallibleExpr,
     FieldExpr, IfExpr, InvokeExpr, LetStmt, LiteralExpr, MapExpr, MatchExpr, NameRefExpr,
@@ -42,6 +42,8 @@ pub enum TypeErrorKind {
         receiver_ty: Ty,
         method_name: String,
     },
+    /// A bare expression appears in statement position without flowing into a value.
+    UnusedExprStatement,
 }
 
 /// Result of expression typing.
@@ -87,9 +89,8 @@ pub fn type_check(
         binding_types: HashMap::new(),
     };
 
-    for stmt in file.statements() {
-        checker.check_stmt(&stmt);
-    }
+    let stmts = file.statements().collect::<Vec<_>>();
+    checker.check_stmt_list(&stmts, false);
 
     TypeCheckResult {
         expr_types: checker.expr_types,
@@ -242,9 +243,8 @@ impl<'a> ExprTyper<'a> {
     }
 
     fn check_block(&mut self, block: &BlockExpr) {
-        for stmt in block.statements() {
-            self.check_stmt(&stmt);
-        }
+        let stmts = block.statements().collect::<Vec<_>>();
+        self.check_stmt_list(&stmts, true);
     }
 
     fn check_stmt(&mut self, stmt: &Stmt) {
@@ -293,6 +293,60 @@ impl<'a> ExprTyper<'a> {
             }
             _ => {}
         }
+    }
+
+    fn check_stmt_list(&mut self, stmts: &[Stmt], allow_tail_expr: bool) -> Ty {
+        let mut last_ty = Ty::Unit;
+        for (index, stmt) in stmts.iter().enumerate() {
+            let is_last = index + 1 == stmts.len();
+            match stmt {
+                Stmt::Expr(expr) => {
+                    let ty = self.infer_expr(expr);
+                    if allow_tail_expr && is_last && !self.stmt_has_trailing_semicolon(stmt) {
+                        last_ty = ty;
+                    } else {
+                        self.push_error(TypeError {
+                            range: expr.syntax().text_range(),
+                            kind: TypeErrorKind::UnusedExprStatement,
+                        });
+                        last_ty = Ty::Unit;
+                    }
+                }
+                Stmt::Return(ret) => {
+                    if let Some(expr) = ret.expr() {
+                        self.infer_expr(&expr);
+                    }
+                    last_ty = Ty::Unit;
+                }
+                _ => {
+                    self.check_stmt(stmt);
+                    last_ty = Ty::Unit;
+                }
+            }
+        }
+        last_ty
+    }
+
+    fn stmt_has_trailing_semicolon(&self, stmt: &Stmt) -> bool {
+        let Some(parent) = stmt.syntax().parent() else {
+            return false;
+        };
+
+        let mut saw_stmt = false;
+        for child in parent.children_with_tokens() {
+            match child {
+                NodeOrToken::Node(node) if node == *stmt.syntax() => {
+                    saw_stmt = true;
+                }
+                NodeOrToken::Token(token) if token.kind().is_trivia() => {}
+                NodeOrToken::Token(token) if saw_stmt => {
+                    return token.kind() == SyntaxKind::SEMICOLON;
+                }
+                _ => {}
+            }
+        }
+
+        false
     }
 
     /// Infer the type of an expression and record it.
@@ -1369,25 +1423,8 @@ impl<'a> ExprTyper<'a> {
     }
 
     fn infer_block(&mut self, block: &BlockExpr) -> Ty {
-        let mut last_ty = Ty::Unit;
-        for stmt in block.statements() {
-            match &stmt {
-                Stmt::Expr(expr) => {
-                    last_ty = self.infer_expr(expr);
-                }
-                Stmt::Return(ret) => {
-                    if let Some(expr) = ret.expr() {
-                        self.infer_expr(&expr);
-                    }
-                    last_ty = Ty::Unit;
-                }
-                _ => {
-                    self.check_stmt(&stmt);
-                    last_ty = Ty::Unit;
-                }
-            }
-        }
-        last_ty
+        let stmts = block.statements().collect::<Vec<_>>();
+        self.check_stmt_list(&stmts, true)
     }
 
     fn infer_if(&mut self, if_expr: &IfExpr) -> Ty {

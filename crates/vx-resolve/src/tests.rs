@@ -1309,7 +1309,7 @@ fn main() {
         observer: (proc, tree) => tree.subtree(@out),
     };
 
-    partial exec where common;
+    partial exec where common
 }
 "#;
     let (result, types) = type_check_with_types(src);
@@ -1893,8 +1893,7 @@ fn tuple_destructuring_let_binds_element_types() {
     let src = r#"
 fn main(pair: (String, String)) {
     let (dep, feat) = pair;
-    dep.ends_with("?");
-    feat.len()
+    (dep.ends_with("?"), feat.len())
 }
 "#;
     let result = type_check(src);
@@ -1925,6 +1924,50 @@ fn main(items: Array[Item]) {
 "#;
     let result = type_check(src);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn top_level_expression_statement_is_a_type_error() {
+    let src = "42";
+    let result = type_check(src);
+    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+    assert_eq!(
+        result.errors[0].kind,
+        crate::TypeErrorKind::UnusedExprStatement
+    );
+}
+
+#[test]
+fn tail_expression_with_trailing_semicolon_is_a_type_error() {
+    let src = r#"
+fn main() {
+    42;
+}
+"#;
+    let result = type_check(src);
+    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+    assert_eq!(
+        result.errors[0].kind,
+        crate::TypeErrorKind::UnusedExprStatement
+    );
+}
+
+#[test]
+fn discarded_discovery_expression_is_a_type_error() {
+    let src = r#"
+fn probe() #discover {
+    discover(executor_class("default"), (host) => {
+        host.read("/tmp/tool");
+        host.which("/tmp/tool")
+    })
+}
+"#;
+    let result = type_check(src);
+    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+    assert_eq!(
+        result.errors[0].kind,
+        crate::TypeErrorKind::UnusedExprStatement
+    );
 }
 
 // r[type.error.arg_mismatch] — host.read(123) gets a type diagnostic
@@ -2089,8 +2132,8 @@ fn let_binding_propagates_type() {
 fn main() {
     build((path, args, env) => {
         let b = read_file("foo");
-        b.utf8();
-    });
+        b.utf8()
+    })
 }
 "#,
     );

@@ -11,11 +11,11 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #discover -> T
     observer: (proc, _vfs) => (
       if proc.exit_code != 0 (
         fail `process failed`
-      );
-
-      Tree {
-        @cc-version.txt: proc.stdout.collect().blob(),
-      }
+      ) else (
+        Tree {
+          @cc-version.txt: proc.stdout.collect().blob(),
+        }
+      )
     ),
   }
 )
