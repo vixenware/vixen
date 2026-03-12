@@ -8,6 +8,7 @@ use crate::worker::Engine;
 
 pub(crate) struct Scheduler<'e> {
     engine: &'e Engine,
+    initial_stack: Vec<NodeId>,
     deps: HashMap<NodeId, HashSet<NodeId>>,
     rdeps: HashMap<NodeId, Vec<NodeId>>,
     ready: VecDeque<NodeId>,
@@ -21,6 +22,21 @@ impl<'e> Scheduler<'e> {
     pub(crate) fn new(engine: &'e Engine) -> Self {
         Self {
             engine,
+            initial_stack: Vec::new(),
+            deps: HashMap::new(),
+            rdeps: HashMap::new(),
+            ready: VecDeque::new(),
+            ready_set: HashSet::new(),
+            demanded: HashSet::new(),
+            completed: HashSet::new(),
+            demand_paths: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn with_initial_stack(engine: &'e Engine, initial_stack: Vec<NodeId>) -> Self {
+        Self {
+            engine,
+            initial_stack,
             deps: HashMap::new(),
             rdeps: HashMap::new(),
             ready: VecDeque::new(),
@@ -38,9 +54,10 @@ impl<'e> Scheduler<'e> {
                 if inspected.errors.is_empty() {
                     return Ok(inspected.value);
                 }
+                let stack = self.prefixed_stack(&[]);
                 return Err(self.engine.scheduler_aggregate_poison_errors(
                     "forcing dependencies",
-                    &[],
+                    &stack,
                     inspected.errors,
                 ));
             }
@@ -59,7 +76,8 @@ impl<'e> Scheduler<'e> {
                     }
                 }
                 if !unresolved.is_empty() {
-                    return Err(self.engine.scheduler_stalled(&[], &unresolved));
+                    let stack = self.prefixed_stack(&[]);
+                    return Err(self.engine.scheduler_stalled(&stack, &unresolved));
                 }
             }
 
@@ -68,15 +86,38 @@ impl<'e> Scheduler<'e> {
         }
     }
 
+    pub(crate) fn resolve_node_shallow(mut self, node_id: NodeId) -> Result<Value, PoisonError> {
+        let mut stack = Vec::new();
+        self.demand_node(node_id, &mut stack)?;
+        while !self.refresh_completion(node_id)? {
+            if self.ready.is_empty() {
+                let stack = self.prefixed_stack(&[]);
+                return Err(self.engine.scheduler_stalled(&stack, &[node_id]));
+            }
+            self.run_ready_nodes()?;
+        }
+
+        match self.engine.scheduler_node_state(node_id)? {
+            crate::worker::SchedulerNodeState::Resolved(value) => Ok(value),
+            crate::worker::SchedulerNodeState::Poisoned(error) => Err(error),
+            crate::worker::SchedulerNodeState::Pending => {
+                let stack = self.prefixed_stack(&[]);
+                Err(self.engine.scheduler_stalled(&stack, &[node_id]))
+            }
+        }
+    }
+
     fn demand_node(&mut self, node_id: NodeId, stack: &mut Vec<NodeId>) -> Result<(), PoisonError> {
         if self.refresh_completion(node_id)? || self.demanded.contains(&node_id) {
             return Ok(());
         }
-        if stack.contains(&node_id) {
-            return Err(self.engine.scheduler_circular_dependency(stack, node_id));
+        if self.initial_stack.contains(&node_id) || stack.contains(&node_id) {
+            let stack = self.prefixed_stack(stack);
+            return Err(self.engine.scheduler_circular_dependency(&stack, node_id));
         }
-        if stack.len() + 1 > self.engine.scheduler_max_demand_depth() {
-            return Err(self.engine.scheduler_demand_depth_exceeded(stack, node_id));
+        if self.initial_stack.len() + stack.len() + 1 > self.engine.scheduler_max_demand_depth() {
+            let stack = self.prefixed_stack(stack);
+            return Err(self.engine.scheduler_demand_depth_exceeded(&stack, node_id));
         }
 
         self.demand_paths
@@ -150,7 +191,8 @@ impl<'e> Scheduler<'e> {
                         match handle.join() {
                             Ok(result) => results.push(result),
                             Err(_) => {
-                                return Err(engine.scheduler_stalled(&[], &stalled_batch));
+                                let stack = self.prefixed_stack(&[]);
+                                return Err(engine.scheduler_stalled(&stack, &stalled_batch));
                             }
                         }
                     }
@@ -209,8 +251,9 @@ impl<'e> Scheduler<'e> {
         }
 
         let mut path = self.demand_paths.get(&node_id).cloned().unwrap_or_default();
-        if path.len() + 1 > self.engine.scheduler_max_demand_depth() {
-            return Err(self.engine.scheduler_demand_depth_exceeded(&path, node_id));
+        if self.initial_stack.len() + path.len() + 1 > self.engine.scheduler_max_demand_depth() {
+            let stack = self.prefixed_stack(&path);
+            return Err(self.engine.scheduler_demand_depth_exceeded(&stack, node_id));
         }
 
         path.push(node_id);
@@ -240,5 +283,11 @@ impl<'e> Scheduler<'e> {
         if !waiters.contains(&waiter) {
             waiters.push(waiter);
         }
+    }
+
+    fn prefixed_stack(&self, stack: &[NodeId]) -> Vec<NodeId> {
+        let mut out = self.initial_stack.clone();
+        out.extend(stack.iter().copied());
+        out
     }
 }

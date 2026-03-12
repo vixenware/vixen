@@ -172,12 +172,7 @@ impl Engine {
         let function = function
             .to_runtime()
             .map_err(|message| engine.type_error(&message))?;
-        let value = engine.execute_call(
-            Value::Function(function),
-            Arc::from(args),
-            Arc::from([]),
-            None,
-        )?;
+        let value = engine.build_call(Value::Function(function), args, None);
         engine.resolve_boundary_value(value)
     }
 
@@ -1082,10 +1077,18 @@ impl Engine {
     // r[impl eval.forcing.boundary]
     fn force_value(&self, value: Value) -> Result<Value, PoisonError> {
         match value {
-            Value::Pending(node_id) => self.with_demand(node_id, || {
-                let value = self.force_node(node_id)?;
+            Value::Pending(node_id) => {
+                if self.discovery_recording_active() {
+                    return self.with_demand(node_id, || {
+                        let value = self.force_node(node_id)?;
+                        self.force_value(value)
+                    });
+                }
+
+                let value = Scheduler::with_initial_stack(self, self.current_demand_stack_ids())
+                    .resolve_node_shallow(node_id)?;
                 self.force_value(value)
-            }),
+            }
             Value::Discovered(discovered) => {
                 let inner = self.force_value(*discovered.value)?;
                 Ok(self.attach_obligations(inner, discovered.obligations.iter().cloned()))
@@ -5098,12 +5101,11 @@ impl Engine {
 
         let process = self.exec_process_value(&output);
         let tree = Value::Tree(TreeValue::FsDir(sandbox_root.clone()));
-        let observed = self.execute_call(
+        let observed = self.resolve_boundary_value(self.build_call(
             request.observer,
-            Arc::from(vec![process, tree]),
-            Arc::from([]),
+            vec![process, tree],
             None,
-        );
+        ));
 
         if let Some(verification_task) = verification_task {
             match verification_task.join() {
@@ -5428,8 +5430,13 @@ impl Engine {
         let Some(method) = self.select_field(value, "to_string").ok() else {
             return Ok(None);
         };
-        let result = self.execute_call(method, Arc::from([]), Arc::from([]), None)?;
-        let (result, _) = self.split_obligations(self.force_value(result)?);
+        let result = if self.discovery_recording_active() {
+            let result = self.execute_call(method, Arc::from([]), Arc::from([]), None)?;
+            self.force_value(result)?
+        } else {
+            self.resolve_boundary_value(self.build_call(method, Vec::new(), None))?
+        };
+        let (result, _) = self.split_obligations(result);
         match result {
             Value::String(text) => Ok(Some(text.to_string())),
             _ => Ok(None),
@@ -6626,8 +6633,17 @@ impl Engine {
         DemandChain { entries }
     }
 
+    fn current_demand_stack_ids(&self) -> Vec<NodeId> {
+        DEMAND_STACK.with(|stack| stack.borrow().iter().copied().collect())
+    }
+
     fn force_pending_shallow(&self, node_id: NodeId) -> Result<Value, PoisonError> {
-        self.with_demand(node_id, || self.force_node(node_id))
+        if self.discovery_recording_active() {
+            self.with_demand(node_id, || self.force_node(node_id))
+        } else {
+            Scheduler::with_initial_stack(self, self.current_demand_stack_ids())
+                .resolve_node_shallow(node_id)
+        }
     }
 
     // r[impl eval.demand-depth]

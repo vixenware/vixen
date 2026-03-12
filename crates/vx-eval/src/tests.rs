@@ -2695,6 +2695,43 @@ fn array_map_schedules_callback_bodies_concurrently() {
 }
 
 #[test]
+fn force_fully_uses_scheduler_for_pending_call_nodes() {
+    let engine = engine(
+        "struct Item { wait: U64, value: U64 }
+         fn project(item: Item) {
+           item.wait;
+           item.value
+         }
+         fn main(items: Array) { items.map(project) }",
+    );
+    let item = |wait, value| {
+        Value::Struct(StructValue {
+            type_name: Arc::from("Item"),
+            fields: Arc::from([(Arc::from("wait"), wait), (Arc::from("value"), value)]),
+        })
+    };
+    let call = engine
+        .call_unforced(
+            "main",
+            vec![Value::Array(Arc::from([
+                item(engine.sleep_value(200, Value::U64(0)), Value::U64(1)),
+                item(engine.sleep_value(200, Value::U64(0)), Value::U64(2)),
+            ]))],
+        )
+        .unwrap();
+
+    let start = Instant::now();
+    let value = engine.force_fully(call).unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        value,
+        Value::Array(Arc::from([Value::U64(1), Value::U64(2)]))
+    );
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[test]
 fn array_flatten_schedules_item_containers_concurrently() {
     let engine = engine("fn main(items: Array) { items.flatten() }");
 
