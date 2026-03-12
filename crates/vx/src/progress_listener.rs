@@ -76,7 +76,7 @@ impl ProgressListenerImpl {
             CliMode::Tui(tui) => tui.start_action(action_type),
             CliMode::Text => {
                 let id = self.next_id();
-                tracing::info!("[{id}] Starting: {action_type:?}");
+                tracing::info!("[{id}] Starting: {}", action_type.display_name());
                 id
             }
         }

@@ -1485,6 +1485,82 @@ fn exec_bridge_poison(
     PoisonError::new(kind, message, demand_chain.clone())
 }
 
+fn summarize_items(items: &[String], limit: usize) -> String {
+    if items.is_empty() {
+        return "-".to_string();
+    }
+
+    let mut summary = items.iter().take(limit).cloned().collect::<Vec<_>>();
+    if items.len() > limit {
+        summary.push(format!("... ({} total)", items.len()));
+    }
+    summary.join(", ")
+}
+
+pub(crate) fn summarize_build_vx_exec_request(request: &ExecRequest) -> String {
+    let argv = request
+        .args
+        .iter()
+        .map(|arg| arg.as_str().to_string())
+        .collect::<Vec<_>>();
+    let mounts = request
+        .mounts
+        .iter()
+        .map(|mount| mount.path.as_str().to_string())
+        .collect::<Vec<_>>();
+    let writable_roots = request
+        .writable_roots
+        .iter()
+        .map(|path| path.as_str().to_string())
+        .collect::<Vec<_>>();
+
+    format!(
+        "build.vx exec: {} (mounts: {}; writable: {})",
+        summarize_items(&argv, 10),
+        summarize_items(&mounts, 6),
+        summarize_items(&writable_roots, 6),
+    )
+}
+
+pub(crate) fn summarize_build_vx_discover_request(request: &EvalDiscoverRequest) -> String {
+    format!("build.vx discover: class={}", request.class)
+}
+
+pub(crate) fn summarize_build_vx_acquire_request(request: &EvalAcquireRequest) -> String {
+    match &request.extract {
+        Some(extract) => format!(
+            "build.vx acquire: url={} digest={} extract={extract}",
+            request.url, request.digest
+        ),
+        None => format!(
+            "build.vx acquire: url={} digest={}",
+            request.url, request.digest
+        ),
+    }
+}
+
+pub(crate) fn summarize_build_vx_render_request(request: &EvalRenderRequest) -> String {
+    format!("build.vx render: template={}", request.template)
+}
+
+fn block_on_runtime<T>(runtime: &Handle, future: impl Future<Output = T>) -> T {
+    if Handle::try_current().is_ok() {
+        block_in_place(|| runtime.block_on(future))
+    } else {
+        runtime.block_on(future)
+    }
+}
+
+fn emit_build_vx_boundary_log(
+    runtime: &Handle,
+    listener: &Option<Arc<ProgressListenerClient>>,
+    message: &str,
+) {
+    if let Some(listener) = listener {
+        let _ = block_on_runtime(runtime, listener.log_message(message.to_string()));
+    }
+}
+
 fn hydrate_exec_value_from_store<'a>(
     store: &'a StoreClient,
     value: Value,
@@ -2156,6 +2232,8 @@ impl VxdService {
                 let store = Arc::clone(&self.store);
                 let exec = Arc::clone(&self.exec);
                 let runtime = Handle::current();
+                let hydration_store = Arc::clone(&self.store);
+                let hydration_runtime = runtime.clone();
                 let acquire_store = Arc::clone(&self.store);
                 let acquire_runtime = runtime.clone();
                 let render_store = Arc::clone(&self.store);
@@ -2164,40 +2242,67 @@ impl VxdService {
                 let discover_store = Arc::clone(&self.store);
                 let discover_exec = Arc::clone(&self.exec);
                 let discover_runtime = runtime.clone();
+                let progress_listener = self.progress_listener.lock().clone();
+                let acquire_listener = progress_listener.clone();
+                let render_listener = progress_listener.clone();
+                let exec_listener = progress_listener.clone();
+                let discover_listener = progress_listener;
                 let engine = Engine::from_module(&module)
+                    .with_store_hydration_handler(Arc::new(move |request| {
+                        let store = Arc::clone(&hydration_store);
+                        let runtime = hydration_runtime.clone();
+                        block_on_runtime(
+                            &runtime,
+                            hydrate_exec_value_from_store(
+                                &store,
+                                request.value,
+                                &request.demand_chain,
+                            ),
+                        )
+                    }))
                     .with_acquire_handler(Arc::new(move |request| {
+                        let summary = summarize_build_vx_acquire_request(&request);
                         let store = Arc::clone(&acquire_store);
                         let runtime = acquire_runtime.clone();
-                        block_in_place(|| {
-                            runtime.block_on(run_build_vx_acquire_via_store(&store, request))
-                        })
+                        emit_build_vx_boundary_log(&runtime, &acquire_listener, &summary);
+                        block_on_runtime(&runtime, run_build_vx_acquire_via_store(&store, request))
+                            .map_err(|error| error.with_context(summary))
                     }))
                     .with_render_handler(Arc::new(move |request| {
+                        let summary = summarize_build_vx_render_request(&request);
                         let store = Arc::clone(&render_store);
                         let runtime = render_runtime.clone();
                         let workspace = render_workspace.clone();
-                        block_in_place(|| {
-                            runtime.block_on(run_build_vx_render_via_store(
-                                &store, &workspace, request,
-                            ))
-                        })
+                        emit_build_vx_boundary_log(&runtime, &render_listener, &summary);
+                        block_on_runtime(
+                            &runtime,
+                            run_build_vx_render_via_store(&store, &workspace, request),
+                        )
+                        .map_err(|error| error.with_context(summary))
                     }))
                     .with_exec_handler(Arc::new(move |request| {
+                        let summary = summarize_build_vx_exec_request(&request);
                         let store = Arc::clone(&store);
                         let exec = Arc::clone(&exec);
                         let runtime = runtime.clone();
-                        block_in_place(|| {
-                            runtime.block_on(run_build_vx_exec_via_runner(&store, &exec, request))
-                        })
+                        emit_build_vx_boundary_log(&runtime, &exec_listener, &summary);
+                        block_on_runtime(
+                            &runtime,
+                            run_build_vx_exec_via_runner(&store, &exec, request),
+                        )
+                        .map_err(|error| error.with_context(summary))
                     }))
                     .with_discover_handler(Arc::new(move |request| {
+                        let summary = summarize_build_vx_discover_request(&request);
                         let store = Arc::clone(&discover_store);
                         let exec = Arc::clone(&discover_exec);
                         let runtime = discover_runtime.clone();
-                        block_in_place(|| {
-                            runtime
-                                .block_on(run_build_vx_discover_via_runner(&store, &exec, request))
-                        })
+                        emit_build_vx_boundary_log(&runtime, &discover_listener, &summary);
+                        block_on_runtime(
+                            &runtime,
+                            run_build_vx_discover_via_runner(&store, &exec, request),
+                        )
+                        .map_err(|error| error.with_context(summary))
                     }));
                 let output = engine
                     .call_entry(

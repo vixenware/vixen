@@ -849,11 +849,14 @@ fn display_group_label_message(group: &DisplayGroup<'_>) -> String {
 }
 
 fn display_group_notes(group: &DisplayGroup<'_>) -> Vec<String> {
+    let mut notes = boundary_context_notes(&group.leaves);
     if group.presentation.category == LeafCategory::ExecMissingInput && group.leaves.len() > 1 {
-        return grouped_exec_missing_input_notes(&group.leaves);
+        notes.extend(grouped_exec_missing_input_notes(&group.leaves));
+        return dedup_notes(notes);
     }
 
-    group.presentation.notes.clone()
+    notes.extend(group.presentation.notes.clone());
+    dedup_notes(notes)
 }
 
 fn grouped_exec_missing_input_notes(leaves: &[&PoisonError]) -> Vec<String> {
@@ -908,6 +911,21 @@ fn summarize_paths(paths: &BTreeSet<String>) -> String {
         summary.push(format!("... ({} total)", paths.len()));
     }
     summary.join(", ")
+}
+
+fn boundary_context_notes(leaves: &[&PoisonError]) -> Vec<String> {
+    leaves
+        .iter()
+        .flat_map(|leaf| leaf.contexts().iter().cloned())
+        .collect()
+}
+
+fn dedup_notes(notes: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    notes
+        .into_iter()
+        .filter(|note| seen.insert(note.clone()))
+        .collect()
 }
 
 fn span_from_provenance(provenance: &SourceProvenance) -> BuildDiagnosticSpan {
@@ -1370,6 +1388,52 @@ fn build() -> Tree (
                 .notes
                 .iter()
                 .any(|note| note == "similar sandbox paths: src/src/lapi.c, src/src/lua.c"),
+            "{failure:#?}"
+        );
+    }
+
+    #[test]
+    fn generic_failures_include_boundary_context_notes() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace_root = Utf8Path::from_path(temp_dir.path()).expect("utf8 workspace root");
+        let source_path = workspace_root.join("build.vx");
+        let source = r#"fn build() -> Tree (
+  exec ["cc", "-x", "c", @probe.c, "-c", "-o", @out/probe.o]
+)
+"#;
+        fs::write(&source_path, source).expect("write source");
+
+        let error = PoisonError::new(
+            PoisonKind::UserFail,
+            "action '/usr/bin/cc -c' cancelled".to_string(),
+            demand_chain(
+                &source_path,
+                source,
+                &[(
+                    "exec [\"cc\", \"-x\", \"c\", @probe.c, \"-c\", \"-o\", @out/probe.o]",
+                    "call(..)",
+                )],
+            ),
+        )
+        .with_context(
+            "build.vx exec: /usr/bin/cc -x c probe.c -c -o out/probe.o (mounts: probe.c; writable: out)",
+        );
+
+        let failure = from_poison_error(workspace_root, &error);
+
+        assert_eq!(failure.message, "build failed");
+        assert!(
+            failure.reports[0]
+                .notes
+                .iter()
+                .any(|note| note == "build.vx exec: /usr/bin/cc -x c probe.c -c -o out/probe.o (mounts: probe.c; writable: out)"),
+            "{failure:#?}"
+        );
+        assert!(
+            failure.reports[0]
+                .notes
+                .iter()
+                .any(|note| note == "action '/usr/bin/cc -c' cancelled"),
             "{failure:#?}"
         );
     }

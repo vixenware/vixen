@@ -23,6 +23,8 @@ pub struct PoisonError {
     pub demand_chain: DemandChain,
     /// Independent poison causes collected in deterministic input order.
     pub causes: Arc<[PoisonError]>,
+    /// Human-facing boundary context (for example, the concrete build.vx exec request).
+    contexts: Arc<[String]>,
     /// Hidden discovery observations that still matter if this poison is recovered via `?`.
     observations: Arc<[HostObservation]>,
 }
@@ -93,6 +95,7 @@ impl PoisonError {
             message: message.into(),
             demand_chain,
             causes: Arc::from([]),
+            contexts: Arc::from([]),
             observations: Arc::from([]),
         }
     }
@@ -103,14 +106,17 @@ impl PoisonError {
         errors: Vec<Self>,
     ) -> Self {
         let mut causes = Vec::new();
+        let mut contexts = Vec::new();
         let mut observations = BTreeMap::new();
         for error in errors {
             if error.kind == PoisonKind::Multiple && !error.causes.is_empty() {
+                contexts.extend(error.contexts.iter().cloned());
                 for observation in error.observations.iter().cloned() {
                     observations.insert(observation.key(), observation);
                 }
                 causes.extend(error.causes.iter().cloned());
             } else {
+                contexts.extend(error.contexts.iter().cloned());
                 for observation in error.observations.iter().cloned() {
                     observations.insert(observation.key(), observation);
                 }
@@ -130,8 +136,24 @@ impl PoisonError {
             message: message.into(),
             demand_chain,
             causes: Arc::from(causes),
+            contexts: Arc::from(contexts),
             observations: Arc::from(observations.into_values().collect::<Vec<_>>()),
         }
+    }
+
+    pub fn contexts(&self) -> &[String] {
+        self.contexts.as_ref()
+    }
+
+    pub fn with_context(mut self, context: impl Into<String>) -> Self {
+        let context = context.into();
+        if self.contexts.iter().any(|existing| existing == &context) {
+            return self;
+        }
+        let mut contexts = self.contexts.iter().cloned().collect::<Vec<_>>();
+        contexts.push(context);
+        self.contexts = Arc::from(contexts);
+        self
     }
 
     pub fn observations(&self) -> &[HostObservation] {
@@ -158,6 +180,12 @@ impl fmt::Display for PoisonError {
             write!(f, "\n  causes:")?;
             for cause in self.causes.iter() {
                 write!(f, "\n    - {:?}: {}", cause.kind, cause.message)?;
+            }
+        }
+        if !self.contexts.is_empty() {
+            write!(f, "\n  contexts:")?;
+            for context in self.contexts.iter() {
+                write!(f, "\n    - {context}")?;
             }
         }
         if !self.demand_chain.entries.is_empty() {

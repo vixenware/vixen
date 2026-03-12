@@ -20,8 +20,10 @@ use std::net::TcpListener;
 use tempfile::TempDir;
 use tokio_test_lite::test as vx_test;
 use vx_eval::{
-    AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain, MapValue,
-    RenderRequest as EvalRenderRequest, TreeValue, Value,
+    AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain,
+    DiscoverRequest as EvalDiscoverRequest, ExecArgValue, ExecRequest, MapValue, PathValue,
+    RenderRequest as EvalRenderRequest, ShippedFunction, TransportBlock, TransportFnDef, TreeValue,
+    Value,
 };
 use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_report::{GraphEdge, GraphNode, GraphTopology};
@@ -79,6 +81,76 @@ fn test_sanitize_id_component_replaces_non_identifier_chars() {
         crate::service::sanitize_id_component("hello/world::crate@1.2.3"),
         "hello_world__crate_1_2_3"
     );
+}
+
+#[test]
+fn build_vx_exec_summary_includes_args_mounts_and_writable_roots() {
+    let empty_module = vx_eval::TransportModule {
+        functions: Vec::new(),
+        top_level: TransportBlock { stmts: Vec::new() },
+    };
+    let empty_function = ShippedFunction {
+        code_identity: "observer".to_string(),
+        def: TransportFnDef {
+            name: "observer".to_string(),
+            params: Vec::new(),
+            keyword_params: Vec::new(),
+            body: TransportBlock { stmts: Vec::new() },
+        },
+        captures: Vec::new(),
+    };
+    let summary = crate::service::summarize_build_vx_exec_request(&ExecRequest {
+        args: vec![
+            ExecArgValue::Literal("/usr/bin/cc".to_string()),
+            ExecArgValue::Literal("-x".to_string()),
+            ExecArgValue::Literal("c".to_string()),
+            ExecArgValue::Path(PathValue::new("probe.c")),
+            ExecArgValue::Literal("-c".to_string()),
+            ExecArgValue::Literal("-o".to_string()),
+            ExecArgValue::Path(PathValue::new("out/probe.o")),
+        ],
+        env: Vec::new(),
+        mounts: vec![vx_eval::ExecMount {
+            path: PathValue::new("probe.c"),
+            value: Value::Blob(BlobValue::from_string("int main(void) { return 0; }\n")),
+        }],
+        writable_roots: vec![PathValue::new("out")],
+        demand_chain: DemandChain::new(),
+        module: empty_module,
+        observer: empty_function,
+        verification_obligations: Vec::new(),
+    });
+
+    assert_eq!(
+        summary,
+        "build.vx exec: /usr/bin/cc, -x, c, probe.c, -c, -o, out/probe.o (mounts: probe.c; writable: out)"
+    );
+}
+
+#[test]
+fn build_vx_discover_summary_includes_executor_class() {
+    let empty_module = vx_eval::TransportModule {
+        functions: Vec::new(),
+        top_level: TransportBlock { stmts: Vec::new() },
+    };
+    let probe = ShippedFunction {
+        code_identity: "probe".to_string(),
+        def: TransportFnDef {
+            name: "probe".to_string(),
+            params: Vec::new(),
+            keyword_params: Vec::new(),
+            body: TransportBlock { stmts: Vec::new() },
+        },
+        captures: Vec::new(),
+    };
+    let summary = crate::service::summarize_build_vx_discover_request(&EvalDiscoverRequest {
+        class: "default".to_string(),
+        demand_chain: DemandChain::new(),
+        module: empty_module,
+        probe,
+    });
+
+    assert_eq!(summary, "build.vx discover: class=default");
 }
 
 #[test]
