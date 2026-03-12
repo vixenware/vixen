@@ -2683,6 +2683,29 @@ fn array_map_schedules_callback_bodies_concurrently() {
 }
 
 #[test]
+fn array_flatten_schedules_item_containers_concurrently() {
+    let engine = engine("fn main(items: Array) { items.flatten() }");
+
+    let start = Instant::now();
+    let value = engine
+        .call(
+            "main",
+            vec![Value::Array(Arc::from([
+                engine.sleep_value(200, Value::Array(Arc::from([Value::U64(1)]))),
+                engine.sleep_value(200, Value::Array(Arc::from([Value::U64(2)]))),
+            ]))],
+        )
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        value,
+        Value::Array(Arc::from([Value::U64(1), Value::U64(2)]))
+    );
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[test]
 fn array_merge_forces_tree_items_concurrently() {
     let engine = engine("fn main(items: Array) { items.merge() }");
     let left = Value::Tree(TreeValue::Inline(Arc::from([(

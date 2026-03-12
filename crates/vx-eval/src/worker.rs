@@ -633,6 +633,9 @@ impl Engine {
                 ..
             } => {
                 let mut deps = self.scheduler_callable_pending(function.clone())?;
+                if deps.is_empty() {
+                    deps.extend(self.scheduler_builtin_call_deps(function.clone())?);
+                }
                 if let Some(kwargs_expr) = kwargs_expr {
                     deps.extend(self.scheduler_pending_shallow(kwargs_expr.clone())?);
                 }
@@ -714,6 +717,51 @@ impl Engine {
             }
             Value::Partial(partial) => {
                 self.scheduler_callable_pending_inner(partial.function.clone(), visiting)
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn scheduler_builtin_call_deps(&self, function: Value) -> Result<Vec<NodeId>, PoisonError> {
+        let function =
+            self.materialize_scheduled_value_shallow(function, "forcing callable surface")?;
+        let (function, _) = self.split_obligations(function);
+        let Value::Builtin(builtin) = function else {
+            return Ok(Vec::new());
+        };
+
+        match builtin {
+            BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver }) => {
+                let receiver = self.materialize_scheduled_value_shallow(
+                    *receiver,
+                    "forcing array.flatten receiver",
+                )?;
+                let (receiver, _) = self.split_obligations(receiver);
+                let Value::Array(items) = receiver else {
+                    return Ok(Vec::new());
+                };
+
+                let mut deps = Vec::new();
+                for item in items.iter() {
+                    deps.extend(self.scheduler_pending_shallow(item.clone())?);
+                }
+                Ok(deps)
+            }
+            BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver }) => {
+                let receiver = self.materialize_scheduled_value_shallow(
+                    *receiver,
+                    "forcing array.merge receiver",
+                )?;
+                let (receiver, _) = self.split_obligations(receiver);
+                let Value::Array(items) = receiver else {
+                    return Ok(Vec::new());
+                };
+
+                let mut deps = Vec::new();
+                for item in items.iter() {
+                    deps.extend(self.scheduler_pending_deep(item.clone())?);
+                }
+                Ok(deps)
             }
             _ => Ok(Vec::new()),
         }
@@ -3420,6 +3468,16 @@ impl Engine {
                 self.check_arity("map.map_values", args, 1)?;
                 self.map_map_values_scheduled(receiver, args[0].clone())
             }
+            BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver }) => {
+                self.require_no_kwargs("array.flatten", kwargs)?;
+                self.check_arity("array.flatten", args, 0)?;
+                self.array_flatten_scheduled(receiver)
+            }
+            BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver }) => {
+                self.require_no_kwargs("array.merge", kwargs)?;
+                self.check_arity("array.merge", args, 0)?;
+                self.array_merge_scheduled(receiver)
+            }
             _ => self.invoke_builtin(builtin, args, kwargs, kwargs_expr),
         }
     }
@@ -3611,6 +3669,34 @@ impl Engine {
         Ok(self.attach_obligations(Value::Array(Arc::from(out)), obligations))
     }
 
+    fn array_flatten_scheduled(&self, receiver: &Value) -> Result<Value, PoisonError> {
+        let (receiver, obligations) =
+            self.split_obligations(self.materialize_scheduled_value_shallow(
+                receiver.clone(),
+                "forcing array.flatten receiver",
+            )?);
+        let Value::Array(items) = receiver else {
+            return Err(self.type_error("array.flatten receiver must be Array"));
+        };
+
+        let mut out = Vec::new();
+        for item in items.iter() {
+            let (item, item_obligations) =
+                self.split_obligations(self.materialize_scheduled_value_shallow(
+                    item.clone(),
+                    "forcing array.flatten item",
+                )?);
+            let Value::Array(inner) = item else {
+                return Err(self.type_error("array.flatten expects Array items"));
+            };
+            for value in inner.iter() {
+                out.push(self.attach_obligations(value.clone(), item_obligations.iter().cloned()));
+            }
+        }
+
+        Ok(self.attach_obligations(Value::Array(Arc::from(out)), obligations))
+    }
+
     fn array_merge(&self, receiver: &Value) -> Result<Value, PoisonError> {
         let (receiver, receiver_obligations) =
             self.split_obligations(self.force_value_shallow(receiver.clone())?);
@@ -3634,6 +3720,54 @@ impl Engine {
         obligations.extend(receiver_obligations);
 
         for item in forced_items {
+            let (item, item_obligations) = self.split_obligations(item);
+            let Value::Tree(tree) = item else {
+                return Err(self.type_error("array.merge expects Tree items"));
+            };
+            merged = match self.tree_merge(&merged, &tree)? {
+                Value::Tree(tree) => tree,
+                other => {
+                    return Err(self.type_error(&format!(
+                        "array.merge expected Tree result, got {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            obligations.extend(item_obligations);
+        }
+
+        Ok(self.attach_obligations(Value::Tree(merged), obligations))
+    }
+
+    fn array_merge_scheduled(&self, receiver: &Value) -> Result<Value, PoisonError> {
+        let (receiver, receiver_obligations) =
+            self.split_obligations(self.materialize_scheduled_value_shallow(
+                receiver.clone(),
+                "forcing array.merge receiver",
+            )?);
+        let Value::Array(items) = receiver else {
+            return Err(self.type_error("array.merge receiver must be Array"));
+        };
+
+        if items.is_empty() {
+            return Ok(self.attach_obligations(
+                Value::Tree(TreeValue::Inline(Arc::from([]))),
+                receiver_obligations,
+            ));
+        }
+
+        let mut materialized = self.materialize_scheduled_many_deep(
+            items.iter().cloned().collect(),
+            "forcing array.merge items",
+        )?;
+        let first = materialized.remove(0);
+        let (first, mut obligations) = self.split_obligations(first);
+        let Value::Tree(mut merged) = first else {
+            return Err(self.type_error("array.merge expects Tree items"));
+        };
+        obligations.extend(receiver_obligations);
+
+        for item in materialized {
             let (item, item_obligations) = self.split_obligations(item);
             let Value::Tree(tree) = item else {
                 return Err(self.type_error("array.merge expects Tree items"));
