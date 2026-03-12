@@ -3,7 +3,7 @@
 //! Each test parses Vixen source, lowers it, and evaluates a function call,
 //! asserting the result.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
@@ -15,12 +15,14 @@ use vx_parser::{AstNode, Pattern as AstPattern, SourceFile, Stmt as AstStmt};
 use vx_store_proto::{Blake3Hash, BlobRef, ChunkHash, NodeHash};
 
 use crate::exec::ExecArgValue;
+use crate::instr::{Block, FnDef};
 use crate::lower::{lower_source_file, lower_source_file_with_source_id};
+use crate::node::{NodeId, NodeJob, TemplateKind, TemplatePartValue};
 use crate::poison::PoisonKind;
 use crate::transport::TransportValue;
 use crate::value::{
-    BlobValue, ExecPathValue, HostObservation, HostValue, MapValue, PathValue, StructValue,
-    TreeValue, Value,
+    BlobValue, BuiltinMethod, BuiltinValue, DiscoveredValue, ExecPathValue, FunctionValue,
+    HostObservation, HostValue, MapValue, PartialValue, PathValue, StructValue, TreeValue, Value,
 };
 use crate::worker::Engine;
 
@@ -123,6 +125,12 @@ fn is_treeish(value: &Value) -> bool {
         Value::Discovered(discovered) => is_treeish(discovered.value.as_ref()),
         _ => false,
     }
+}
+
+fn sorted_node_ids(ids: Vec<NodeId>) -> Vec<u64> {
+    let mut ids = ids.into_iter().map(|id| id.0).collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids
 }
 
 #[test]
@@ -2178,6 +2186,106 @@ fn field_access_does_not_force_other_fields() {
 }
 
 #[test]
+fn collect_pending_walks_nested_runtime_values() {
+    let value = Value::Array(Arc::from([
+        Value::Pending(NodeId(1)),
+        Value::ExecPath(ExecPathValue::InTree {
+            tree: TreeValue::Inline(Arc::from([(Arc::from("bin"), Value::Pending(NodeId(2)))])),
+            suffix: PathValue::new("tool"),
+        }),
+        Value::Discovered(DiscoveredValue {
+            value: Box::new(Value::Map(MapValue {
+                entries: Arc::from([(
+                    Value::Pending(NodeId(3)),
+                    Value::Builtin(BuiltinValue::Method(BuiltinMethod::ArrayMerge {
+                        receiver: Box::new(Value::Pending(NodeId(4))),
+                    })),
+                )]),
+            })),
+            obligations: Arc::from([]),
+        }),
+        Value::Partial(Arc::new(PartialValue {
+            function: Value::Pending(NodeId(5)),
+            args: Arc::from([Value::Function(FunctionValue {
+                def: Arc::new(FnDef {
+                    name: "capture".into(),
+                    params: vec![],
+                    body: Block { stmts: Vec::new() },
+                }),
+                code_identity: Arc::from("capture"),
+                captures: Arc::from([(Arc::from("value"), Value::Pending(NodeId(6)))]),
+            })]),
+            kwargs: Arc::from([(Arc::from("extra"), Value::Pending(NodeId(7)))]),
+            kwargs_expr: None,
+        })),
+    ]));
+
+    let mut deps = Vec::new();
+    value.collect_pending(&mut deps);
+
+    assert_eq!(sorted_node_ids(deps), vec![1, 2, 3, 4, 5, 6, 7]);
+}
+
+#[test]
+fn node_job_pending_deps_cover_templates_calls_and_invokes() {
+    let template = NodeJob::Template {
+        kind: TemplateKind::String,
+        parts: Arc::from([
+            TemplatePartValue::Text(Arc::from("hello ")),
+            TemplatePartValue::Expr(Value::Pending(NodeId(8))),
+            TemplatePartValue::Expr(Value::Array(Arc::from([Value::Pending(NodeId(9))]))),
+        ]),
+    };
+    assert_eq!(sorted_node_ids(template.pending_deps()), vec![8, 9]);
+
+    let call = NodeJob::Call {
+        function: Value::Builtin(BuiltinValue::Method(BuiltinMethod::ArrayMap {
+            receiver: Box::new(Value::Pending(NodeId(10))),
+        })),
+        args: Arc::from([
+            Value::Pending(NodeId(11)),
+            Value::Array(Arc::from([Value::Pending(NodeId(12))])),
+        ]),
+        kwargs: Arc::from([(Arc::from("named"), Value::Pending(NodeId(13)))]),
+        kwargs_expr: Some(Value::Pending(NodeId(14))),
+    };
+    assert_eq!(
+        sorted_node_ids(call.pending_deps()),
+        vec![10, 11, 12, 13, 14]
+    );
+
+    let invoke = NodeJob::Invoke {
+        function: FunctionValue {
+            def: Arc::new(FnDef {
+                name: "invoke".into(),
+                params: vec![],
+                body: Block { stmts: Vec::new() },
+            }),
+            code_identity: Arc::from("invoke"),
+            captures: Arc::from([(Arc::from("captured"), Value::Pending(NodeId(15)))]),
+        },
+        args: Arc::from([Value::Pending(NodeId(16))]),
+    };
+    assert_eq!(sorted_node_ids(invoke.pending_deps()), vec![15, 16]);
+}
+
+#[test]
+fn node_job_if_only_depends_on_the_condition() {
+    let job = NodeJob::If {
+        cond: Value::Pending(NodeId(17)),
+        then_branch: Block { stmts: Vec::new() },
+        else_branch: Block { stmts: Vec::new() },
+        bindings: Arc::new(HashMap::from([(
+            "ignored".into(),
+            Value::Pending(NodeId(18)),
+        )])),
+        scope_identity: Arc::from("<test>"),
+    };
+
+    assert_eq!(sorted_node_ids(job.pending_deps()), vec![17]);
+}
+
+#[test]
 // r[verify eval.memoization]
 // r[verify eval.memoization.pending]
 fn resolved_calls_are_memoized() {
@@ -2505,6 +2613,47 @@ fn independent_children_are_forced_concurrently() {
                 (Arc::from("right"), Value::U64(2)),
             ]),
         })
+    );
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[test]
+fn array_merge_forces_tree_items_concurrently() {
+    let engine = engine("fn main(items: Array) { items.merge() }");
+    let left = Value::Tree(TreeValue::Inline(Arc::from([(
+        Arc::from("left.txt"),
+        Value::Blob(BlobValue::from_string("left")),
+    )])));
+    let right = Value::Tree(TreeValue::Inline(Arc::from([(
+        Arc::from("right.txt"),
+        Value::Blob(BlobValue::from_string("right")),
+    )])));
+    let call = engine
+        .call_unforced(
+            "main",
+            vec![Value::Array(Arc::from([
+                engine.sleep_value(200, left),
+                engine.sleep_value(200, right),
+            ]))],
+        )
+        .unwrap();
+
+    let start = Instant::now();
+    let value = engine.force_fully(call).unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        value,
+        Value::Tree(TreeValue::Inline(Arc::from([
+            (
+                Arc::from("left.txt"),
+                Value::Blob(BlobValue::from_string("left")),
+            ),
+            (
+                Arc::from("right.txt"),
+                Value::Blob(BlobValue::from_string("right")),
+            ),
+        ])))
     );
     assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
 }

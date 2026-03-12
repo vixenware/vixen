@@ -245,6 +245,56 @@ impl Value {
         }
     }
 
+    pub fn collect_pending(&self, deps: &mut Vec<NodeId>) {
+        match self {
+            Value::Pending(node_id) => deps.push(*node_id),
+            Value::ExecPath(path) => path.collect_pending(deps),
+            Value::Discovered(discovered) => discovered.value.collect_pending(deps),
+            Value::Tuple(elems) | Value::Array(elems) => {
+                for elem in elems.iter() {
+                    elem.collect_pending(deps);
+                }
+            }
+            Value::Map(map) => {
+                for (key, value) in map.entries.iter() {
+                    key.collect_pending(deps);
+                    value.collect_pending(deps);
+                }
+            }
+            Value::Tree(tree) => tree.collect_pending(deps),
+            Value::Struct(struct_value) => {
+                for (_, value) in struct_value.fields.iter() {
+                    value.collect_pending(deps);
+                }
+            }
+            Value::Function(function) => function.collect_pending(deps),
+            Value::Partial(partial) => {
+                partial.function.collect_pending(deps);
+                for arg in partial.args.iter() {
+                    arg.collect_pending(deps);
+                }
+                for (_, value) in partial.kwargs.iter() {
+                    value.collect_pending(deps);
+                }
+                if let Some(kwargs_expr) = &partial.kwargs_expr {
+                    kwargs_expr.collect_pending(deps);
+                }
+            }
+            Value::Builtin(builtin) => builtin.collect_pending(deps),
+            Value::U64(_)
+            | Value::I64(_)
+            | Value::F64(_)
+            | Value::Bool(_)
+            | Value::String(_)
+            | Value::Path(_)
+            | Value::Blob(_)
+            | Value::Bytes(_)
+            | Value::ExecutorClass(_)
+            | Value::Host(_)
+            | Value::Unit => {}
+        }
+    }
+
     pub fn is_fully_resolved(&self) -> bool {
         match self {
             Value::Pending(_) => false,
@@ -380,6 +430,13 @@ impl PathValue {
 }
 
 impl ExecPathValue {
+    fn collect_pending(&self, deps: &mut Vec<NodeId>) {
+        match self {
+            ExecPathValue::InTree { tree, .. } => tree.collect_pending(deps),
+            ExecPathValue::InBlob { .. } => {}
+        }
+    }
+
     pub fn is_fully_resolved(&self) -> bool {
         match self {
             ExecPathValue::InTree { tree, .. } => tree.is_fully_resolved(),
@@ -448,6 +505,17 @@ impl BlobValue {
 }
 
 impl TreeValue {
+    fn collect_pending(&self, deps: &mut Vec<NodeId>) {
+        match self {
+            TreeValue::Inline(entries) => {
+                for (_, value) in entries.iter() {
+                    value.collect_pending(deps);
+                }
+            }
+            TreeValue::FsDir(_) | TreeValue::Store(_) => {}
+        }
+    }
+
     pub fn is_fully_resolved(&self) -> bool {
         match self {
             TreeValue::Inline(entries) => {
@@ -484,6 +552,12 @@ impl FunctionValue {
         self.code_identity.to_string()
     }
 
+    fn collect_pending(&self, deps: &mut Vec<NodeId>) {
+        for (_, value) in self.captures.iter() {
+            value.collect_pending(deps);
+        }
+    }
+
     pub fn key(&self) -> Option<String> {
         let captures = self
             .captures
@@ -495,6 +569,44 @@ impl FunctionValue {
 }
 
 impl BuiltinValue {
+    fn collect_pending(&self, deps: &mut Vec<NodeId>) {
+        match self {
+            BuiltinValue::Namespace(_)
+            | BuiltinValue::Function(BuiltinFunction::Exec)
+            | BuiltinValue::Function(BuiltinFunction::Discover)
+            | BuiltinValue::Function(BuiltinFunction::ExecutorClass)
+            | BuiltinValue::Function(BuiltinFunction::StructConstructor { .. })
+            | BuiltinValue::Method(BuiltinMethod::BlobFromString)
+            | BuiltinValue::Method(BuiltinMethod::BytesFromString)
+            | BuiltinValue::Method(BuiltinMethod::TreeOf)
+            | BuiltinValue::Method(BuiltinMethod::TreeEmpty)
+            | BuiltinValue::Method(BuiltinMethod::TreeFromPath) => {}
+            BuiltinValue::Method(BuiltinMethod::ArrayMap { receiver })
+            | BuiltinValue::Method(BuiltinMethod::ArrayToMap { receiver })
+            | BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver })
+            | BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver })
+            | BuiltinValue::Method(BuiltinMethod::MapMapValues { receiver })
+            | BuiltinValue::Method(BuiltinMethod::BlobToString { receiver })
+            | BuiltinValue::Method(BuiltinMethod::BlobExecutable { receiver })
+            | BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver })
+            | BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy { receiver })
+            | BuiltinValue::Method(BuiltinMethod::BytesUtf8 { receiver })
+            | BuiltinValue::Method(BuiltinMethod::BytesUtf8Lossy { receiver })
+            | BuiltinValue::Method(BuiltinMethod::BytesBlob { receiver })
+            | BuiltinValue::Method(BuiltinMethod::StreamCollect { receiver })
+            | BuiltinValue::Method(BuiltinMethod::TreeFile { receiver })
+            | BuiltinValue::Method(BuiltinMethod::TreeMerge { receiver })
+            | BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver })
+            | BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver })
+            | BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver })
+            | BuiltinValue::Method(BuiltinMethod::HostRead { receiver })
+            | BuiltinValue::Method(BuiltinMethod::HostHash { receiver })
+            | BuiltinValue::Method(BuiltinMethod::HostWhich { receiver }) => {
+                receiver.collect_pending(deps);
+            }
+        }
+    }
+
     pub fn is_fully_resolved(&self) -> bool {
         match self {
             BuiltinValue::Namespace(_)

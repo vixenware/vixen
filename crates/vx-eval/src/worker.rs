@@ -7,6 +7,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
+use std::fmt::Write;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -707,6 +708,46 @@ impl Engine {
                 Ok(forced)
             } else {
                 Err(self.aggregate_poison_errors("forcing dependencies", errors))
+            }
+        })
+    }
+
+    fn force_many_shallow(&self, values: Vec<Value>) -> Result<Vec<Value>, PoisonError> {
+        if values.len() <= 1 {
+            let mut forced = Vec::with_capacity(values.len());
+            let mut errors = Vec::new();
+            for value in values {
+                match self.force_value_shallow(value) {
+                    Ok(value) => forced.push(value),
+                    Err(error) => errors.push(error),
+                }
+            }
+            return if errors.is_empty() {
+                Ok(forced)
+            } else {
+                Err(self.aggregate_poison_errors("forcing shallow dependency", errors))
+            };
+        }
+
+        thread::scope(|scope| {
+            let handles = values
+                .into_iter()
+                .map(|value| scope.spawn(move || self.force_value_shallow(value)))
+                .collect::<Vec<_>>();
+
+            let mut forced = Vec::with_capacity(handles.len());
+            let mut errors = Vec::new();
+            for handle in handles {
+                match handle.join() {
+                    Ok(Ok(value)) => forced.push(value),
+                    Ok(Err(error)) => errors.push(error),
+                    Err(_) => errors.push(self.internal_error("force shallow worker panicked")),
+                }
+            }
+            if errors.is_empty() {
+                Ok(forced)
+            } else {
+                Err(self.aggregate_poison_errors("forcing shallow dependencies", errors))
             }
         })
     }
@@ -2421,10 +2462,10 @@ impl Engine {
             return Err(self.type_error("array.flatten receiver must be Array"));
         };
 
+        let forced_items = self.force_many_shallow(items.iter().cloned().collect())?;
         let mut out = Vec::new();
-        for item in items.iter() {
-            let (item, item_obligations) =
-                self.split_obligations(self.force_value_shallow(item.clone())?);
+        for item in forced_items {
+            let (item, item_obligations) = self.split_obligations(item);
             let Value::Array(inner) = item else {
                 return Err(self.type_error("array.flatten expects Array items"));
             };
@@ -2443,22 +2484,23 @@ impl Engine {
             return Err(self.type_error("array.merge receiver must be Array"));
         };
 
-        let mut iter = items.iter();
-        let Some(first) = iter.next() else {
+        if items.is_empty() {
             return Ok(self.attach_obligations(
                 Value::Tree(TreeValue::Inline(Arc::from([]))),
                 receiver_obligations,
             ));
-        };
+        }
 
-        let (first, mut obligations) = self.split_obligations(self.force_value(first.clone())?);
+        let mut forced_items = self.force_many(items.iter().cloned().collect())?;
+        let first = forced_items.remove(0);
+        let (first, mut obligations) = self.split_obligations(first);
         let Value::Tree(mut merged) = first else {
             return Err(self.type_error("array.merge expects Tree items"));
         };
         obligations.extend(receiver_obligations);
 
-        for item in iter {
-            let (item, item_obligations) = self.split_obligations(self.force_value(item.clone())?);
+        for item in forced_items {
+            let (item, item_obligations) = self.split_obligations(item);
             let Value::Tree(tree) = item else {
                 return Err(self.type_error("array.merge expects Tree items"));
             };
@@ -4424,7 +4466,327 @@ fn fn_ptr(def: &Arc<instr::FnDef>) -> usize {
 }
 
 fn stable_fn_repr(def: &instr::FnDef) -> String {
-    format!("{def:?}")
+    let mut out = String::new();
+    write_fn_def_repr(&mut out, def);
+    out
+}
+
+fn write_fn_def_repr(out: &mut String, def: &instr::FnDef) {
+    let _ = write!(out, "fn {}(", def.name);
+    for (index, param) in def.params.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&param.name);
+    }
+    out.push(')');
+    write_block_repr(out, &def.body);
+}
+
+fn write_block_repr(out: &mut String, block: &instr::Block) {
+    out.push('{');
+    for stmt in &block.stmts {
+        write_stmt_repr(out, stmt);
+        out.push(';');
+    }
+    out.push('}');
+}
+
+fn write_stmt_repr(out: &mut String, stmt: &instr::Stmt) {
+    match stmt {
+        instr::Stmt::Let { name, value } => {
+            let _ = write!(out, "let {name}=");
+            write_expr_repr(out, value);
+        }
+        instr::Stmt::LetPattern { pattern, value } => {
+            out.push_str("let_pattern ");
+            write_pattern_repr(out, pattern);
+            out.push('=');
+            write_expr_repr(out, value);
+        }
+        instr::Stmt::Assign { name, value } => {
+            let _ = write!(out, "assign {name}=");
+            write_expr_repr(out, value);
+        }
+        instr::Stmt::Expr(expr) => write_expr_repr(out, expr),
+        instr::Stmt::Return(expr) => {
+            out.push_str("return ");
+            write_expr_repr(out, expr);
+        }
+        instr::Stmt::FnDecl(def) => {
+            out.push_str("fn_decl ");
+            write_fn_def_repr(out, def);
+        }
+        instr::Stmt::StructDecl(decl) => {
+            let _ = write!(out, "struct {}(", decl.name);
+            for (index, field) in decl.fields.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(field);
+            }
+            out.push(')');
+        }
+    }
+}
+
+fn write_pattern_repr(out: &mut String, pattern: &instr::Pattern) {
+    match pattern {
+        instr::Pattern::Binding(name) => {
+            let _ = write!(out, "bind({name})");
+        }
+        instr::Pattern::Struct(fields) => {
+            out.push_str("struct(");
+            for (index, (name, nested)) in fields.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(name);
+                if let Some(nested) = nested {
+                    out.push(':');
+                    write_pattern_repr(out, nested);
+                }
+            }
+            out.push(')');
+        }
+    }
+}
+
+fn write_expr_repr(out: &mut String, expr: &instr::Expr) {
+    match expr {
+        instr::Expr::LitInt(value) => {
+            let _ = write!(out, "u64({value})");
+        }
+        instr::Expr::LitFloat(value) => {
+            let _ = write!(out, "f64({value:?})");
+        }
+        instr::Expr::LitBool(value) => {
+            let _ = write!(out, "bool({value})");
+        }
+        instr::Expr::LitString(value) => {
+            let _ = write!(out, "string({value:?})");
+        }
+        instr::Expr::StringTemplate { parts, .. } => {
+            out.push_str("string_template(");
+            write_template_parts_repr(out, parts);
+            out.push(')');
+        }
+        instr::Expr::PathTemplate { parts, .. } => {
+            out.push_str("path_template(");
+            write_template_parts_repr(out, parts);
+            out.push(')');
+        }
+        instr::Expr::Unit => out.push_str("unit"),
+        instr::Expr::Var(name) => {
+            let _ = write!(out, "var({name})");
+        }
+        instr::Expr::Binary {
+            op, left, right, ..
+        } => {
+            let _ = write!(out, "binary({op:?},");
+            write_expr_repr(out, left);
+            out.push(',');
+            write_expr_repr(out, right);
+            out.push(')');
+        }
+        instr::Expr::Unary { op, operand, .. } => {
+            let _ = write!(out, "unary({op:?},");
+            write_expr_repr(out, operand);
+            out.push(')');
+        }
+        instr::Expr::Block(block) => write_block_repr(out, block),
+        instr::Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            out.push_str("if(");
+            write_expr_repr(out, cond);
+            out.push(')');
+            write_block_repr(out, then_branch);
+            write_block_repr(out, else_branch);
+        }
+        instr::Expr::Closure { closure_id, def } => {
+            let _ = write!(out, "closure({closure_id},");
+            write_fn_def_repr(out, def);
+            out.push(')');
+        }
+        instr::Expr::Call {
+            func,
+            args,
+            kwargs,
+            kwargs_expr,
+            ..
+        } => {
+            out.push_str("call(");
+            write_expr_repr(out, func);
+            write_expr_list_repr(out, args);
+            write_kwargs_repr(out, kwargs);
+            if let Some(kwargs_expr) = kwargs_expr {
+                out.push_str("kwargs_expr=");
+                write_expr_repr(out, kwargs_expr);
+            }
+            out.push(')');
+        }
+        instr::Expr::PartialCall {
+            func,
+            args,
+            kwargs,
+            kwargs_expr,
+            ..
+        } => {
+            out.push_str("partial_call(");
+            write_expr_repr(out, func);
+            write_expr_list_repr(out, args);
+            write_kwargs_repr(out, kwargs);
+            if let Some(kwargs_expr) = kwargs_expr {
+                out.push_str("kwargs_expr=");
+                write_expr_repr(out, kwargs_expr);
+            }
+            out.push(')');
+        }
+        instr::Expr::StructLit { name, fields } => {
+            let _ = write!(out, "struct_lit({name}:");
+            out.push('[');
+            for (index, (field, value)) in fields.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(field);
+                out.push('=');
+                write_expr_repr(out, value);
+            }
+            out.push_str("])");
+        }
+        instr::Expr::Record(items) => {
+            out.push_str("record(");
+            write_record_items_repr(out, items);
+            out.push(')');
+        }
+        instr::Expr::Array(items) => {
+            out.push_str("array(");
+            write_array_items_repr(out, items);
+            out.push(')');
+        }
+        instr::Expr::Map(entries) => {
+            out.push_str("map(");
+            out.push('[');
+            for (index, (key, value)) in entries.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                write_expr_repr(out, key);
+                out.push_str("=>");
+                write_expr_repr(out, value);
+            }
+            out.push_str("])");
+        }
+        instr::Expr::Field {
+            receiver, field, ..
+        } => {
+            out.push_str("field(");
+            write_expr_repr(out, receiver);
+            let _ = write!(out, ",{field})");
+        }
+        instr::Expr::Fail { message, .. } => {
+            out.push_str("fail(");
+            write_expr_repr(out, message);
+            out.push(')');
+        }
+        instr::Expr::Fallible(expr) => {
+            out.push_str("fallible(");
+            write_expr_repr(out, expr);
+            out.push(')');
+        }
+        instr::Expr::Tuple(items) => {
+            out.push_str("tuple(");
+            write_expr_list_repr(out, items);
+            out.push(')');
+        }
+    }
+}
+
+fn write_template_parts_repr(out: &mut String, parts: &[instr::TemplatePart]) {
+    out.push('[');
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        match part {
+            instr::TemplatePart::Text(text) => {
+                let _ = write!(out, "text({text:?})");
+            }
+            instr::TemplatePart::Expr(expr) => {
+                out.push_str("expr(");
+                write_expr_repr(out, expr);
+                out.push(')');
+            }
+        }
+    }
+    out.push(']');
+}
+
+fn write_expr_list_repr(out: &mut String, exprs: &[instr::Expr]) {
+    out.push('[');
+    for (index, expr) in exprs.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        write_expr_repr(out, expr);
+    }
+    out.push(']');
+}
+
+fn write_kwargs_repr(out: &mut String, kwargs: &[(String, instr::Expr)]) {
+    out.push('[');
+    for (index, (name, expr)) in kwargs.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(name);
+        out.push('=');
+        write_expr_repr(out, expr);
+    }
+    out.push(']');
+}
+
+fn write_record_items_repr(out: &mut String, items: &[instr::RecordItem]) {
+    out.push('[');
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        match item {
+            instr::RecordItem::Field { name, value } => {
+                out.push_str(name);
+                out.push('=');
+                write_expr_repr(out, value);
+            }
+            instr::RecordItem::Spread(expr) => {
+                out.push_str("..");
+                write_expr_repr(out, expr);
+            }
+        }
+    }
+    out.push(']');
+}
+
+fn write_array_items_repr(out: &mut String, items: &[instr::ArrayItem]) {
+    out.push('[');
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        match item {
+            instr::ArrayItem::Expr(expr) => write_expr_repr(out, expr),
+            instr::ArrayItem::Spread(expr) => {
+                out.push_str("..");
+                write_expr_repr(out, expr);
+            }
+        }
+    }
+    out.push(']');
 }
 
 fn option_some(value: Value) -> Value {

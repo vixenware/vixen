@@ -95,6 +95,58 @@ pub enum NodeJob {
     Poison(PoisonError),
 }
 
+impl NodeJob {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn pending_deps(&self) -> Vec<NodeId> {
+        let mut deps = Vec::new();
+        match self {
+            NodeJob::Binary { left, right, .. } => {
+                left.collect_pending(&mut deps);
+                right.collect_pending(&mut deps);
+            }
+            NodeJob::Unary { operand, .. } => operand.collect_pending(&mut deps),
+            NodeJob::Template { parts, .. } => {
+                for part in parts.iter() {
+                    if let TemplatePartValue::Expr(value) = part {
+                        value.collect_pending(&mut deps);
+                    }
+                }
+            }
+            NodeJob::If { cond, .. } => cond.collect_pending(&mut deps),
+            NodeJob::Call {
+                function,
+                args,
+                kwargs,
+                kwargs_expr,
+            } => {
+                function.collect_pending(&mut deps);
+                for arg in args.iter() {
+                    arg.collect_pending(&mut deps);
+                }
+                for (_, value) in kwargs.iter() {
+                    value.collect_pending(&mut deps);
+                }
+                if let Some(kwargs_expr) = kwargs_expr {
+                    kwargs_expr.collect_pending(&mut deps);
+                }
+            }
+            NodeJob::Invoke { function, args } => {
+                Value::Function(function.clone()).collect_pending(&mut deps);
+                for arg in args.iter() {
+                    arg.collect_pending(&mut deps);
+                }
+            }
+            NodeJob::Field { receiver, .. } => receiver.collect_pending(&mut deps),
+            NodeJob::Fail { message } => message.collect_pending(&mut deps),
+            #[cfg(test)]
+            NodeJob::Sleep { value, .. } => value.collect_pending(&mut deps),
+            #[cfg(test)]
+            NodeJob::Poison(_) => {}
+        }
+        deps
+    }
+}
+
 /// The outcome of a resolved node — either a value or a poison.
 #[derive(Debug, Clone)]
 pub enum Outcome {
