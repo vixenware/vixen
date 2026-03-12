@@ -1043,21 +1043,6 @@ impl Engine {
         }
     }
 
-    fn force_selector_receiver(&self, value: Value) -> Result<Value, PoisonError> {
-        match value {
-            Value::Pending(node_id) => {
-                let value = self.force_pending_shallow(node_id)?;
-                self.force_selector_receiver(value)
-            }
-            Value::Discovered(discovered) => {
-                let inner = self.force_selector_receiver(*discovered.value)?;
-                Ok(self.attach_obligations(inner, discovered.obligations.iter().cloned()))
-            }
-            other => Ok(other),
-        }
-    }
-
-    // r[impl eval.forcing.boundary]
     fn force_value(&self, value: Value) -> Result<Value, PoisonError> {
         match value {
             Value::Pending(node_id) => {
@@ -1180,153 +1165,6 @@ impl Engine {
                 Err(self.aggregate_poison_errors("forcing dependencies", errors))
             }
         })
-    }
-
-    fn force_many_shallow(&self, values: Vec<Value>) -> Result<Vec<Value>, PoisonError> {
-        if values.len() <= 1 {
-            let mut forced = Vec::with_capacity(values.len());
-            let mut errors = Vec::new();
-            for value in values {
-                match self.force_value_shallow(value) {
-                    Ok(value) => forced.push(value),
-                    Err(error) => errors.push(error),
-                }
-            }
-            return if errors.is_empty() {
-                Ok(forced)
-            } else {
-                Err(self.aggregate_poison_errors("forcing shallow dependency", errors))
-            };
-        }
-
-        thread::scope(|scope| {
-            let handles = values
-                .into_iter()
-                .map(|value| scope.spawn(move || self.force_value_shallow(value)))
-                .collect::<Vec<_>>();
-
-            let mut forced = Vec::with_capacity(handles.len());
-            let mut errors = Vec::new();
-            for handle in handles {
-                match handle.join() {
-                    Ok(Ok(value)) => forced.push(value),
-                    Ok(Err(error)) => errors.push(error),
-                    Err(_) => errors.push(self.internal_error("force shallow worker panicked")),
-                }
-            }
-            if errors.is_empty() {
-                Ok(forced)
-            } else {
-                Err(self.aggregate_poison_errors("forcing shallow dependencies", errors))
-            }
-        })
-    }
-
-    fn force_node(&self, node_id: NodeId) -> Result<Value, PoisonError> {
-        let node = self
-            .nodes
-            .get(&node_id)
-            .map(|entry| entry.clone())
-            .ok_or_else(|| self.internal_error(&format!("missing node {}", node_id.0)))?;
-        let (sender, receiver) = crossbeam_channel::bounded(1);
-
-        match node.try_start_or_wait(Waiter { sender }) {
-            Ok(()) => {
-                let result = self.execute_node(&node);
-                match result {
-                    Ok(value) => {
-                        node.resolve(value.clone());
-                        Ok(value)
-                    }
-                    Err(error) => {
-                        node.poison(error.clone());
-                        Err(error)
-                    }
-                }
-            }
-            Err(Some(Outcome::Value(value))) => Ok(value),
-            Err(Some(Outcome::Poison(error))) => Err(error),
-            Err(None) => match receiver.recv() {
-                Ok((_node_id, Outcome::Value(value))) => Ok(value),
-                Ok((_node_id, Outcome::Poison(error))) => Err(error),
-                Err(_) => Err(self.internal_error("all waiters dropped")),
-            },
-        }
-    }
-
-    fn execute_node(&self, node: &Arc<Node>) -> Result<Value, PoisonError> {
-        match &node.job {
-            NodeJob::Binary { op, left, right } => {
-                let mut values = self.force_many(vec![left.clone(), right.clone()])?;
-                let right = values.pop().expect("pair has two values");
-                let left = values.pop().expect("pair has two values");
-                self.compute_binary(*op, &left, &right)
-            }
-            NodeJob::Unary { op, operand } => {
-                let operand = self.force_value(operand.clone())?;
-                self.compute_unary(*op, &operand)
-            }
-            NodeJob::Template { kind, parts } => {
-                let values = self.force_template_parts(parts)?;
-                match kind {
-                    TemplateKind::String => self.interpolate_string_parts(&values),
-                    TemplateKind::Path => self.interpolate_path_parts(&values),
-                }
-            }
-            NodeJob::If {
-                cond,
-                then_branch,
-                else_branch,
-                bindings,
-                scope_identity,
-            } => {
-                let cond = self.force_value(cond.clone())?;
-                match cond {
-                    Value::Bool(true) => self
-                        .eval_block(then_branch, bindings.as_ref(), scope_identity.as_ref())
-                        .into_value(),
-                    Value::Bool(false) => self
-                        .eval_block(else_branch, bindings.as_ref(), scope_identity.as_ref())
-                        .into_value(),
-                    other => Err(self.type_error(&format!(
-                        "if condition must be Bool, got {}",
-                        other.type_name()
-                    ))),
-                }
-            }
-            NodeJob::Fallible { value } => match self.force_value_shallow(value.clone()) {
-                Ok(value) => Ok(self.build_fallible_value(value)),
-                Err(error) => Ok(self.fallible_none_from_error(&error)),
-            },
-            NodeJob::Demand { demands, result } => {
-                let _ = self.resolve_boundary_value(Value::Array(Arc::clone(demands)))?;
-                result.clone()
-            }
-            NodeJob::Call {
-                function,
-                args,
-                kwargs,
-                kwargs_expr,
-            } => self.execute_call(
-                function.clone(),
-                args.clone(),
-                kwargs.clone(),
-                kwargs_expr.clone(),
-            ),
-            NodeJob::Invoke { function, args } => self.invoke_function(function, args.clone()),
-            NodeJob::Field { receiver, field } => {
-                let receiver = self.force_selector_receiver(receiver.clone())?;
-                self.select_field(&receiver, field)
-            }
-            NodeJob::Fail { message } => Err(self.user_fail(message.clone())?),
-            #[cfg(test)]
-            NodeJob::Sleep { millis, value } => {
-                thread::sleep(Duration::from_millis(*millis));
-                Ok(value.clone())
-            }
-            #[cfg(test)]
-            NodeJob::Poison(error) => Err(error.clone()),
-        }
     }
 
     pub(crate) fn inspect_scheduled_value(
@@ -2110,73 +1948,6 @@ impl Engine {
     }
 
     // r[impl eval.enter-functions]
-    fn execute_call(
-        &self,
-        function: Value,
-        args: Arc<[Value]>,
-        kwargs: Arc<[(Arc<str>, Value)]>,
-        kwargs_expr: Option<Value>,
-    ) -> Result<Value, PoisonError> {
-        let (function, function_obligations) = self.split_obligations(self.force_value(function)?);
-        match function {
-            Value::Function(function) => {
-                self.finish_execute_call(function, args, kwargs, kwargs_expr, function_obligations)
-            }
-            Value::Partial(partial) => {
-                let mut merged_args = partial.args.iter().cloned().collect::<Vec<_>>();
-                merged_args.extend(args.iter().cloned());
-                let mut merged_kwargs = partial.kwargs.iter().cloned().collect::<Vec<_>>();
-                merged_kwargs.extend(kwargs.iter().cloned());
-                let merged_kwargs_expr = match (partial.kwargs_expr.as_ref(), kwargs_expr) {
-                    (Some(left), Some(right)) => {
-                        Some(self.merge_keyword_records((**left).clone(), right)?)
-                    }
-                    (Some(value), None) => Some((**value).clone()),
-                    (None, value) => value,
-                };
-                self.finish_obligated_result(
-                    self.execute_call(
-                        partial.function.clone(),
-                        Arc::from(merged_args),
-                        Arc::from(merged_kwargs),
-                        merged_kwargs_expr,
-                    ),
-                    function_obligations,
-                )
-            }
-            Value::Builtin(builtin) => self.finish_obligated_result(
-                self.invoke_builtin(&builtin, &args, &kwargs, kwargs_expr),
-                function_obligations,
-            ),
-            other => Err(self.type_error(&format!("cannot call {}", other.type_name()))),
-        }
-    }
-
-    fn finish_execute_call(
-        &self,
-        function: FunctionValue,
-        args: Arc<[Value]>,
-        kwargs: Arc<[(Arc<str>, Value)]>,
-        kwargs_expr: Option<Value>,
-        function_obligations: Vec<HostObservation>,
-    ) -> Result<Value, PoisonError> {
-        if !kwargs.is_empty() || kwargs_expr.is_some() {
-            return Err(self.type_error("keyword arguments are only supported for builtins"));
-        }
-
-        if function.key().is_some() && args.iter().all(|value| value.key().is_some()) {
-            return self.finish_obligated_result(
-                self.force_pending_shallow(
-                    self.memoized_invoke_node(function, args.iter().cloned().collect()),
-                ),
-                function_obligations,
-            );
-        }
-
-        self.finish_obligated_result(self.invoke_function(&function, args), function_obligations)
-    }
-
-    // r[impl eval.enter-functions]
     fn invoke_function(
         &self,
         function: &FunctionValue,
@@ -2859,31 +2630,6 @@ impl Engine {
         BuildResult::from_result(result)
     }
 
-    fn force_template_parts(
-        &self,
-        parts: &[TemplatePartValue],
-    ) -> Result<Vec<TemplatePartValue>, PoisonError> {
-        let values = parts
-            .iter()
-            .filter_map(|part| match part {
-                TemplatePartValue::Text(_) => None,
-                TemplatePartValue::Expr(value) => Some(value.clone()),
-            })
-            .collect::<Vec<_>>();
-        let forced = self.force_many(values)?;
-        let mut forced_iter = forced.into_iter();
-        Ok(parts
-            .iter()
-            .map(|part| match part {
-                TemplatePartValue::Text(text) => TemplatePartValue::Text(text.clone()),
-                TemplatePartValue::Expr(_) => {
-                    TemplatePartValue::Expr(forced_iter.next().expect("forced value for template"))
-                }
-            })
-            .collect())
-    }
-
-    // r[expr.literal.interpolation]
     fn interpolate_string_parts(&self, parts: &[TemplatePartValue]) -> Result<Value, PoisonError> {
         let mut value = String::new();
         let mut obligations = BTreeMap::new();
@@ -3295,410 +3041,6 @@ impl Engine {
             kwargs: Arc::from([]),
             kwargs_expr: None,
         })))
-    }
-
-    fn invoke_builtin(
-        &self,
-        builtin: &BuiltinValue,
-        args: &[Value],
-        kwargs: &[(Arc<str>, Value)],
-        kwargs_expr: Option<Value>,
-    ) -> Result<Value, PoisonError> {
-        match builtin {
-            BuiltinValue::Namespace(namespace) => match namespace {
-                BuiltinNamespace::Blob => {
-                    self.require_no_kwargs("Blob", kwargs)?;
-                    self.check_arity("Blob", args, 1)?;
-                    let value = self.force_value(args[0].clone())?;
-                    let text = self.stringify_scalar(&value)?;
-                    Ok(Value::Blob(BlobValue::from_string(text)))
-                }
-                BuiltinNamespace::Bytes => {
-                    self.require_no_kwargs("Bytes", kwargs)?;
-                    self.check_arity("Bytes", args, 1)?;
-                    let value = self.force_value(args[0].clone())?;
-                    let text = self.stringify_scalar(&value)?;
-                    Ok(Value::Bytes(Arc::from(text.as_bytes().to_vec())))
-                }
-                BuiltinNamespace::Tree => {
-                    self.require_no_kwargs("Tree", kwargs)?;
-                    self.check_arity("Tree", args, 1)?;
-                    let (value, _) =
-                        self.split_obligations(self.force_value_shallow(args[0].clone())?);
-                    match value {
-                        Value::Map(map) => self.tree_from_map(&map),
-                        Value::Array(_) => self.array_merge(&value),
-                        Value::Path(path) => Ok(Value::Tree(TreeValue::FsDir(path))),
-                        Value::String(path) => {
-                            Ok(Value::Tree(TreeValue::FsDir(PathValue::new(path.as_ref()))))
-                        }
-                        other => Err(self.type_error(&format!(
-                            "Tree expects Map, Array, or Path/String, got {}",
-                            other.type_name()
-                        ))),
-                    }
-                }
-            },
-            BuiltinValue::Function(BuiltinFunction::Exec) => {
-                self.exec_builtin(args, kwargs, kwargs_expr)
-            }
-            BuiltinValue::Function(BuiltinFunction::Discover) => {
-                self.discover_builtin(args, kwargs, kwargs_expr)
-            }
-            BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
-                self.executor_class_builtin(args, kwargs, kwargs_expr)
-            }
-            BuiltinValue::Function(BuiltinFunction::StructConstructor { type_name, fields }) => {
-                self.require_no_kwargs(type_name.as_ref(), kwargs)?;
-                self.check_arity(type_name.as_ref(), args, 1)?;
-                let (value, _) = self.split_obligations(self.force_value_shallow(args[0].clone())?);
-                let Value::Map(map) = value else {
-                    return Err(self.type_error(&format!(
-                        "{} expects a record/map payload, got {}",
-                        type_name,
-                        value.type_name()
-                    )));
-                };
-                let mut values = Vec::with_capacity(fields.len());
-                for field in fields.iter() {
-                    let field_value = map
-                        .entries
-                        .iter()
-                        .find_map(|(key, value)| match key {
-                            Value::String(name) if name.as_ref() == field.as_ref() => {
-                                Some(value.clone())
-                            }
-                            _ => None,
-                        })
-                        .ok_or_else(|| {
-                            self.type_error(&format!("{} requires field '{}'", type_name, field))
-                        })?;
-                    values.push((Arc::<str>::clone(field), field_value));
-                }
-                Ok(Value::Struct(StructValue {
-                    type_name: Arc::clone(type_name),
-                    fields: Arc::from(values),
-                }))
-            }
-            BuiltinValue::Method(BuiltinMethod::BlobFromString) => {
-                self.require_no_kwargs("Blob.from_string", kwargs)?;
-                self.check_arity("Blob.from_string", args, 1)?;
-                let value = &args[0];
-                let value = self.force_value(value.clone())?;
-                let text = self.stringify_scalar(&value)?;
-                Ok(Value::Blob(BlobValue::from_string(text)))
-            }
-            BuiltinValue::Method(BuiltinMethod::BytesFromString) => {
-                self.require_no_kwargs("Bytes", kwargs)?;
-                self.check_arity("Bytes", args, 1)?;
-                let value = self.force_value(args[0].clone())?;
-                let text = self.stringify_scalar(&value)?;
-                Ok(Value::Bytes(Arc::from(text.as_bytes().to_vec())))
-            }
-            BuiltinValue::Method(BuiltinMethod::TreeOf) => {
-                self.require_no_kwargs("Tree.of", kwargs)?;
-                self.check_arity("Tree.of", args, 1)?;
-                let value = &args[0];
-                let (value, _) = self.split_obligations(self.force_value_shallow(value.clone())?);
-                let Value::Map(map) = value else {
-                    return Err(
-                        self.type_error(&format!("Tree.of expects Map, got {}", value.type_name()))
-                    );
-                };
-                self.tree_from_map(&map)
-            }
-            BuiltinValue::Method(BuiltinMethod::TreeEmpty) => {
-                self.require_no_kwargs("Tree.empty", kwargs)?;
-                self.check_arity("Tree.empty", args, 0)?;
-                Ok(Value::Tree(TreeValue::Inline(Arc::from([]))))
-            }
-            BuiltinValue::Method(BuiltinMethod::TreeFromPath) => {
-                self.require_no_kwargs("Tree.from_path", kwargs)?;
-                self.check_arity("Tree.from_path", args, 1)?;
-                let path = self.force_value(args[0].clone())?;
-                let path = self.expect_path_value(&path, "Tree.from_path path")?;
-                Ok(Value::Tree(TreeValue::FsDir(path)))
-            }
-            BuiltinValue::Method(BuiltinMethod::ArrayMap { receiver }) => {
-                self.require_no_kwargs("array.map", kwargs)?;
-                self.check_arity("array.map", args, 1)?;
-                self.array_map(receiver, args[0].clone())
-            }
-            BuiltinValue::Method(BuiltinMethod::ArrayToMap { receiver }) => {
-                self.require_no_kwargs("array.to_map", kwargs)?;
-                self.check_arity("array.to_map", args, 1)?;
-                self.array_to_map(receiver, args[0].clone())
-            }
-            BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver }) => {
-                self.require_no_kwargs("array.flatten", kwargs)?;
-                self.check_arity("array.flatten", args, 0)?;
-                self.array_flatten(receiver)
-            }
-            BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver }) => {
-                self.require_no_kwargs("array.merge", kwargs)?;
-                self.check_arity("array.merge", args, 0)?;
-                self.array_merge(receiver)
-            }
-            BuiltinValue::Method(BuiltinMethod::MapMapValues { receiver }) => {
-                self.require_no_kwargs("map.map_values", kwargs)?;
-                self.check_arity("map.map_values", args, 1)?;
-                self.map_map_values(receiver, args[0].clone())
-            }
-            BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
-                self.require_no_kwargs("blob.to_string", kwargs)?;
-                self.check_arity("blob.to_string", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.force_value(receiver.as_ref().clone())?);
-                let Value::Blob(blob) = receiver else {
-                    return Err(self.type_error("blob.to_string receiver must be Blob"));
-                };
-                self.finish_obligated_result(
-                    blob.to_utf8_string().map(Value::String).map_err(|message| {
-                        PoisonError::new(
-                            PoisonKind::TypeError,
-                            message,
-                            self.current_demand_chain(None),
-                        )
-                    }),
-                    obligations,
-                )
-            }
-            BuiltinValue::Method(BuiltinMethod::BlobExecutable { receiver }) => {
-                self.require_no_kwargs("blob.executable", kwargs)?;
-                self.check_arity("blob.executable", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.force_value(receiver.as_ref().clone())?);
-                let Value::Blob(blob) = receiver else {
-                    return Err(self.type_error("blob.executable receiver must be Blob"));
-                };
-                let blob = match blob {
-                    BlobValue::Inline { bytes, .. } => BlobValue::Inline {
-                        bytes,
-                        executable: true,
-                    },
-                    BlobValue::FsFile { path, .. } => BlobValue::FsFile {
-                        path,
-                        executable: true,
-                    },
-                    BlobValue::Store { blob_ref, .. } => BlobValue::Store {
-                        blob_ref,
-                        executable: true,
-                    },
-                };
-                self.finish_obligated_result(Ok(Value::Blob(blob)), obligations)
-            }
-            BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver }) => {
-                self.require_no_kwargs("blob.utf8", kwargs)?;
-                self.check_arity("blob.utf8", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.force_value(receiver.as_ref().clone())?);
-                let Value::Blob(blob) = receiver else {
-                    return Err(self.type_error("blob.utf8 receiver must be Blob"));
-                };
-                self.finish_obligated_result(
-                    blob.to_utf8_string().map(Value::String).map_err(|message| {
-                        PoisonError::new(
-                            PoisonKind::TypeError,
-                            message,
-                            self.current_demand_chain(None),
-                        )
-                    }),
-                    obligations,
-                )
-            }
-            BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy { receiver }) => {
-                self.require_no_kwargs("blob.utf8_lossy", kwargs)?;
-                self.check_arity("blob.utf8_lossy", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.force_value(receiver.as_ref().clone())?);
-                let Value::Blob(blob) = receiver else {
-                    return Err(self.type_error("blob.utf8_lossy receiver must be Blob"));
-                };
-                let result = match blob {
-                    BlobValue::Inline { bytes, .. } => Ok(Value::String(Arc::from(
-                        String::from_utf8_lossy(bytes.as_ref()).into_owned(),
-                    ))),
-                    BlobValue::FsFile { path, .. } => std::fs::read(path.as_str())
-                        .map(|bytes| {
-                            Value::String(Arc::from(String::from_utf8_lossy(&bytes).into_owned()))
-                        })
-                        .map_err(|error| {
-                            self.type_error(&format!("failed to read {}: {error}", path.as_str()))
-                        }),
-                    BlobValue::Store { blob_ref, .. } => Err(self.type_error(&format!(
-                        "store-backed blob {:?} requires an external store resolver",
-                        blob_ref
-                    ))),
-                };
-                self.finish_obligated_result(result, obligations)
-            }
-            BuiltinValue::Method(BuiltinMethod::BytesUtf8 { receiver }) => {
-                self.require_no_kwargs("bytes.utf8", kwargs)?;
-                self.check_arity("bytes.utf8", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.force_value(receiver.as_ref().clone())?);
-                let Value::Bytes(bytes) = receiver else {
-                    return Err(self.type_error("bytes.utf8 receiver must be Bytes"));
-                };
-                self.finish_obligated_result(
-                    String::from_utf8(bytes.as_ref().to_vec())
-                        .map(|text| Value::String(Arc::from(text)))
-                        .map_err(|error| {
-                            PoisonError::new(
-                                PoisonKind::TypeError,
-                                format!("bytes are not UTF-8: {error}"),
-                                self.current_demand_chain(None),
-                            )
-                        }),
-                    obligations,
-                )
-            }
-            BuiltinValue::Method(BuiltinMethod::BytesUtf8Lossy { receiver }) => {
-                self.require_no_kwargs("bytes.utf8_lossy", kwargs)?;
-                self.check_arity("bytes.utf8_lossy", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.force_value(receiver.as_ref().clone())?);
-                let Value::Bytes(bytes) = receiver else {
-                    return Err(self.type_error("bytes.utf8_lossy receiver must be Bytes"));
-                };
-                let text = String::from_utf8_lossy(bytes.as_ref()).into_owned();
-                self.finish_obligated_result(Ok(Value::String(Arc::from(text))), obligations)
-            }
-            BuiltinValue::Method(BuiltinMethod::BytesBlob { receiver }) => {
-                self.require_no_kwargs("bytes.blob", kwargs)?;
-                self.check_arity("bytes.blob", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.force_value(receiver.as_ref().clone())?);
-                let Value::Bytes(bytes) = receiver else {
-                    return Err(self.type_error("bytes.blob receiver must be Bytes"));
-                };
-                self.finish_obligated_result(
-                    Ok(Value::Blob(BlobValue::Inline {
-                        bytes,
-                        executable: false,
-                    })),
-                    obligations,
-                )
-            }
-            BuiltinValue::Method(BuiltinMethod::StreamCollect { receiver }) => {
-                self.require_no_kwargs("stream.collect", kwargs)?;
-                self.check_arity("stream.collect", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.force_value(receiver.as_ref().clone())?);
-                self.finish_obligated_result(Ok(receiver), obligations)
-            }
-            BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => {
-                self.require_no_kwargs("tree.file", kwargs)?;
-                self.check_arity("tree.file", args, 1)?;
-                let (path, path_obligations) =
-                    self.split_obligations(self.force_value(args[0].clone())?);
-                let path = self.expect_relative_path(&path, "tree.file path")?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.force_value_shallow(receiver.as_ref().clone())?);
-                let Value::Tree(tree) = receiver else {
-                    return Err(self.type_error("tree.file receiver must be Tree"));
-                };
-                self.finish_obligated_result(
-                    self.tree_file(&tree, path),
-                    obligations.into_iter().chain(path_obligations),
-                )
-            }
-            BuiltinValue::Method(BuiltinMethod::TreeMerge { receiver }) => {
-                self.require_no_kwargs("tree.merge", kwargs)?;
-                self.check_arity("tree.merge", args, 1)?;
-                let (other, other_obligations) =
-                    self.split_obligations(self.force_value_shallow(args[0].clone())?);
-                let Value::Tree(other) = other else {
-                    return Err(self.type_error("tree.merge expects Tree"));
-                };
-                let (receiver, obligations) =
-                    self.split_obligations(self.force_value_shallow(receiver.as_ref().clone())?);
-                let Value::Tree(receiver) = receiver else {
-                    return Err(self.type_error("tree.merge receiver must be Tree"));
-                };
-                self.finish_obligated_result(
-                    self.tree_merge(&receiver, &other),
-                    obligations.into_iter().chain(other_obligations),
-                )
-            }
-            BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver }) => {
-                self.require_no_kwargs("tree.subtree", kwargs)?;
-                self.check_arity("tree.subtree", args, 1)?;
-                let (path, path_obligations) =
-                    self.split_obligations(self.force_value(args[0].clone())?);
-                let path = self.expect_relative_path(&path, "tree.subtree path")?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.force_value_shallow(receiver.as_ref().clone())?);
-                let Value::Tree(tree) = receiver else {
-                    return Err(self.type_error("tree.subtree receiver must be Tree"));
-                };
-                self.finish_obligated_result(
-                    self.tree_subtree(&tree, path),
-                    obligations.into_iter().chain(path_obligations),
-                )
-            }
-            BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver }) => {
-                self.require_no_kwargs("option.unwrap_or", kwargs)?;
-                self.check_arity("option.unwrap_or", args, 1)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.force_value_shallow(receiver.as_ref().clone())?);
-                let Value::Struct(option) = receiver else {
-                    return Err(self.type_error("option.unwrap_or receiver must be Option"));
-                };
-                let result = match option.type_name.as_ref() {
-                    "Some" => option
-                        .fields
-                        .iter()
-                        .find(|(name, _)| name.as_ref() == "value")
-                        .map(|(_, value)| value.clone())
-                        .ok_or_else(|| self.type_error("Some.unwrap_or requires a value field")),
-                    "None" => Ok(args[0].clone()),
-                    _ => Err(self.type_error("option.unwrap_or receiver must be Option")),
-                };
-                self.finish_obligated_result(result, obligations)
-            }
-            BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver }) => {
-                self.require_no_kwargs("fallible", kwargs)?;
-                self.check_arity("fallible", args, 0)?;
-                Ok(self.build_fallible_value(receiver.as_ref().clone()))
-            }
-            BuiltinValue::Method(BuiltinMethod::HostRead { receiver }) => {
-                self.require_no_kwargs("host.read", kwargs)?;
-                self.check_arity("host.read", args, 1)?;
-                let (path, obligations) =
-                    self.split_obligations(self.force_value(args[0].clone())?);
-                let path = self.expect_host_path(&path, "host.read path")?;
-                let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
-                let Value::Host(_) = receiver else {
-                    return Err(self.type_error("host.read receiver must be Host"));
-                };
-                self.finish_obligated_result(self.host_read(&path), obligations)
-            }
-            BuiltinValue::Method(BuiltinMethod::HostHash { receiver }) => {
-                self.require_no_kwargs("host.hash", kwargs)?;
-                self.check_arity("host.hash", args, 1)?;
-                let (path, obligations) =
-                    self.split_obligations(self.force_value(args[0].clone())?);
-                let path = self.expect_host_path(&path, "host.hash path")?;
-                let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
-                let Value::Host(_) = receiver else {
-                    return Err(self.type_error("host.hash receiver must be Host"));
-                };
-                self.finish_obligated_result(self.host_hash(&path), obligations)
-            }
-            BuiltinValue::Method(BuiltinMethod::HostWhich { receiver }) => {
-                self.require_no_kwargs("host.which", kwargs)?;
-                self.check_arity("host.which", args, 1)?;
-                let (name, obligations) =
-                    self.split_obligations(self.force_value(args[0].clone())?);
-                let name = self.expect_host_path(&name, "host.which name")?;
-                let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
-                let Value::Host(_) = receiver else {
-                    return Err(self.type_error("host.which receiver must be Host"));
-                };
-                self.finish_obligated_result(self.host_which(&name), obligations)
-            }
-        }
     }
 
     fn invoke_builtin_scheduled(
@@ -4176,73 +3518,6 @@ impl Engine {
         }
     }
 
-    fn tree_from_map(&self, map: &MapValue) -> Result<Value, PoisonError> {
-        fn insert_tree_path(
-            engine: &Engine,
-            entries: &mut BTreeMap<Arc<str>, Value>,
-            segments: &[&str],
-            value: Value,
-        ) -> Result<(), PoisonError> {
-            let Some((head, tail)) = segments.split_first() else {
-                return Err(engine.type_error("Tree entry path cannot be empty"));
-            };
-            if tail.is_empty() {
-                if entries.contains_key(*head) {
-                    return Err(engine.type_error(&format!(
-                        "Tree contains duplicate entry '{}'",
-                        segments.join("/")
-                    )));
-                }
-                entries.insert(Arc::from(*head), value);
-                return Ok(());
-            }
-
-            let child = entries
-                .entry(Arc::from(*head))
-                .or_insert_with(|| Value::Tree(TreeValue::Inline(Arc::from([]))));
-            match child {
-                Value::Tree(TreeValue::Inline(existing)) => {
-                    let mut nested = existing
-                        .iter()
-                        .cloned()
-                        .collect::<BTreeMap<Arc<str>, Value>>();
-                    insert_tree_path(engine, &mut nested, tail, value)?;
-                    *child = Value::Tree(TreeValue::Inline(Arc::from(
-                        nested.into_iter().collect::<Vec<_>>(),
-                    )));
-                    Ok(())
-                }
-                Value::Tree(TreeValue::FsDir(_))
-                | Value::Tree(TreeValue::Store(_))
-                | Value::Blob(_)
-                | Value::Pending(_) => Err(engine.type_error(&format!(
-                    "Tree entry path '{}' collides with an existing non-inline tree entry",
-                    segments.join("/")
-                ))),
-                other => Err(engine.type_error(&format!(
-                    "tree entries must be Blob or Tree, got {}",
-                    other.type_name()
-                ))),
-            }
-        }
-
-        let mut nested = BTreeMap::<Arc<str>, Value>::new();
-        for (key, value) in map.entries.iter() {
-            let key = self.force_value(key.clone())?;
-            let path = self.expect_relative_path(&key, "Tree entry path")?;
-            let raw = path.as_str();
-            if raw.is_empty() || raw == "." {
-                return Err(self.type_error("Tree entry path cannot be empty"));
-            }
-            let segments = raw.split('/').collect::<Vec<_>>();
-            insert_tree_path(self, &mut nested, &segments, value.clone())?;
-        }
-        self.validate_tree_entries(&nested.values().cloned().collect::<Vec<_>>())?;
-        Ok(Value::Tree(TreeValue::Inline(Arc::from(
-            nested.into_iter().collect::<Vec<_>>(),
-        ))))
-    }
-
     fn tree_from_map_scheduled(&self, map: &MapValue) -> Result<Value, PoisonError> {
         fn insert_tree_path(
             engine: &Engine,
@@ -4311,27 +3586,6 @@ impl Engine {
         ))))
     }
 
-    fn array_map(&self, receiver: &Value, callback: Value) -> Result<Value, PoisonError> {
-        let callback = self.force_value(callback)?;
-        let (receiver, obligations) =
-            self.split_obligations(self.force_value_shallow(receiver.clone())?);
-        let Value::Array(items) = receiver else {
-            return Err(self.type_error("array.map receiver must be Array"));
-        };
-
-        let mut out = Vec::with_capacity(items.len());
-        for item in items.iter() {
-            out.push(self.execute_call(
-                callback.clone(),
-                Arc::from(vec![item.clone()]),
-                Arc::from(Vec::<(Arc<str>, Value)>::new()),
-                None,
-            )?);
-        }
-
-        Ok(self.attach_obligations(Value::Array(Arc::from(out)), obligations))
-    }
-
     fn array_map_scheduled(&self, receiver: &Value, callback: Value) -> Result<Value, PoisonError> {
         let (receiver, obligations) =
             self.split_obligations(self.materialize_scheduled_value_shallow(
@@ -4348,33 +3602,6 @@ impl Engine {
             .collect::<Vec<_>>();
 
         Ok(self.attach_obligations(Value::Array(Arc::from(out)), obligations))
-    }
-
-    fn array_to_map(&self, receiver: &Value, callback: Value) -> Result<Value, PoisonError> {
-        let callback = self.force_value(callback)?;
-        let (receiver, obligations) =
-            self.split_obligations(self.force_value_shallow(receiver.clone())?);
-        let Value::Array(items) = receiver else {
-            return Err(self.type_error("array.to_map receiver must be Array"));
-        };
-
-        let mut entries = Vec::with_capacity(items.len());
-        for item in items.iter() {
-            let value = self.execute_call(
-                callback.clone(),
-                Arc::from(vec![item.clone()]),
-                Arc::from(Vec::<(Arc<str>, Value)>::new()),
-                None,
-            )?;
-            entries.push((item.clone(), value));
-        }
-
-        Ok(self.attach_obligations(
-            Value::Map(MapValue {
-                entries: Arc::from(entries),
-            }),
-            obligations,
-        ))
     }
 
     fn array_to_map_scheduled(
@@ -4409,28 +3636,6 @@ impl Engine {
         ))
     }
 
-    fn array_flatten(&self, receiver: &Value) -> Result<Value, PoisonError> {
-        let (receiver, obligations) =
-            self.split_obligations(self.force_value_shallow(receiver.clone())?);
-        let Value::Array(items) = receiver else {
-            return Err(self.type_error("array.flatten receiver must be Array"));
-        };
-
-        let forced_items = self.force_many_shallow(items.iter().cloned().collect())?;
-        let mut out = Vec::new();
-        for item in forced_items {
-            let (item, item_obligations) = self.split_obligations(item);
-            let Value::Array(inner) = item else {
-                return Err(self.type_error("array.flatten expects Array items"));
-            };
-            for value in inner.iter() {
-                out.push(self.attach_obligations(value.clone(), item_obligations.iter().cloned()));
-            }
-        }
-
-        Ok(self.attach_obligations(Value::Array(Arc::from(out)), obligations))
-    }
-
     fn array_flatten_scheduled(&self, receiver: &Value) -> Result<Value, PoisonError> {
         let (receiver, obligations) =
             self.split_obligations(self.materialize_scheduled_value_shallow(
@@ -4457,48 +3662,6 @@ impl Engine {
         }
 
         Ok(self.attach_obligations(Value::Array(Arc::from(out)), obligations))
-    }
-
-    fn array_merge(&self, receiver: &Value) -> Result<Value, PoisonError> {
-        let (receiver, receiver_obligations) =
-            self.split_obligations(self.force_value_shallow(receiver.clone())?);
-        let Value::Array(items) = receiver else {
-            return Err(self.type_error("array.merge receiver must be Array"));
-        };
-
-        if items.is_empty() {
-            return Ok(self.attach_obligations(
-                Value::Tree(TreeValue::Inline(Arc::from([]))),
-                receiver_obligations,
-            ));
-        }
-
-        let mut forced_items = self.force_many(items.iter().cloned().collect())?;
-        let first = forced_items.remove(0);
-        let (first, mut obligations) = self.split_obligations(first);
-        let Value::Tree(mut merged) = first else {
-            return Err(self.type_error("array.merge expects Tree items"));
-        };
-        obligations.extend(receiver_obligations);
-
-        for item in forced_items {
-            let (item, item_obligations) = self.split_obligations(item);
-            let Value::Tree(tree) = item else {
-                return Err(self.type_error("array.merge expects Tree items"));
-            };
-            merged = match self.tree_merge(&merged, &tree)? {
-                Value::Tree(tree) => tree,
-                other => {
-                    return Err(self.type_error(&format!(
-                        "array.merge expected Tree result, got {}",
-                        other.type_name()
-                    )));
-                }
-            };
-            obligations.extend(item_obligations);
-        }
-
-        Ok(self.attach_obligations(Value::Tree(merged), obligations))
     }
 
     fn array_merge_scheduled(&self, receiver: &Value) -> Result<Value, PoisonError> {
@@ -4549,33 +3712,6 @@ impl Engine {
         Ok(self.attach_obligations(Value::Tree(merged), obligations))
     }
 
-    fn map_map_values(&self, receiver: &Value, callback: Value) -> Result<Value, PoisonError> {
-        let callback = self.force_value(callback)?;
-        let (receiver, obligations) =
-            self.split_obligations(self.force_value_shallow(receiver.clone())?);
-        let Value::Map(map) = receiver else {
-            return Err(self.type_error("map.map_values receiver must be Map"));
-        };
-
-        let mut entries = Vec::with_capacity(map.entries.len());
-        for (key, value) in map.entries.iter() {
-            let mapped = self.execute_call(
-                callback.clone(),
-                Arc::from(vec![value.clone()]),
-                Arc::from(Vec::<(Arc<str>, Value)>::new()),
-                None,
-            )?;
-            entries.push((key.clone(), mapped));
-        }
-
-        Ok(self.attach_obligations(
-            Value::Map(MapValue {
-                entries: Arc::from(entries),
-            }),
-            obligations,
-        ))
-    }
-
     fn map_map_values_scheduled(
         &self,
         receiver: &Value,
@@ -4609,21 +3745,6 @@ impl Engine {
         ))
     }
 
-    fn exec_builtin(
-        &self,
-        args: &[Value],
-        kwargs: &[(Arc<str>, Value)],
-        kwargs_expr: Option<Value>,
-    ) -> Result<Value, PoisonError> {
-        let kwargs = self.materialize_kwargs(kwargs, kwargs_expr, "exec")?;
-        let request = self.parse_exec_request(args, &kwargs)?;
-        if let Some(exec_handler) = &self.exec_handler {
-            let request = self.ship_exec_request(&request)?;
-            return exec_handler(request);
-        }
-        self.exec_builtin_local(request)
-    }
-
     fn exec_builtin_scheduled(
         &self,
         args: &[Value],
@@ -4637,34 +3758,6 @@ impl Engine {
             return exec_handler(request);
         }
         self.exec_builtin_local(request)
-    }
-
-    fn discover_builtin(
-        &self,
-        args: &[Value],
-        kwargs: &[(Arc<str>, Value)],
-        kwargs_expr: Option<Value>,
-    ) -> Result<Value, PoisonError> {
-        if kwargs_expr.is_some() {
-            return Err(self.type_error("discover does not accept keyword records"));
-        }
-        self.require_no_kwargs("discover", kwargs)?;
-        self.check_arity("discover", args, 2)?;
-        let class = self.force_value(args[0].clone())?;
-        let class = self.expect_executor_class(&class, "discover class")?;
-        let probe = self.force_value(args[1].clone())?;
-
-        if let Some(discover_handler) = &self.discover_handler {
-            let request = DiscoverRequest {
-                class,
-                demand_chain: self.current_demand_chain(None),
-                module: self.transport_module(),
-                probe: self.ship_function(probe)?,
-            };
-            return discover_handler(request);
-        }
-
-        self.invoke_discover_probe(probe)
     }
 
     fn discover_builtin_scheduled(
@@ -4697,22 +3790,6 @@ impl Engine {
         self.invoke_discover_probe(probe)
     }
 
-    fn executor_class_builtin(
-        &self,
-        args: &[Value],
-        kwargs: &[(Arc<str>, Value)],
-        kwargs_expr: Option<Value>,
-    ) -> Result<Value, PoisonError> {
-        if kwargs_expr.is_some() {
-            return Err(self.type_error("executor_class does not accept keyword records"));
-        }
-        self.require_no_kwargs("executor_class", kwargs)?;
-        self.check_arity("executor_class", args, 1)?;
-        let name = self.force_value(args[0].clone())?;
-        let name = self.expect_host_path(&name, "executor_class name")?;
-        Ok(Value::ExecutorClass(Arc::from(name)))
-    }
-
     fn executor_class_builtin_scheduled(
         &self,
         args: &[Value],
@@ -4728,43 +3805,6 @@ impl Engine {
             self.materialize_scheduled_value_deep(args[0].clone(), "forcing executor_class name")?;
         let name = self.expect_host_path(&name, "executor_class name")?;
         Ok(Value::ExecutorClass(Arc::from(name)))
-    }
-
-    fn materialize_kwargs(
-        &self,
-        kwargs: &[(Arc<str>, Value)],
-        kwargs_expr: Option<Value>,
-        context: &str,
-    ) -> Result<Vec<(Arc<str>, Value)>, PoisonError> {
-        let mut out = kwargs.to_vec();
-        let Some(kwargs_expr) = kwargs_expr else {
-            return Ok(out);
-        };
-
-        let kwargs_expr = self.force_value_shallow(kwargs_expr)?;
-        let (value, obligations) = self.split_obligations(kwargs_expr);
-        let Value::Map(map) = value else {
-            return Err(self.type_error(&format!(
-                "{context} keyword record must be a record/map, got {}",
-                value.type_name()
-            )));
-        };
-
-        for (key, value) in map.entries.iter() {
-            let key = self.force_value(key.clone())?;
-            let Value::String(name) = key else {
-                return Err(self.type_error(&format!(
-                    "{context} keyword record keys must be String, got {}",
-                    key.type_name()
-                )));
-            };
-            out.push((
-                Arc::from(name.as_ref()),
-                self.attach_obligations(value.clone(), obligations.iter().cloned()),
-            ));
-        }
-
-        Ok(out)
     }
 
     fn materialize_kwargs_scheduled(
@@ -4810,17 +3850,6 @@ impl Engine {
         Ok(out)
     }
 
-    fn merge_keyword_records(&self, left: Value, right: Value) -> Result<Value, PoisonError> {
-        let mut entries = Vec::new();
-        let left = self.force_value_shallow(left)?;
-        self.extend_record_with_spread(&mut entries, left)?;
-        let right = self.force_value_shallow(right)?;
-        self.extend_record_with_spread(&mut entries, right)?;
-        Ok(Value::Map(MapValue {
-            entries: Arc::from(entries),
-        }))
-    }
-
     fn merge_keyword_records_scheduled(
         &self,
         left: Value,
@@ -4836,103 +3865,6 @@ impl Engine {
         Ok(Value::Map(MapValue {
             entries: Arc::from(entries),
         }))
-    }
-
-    fn parse_exec_request(
-        &self,
-        args: &[Value],
-        kwargs: &[(Arc<str>, Value)],
-    ) -> Result<ParsedExecRequest, PoisonError> {
-        self.check_arity("exec", args, 1)?;
-
-        let mut env_value = None;
-        let mut mounts_value = None;
-        let mut observer_value = None;
-        let mut executor_value = None;
-        let mut writable_value = None;
-
-        for (name, value) in kwargs {
-            match name.as_ref() {
-                "env" => env_value = Some(value.clone()),
-                "mounts" => mounts_value = Some(value.clone()),
-                "observer" => observer_value = Some(value.clone()),
-                "executor" => executor_value = Some(value.clone()),
-                "writable" => writable_value = Some(value.clone()),
-                other => {
-                    return Err(self
-                        .type_error(&format!("exec does not accept keyword argument '{other}'")));
-                }
-            }
-        }
-
-        let args_value = self.force_value_shallow(args[0].clone())?;
-        let (args_value, top_level_arg_obligations) = self.split_obligations(args_value);
-        let Value::Array(exec_args_raw) = args_value else {
-            return Err(self.type_error(&format!(
-                "exec expects Array[String | Path | Blob | Tree] for args, got {}",
-                args_value.type_name()
-            )));
-        };
-
-        let observer =
-            observer_value.ok_or_else(|| self.type_error("exec requires an observer function"))?;
-        let observer = self.force_value(observer)?;
-        match self.split_obligations_ref(&observer).0 {
-            Value::Function(_) | Value::Builtin(_) => {}
-            other => {
-                return Err(self.type_error(&format!(
-                    "exec observer must be callable, got {}",
-                    other.type_name()
-                )));
-            }
-        }
-
-        if let Some(executor) = executor_value {
-            let executor = self.force_value(executor)?;
-            let _ = self.expect_executor_class(&executor, "exec executor")?;
-        }
-
-        let mut verification_obligations = BTreeMap::new();
-        Self::add_obligations(&mut verification_obligations, top_level_arg_obligations);
-        self.collect_value_obligations(
-            &Value::Array(exec_args_raw.clone()),
-            &mut verification_obligations,
-        );
-        if let Some(env_value) = &env_value {
-            self.collect_value_obligations(env_value, &mut verification_obligations);
-        }
-        if let Some(mounts_value) = &mounts_value {
-            self.collect_value_obligations(mounts_value, &mut verification_obligations);
-        }
-        if let Some(writable_value) = &writable_value {
-            self.collect_value_obligations(writable_value, &mut verification_obligations);
-        }
-        self.collect_value_obligations(&observer, &mut verification_obligations);
-
-        let mut mounts = self.exec_mounts_from_value(mounts_value)?;
-        let explicit_writable = self.exec_writable_from_value(writable_value)?;
-        let env = self.exec_env_from_value(env_value, &mut mounts, &explicit_writable)?;
-        let exec_args = exec_args_raw
-            .iter()
-            .map(|value| self.parse_exec_arg(value, &mut mounts, &explicit_writable, "exec arg"))
-            .collect::<Result<Vec<_>, _>>()?;
-        if exec_args.is_empty() {
-            return Err(self.type_error("exec requires at least one program argument"));
-        }
-        let writable_roots = if explicit_writable.is_empty() {
-            self.infer_exec_writable_roots(&mounts, &exec_args, &env)
-        } else {
-            explicit_writable
-        };
-
-        Ok(ParsedExecRequest {
-            args: exec_args,
-            env,
-            mounts,
-            writable_roots,
-            observer,
-            verification_obligations: verification_obligations.into_values().collect(),
-        })
     }
 
     fn parse_exec_request_scheduled(
@@ -5136,39 +4068,6 @@ impl Engine {
         self.snapshot_value(observed)
     }
 
-    fn exec_mounts_from_value(
-        &self,
-        value: Option<Value>,
-    ) -> Result<Vec<(PathValue, Value)>, PoisonError> {
-        let Some(value) = value else {
-            return Ok(Vec::new());
-        };
-        let (value, _) = self.split_obligations(self.force_value_shallow(value)?);
-        let Value::Map(map) = value else {
-            return Err(self.type_error(&format!(
-                "exec mounts must be Map, got {}",
-                value.type_name()
-            )));
-        };
-
-        let mut mounts = Vec::with_capacity(map.entries.len());
-        for (key, value) in map.entries.iter() {
-            let key = self.force_value(key.clone())?;
-            let path = self.expect_relative_path(&key, "exec mount path")?;
-            let (value, _) = self.split_obligations(self.force_value_shallow(value.clone())?);
-            match value {
-                Value::Blob(_) | Value::Tree(_) => mounts.push((path, value)),
-                other => {
-                    return Err(self.type_error(&format!(
-                        "exec mount values must be Blob or Tree, got {}",
-                        other.type_name()
-                    )));
-                }
-            }
-        }
-        Ok(mounts)
-    }
-
     fn exec_mounts_from_value_scheduled(
         &self,
         value: Option<Value>,
@@ -5207,29 +4106,6 @@ impl Engine {
             }
         }
         Ok(mounts)
-    }
-
-    fn exec_writable_from_value(
-        &self,
-        value: Option<Value>,
-    ) -> Result<Vec<PathValue>, PoisonError> {
-        let Some(value) = value else {
-            return Ok(Vec::new());
-        };
-        let (value, _) = self.split_obligations(self.force_value_shallow(value)?);
-        let Value::Array(items) = value else {
-            return Err(self.type_error(&format!(
-                "exec writable must be Array[Path], got {}",
-                value.type_name()
-            )));
-        };
-
-        let mut writable = Vec::with_capacity(items.len());
-        for item in items.iter() {
-            let item = self.force_value(item.clone())?;
-            writable.push(self.expect_relative_path(&item, "exec writable path")?);
-        }
-        Ok(writable)
     }
 
     fn exec_writable_from_value_scheduled(
@@ -5292,40 +4168,6 @@ impl Engine {
         roots.into_iter().map(PathValue::new).collect()
     }
 
-    fn exec_env_from_value(
-        &self,
-        value: Option<Value>,
-        mounts: &mut Vec<(PathValue, Value)>,
-        writable_roots: &[PathValue],
-    ) -> Result<Vec<(String, ExecArgValue)>, PoisonError> {
-        let Some(value) = value else {
-            return Ok(Vec::new());
-        };
-        let (value, _) = self.split_obligations(self.force_value_shallow(value)?);
-        let Value::Map(map) = value else {
-            return Err(
-                self.type_error(&format!("exec env must be Map, got {}", value.type_name()))
-            );
-        };
-
-        let mut env = Vec::with_capacity(map.entries.len());
-        for (key, value) in map.entries.iter() {
-            let key = self.force_value(key.clone())?;
-            let key = match key {
-                Value::String(key) => key.to_string(),
-                other => {
-                    return Err(self.type_error(&format!(
-                        "exec env keys must be String, got {}",
-                        other.type_name()
-                    )));
-                }
-            };
-            let value = self.parse_exec_arg(value, mounts, writable_roots, "exec env value")?;
-            env.push((key, value));
-        }
-        Ok(env)
-    }
-
     fn exec_env_from_value_scheduled(
         &self,
         value: Option<Value>,
@@ -5361,39 +4203,6 @@ impl Engine {
             env.push((key, value));
         }
         Ok(env)
-    }
-
-    fn parse_exec_arg(
-        &self,
-        value: &Value,
-        mounts: &mut Vec<(PathValue, Value)>,
-        _writable_roots: &[PathValue],
-        context: &str,
-    ) -> Result<ExecArgValue, PoisonError> {
-        let (value, _) = self.split_obligations(self.force_value(value.clone())?);
-        match value {
-            Value::String(text) => Ok(ExecArgValue::Literal(text.to_string())),
-            Value::Path(path) => {
-                let path = self.expect_relative_path(&Value::Path(path), context)?;
-                Ok(ExecArgValue::Path(path))
-            }
-            Value::ExecPath(path) => self.exec_arg_from_exec_path(mounts, &path),
-            Value::Blob(blob) => Ok(ExecArgValue::Path(
-                self.ensure_blob_exec_mount(mounts, &blob),
-            )),
-            Value::Tree(tree) => Ok(ExecArgValue::Path(
-                self.ensure_tree_exec_mount(mounts, &tree),
-            )),
-            other => {
-                if let Some(text) = self.try_stringify_exec_arg(&other)? {
-                    return Ok(ExecArgValue::Literal(text));
-                }
-                Err(self.type_error(&format!(
-                    "{context} must be String, Path, Blob, Tree, ExecPath, or a value with to_string(), got {}",
-                    other.type_name()
-                )))
-            }
-        }
     }
 
     fn parse_exec_arg_scheduled(
@@ -6612,15 +5421,6 @@ impl Engine {
             message,
             self.current_demand_chain(None),
         )
-    }
-
-    fn user_fail(&self, message: Value) -> Result<PoisonError, PoisonError> {
-        let message = self.force_value(message)?;
-        Ok(PoisonError::new(
-            PoisonKind::UserFail,
-            message.to_string(),
-            self.current_demand_chain(None),
-        ))
     }
 
     fn aggregate_poison_errors(&self, context: &str, errors: Vec<PoisonError>) -> PoisonError {
