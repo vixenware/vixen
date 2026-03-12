@@ -55,7 +55,7 @@ impl<'e> Scheduler<'e> {
                     return Ok(inspected.value);
                 }
                 let stack = self.prefixed_stack(&[]);
-                return Err(self.engine.scheduler_aggregate_poison_errors(
+                return Err(self.engine.aggregate_poison_errors_for_stack(
                     "forcing dependencies",
                     &stack,
                     inspected.errors,
@@ -77,7 +77,7 @@ impl<'e> Scheduler<'e> {
                 }
                 if !unresolved.is_empty() {
                     let stack = self.prefixed_stack(&[]);
-                    return Err(self.engine.scheduler_stalled(&stack, &unresolved));
+                    return Err(self.engine.stalled_error(&stack, &unresolved));
                 }
             }
 
@@ -92,17 +92,17 @@ impl<'e> Scheduler<'e> {
         while !self.refresh_completion(node_id)? {
             if self.ready.is_empty() {
                 let stack = self.prefixed_stack(&[]);
-                return Err(self.engine.scheduler_stalled(&stack, &[node_id]));
+                return Err(self.engine.stalled_error(&stack, &[node_id]));
             }
             self.run_ready_nodes()?;
         }
 
-        match self.engine.scheduler_node_state(node_id)? {
+        match self.engine.node_state(node_id)? {
             crate::worker::SchedulerNodeState::Resolved(value) => Ok(value),
             crate::worker::SchedulerNodeState::Poisoned(error) => Err(error),
             crate::worker::SchedulerNodeState::Pending => {
                 let stack = self.prefixed_stack(&[]);
-                Err(self.engine.scheduler_stalled(&stack, &[node_id]))
+                Err(self.engine.stalled_error(&stack, &[node_id]))
             }
         }
     }
@@ -113,11 +113,11 @@ impl<'e> Scheduler<'e> {
         }
         if self.initial_stack.contains(&node_id) || stack.contains(&node_id) {
             let stack = self.prefixed_stack(stack);
-            return Err(self.engine.scheduler_circular_dependency(&stack, node_id));
+            return Err(self.engine.circular_dependency_error(&stack, node_id));
         }
-        if self.initial_stack.len() + stack.len() + 1 > self.engine.scheduler_max_demand_depth() {
+        if self.initial_stack.len() + stack.len() + 1 > self.engine.max_demand_depth_limit() {
             let stack = self.prefixed_stack(stack);
-            return Err(self.engine.scheduler_demand_depth_exceeded(&stack, node_id));
+            return Err(self.engine.demand_depth_exceeded_error(&stack, node_id));
         }
 
         self.demand_paths
@@ -125,7 +125,7 @@ impl<'e> Scheduler<'e> {
             .or_insert_with(|| stack.clone());
         stack.push(node_id);
         let mut unresolved = HashSet::new();
-        for dep in self.engine.scheduler_node_deps(node_id)? {
+        for dep in self.engine.node_deps(node_id)? {
             self.demand_node(dep, stack)?;
             if !self.refresh_completion(dep)? {
                 unresolved.insert(dep);
@@ -163,8 +163,7 @@ impl<'e> Scheduler<'e> {
                 let chain = self.demand_paths.get(&node_id).cloned().unwrap_or_default();
                 vec![(
                     node_id,
-                    self.engine
-                        .scheduler_execute_pending_node_with_chain(node_id, &chain),
+                    self.engine.execute_pending_node_with_chain(node_id, &chain),
                 )]
             } else {
                 let engine = self.engine;
@@ -179,8 +178,7 @@ impl<'e> Scheduler<'e> {
                             scope.spawn(move || {
                                 (
                                     node_id,
-                                    engine
-                                        .scheduler_execute_pending_node_with_chain(node_id, &chain),
+                                    engine.execute_pending_node_with_chain(node_id, &chain),
                                 )
                             })
                         })
@@ -192,7 +190,7 @@ impl<'e> Scheduler<'e> {
                             Ok(result) => results.push(result),
                             Err(_) => {
                                 let stack = self.prefixed_stack(&[]);
-                                return Err(engine.scheduler_stalled(&stack, &stalled_batch));
+                                return Err(engine.stalled_error(&stack, &stalled_batch));
                             }
                         }
                     }
@@ -234,7 +232,7 @@ impl<'e> Scheduler<'e> {
     }
 
     fn refresh_completion(&mut self, node_id: NodeId) -> Result<bool, PoisonError> {
-        match self.engine.scheduler_node_state(node_id)? {
+        match self.engine.node_state(node_id)? {
             crate::worker::SchedulerNodeState::Pending => Ok(false),
             crate::worker::SchedulerNodeState::Resolved(_)
             | crate::worker::SchedulerNodeState::Poisoned(_) => {
@@ -251,14 +249,14 @@ impl<'e> Scheduler<'e> {
         }
 
         let mut path = self.demand_paths.get(&node_id).cloned().unwrap_or_default();
-        if self.initial_stack.len() + path.len() + 1 > self.engine.scheduler_max_demand_depth() {
+        if self.initial_stack.len() + path.len() + 1 > self.engine.max_demand_depth_limit() {
             let stack = self.prefixed_stack(&path);
-            return Err(self.engine.scheduler_demand_depth_exceeded(&stack, node_id));
+            return Err(self.engine.demand_depth_exceeded_error(&stack, node_id));
         }
 
         path.push(node_id);
         let mut unresolved = HashSet::new();
-        for dep in self.engine.scheduler_node_deps(node_id)? {
+        for dep in self.engine.node_deps(node_id)? {
             self.demand_node(dep, &mut path)?;
             if !self.refresh_completion(dep)? {
                 unresolved.insert(dep);

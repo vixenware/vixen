@@ -575,15 +575,12 @@ impl Engine {
         Value::Pending(node_id)
     }
 
-    pub(crate) fn scheduler_max_demand_depth(&self) -> usize {
+    pub(crate) fn max_demand_depth_limit(&self) -> usize {
         self.max_demand_depth
     }
 
-    pub(crate) fn scheduler_node_state(
-        &self,
-        node_id: NodeId,
-    ) -> Result<SchedulerNodeState, PoisonError> {
-        let node = self.scheduler_node(node_id)?;
+    pub(crate) fn node_state(&self, node_id: NodeId) -> Result<SchedulerNodeState, PoisonError> {
+        let node = self.node_ref(node_id)?;
         let state = node.state.lock();
         match &*state {
             NodeState::Pending | NodeState::Evaluating { .. } => Ok(SchedulerNodeState::Pending),
@@ -592,83 +589,83 @@ impl Engine {
         }
     }
 
-    pub(crate) fn scheduler_node_deps(&self, node_id: NodeId) -> Result<Vec<NodeId>, PoisonError> {
-        let node = self.scheduler_node(node_id)?;
+    pub(crate) fn node_deps(&self, node_id: NodeId) -> Result<Vec<NodeId>, PoisonError> {
+        let node = self.node_ref(node_id)?;
         let deps = match &node.job {
             NodeJob::Binary { left, right, .. } => {
-                let mut deps = self.scheduler_pending_deep(left.clone())?;
-                deps.extend(self.scheduler_pending_deep(right.clone())?);
+                let mut deps = self.collect_pending_deep(left.clone())?;
+                deps.extend(self.collect_pending_deep(right.clone())?);
                 deps
             }
-            NodeJob::Unary { operand, .. } => self.scheduler_pending_deep(operand.clone())?,
+            NodeJob::Unary { operand, .. } => self.collect_pending_deep(operand.clone())?,
             NodeJob::Template { parts, .. } => {
                 let mut deps = Vec::new();
                 for part in parts.iter() {
                     if let TemplatePartValue::Expr(value) = part {
-                        deps.extend(self.scheduler_pending_deep(value.clone())?);
+                        deps.extend(self.collect_pending_deep(value.clone())?);
                     }
                 }
                 deps
             }
-            NodeJob::If { cond, .. } => self.scheduler_pending_deep(cond.clone())?,
-            NodeJob::Fallible { value } => self.scheduler_pending_shallow(value.clone())?,
+            NodeJob::If { cond, .. } => self.collect_pending_deep(cond.clone())?,
+            NodeJob::Fallible { value } => self.collect_pending_shallow(value.clone())?,
             NodeJob::Demand { demands, .. } => {
                 let mut deps = Vec::new();
                 for value in demands.iter() {
-                    deps.extend(self.scheduler_pending_deep(value.clone())?);
+                    deps.extend(self.collect_pending_deep(value.clone())?);
                 }
                 deps
             }
-            NodeJob::Fail { message } => self.scheduler_pending_deep(message.clone())?,
+            NodeJob::Fail { message } => self.collect_pending_deep(message.clone())?,
             NodeJob::Call {
                 function,
                 args,
                 kwargs,
                 kwargs_expr,
             } => {
-                let mut deps = self.scheduler_callable_pending(function.clone())?;
+                let mut deps = self.collect_callable_pending(function.clone())?;
                 if deps.is_empty() {
-                    deps.extend(self.scheduler_builtin_call_deps(
+                    deps.extend(self.builtin_call_pending_deps(
                         function.clone(),
                         args.as_ref(),
                         kwargs.as_ref(),
                         kwargs_expr.as_ref(),
                     )?);
                 } else if let Some(kwargs_expr) = kwargs_expr {
-                    deps.extend(self.scheduler_pending_shallow(kwargs_expr.clone())?);
+                    deps.extend(self.collect_pending_shallow(kwargs_expr.clone())?);
                 }
                 deps
             }
             NodeJob::Invoke { .. } => Vec::new(),
-            NodeJob::Field { receiver, .. } => self.scheduler_pending_shallow(receiver.clone())?,
+            NodeJob::Field { receiver, .. } => self.collect_pending_shallow(receiver.clone())?,
             #[cfg(test)]
             NodeJob::Sleep { .. } | NodeJob::Poison(_) => Vec::new(),
         };
         Ok(Self::dedup_node_ids(deps))
     }
 
-    fn scheduler_pending_deep(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
+    fn collect_pending_deep(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
         Ok(self.inspect_value(value)?.pending.into_iter().collect())
     }
 
-    fn scheduler_pending_shallow(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
-        self.scheduler_pending_shallow_inner(value, &mut Vec::new())
+    fn collect_pending_shallow(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
+        self.collect_pending_shallow_inner(value, &mut Vec::new())
     }
 
-    fn scheduler_pending_shallow_inner(
+    fn collect_pending_shallow_inner(
         &self,
         value: Value,
         visiting: &mut Vec<NodeId>,
     ) -> Result<Vec<NodeId>, PoisonError> {
         match value {
-            Value::Pending(node_id) => match self.scheduler_node_state(node_id)? {
+            Value::Pending(node_id) => match self.node_state(node_id)? {
                 SchedulerNodeState::Pending => Ok(vec![node_id]),
                 SchedulerNodeState::Resolved(value) => {
                     if visiting.contains(&node_id) {
-                        return Err(self.scheduler_circular_dependency(visiting, node_id));
+                        return Err(self.circular_dependency_error(visiting, node_id));
                     }
                     visiting.push(node_id);
-                    let result = self.scheduler_pending_shallow_inner(value, visiting);
+                    let result = self.collect_pending_shallow_inner(value, visiting);
                     let popped = visiting.pop();
                     debug_assert_eq!(popped, Some(node_id));
                     result
@@ -676,30 +673,30 @@ impl Engine {
                 SchedulerNodeState::Poisoned(_) => Ok(Vec::new()),
             },
             Value::Discovered(discovered) => {
-                self.scheduler_pending_shallow_inner(*discovered.value, visiting)
+                self.collect_pending_shallow_inner(*discovered.value, visiting)
             }
             _ => Ok(Vec::new()),
         }
     }
 
-    fn scheduler_callable_pending(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
-        self.scheduler_callable_pending_inner(value, &mut Vec::new())
+    fn collect_callable_pending(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
+        self.collect_callable_pending_inner(value, &mut Vec::new())
     }
 
-    fn scheduler_callable_pending_inner(
+    fn collect_callable_pending_inner(
         &self,
         value: Value,
         visiting: &mut Vec<NodeId>,
     ) -> Result<Vec<NodeId>, PoisonError> {
         match value {
-            Value::Pending(node_id) => match self.scheduler_node_state(node_id)? {
+            Value::Pending(node_id) => match self.node_state(node_id)? {
                 SchedulerNodeState::Pending => Ok(vec![node_id]),
                 SchedulerNodeState::Resolved(value) => {
                     if visiting.contains(&node_id) {
-                        return Err(self.scheduler_circular_dependency(visiting, node_id));
+                        return Err(self.circular_dependency_error(visiting, node_id));
                     }
                     visiting.push(node_id);
-                    let result = self.scheduler_callable_pending_inner(value, visiting);
+                    let result = self.collect_callable_pending_inner(value, visiting);
                     let popped = visiting.pop();
                     debug_assert_eq!(popped, Some(node_id));
                     result
@@ -707,16 +704,16 @@ impl Engine {
                 SchedulerNodeState::Poisoned(_) => Ok(Vec::new()),
             },
             Value::Discovered(discovered) => {
-                self.scheduler_callable_pending_inner(*discovered.value, visiting)
+                self.collect_callable_pending_inner(*discovered.value, visiting)
             }
             Value::Partial(partial) => {
-                self.scheduler_callable_pending_inner(partial.function.clone(), visiting)
+                self.collect_callable_pending_inner(partial.function.clone(), visiting)
             }
             _ => Ok(Vec::new()),
         }
     }
 
-    fn scheduler_builtin_call_deps(
+    fn builtin_call_pending_deps(
         &self,
         function: Value,
         args: &[Value],
@@ -728,28 +725,28 @@ impl Engine {
         match function {
             Value::Partial(partial) => {
                 let mut deps =
-                    self.scheduler_builtin_call_deps(partial.function.clone(), &[], &[], None)?;
+                    self.builtin_call_pending_deps(partial.function.clone(), &[], &[], None)?;
                 for value in partial.args.iter().chain(args.iter()) {
-                    deps.extend(self.scheduler_pending_deep(value.clone())?);
+                    deps.extend(self.collect_pending_deep(value.clone())?);
                 }
                 for (_, value) in partial.kwargs.iter().chain(kwargs.iter()) {
-                    deps.extend(self.scheduler_pending_deep(value.clone())?);
+                    deps.extend(self.collect_pending_deep(value.clone())?);
                 }
                 if let Some(kwargs_expr) = &partial.kwargs_expr {
-                    deps.extend(self.scheduler_pending_deep((**kwargs_expr).clone())?);
+                    deps.extend(self.collect_pending_deep((**kwargs_expr).clone())?);
                 }
                 if let Some(kwargs_expr) = kwargs_expr {
-                    deps.extend(self.scheduler_pending_deep(kwargs_expr.clone())?);
+                    deps.extend(self.collect_pending_deep(kwargs_expr.clone())?);
                 }
                 Ok(Self::dedup_node_ids(deps))
             }
             Value::Builtin(builtin) => match builtin {
                 BuiltinValue::Namespace(BuiltinNamespace::Blob)
                 | BuiltinValue::Namespace(BuiltinNamespace::Bytes) => Ok(Self::dedup_node_ids(
-                    self.scheduler_pending_deep(args[0].clone())?,
+                    self.collect_pending_deep(args[0].clone())?,
                 )),
                 BuiltinValue::Namespace(BuiltinNamespace::Tree) => {
-                    let mut deps = self.scheduler_pending_shallow(args[0].clone())?;
+                    let mut deps = self.collect_pending_shallow(args[0].clone())?;
                     if !deps.is_empty() {
                         return Ok(Self::dedup_node_ids(deps));
                     }
@@ -760,12 +757,12 @@ impl Engine {
                     match value {
                         Value::Map(map) => {
                             for (key, _) in map.entries.iter() {
-                                deps.extend(self.scheduler_pending_deep(key.clone())?);
+                                deps.extend(self.collect_pending_deep(key.clone())?);
                             }
                         }
                         Value::Array(items) => {
                             for item in items.iter() {
-                                deps.extend(self.scheduler_pending_deep(item.clone())?);
+                                deps.extend(self.collect_pending_deep(item.clone())?);
                             }
                         }
                         Value::Path(_) | Value::String(_) => {}
@@ -774,7 +771,7 @@ impl Engine {
                     Ok(Self::dedup_node_ids(deps))
                 }
                 BuiltinValue::Function(BuiltinFunction::StructConstructor { .. }) => Ok(
-                    Self::dedup_node_ids(self.scheduler_pending_shallow(args[0].clone())?),
+                    Self::dedup_node_ids(self.collect_pending_shallow(args[0].clone())?),
                 ),
                 BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver }) => {
                     let receiver = self
@@ -786,7 +783,7 @@ impl Engine {
 
                     let mut deps = Vec::new();
                     for item in items.iter() {
-                        deps.extend(self.scheduler_pending_shallow(item.clone())?);
+                        deps.extend(self.collect_pending_shallow(item.clone())?);
                     }
                     Ok(Self::dedup_node_ids(deps))
                 }
@@ -800,7 +797,7 @@ impl Engine {
 
                     let mut deps = Vec::new();
                     for item in items.iter() {
-                        deps.extend(self.scheduler_pending_deep(item.clone())?);
+                        deps.extend(self.collect_pending_deep(item.clone())?);
                     }
                     Ok(Self::dedup_node_ids(deps))
                 }
@@ -810,10 +807,10 @@ impl Engine {
                 | BuiltinValue::Method(BuiltinMethod::HostRead { .. })
                 | BuiltinValue::Method(BuiltinMethod::HostHash { .. })
                 | BuiltinValue::Method(BuiltinMethod::HostWhich { .. }) => Ok(
-                    Self::dedup_node_ids(self.scheduler_pending_deep(args[0].clone())?),
+                    Self::dedup_node_ids(self.collect_pending_deep(args[0].clone())?),
                 ),
                 BuiltinValue::Method(BuiltinMethod::TreeOf) => {
-                    let mut deps = self.scheduler_pending_shallow(args[0].clone())?;
+                    let mut deps = self.collect_pending_shallow(args[0].clone())?;
                     if !deps.is_empty() {
                         return Ok(Self::dedup_node_ids(deps));
                     }
@@ -825,7 +822,7 @@ impl Engine {
                         return Ok(Vec::new());
                     };
                     for (key, _) in map.entries.iter() {
-                        deps.extend(self.scheduler_pending_deep(key.clone())?);
+                        deps.extend(self.collect_pending_deep(key.clone())?);
                     }
                     Ok(Self::dedup_node_ids(deps))
                 }
@@ -840,16 +837,14 @@ impl Engine {
                 | BuiltinValue::Method(BuiltinMethod::StreamCollect { .. }) => Ok(Vec::new()),
                 BuiltinValue::Method(BuiltinMethod::TreeFile { .. })
                 | BuiltinValue::Method(BuiltinMethod::TreeSubtree { .. }) => Ok(
-                    Self::dedup_node_ids(self.scheduler_pending_deep(args[0].clone())?),
+                    Self::dedup_node_ids(self.collect_pending_deep(args[0].clone())?),
                 ),
                 BuiltinValue::Method(BuiltinMethod::TreeMerge { .. }) => Ok(Self::dedup_node_ids(
-                    self.scheduler_pending_shallow(args[0].clone())?,
+                    self.collect_pending_shallow(args[0].clone())?,
                 )),
-                BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver }) => {
-                    Ok(Self::dedup_node_ids(
-                        self.scheduler_pending_shallow(receiver.as_ref().clone())?,
-                    ))
-                }
+                BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver }) => Ok(
+                    Self::dedup_node_ids(self.collect_pending_shallow(receiver.as_ref().clone())?),
+                ),
                 BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver }) => {
                     let receiver = self.materialize_value_shallow(
                         *receiver,
@@ -862,7 +857,7 @@ impl Engine {
                     match option.type_name.as_ref() {
                         "Some" => Ok(Vec::new()),
                         "None" => Ok(Self::dedup_node_ids(
-                            self.scheduler_pending_deep(args[0].clone())?,
+                            self.collect_pending_deep(args[0].clone())?,
                         )),
                         _ => Ok(Vec::new()),
                     }
@@ -872,13 +867,13 @@ impl Engine {
                 | BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
                     let mut deps = Vec::new();
                     for value in args {
-                        deps.extend(self.scheduler_pending_deep(value.clone())?);
+                        deps.extend(self.collect_pending_deep(value.clone())?);
                     }
                     for (_, value) in kwargs {
-                        deps.extend(self.scheduler_pending_deep(value.clone())?);
+                        deps.extend(self.collect_pending_deep(value.clone())?);
                     }
                     if let Some(kwargs_expr) = kwargs_expr {
-                        deps.extend(self.scheduler_pending_deep(kwargs_expr.clone())?);
+                        deps.extend(self.collect_pending_deep(kwargs_expr.clone())?);
                     }
                     Ok(Self::dedup_node_ids(deps))
                 }
@@ -895,18 +890,18 @@ impl Engine {
             .collect()
     }
 
-    pub(crate) fn scheduler_execute_pending_node_with_chain(
+    pub(crate) fn execute_pending_node_with_chain(
         &self,
         node_id: NodeId,
         chain: &[NodeId],
     ) -> Result<Value, PoisonError> {
-        let node = self.scheduler_node(node_id)?;
+        let node = self.node_ref(node_id)?;
         let (sender, receiver) = crossbeam_channel::bounded(1);
 
         match node.try_start_or_wait(Waiter { sender }) {
             Ok(()) => {
                 let result =
-                    self.with_scheduler_demand_chain(chain, node_id, || self.execute_node(&node));
+                    self.with_prefixed_demand_chain(chain, node_id, || self.execute_node(&node));
                 match result {
                     Ok(value) => {
                         node.resolve(value.clone());
@@ -928,7 +923,7 @@ impl Engine {
         }
     }
 
-    fn with_scheduler_demand_chain<T>(
+    fn with_prefixed_demand_chain<T>(
         &self,
         chain: &[NodeId],
         node_id: NodeId,
@@ -946,7 +941,7 @@ impl Engine {
         result
     }
 
-    pub(crate) fn scheduler_demand_chain(
+    pub(crate) fn demand_chain_for_stack(
         &self,
         stack: &[NodeId],
         next: Option<NodeId>,
@@ -964,7 +959,7 @@ impl Engine {
         DemandChain { entries }
     }
 
-    pub(crate) fn scheduler_circular_dependency(
+    pub(crate) fn circular_dependency_error(
         &self,
         stack: &[NodeId],
         node_id: NodeId,
@@ -972,11 +967,11 @@ impl Engine {
         PoisonError::new(
             PoisonKind::CircularDependency,
             format!("circular dependency while demanding node {}", node_id.0),
-            self.scheduler_demand_chain(stack, Some(node_id)),
+            self.demand_chain_for_stack(stack, Some(node_id)),
         )
     }
 
-    pub(crate) fn scheduler_demand_depth_exceeded(
+    pub(crate) fn demand_depth_exceeded_error(
         &self,
         stack: &[NodeId],
         node_id: NodeId,
@@ -987,11 +982,11 @@ impl Engine {
                 "demand chain exceeded configured depth limit of {}",
                 self.max_demand_depth
             ),
-            self.scheduler_demand_chain(stack, Some(node_id)),
+            self.demand_chain_for_stack(stack, Some(node_id)),
         )
     }
 
-    pub(crate) fn scheduler_stalled(&self, stack: &[NodeId], pending: &[NodeId]) -> PoisonError {
+    pub(crate) fn stalled_error(&self, stack: &[NodeId], pending: &[NodeId]) -> PoisonError {
         let list = pending
             .iter()
             .map(|node_id| node_id.0.to_string())
@@ -1000,20 +995,20 @@ impl Engine {
         PoisonError::new(
             PoisonKind::Internal,
             format!("scheduler stalled while resolving pending nodes [{list}]"),
-            self.scheduler_demand_chain(stack, None),
+            self.demand_chain_for_stack(stack, None),
         )
     }
 
-    pub(crate) fn scheduler_aggregate_poison_errors(
+    pub(crate) fn aggregate_poison_errors_for_stack(
         &self,
         context: &str,
         stack: &[NodeId],
         errors: Vec<PoisonError>,
     ) -> PoisonError {
-        PoisonError::aggregate(context, self.scheduler_demand_chain(stack, None), errors)
+        PoisonError::aggregate(context, self.demand_chain_for_stack(stack, None), errors)
     }
 
-    fn scheduler_node(&self, node_id: NodeId) -> Result<Arc<Node>, PoisonError> {
+    fn node_ref(&self, node_id: NodeId) -> Result<Arc<Node>, PoisonError> {
         self.nodes
             .get(&node_id)
             .map(|entry| entry.clone())
@@ -1165,7 +1160,7 @@ impl Engine {
         visiting: &mut Vec<NodeId>,
     ) -> Result<InspectedValue, PoisonError> {
         match value {
-            Value::Pending(node_id) => match self.scheduler_node_state(node_id)? {
+            Value::Pending(node_id) => match self.node_state(node_id)? {
                 SchedulerNodeState::Pending => {
                     let mut pending = BTreeSet::new();
                     pending.insert(node_id);
@@ -1177,10 +1172,10 @@ impl Engine {
                 }
                 SchedulerNodeState::Resolved(value) => {
                     if visiting.contains(&node_id) {
-                        return Err(self.scheduler_circular_dependency(visiting, node_id));
+                        return Err(self.circular_dependency_error(visiting, node_id));
                     }
                     if visiting.len() + 1 > self.max_demand_depth {
-                        return Err(self.scheduler_demand_depth_exceeded(visiting, node_id));
+                        return Err(self.demand_depth_exceeded_error(visiting, node_id));
                     }
                     visiting.push(node_id);
                     let result = self.inspect_value_inner(value, visiting);
@@ -1668,7 +1663,7 @@ impl Engine {
     fn materialize_value_deep(&self, value: Value, context: &str) -> Result<Value, PoisonError> {
         let inspected = self.inspect_value(value)?;
         if !inspected.errors.is_empty() {
-            return Err(self.scheduler_aggregate_poison_errors(context, &[], inspected.errors));
+            return Err(self.aggregate_poison_errors_for_stack(context, &[], inspected.errors));
         }
         if !inspected.pending.is_empty() {
             return Err(self.internal_error(&format!(
@@ -1699,7 +1694,7 @@ impl Engine {
             errors.extend(inspected.errors);
         }
         if !errors.is_empty() {
-            return Err(self.scheduler_aggregate_poison_errors(context, &[], errors));
+            return Err(self.aggregate_poison_errors_for_stack(context, &[], errors));
         }
         if !pending.is_empty() {
             return Err(self.internal_error(&format!(
@@ -1716,7 +1711,7 @@ impl Engine {
 
     fn materialize_value_shallow(&self, value: Value, context: &str) -> Result<Value, PoisonError> {
         match value {
-            Value::Pending(node_id) => match self.scheduler_node_state(node_id)? {
+            Value::Pending(node_id) => match self.node_state(node_id)? {
                 SchedulerNodeState::Pending => Err(self.internal_error(&format!(
                     "{context} still had unresolved pending node {}",
                     node_id.0
