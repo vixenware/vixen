@@ -4,6 +4,17 @@ use moire::process::Command;
 use super::probe::{self, HealthProbe};
 use super::{FsKitResult, Log, VIXEN_APP_PATH, VIXEN_EXTENSION_IDENTIFIER, mount_path_candidates};
 
+const RESTART_FSKIT_COMMAND: &str = "sudo killall fskitd fskit_agent";
+const RESTART_EXTENSIONKIT_COMMAND: &str = "killall extensionkitservice";
+const RELAUNCH_VIXEN_COMMAND: &str = "open /Applications/Vixen.app";
+
+#[derive(Debug)]
+struct MountFailureDiagnosis {
+    summary: String,
+    remediation: Vec<String>,
+    extra_log_lines: Vec<String>,
+}
+
 /// Mount a VixenFS filesystem.
 ///
 /// Checks prerequisites (app installed, codesign, extension registered+enabled),
@@ -161,36 +172,12 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
     if !mount_output.status.success() {
         let stderr = String::from_utf8_lossy(&mount_output.stderr);
         let exit_code = mount_output.status.code();
-
-        // Exit code 69 (EX_UNAVAILABLE) with "File system named vixenfs not found"
-        // means fskitd has a stale view of the extension — typically because the
-        // extension binary was rebuilt or updated. Killing fskitd forces a rescan.
-        let (summary, remediation) = if exit_code == Some(69) && stderr.contains("not found") {
-            (
-                "FSKit daemon has a stale view of the VixenFS extension \
-                 (it was likely rebuilt). Kill fskitd to force a rescan."
-                    .to_string(),
-                vec!["sudo killall fskitd fskit_agent".to_string()],
-            )
-        } else if exit_code == Some(69) {
-            (
-                "The VixenFS filesystem type is not available. \
-                 The FSKit daemon may need to be restarted."
-                    .to_string(),
-                vec!["sudo killall fskitd fskit_agent".to_string()],
-            )
+        let system_log_excerpt = if exit_code == Some(69) {
+            recent_extensionkit_log_excerpt().await
         } else {
-            let first_line = stderr.lines().next().unwrap_or("").trim();
-            let detail = if first_line.is_empty() {
-                String::new()
-            } else {
-                format!(": {first_line}")
-            };
-            (
-                format!("mount failed{detail}"),
-                vec!["sudo killall fskitd fskit_agent".to_string()],
-            )
+            None
         };
+        let diagnosis = diagnose_mount_failure(exit_code, &stderr, system_log_excerpt.as_deref());
 
         log.fail(format!(
             "mount failed (exit code {})",
@@ -201,8 +188,11 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
                 log.info(format!("  {line}"));
             }
         }
+        for line in &diagnosis.extra_log_lines {
+            log.info(format!("  system log: {line}"));
+        }
 
-        return FsKitResult::failure(log.into_entries(), summary, remediation);
+        return FsKitResult::failure(log.into_entries(), diagnosis.summary, diagnosis.remediation);
     }
 
     // --- Verify via health.json ---
@@ -268,6 +258,165 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
     FsKitResult::failure(
         log.into_entries(),
         "mount verification failed",
-        vec!["sudo killall fskitd fskit_agent".to_string()],
+        vec![RESTART_FSKIT_COMMAND.to_string()],
     )
+}
+
+async fn recent_extensionkit_log_excerpt() -> Option<String> {
+    let output = Command::new("/usr/bin/log")
+        .args([
+            "show",
+            "--last",
+            "20s",
+            "--style",
+            "compact",
+            "--predicate",
+            &format!(
+                "process == \"mount\" OR process == \"fskitd\" OR process == \"fskit_agent\" \
+                 OR process == \"extensionkitservice\" OR eventMessage CONTAINS \"{VIXEN_EXTENSION_IDENTIFIER}\""
+            ),
+        ])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn diagnose_mount_failure(
+    exit_code: Option<i32>,
+    stderr: &str,
+    system_log_excerpt: Option<&str>,
+) -> MountFailureDiagnosis {
+    if exit_code == Some(69) && stderr.contains("not found") {
+        if let Some(extensionkit_failure) = diagnose_extensionkit_failure(system_log_excerpt) {
+            return extensionkit_failure;
+        }
+
+        return MountFailureDiagnosis {
+            summary: "FSKit daemon has a stale view of the VixenFS extension \
+                      (it was likely rebuilt). Kill fskitd to force a rescan."
+                .to_string(),
+            remediation: vec![RESTART_FSKIT_COMMAND.to_string()],
+            extra_log_lines: Vec::new(),
+        };
+    }
+
+    if exit_code == Some(69) {
+        return MountFailureDiagnosis {
+            summary: "The VixenFS filesystem type is not available. \
+                      The FSKit daemon may need to be restarted."
+                .to_string(),
+            remediation: vec![RESTART_FSKIT_COMMAND.to_string()],
+            extra_log_lines: Vec::new(),
+        };
+    }
+
+    let first_line = stderr.lines().next().unwrap_or("").trim();
+    let detail = if first_line.is_empty() {
+        String::new()
+    } else {
+        format!(": {first_line}")
+    };
+    MountFailureDiagnosis {
+        summary: format!("mount failed{detail}"),
+        remediation: vec![RESTART_FSKIT_COMMAND.to_string()],
+        extra_log_lines: Vec::new(),
+    }
+}
+
+fn diagnose_extensionkit_failure(
+    system_log_excerpt: Option<&str>,
+) -> Option<MountFailureDiagnosis> {
+    let excerpt = system_log_excerpt?;
+    let matched_lines = excerpt
+        .lines()
+        .filter(|line| {
+            (line.contains("extensionkitservice")
+                && line.contains("Failed to initialize _EXExtensionIdentity"))
+                || (line.contains("fskit_agent")
+                    && line.contains("Failed to create extensionProcess for extension")
+                    && line.contains(VIXEN_EXTENSION_IDENTIFIER))
+        })
+        .map(str::trim)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let matched_lines = matched_lines
+        .into_iter()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+
+    if matched_lines.is_empty() {
+        return None;
+    }
+
+    Some(MountFailureDiagnosis {
+        summary: "ExtensionKit could not launch the VixenFS extension process. \
+                  Restart ExtensionKit and FSKit, then relaunch Vixen.app."
+            .to_string(),
+        remediation: vec![
+            RESTART_EXTENSIONKIT_COMMAND.to_string(),
+            RESTART_FSKIT_COMMAND.to_string(),
+            RELAUNCH_VIXEN_COMMAND.to_string(),
+        ],
+        extra_log_lines: matched_lines,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        RELAUNCH_VIXEN_COMMAND, RESTART_EXTENSIONKIT_COMMAND, RESTART_FSKIT_COMMAND,
+        diagnose_mount_failure,
+    };
+
+    #[test]
+    fn diagnose_mount_failure_prefers_extensionkit_identity_failure() {
+        let log_excerpt = r#"
+2026-03-12 21:29:25.521 E  extensionkitservice[8164:59d63d6] [com.apple.extensionkit:default] Failed to initialize _EXExtensionIdentity: Error Domain=com.apple.extensionKit.errorDomain Code=5
+2026-03-12 21:29:25.523 E  fskit_agent[37787:59d57a1] [com.apple.extensionkit:default] Failed to create extensionProcess for extension 'eu.bearcove.vixenfs' error: Error Domain=com.apple.extensionKit.errorDomain Code=2
+"#;
+
+        let diagnosis = diagnose_mount_failure(
+            Some(69),
+            "mount: File system named vixenfs not found",
+            Some(log_excerpt),
+        );
+
+        assert_eq!(
+            diagnosis.summary,
+            "ExtensionKit could not launch the VixenFS extension process. Restart ExtensionKit and FSKit, then relaunch Vixen.app."
+        );
+        assert_eq!(
+            diagnosis.remediation,
+            vec![
+                RESTART_EXTENSIONKIT_COMMAND.to_string(),
+                RESTART_FSKIT_COMMAND.to_string(),
+                RELAUNCH_VIXEN_COMMAND.to_string(),
+            ]
+        );
+        assert_eq!(diagnosis.extra_log_lines.len(), 2);
+    }
+
+    #[test]
+    fn diagnose_mount_failure_falls_back_to_stale_view() {
+        let diagnosis =
+            diagnose_mount_failure(Some(69), "mount: File system named vixenfs not found", None);
+
+        assert_eq!(
+            diagnosis.summary,
+            "FSKit daemon has a stale view of the VixenFS extension (it was likely rebuilt). Kill fskitd to force a rescan."
+        );
+        assert_eq!(
+            diagnosis.remediation,
+            vec![RESTART_FSKIT_COMMAND.to_string()]
+        );
+        assert!(diagnosis.extra_log_lines.is_empty());
+    }
 }
