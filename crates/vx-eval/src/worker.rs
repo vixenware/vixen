@@ -1879,7 +1879,8 @@ impl Engine {
                 Ok(self.attach_obligations(result, function_obligations))
             }
             Value::Builtin(builtin) => {
-                let result = self.invoke_builtin(&builtin, &args, &kwargs, kwargs_expr)?;
+                let result =
+                    self.invoke_builtin_scheduled(&builtin, &args, &kwargs, kwargs_expr)?;
                 Ok(self.attach_obligations(result, function_obligations))
             }
             other => Err(self.type_error(&format!("cannot call {}", other.type_name()))),
@@ -3396,6 +3397,33 @@ impl Engine {
         }
     }
 
+    fn invoke_builtin_scheduled(
+        &self,
+        builtin: &BuiltinValue,
+        args: &[Value],
+        kwargs: &[(Arc<str>, Value)],
+        kwargs_expr: Option<Value>,
+    ) -> Result<Value, PoisonError> {
+        match builtin {
+            BuiltinValue::Method(BuiltinMethod::ArrayMap { receiver }) => {
+                self.require_no_kwargs("array.map", kwargs)?;
+                self.check_arity("array.map", args, 1)?;
+                self.array_map_scheduled(receiver, args[0].clone())
+            }
+            BuiltinValue::Method(BuiltinMethod::ArrayToMap { receiver }) => {
+                self.require_no_kwargs("array.to_map", kwargs)?;
+                self.check_arity("array.to_map", args, 1)?;
+                self.array_to_map_scheduled(receiver, args[0].clone())
+            }
+            BuiltinValue::Method(BuiltinMethod::MapMapValues { receiver }) => {
+                self.require_no_kwargs("map.map_values", kwargs)?;
+                self.check_arity("map.map_values", args, 1)?;
+                self.map_map_values_scheduled(receiver, args[0].clone())
+            }
+            _ => self.invoke_builtin(builtin, args, kwargs, kwargs_expr),
+        }
+    }
+
     fn tree_from_map(&self, map: &MapValue) -> Result<Value, PoisonError> {
         fn insert_tree_path(
             engine: &Engine,
@@ -3484,6 +3512,24 @@ impl Engine {
         Ok(self.attach_obligations(Value::Array(Arc::from(out)), obligations))
     }
 
+    fn array_map_scheduled(&self, receiver: &Value, callback: Value) -> Result<Value, PoisonError> {
+        let (receiver, obligations) =
+            self.split_obligations(self.materialize_scheduled_value_shallow(
+                receiver.clone(),
+                "forcing array.map receiver",
+            )?);
+        let Value::Array(items) = receiver else {
+            return Err(self.type_error("array.map receiver must be Array"));
+        };
+
+        let out = items
+            .iter()
+            .map(|item| self.build_call(callback.clone(), vec![item.clone()], None))
+            .collect::<Vec<_>>();
+
+        Ok(self.attach_obligations(Value::Array(Arc::from(out)), obligations))
+    }
+
     fn array_to_map(&self, receiver: &Value, callback: Value) -> Result<Value, PoisonError> {
         let callback = self.force_value(callback)?;
         let (receiver, obligations) =
@@ -3502,6 +3548,38 @@ impl Engine {
             )?;
             entries.push((item.clone(), value));
         }
+
+        Ok(self.attach_obligations(
+            Value::Map(MapValue {
+                entries: Arc::from(entries),
+            }),
+            obligations,
+        ))
+    }
+
+    fn array_to_map_scheduled(
+        &self,
+        receiver: &Value,
+        callback: Value,
+    ) -> Result<Value, PoisonError> {
+        let (receiver, obligations) =
+            self.split_obligations(self.materialize_scheduled_value_shallow(
+                receiver.clone(),
+                "forcing array.to_map receiver",
+            )?);
+        let Value::Array(items) = receiver else {
+            return Err(self.type_error("array.to_map receiver must be Array"));
+        };
+
+        let entries = items
+            .iter()
+            .map(|item| {
+                (
+                    item.clone(),
+                    self.build_call(callback.clone(), vec![item.clone()], None),
+                )
+            })
+            .collect::<Vec<_>>();
 
         Ok(self.attach_obligations(
             Value::Map(MapValue {
@@ -3593,6 +3671,39 @@ impl Engine {
             )?;
             entries.push((key.clone(), mapped));
         }
+
+        Ok(self.attach_obligations(
+            Value::Map(MapValue {
+                entries: Arc::from(entries),
+            }),
+            obligations,
+        ))
+    }
+
+    fn map_map_values_scheduled(
+        &self,
+        receiver: &Value,
+        callback: Value,
+    ) -> Result<Value, PoisonError> {
+        let (receiver, obligations) =
+            self.split_obligations(self.materialize_scheduled_value_shallow(
+                receiver.clone(),
+                "forcing map.map_values receiver",
+            )?);
+        let Value::Map(map) = receiver else {
+            return Err(self.type_error("map.map_values receiver must be Map"));
+        };
+
+        let entries = map
+            .entries
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    self.build_call(callback.clone(), vec![value.clone()], None),
+                )
+            })
+            .collect::<Vec<_>>();
 
         Ok(self.attach_obligations(
             Value::Map(MapValue {

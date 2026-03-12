@@ -2647,6 +2647,42 @@ fn call_boundary_forces_independent_children_concurrently() {
 }
 
 #[test]
+fn array_map_schedules_callback_bodies_concurrently() {
+    let engine = engine(
+        "struct Item { wait: U64, value: U64 }
+         fn project(item: Item) {
+           item.wait;
+           item.value
+         }
+         fn main(items: Array) { items.map(project) }",
+    );
+    let item = |wait, value| {
+        Value::Struct(StructValue {
+            type_name: Arc::from("Item"),
+            fields: Arc::from([(Arc::from("wait"), wait), (Arc::from("value"), value)]),
+        })
+    };
+
+    let start = Instant::now();
+    let value = engine
+        .call(
+            "main",
+            vec![Value::Array(Arc::from([
+                item(engine.sleep_value(200, Value::U64(0)), Value::U64(1)),
+                item(engine.sleep_value(200, Value::U64(0)), Value::U64(2)),
+            ]))],
+        )
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        value,
+        Value::Array(Arc::from([Value::U64(1), Value::U64(2)]))
+    );
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[test]
 fn array_merge_forces_tree_items_concurrently() {
     let engine = engine("fn main(items: Array) { items.merge() }");
     let left = Value::Tree(TreeValue::Inline(Arc::from([(
