@@ -69,8 +69,18 @@ impl<'e> Scheduler<'e> {
             }
 
             if self.ready.is_empty() {
+                if self.advance_external_progress()? {
+                    value = inspected.value;
+                    continue;
+                }
+                self.recompute_incomplete_demanded()?;
+                if !self.ready.is_empty() {
+                    self.run_ready_nodes()?;
+                    value = inspected.value;
+                    continue;
+                }
                 let mut unresolved = Vec::new();
-                for node_id in pending {
+                for node_id in inspected.pending.iter().copied() {
                     if !self.refresh_completion(node_id)? {
                         unresolved.push(node_id);
                     }
@@ -91,6 +101,19 @@ impl<'e> Scheduler<'e> {
         self.demand_node(node_id, &mut stack)?;
         while !self.refresh_completion(node_id)? {
             if self.ready.is_empty() {
+                if self.advance_external_progress()? {
+                    continue;
+                }
+                if self.refresh_completion(node_id)? {
+                    continue;
+                }
+                self.recompute_incomplete_demanded()?;
+                if self.refresh_completion(node_id)? {
+                    continue;
+                }
+                if !self.ready.is_empty() {
+                    continue;
+                }
                 let stack = self.prefixed_stack(&[]);
                 return Err(self.engine.stalled_error(&stack, &[node_id]));
             }
@@ -100,7 +123,8 @@ impl<'e> Scheduler<'e> {
         match self.engine.node_state(node_id)? {
             crate::worker::SchedulerNodeState::Resolved(value) => Ok(value),
             crate::worker::SchedulerNodeState::Poisoned(error) => Err(error),
-            crate::worker::SchedulerNodeState::Pending => {
+            crate::worker::SchedulerNodeState::Pending
+            | crate::worker::SchedulerNodeState::Evaluating => {
                 let stack = self.prefixed_stack(&[]);
                 Err(self.engine.stalled_error(&stack, &[node_id]))
             }
@@ -199,22 +223,7 @@ impl<'e> Scheduler<'e> {
             };
 
             for (node_id, result) in results {
-                if let Ok(value) = &result {
-                    let inspected = self.engine.inspect_value(value.clone())?;
-                    let mut path = self.demand_paths.get(&node_id).cloned().unwrap_or_default();
-                    path.push(node_id);
-                    for pending_id in inspected.pending {
-                        self.demand_paths
-                            .entry(pending_id)
-                            .or_insert_with(|| path.clone());
-                    }
-                }
-                self.completed.insert(node_id);
-                if let Some(waiters) = self.rdeps.remove(&node_id) {
-                    for waiter in waiters {
-                        self.recompute_node(waiter)?;
-                    }
-                }
+                self.finish_completed_node(node_id, result)?;
             }
         }
 
@@ -233,7 +242,8 @@ impl<'e> Scheduler<'e> {
 
     fn refresh_completion(&mut self, node_id: NodeId) -> Result<bool, PoisonError> {
         match self.engine.node_state(node_id)? {
-            crate::worker::SchedulerNodeState::Pending => Ok(false),
+            crate::worker::SchedulerNodeState::Pending
+            | crate::worker::SchedulerNodeState::Evaluating => Ok(false),
             crate::worker::SchedulerNodeState::Resolved(_)
             | crate::worker::SchedulerNodeState::Poisoned(_) => {
                 self.completed.insert(node_id);
@@ -276,11 +286,82 @@ impl<'e> Scheduler<'e> {
         Ok(())
     }
 
+    fn recompute_incomplete_demanded(&mut self) -> Result<(), PoisonError> {
+        for node_id in self.demanded.iter().copied().collect::<Vec<_>>() {
+            if self.completed.contains(&node_id) {
+                continue;
+            }
+            self.recompute_node(node_id)?;
+        }
+        Ok(())
+    }
+
     fn add_reverse_dep(&mut self, dep: NodeId, waiter: NodeId) {
         let waiters = self.rdeps.entry(dep).or_default();
         if !waiters.contains(&waiter) {
             waiters.push(waiter);
         }
+    }
+
+    fn advance_external_progress(&mut self) -> Result<bool, PoisonError> {
+        for node_id in self.demanded.iter().copied().collect::<Vec<_>>() {
+            if self.completed.contains(&node_id) {
+                continue;
+            }
+            match self.engine.node_state(node_id)? {
+                crate::worker::SchedulerNodeState::Resolved(value) => {
+                    self.finish_completed_node(node_id, Ok(value))?;
+                    return Ok(true);
+                }
+                crate::worker::SchedulerNodeState::Poisoned(error) => {
+                    self.finish_completed_node(node_id, Err(error))?;
+                    return Ok(true);
+                }
+                crate::worker::SchedulerNodeState::Evaluating => {
+                    self.engine.wait_for_node_completion(node_id)?;
+                    let result = match self.engine.node_state(node_id)? {
+                        crate::worker::SchedulerNodeState::Resolved(value) => Ok(value),
+                        crate::worker::SchedulerNodeState::Poisoned(error) => Err(error),
+                        crate::worker::SchedulerNodeState::Pending
+                        | crate::worker::SchedulerNodeState::Evaluating => {
+                            return Err(self.engine.internal_error(&format!(
+                                "node {} remained in-flight after waiting",
+                                node_id.0
+                            )));
+                        }
+                    };
+                    self.finish_completed_node(node_id, result)?;
+                    return Ok(true);
+                }
+                crate::worker::SchedulerNodeState::Pending => {}
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn finish_completed_node(
+        &mut self,
+        node_id: NodeId,
+        result: Result<Value, PoisonError>,
+    ) -> Result<(), PoisonError> {
+        if let Ok(value) = &result {
+            let inspected = self.engine.inspect_value(value.clone())?;
+            let mut path = self.demand_paths.get(&node_id).cloned().unwrap_or_default();
+            path.push(node_id);
+            for pending_id in inspected.pending {
+                self.demand_paths
+                    .entry(pending_id)
+                    .or_insert_with(|| path.clone());
+            }
+        }
+        self.completed.insert(node_id);
+        if let Some(waiters) = self.rdeps.remove(&node_id) {
+            for waiter in waiters {
+                self.recompute_node(waiter)?;
+            }
+        }
+        Ok(())
     }
 
     fn prefixed_stack(&self, stack: &[NodeId]) -> Vec<NodeId> {

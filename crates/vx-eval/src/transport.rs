@@ -21,12 +21,19 @@ pub struct TransportModule {
 pub struct TransportFnDef {
     pub name: String,
     pub params: Vec<TransportParam>,
+    pub keyword_params: Vec<TransportKeywordParam>,
     pub body: TransportBlock,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct TransportParam {
     pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Facet)]
+pub struct TransportKeywordParam {
+    pub name: String,
+    pub default: Option<TransportExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
@@ -65,6 +72,16 @@ pub enum TransportPattern {
 #[repr(u8)]
 pub enum TransportRecordItem {
     Field { name: String, value: TransportExpr },
+    Spread(TransportExpr),
+}
+
+#[derive(Debug, Clone, PartialEq, Facet)]
+#[repr(u8)]
+pub enum TransportMapItem {
+    Entry {
+        key: TransportExpr,
+        value: TransportExpr,
+    },
     Spread(TransportExpr),
 }
 
@@ -154,7 +171,7 @@ pub enum TransportExpr {
     },
     Record(Vec<TransportRecordItem>),
     Array(Vec<TransportArrayItem>),
-    Map(Vec<(TransportExpr, TransportExpr)>),
+    Map(Vec<TransportMapItem>),
     Field {
         receiver: Box<TransportExpr>,
         field: String,
@@ -336,6 +353,11 @@ impl From<&instr::FnDef> for TransportFnDef {
         Self {
             name: def.name.clone(),
             params: def.params.iter().map(TransportParam::from).collect(),
+            keyword_params: def
+                .keyword_params
+                .iter()
+                .map(TransportKeywordParam::from)
+                .collect(),
             body: TransportBlock::from(&def.body),
         }
     }
@@ -346,6 +368,7 @@ impl From<TransportFnDef> for instr::FnDef {
         Self {
             name: def.name,
             params: def.params.into_iter().map(Into::into).collect(),
+            keyword_params: def.keyword_params.into_iter().map(Into::into).collect(),
             body: def.body.into(),
         }
     }
@@ -355,6 +378,24 @@ impl From<&instr::Param> for TransportParam {
     fn from(param: &instr::Param) -> Self {
         Self {
             name: param.name.clone(),
+        }
+    }
+}
+
+impl From<&instr::KeywordParam> for TransportKeywordParam {
+    fn from(param: &instr::KeywordParam) -> Self {
+        Self {
+            name: param.name.clone(),
+            default: param.default.as_ref().map(TransportExpr::from),
+        }
+    }
+}
+
+impl From<TransportKeywordParam> for instr::KeywordParam {
+    fn from(param: TransportKeywordParam) -> Self {
+        Self {
+            name: param.name,
+            default: param.default.map(Into::into),
         }
     }
 }
@@ -518,6 +559,30 @@ impl From<TransportRecordItem> for instr::RecordItem {
     }
 }
 
+impl From<&instr::MapItem> for TransportMapItem {
+    fn from(item: &instr::MapItem) -> Self {
+        match item {
+            instr::MapItem::Entry { key, value } => Self::Entry {
+                key: key.into(),
+                value: value.into(),
+            },
+            instr::MapItem::Spread(value) => Self::Spread(value.into()),
+        }
+    }
+}
+
+impl From<TransportMapItem> for instr::MapItem {
+    fn from(item: TransportMapItem) -> Self {
+        match item {
+            TransportMapItem::Entry { key, value } => Self::Entry {
+                key: key.into(),
+                value: value.into(),
+            },
+            TransportMapItem::Spread(value) => Self::Spread(value.into()),
+        }
+    }
+}
+
 impl From<&instr::TemplatePart> for TransportTemplatePart {
     fn from(part: &instr::TemplatePart) -> Self {
         match part {
@@ -644,12 +709,9 @@ impl From<&instr::Expr> for TransportExpr {
                     })
                     .collect(),
             ),
-            instr::Expr::Map(entries) => Self::Map(
-                entries
-                    .iter()
-                    .map(|(key, value)| (TransportExpr::from(key), TransportExpr::from(value)))
-                    .collect(),
-            ),
+            instr::Expr::Map(entries) => {
+                Self::Map(entries.iter().map(TransportMapItem::from).collect())
+            }
             instr::Expr::Field {
                 receiver,
                 field,
@@ -780,12 +842,7 @@ impl From<TransportExpr> for instr::Expr {
                     })
                     .collect(),
             ),
-            TransportExpr::Map(entries) => Self::Map(
-                entries
-                    .into_iter()
-                    .map(|(key, value)| (key.into(), value.into()))
-                    .collect(),
-            ),
+            TransportExpr::Map(entries) => Self::Map(entries.into_iter().map(Into::into).collect()),
             TransportExpr::Field {
                 receiver,
                 field,
@@ -1255,7 +1312,13 @@ impl TryFrom<&BuiltinValue> for TransportBuiltinValue {
                     receiver: Box::new(TransportValue::try_from(receiver.as_ref())?),
                 })
             }
-            BuiltinValue::Method(BuiltinMethod::ArrayMap { .. })
+            BuiltinValue::Method(BuiltinMethod::StringStartsWith { .. })
+            | BuiltinValue::Method(BuiltinMethod::StringContains { .. })
+            | BuiltinValue::Method(BuiltinMethod::StringSplit { .. })
+            | BuiltinValue::Method(BuiltinMethod::StringLines { .. })
+            | BuiltinValue::Method(BuiltinMethod::StringTrim { .. })
+            | BuiltinValue::Method(BuiltinMethod::StringToLower { .. })
+            | BuiltinValue::Method(BuiltinMethod::ArrayMap { .. })
             | BuiltinValue::Method(BuiltinMethod::ArrayToMap { .. })
             | BuiltinValue::Method(BuiltinMethod::ArrayFlatten { .. })
             | BuiltinValue::Method(BuiltinMethod::ArrayMerge { .. })

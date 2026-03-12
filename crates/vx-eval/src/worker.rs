@@ -26,6 +26,7 @@ use tempfile::TempDir;
 use crate::exec::{
     AcquireRequest, DiscoverRequest, ExecArgValue, ExecMount, ExecRequest, RenderRequest,
     SharedAcquireHandler, SharedDiscoverHandler, SharedExecHandler, SharedRenderHandler,
+    SharedStoreHydrationHandler, StoreHydrationRequest,
 };
 use crate::instr::{self, BinOp, UnaryOp};
 use crate::node::{
@@ -73,6 +74,7 @@ impl InspectedValue {
 
 pub(crate) enum SchedulerNodeState {
     Pending,
+    Evaluating,
     Resolved(Value),
     Poisoned(PoisonError),
 }
@@ -99,6 +101,7 @@ pub struct Engine {
     render_handler: Option<SharedRenderHandler>,
     exec_handler: Option<SharedExecHandler>,
     discover_handler: Option<SharedDiscoverHandler>,
+    store_hydration_handler: Option<SharedStoreHydrationHandler>,
 }
 
 impl Engine {
@@ -124,6 +127,7 @@ impl Engine {
             render_handler: None,
             exec_handler: None,
             discover_handler: None,
+            store_hydration_handler: None,
         }
     }
 
@@ -150,6 +154,14 @@ impl Engine {
 
     pub fn with_discover_handler(mut self, discover_handler: SharedDiscoverHandler) -> Self {
         self.discover_handler = Some(discover_handler);
+        self
+    }
+
+    pub fn with_store_hydration_handler(
+        mut self,
+        store_hydration_handler: SharedStoreHydrationHandler,
+    ) -> Self {
+        self.store_hydration_handler = Some(store_hydration_handler);
         self
     }
 
@@ -372,6 +384,61 @@ impl Engine {
         }
     }
 
+    fn hydrate_store_value(&self, value: Value, context: &str) -> Result<Value, PoisonError> {
+        match value {
+            Value::Blob(BlobValue::Store { .. }) | Value::Tree(TreeValue::Store(_)) => {
+                let Some(handler) = &self.store_hydration_handler else {
+                    return Err(self.internal_error(&format!(
+                        "{context} requires an external store hydration handler"
+                    )));
+                };
+                let hydrated = handler(StoreHydrationRequest {
+                    value,
+                    demand_chain: self.current_demand_chain(None),
+                })?;
+                match hydrated {
+                    Value::Blob(BlobValue::Store { .. }) | Value::Tree(TreeValue::Store(_)) => {
+                        Err(self.internal_error(&format!(
+                            "{context} store hydration did not resolve the requested value"
+                        )))
+                    }
+                    other => Ok(other),
+                }
+            }
+            other => Ok(other),
+        }
+    }
+
+    fn hydrate_store_blob(
+        &self,
+        blob: &BlobValue,
+        context: &str,
+    ) -> Result<BlobValue, PoisonError> {
+        let hydrated = self.hydrate_store_value(Value::Blob(blob.clone()), context)?;
+        let Value::Blob(blob) = hydrated else {
+            return Err(self.internal_error(&format!(
+                "{context} store hydration returned {} instead of Blob",
+                hydrated.type_name()
+            )));
+        };
+        Ok(blob)
+    }
+
+    fn hydrate_store_tree(
+        &self,
+        tree: &TreeValue,
+        context: &str,
+    ) -> Result<TreeValue, PoisonError> {
+        let hydrated = self.hydrate_store_value(Value::Tree(tree.clone()), context)?;
+        let Value::Tree(tree) = hydrated else {
+            return Err(self.internal_error(&format!(
+                "{context} store hydration returned {} instead of Tree",
+                hydrated.type_name()
+            )));
+        };
+        Ok(tree)
+    }
+
     fn collect_value_obligations(
         &self,
         value: &Value,
@@ -416,7 +483,13 @@ impl Engine {
                 }
             }
             Value::Builtin(BuiltinValue::Method(method)) => match method {
-                BuiltinMethod::ArrayMap { receiver }
+                BuiltinMethod::StringStartsWith { receiver }
+                | BuiltinMethod::StringContains { receiver }
+                | BuiltinMethod::StringSplit { receiver }
+                | BuiltinMethod::StringLines { receiver }
+                | BuiltinMethod::StringTrim { receiver }
+                | BuiltinMethod::StringToLower { receiver }
+                | BuiltinMethod::ArrayMap { receiver }
                 | BuiltinMethod::ArrayToMap { receiver }
                 | BuiltinMethod::ArrayFlatten { receiver }
                 | BuiltinMethod::ArrayMerge { receiver }
@@ -598,9 +671,37 @@ impl Engine {
         let node = self.node_ref(node_id)?;
         let state = node.state.lock();
         match &*state {
-            NodeState::Pending | NodeState::Evaluating { .. } => Ok(SchedulerNodeState::Pending),
+            NodeState::Pending => Ok(SchedulerNodeState::Pending),
+            NodeState::Evaluating { .. } => Ok(SchedulerNodeState::Evaluating),
             NodeState::Resolved(value) => Ok(SchedulerNodeState::Resolved(value.clone())),
             NodeState::Poisoned(error) => Ok(SchedulerNodeState::Poisoned(error.clone())),
+        }
+    }
+
+    pub(crate) fn wait_for_node_completion(&self, node_id: NodeId) -> Result<(), PoisonError> {
+        let node = self.node_ref(node_id)?;
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let waiter = Waiter { sender };
+
+        let immediate = {
+            let mut state = node.state.lock();
+            match &mut *state {
+                NodeState::Pending => return Ok(()),
+                NodeState::Evaluating { waiters } => {
+                    waiters.push(waiter);
+                    None
+                }
+                NodeState::Resolved(value) => Some(Outcome::Value(value.clone())),
+                NodeState::Poisoned(error) => Some(Outcome::Poison(error.clone())),
+            }
+        };
+
+        match immediate {
+            Some(Outcome::Value(_)) | Some(Outcome::Poison(_)) => Ok(()),
+            None => match receiver.recv() {
+                Ok((_node_id, Outcome::Value(_))) | Ok((_node_id, Outcome::Poison(_))) => Ok(()),
+                Err(_) => Err(self.internal_error("all scheduler waiters dropped")),
+            },
         }
     }
 
@@ -682,7 +783,7 @@ impl Engine {
     ) -> Result<Vec<NodeId>, PoisonError> {
         match value {
             Value::Pending(node_id) => match self.node_state(node_id)? {
-                SchedulerNodeState::Pending => Ok(vec![node_id]),
+                SchedulerNodeState::Pending | SchedulerNodeState::Evaluating => Ok(vec![node_id]),
                 SchedulerNodeState::Resolved(value) => {
                     if visiting.contains(&node_id) {
                         return Err(self.circular_dependency_error(visiting, node_id));
@@ -713,7 +814,7 @@ impl Engine {
     ) -> Result<Vec<NodeId>, PoisonError> {
         match value {
             Value::Pending(node_id) => match self.node_state(node_id)? {
-                SchedulerNodeState::Pending => Ok(vec![node_id]),
+                SchedulerNodeState::Pending | SchedulerNodeState::Evaluating => Ok(vec![node_id]),
                 SchedulerNodeState::Resolved(value) => {
                     if visiting.contains(&node_id) {
                         return Err(self.circular_dependency_error(visiting, node_id));
@@ -824,7 +925,10 @@ impl Engine {
                     }
                     Ok(Self::dedup_node_ids(deps))
                 }
-                BuiltinValue::Method(BuiltinMethod::BlobFromString)
+                BuiltinValue::Method(BuiltinMethod::StringStartsWith { .. })
+                | BuiltinValue::Method(BuiltinMethod::StringContains { .. })
+                | BuiltinValue::Method(BuiltinMethod::StringSplit { .. })
+                | BuiltinValue::Method(BuiltinMethod::BlobFromString)
                 | BuiltinValue::Method(BuiltinMethod::BytesFromString)
                 | BuiltinValue::Method(BuiltinMethod::TreeFromPath)
                 | BuiltinValue::Method(BuiltinMethod::HostRead { .. })
@@ -850,6 +954,9 @@ impl Engine {
                     Ok(Self::dedup_node_ids(deps))
                 }
                 BuiltinValue::Method(BuiltinMethod::TreeEmpty)
+                | BuiltinValue::Method(BuiltinMethod::StringLines { .. })
+                | BuiltinValue::Method(BuiltinMethod::StringTrim { .. })
+                | BuiltinValue::Method(BuiltinMethod::StringToLower { .. })
                 | BuiltinValue::Method(BuiltinMethod::BlobToString { .. })
                 | BuiltinValue::Method(BuiltinMethod::BlobExecutable { .. })
                 | BuiltinValue::Method(BuiltinMethod::BlobUtf8 { .. })
@@ -1017,10 +1124,47 @@ impl Engine {
             .map(|node_id| node_id.0.to_string())
             .collect::<Vec<_>>()
             .join(", ");
+        let details = pending
+            .iter()
+            .map(|node_id| self.format_stalled_node(*node_id, 3))
+            .collect::<Vec<_>>()
+            .join("; ");
         PoisonError::new(
             PoisonKind::Internal,
-            format!("scheduler stalled while resolving pending nodes [{list}]"),
+            format!("scheduler stalled while resolving pending nodes [{list}] ({details})"),
             self.demand_chain_for_stack(stack, None),
+        )
+    }
+
+    fn format_stalled_node(&self, node_id: NodeId, depth: usize) -> String {
+        let Some(node) = self.nodes.get(&node_id) else {
+            return format!("{}:<missing>", node_id.0);
+        };
+
+        let state = node.state.lock();
+        let state = match &*state {
+            NodeState::Pending => "Pending".to_string(),
+            NodeState::Evaluating { .. } => "Evaluating".to_string(),
+            NodeState::Resolved(value) => format!("Resolved({})", value.type_name()),
+            NodeState::Poisoned(error) => format!("Poisoned({})", error.message),
+        };
+        let deps = self
+            .node_deps(node_id)
+            .unwrap_or_else(|_| node.job.pending_deps())
+            .into_iter()
+            .map(|dep| {
+                if depth == 0 {
+                    dep.0.to_string()
+                } else {
+                    self.format_stalled_node(dep, depth - 1)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        format!(
+            "{}:{} state={} deps=[{}]",
+            node_id.0, node.description, state, deps
         )
     }
 
@@ -1045,6 +1189,19 @@ impl Engine {
             Value::Pending(node_id) => self.force_pending_shallow(node_id),
             Value::Discovered(discovered) => {
                 let inner = self.force_value_shallow(*discovered.value)?;
+                Ok(self.attach_obligations(inner, discovered.obligations.iter().cloned()))
+            }
+            other => Ok(other),
+        }
+    }
+
+    fn demand_value_shallow(&self, value: Value) -> Result<Value, PoisonError> {
+        match value {
+            Value::Pending(node_id) => {
+                self.demand_value_shallow(self.force_pending_shallow(node_id)?)
+            }
+            Value::Discovered(discovered) => {
+                let inner = self.demand_value_shallow(*discovered.value)?;
                 Ok(self.attach_obligations(inner, discovered.obligations.iter().cloned()))
             }
             other => Ok(other),
@@ -1186,7 +1343,7 @@ impl Engine {
     ) -> Result<InspectedValue, PoisonError> {
         match value {
             Value::Pending(node_id) => match self.node_state(node_id)? {
-                SchedulerNodeState::Pending => {
+                SchedulerNodeState::Pending | SchedulerNodeState::Evaluating => {
                     let mut pending = BTreeSet::new();
                     pending.insert(node_id);
                     Ok(InspectedValue {
@@ -1446,6 +1603,66 @@ impl Engine {
                 Vec::new(),
             )),
             BuiltinValue::Method(method) => match method {
+                BuiltinMethod::StringStartsWith { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::StringStartsWith {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::StringContains { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::StringContains {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::StringSplit { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::StringSplit {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::StringLines { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::StringLines {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::StringTrim { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::StringTrim {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::StringToLower { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::StringToLower {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
                 BuiltinMethod::BlobFromString => Ok((
                     BuiltinValue::Method(BuiltinMethod::BlobFromString),
                     BTreeSet::new(),
@@ -1737,10 +1954,11 @@ impl Engine {
     fn materialize_value_shallow(&self, value: Value, context: &str) -> Result<Value, PoisonError> {
         match value {
             Value::Pending(node_id) => match self.node_state(node_id)? {
-                SchedulerNodeState::Pending => Err(self.internal_error(&format!(
-                    "{context} still had unresolved pending node {}",
-                    node_id.0
-                ))),
+                SchedulerNodeState::Pending | SchedulerNodeState::Evaluating => Err(self
+                    .internal_error(&format!(
+                        "{context} still had unresolved pending node {}",
+                        node_id.0
+                    ))),
                 SchedulerNodeState::Resolved(value) => {
                     self.materialize_value_shallow(value, context)
                 }
@@ -1783,8 +2001,8 @@ impl Engine {
             NodeJob::Binary { op, left, right } => {
                 let (left, right) = if matches!(op, BinOp::Concat) {
                     (
-                        self.force_value_shallow(left.clone())?,
-                        self.force_value_shallow(right.clone())?,
+                        self.demand_value_shallow(left.clone())?,
+                        self.demand_value_shallow(right.clone())?,
                     )
                 } else {
                     let mut values = self.materialize_many_deep(
@@ -1850,10 +2068,11 @@ impl Engine {
                 kwargs.clone(),
                 kwargs_expr.clone(),
             ),
-            NodeJob::Invoke { function, args } => self.invoke_function(function, args.clone()),
+            NodeJob::Invoke { function, args } => {
+                self.invoke_function(function, args.clone(), Arc::from([]))
+            }
             NodeJob::Field { receiver, field } => {
-                let receiver =
-                    self.materialize_value_shallow(receiver.clone(), "forcing selector receiver")?;
+                let receiver = self.demand_value_shallow(receiver.clone())?;
                 self.select_field(&receiver, field)
             }
             NodeJob::Fail { message } => {
@@ -1926,16 +2145,24 @@ impl Engine {
         kwargs_expr: Option<Value>,
         function_obligations: Vec<HostObservation>,
     ) -> Result<Value, PoisonError> {
-        if !kwargs.is_empty() || kwargs_expr.is_some() {
-            return Err(self.type_error("keyword arguments are only supported for builtins"));
-        }
+        let kwargs = self.materialize_kwargs(
+            &kwargs,
+            kwargs_expr,
+            &format!("function '{}'", function.def.name),
+        )?;
 
-        if function.key().is_some() && args.iter().all(|value| value.key().is_some()) {
+        if kwargs.is_empty()
+            && function.key().is_some()
+            && args.iter().all(|value| value.key().is_some())
+        {
             let node_id = self.memoized_invoke_node(function, args.iter().cloned().collect());
             return Ok(self.attach_obligations(Value::Pending(node_id), function_obligations));
         }
 
-        self.finish_obligated_result(self.invoke_function(&function, args), function_obligations)
+        self.finish_obligated_result(
+            self.invoke_function(&function, args, Arc::from(kwargs)),
+            function_obligations,
+        )
     }
 
     // r[impl eval.enter-functions]
@@ -1943,11 +2170,21 @@ impl Engine {
         &self,
         function: &FunctionValue,
         args: Arc<[Value]>,
+        kwargs: Arc<[(Arc<str>, Value)]>,
     ) -> Result<Value, PoisonError> {
         let mut bindings = HashMap::new();
 
         for (name, value) in function.captures.iter() {
             bindings.insert(name.to_string(), value.clone());
+        }
+
+        if args.len() != function.def.params.len() {
+            return Err(self.type_error(&format!(
+                "function '{}' expects {} positional argument(s), got {}",
+                function.def.name,
+                function.def.params.len(),
+                args.len()
+            )));
         }
 
         for (param, arg) in function.def.params.iter().zip(args.iter()) {
@@ -1961,6 +2198,37 @@ impl Engine {
                     Value::Function(self.global_function_value(overloads[0].clone())),
                 );
             }
+        }
+
+        let mut kwarg_values = kwargs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect::<HashMap<_, _>>();
+
+        for param in &function.def.keyword_params {
+            if let Some(value) = kwarg_values.remove(&param.name) {
+                bindings.insert(param.name.clone(), value);
+                continue;
+            }
+
+            let Some(default) = &param.default else {
+                return Err(self.type_error(&format!(
+                    "function '{}' requires keyword argument '{}'",
+                    function.def.name, param.name
+                )));
+            };
+
+            let value = self
+                .eval_expr(default, &bindings, function.code_identity.as_ref())
+                .into_value()?;
+            bindings.insert(param.name.clone(), value);
+        }
+
+        if let Some(name) = kwarg_values.into_keys().next() {
+            return Err(self.type_error(&format!(
+                "function '{}' does not accept keyword argument '{}'",
+                function.def.name, name
+            )));
         }
 
         self.eval_block(
@@ -2012,7 +2280,12 @@ impl Engine {
                         def.name.clone(),
                         Value::Function(self.local_function_value(
                             def.clone(),
-                            capture_referenced_bindings(&bindings, &def.params, &def.body),
+                            capture_referenced_bindings(
+                                &bindings,
+                                &def.params,
+                                &def.keyword_params,
+                                &def.body,
+                            ),
                         )),
                     );
                 }
@@ -2090,7 +2363,12 @@ impl Engine {
                         def.name.clone(),
                         Value::Function(self.local_function_value(
                             def.clone(),
-                            capture_referenced_bindings(&local_bindings, &def.params, &def.body),
+                            capture_referenced_bindings(
+                                &local_bindings,
+                                &def.params,
+                                &def.keyword_params,
+                                &def.body,
+                            ),
                         )),
                     );
                 }
@@ -2250,7 +2528,16 @@ impl Engine {
                     other => return other,
                 };
 
-                if matches!(op, BinOp::Concat) || (left.key().is_some() && right.key().is_some()) {
+                let concat_ready = if matches!(op, BinOp::Concat) {
+                    let mut deps = Vec::new();
+                    left.collect_pending_shallow(&mut deps);
+                    right.collect_pending_shallow(&mut deps);
+                    deps.is_empty()
+                } else {
+                    false
+                };
+
+                if concat_ready || (left.key().is_some() && right.key().is_some()) {
                     BuildResult::from_result(self.compute_binary(*op, &left, &right))
                 } else {
                     BuildResult::Value(self.pending_value(
@@ -2327,7 +2614,12 @@ impl Engine {
                 BuildResult::Value(Value::Function(self.closure_function_value(
                     def.clone(),
                     Arc::from(format!("{current_code_identity}::closure#{closure_id}")),
-                    capture_referenced_bindings(bindings, &def.params, &def.body),
+                    capture_referenced_bindings(
+                        bindings,
+                        &def.params,
+                        &def.keyword_params,
+                        &def.body,
+                    ),
                 )))
             }
             instr::Expr::Call {
@@ -2449,7 +2741,7 @@ impl Engine {
                                 BuildResult::Value(value) => value,
                                 other => return other,
                             };
-                            let spread_value = match self.force_value_shallow(spread_value) {
+                            let spread_value = match self.demand_value_shallow(spread_value) {
                                 Ok(value) => value,
                                 Err(error) => return BuildResult::Poisoned(error),
                             };
@@ -2483,7 +2775,7 @@ impl Engine {
                                 BuildResult::Value(value) => value,
                                 other => return other,
                             };
-                            let spread_value = match self.force_value_shallow(spread_value) {
+                            let spread_value = match self.demand_value_shallow(spread_value) {
                                 Ok(value) => value,
                                 Err(error) => return BuildResult::Poisoned(error),
                             };
@@ -2498,16 +2790,39 @@ impl Engine {
             }
             instr::Expr::Map(entries) => {
                 let mut values = Vec::with_capacity(entries.len());
-                for (key_expr, value_expr) in entries {
-                    let key = match self.eval_expr(key_expr, bindings, current_code_identity) {
-                        BuildResult::Value(value) => value,
-                        other => return other,
-                    };
-                    let value = match self.eval_expr(value_expr, bindings, current_code_identity) {
-                        BuildResult::Value(value) => value,
-                        other => return other,
-                    };
-                    values.push((key, value));
+                for entry in entries {
+                    match entry {
+                        instr::MapItem::Entry { key, value } => {
+                            let key = match self.eval_expr(key, bindings, current_code_identity) {
+                                BuildResult::Value(value) => value,
+                                other => return other,
+                            };
+                            let value = match self.eval_expr(value, bindings, current_code_identity)
+                            {
+                                BuildResult::Value(value) => value,
+                                other => return other,
+                            };
+                            values.push((key, value));
+                        }
+                        instr::MapItem::Spread(spread_expr) => {
+                            let spread_value = match self.eval_expr(
+                                spread_expr,
+                                bindings,
+                                current_code_identity,
+                            ) {
+                                BuildResult::Value(value) => value,
+                                other => return other,
+                            };
+                            let spread_value = match self.demand_value_shallow(spread_value) {
+                                Ok(value) => value,
+                                Err(error) => return BuildResult::Poisoned(error),
+                            };
+                            match self.extend_map_with_spread(&mut values, spread_value) {
+                                Ok(()) => {}
+                                Err(error) => return BuildResult::Poisoned(error),
+                            }
+                        }
+                    }
                 }
                 BuildResult::Value(Value::Map(MapValue {
                     entries: Arc::from(values),
@@ -2789,6 +3104,36 @@ impl Engine {
                     Err(self.type_error(&format!("invalid tuple field '{}'", field)))
                 }
             }
+            Value::String(_) if field == "starts_with" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::StringStartsWith {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::String(_) if field == "contains" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::StringContains {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::String(_) if field == "split" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::StringSplit {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::String(_) if field == "lines" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::StringLines {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::String(_) if field == "trim" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::StringTrim {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::String(_) if field == "to_lower" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::StringToLower {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
             Value::Array(_) if field == "map" => Ok(Value::Builtin(BuiltinValue::Method(
                 BuiltinMethod::ArrayMap {
                     receiver: Box::new(receiver.clone()),
@@ -3146,6 +3491,113 @@ impl Engine {
                     .materialize_value_deep(args[0].clone(), "forcing Bytes.from_string value")?;
                 let text = self.stringify_scalar(&value)?;
                 Ok(Value::Bytes(Arc::from(text.as_bytes().to_vec())))
+            }
+            BuiltinValue::Method(BuiltinMethod::StringStartsWith { receiver }) => {
+                self.require_no_kwargs("string.starts_with", kwargs)?;
+                self.check_arity("string.starts_with", args, 1)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing string.starts_with receiver",
+                    )?);
+                let Value::String(receiver) = receiver else {
+                    return Err(self.type_error("string.starts_with receiver must be String"));
+                };
+                let prefix = self
+                    .materialize_value_deep(args[0].clone(), "forcing string.starts_with prefix")?;
+                let prefix = self.stringify_scalar(&prefix)?;
+                self.finish_obligated_result(
+                    Ok(Value::Bool(receiver.starts_with(&prefix))),
+                    obligations,
+                )
+            }
+            BuiltinValue::Method(BuiltinMethod::StringContains { receiver }) => {
+                self.require_no_kwargs("string.contains", kwargs)?;
+                self.check_arity("string.contains", args, 1)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing string.contains receiver",
+                    )?);
+                let Value::String(receiver) = receiver else {
+                    return Err(self.type_error("string.contains receiver must be String"));
+                };
+                let needle =
+                    self.materialize_value_deep(args[0].clone(), "forcing string.contains needle")?;
+                let needle = self.stringify_scalar(&needle)?;
+                self.finish_obligated_result(
+                    Ok(Value::Bool(receiver.contains(&needle))),
+                    obligations,
+                )
+            }
+            BuiltinValue::Method(BuiltinMethod::StringSplit { receiver }) => {
+                self.require_no_kwargs("string.split", kwargs)?;
+                self.check_arity("string.split", args, 1)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing string.split receiver",
+                    )?);
+                let Value::String(receiver) = receiver else {
+                    return Err(self.type_error("string.split receiver must be String"));
+                };
+                let sep =
+                    self.materialize_value_deep(args[0].clone(), "forcing string.split separator")?;
+                let sep = self.stringify_scalar(&sep)?;
+                let items = receiver
+                    .split(&sep)
+                    .map(|item| Value::String(Arc::from(item)))
+                    .collect::<Vec<_>>();
+                self.finish_obligated_result(Ok(Value::Array(Arc::from(items))), obligations)
+            }
+            BuiltinValue::Method(BuiltinMethod::StringLines { receiver }) => {
+                self.require_no_kwargs("string.lines", kwargs)?;
+                self.check_arity("string.lines", args, 0)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing string.lines receiver",
+                    )?);
+                let Value::String(receiver) = receiver else {
+                    return Err(self.type_error("string.lines receiver must be String"));
+                };
+                let items = receiver
+                    .lines()
+                    .map(|line| Value::String(Arc::from(line)))
+                    .collect::<Vec<_>>();
+                self.finish_obligated_result(Ok(Value::Array(Arc::from(items))), obligations)
+            }
+            BuiltinValue::Method(BuiltinMethod::StringTrim { receiver }) => {
+                self.require_no_kwargs("string.trim", kwargs)?;
+                self.check_arity("string.trim", args, 0)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing string.trim receiver",
+                    )?);
+                let Value::String(receiver) = receiver else {
+                    return Err(self.type_error("string.trim receiver must be String"));
+                };
+                self.finish_obligated_result(
+                    Ok(Value::String(Arc::from(receiver.trim()))),
+                    obligations,
+                )
+            }
+            BuiltinValue::Method(BuiltinMethod::StringToLower { receiver }) => {
+                self.require_no_kwargs("string.to_lower", kwargs)?;
+                self.check_arity("string.to_lower", args, 0)?;
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_value_shallow(
+                        receiver.as_ref().clone(),
+                        "forcing string.to_lower receiver",
+                    )?);
+                let Value::String(receiver) = receiver else {
+                    return Err(self.type_error("string.to_lower receiver must be String"));
+                };
+                self.finish_obligated_result(
+                    Ok(Value::String(Arc::from(receiver.to_lowercase()))),
+                    obligations,
+                )
             }
             BuiltinValue::Method(BuiltinMethod::TreeOf) => {
                 self.require_no_kwargs("Tree.of", kwargs)?;
@@ -4349,6 +4801,28 @@ impl Engine {
         }
     }
 
+    fn extend_map_with_spread(
+        &self,
+        entries: &mut Vec<(Value, Value)>,
+        spread_value: Value,
+    ) -> Result<(), PoisonError> {
+        let (spread_value, obligations) = self.split_obligations(spread_value);
+        let Value::Map(map) = spread_value else {
+            return Err(self.type_error(&format!(
+                "map spread requires Map, got {}",
+                spread_value.type_name()
+            )));
+        };
+
+        entries.extend(map.entries.iter().cloned().map(|(key, value)| {
+            (
+                self.attach_obligations(key, obligations.clone()),
+                self.attach_obligations(value, obligations.clone()),
+            )
+        }));
+        Ok(())
+    }
+
     fn bind_pattern_into(
         &self,
         pattern: &instr::Pattern,
@@ -4530,9 +5004,10 @@ impl Engine {
                 }
                 Ok(())
             }
-            TreeValue::Store(root) => Err(self.internal_error(&format!(
-                "cannot spread store-backed tree {root} without an external store resolver"
-            ))),
+            TreeValue::Store(_) => {
+                let tree = self.hydrate_store_tree(tree, "spreading store-backed tree")?;
+                self.collect_tree_leaf_suffixes(&tree, prefix, suffixes)
+            }
         }
     }
 
@@ -4721,10 +5196,10 @@ impl Engine {
                     ))
                 })
             }
-            BlobValue::Store { blob_ref, .. } => Err(self.internal_error(&format!(
-                "cannot materialize store-backed blob {:?} without an external store resolver",
-                blob_ref
-            ))),
+            BlobValue::Store { .. } => {
+                let blob = self.hydrate_store_blob(blob, "materializing store-backed blob")?;
+                self.write_blob_to_path(&blob, destination)
+            }
         }
     }
 
@@ -4742,9 +5217,10 @@ impl Engine {
                 Ok(())
             }
             TreeValue::FsDir(path) => self.copy_dir_recursive(path, destination),
-            TreeValue::Store(root) => Err(self.internal_error(&format!(
-                "cannot materialize store-backed tree {root} without an external store resolver"
-            ))),
+            TreeValue::Store(_) => {
+                let tree = self.hydrate_store_tree(tree, "materializing store-backed tree")?;
+                self.write_tree_to_path(&tree, destination)
+            }
         }
     }
 
@@ -5082,9 +5558,10 @@ impl Engine {
                     path: full_path,
                 }))
             }
-            TreeValue::Store(root) => Err(self.internal_error(&format!(
-                "cannot read store-backed tree {root} without an external store resolver"
-            ))),
+            TreeValue::Store(_) => {
+                let tree = self.hydrate_store_tree(tree, "reading store-backed tree file")?;
+                self.tree_file(&tree, path)
+            }
         }
     }
 
@@ -5132,9 +5609,10 @@ impl Engine {
                 }
                 Ok(Value::Tree(TreeValue::FsDir(full_path)))
             }
-            TreeValue::Store(root) => Err(self.internal_error(&format!(
-                "cannot read store-backed tree {root} without an external store resolver"
-            ))),
+            TreeValue::Store(_) => {
+                let tree = self.hydrate_store_tree(tree, "reading store-backed subtree")?;
+                self.tree_subtree(&tree, path)
+            }
         }
     }
 
@@ -5277,9 +5755,10 @@ impl Engine {
                 }
                 Ok(entries)
             }
-            TreeValue::Store(root) => Err(self.internal_error(&format!(
-                "cannot read store-backed tree {root} without an external store resolver"
-            ))),
+            TreeValue::Store(_) => {
+                let tree = self.hydrate_store_tree(tree, "merging store-backed tree")?;
+                self.tree_entries(&tree)
+            }
         }
     }
 
@@ -5449,7 +5928,7 @@ impl Engine {
         )
     }
 
-    fn internal_error(&self, message: &str) -> PoisonError {
+    pub(crate) fn internal_error(&self, message: &str) -> PoisonError {
         PoisonError::new(
             PoisonKind::Internal,
             message,
@@ -5541,6 +6020,7 @@ impl BuildResult {
 fn capture_referenced_bindings(
     bindings: &HashMap<String, Value>,
     params: &[instr::Param],
+    keyword_params: &[instr::KeywordParam],
     body: &instr::Block,
 ) -> Arc<[(Arc<str>, Value)]> {
     let mut visible_locals = params
@@ -5548,6 +6028,12 @@ fn capture_referenced_bindings(
         .map(|param| param.name.clone())
         .collect::<HashSet<_>>();
     let mut captured = BTreeSet::new();
+    collect_keyword_param_capture_names(
+        keyword_params,
+        &mut visible_locals,
+        bindings,
+        &mut captured,
+    );
     collect_block_capture_names(body, &mut visible_locals, bindings, &mut captured);
     Arc::from(
         captured
@@ -5560,6 +6046,20 @@ fn capture_referenced_bindings(
             })
             .collect::<Vec<_>>(),
     )
+}
+
+fn collect_keyword_param_capture_names(
+    keyword_params: &[instr::KeywordParam],
+    visible_locals: &mut HashSet<String>,
+    bindings: &HashMap<String, Value>,
+    captured: &mut BTreeSet<String>,
+) {
+    for param in keyword_params {
+        if let Some(default) = &param.default {
+            collect_expr_capture_names(default, visible_locals, bindings, captured);
+        }
+        visible_locals.insert(param.name.clone());
+    }
 }
 
 fn collect_block_capture_names(
@@ -5589,6 +6089,12 @@ fn collect_block_capture_names(
                 for param in &def.params {
                     fn_scope.insert(param.name.clone());
                 }
+                collect_keyword_param_capture_names(
+                    &def.keyword_params,
+                    &mut fn_scope,
+                    bindings,
+                    captured,
+                );
                 collect_block_capture_names(&def.body, &mut fn_scope, bindings, captured);
             }
             instr::Stmt::StructDecl(decl) => {
@@ -5654,6 +6160,12 @@ fn collect_expr_capture_names(
             for param in &def.params {
                 closure_scope.insert(param.name.clone());
             }
+            collect_keyword_param_capture_names(
+                &def.keyword_params,
+                &mut closure_scope,
+                bindings,
+                captured,
+            );
             collect_block_capture_names(&def.body, &mut closure_scope, bindings, captured);
         }
         instr::Expr::Call {
@@ -5705,9 +6217,16 @@ fn collect_expr_capture_names(
             }
         }
         instr::Expr::Map(entries) => {
-            for (key, value) in entries {
-                collect_expr_capture_names(key, visible_locals, bindings, captured);
-                collect_expr_capture_names(value, visible_locals, bindings, captured);
+            for entry in entries {
+                match entry {
+                    instr::MapItem::Entry { key, value } => {
+                        collect_expr_capture_names(key, visible_locals, bindings, captured);
+                        collect_expr_capture_names(value, visible_locals, bindings, captured);
+                    }
+                    instr::MapItem::Spread(expr) => {
+                        collect_expr_capture_names(expr, visible_locals, bindings, captured);
+                    }
+                }
             }
         }
         instr::Expr::Field { receiver, .. } => {
@@ -5752,6 +6271,19 @@ fn write_fn_def_repr(out: &mut String, def: &instr::FnDef) {
             out.push(',');
         }
         out.push_str(&param.name);
+    }
+    if !def.keyword_params.is_empty() {
+        out.push(';');
+        for (index, param) in def.keyword_params.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str(&param.name);
+            if let Some(default) = &param.default {
+                out.push('=');
+                write_expr_repr(out, default);
+            }
+        }
     }
     out.push(')');
     write_block_repr(out, &def.body);
@@ -5946,13 +6478,21 @@ fn write_expr_repr(out: &mut String, expr: &instr::Expr) {
         instr::Expr::Map(entries) => {
             out.push_str("map(");
             out.push('[');
-            for (index, (key, value)) in entries.iter().enumerate() {
+            for (index, entry) in entries.iter().enumerate() {
                 if index > 0 {
                     out.push(',');
                 }
-                write_expr_repr(out, key);
-                out.push_str("=>");
-                write_expr_repr(out, value);
+                match entry {
+                    instr::MapItem::Entry { key, value } => {
+                        write_expr_repr(out, key);
+                        out.push_str("=>");
+                        write_expr_repr(out, value);
+                    }
+                    instr::MapItem::Spread(expr) => {
+                        out.push_str("..");
+                        write_expr_repr(out, expr);
+                    }
+                }
             }
             out.push_str("])");
         }
@@ -6381,6 +6921,12 @@ fn collect_global_callee_names(
         .map(|param| param.name.clone())
         .collect::<HashSet<_>>();
     let mut deps = BTreeSet::new();
+    collect_keyword_param_callee_names(
+        &function.keyword_params,
+        &mut visible_locals,
+        top_level_names,
+        &mut deps,
+    );
     collect_block_callee_names(
         &function.body,
         &mut visible_locals,
@@ -6388,6 +6934,20 @@ fn collect_global_callee_names(
         &mut deps,
     );
     deps
+}
+
+fn collect_keyword_param_callee_names(
+    keyword_params: &[instr::KeywordParam],
+    visible_locals: &mut HashSet<String>,
+    top_level_names: &HashSet<String>,
+    deps: &mut BTreeSet<String>,
+) {
+    for param in keyword_params {
+        if let Some(default) = &param.default {
+            collect_expr_callee_names(default, visible_locals, top_level_names, deps);
+        }
+        visible_locals.insert(param.name.clone());
+    }
 }
 
 fn collect_block_callee_names(
@@ -6417,6 +6977,12 @@ fn collect_block_callee_names(
                 for param in &def.params {
                     fn_scope.insert(param.name.clone());
                 }
+                collect_keyword_param_callee_names(
+                    &def.keyword_params,
+                    &mut fn_scope,
+                    top_level_names,
+                    deps,
+                );
                 collect_block_callee_names(&def.body, &mut fn_scope, top_level_names, deps);
             }
             instr::Stmt::StructDecl(_) => {}
@@ -6476,6 +7042,12 @@ fn collect_expr_callee_names(
             for param in &def.params {
                 closure_scope.insert(param.name.clone());
             }
+            collect_keyword_param_callee_names(
+                &def.keyword_params,
+                &mut closure_scope,
+                top_level_names,
+                deps,
+            );
             collect_block_callee_names(&def.body, &mut closure_scope, top_level_names, deps);
         }
         instr::Expr::Call {
@@ -6533,9 +7105,16 @@ fn collect_expr_callee_names(
             }
         }
         instr::Expr::Map(entries) => {
-            for (key, value) in entries {
-                collect_expr_callee_names(key, visible_locals, top_level_names, deps);
-                collect_expr_callee_names(value, visible_locals, top_level_names, deps);
+            for entry in entries {
+                match entry {
+                    instr::MapItem::Entry { key, value } => {
+                        collect_expr_callee_names(key, visible_locals, top_level_names, deps);
+                        collect_expr_callee_names(value, visible_locals, top_level_names, deps);
+                    }
+                    instr::MapItem::Spread(expr) => {
+                        collect_expr_callee_names(expr, visible_locals, top_level_names, deps);
+                    }
+                }
             }
         }
         instr::Expr::Field { receiver, .. } => {

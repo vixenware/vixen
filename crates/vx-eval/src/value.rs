@@ -184,6 +184,12 @@ pub enum BuiltinFunction {
 
 #[derive(Debug, Clone)]
 pub enum BuiltinMethod {
+    StringStartsWith { receiver: Box<Value> },
+    StringContains { receiver: Box<Value> },
+    StringSplit { receiver: Box<Value> },
+    StringLines { receiver: Box<Value> },
+    StringTrim { receiver: Box<Value> },
+    StringToLower { receiver: Box<Value> },
     BlobFromString,
     BytesFromString,
     TreeOf,
@@ -593,7 +599,13 @@ impl BuiltinValue {
             | BuiltinValue::Method(BuiltinMethod::TreeOf)
             | BuiltinValue::Method(BuiltinMethod::TreeEmpty)
             | BuiltinValue::Method(BuiltinMethod::TreeFromPath) => {}
-            BuiltinValue::Method(BuiltinMethod::ArrayMap { receiver })
+            BuiltinValue::Method(BuiltinMethod::StringStartsWith { receiver })
+            | BuiltinValue::Method(BuiltinMethod::StringContains { receiver })
+            | BuiltinValue::Method(BuiltinMethod::StringSplit { receiver })
+            | BuiltinValue::Method(BuiltinMethod::StringLines { receiver })
+            | BuiltinValue::Method(BuiltinMethod::StringTrim { receiver })
+            | BuiltinValue::Method(BuiltinMethod::StringToLower { receiver })
+            | BuiltinValue::Method(BuiltinMethod::ArrayMap { receiver })
             | BuiltinValue::Method(BuiltinMethod::ArrayToMap { receiver })
             | BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver })
             | BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver })
@@ -633,7 +645,13 @@ impl BuiltinValue {
             | BuiltinValue::Method(BuiltinMethod::TreeOf)
             | BuiltinValue::Method(BuiltinMethod::TreeEmpty)
             | BuiltinValue::Method(BuiltinMethod::TreeFromPath) => true,
-            BuiltinValue::Method(BuiltinMethod::ArrayMap { receiver })
+            BuiltinValue::Method(BuiltinMethod::StringStartsWith { receiver })
+            | BuiltinValue::Method(BuiltinMethod::StringContains { receiver })
+            | BuiltinValue::Method(BuiltinMethod::StringSplit { receiver })
+            | BuiltinValue::Method(BuiltinMethod::StringLines { receiver })
+            | BuiltinValue::Method(BuiltinMethod::StringTrim { receiver })
+            | BuiltinValue::Method(BuiltinMethod::StringToLower { receiver })
+            | BuiltinValue::Method(BuiltinMethod::ArrayMap { receiver })
             | BuiltinValue::Method(BuiltinMethod::ArrayToMap { receiver })
             | BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver })
             | BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver })
@@ -681,6 +699,24 @@ impl BuiltinValue {
                         .collect::<Vec<_>>()
                         .join(",")
                 ))
+            }
+            BuiltinValue::Method(BuiltinMethod::StringStartsWith { receiver }) => {
+                Some(format!("builtin:string.starts_with({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::StringContains { receiver }) => {
+                Some(format!("builtin:string.contains({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::StringSplit { receiver }) => {
+                Some(format!("builtin:string.split({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::StringLines { receiver }) => {
+                Some(format!("builtin:string.lines({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::StringTrim { receiver }) => {
+                Some(format!("builtin:string.trim({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::StringToLower { receiver }) => {
+                Some(format!("builtin:string.to_lower({})", receiver.key()?))
             }
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => {
                 Some("builtin:Blob.from_string".into())
@@ -969,6 +1005,30 @@ impl PartialEq for BuiltinMethod {
             | (BuiltinMethod::TreeEmpty, BuiltinMethod::TreeEmpty)
             | (BuiltinMethod::TreeFromPath, BuiltinMethod::TreeFromPath) => true,
             (
+                BuiltinMethod::StringStartsWith { receiver: left },
+                BuiltinMethod::StringStartsWith { receiver: right },
+            )
+            | (
+                BuiltinMethod::StringContains { receiver: left },
+                BuiltinMethod::StringContains { receiver: right },
+            )
+            | (
+                BuiltinMethod::StringSplit { receiver: left },
+                BuiltinMethod::StringSplit { receiver: right },
+            )
+            | (
+                BuiltinMethod::StringLines { receiver: left },
+                BuiltinMethod::StringLines { receiver: right },
+            )
+            | (
+                BuiltinMethod::StringTrim { receiver: left },
+                BuiltinMethod::StringTrim { receiver: right },
+            )
+            | (
+                BuiltinMethod::StringToLower { receiver: left },
+                BuiltinMethod::StringToLower { receiver: right },
+            )
+            | (
                 BuiltinMethod::ArrayMap { receiver: left },
                 BuiltinMethod::ArrayMap { receiver: right },
             )
@@ -1128,6 +1188,24 @@ impl fmt::Display for BuiltinValue {
             }
             BuiltinValue::Function(BuiltinFunction::StructConstructor { type_name, .. }) => {
                 write!(f, "{type_name}")
+            }
+            BuiltinValue::Method(BuiltinMethod::StringStartsWith { .. }) => {
+                write!(f, "<bound string.starts_with>")
+            }
+            BuiltinValue::Method(BuiltinMethod::StringContains { .. }) => {
+                write!(f, "<bound string.contains>")
+            }
+            BuiltinValue::Method(BuiltinMethod::StringSplit { .. }) => {
+                write!(f, "<bound string.split>")
+            }
+            BuiltinValue::Method(BuiltinMethod::StringLines { .. }) => {
+                write!(f, "<bound string.lines>")
+            }
+            BuiltinValue::Method(BuiltinMethod::StringTrim { .. }) => {
+                write!(f, "<bound string.trim>")
+            }
+            BuiltinValue::Method(BuiltinMethod::StringToLower { .. }) => {
+                write!(f, "<bound string.to_lower>")
             }
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => write!(f, "Blob.from_string"),
             BuiltinValue::Method(BuiltinMethod::BytesFromString) => write!(f, "Bytes"),

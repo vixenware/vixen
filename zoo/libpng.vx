@@ -18,11 +18,11 @@
 // The one obvious primitive this sketch needs beyond what Vixen already has is
 // template-driven file generation (`render ...`).
 
-let zlib_url = "https://zlib.net/zlib-1.3.1.tar.xz";
-let zlib_digest = "sha256:<sha256>";
+let zlib_url = "https://zlib.net/fossils/zlib-1.3.1.tar.gz";
+let zlib_digest = "sha256:9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23";
 
 let libpng_url = "https://download.sourceforge.net/libpng/libpng-1.6.43.tar.xz";
-let libpng_digest = "sha256:<sha256>";
+let libpng_digest = "sha256:6a5ca0652392a2d7c9db2ae5b40210843c0bbc081cbd410825ab00cc59f14a6c";
 
 let zlib_sources = [
   @adler32.c, @compress.c, @crc32.c, @deflate.c,
@@ -81,9 +81,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     fn to_string(self) -> String self.path;
   }
 
-  // In a real build this target triple would come from args/env/project data.
-  let target = "linux-x86_64";
-  let class = executor_class(target);
+  let class = executor_class("default");
 
   let tools =
     discover(class, (host) =>
@@ -93,6 +91,32 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     );
 
   let { cc, ar } = tools;
+
+  let target_triple =
+    exec [cc, "-dumpmachine"] where {
+      observer: (proc, _vfs) => (
+        if proc.exit_code != 0 (
+          fail `process failed`
+        ) else (
+          proc.stdout.collect().utf8().trim()
+        )
+      ),
+    };
+
+  let target =
+    if target_triple.contains("aarch64") || target_triple.contains("arm64") (
+      "aarch64"
+    ) else if target_triple.contains("x86_64") || target_triple.contains("amd64") (
+      "x86_64"
+    ) else if target_triple.contains("ppc64le") || target_triple.contains("powerpc64le") (
+      "ppc64le"
+    ) else if target_triple.contains("mips64el") (
+      "mips64el"
+    ) else if target_triple.contains("loongarch64") (
+      "loongarch64"
+    ) else (
+      "generic"
+    );
 
   let cexec = partial exec where {
     observer: (proc, vfs) => (
@@ -142,9 +166,8 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
           @(src/{file}),
           "-o",
           @(out/{file}.o),
-          "-I", @src,
-          ..includes.map ["-I", $].flatten(),
-          ..defines.map(`-D${$}`),
+          ..includes.map((include) => ["-I", include]).flatten(),
+          ..defines.map((define) => `-D${define}`),
           ..common_cflags,
           ..flags,
         ] where {
@@ -160,33 +183,31 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
 
   fn shared_library(name: Path, objects: Tree) where {
     link_flags: Array[ExecInput] = [],
+    mounts: Map[Path, TreeEntry] = {},
   } -> Tree (
-    cexec [cc, "-shared", "-o", @(out/{name}), ..objects, ..link_flags]
+    cexec [cc, "-shared", "-o", @(out/{name}), ..objects, ..link_flags] where {
+      mounts,
+    }
   );
 
   let zlib_src = acquire(zlib_url) where {
     digest: zlib_digest,
-    extract: "tar.xz",
+    extract: "tar.gz",
   };
 
   let z_have_unistd_h = cc_probe(Blob("#include <unistd.h>\nint main(void) { return 0; }\n"));
   let have_fseeko = cc_probe(Blob("#include <stdio.h>\nint main(void) { return (void*)fseeko ? 0 : 0; }\n"));
   let have_off64_t = cc_probe(Blob("#include <sys/types.h>\noff64_t x; int main(void) { return 0; }\n"));
-
-  // This is the real missing primitive: template-driven file generation.
-  let zconf_h =
-    render @zoo/templates/zconf.h where {
-      bindings: {
-        Z_HAVE_UNISTD_H: z_have_unistd_h,
-        HAVE_FSEEKO: have_fseeko,
-        HAVE_OFF64_T: have_off64_t,
-      },
-    };
+  let zlib_defines = [
+    ..if z_have_unistd_h (["Z_HAVE_UNISTD_H"]) else ([]),
+    ..if !have_fseeko (["NO_FSEEKO"]) else ([]),
+    ..if have_off64_t (["_LARGEFILE64_SOURCE=1"]) else ([]),
+  ];
 
   let zlib_objects =
     compile_objects(zlib_src, zlib_sources) where {
-      generated: { @zconf.h: zconf_h },
-      includes: [@gen],
+      includes: [@src],
+      defines: zlib_defines,
     };
 
   let zlib_static = static_archive(@lib/libz.a, zlib_objects);
@@ -194,7 +215,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
 
   let zlib_install = Tree {
     @include/zlib.h: zlib_src.file @zlib.h,
-    @include/zconf.h: zconf_h,
+    @include/zconf.h: zlib_src.file @zconf.h,
     @lib/libz.a: zlib_static.file @lib/libz.a,
     @lib/libz.so: zlib_shared.file @lib/libz.so,
   };
@@ -212,37 +233,25 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
 
   let png_arch_sources =
     match target (
-      "linux-aarch64" => libpng_arm_sources,
-      "linux-x86_64" => libpng_intel_sources,
-      "linux-ppc64le" => libpng_powerpc_sources,
-      "linux-mips64el" => libpng_mips_msa_sources ++ libpng_mips_mmi_sources,
-      "linux-loongarch64" => libpng_loongarch_sources,
+      "aarch64" => libpng_arm_sources,
+      "x86_64" => libpng_intel_sources,
+      "ppc64le" => libpng_powerpc_sources,
+      "mips64el" => libpng_mips_msa_sources ++ libpng_mips_mmi_sources,
+      "loongarch64" => libpng_loongarch_sources,
       _ => [],
     );
 
   let png_arch_defines =
     match target (
-      "linux-aarch64" => ["PNG_ARM_NEON_OPT=2"],
-      "linux-x86_64" => ["PNG_INTEL_SSE_OPT=1"],
-      "linux-ppc64le" => ["PNG_POWERPC_VSX_OPT=2"],
-      "linux-mips64el" => ["PNG_MIPS_MSA_OPT=2", "PNG_MIPS_MMI_OPT=1"],
-      "linux-loongarch64" => ["PNG_LOONGARCH_LSX_OPT=1"],
+      "aarch64" => ["PNG_ARM_NEON_OPT=2"],
+      "x86_64" => ["PNG_INTEL_SSE_OPT=1"],
+      "ppc64le" => ["PNG_POWERPC_VSX_OPT=2"],
+      "mips64el" => ["PNG_MIPS_MSA_OPT=2", "PNG_MIPS_MMI_OPT=1"],
+      "loongarch64" => ["PNG_LOONGARCH_LSX_OPT=1"],
       _ => [],
     );
 
-  let pnglibconf_h =
-    render @zoo/templates/pnglibconf.h where {
-      bindings: {
-        TARGET: target,
-        PNG_DEBUG: false,
-        PNG_SHARED: true,
-        PNG_STATIC: true,
-        PNG_TESTS: false,
-        PNG_TOOLS: false,
-        PNG_HARDWARE_OPTIMIZATIONS: true,
-        PNG_ARCH_DEFINES: png_arch_defines,
-      },
-    };
+  let pnglibconf_h = libpng_src.file @scripts/pnglibconf.h.prebuilt;
 
   let libpng_objects =
     compile_objects(libpng_src, libpng_core_sources ++ png_arch_sources) where {
@@ -259,6 +268,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
         ..if has_ld_version_script (["-Wl,--version-script=@src/libpng.vers"]) else ([]),
         @deps/zlib/lib/libz.so,
       ],
+      mounts: { @deps/zlib: zlib_install },
     };
 
   let libpng_install = Tree {

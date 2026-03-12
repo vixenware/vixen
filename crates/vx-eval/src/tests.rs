@@ -18,7 +18,7 @@ use crate::exec::{AcquireRequest, ExecArgValue, RenderRequest};
 use crate::instr::{Block, FnDef};
 use crate::lower::{lower_source_file, lower_source_file_with_source_id};
 use crate::node::{NodeId, NodeJob, TemplateKind, TemplatePartValue};
-use crate::poison::PoisonKind;
+use crate::poison::{PoisonError, PoisonKind};
 use crate::transport::TransportValue;
 use crate::value::{
     BlobValue, BuiltinMethod, BuiltinValue, DiscoveredValue, ExecPathValue, FunctionValue,
@@ -105,6 +105,14 @@ fn collect_tree_leaf_paths(value: &Value) -> Vec<String> {
     out
 }
 
+fn inline_tree_with_blob(path: &str, contents: &str) -> Value {
+    let mut value = Value::Blob(BlobValue::from_string(contents));
+    for segment in path.split('/').rev() {
+        value = Value::Tree(TreeValue::Inline(Arc::from([(Arc::from(segment), value)])));
+    }
+    value
+}
+
 fn treeish_type_name(value: &Value) -> String {
     match value {
         Value::Tree(_) => "Tree".into(),
@@ -157,6 +165,401 @@ fn array_concat() {
             Value::U64(4),
         ]))
     );
+}
+
+#[test]
+fn string_methods_work() {
+    let value = eval(
+        r#"
+fn main() {
+  {
+    "starts": "arm64-apple-darwin".starts_with("arm64"),
+    "contains": "x86_64-unknown-linux-gnu".contains("linux"),
+    "split": "a,b,c".split(","),
+    "lines": "a\nb\n".lines(),
+    "trim": "  hi \n".trim(),
+    "lower": "PNG_ARM_NEON".to_lower(),
+  }
+}
+"#,
+        "main",
+    )
+    .unwrap();
+
+    let Value::Map(map) = value else {
+        panic!("expected map result");
+    };
+
+    let get = |name: &str| {
+        map.entries
+            .iter()
+            .find_map(|(key, value)| match key {
+                Value::String(key) if key.as_ref() == name => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing key {name}"))
+    };
+
+    assert_eq!(get("starts"), Value::Bool(true));
+    assert_eq!(get("contains"), Value::Bool(true));
+    assert_eq!(
+        get("split"),
+        Value::Array(Arc::from([
+            Value::String(Arc::from("a")),
+            Value::String(Arc::from("b")),
+            Value::String(Arc::from("c")),
+        ]))
+    );
+    assert_eq!(
+        get("lines"),
+        Value::Array(Arc::from([
+            Value::String(Arc::from("a")),
+            Value::String(Arc::from("b")),
+        ]))
+    );
+    assert_eq!(get("trim"), Value::String(Arc::from("hi")));
+    assert_eq!(get("lower"), Value::String(Arc::from("png_arm_neon")));
+}
+
+#[test]
+fn pending_string_contains_resolves() {
+    let engine = engine(indoc! {r#"
+        fn main() {
+          let target =
+            exec ["tool", "-dumpmachine"] where {
+              observer: (proc, _vfs) => proc.stdout.collect().utf8().trim(),
+            };
+          if target.contains("x86_64") (
+            "x86_64"
+          ) else (
+            "other"
+          )
+        }
+    "#})
+    .with_exec_handler(Arc::new(|request| {
+        assert_eq!(
+            request.args.as_slice(),
+            &[
+                ExecArgValue::Literal("tool".to_string()),
+                ExecArgValue::Literal("-dumpmachine".to_string()),
+            ]
+        );
+        Ok(Value::String(Arc::from("x86_64-unknown-linux-gnu")))
+    }));
+
+    assert_eq!(
+        engine.call("main", vec![]).unwrap(),
+        Value::String(Arc::from("x86_64"))
+    );
+}
+
+#[test]
+fn pending_array_map_receiver_resolves() {
+    let engine = engine(indoc! {r#"
+        fn main() {
+          let target =
+            exec ["tool", "-dumpmachine"] where {
+              observer: (proc, _vfs) => proc.stdout.collect().utf8().trim(),
+            };
+          let defines =
+            if target.contains("x86_64") (
+              ["PNG_INTEL_SSE_OPT=1"]
+            ) else (
+              []
+            );
+          defines.map((define) => `-D${define}`)
+        }
+    "#})
+    .with_exec_handler(Arc::new(|request| {
+        assert_eq!(
+            request.args.as_slice(),
+            &[
+                ExecArgValue::Literal("tool".to_string()),
+                ExecArgValue::Literal("-dumpmachine".to_string()),
+            ]
+        );
+        Ok(Value::String(Arc::from("x86_64-unknown-linux-gnu")))
+    }));
+
+    assert_eq!(
+        engine.call("main", vec![]).unwrap(),
+        Value::Array(Arc::from([Value::String(Arc::from(
+            "-DPNG_INTEL_SSE_OPT=1",
+        ))]))
+    );
+}
+
+#[test]
+fn pending_kwarg_array_map_receiver_resolves() {
+    let engine = engine(indoc! {r#"
+        fn render_defines() where { defines: Array[String] = [] } {
+          defines.map((define) => `-D${define}`)
+        }
+
+        fn main() {
+          let target =
+            exec ["tool", "-dumpmachine"] where {
+              observer: (proc, _vfs) => proc.stdout.collect().utf8().trim(),
+            };
+          let defines =
+            if target.contains("x86_64") (
+              ["PNG_INTEL_SSE_OPT=1"]
+            ) else (
+              []
+            );
+          render_defines() where { defines }
+        }
+    "#})
+    .with_exec_handler(Arc::new(|request| {
+        assert_eq!(
+            request.args.as_slice(),
+            &[
+                ExecArgValue::Literal("tool".to_string()),
+                ExecArgValue::Literal("-dumpmachine".to_string()),
+            ]
+        );
+        Ok(Value::String(Arc::from("x86_64-unknown-linux-gnu")))
+    }));
+
+    assert_eq!(
+        engine.call("main", vec![]).unwrap(),
+        Value::Array(Arc::from([Value::String(Arc::from(
+            "-DPNG_INTEL_SSE_OPT=1",
+        ))]))
+    );
+}
+
+#[test]
+fn pending_kwarg_array_map_spread_into_exec_resolves() {
+    let engine = engine(indoc! {r#"
+        fn observe(_proc: Process, tree: Tree) {
+          tree
+        }
+
+        fn compile() where { defines: Array[String] = [] } {
+          let cexec = partial exec where { observer: observe };
+          cexec [
+            "tool",
+            ..defines.map((define) => `-D${define}`),
+            "-o",
+            @out/result,
+          ]
+        }
+
+        fn main() {
+          let target_triple =
+            exec ["tool", "-dumpmachine"] where {
+              observer: (proc, _vfs) => proc.stdout.collect().utf8().trim(),
+            };
+          let target =
+            if target_triple.contains("x86_64") (
+              "x86_64"
+            ) else (
+              "generic"
+            );
+          let defines =
+            match target (
+              "x86_64" => ["PNG_INTEL_SSE_OPT=1"],
+              _ => [],
+            );
+          compile() where { defines }
+        }
+    "#})
+    .with_exec_handler(Arc::new(|request| {
+        if matches!(
+            request.args.as_slice(),
+            [
+                ExecArgValue::Literal(program),
+                ExecArgValue::Literal(flag),
+            ] if program == "tool" && flag == "-dumpmachine"
+        ) {
+            return Ok(Value::String(Arc::from("x86_64-unknown-linux-gnu")));
+        }
+
+        Ok(inline_tree_with_blob("out/result", "artifact"))
+    }));
+
+    assert_eq!(
+        collect_tree_leaf_paths(&engine.call("main", vec![]).unwrap()),
+        vec!["out/result".to_string()]
+    );
+}
+
+#[test]
+fn pending_kwarg_array_map_spread_shared_across_exec_callbacks_resolves() {
+    let engine = engine(indoc! {r#"
+        fn observe(_proc: Process, tree: Tree) {
+          tree
+        }
+
+        fn compile_all(files: Array[Path]) where { defines: Array[String] = [] } {
+          let cexec = partial exec where { observer: observe };
+          files
+            .map((file) =>
+              cexec [
+                "tool",
+                ..defines.map((define) => `-D${define}`),
+                "-c",
+                file,
+                "-o",
+                @(out/{file}.o),
+              ]
+            )
+            .merge()
+        }
+
+        fn main() {
+          let target_triple =
+            exec ["tool", "-dumpmachine"] where {
+              observer: (proc, _vfs) => proc.stdout.collect().utf8().trim(),
+            };
+          let target =
+            if target_triple.contains("x86_64") (
+              "x86_64"
+            ) else (
+              "generic"
+            );
+          let defines =
+            match target (
+              "x86_64" => ["PNG_INTEL_SSE_OPT=1"],
+              _ => [],
+            );
+          compile_all([@a.c, @b.c]) where { defines }
+        }
+    "#})
+    .with_exec_handler(Arc::new(|request| {
+        if matches!(
+            request.args.as_slice(),
+            [
+                ExecArgValue::Literal(program),
+                ExecArgValue::Literal(flag),
+            ] if program == "tool" && flag == "-dumpmachine"
+        ) {
+            return Ok(Value::String(Arc::from("x86_64-unknown-linux-gnu")));
+        }
+
+        let output = request
+            .args
+            .iter()
+            .zip(request.args.iter().skip(1))
+            .find_map(|(arg, next)| match (arg, next) {
+                (ExecArgValue::Literal(flag), ExecArgValue::Path(path)) if flag == "-o" => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+            .expect("expected -o output path");
+        let file = output
+            .as_str()
+            .rsplit('/')
+            .next()
+            .expect("output path should have a filename")
+            .to_string();
+        Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+            Arc::from("out"),
+            Value::Tree(TreeValue::Inline(Arc::from([(
+                Arc::from(file),
+                Value::Blob(BlobValue::from_string("ok")),
+            )]))),
+        )]))))
+    }));
+
+    assert_eq!(
+        collect_tree_leaf_paths(&engine.call("main", vec![]).unwrap()),
+        vec!["out/a.c.o".to_string(), "out/b.c.o".to_string()]
+    );
+}
+
+#[test]
+fn match_expression_selects_literal_arms() {
+    let source = r#"
+fn main(target: String) {
+  match target (
+    "linux-x86_64" => "intel",
+    _ => "generic",
+  )
+}
+"#;
+    let engine = engine(source);
+    assert_eq!(
+        engine
+            .call("main", vec![Value::String(Arc::from("linux-x86_64"))])
+            .unwrap(),
+        Value::String(Arc::from("intel"))
+    );
+    assert_eq!(
+        engine
+            .call("main", vec![Value::String(Arc::from("linux-riscv64"))])
+            .unwrap(),
+        Value::String(Arc::from("generic"))
+    );
+}
+
+#[test]
+fn match_expression_with_binding_pattern_returns_scrutinee() {
+    let source = r#"
+fn main(target: String) {
+  match target (
+    value => value,
+  )
+}
+"#;
+    let engine = engine(source);
+    let value = engine
+        .call("main", vec![Value::String(Arc::from("linux-x86_64"))])
+        .unwrap();
+    assert_eq!(value, Value::String(Arc::from("linux-x86_64")));
+}
+
+#[test]
+fn ordinary_functions_accept_keyword_args_via_where_records() {
+    let source = r#"
+fn cc_probe(source: String) where {
+  flags: Array[String] = [],
+  link: Bool = false,
+} {
+  if link (
+    [source] ++ flags ++ ["link"]
+  ) else (
+    [source] ++ flags ++ ["compile"]
+  )
+}
+
+fn main() {
+  let common = { flags: ["-Wall"] };
+  cc_probe("probe.c") where {
+    ..common,
+    link: true,
+  }
+}
+"#;
+    let value = eval(source, "main").unwrap();
+    assert_eq!(
+        value,
+        Value::Array(Arc::from([
+            Value::String(Arc::from("probe.c")),
+            Value::String(Arc::from("-Wall")),
+            Value::String(Arc::from("link")),
+        ]))
+    );
+}
+
+#[test]
+fn keyword_defaults_can_reference_prior_bindings() {
+    let source = r#"
+fn banner(name: String) where {
+  prefix: String = name,
+  suffix: String = `${prefix}!`,
+} {
+  `${prefix}:${suffix}`
+}
+
+fn main() {
+  banner("png")
+}
+"#;
+    let value = eval(source, "main").unwrap();
+    assert_eq!(value, Value::String(Arc::from("png:png!")));
 }
 
 #[test]
@@ -1022,6 +1425,603 @@ printf 'archive\n' > "$out"
 }
 
 #[test]
+fn libpng_sketch_zlib_archive_returns_tree_with_mocked_boundaries() {
+    let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/libpng.vx");
+    let source = fs::read_to_string(&sketch_path).expect("read libpng sketch");
+    let marker = "  let zlib_static = static_archive(@lib/libz.a, zlib_objects);\n";
+    let (prefix, _) = source
+        .split_once(marker)
+        .expect("libpng sketch should contain zlib archive marker");
+    let source = format!("{prefix}{marker}  zlib_static\n)\n");
+
+    let tempdir = TempDir::new().unwrap();
+    let workspace = tempdir.path();
+    let zlib_src_dir = workspace.join("mock-zlib");
+    fs::create_dir_all(&zlib_src_dir).unwrap();
+
+    let engine = engine(&source)
+        .with_acquire_handler(Arc::new({
+            let zlib_src_dir = zlib_src_dir.clone();
+            move |_request| {
+                Ok(Value::Tree(TreeValue::FsDir(PathValue::new(
+                    zlib_src_dir.to_string_lossy(),
+                ))))
+            }
+        }))
+        .with_render_handler(Arc::new(|_request| {
+            Ok(Value::Blob(BlobValue::from_string("generated header")))
+        }))
+        .with_discover_handler(Arc::new(|_request| {
+            Ok(Value::Map(MapValue {
+                entries: Arc::from([
+                    (
+                        Value::String(Arc::from("cc")),
+                        Value::String(Arc::from("/usr/bin/cc")),
+                    ),
+                    (
+                        Value::String(Arc::from("ar")),
+                        Value::String(Arc::from("/usr/bin/ar")),
+                    ),
+                ]),
+            }))
+        }))
+        .with_exec_handler(Arc::new(|request| {
+            if matches!(
+                request.args.as_slice(),
+                [ExecArgValue::Literal(program), ExecArgValue::Literal(flag)]
+                    if program == "/usr/bin/cc" && flag == "-dumpmachine"
+            ) {
+                return Ok(Value::String(Arc::from("x86_64-unknown-linux-gnu")));
+            }
+            let output_arg = request
+                .args
+                .windows(2)
+                .find_map(|window| match window {
+                    [ExecArgValue::Literal(flag), output] if flag == "-o" => Some(output.as_str()),
+                    _ => None,
+                })
+                .or_else(|| request.args.get(2).map(ExecArgValue::as_str))
+                .expect("mock exec should receive an output path");
+            if output_arg == "out/probe" || output_arg == "out/probe.o" {
+                return Ok(Value::Bool(true));
+            }
+            let relative = output_arg.strip_prefix("out/").unwrap_or(output_arg);
+            Ok(inline_tree_with_blob(relative, "artifact"))
+        }));
+
+    let value = engine
+        .call(
+            "build",
+            vec![
+                Value::Path(PathValue::new(workspace.to_string_lossy())),
+                Value::Array(Arc::from([])),
+                Value::Map(MapValue {
+                    entries: Arc::from([]),
+                }),
+            ],
+        )
+        .unwrap();
+
+    assert!(
+        matches!(value, Value::Tree(_)),
+        "expected Tree result, got {value:?}"
+    );
+    assert_eq!(
+        collect_tree_leaf_paths(&value),
+        vec!["lib/libz.a".to_string()]
+    );
+}
+
+#[test]
+fn libpng_sketch_full_build_returns_tree_with_mocked_boundaries() {
+    let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/libpng.vx");
+    let source = fs::read_to_string(&sketch_path).expect("read libpng sketch");
+
+    let tempdir = TempDir::new().unwrap();
+    let workspace = tempdir.path();
+    let zlib_src_dir = workspace.join("mock-zlib");
+    let libpng_src_dir = workspace.join("mock-libpng");
+    fs::create_dir_all(&zlib_src_dir).unwrap();
+    fs::create_dir_all(&libpng_src_dir).unwrap();
+    fs::create_dir_all(libpng_src_dir.join("scripts")).unwrap();
+    fs::write(zlib_src_dir.join("zlib.h"), "/* mock zlib.h */\n").unwrap();
+    fs::write(zlib_src_dir.join("zconf.h"), "/* mock zconf.h */\n").unwrap();
+    fs::write(libpng_src_dir.join("png.h"), "/* mock png.h */\n").unwrap();
+    fs::write(libpng_src_dir.join("pngconf.h"), "/* mock pngconf.h */\n").unwrap();
+    fs::write(
+        libpng_src_dir.join("scripts/pnglibconf.h.prebuilt"),
+        "/* mock pnglibconf.h */\n",
+    )
+    .unwrap();
+    fs::write(libpng_src_dir.join("libpng.vers"), "{ global: *; };\n").unwrap();
+
+    let acquire_calls = Arc::new(Mutex::new(0usize));
+    let zlib_root = NodeHash(Blake3Hash::from_bytes(b"mock-zlib-root"));
+    let libpng_root = NodeHash(Blake3Hash::from_bytes(b"mock-libpng-root"));
+    let engine = engine(&source)
+        .with_store_hydration_handler(Arc::new({
+            let zlib_src_dir = zlib_src_dir.clone();
+            let libpng_src_dir = libpng_src_dir.clone();
+            move |request| match request.value {
+                Value::Tree(TreeValue::Store(root)) if root == zlib_root => Ok(Value::Tree(
+                    TreeValue::FsDir(PathValue::new(zlib_src_dir.to_string_lossy())),
+                )),
+                Value::Tree(TreeValue::Store(root)) if root == libpng_root => Ok(Value::Tree(
+                    TreeValue::FsDir(PathValue::new(libpng_src_dir.to_string_lossy())),
+                )),
+                other => panic!("unexpected hydration request: {other:?}"),
+            }
+        }))
+        .with_acquire_handler(Arc::new({
+            let acquire_calls = Arc::clone(&acquire_calls);
+            move |_request| {
+                let mut calls = acquire_calls.lock().unwrap();
+                let value = match *calls {
+                    0 => Value::Tree(TreeValue::Store(zlib_root)),
+                    1 => Value::Tree(TreeValue::Store(libpng_root)),
+                    other => panic!("unexpected acquire call #{other}"),
+                };
+                *calls += 1;
+                Ok(value)
+            }
+        }))
+        .with_render_handler(Arc::new(|_request| {
+            Ok(Value::Blob(BlobValue::from_string("generated header")))
+        }))
+        .with_discover_handler(Arc::new(|_request| {
+            Ok(Value::Map(MapValue {
+                entries: Arc::from([
+                    (
+                        Value::String(Arc::from("cc")),
+                        Value::String(Arc::from("/usr/bin/cc")),
+                    ),
+                    (
+                        Value::String(Arc::from("ar")),
+                        Value::String(Arc::from("/usr/bin/ar")),
+                    ),
+                ]),
+            }))
+        }))
+        .with_exec_handler(Arc::new(|request| {
+            if matches!(
+                request.args.as_slice(),
+                [ExecArgValue::Literal(program), ExecArgValue::Literal(flag)]
+                    if program == "/usr/bin/cc" && flag == "-dumpmachine"
+            ) {
+                return Ok(Value::String(Arc::from("x86_64-unknown-linux-gnu")));
+            }
+            let output_arg = request
+                .args
+                .windows(2)
+                .find_map(|window| match window {
+                    [ExecArgValue::Literal(flag), output] if flag == "-o" => Some(output.as_str()),
+                    _ => None,
+                })
+                .or_else(|| request.args.get(2).map(ExecArgValue::as_str))
+                .expect("mock exec should receive an output path");
+            if output_arg == "out/probe" || output_arg == "out/probe.o" {
+                return Ok(Value::Bool(true));
+            }
+            let relative = output_arg.strip_prefix("out/").unwrap_or(output_arg);
+            Ok(inline_tree_with_blob(relative, "artifact"))
+        }));
+
+    let value = engine
+        .call(
+            "build",
+            vec![
+                Value::Path(PathValue::new(workspace.to_string_lossy())),
+                Value::Array(Arc::from([])),
+                Value::Map(MapValue {
+                    entries: Arc::from([]),
+                }),
+            ],
+        )
+        .unwrap();
+
+    assert!(
+        matches!(value, Value::Tree(_)),
+        "expected Tree result, got {value:?}"
+    );
+    assert_eq!(
+        collect_tree_leaf_paths(&value),
+        vec![
+            "libpng/include/png.h".to_string(),
+            "libpng/include/pngconf.h".to_string(),
+            "libpng/include/pnglibconf.h".to_string(),
+            "libpng/lib/libpng16.a".to_string(),
+            "libpng/lib/libpng16.so".to_string(),
+            "zlib/include/zconf.h".to_string(),
+            "zlib/include/zlib.h".to_string(),
+            "zlib/lib/libz.a".to_string(),
+            "zlib/lib/libz.so".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn libpng_sketch_full_build_with_discovered_tools_returns_tree_with_mocked_boundaries() {
+    let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/libpng.vx");
+    let source = fs::read_to_string(&sketch_path).expect("read libpng sketch");
+
+    let tempdir = TempDir::new().unwrap();
+    let workspace = tempdir.path();
+    let zlib_src_dir = workspace.join("mock-zlib");
+    let libpng_src_dir = workspace.join("mock-libpng");
+    fs::create_dir_all(&zlib_src_dir).unwrap();
+    fs::create_dir_all(&libpng_src_dir).unwrap();
+    fs::create_dir_all(libpng_src_dir.join("scripts")).unwrap();
+    fs::write(zlib_src_dir.join("zlib.h"), "/* mock zlib.h */\n").unwrap();
+    fs::write(zlib_src_dir.join("zconf.h"), "/* mock zconf.h */\n").unwrap();
+    fs::write(libpng_src_dir.join("png.h"), "/* mock png.h */\n").unwrap();
+    fs::write(libpng_src_dir.join("pngconf.h"), "/* mock pngconf.h */\n").unwrap();
+    fs::write(
+        libpng_src_dir.join("scripts/pnglibconf.h.prebuilt"),
+        "/* mock pnglibconf.h */\n",
+    )
+    .unwrap();
+    fs::write(libpng_src_dir.join("libpng.vers"), "{ global: *; };\n").unwrap();
+
+    let zlib_root = NodeHash(Blake3Hash::from_bytes(b"mock-zlib-root"));
+    let libpng_root = NodeHash(Blake3Hash::from_bytes(b"mock-libpng-root"));
+    let engine = engine(&source)
+        .with_store_hydration_handler(Arc::new({
+            let zlib_src_dir = zlib_src_dir.clone();
+            let libpng_src_dir = libpng_src_dir.clone();
+            move |request| match request.value {
+                Value::Tree(TreeValue::Store(root)) if root == zlib_root => Ok(Value::Tree(
+                    TreeValue::FsDir(PathValue::new(zlib_src_dir.to_string_lossy())),
+                )),
+                Value::Tree(TreeValue::Store(root)) if root == libpng_root => Ok(Value::Tree(
+                    TreeValue::FsDir(PathValue::new(libpng_src_dir.to_string_lossy())),
+                )),
+                other => panic!("unexpected hydration request: {other:?}"),
+            }
+        }))
+        .with_acquire_handler(Arc::new(move |request| match request.url.as_ref() {
+            "https://zlib.net/fossils/zlib-1.3.1.tar.gz" => {
+                Ok(Value::Tree(TreeValue::Store(zlib_root)))
+            }
+            "https://download.sourceforge.net/libpng/libpng-1.6.43.tar.xz" => {
+                Ok(Value::Tree(TreeValue::Store(libpng_root)))
+            }
+            other => panic!("unexpected acquire url: {other}"),
+        }))
+        .with_render_handler(Arc::new(|_request| {
+            Ok(Value::Blob(BlobValue::from_string("generated header")))
+        }))
+        .with_discover_handler(Arc::new(|_request| {
+            let cc_tool = Value::Struct(StructValue {
+                type_name: Arc::from("Tool"),
+                fields: Arc::from([
+                    (Arc::from("path"), Value::String(Arc::from("/usr/bin/cc"))),
+                    (
+                        Arc::from("hash"),
+                        Value::Blob(BlobValue::from_string("cc-hash")),
+                    ),
+                ]),
+            });
+            let ar_tool = Value::Struct(StructValue {
+                type_name: Arc::from("Tool"),
+                fields: Arc::from([
+                    (Arc::from("path"), Value::String(Arc::from("/usr/bin/ar"))),
+                    (
+                        Arc::from("hash"),
+                        Value::Blob(BlobValue::from_string("ar-hash")),
+                    ),
+                ]),
+            });
+            Ok(Value::Discovered(DiscoveredValue {
+                value: Box::new(Value::Map(MapValue {
+                    entries: Arc::from([
+                        (Value::String(Arc::from("cc")), cc_tool),
+                        (Value::String(Arc::from("ar")), ar_tool),
+                    ]),
+                })),
+                obligations: Arc::from([
+                    HostObservation::Which {
+                        name: "cc".to_string(),
+                        expected_path: Some("/usr/bin/cc".to_string()),
+                    },
+                    HostObservation::Hash {
+                        path: "/usr/bin/cc".to_string(),
+                        content_hash: "cc-hash".to_string(),
+                    },
+                    HostObservation::Which {
+                        name: "ar".to_string(),
+                        expected_path: Some("/usr/bin/ar".to_string()),
+                    },
+                    HostObservation::Hash {
+                        path: "/usr/bin/ar".to_string(),
+                        content_hash: "ar-hash".to_string(),
+                    },
+                ]),
+            }))
+        }))
+        .with_exec_handler(Arc::new(|request| {
+            if matches!(
+                request.args.as_slice(),
+                [ExecArgValue::Literal(program), ExecArgValue::Literal(flag)]
+                    if program == "/usr/bin/cc" && flag == "-dumpmachine"
+            ) {
+                return Ok(Value::String(Arc::from("x86_64-unknown-linux-gnu")));
+            }
+            let output_arg = request
+                .args
+                .windows(2)
+                .find_map(|window| match window {
+                    [ExecArgValue::Literal(flag), output] if flag == "-o" => Some(output.as_str()),
+                    _ => None,
+                })
+                .or_else(|| request.args.get(2).map(ExecArgValue::as_str))
+                .expect("mock exec should receive an output path");
+            if output_arg == "out/probe" || output_arg == "out/probe.o" {
+                return Ok(Value::Bool(true));
+            }
+            let relative = output_arg.strip_prefix("out/").unwrap_or(output_arg);
+            Ok(inline_tree_with_blob(relative, "artifact"))
+        }));
+
+    let value = engine
+        .call(
+            "build",
+            vec![
+                Value::Path(PathValue::new(workspace.to_string_lossy())),
+                Value::Array(Arc::from([])),
+                Value::Map(MapValue {
+                    entries: Arc::from([]),
+                }),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(
+        collect_tree_leaf_paths(&value),
+        vec![
+            "libpng/include/png.h".to_string(),
+            "libpng/include/pngconf.h".to_string(),
+            "libpng/include/pnglibconf.h".to_string(),
+            "libpng/lib/libpng16.a".to_string(),
+            "libpng/lib/libpng16.so".to_string(),
+            "zlib/include/zconf.h".to_string(),
+            "zlib/include/zlib.h".to_string(),
+            "zlib/lib/libz.a".to_string(),
+            "zlib/lib/libz.so".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn libpng_sketch_surfaces_archive_failures_from_exec_boundaries() {
+    let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/libpng.vx");
+    let source = fs::read_to_string(&sketch_path).expect("read libpng sketch");
+
+    let tempdir = TempDir::new().unwrap();
+    let workspace = tempdir.path();
+    let zlib_src_dir = workspace.join("mock-zlib");
+    let libpng_src_dir = workspace.join("mock-libpng");
+    fs::create_dir_all(&zlib_src_dir).unwrap();
+    fs::create_dir_all(&libpng_src_dir).unwrap();
+    fs::create_dir_all(libpng_src_dir.join("scripts")).unwrap();
+    fs::write(zlib_src_dir.join("zlib.h"), "/* mock zlib.h */\n").unwrap();
+    fs::write(zlib_src_dir.join("zconf.h"), "/* mock zconf.h */\n").unwrap();
+    fs::write(libpng_src_dir.join("png.h"), "/* mock png.h */\n").unwrap();
+    fs::write(libpng_src_dir.join("pngconf.h"), "/* mock pngconf.h */\n").unwrap();
+    fs::write(
+        libpng_src_dir.join("scripts/pnglibconf.h.prebuilt"),
+        "/* mock pnglibconf.h */\n",
+    )
+    .unwrap();
+    fs::write(libpng_src_dir.join("libpng.vers"), "{ global: *; };\n").unwrap();
+
+    let zlib_root = NodeHash(Blake3Hash::from_bytes(b"mock-zlib-root"));
+    let libpng_root = NodeHash(Blake3Hash::from_bytes(b"mock-libpng-root"));
+    let engine = engine(&source)
+        .with_store_hydration_handler(Arc::new({
+            let zlib_src_dir = zlib_src_dir.clone();
+            let libpng_src_dir = libpng_src_dir.clone();
+            move |request| match request.value {
+                Value::Tree(TreeValue::Store(root)) if root == zlib_root => Ok(Value::Tree(
+                    TreeValue::FsDir(PathValue::new(zlib_src_dir.to_string_lossy())),
+                )),
+                Value::Tree(TreeValue::Store(root)) if root == libpng_root => Ok(Value::Tree(
+                    TreeValue::FsDir(PathValue::new(libpng_src_dir.to_string_lossy())),
+                )),
+                other => panic!("unexpected hydration request: {other:?}"),
+            }
+        }))
+        .with_acquire_handler(Arc::new(move |request| match request.url.as_ref() {
+            "https://zlib.net/fossils/zlib-1.3.1.tar.gz" => {
+                Ok(Value::Tree(TreeValue::Store(zlib_root)))
+            }
+            "https://download.sourceforge.net/libpng/libpng-1.6.43.tar.xz" => {
+                Ok(Value::Tree(TreeValue::Store(libpng_root)))
+            }
+            other => panic!("unexpected acquire url: {other}"),
+        }))
+        .with_render_handler(Arc::new(|_request| {
+            Ok(Value::Blob(BlobValue::from_string("generated header")))
+        }))
+        .with_discover_handler(Arc::new(|_request| {
+            Ok(Value::Map(MapValue {
+                entries: Arc::from([
+                    (
+                        Value::String(Arc::from("cc")),
+                        Value::String(Arc::from("/usr/bin/cc")),
+                    ),
+                    (
+                        Value::String(Arc::from("ar")),
+                        Value::String(Arc::from("/usr/bin/ar")),
+                    ),
+                ]),
+            }))
+        }))
+        .with_exec_handler(Arc::new(|request| {
+            let program = request
+                .args
+                .first()
+                .expect("mock exec should receive a program")
+                .as_str();
+            if matches!(
+                request.args.as_slice(),
+                [ExecArgValue::Literal(program), ExecArgValue::Literal(flag)]
+                    if program == "/usr/bin/cc" && flag == "-dumpmachine"
+            ) {
+                return Ok(Value::String(Arc::from("x86_64-unknown-linux-gnu")));
+            }
+            if program == "/usr/bin/ar" {
+                return Err(PoisonError::new(
+                    PoisonKind::UserFail,
+                    "archive failed",
+                    request.demand_chain.clone(),
+                ));
+            }
+            let output_arg = request
+                .args
+                .windows(2)
+                .find_map(|window| match window {
+                    [ExecArgValue::Literal(flag), output] if flag == "-o" => Some(output.as_str()),
+                    _ => None,
+                })
+                .or_else(|| request.args.get(2).map(ExecArgValue::as_str))
+                .expect("mock exec should receive an output path");
+            if output_arg == "out/probe" || output_arg == "out/probe.o" {
+                return Ok(Value::Bool(true));
+            }
+            let relative = output_arg.strip_prefix("out/").unwrap_or(output_arg);
+            Ok(inline_tree_with_blob(relative, "artifact"))
+        }));
+
+    let error = engine
+        .call(
+            "build",
+            vec![
+                Value::Path(PathValue::new(workspace.to_string_lossy())),
+                Value::Array(Arc::from([])),
+                Value::Map(MapValue {
+                    entries: Arc::from([]),
+                }),
+            ],
+        )
+        .expect_err("archive failure should poison the build");
+
+    assert_eq!(error.kind, PoisonKind::UserFail);
+    assert!(
+        error.message.contains("archive failed"),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
+fn libpng_compile_objects_body_survives_lowering() {
+    let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/libpng.vx");
+    let source = fs::read_to_string(&sketch_path).expect("read libpng sketch");
+    let parse = vx_parser::parse(&source);
+    assert_eq!(parse.errors(), []);
+    let root = SourceFile::cast_root(parse.syntax());
+    let module = lower_source_file(&root);
+    let build = module
+        .functions
+        .iter()
+        .find(|function| function.name == "build")
+        .expect("build function");
+    let compile_objects = build
+        .body
+        .stmts
+        .iter()
+        .find_map(|stmt| match stmt {
+            crate::instr::Stmt::FnDecl(def) if def.name == "compile_objects" => Some(def.clone()),
+            _ => None,
+        })
+        .expect("compile_objects function");
+
+    assert!(
+        !compile_objects.body.stmts.is_empty(),
+        "compile_objects body should not be dropped by lowering"
+    );
+    assert!(
+        matches!(
+            compile_objects.body.stmts.last(),
+            Some(crate::instr::Stmt::Expr(_))
+        ),
+        "compile_objects should end with an expression, got {:?}",
+        compile_objects.body.stmts
+    );
+}
+
+#[test]
+fn lowering_preserves_includes_map_flatten_expression() {
+    let source = r#"
+fn main(includes: Array[Path]) {
+  includes.map((include) => ["-I", include]).flatten()
+}
+"#;
+    let parse = vx_parser::parse(source);
+    assert_eq!(parse.errors(), []);
+    let root = SourceFile::cast_root(parse.syntax());
+    let module = lower_source_file(&root);
+    let main = module
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .expect("main function");
+
+    assert!(
+        matches!(main.body.stmts.last(), Some(crate::instr::Stmt::Expr(_))),
+        "main should end with an expression, got {:?}",
+        main.body.stmts
+    );
+}
+
+#[test]
+fn lowering_preserves_exec_where_expression_with_spreads() {
+    let source = r#"
+fn main(
+  cexec: Fn(Array[ExecInput]) -> Tree,
+  cc: String,
+  src: Tree,
+  file: Path,
+  includes: Array[Path],
+  defines: Array[String],
+  common_cflags: Array[String],
+  flags: Array[String],
+  mounts: Map[Path, TreeEntry],
+  generated: Map[Path, Blob]
+) {
+  cexec [
+    cc,
+    "-c",
+    @(src/{file}),
+    "-o",
+    @(out/{file}.o),
+    "-I", @src,
+    ..includes.map((include) => ["-I", include]).flatten(),
+    ..defines.map((define) => `-D${define}`),
+    ..common_cflags,
+    ..flags,
+  ] where {
+    mounts: { @src: src, @gen: Tree(generated), ..mounts },
+  }
+}
+"#;
+    let parse = vx_parser::parse(source);
+    assert_eq!(parse.errors(), []);
+    let root = SourceFile::cast_root(parse.syntax());
+    let module = lower_source_file(&root);
+    let main = module
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .expect("main function");
+
+    assert!(
+        matches!(main.body.stmts.last(), Some(crate::instr::Stmt::Expr(_))),
+        "main should end with an expression, got {:?}",
+        main.body.stmts
+    );
+}
+
+#[test]
 fn lua_sketch_link_input_array_contains_tree_items() {
     let sketch_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/lua.vx");
     let source = fs::read_to_string(&sketch_path).expect("read lua sketch");
@@ -1835,6 +2835,33 @@ fn array_spread_flattens_arrays() {
 }
 
 #[test]
+fn array_spread_forces_pending_trees_shallowly() {
+    let value = eval(
+        r#"
+fn objects() {
+  Tree { @artifact.o: Blob("x") }
+}
+
+fn main() {
+  ["ar", ..objects()]
+}
+"#,
+        "main",
+    )
+    .unwrap();
+
+    let Value::Array(items) = value else {
+        panic!("expected array, got {value:?}");
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0], Value::String(Arc::from("ar")));
+    assert!(
+        matches!(items[1], Value::ExecPath(_)),
+        "expected exec path spread"
+    );
+}
+
+#[test]
 fn if_true_branch() {
     let val = eval("fn main() { if true { 1 } else { 2 } }", "main").unwrap();
     assert_eq!(val, Value::U64(1));
@@ -2221,6 +3248,7 @@ fn collect_pending_walks_nested_runtime_values() {
                 def: Arc::new(FnDef {
                     name: "capture".into(),
                     params: vec![],
+                    keyword_params: vec![],
                     body: Block { stmts: Vec::new() },
                 }),
                 code_identity: Arc::from("capture"),
@@ -2270,6 +3298,7 @@ fn node_job_pending_deps_cover_templates_calls_and_invokes() {
             def: Arc::new(FnDef {
                 name: "invoke".into(),
                 params: vec![],
+                keyword_params: vec![],
                 body: Block { stmts: Vec::new() },
             }),
             code_identity: Arc::from("invoke"),
@@ -2387,6 +3416,897 @@ fn array_concat_keeps_pending_children_lazy() {
 
     let err = engine.force_fully(result).unwrap_err();
     assert_eq!(err.kind, PoisonKind::UserFail);
+}
+
+#[test]
+fn array_concat_map_merge_resolves_pending_tree_items() {
+    let engine = engine(
+        r#"
+fn object(file: Path) {
+  Tree { @(out/{file}.o): Blob("ok") }
+}
+
+fn main(extra: Array[Path]) {
+  let sources = [@core1.c, @core2.c] ++ extra;
+  sources.map(object).merge()
+}
+"#,
+    );
+
+    let call = engine
+        .call_unforced(
+            "main",
+            vec![Value::Array(Arc::from([Value::Path(PathValue::new(
+                "arch1.c",
+            ))]))],
+        )
+        .unwrap();
+
+    let value = engine.force_fully(call).unwrap();
+    let Value::Tree(TreeValue::Inline(entries)) = value else {
+        panic!("expected merged tree");
+    };
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0.as_ref(), "out");
+    let Value::Tree(TreeValue::Inline(out_entries)) = &entries[0].1 else {
+        panic!("expected merged out subtree");
+    };
+    assert_eq!(out_entries.len(), 3);
+    assert_eq!(out_entries[0].0.as_ref(), "arch1.c.o");
+    assert_eq!(out_entries[1].0.as_ref(), "core1.c.o");
+    assert_eq!(out_entries[2].0.as_ref(), "core2.c.o");
+}
+
+#[test]
+fn array_concat_map_merge_resolves_exec_tree_results() {
+    let engine = engine(
+        r#"
+fn observe(process: Process, tree: Tree) {
+  tree
+}
+
+fn compile(file: Path) {
+  exec ["tool", file] where { observer: observe }
+}
+
+fn main(extra: Array[Path]) {
+  let sources = [@core1.c, @core2.c] ++ extra;
+  sources.map(compile).merge()
+}
+"#,
+    )
+    .with_exec_handler(Arc::new(|request| {
+        let [ExecArgValue::Literal(program), ExecArgValue::Path(path)] = request.args.as_slice()
+        else {
+            panic!("expected tool plus one path arg");
+        };
+        assert_eq!(program, "tool");
+        let file = path
+            .as_str()
+            .rsplit('/')
+            .next()
+            .expect("path argument should have a filename")
+            .to_string();
+        Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+            Arc::from("out"),
+            Value::Tree(TreeValue::Inline(Arc::from([(
+                Arc::from(format!("{file}.o")),
+                Value::Blob(BlobValue::from_string("ok")),
+            )]))),
+        )]))))
+    }));
+
+    let call = engine
+        .call_unforced(
+            "main",
+            vec![Value::Array(Arc::from([Value::Path(PathValue::new(
+                "arch1.c",
+            ))]))],
+        )
+        .unwrap();
+
+    let value = engine.force_fully(call).unwrap();
+    let Value::Tree(TreeValue::Inline(entries)) = value else {
+        panic!("expected merged tree");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0.as_ref(), "out");
+    let Value::Tree(TreeValue::Inline(out_entries)) = &entries[0].1 else {
+        panic!("expected merged out subtree");
+    };
+    assert_eq!(out_entries.len(), 3);
+    assert_eq!(out_entries[0].0.as_ref(), "arch1.c.o");
+    assert_eq!(out_entries[1].0.as_ref(), "core1.c.o");
+    assert_eq!(out_entries[2].0.as_ref(), "core2.c.o");
+}
+
+#[test]
+fn array_concat_map_merge_resolves_partial_exec_tree_results() {
+    let engine = engine(
+        r#"
+fn observe(process: Process, tree: Tree) {
+  tree
+}
+
+fn main(extra: Array[Path]) {
+  let cexec = partial exec where { observer: observe };
+  let compile = (file) => cexec ["tool", file];
+  let sources = [@core1.c, @core2.c] ++ extra;
+  sources.map(compile).merge()
+}
+"#,
+    )
+    .with_exec_handler(Arc::new(|request| {
+        let [ExecArgValue::Literal(program), ExecArgValue::Path(path)] = request.args.as_slice()
+        else {
+            panic!("expected tool plus one path arg");
+        };
+        assert_eq!(program, "tool");
+        let file = path
+            .as_str()
+            .rsplit('/')
+            .next()
+            .expect("path argument should have a filename")
+            .to_string();
+        Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+            Arc::from("out"),
+            Value::Tree(TreeValue::Inline(Arc::from([(
+                Arc::from(format!("{file}.o")),
+                Value::Blob(BlobValue::from_string("ok")),
+            )]))),
+        )]))))
+    }));
+
+    let call = engine
+        .call_unforced(
+            "main",
+            vec![Value::Array(Arc::from([Value::Path(PathValue::new(
+                "arch1.c",
+            ))]))],
+        )
+        .unwrap();
+
+    let value = engine.force_fully(call).unwrap();
+    let Value::Tree(TreeValue::Inline(entries)) = value else {
+        panic!("expected merged tree");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0.as_ref(), "out");
+    let Value::Tree(TreeValue::Inline(out_entries)) = &entries[0].1 else {
+        panic!("expected merged out subtree");
+    };
+    assert_eq!(out_entries.len(), 3);
+    assert_eq!(out_entries[0].0.as_ref(), "arch1.c.o");
+    assert_eq!(out_entries[1].0.as_ref(), "core1.c.o");
+    assert_eq!(out_entries[2].0.as_ref(), "core2.c.o");
+}
+
+#[test]
+fn array_concat_map_merge_with_discovered_tool_exec_results_resolves() {
+    let engine = engine(
+        r#"
+struct Tool {
+  path: String,
+  hash: Blob,
+}
+
+namespace Tool {
+  fn to_string(self) -> String self.path;
+}
+
+fn observe(process: Process, tree: Tree) {
+  tree
+}
+
+fn main(extra: Array[Path], cc: Tool) {
+  let cexec = partial exec where { observer: observe };
+  let compile = (file) => cexec [cc, "-c", file, "-o", @(out/{file}.o)];
+  let sources = [@core1.c, @core2.c] ++ extra;
+  sources.map(compile).merge()
+}
+"#,
+    )
+    .with_exec_handler(Arc::new(|request| {
+        let output = request
+            .args
+            .windows(2)
+            .find_map(|window| match window {
+                [ExecArgValue::Literal(flag), ExecArgValue::Path(path)] if flag == "-o" => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+            .expect("expected -o output path");
+        let file = output
+            .as_str()
+            .rsplit('/')
+            .next()
+            .expect("output path should have a filename")
+            .to_string();
+        Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+            Arc::from("out"),
+            Value::Tree(TreeValue::Inline(Arc::from([(
+                Arc::from(file),
+                Value::Blob(BlobValue::from_string("ok")),
+            )]))),
+        )]))))
+    }));
+
+    let cc = Value::Discovered(DiscoveredValue {
+        value: Box::new(Value::Struct(StructValue {
+            type_name: Arc::from("Tool"),
+            fields: Arc::from([
+                (Arc::from("path"), Value::String(Arc::from("/usr/bin/cc"))),
+                (
+                    Arc::from("hash"),
+                    Value::Blob(BlobValue::from_string("cc-hash")),
+                ),
+            ]),
+        })),
+        obligations: Arc::from([
+            HostObservation::Which {
+                name: "cc".to_string(),
+                expected_path: Some("/usr/bin/cc".to_string()),
+            },
+            HostObservation::Hash {
+                path: "/usr/bin/cc".to_string(),
+                content_hash: "cc-hash".to_string(),
+            },
+        ]),
+    });
+
+    let value = engine
+        .call(
+            "main",
+            vec![
+                Value::Array(Arc::from([Value::Path(PathValue::new("arch1.c"))])),
+                cc,
+            ],
+        )
+        .unwrap();
+    let Value::Tree(TreeValue::Inline(entries)) = value else {
+        panic!("expected merged tree");
+    };
+    assert_eq!(entries.len(), 1);
+}
+
+#[test]
+fn compile_objects_shape_with_concat_exec_and_mount_spreads_resolves() {
+    let engine = engine(
+        r#"
+let common_cflags = ["-O2", "-fPIC"];
+
+fn observe(process: Process, tree: Tree) {
+  tree
+}
+
+fn compile_objects(src: Tree, sources: Array[Path]) where {
+  generated: Map[Path, Blob] = {},
+  mounts: Map[Path, TreeEntry] = {},
+  includes: Array[Path] = [],
+  defines: Array[String] = [],
+  flags: Array[String] = [],
+} -> Tree (
+  let cexec = partial exec where { observer: observe };
+  sources
+    .map((file) =>
+      cexec [
+        "tool",
+        "-c",
+        @(src/{file}),
+        "-o",
+        @(out/{file}.o),
+        ..includes.map((include) => ["-I", include]).flatten(),
+        ..defines.map((define) => `-D${define}`),
+        ..common_cflags,
+        ..flags,
+      ] where {
+        mounts: { @src: src, @gen: Tree(generated), ..mounts },
+      }
+    )
+    .merge()
+);
+
+fn main(extra: Array[Path]) {
+  let src = Tree {
+    @core1.c: Blob("1"),
+    @core2.c: Blob("2"),
+    @arch1.c: Blob("3"),
+  };
+
+  compile_objects(src, [@core1.c, @core2.c] ++ extra) where {
+    generated: { @config.h: Blob("generated") },
+    includes: [@gen, @src],
+    defines: ["FOO=1"],
+  }
+}
+"#,
+    )
+    .with_exec_handler(Arc::new(|request| {
+        let output = request
+            .args
+            .iter()
+            .zip(request.args.iter().skip(1))
+            .find_map(|(arg, next)| match (arg, next) {
+                (ExecArgValue::Literal(flag), ExecArgValue::Path(path)) if flag == "-o" => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+            .expect("expected -o output path");
+        let file = output
+            .as_str()
+            .rsplit('/')
+            .next()
+            .expect("output path should have a filename")
+            .to_string();
+        Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+            Arc::from("out"),
+            Value::Tree(TreeValue::Inline(Arc::from([(
+                Arc::from(file),
+                Value::Blob(BlobValue::from_string("ok")),
+            )]))),
+        )]))))
+    }));
+
+    let call = engine
+        .call_unforced(
+            "main",
+            vec![Value::Array(Arc::from([Value::Path(PathValue::new(
+                "arch1.c",
+            ))]))],
+        )
+        .unwrap();
+
+    let value = engine.force_fully(call).unwrap();
+    let Value::Tree(TreeValue::Inline(entries)) = value else {
+        panic!("expected merged tree");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0.as_ref(), "out");
+    let Value::Tree(TreeValue::Inline(out_entries)) = &entries[0].1 else {
+        panic!("expected merged out subtree");
+    };
+    assert_eq!(out_entries.len(), 3);
+    assert_eq!(out_entries[0].0.as_ref(), "arch1.c.o");
+    assert_eq!(out_entries[1].0.as_ref(), "core1.c.o");
+    assert_eq!(out_entries[2].0.as_ref(), "core2.c.o");
+}
+
+#[test]
+fn compile_objects_shape_with_discovered_tool_and_mount_spreads_resolves() {
+    let engine = engine(
+        r#"
+struct Tool {
+  path: String,
+  hash: Blob,
+}
+
+namespace Tool {
+  fn to_string(self) -> String self.path;
+}
+
+let common_cflags = ["-O2", "-fPIC"];
+
+fn observe(process: Process, tree: Tree) {
+  tree
+}
+
+fn compile_objects(cc: Tool, src: Tree, sources: Array[Path]) where {
+  generated: Map[Path, Blob] = {},
+  mounts: Map[Path, TreeEntry] = {},
+  includes: Array[Path] = [],
+  defines: Array[String] = [],
+  flags: Array[String] = [],
+} -> Tree (
+  let cexec = partial exec where { observer: observe };
+  sources
+    .map((file) =>
+      cexec [
+        cc,
+        "-c",
+        @(src/{file}),
+        "-o",
+        @(out/{file}.o),
+        ..includes.map((include) => ["-I", include]).flatten(),
+        ..defines.map((define) => `-D${define}`),
+        ..common_cflags,
+        ..flags,
+      ] where {
+        mounts: { @src: src, @gen: Tree(generated), ..mounts },
+      }
+    )
+    .merge()
+);
+
+fn main(extra: Array[Path], cc: Tool) {
+  let src = Tree {
+    @core1.c: Blob("1"),
+    @core2.c: Blob("2"),
+    @arch1.c: Blob("3"),
+  };
+
+  compile_objects(cc, src, [@core1.c, @core2.c] ++ extra) where {
+    generated: { @config.h: Blob("generated") },
+    includes: [@gen, @src],
+    defines: ["FOO=1"],
+  }
+}
+"#,
+    )
+    .with_exec_handler(Arc::new(|request| {
+        let output = request
+            .args
+            .iter()
+            .zip(request.args.iter().skip(1))
+            .find_map(|(arg, next)| match (arg, next) {
+                (ExecArgValue::Literal(flag), ExecArgValue::Path(path)) if flag == "-o" => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+            .expect("expected -o output path");
+        let file = output
+            .as_str()
+            .rsplit('/')
+            .next()
+            .expect("output path should have a filename")
+            .to_string();
+        Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+            Arc::from("out"),
+            Value::Tree(TreeValue::Inline(Arc::from([(
+                Arc::from(file),
+                Value::Blob(BlobValue::from_string("ok")),
+            )]))),
+        )]))))
+    }));
+
+    let cc = Value::Discovered(DiscoveredValue {
+        value: Box::new(Value::Struct(StructValue {
+            type_name: Arc::from("Tool"),
+            fields: Arc::from([
+                (Arc::from("path"), Value::String(Arc::from("/usr/bin/cc"))),
+                (
+                    Arc::from("hash"),
+                    Value::Blob(BlobValue::from_string("cc-hash")),
+                ),
+            ]),
+        })),
+        obligations: Arc::from([
+            HostObservation::Which {
+                name: "cc".to_string(),
+                expected_path: Some("/usr/bin/cc".to_string()),
+            },
+            HostObservation::Hash {
+                path: "/usr/bin/cc".to_string(),
+                content_hash: "cc-hash".to_string(),
+            },
+        ]),
+    });
+
+    let value = engine
+        .call(
+            "main",
+            vec![
+                Value::Array(Arc::from([Value::Path(PathValue::new("arch1.c"))])),
+                cc,
+            ],
+        )
+        .unwrap();
+    let Value::Tree(TreeValue::Inline(entries)) = value else {
+        panic!("expected merged tree");
+    };
+    assert_eq!(entries.len(), 1);
+}
+
+#[test]
+fn compile_objects_shape_with_match_rhs_concat_resolves() {
+    let engine = engine(
+        r#"
+let common_cflags = ["-O2", "-fPIC"];
+
+fn observe(process: Process, tree: Tree) {
+  tree
+}
+
+fn compile_objects(src: Tree, sources: Array[Path]) where {
+  includes: Array[Path] = [],
+} -> Tree (
+  let cexec = partial exec where { observer: observe };
+  sources
+    .map((file) =>
+      cexec [
+        "tool",
+        "-c",
+        @(src/{file}),
+        "-o",
+        @(out/{file}.o),
+        ..includes.map((include) => ["-I", include]).flatten(),
+        ..common_cflags,
+      ] where {
+        mounts: { @src: src },
+      }
+    )
+    .merge()
+);
+
+fn main() {
+  let target =
+    exec ["tool", "-dumpmachine"] where {
+      observer: (proc, _vfs) => proc.stdout.collect().utf8().trim(),
+    };
+  let src = Tree {
+    @core1.c: Blob("1"),
+    @core2.c: Blob("2"),
+    @arch1.c: Blob("3"),
+  };
+  let extra =
+    match target (
+      "x86_64-unknown-linux-gnu" => [@arch1.c],
+      _ => [],
+    );
+
+  compile_objects(src, [@core1.c, @core2.c] ++ extra) where {
+    includes: [@src],
+  }
+}
+"#,
+    )
+    .with_exec_handler(Arc::new(|request| {
+        if matches!(
+            request.args.as_slice(),
+            [ExecArgValue::Literal(program), ExecArgValue::Literal(flag)]
+                if program == "tool" && flag == "-dumpmachine"
+        ) {
+            return Ok(Value::String(Arc::from("x86_64-unknown-linux-gnu")));
+        }
+        let output = request
+            .args
+            .iter()
+            .zip(request.args.iter().skip(1))
+            .find_map(|(arg, next)| match (arg, next) {
+                (ExecArgValue::Literal(flag), ExecArgValue::Path(path)) if flag == "-o" => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+            .expect("expected -o output path");
+        let file = output
+            .as_str()
+            .rsplit('/')
+            .next()
+            .expect("output path should have a filename")
+            .to_string();
+        Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+            Arc::from("out"),
+            Value::Tree(TreeValue::Inline(Arc::from([(
+                Arc::from(file),
+                Value::Blob(BlobValue::from_string("ok")),
+            )]))),
+        )]))))
+    }));
+
+    let value = engine.call("main", vec![]).unwrap();
+    let Value::Tree(TreeValue::Inline(entries)) = value else {
+        panic!("expected merged tree");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0.as_ref(), "out");
+    let Value::Tree(TreeValue::Inline(out_entries)) = &entries[0].1 else {
+        panic!("expected merged out subtree");
+    };
+    assert_eq!(out_entries.len(), 3);
+    assert_eq!(out_entries[0].0.as_ref(), "arch1.c.o");
+    assert_eq!(out_entries[1].0.as_ref(), "core1.c.o");
+    assert_eq!(out_entries[2].0.as_ref(), "core2.c.o");
+}
+
+#[test]
+fn array_merge_over_nested_subtree_exec_results_resolves() {
+    let engine = engine(
+        r#"
+fn observe(process: Process, tree: Tree) {
+  tree.subtree(@out)
+}
+
+fn compile(file: Path) {
+  let cexec = partial exec where { observer: observe };
+  cexec ["tool", "-c", file, "-o", @(out/{file}.o)]
+}
+
+fn main() {
+  let sources = [@core1.c, @intel/intel_init.c];
+  sources.map(compile).merge()
+}
+"#,
+    )
+    .with_exec_handler(Arc::new(|request| {
+        let output = request
+            .args
+            .iter()
+            .zip(request.args.iter().skip(1))
+            .find_map(|(arg, next)| match (arg, next) {
+                (ExecArgValue::Literal(flag), ExecArgValue::Path(path)) if flag == "-o" => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+            .expect("expected -o output path");
+        let relative = output
+            .as_str()
+            .strip_prefix("out/")
+            .expect("output path should be rooted in out/")
+            .to_string();
+        Ok(inline_tree_with_blob(&relative, "ok"))
+    }));
+
+    let call = engine.call_unforced("main", vec![]).unwrap();
+    let value = engine.force_fully(call).unwrap();
+
+    assert_eq!(
+        collect_tree_leaf_paths(&value),
+        vec!["core1.c.o".to_string(), "intel/intel_init.c.o".to_string()]
+    );
+}
+
+#[test]
+fn static_archive_shape_with_tool_to_string_and_tree_spread_resolves() {
+    let engine = engine(
+        r#"
+struct Tool {
+  path: String,
+}
+
+namespace Tool {
+  fn to_string(self) -> String self.path;
+}
+
+fn observe(process: Process, tree: Tree) {
+  tree
+}
+
+fn compile(file: Path) {
+  exec ["compile", file] where { observer: observe }
+}
+
+fn static_archive(ar: Tool, objects: Tree) {
+  exec [ar, "rcs", @out/lib.a, ..objects] where { observer: observe }
+}
+
+fn main(extra: Array[Path]) {
+  let ar = Tool { path: "archive-tool" };
+  let sources = [@core1.c, @core2.c] ++ extra;
+  let objects = sources.map(compile).merge();
+  let archive = static_archive(ar, objects);
+  archive.file(@lib.a)
+}
+"#,
+    )
+    .with_exec_handler(Arc::new(|request| {
+        let program = match request.args.first() {
+            Some(ExecArgValue::Literal(program)) => program.as_str(),
+            other => panic!("expected literal program, got {other:?}"),
+        };
+        match program {
+            "compile" => {
+                let [_, ExecArgValue::Path(path)] = request.args.as_slice() else {
+                    panic!("expected compile plus one path arg");
+                };
+                let file = path
+                    .as_str()
+                    .rsplit('/')
+                    .next()
+                    .expect("path argument should have a filename")
+                    .to_string();
+                Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+                    Arc::from("obj"),
+                    Value::Tree(TreeValue::Inline(Arc::from([(
+                        Arc::from(format!("{file}.o")),
+                        Value::Blob(BlobValue::from_string("obj")),
+                    )]))),
+                )]))))
+            }
+            "archive-tool" => Ok(Value::Tree(TreeValue::Inline(Arc::from([(
+                Arc::from("lib.a"),
+                Value::Blob(BlobValue::from_string("archive")),
+            )])))),
+            other => panic!("unexpected program {other}"),
+        }
+    }));
+
+    let value = engine
+        .call(
+            "main",
+            vec![Value::Array(Arc::from([Value::Path(PathValue::new(
+                "arch1.c",
+            ))]))],
+        )
+        .unwrap();
+
+    let Value::Blob(BlobValue::Inline { bytes, executable }) = value else {
+        panic!("expected hydrated archive blob, got {:?}", value);
+    };
+    assert!(!executable);
+    assert_eq!(bytes.as_ref(), b"archive");
+}
+
+#[test]
+fn static_archive_shape_with_store_backed_exec_results_resolves() {
+    let stored_trees = Arc::new(Mutex::new(HashMap::<NodeHash, Value>::new()));
+    let store_sink = Arc::clone(&stored_trees);
+    let engine = engine(
+        r#"
+struct Tool {
+  path: String,
+}
+
+namespace Tool {
+  fn to_string(self) -> String self.path;
+}
+
+fn observe(process: Process, tree: Tree) {
+  tree
+}
+
+fn compile(file: Path) {
+  exec ["compile", file] where { observer: observe }
+}
+
+fn static_archive(ar: Tool, objects: Tree) {
+  exec [ar, "rcs", @out/lib.a, ..objects] where { observer: observe }
+}
+
+fn main(extra: Array[Path]) {
+  let ar = Tool { path: "archive-tool" };
+  let sources = [@core1.c, @core2.c] ++ extra;
+  let objects = sources.map(compile).merge();
+  let archive = static_archive(ar, objects);
+  archive.file(@lib.a)
+}
+"#,
+    )
+    .with_store_hydration_handler(Arc::new(move |request| {
+        let Value::Tree(TreeValue::Store(root)) = request.value else {
+            panic!("unexpected hydration request: {:?}", request.value);
+        };
+        store_sink
+            .lock()
+            .unwrap()
+            .get(&root)
+            .cloned()
+            .ok_or_else(|| {
+                PoisonError::new(
+                    PoisonKind::Internal,
+                    format!("missing stored tree {root}"),
+                    request.demand_chain,
+                )
+            })
+    }))
+    .with_exec_handler(Arc::new({
+        let stored_trees = Arc::clone(&stored_trees);
+        move |request| {
+            let program = match request.args.first() {
+                Some(ExecArgValue::Literal(program)) => program.as_str(),
+                other => panic!("expected literal program, got {other:?}"),
+            };
+            let root = match program {
+                "compile" => {
+                    let [_, ExecArgValue::Path(path)] = request.args.as_slice() else {
+                        panic!("expected compile plus one path arg");
+                    };
+                    let file = path
+                        .as_str()
+                        .rsplit('/')
+                        .next()
+                        .expect("path argument should have a filename")
+                        .to_string();
+                    let root = NodeHash(Blake3Hash::from_bytes(file.as_bytes()));
+                    stored_trees.lock().unwrap().insert(
+                        root,
+                        Value::Tree(TreeValue::Inline(Arc::from([(
+                            Arc::from("obj"),
+                            Value::Tree(TreeValue::Inline(Arc::from([(
+                                Arc::from(format!("{file}.o")),
+                                Value::Blob(BlobValue::from_string("obj")),
+                            )]))),
+                        )]))),
+                    );
+                    root
+                }
+                "archive-tool" => {
+                    let root = NodeHash(Blake3Hash::from_bytes(b"archive-root"));
+                    stored_trees.lock().unwrap().insert(
+                        root,
+                        Value::Tree(TreeValue::Inline(Arc::from([(
+                            Arc::from("lib.a"),
+                            Value::Blob(BlobValue::from_string("archive")),
+                        )]))),
+                    );
+                    root
+                }
+                other => panic!("unexpected program {other}"),
+            };
+            Ok(Value::Tree(TreeValue::Store(root)))
+        }
+    }));
+
+    let value = engine
+        .call(
+            "main",
+            vec![Value::Array(Arc::from([Value::Path(PathValue::new(
+                "arch1.c",
+            ))]))],
+        )
+        .unwrap();
+
+    let Value::Blob(BlobValue::Inline { bytes, executable }) = value else {
+        panic!("expected hydrated archive blob, got {:?}", value);
+    };
+    assert!(!executable);
+    assert_eq!(bytes.as_ref(), b"archive");
+}
+
+#[test]
+fn local_exec_partial_archive_shape_with_concat_resolves() {
+    let engine = engine(
+        r#"
+struct Tool {
+  path: String,
+}
+
+namespace Tool {
+  fn to_string(self) -> String self.path;
+}
+
+fn observe(process: Process, tree: Tree) {
+  tree
+}
+
+fn compile(file: Path) {
+  exec [
+    "/bin/sh",
+    "-c",
+    "mkdir -p out && printf obj > \"out/$(basename \"$1\").o\"",
+    "sh",
+    file,
+  ] where { observer: observe }
+}
+
+fn static_archive(ar: Tool, objects: Tree) {
+  exec [
+    ar,
+    "-c",
+    "mkdir -p out && printf archive > out/lib.a",
+    "sh",
+    ..objects,
+  ] where { observer: observe }
+}
+
+fn main(extra: Array[Path]) {
+  let ar = Tool { path: "/bin/sh" };
+  let sources = [@core1.c, @core2.c] ++ extra;
+  let objects = sources.map(compile).merge();
+  static_archive(ar, objects)
+}
+"#,
+    );
+
+    let value = engine
+        .call(
+            "main",
+            vec![Value::Array(Arc::from([Value::Path(PathValue::new(
+                "arch1.c",
+            ))]))],
+        )
+        .unwrap();
+
+    let paths = collect_tree_leaf_paths(&value);
+    assert_eq!(paths.len(), 4);
+    assert!(paths.iter().any(|path| path == "out/lib.a"));
+    assert!(paths.iter().any(|path| path.ends_with("/out/core1.c.o")));
+    assert!(paths.iter().any(|path| path.ends_with("/out/core2.c.o")));
+    assert!(paths.iter().any(|path| path.ends_with("/out/arch1.c.o")));
 }
 
 #[test]
