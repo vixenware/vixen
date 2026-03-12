@@ -1451,6 +1451,29 @@ fn cargo_resolve_sketch_resolves_and_typechecks() {
 }
 
 #[test]
+fn libpng_sketch_resolves_and_typechecks() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/libpng.vx");
+    let file = parse_file_path(&path);
+
+    let resolution = resolve_with_stdlib(&file);
+    assert!(
+        resolution.errors.is_empty(),
+        "resolve errors in {}: {:?}",
+        path.display(),
+        resolution.errors
+    );
+
+    let types = collect_types_with_stdlib(&file);
+    let checked = crate::type_check(&file, &resolution, &types);
+    assert!(
+        checked.errors.is_empty(),
+        "type errors in {}: {:?}",
+        path.display(),
+        checked.errors
+    );
+}
+
+#[test]
 fn pipe_placeholder_does_not_produce_resolve_errors() {
     let file = parse_file(
         r#"
@@ -1799,6 +1822,47 @@ fn main(parts: Array[Tree]) {
     let (result, types) = type_check_with_types(src);
     let ty = find_expr_type(&result, src, "parts.merge()");
     assert_eq!(ty, Some(nominal_ty(&types, "Tree")));
+}
+
+#[test]
+fn array_concat_returns_array_type() {
+    let src = r#"
+fn main(left: Array[String], right: Array[String]) {
+    left ++ right
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, "left ++ right");
+    assert_eq!(
+        ty,
+        Some(Ty::Array(Box::new(Ty::Scalar(vx_types::Scalar::String))))
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+}
+
+#[test]
+fn array_concat_requires_matching_element_types() {
+    let src = r#"
+fn main(left: Array[String], right: Array[U64]) {
+    left ++ right
+}
+"#;
+    let result = type_check(src);
+    assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+    match &result.errors[0].kind {
+        crate::TypeErrorKind::BinaryOpMismatch { op, left, right } => {
+            assert_eq!(op, "++");
+            assert_eq!(
+                left,
+                &Ty::Array(Box::new(Ty::Scalar(vx_types::Scalar::String)))
+            );
+            assert_eq!(
+                right,
+                &Ty::Array(Box::new(Ty::Scalar(vx_types::Scalar::U64)))
+            );
+        }
+        other => panic!("expected BinaryOpMismatch, got: {other:?}"),
+    }
 }
 
 #[test]

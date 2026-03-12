@@ -39,6 +39,8 @@ namespace Option[T] {
 
 /// Surface values accepted by `exec` arguments and environment entries.
 type ExecInput = String | Path | Blob | Tree | ExecPath;
+/// Values that can occupy a tree entry or explicit exec mount.
+type TreeEntry = Blob | Tree;
 
 /// Process result visible to an `exec` observer.
 struct Process {
@@ -176,9 +178,9 @@ namespace Http {
 
 namespace Tree {
   /// Construct a tree from a path-keyed map of entries.
-  fn Tree(entries: Map[Path, Blob | Tree]) -> Self;
+  fn Tree(entries: Map[Path, TreeEntry]) -> Self;
   /// Construct a tree by merging an array of tree/blob values.
-  fn Tree(entries: Array[Tree | Blob]) -> Self;
+  fn Tree(entries: Array[TreeEntry]) -> Self;
   /// Create a lazy filesystem-backed tree handle.
   fn Tree(path: Path) #fs -> Self;
 

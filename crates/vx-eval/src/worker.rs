@@ -607,9 +607,17 @@ impl Engine {
     pub(crate) fn node_deps(&self, node_id: NodeId) -> Result<Vec<NodeId>, PoisonError> {
         let node = self.node_ref(node_id)?;
         let deps = match &node.job {
-            NodeJob::Binary { left, right, .. } => {
-                let mut deps = self.collect_pending_deep(left.clone())?;
-                deps.extend(self.collect_pending_deep(right.clone())?);
+            NodeJob::Binary { op, left, right } => {
+                let mut deps = if matches!(op, BinOp::Concat) {
+                    self.collect_pending_shallow(left.clone())?
+                } else {
+                    self.collect_pending_deep(left.clone())?
+                };
+                deps.extend(if matches!(op, BinOp::Concat) {
+                    self.collect_pending_shallow(right.clone())?
+                } else {
+                    self.collect_pending_deep(right.clone())?
+                });
                 deps
             }
             NodeJob::Unary { operand, .. } => self.collect_pending_deep(operand.clone())?,
@@ -1773,12 +1781,20 @@ impl Engine {
     fn execute_node(&self, node: &Arc<Node>) -> Result<Value, PoisonError> {
         match &node.job {
             NodeJob::Binary { op, left, right } => {
-                let mut values = self.materialize_many_deep(
-                    vec![left.clone(), right.clone()],
-                    "forcing dependencies",
-                )?;
-                let right = values.pop().expect("pair has two values");
-                let left = values.pop().expect("pair has two values");
+                let (left, right) = if matches!(op, BinOp::Concat) {
+                    (
+                        self.force_value_shallow(left.clone())?,
+                        self.force_value_shallow(right.clone())?,
+                    )
+                } else {
+                    let mut values = self.materialize_many_deep(
+                        vec![left.clone(), right.clone()],
+                        "forcing dependencies",
+                    )?;
+                    let right = values.pop().expect("pair has two values");
+                    let left = values.pop().expect("pair has two values");
+                    (left, right)
+                };
                 self.compute_binary(*op, &left, &right)
             }
             NodeJob::Unary { op, operand } => {
@@ -2234,7 +2250,7 @@ impl Engine {
                     other => return other,
                 };
 
-                if left.key().is_some() && right.key().is_some() {
+                if matches!(op, BinOp::Concat) || (left.key().is_some() && right.key().is_some()) {
                     BuildResult::from_result(self.compute_binary(*op, &left, &right))
                 } else {
                     BuildResult::Value(self.pending_value(
@@ -2920,6 +2936,12 @@ impl Engine {
         let (right, right_obligations) = self.split_obligations_ref(right);
         let result = match (op, left, right) {
             (BinOp::Add, Value::U64(a), Value::U64(b)) => Ok(Value::U64(a.wrapping_add(*b))),
+            (BinOp::Concat, Value::Array(a), Value::Array(b)) => {
+                let mut values = Vec::with_capacity(a.len() + b.len());
+                values.extend(a.iter().cloned());
+                values.extend(b.iter().cloned());
+                Ok(Value::Array(Arc::from(values)))
+            }
             (BinOp::Sub, Value::U64(a), Value::U64(b)) => Ok(Value::U64(a.wrapping_sub(*b))),
             (BinOp::Mul, Value::U64(a), Value::U64(b)) => Ok(Value::U64(a.wrapping_mul(*b))),
             (BinOp::Div, Value::U64(_), Value::U64(0)) => {

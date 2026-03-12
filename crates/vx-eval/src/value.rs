@@ -297,6 +297,14 @@ impl Value {
         }
     }
 
+    pub fn collect_pending_shallow(&self, deps: &mut Vec<NodeId>) {
+        match self {
+            Value::Pending(node_id) => deps.push(*node_id),
+            Value::Discovered(discovered) => discovered.value.collect_pending_shallow(deps),
+            _ => {}
+        }
+    }
+
     pub fn is_fully_resolved(&self) -> bool {
         match self {
             Value::Pending(_) => false,

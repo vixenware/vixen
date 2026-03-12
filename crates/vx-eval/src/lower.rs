@@ -462,6 +462,7 @@ fn lower_binary(bin: &BinaryExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
         .filter_map(|child| child.into_token())
         .find_map(|token| match token.kind() {
             SyntaxKind::PLUS => Some(instr::BinOp::Add),
+            SyntaxKind::PLUS2 => Some(instr::BinOp::Concat),
             SyntaxKind::MINUS => Some(instr::BinOp::Sub),
             SyntaxKind::STAR => Some(instr::BinOp::Mul),
             SyntaxKind::SLASH => Some(instr::BinOp::Div),

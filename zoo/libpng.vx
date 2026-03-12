@@ -98,8 +98,9 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
     observer: (proc, vfs) => (
       if proc.exit_code != 0 (
         fail `process failed`
-      );
-      vfs.subtree(@out)
+      ) else (
+        vfs.subtree(@out)
+      )
     ),
   };
 
@@ -128,7 +129,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
 
   fn compile_objects(src: Tree, sources: Array[Path]) where {
     generated: Map[Path, Blob] = {},
-    mounts: Map[Path, Blob | Tree] = {},
+    mounts: Map[Path, TreeEntry] = {},
     includes: Array[Path] = [],
     defines: Array[String] = [],
     flags: Array[String] = [],
@@ -158,7 +159,7 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   );
 
   fn shared_library(name: Path, objects: Tree) where {
-    link_flags: Array[String] = [],
+    link_flags: Array[ExecInput] = [],
   } -> Tree (
     cexec [cc, "-shared", "-o", @(out/{name}), ..objects, ..link_flags]
   );
@@ -175,9 +176,11 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
   // This is the real missing primitive: template-driven file generation.
   let zconf_h =
     render @zoo/templates/zconf.h where {
-      Z_HAVE_UNISTD_H: z_have_unistd_h,
-      HAVE_FSEEKO: have_fseeko,
-      HAVE_OFF64_T: have_off64_t,
+      bindings: {
+        Z_HAVE_UNISTD_H: z_have_unistd_h,
+        HAVE_FSEEKO: have_fseeko,
+        HAVE_OFF64_T: have_off64_t,
+      },
     };
 
   let zlib_objects =
@@ -229,14 +232,16 @@ fn build(ws: Path, args: Array[String], env: Map[String, String]) #fs #discover 
 
   let pnglibconf_h =
     render @zoo/templates/pnglibconf.h where {
-      TARGET: target,
-      PNG_DEBUG: false,
-      PNG_SHARED: true,
-      PNG_STATIC: true,
-      PNG_TESTS: false,
-      PNG_TOOLS: false,
-      PNG_HARDWARE_OPTIMIZATIONS: true,
-      PNG_ARCH_DEFINES: png_arch_defines,
+      bindings: {
+        TARGET: target,
+        PNG_DEBUG: false,
+        PNG_SHARED: true,
+        PNG_STATIC: true,
+        PNG_TESTS: false,
+        PNG_TOOLS: false,
+        PNG_HARDWARE_OPTIMIZATIONS: true,
+        PNG_ARCH_DEFINES: png_arch_defines,
+      },
     };
 
   let libpng_objects =

@@ -37,6 +37,8 @@ pub enum TypeErrorKind {
         expected: Ty,
         found: Ty,
     },
+    /// Binary operator does not apply to the operand types.
+    BinaryOpMismatch { op: String, left: Ty, right: Ty },
     /// Method not found on type.
     NoSuchMethod {
         receiver_ty: Ty,
@@ -1757,6 +1759,35 @@ impl<'a> ExprTyper<'a> {
             ) => Ty::Scalar(vx_types::Scalar::Bool),
             // Logical operators produce Bool
             Some(SyntaxKind::AMP2 | SyntaxKind::PIPE2) => Ty::Scalar(vx_types::Scalar::Bool),
+            Some(SyntaxKind::PLUS2) => {
+                if lhs_ty.is_poison() || rhs_ty.is_poison() {
+                    Ty::Poison
+                } else if let (Ty::Array(lhs_inner), Ty::Array(rhs_inner)) = (&lhs_ty, &rhs_ty) {
+                    if self.types_compatible(lhs_inner, rhs_inner) {
+                        Ty::Array(lhs_inner.clone())
+                    } else {
+                        self.push_error(TypeError {
+                            range: bin.syntax().text_range(),
+                            kind: TypeErrorKind::BinaryOpMismatch {
+                                op: "++".to_string(),
+                                left: lhs_ty,
+                                right: rhs_ty,
+                            },
+                        });
+                        Ty::Poison
+                    }
+                } else {
+                    self.push_error(TypeError {
+                        range: bin.syntax().text_range(),
+                        kind: TypeErrorKind::BinaryOpMismatch {
+                            op: "++".to_string(),
+                            left: lhs_ty,
+                            right: rhs_ty,
+                        },
+                    });
+                    Ty::Poison
+                }
+            }
             // Arithmetic operators: result type matches the lhs (or rhs if lhs is Poison)
             Some(
                 SyntaxKind::PLUS
@@ -2011,6 +2042,7 @@ fn binary_operator_kind(binary: &BinaryExpr) -> Option<SyntaxKind> {
             | SyntaxKind::PERCENT
             | SyntaxKind::AMP2
             | SyntaxKind::PIPE2
+            | SyntaxKind::PLUS2
             | SyntaxKind::EQ2
             | SyntaxKind::BANG_EQ
             | SyntaxKind::LT

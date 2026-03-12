@@ -105,7 +105,7 @@ insert_anchor_links = "heading"
 >   args: Array[ExecInput]
 > ) where {
 >   env: Map[String, ExecInput] = {},
->   mounts: Map[Path, Blob | Tree] = {},
+>   mounts: Map[Path, TreeEntry] = {},
 >   executor: ExecutorClass = executor_class("default"),
 >   observer: Fn(Process, Tree) #sandbox -> T,
 > } -> T
@@ -117,6 +117,12 @@ insert_anchor_links = "heading"
 >
 > ```vixen
 > type ExecInput = String | Path | Blob | Tree | ExecPath
+> ```
+>
+> Explicit tree-shaped payloads such as VFS mounts use:
+>
+> ```vixen
+> type TreeEntry = Blob | Tree
 > ```
 >
 > `exec` normalizes each input into an `ExecArg` plus an implicit mount

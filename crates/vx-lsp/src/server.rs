@@ -1543,6 +1543,9 @@ impl VxLanguageServer {
                         "type mismatch for `{param_name}`: expected `{expected}`, found `{found}`"
                     )
                 }
+                vx_resolve::TypeErrorKind::BinaryOpMismatch { op, left, right } => {
+                    format!("cannot apply `{op}` to `{left}` and `{right}`")
+                }
                 vx_resolve::TypeErrorKind::NoSuchMethod {
                     receiver_ty,
                     method_name,

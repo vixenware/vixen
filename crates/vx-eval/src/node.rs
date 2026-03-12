@@ -107,9 +107,14 @@ impl NodeJob {
     pub fn pending_deps(&self) -> Vec<NodeId> {
         let mut deps = Vec::new();
         match self {
-            NodeJob::Binary { left, right, .. } => {
-                left.collect_pending(&mut deps);
-                right.collect_pending(&mut deps);
+            NodeJob::Binary { op, left, right } => {
+                if matches!(op, crate::instr::BinOp::Concat) {
+                    left.collect_pending_shallow(&mut deps);
+                    right.collect_pending_shallow(&mut deps);
+                } else {
+                    left.collect_pending(&mut deps);
+                    right.collect_pending(&mut deps);
+                }
             }
             NodeJob::Unary { operand, .. } => operand.collect_pending(&mut deps),
             NodeJob::Template { parts, .. } => {

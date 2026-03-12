@@ -172,6 +172,7 @@ pub enum TransportExpr {
 #[repr(u8)]
 pub enum TransportBinOp {
     Add,
+    Concat,
     Sub,
     Mul,
     Div,
@@ -810,6 +811,7 @@ impl From<instr::BinOp> for TransportBinOp {
     fn from(op: instr::BinOp) -> Self {
         match op {
             instr::BinOp::Add => Self::Add,
+            instr::BinOp::Concat => Self::Concat,
             instr::BinOp::Sub => Self::Sub,
             instr::BinOp::Mul => Self::Mul,
             instr::BinOp::Div => Self::Div,
@@ -830,6 +832,7 @@ impl From<TransportBinOp> for instr::BinOp {
     fn from(op: TransportBinOp) -> Self {
         match op {
             TransportBinOp::Add => Self::Add,
+            TransportBinOp::Concat => Self::Concat,
             TransportBinOp::Sub => Self::Sub,
             TransportBinOp::Mul => Self::Mul,
             TransportBinOp::Div => Self::Div,

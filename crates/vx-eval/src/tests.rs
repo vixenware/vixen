@@ -146,6 +146,20 @@ fn addition() {
 }
 
 #[test]
+fn array_concat() {
+    let val = eval("fn main() { [1, 2] ++ [3, 4] }", "main").unwrap();
+    assert_eq!(
+        val,
+        Value::Array(Arc::from([
+            Value::U64(1),
+            Value::U64(2),
+            Value::U64(3),
+            Value::U64(4),
+        ]))
+    );
+}
+
+#[test]
 fn nested_arithmetic() {
     let val = eval("fn main() { 2 + 3 * 4 }", "main").unwrap();
     // Parser handles precedence: 2 + (3 * 4) = 14
@@ -2347,6 +2361,32 @@ fn binary_ops_with_pending_inputs_produce_pending_results() {
     let result = engine.force_shallow(call).unwrap();
     assert!(matches!(result, Value::Pending(_)));
     assert_eq!(engine.force_fully(result).unwrap(), Value::U64(3));
+}
+
+#[test]
+fn array_concat_keeps_pending_children_lazy() {
+    let engine = engine("fn append(xs: Array[U64], ys: Array[U64]) { xs ++ ys }");
+    let left = Value::Array(Arc::from([
+        Value::U64(1),
+        engine.poison_value("pending child"),
+    ]));
+    let right = Value::Array(Arc::from([Value::U64(3)]));
+    let call = engine.call_unforced("append", vec![left, right]).unwrap();
+
+    let mut result = engine.force_shallow(call).unwrap();
+    while matches!(result, Value::Pending(_)) {
+        result = engine.force_shallow(result).unwrap();
+    }
+    let Value::Array(items) = &result else {
+        panic!("expected concatenation to produce an array");
+    };
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0], Value::U64(1));
+    assert!(matches!(items[1], Value::Pending(_)));
+    assert_eq!(items[2], Value::U64(3));
+
+    let err = engine.force_fully(result).unwrap_err();
+    assert_eq!(err.kind, PoisonKind::UserFail);
 }
 
 #[test]
