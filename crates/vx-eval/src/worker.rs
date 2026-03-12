@@ -41,7 +41,6 @@ use crate::value::{
 
 thread_local! {
     static DEMAND_STACK: RefCell<Vec<NodeId>> = const { RefCell::new(Vec::new()) };
-    static DISCOVERY_OBSERVATIONS: RefCell<Vec<Vec<HostObservation>>> = const { RefCell::new(Vec::new()) };
 }
 
 const DEFAULT_MAX_DEMAND_DEPTH: usize = 1_024;
@@ -277,28 +276,7 @@ impl Engine {
         }
     }
 
-    fn begin_discovery_recording(&self) {
-        DISCOVERY_OBSERVATIONS.with(|stack| stack.borrow_mut().push(Vec::new()));
-    }
-
-    fn finish_discovery_recording(&self) -> Vec<HostObservation> {
-        DISCOVERY_OBSERVATIONS.with(|stack| stack.borrow_mut().pop().unwrap_or_default())
-    }
-
-    fn record_discovery_observation(&self, observation: HostObservation) {
-        DISCOVERY_OBSERVATIONS.with(|stack| {
-            if let Some(current) = stack.borrow_mut().last_mut() {
-                current.push(observation);
-            }
-        });
-    }
-
-    fn discovery_recording_active(&self) -> bool {
-        DISCOVERY_OBSERVATIONS.with(|stack| !stack.borrow().is_empty())
-    }
-
     fn invoke_discover_probe(&self, probe: Value) -> Result<Value, PoisonError> {
-        let probe = self.force_value(probe)?;
         match probe {
             Value::Function(_) | Value::Builtin(_) => {}
             other => {
@@ -309,18 +287,7 @@ impl Engine {
             }
         }
 
-        self.begin_discovery_recording();
-        let result = (|| {
-            let value = self.execute_call(
-                probe,
-                Arc::from([Value::Host(HostValue)]),
-                Arc::from([]),
-                None,
-            )?;
-            self.force_value(value)
-        })();
-        let observations = self.finish_discovery_recording();
-        result.map(|value| self.attach_obligations(value, observations))
+        self.resolve_boundary_value(self.build_call(probe, vec![Value::Host(HostValue)], None))
     }
 
     fn add_obligations(
@@ -354,6 +321,22 @@ impl Engine {
                 obligations: Arc::from(obligations.into_values().collect::<Vec<_>>()),
             })
         }
+    }
+
+    fn finish_obligated_result(
+        &self,
+        result: Result<Value, PoisonError>,
+        items: impl IntoIterator<Item = HostObservation>,
+    ) -> Result<Value, PoisonError> {
+        let items = items.into_iter().collect::<Vec<_>>();
+        match result {
+            Ok(value) => Ok(self.attach_obligations(value, items.iter().cloned())),
+            Err(error) => Err(error.with_observations(items)),
+        }
+    }
+
+    fn fallible_none_from_error(&self, error: &PoisonError) -> Value {
+        self.attach_obligations(option_none(), error.observations().iter().cloned())
     }
 
     fn split_obligations(&self, value: Value) -> (Value, Vec<HostObservation>) {
@@ -1078,13 +1061,6 @@ impl Engine {
     fn force_value(&self, value: Value) -> Result<Value, PoisonError> {
         match value {
             Value::Pending(node_id) => {
-                if self.discovery_recording_active() {
-                    return self.with_demand(node_id, || {
-                        let value = self.force_node(node_id)?;
-                        self.force_value(value)
-                    });
-                }
-
                 let value = Scheduler::with_initial_stack(self, self.current_demand_stack_ids())
                     .resolve_node_shallow(node_id)?;
                 self.force_value(value)
@@ -1320,14 +1296,10 @@ impl Engine {
             }
             NodeJob::Fallible { value } => match self.force_value_shallow(value.clone()) {
                 Ok(value) => Ok(self.build_fallible_value(value)),
-                Err(_) => Ok(option_none()),
+                Err(error) => Ok(self.fallible_none_from_error(&error)),
             },
             NodeJob::Demand { demands, result } => {
-                if self.discovery_recording_active() {
-                    let _ = self.force_value(Value::Array(Arc::clone(demands)))?;
-                } else {
-                    let _ = self.resolve_boundary_value(Value::Array(Arc::clone(demands)))?;
-                }
+                let _ = self.resolve_boundary_value(Value::Array(Arc::clone(demands)))?;
                 result.clone()
             }
             NodeJob::Call {
@@ -2024,17 +1996,11 @@ impl Engine {
                     .materialize_scheduled_value_shallow(value.clone(), "forcing fallible operand")
                 {
                     Ok(value) => Ok(self.build_fallible_value(value)),
-                    Err(_) => Ok(option_none()),
+                    Err(error) => Ok(self.fallible_none_from_error(&error)),
                 }
             }
             NodeJob::Demand { demands, result } => {
-                if self.discovery_recording_active() {
-                    for value in demands.iter() {
-                        let _ = self.force_value(value.clone())?;
-                    }
-                } else {
-                    let _ = self.force_many(demands.iter().cloned().collect())?;
-                }
+                let _ = self.force_many(demands.iter().cloned().collect())?;
                 result.clone()
             }
             NodeJob::Call {
@@ -2105,19 +2071,20 @@ impl Engine {
                     (Some(value), None) => Some((**value).clone()),
                     (None, value) => value,
                 };
-                let result = self.execute_call_scheduled(
-                    partial.function.clone(),
-                    Arc::from(merged_args),
-                    Arc::from(merged_kwargs),
-                    merged_kwargs_expr,
-                )?;
-                Ok(self.attach_obligations(result, function_obligations))
+                self.finish_obligated_result(
+                    self.execute_call_scheduled(
+                        partial.function.clone(),
+                        Arc::from(merged_args),
+                        Arc::from(merged_kwargs),
+                        merged_kwargs_expr,
+                    ),
+                    function_obligations,
+                )
             }
-            Value::Builtin(builtin) => {
-                let result =
-                    self.invoke_builtin_scheduled(&builtin, &args, &kwargs, kwargs_expr)?;
-                Ok(self.attach_obligations(result, function_obligations))
-            }
+            Value::Builtin(builtin) => self.finish_obligated_result(
+                self.invoke_builtin_scheduled(&builtin, &args, &kwargs, kwargs_expr),
+                function_obligations,
+            ),
             other => Err(self.type_error(&format!("cannot call {}", other.type_name()))),
         }
     }
@@ -2139,8 +2106,7 @@ impl Engine {
             return Ok(self.attach_obligations(Value::Pending(node_id), function_obligations));
         }
 
-        let result = self.invoke_function(&function, args)?;
-        Ok(self.attach_obligations(result, function_obligations))
+        self.finish_obligated_result(self.invoke_function(&function, args), function_obligations)
     }
 
     // r[impl eval.enter-functions]
@@ -2168,18 +2134,20 @@ impl Engine {
                     (Some(value), None) => Some((**value).clone()),
                     (None, value) => value,
                 };
-                let result = self.execute_call(
-                    partial.function.clone(),
-                    Arc::from(merged_args),
-                    Arc::from(merged_kwargs),
-                    merged_kwargs_expr,
-                )?;
-                Ok(self.attach_obligations(result, function_obligations))
+                self.finish_obligated_result(
+                    self.execute_call(
+                        partial.function.clone(),
+                        Arc::from(merged_args),
+                        Arc::from(merged_kwargs),
+                        merged_kwargs_expr,
+                    ),
+                    function_obligations,
+                )
             }
-            Value::Builtin(builtin) => {
-                let result = self.invoke_builtin(&builtin, &args, &kwargs, kwargs_expr)?;
-                Ok(self.attach_obligations(result, function_obligations))
-            }
+            Value::Builtin(builtin) => self.finish_obligated_result(
+                self.invoke_builtin(&builtin, &args, &kwargs, kwargs_expr),
+                function_obligations,
+            ),
             other => Err(self.type_error(&format!("cannot call {}", other.type_name()))),
         }
     }
@@ -2197,14 +2165,15 @@ impl Engine {
         }
 
         if function.key().is_some() && args.iter().all(|value| value.key().is_some()) {
-            let result = self.force_pending_shallow(
-                self.memoized_invoke_node(function, args.iter().cloned().collect()),
-            )?;
-            return Ok(self.attach_obligations(result, function_obligations));
+            return self.finish_obligated_result(
+                self.force_pending_shallow(
+                    self.memoized_invoke_node(function, args.iter().cloned().collect()),
+                ),
+                function_obligations,
+            );
         }
 
-        let result = self.invoke_function(&function, args)?;
-        Ok(self.attach_obligations(result, function_obligations))
+        self.finish_obligated_result(self.invoke_function(&function, args), function_obligations)
     }
 
     // r[impl eval.enter-functions]
@@ -2375,16 +2344,7 @@ impl Engine {
                                     &mut demanded_values,
                                 );
                             }
-                            if self.discovery_recording_active() {
-                                if let Err(error) = self.force_value(value) {
-                                    return self.finish_demanded_result(
-                                        BuildResult::Poisoned(error),
-                                        &mut demanded_values,
-                                    );
-                                }
-                            } else {
-                                demanded_values.push(value);
-                            }
+                            demanded_values.push(value);
                         }
                         other => {
                             return self.finish_demanded_result(other, &mut demanded_values);
@@ -2467,7 +2427,7 @@ impl Engine {
                 "fallible(..)".into(),
                 None,
             ),
-            other => option_some(self.attach_obligations(other, obligations)),
+            other => self.attach_obligations(option_some(other), obligations),
         }
     }
 
@@ -2834,7 +2794,9 @@ impl Engine {
                     BuildResult::Value(value) => {
                         BuildResult::Value(self.build_fallible_value(value))
                     }
-                    BuildResult::Poisoned(_) => BuildResult::Value(option_none()),
+                    BuildResult::Poisoned(error) => {
+                        BuildResult::Value(self.fallible_none_from_error(&error))
+                    }
                     other => other,
                 }
             }
@@ -2935,7 +2897,10 @@ impl Engine {
                 }
             }
         }
-        Ok(self.attach_obligations(Value::String(Arc::from(value)), obligations.into_values()))
+        self.finish_obligated_result(
+            Ok(Value::String(Arc::from(value))),
+            obligations.into_values(),
+        )
     }
 
     // r[exec.arg.interpolation]
@@ -3007,10 +2972,10 @@ impl Engine {
 
         if let Some((tree, prefix)) = mounted_tree {
             let suffix = PathValue::new(format!("{prefix}{plain}").trim_start_matches('/'));
-            return Ok(self.attach_obligations(
-                Value::ExecPath(ExecPathValue::InTree { tree, suffix }),
+            return self.finish_obligated_result(
+                Ok(Value::ExecPath(ExecPathValue::InTree { tree, suffix })),
                 obligations.into_values(),
-            ));
+            );
         }
 
         if let Some((blob, leaf)) = mounted_blob {
@@ -3021,19 +2986,19 @@ impl Engine {
                 return Err(self
                     .type_error("path literal cannot append path segments to a blob-backed path"));
             }
-            return Ok(self.attach_obligations(
-                Value::ExecPath(ExecPathValue::InBlob {
+            return self.finish_obligated_result(
+                Ok(Value::ExecPath(ExecPathValue::InBlob {
                     blob,
                     leaf: normalized,
-                }),
+                })),
                 obligations.into_values(),
-            ));
+            );
         }
 
-        Ok(self.attach_obligations(
-            Value::Path(PathValue::new(plain)),
+        self.finish_obligated_result(
+            Ok(Value::Path(PathValue::new(plain))),
             obligations.into_values(),
-        ))
+        )
     }
 
     fn stringify_interpolated_value(&self, value: &Value) -> Result<String, PoisonError> {
@@ -3082,9 +3047,10 @@ impl Engine {
                     && let Ok(index) = index.parse::<usize>()
                     && let Some(value) = elems.get(index)
                 {
-                    return Ok(value.clone());
+                    Ok(value.clone())
+                } else {
+                    Err(self.type_error(&format!("invalid tuple field '{}'", field)))
                 }
-                Err(self.type_error(&format!("invalid tuple field '{}'", field)))
             }
             Value::Array(_) if field == "map" => Ok(Value::Builtin(BuiltinValue::Method(
                 BuiltinMethod::ArrayMap {
@@ -3224,8 +3190,8 @@ impl Engine {
                 field,
                 other.type_name()
             ))),
-        }?;
-        Ok(self.attach_obligations(result, obligations.iter().cloned()))
+        };
+        self.finish_obligated_result(result, obligations.iter().cloned())
     }
 
     fn compute_binary(&self, op: BinOp, left: &Value, right: &Value) -> Result<Value, PoisonError> {
@@ -3298,14 +3264,14 @@ impl Engine {
                 left.type_name(),
                 right.type_name()
             ))),
-        }?;
-        Ok(self.attach_obligations(
+        };
+        self.finish_obligated_result(
             result,
             left_obligations
                 .iter()
                 .chain(right_obligations.iter())
                 .cloned(),
-        ))
+        )
     }
 
     fn compute_unary(&self, op: UnaryOp, value: &Value) -> Result<Value, PoisonError> {
@@ -3315,8 +3281,8 @@ impl Engine {
             (UnaryOp::Neg, Value::F64(n)) => Ok(Value::F64(-n)),
             (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
             _ => Err(self.type_error(&format!("cannot apply {:?} to {}", op, value.type_name()))),
-        }?;
-        Ok(self.attach_obligations(result, obligations.iter().cloned()))
+        };
+        self.finish_obligated_result(result, obligations.iter().cloned())
     }
 
     fn user_method_value(&self, receiver: &Value, type_name: &str, field: &str) -> Option<Value> {
@@ -3486,14 +3452,16 @@ impl Engine {
                 let Value::Blob(blob) = receiver else {
                     return Err(self.type_error("blob.to_string receiver must be Blob"));
                 };
-                let text = blob.to_utf8_string().map_err(|message| {
-                    PoisonError::new(
-                        PoisonKind::TypeError,
-                        message,
-                        self.current_demand_chain(None),
-                    )
-                })?;
-                Ok(self.attach_obligations(Value::String(text), obligations))
+                self.finish_obligated_result(
+                    blob.to_utf8_string().map(Value::String).map_err(|message| {
+                        PoisonError::new(
+                            PoisonKind::TypeError,
+                            message,
+                            self.current_demand_chain(None),
+                        )
+                    }),
+                    obligations,
+                )
             }
             BuiltinValue::Method(BuiltinMethod::BlobExecutable { receiver }) => {
                 self.require_no_kwargs("blob.executable", kwargs)?;
@@ -3517,7 +3485,7 @@ impl Engine {
                         executable: true,
                     },
                 };
-                Ok(self.attach_obligations(Value::Blob(blob), obligations))
+                self.finish_obligated_result(Ok(Value::Blob(blob)), obligations)
             }
             BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver }) => {
                 self.require_no_kwargs("blob.utf8", kwargs)?;
@@ -3527,14 +3495,16 @@ impl Engine {
                 let Value::Blob(blob) = receiver else {
                     return Err(self.type_error("blob.utf8 receiver must be Blob"));
                 };
-                let text = blob.to_utf8_string().map_err(|message| {
-                    PoisonError::new(
-                        PoisonKind::TypeError,
-                        message,
-                        self.current_demand_chain(None),
-                    )
-                })?;
-                Ok(self.attach_obligations(Value::String(text), obligations))
+                self.finish_obligated_result(
+                    blob.to_utf8_string().map(Value::String).map_err(|message| {
+                        PoisonError::new(
+                            PoisonKind::TypeError,
+                            message,
+                            self.current_demand_chain(None),
+                        )
+                    }),
+                    obligations,
+                )
             }
             BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy { receiver }) => {
                 self.require_no_kwargs("blob.utf8_lossy", kwargs)?;
@@ -3544,24 +3514,23 @@ impl Engine {
                 let Value::Blob(blob) = receiver else {
                     return Err(self.type_error("blob.utf8_lossy receiver must be Blob"));
                 };
-                let text = match blob {
-                    BlobValue::Inline { bytes, .. } => {
-                        String::from_utf8_lossy(bytes.as_ref()).into_owned()
-                    }
-                    BlobValue::FsFile { path, .. } => {
-                        let bytes = std::fs::read(path.as_str()).map_err(|error| {
+                let result = match blob {
+                    BlobValue::Inline { bytes, .. } => Ok(Value::String(Arc::from(
+                        String::from_utf8_lossy(bytes.as_ref()).into_owned(),
+                    ))),
+                    BlobValue::FsFile { path, .. } => std::fs::read(path.as_str())
+                        .map(|bytes| {
+                            Value::String(Arc::from(String::from_utf8_lossy(&bytes).into_owned()))
+                        })
+                        .map_err(|error| {
                             self.type_error(&format!("failed to read {}: {error}", path.as_str()))
-                        })?;
-                        String::from_utf8_lossy(&bytes).into_owned()
-                    }
-                    BlobValue::Store { blob_ref, .. } => {
-                        return Err(self.type_error(&format!(
-                            "store-backed blob {:?} requires an external store resolver",
-                            blob_ref
-                        )));
-                    }
+                        }),
+                    BlobValue::Store { blob_ref, .. } => Err(self.type_error(&format!(
+                        "store-backed blob {:?} requires an external store resolver",
+                        blob_ref
+                    ))),
                 };
-                Ok(self.attach_obligations(Value::String(Arc::from(text)), obligations))
+                self.finish_obligated_result(result, obligations)
             }
             BuiltinValue::Method(BuiltinMethod::BytesUtf8 { receiver }) => {
                 self.require_no_kwargs("bytes.utf8", kwargs)?;
@@ -3571,14 +3540,18 @@ impl Engine {
                 let Value::Bytes(bytes) = receiver else {
                     return Err(self.type_error("bytes.utf8 receiver must be Bytes"));
                 };
-                let text = String::from_utf8(bytes.as_ref().to_vec()).map_err(|error| {
-                    PoisonError::new(
-                        PoisonKind::TypeError,
-                        format!("bytes are not UTF-8: {error}"),
-                        self.current_demand_chain(None),
-                    )
-                })?;
-                Ok(self.attach_obligations(Value::String(Arc::from(text)), obligations))
+                self.finish_obligated_result(
+                    String::from_utf8(bytes.as_ref().to_vec())
+                        .map(|text| Value::String(Arc::from(text)))
+                        .map_err(|error| {
+                            PoisonError::new(
+                                PoisonKind::TypeError,
+                                format!("bytes are not UTF-8: {error}"),
+                                self.current_demand_chain(None),
+                            )
+                        }),
+                    obligations,
+                )
             }
             BuiltinValue::Method(BuiltinMethod::BytesUtf8Lossy { receiver }) => {
                 self.require_no_kwargs("bytes.utf8_lossy", kwargs)?;
@@ -3589,7 +3562,7 @@ impl Engine {
                     return Err(self.type_error("bytes.utf8_lossy receiver must be Bytes"));
                 };
                 let text = String::from_utf8_lossy(bytes.as_ref()).into_owned();
-                Ok(self.attach_obligations(Value::String(Arc::from(text)), obligations))
+                self.finish_obligated_result(Ok(Value::String(Arc::from(text))), obligations)
             }
             BuiltinValue::Method(BuiltinMethod::BytesBlob { receiver }) => {
                 self.require_no_kwargs("bytes.blob", kwargs)?;
@@ -3599,32 +3572,36 @@ impl Engine {
                 let Value::Bytes(bytes) = receiver else {
                     return Err(self.type_error("bytes.blob receiver must be Bytes"));
                 };
-                Ok(self.attach_obligations(
-                    Value::Blob(BlobValue::Inline {
+                self.finish_obligated_result(
+                    Ok(Value::Blob(BlobValue::Inline {
                         bytes,
                         executable: false,
-                    }),
+                    })),
                     obligations,
-                ))
+                )
             }
             BuiltinValue::Method(BuiltinMethod::StreamCollect { receiver }) => {
                 self.require_no_kwargs("stream.collect", kwargs)?;
                 self.check_arity("stream.collect", args, 0)?;
-                self.force_value(receiver.as_ref().clone())
+                let (receiver, obligations) =
+                    self.split_obligations(self.force_value(receiver.as_ref().clone())?);
+                self.finish_obligated_result(Ok(receiver), obligations)
             }
             BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => {
                 self.require_no_kwargs("tree.file", kwargs)?;
                 self.check_arity("tree.file", args, 1)?;
-                let path = &args[0];
-                let path = self.force_value(path.clone())?;
+                let (path, path_obligations) =
+                    self.split_obligations(self.force_value(args[0].clone())?);
                 let path = self.expect_relative_path(&path, "tree.file path")?;
                 let (receiver, obligations) =
                     self.split_obligations(self.force_value_shallow(receiver.as_ref().clone())?);
                 let Value::Tree(tree) = receiver else {
                     return Err(self.type_error("tree.file receiver must be Tree"));
                 };
-                let result = self.tree_file(&tree, path)?;
-                Ok(self.attach_obligations(result, obligations))
+                self.finish_obligated_result(
+                    self.tree_file(&tree, path),
+                    obligations.into_iter().chain(path_obligations),
+                )
             }
             BuiltinValue::Method(BuiltinMethod::TreeMerge { receiver }) => {
                 self.require_no_kwargs("tree.merge", kwargs)?;
@@ -3639,22 +3616,26 @@ impl Engine {
                 let Value::Tree(receiver) = receiver else {
                     return Err(self.type_error("tree.merge receiver must be Tree"));
                 };
-                let result = self.tree_merge(&receiver, &other)?;
-                Ok(self
-                    .attach_obligations(result, obligations.into_iter().chain(other_obligations)))
+                self.finish_obligated_result(
+                    self.tree_merge(&receiver, &other),
+                    obligations.into_iter().chain(other_obligations),
+                )
             }
             BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver }) => {
                 self.require_no_kwargs("tree.subtree", kwargs)?;
                 self.check_arity("tree.subtree", args, 1)?;
-                let path = self.force_value(args[0].clone())?;
+                let (path, path_obligations) =
+                    self.split_obligations(self.force_value(args[0].clone())?);
                 let path = self.expect_relative_path(&path, "tree.subtree path")?;
                 let (receiver, obligations) =
                     self.split_obligations(self.force_value_shallow(receiver.as_ref().clone())?);
                 let Value::Tree(tree) = receiver else {
                     return Err(self.type_error("tree.subtree receiver must be Tree"));
                 };
-                let result = self.tree_subtree(&tree, path)?;
-                Ok(self.attach_obligations(result, obligations))
+                self.finish_obligated_result(
+                    self.tree_subtree(&tree, path),
+                    obligations.into_iter().chain(path_obligations),
+                )
             }
             BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver }) => {
                 self.require_no_kwargs("option.unwrap_or", kwargs)?;
@@ -3673,8 +3654,8 @@ impl Engine {
                         .ok_or_else(|| self.type_error("Some.unwrap_or requires a value field")),
                     "None" => Ok(args[0].clone()),
                     _ => Err(self.type_error("option.unwrap_or receiver must be Option")),
-                }?;
-                Ok(self.attach_obligations(result, obligations))
+                };
+                self.finish_obligated_result(result, obligations)
             }
             BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver }) => {
                 self.require_no_kwargs("fallible", kwargs)?;
@@ -3684,35 +3665,38 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::HostRead { receiver }) => {
                 self.require_no_kwargs("host.read", kwargs)?;
                 self.check_arity("host.read", args, 1)?;
-                let path = self.force_value(args[0].clone())?;
+                let (path, obligations) =
+                    self.split_obligations(self.force_value(args[0].clone())?);
                 let path = self.expect_host_path(&path, "host.read path")?;
                 let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
                 let Value::Host(_) = receiver else {
                     return Err(self.type_error("host.read receiver must be Host"));
                 };
-                self.host_read(&path)
+                self.finish_obligated_result(self.host_read(&path), obligations)
             }
             BuiltinValue::Method(BuiltinMethod::HostHash { receiver }) => {
                 self.require_no_kwargs("host.hash", kwargs)?;
                 self.check_arity("host.hash", args, 1)?;
-                let path = self.force_value(args[0].clone())?;
+                let (path, obligations) =
+                    self.split_obligations(self.force_value(args[0].clone())?);
                 let path = self.expect_host_path(&path, "host.hash path")?;
                 let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
                 let Value::Host(_) = receiver else {
                     return Err(self.type_error("host.hash receiver must be Host"));
                 };
-                self.host_hash(&path)
+                self.finish_obligated_result(self.host_hash(&path), obligations)
             }
             BuiltinValue::Method(BuiltinMethod::HostWhich { receiver }) => {
                 self.require_no_kwargs("host.which", kwargs)?;
                 self.check_arity("host.which", args, 1)?;
-                let name = self.force_value(args[0].clone())?;
+                let (name, obligations) =
+                    self.split_obligations(self.force_value(args[0].clone())?);
                 let name = self.expect_host_path(&name, "host.which name")?;
                 let receiver = self.force_value_shallow(receiver.as_ref().clone())?;
                 let Value::Host(_) = receiver else {
                     return Err(self.type_error("host.which receiver must be Host"));
                 };
-                self.host_which(&name)
+                self.finish_obligated_result(self.host_which(&name), obligations)
             }
         }
     }
@@ -3889,14 +3873,16 @@ impl Engine {
                 let Value::Blob(blob) = receiver else {
                     return Err(self.type_error("blob.to_string receiver must be Blob"));
                 };
-                let text = blob.to_utf8_string().map_err(|message| {
-                    PoisonError::new(
-                        PoisonKind::TypeError,
-                        message,
-                        self.current_demand_chain(None),
-                    )
-                })?;
-                Ok(self.attach_obligations(Value::String(text), obligations))
+                self.finish_obligated_result(
+                    blob.to_utf8_string().map(Value::String).map_err(|message| {
+                        PoisonError::new(
+                            PoisonKind::TypeError,
+                            message,
+                            self.current_demand_chain(None),
+                        )
+                    }),
+                    obligations,
+                )
             }
             BuiltinValue::Method(BuiltinMethod::BlobExecutable { receiver }) => {
                 self.require_no_kwargs("blob.executable", kwargs)?;
@@ -3923,7 +3909,7 @@ impl Engine {
                         executable: true,
                     },
                 };
-                Ok(self.attach_obligations(Value::Blob(blob), obligations))
+                self.finish_obligated_result(Ok(Value::Blob(blob)), obligations)
             }
             BuiltinValue::Method(BuiltinMethod::BlobUtf8 { receiver }) => {
                 self.require_no_kwargs("blob.utf8", kwargs)?;
@@ -3936,14 +3922,16 @@ impl Engine {
                 let Value::Blob(blob) = receiver else {
                     return Err(self.type_error("blob.utf8 receiver must be Blob"));
                 };
-                let text = blob.to_utf8_string().map_err(|message| {
-                    PoisonError::new(
-                        PoisonKind::TypeError,
-                        message,
-                        self.current_demand_chain(None),
-                    )
-                })?;
-                Ok(self.attach_obligations(Value::String(text), obligations))
+                self.finish_obligated_result(
+                    blob.to_utf8_string().map(Value::String).map_err(|message| {
+                        PoisonError::new(
+                            PoisonKind::TypeError,
+                            message,
+                            self.current_demand_chain(None),
+                        )
+                    }),
+                    obligations,
+                )
             }
             BuiltinValue::Method(BuiltinMethod::BlobUtf8Lossy { receiver }) => {
                 self.require_no_kwargs("blob.utf8_lossy", kwargs)?;
@@ -3956,24 +3944,23 @@ impl Engine {
                 let Value::Blob(blob) = receiver else {
                     return Err(self.type_error("blob.utf8_lossy receiver must be Blob"));
                 };
-                let text = match blob {
-                    BlobValue::Inline { bytes, .. } => {
-                        String::from_utf8_lossy(bytes.as_ref()).into_owned()
-                    }
-                    BlobValue::FsFile { path, .. } => {
-                        let bytes = std::fs::read(path.as_str()).map_err(|error| {
+                let result = match blob {
+                    BlobValue::Inline { bytes, .. } => Ok(Value::String(Arc::from(
+                        String::from_utf8_lossy(bytes.as_ref()).into_owned(),
+                    ))),
+                    BlobValue::FsFile { path, .. } => std::fs::read(path.as_str())
+                        .map(|bytes| {
+                            Value::String(Arc::from(String::from_utf8_lossy(&bytes).into_owned()))
+                        })
+                        .map_err(|error| {
                             self.type_error(&format!("failed to read {}: {error}", path.as_str()))
-                        })?;
-                        String::from_utf8_lossy(&bytes).into_owned()
-                    }
-                    BlobValue::Store { blob_ref, .. } => {
-                        return Err(self.type_error(&format!(
-                            "store-backed blob {:?} requires an external store resolver",
-                            blob_ref
-                        )));
-                    }
+                        }),
+                    BlobValue::Store { blob_ref, .. } => Err(self.type_error(&format!(
+                        "store-backed blob {:?} requires an external store resolver",
+                        blob_ref
+                    ))),
                 };
-                Ok(self.attach_obligations(Value::String(Arc::from(text)), obligations))
+                self.finish_obligated_result(result, obligations)
             }
             BuiltinValue::Method(BuiltinMethod::BytesUtf8 { receiver }) => {
                 self.require_no_kwargs("bytes.utf8", kwargs)?;
@@ -3986,14 +3973,18 @@ impl Engine {
                 let Value::Bytes(bytes) = receiver else {
                     return Err(self.type_error("bytes.utf8 receiver must be Bytes"));
                 };
-                let text = String::from_utf8(bytes.as_ref().to_vec()).map_err(|error| {
-                    PoisonError::new(
-                        PoisonKind::TypeError,
-                        format!("bytes are not UTF-8: {error}"),
-                        self.current_demand_chain(None),
-                    )
-                })?;
-                Ok(self.attach_obligations(Value::String(Arc::from(text)), obligations))
+                self.finish_obligated_result(
+                    String::from_utf8(bytes.as_ref().to_vec())
+                        .map(|text| Value::String(Arc::from(text)))
+                        .map_err(|error| {
+                            PoisonError::new(
+                                PoisonKind::TypeError,
+                                format!("bytes are not UTF-8: {error}"),
+                                self.current_demand_chain(None),
+                            )
+                        }),
+                    obligations,
+                )
             }
             BuiltinValue::Method(BuiltinMethod::BytesUtf8Lossy { receiver }) => {
                 self.require_no_kwargs("bytes.utf8_lossy", kwargs)?;
@@ -4007,7 +3998,7 @@ impl Engine {
                     return Err(self.type_error("bytes.utf8_lossy receiver must be Bytes"));
                 };
                 let text = String::from_utf8_lossy(bytes.as_ref()).into_owned();
-                Ok(self.attach_obligations(Value::String(Arc::from(text)), obligations))
+                self.finish_obligated_result(Ok(Value::String(Arc::from(text))), obligations)
             }
             BuiltinValue::Method(BuiltinMethod::BytesBlob { receiver }) => {
                 self.require_no_kwargs("bytes.blob", kwargs)?;
@@ -4020,27 +4011,32 @@ impl Engine {
                 let Value::Bytes(bytes) = receiver else {
                     return Err(self.type_error("bytes.blob receiver must be Bytes"));
                 };
-                Ok(self.attach_obligations(
-                    Value::Blob(BlobValue::Inline {
+                self.finish_obligated_result(
+                    Ok(Value::Blob(BlobValue::Inline {
                         bytes,
                         executable: false,
-                    }),
+                    })),
                     obligations,
-                ))
+                )
             }
             BuiltinValue::Method(BuiltinMethod::StreamCollect { receiver }) => {
                 self.require_no_kwargs("stream.collect", kwargs)?;
                 self.check_arity("stream.collect", args, 0)?;
-                self.materialize_scheduled_value_deep(
-                    receiver.as_ref().clone(),
-                    "forcing stream.collect receiver",
-                )
+                let (receiver, obligations) =
+                    self.split_obligations(self.materialize_scheduled_value_deep(
+                        receiver.as_ref().clone(),
+                        "forcing stream.collect receiver",
+                    )?);
+                self.finish_obligated_result(Ok(receiver), obligations)
             }
             BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => {
                 self.require_no_kwargs("tree.file", kwargs)?;
                 self.check_arity("tree.file", args, 1)?;
-                let path = self
-                    .materialize_scheduled_value_deep(args[0].clone(), "forcing tree.file path")?;
+                let (path, path_obligations) =
+                    self.split_obligations(self.materialize_scheduled_value_deep(
+                        args[0].clone(),
+                        "forcing tree.file path",
+                    )?);
                 let path = self.expect_relative_path(&path, "tree.file path")?;
                 let (receiver, obligations) =
                     self.split_obligations(self.materialize_scheduled_value_shallow(
@@ -4050,8 +4046,10 @@ impl Engine {
                 let Value::Tree(tree) = receiver else {
                     return Err(self.type_error("tree.file receiver must be Tree"));
                 };
-                let result = self.tree_file(&tree, path)?;
-                Ok(self.attach_obligations(result, obligations))
+                self.finish_obligated_result(
+                    self.tree_file(&tree, path),
+                    obligations.into_iter().chain(path_obligations),
+                )
             }
             BuiltinValue::Method(BuiltinMethod::TreeMerge { receiver }) => {
                 self.require_no_kwargs("tree.merge", kwargs)?;
@@ -4072,17 +4070,19 @@ impl Engine {
                 let Value::Tree(receiver) = receiver else {
                     return Err(self.type_error("tree.merge receiver must be Tree"));
                 };
-                let result = self.tree_merge(&receiver, &other)?;
-                Ok(self
-                    .attach_obligations(result, obligations.into_iter().chain(other_obligations)))
+                self.finish_obligated_result(
+                    self.tree_merge(&receiver, &other),
+                    obligations.into_iter().chain(other_obligations),
+                )
             }
             BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver }) => {
                 self.require_no_kwargs("tree.subtree", kwargs)?;
                 self.check_arity("tree.subtree", args, 1)?;
-                let path = self.materialize_scheduled_value_deep(
-                    args[0].clone(),
-                    "forcing tree.subtree path",
-                )?;
+                let (path, path_obligations) =
+                    self.split_obligations(self.materialize_scheduled_value_deep(
+                        args[0].clone(),
+                        "forcing tree.subtree path",
+                    )?);
                 let path = self.expect_relative_path(&path, "tree.subtree path")?;
                 let (receiver, obligations) =
                     self.split_obligations(self.materialize_scheduled_value_shallow(
@@ -4092,8 +4092,10 @@ impl Engine {
                 let Value::Tree(tree) = receiver else {
                     return Err(self.type_error("tree.subtree receiver must be Tree"));
                 };
-                let result = self.tree_subtree(&tree, path)?;
-                Ok(self.attach_obligations(result, obligations))
+                self.finish_obligated_result(
+                    self.tree_subtree(&tree, path),
+                    obligations.into_iter().chain(path_obligations),
+                )
             }
             BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver }) => {
                 self.require_no_kwargs("option.unwrap_or", kwargs)?;
@@ -4115,8 +4117,8 @@ impl Engine {
                         .ok_or_else(|| self.type_error("Some.unwrap_or requires a value field")),
                     "None" => Ok(args[0].clone()),
                     _ => Err(self.type_error("option.unwrap_or receiver must be Option")),
-                }?;
-                Ok(self.attach_obligations(result, obligations))
+                };
+                self.finish_obligated_result(result, obligations)
             }
             BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver }) => {
                 self.require_no_kwargs("fallible", kwargs)?;
@@ -4126,8 +4128,9 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::HostRead { receiver }) => {
                 self.require_no_kwargs("host.read", kwargs)?;
                 self.check_arity("host.read", args, 1)?;
-                let path =
-                    self.materialize_scheduled_value_deep(args[0].clone(), "forcing host.read")?;
+                let (path, obligations) = self.split_obligations(
+                    self.materialize_scheduled_value_deep(args[0].clone(), "forcing host.read")?,
+                );
                 let path = self.expect_host_path(&path, "host.read path")?;
                 let receiver = self.materialize_scheduled_value_shallow(
                     receiver.as_ref().clone(),
@@ -4136,13 +4139,14 @@ impl Engine {
                 let Value::Host(_) = receiver else {
                     return Err(self.type_error("host.read receiver must be Host"));
                 };
-                self.host_read(&path)
+                self.finish_obligated_result(self.host_read(&path), obligations)
             }
             BuiltinValue::Method(BuiltinMethod::HostHash { receiver }) => {
                 self.require_no_kwargs("host.hash", kwargs)?;
                 self.check_arity("host.hash", args, 1)?;
-                let path =
-                    self.materialize_scheduled_value_deep(args[0].clone(), "forcing host.hash")?;
+                let (path, obligations) = self.split_obligations(
+                    self.materialize_scheduled_value_deep(args[0].clone(), "forcing host.hash")?,
+                );
                 let path = self.expect_host_path(&path, "host.hash path")?;
                 let receiver = self.materialize_scheduled_value_shallow(
                     receiver.as_ref().clone(),
@@ -4151,13 +4155,14 @@ impl Engine {
                 let Value::Host(_) = receiver else {
                     return Err(self.type_error("host.hash receiver must be Host"));
                 };
-                self.host_hash(&path)
+                self.finish_obligated_result(self.host_hash(&path), obligations)
             }
             BuiltinValue::Method(BuiltinMethod::HostWhich { receiver }) => {
                 self.require_no_kwargs("host.which", kwargs)?;
                 self.check_arity("host.which", args, 1)?;
-                let name =
-                    self.materialize_scheduled_value_deep(args[0].clone(), "forcing host.which")?;
+                let (name, obligations) = self.split_obligations(
+                    self.materialize_scheduled_value_deep(args[0].clone(), "forcing host.which")?,
+                );
                 let name = self.expect_host_path(&name, "host.which name")?;
                 let receiver = self.materialize_scheduled_value_shallow(
                     receiver.as_ref().clone(),
@@ -4166,7 +4171,7 @@ impl Engine {
                 let Value::Host(_) = receiver else {
                     return Err(self.type_error("host.which receiver must be Host"));
                 };
-                self.host_which(&name)
+                self.finish_obligated_result(self.host_which(&name), obligations)
             }
         }
     }
@@ -5430,12 +5435,7 @@ impl Engine {
         let Some(method) = self.select_field(value, "to_string").ok() else {
             return Ok(None);
         };
-        let result = if self.discovery_recording_active() {
-            let result = self.execute_call(method, Arc::from([]), Arc::from([]), None)?;
-            self.force_value(result)?
-        } else {
-            self.resolve_boundary_value(self.build_call(method, Vec::new(), None))?
-        };
+        let result = self.resolve_boundary_value(self.build_call(method, Vec::new(), None))?;
         let (result, _) = self.split_obligations(result);
         match result {
             Value::String(text) => Ok(Some(text.to_string())),
@@ -5996,14 +5996,17 @@ impl Engine {
                     self.current_demand_chain(None),
                 )
             })?;
-        self.record_discovery_observation(HostObservation::Read {
+        let observation = HostObservation::Read {
             path: path.to_string(),
             content_hash,
-        });
-        Ok(Value::Blob(BlobValue::FsFile {
-            path: PathValue::new(path),
-            executable: host_path_is_executable(Path::new(path)),
-        }))
+        };
+        Ok(self.attach_obligations(
+            Value::Blob(BlobValue::FsFile {
+                path: PathValue::new(path),
+                executable: host_path_is_executable(Path::new(path)),
+            }),
+            [observation],
+        ))
     }
 
     fn host_hash(&self, path: &str) -> Result<Value, PoisonError> {
@@ -6015,53 +6018,60 @@ impl Engine {
             )
         })?;
         let content_hash = blake3::hash(&bytes).to_hex().to_string();
-        self.record_discovery_observation(HostObservation::Hash {
+        let observation = HostObservation::Hash {
             path: path.to_string(),
             content_hash: content_hash.clone(),
-        });
-        Ok(Value::Blob(BlobValue::from_string(content_hash)))
+        };
+        Ok(self.attach_obligations(
+            Value::Blob(BlobValue::from_string(content_hash)),
+            [observation],
+        ))
     }
 
     fn host_which(&self, name: &str) -> Result<Value, PoisonError> {
         if host_lookup_candidate(name).is_some_and(host_path_is_executable) {
-            self.record_discovery_observation(HostObservation::Which {
+            let observation = HostObservation::Which {
                 name: name.to_string(),
                 expected_path: Some(name.to_string()),
-            });
-            return Ok(Value::String(Arc::from(name)));
+            };
+            return Ok(self.attach_obligations(Value::String(Arc::from(name)), [observation]));
         }
 
         let Some(path) = env::var_os("PATH") else {
-            self.record_discovery_observation(HostObservation::Which {
+            let observation = HostObservation::Which {
                 name: name.to_string(),
                 expected_path: None,
-            });
+            };
             return Err(PoisonError::new(
                 PoisonKind::UserFail,
                 format!("host.which could not find {name}"),
                 self.current_demand_chain(None),
-            ));
+            )
+            .with_observations([observation]));
         };
         for dir in env::split_paths(&path) {
             let candidate = dir.join(name);
             if host_path_is_executable(&candidate) {
                 let candidate = candidate.to_string_lossy().to_string();
-                self.record_discovery_observation(HostObservation::Which {
+                let observation = HostObservation::Which {
                     name: name.to_string(),
                     expected_path: Some(candidate.clone()),
-                });
-                return Ok(Value::String(Arc::from(candidate)));
+                };
+                return Ok(
+                    self.attach_obligations(Value::String(Arc::from(candidate)), [observation])
+                );
             }
         }
-        self.record_discovery_observation(HostObservation::Which {
+        let observation = HostObservation::Which {
             name: name.to_string(),
             expected_path: None,
-        });
+        };
         Err(PoisonError::new(
             PoisonKind::UserFail,
             format!("host.which could not find {name}"),
             self.current_demand_chain(None),
-        ))
+        )
+        .with_observations([observation]))
     }
 
     fn exec_process_value(&self, output: &std::process::Output) -> Value {
@@ -6638,12 +6648,8 @@ impl Engine {
     }
 
     fn force_pending_shallow(&self, node_id: NodeId) -> Result<Value, PoisonError> {
-        if self.discovery_recording_active() {
-            self.with_demand(node_id, || self.force_node(node_id))
-        } else {
-            Scheduler::with_initial_stack(self, self.current_demand_stack_ids())
-                .resolve_node_shallow(node_id)
-        }
+        Scheduler::with_initial_stack(self, self.current_demand_stack_ids())
+            .resolve_node_shallow(node_id)
     }
 
     // r[impl eval.demand-depth]

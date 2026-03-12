@@ -4,11 +4,13 @@
 //! wakes all its waiters with the poison, and they propagate it to their
 //! waiters in turn. Independent subgraphs are unaffected.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
 use crate::instr::SourceProvenance;
 use crate::node::NodeId;
+use crate::value::HostObservation;
 
 // r[impl error.poison]
 /// The error carried by a poisoned node.
@@ -21,6 +23,8 @@ pub struct PoisonError {
     pub demand_chain: DemandChain,
     /// Independent poison causes collected in deterministic input order.
     pub causes: Arc<[PoisonError]>,
+    /// Hidden discovery observations that still matter if this poison is recovered via `?`.
+    observations: Arc<[HostObservation]>,
 }
 
 /// What kind of failure caused the poison.
@@ -89,6 +93,7 @@ impl PoisonError {
             message: message.into(),
             demand_chain,
             causes: Arc::from([]),
+            observations: Arc::from([]),
         }
     }
 
@@ -98,16 +103,26 @@ impl PoisonError {
         errors: Vec<Self>,
     ) -> Self {
         let mut causes = Vec::new();
+        let mut observations = BTreeMap::new();
         for error in errors {
             if error.kind == PoisonKind::Multiple && !error.causes.is_empty() {
+                for observation in error.observations.iter().cloned() {
+                    observations.insert(observation.key(), observation);
+                }
                 causes.extend(error.causes.iter().cloned());
             } else {
+                for observation in error.observations.iter().cloned() {
+                    observations.insert(observation.key(), observation);
+                }
                 causes.push(error);
             }
         }
 
         if causes.len() == 1 {
-            return causes.pop().expect("checked len above");
+            return causes
+                .pop()
+                .expect("checked len above")
+                .with_observations(observations.into_values());
         }
 
         Self {
@@ -115,7 +130,24 @@ impl PoisonError {
             message: message.into(),
             demand_chain,
             causes: Arc::from(causes),
+            observations: Arc::from(observations.into_values().collect::<Vec<_>>()),
         }
+    }
+
+    pub fn observations(&self) -> &[HostObservation] {
+        self.observations.as_ref()
+    }
+
+    pub fn with_observations(mut self, items: impl IntoIterator<Item = HostObservation>) -> Self {
+        let mut observations = BTreeMap::new();
+        for observation in self.observations.iter().cloned() {
+            observations.insert(observation.key(), observation);
+        }
+        for observation in items {
+            observations.insert(observation.key(), observation);
+        }
+        self.observations = Arc::from(observations.into_values().collect::<Vec<_>>());
+        self
     }
 }
 

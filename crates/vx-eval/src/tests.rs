@@ -3475,6 +3475,41 @@ fn host_which_poisons_by_default_and_fallible_calls_return_options() {
 }
 
 #[test]
+fn fallible_discovery_preserves_obligations_from_discovered_inputs() {
+    let tempdir = TempDir::new().unwrap();
+    let input_path = tempdir.path().join("input.bin");
+    let bytes = [0xff, 0xfe, 0xfd];
+    fs::write(&input_path, bytes).unwrap();
+    let expected_hash = blake3_hash(&bytes).to_hex().to_string();
+    let source = format!(
+        r#"fn probe() #discover {{
+               discover(executor_class("default"), (host) => host.read({path:?}).utf8()?)
+             }}"#,
+        path = input_path.to_string_lossy(),
+    );
+    let engine = engine(&source);
+
+    let value = engine.call("probe", vec![]).unwrap();
+    let Value::Discovered(discovered) = value else {
+        panic!("expected discovered value");
+    };
+    assert_eq!(
+        *discovered.value,
+        Value::Struct(StructValue {
+            type_name: Arc::from("None"),
+            fields: Arc::from([]),
+        })
+    );
+    assert_eq!(
+        discovered.obligations.as_ref(),
+        &[HostObservation::Read {
+            path: input_path.to_string_lossy().to_string(),
+            content_hash: expected_hash,
+        }]
+    );
+}
+
+#[test]
 // r[verify exec.arg.auto-mount]
 fn exec_implicitly_mounts_blob_args() {
     let engine = engine(
