@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fmt::Write;
 use std::fs;
+use std::mem;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -295,6 +296,10 @@ impl Engine {
                 current.push(observation);
             }
         });
+    }
+
+    fn discovery_recording_active(&self) -> bool {
+        DISCOVERY_OBSERVATIONS.with(|stack| !stack.borrow().is_empty())
     }
 
     fn invoke_discover_probe(&self, probe: Value) -> Result<Value, PoisonError> {
@@ -626,17 +631,29 @@ impl Engine {
                 deps
             }
             NodeJob::If { cond, .. } => self.scheduler_pending_deep(cond.clone())?,
+            NodeJob::Demand { demands, .. } => {
+                let mut deps = Vec::new();
+                for value in demands.iter() {
+                    deps.extend(self.scheduler_pending_deep(value.clone())?);
+                }
+                deps
+            }
             NodeJob::Fail { message } => self.scheduler_pending_deep(message.clone())?,
             NodeJob::Call {
                 function,
+                args,
+                kwargs,
                 kwargs_expr,
-                ..
             } => {
                 let mut deps = self.scheduler_callable_pending(function.clone())?;
                 if deps.is_empty() {
-                    deps.extend(self.scheduler_builtin_call_deps(function.clone())?);
-                }
-                if let Some(kwargs_expr) = kwargs_expr {
+                    deps.extend(self.scheduler_builtin_call_deps(
+                        function.clone(),
+                        args.as_ref(),
+                        kwargs.as_ref(),
+                        kwargs_expr.as_ref(),
+                    )?);
+                } else if let Some(kwargs_expr) = kwargs_expr {
                     deps.extend(self.scheduler_pending_shallow(kwargs_expr.clone())?);
                 }
                 deps
@@ -722,47 +739,84 @@ impl Engine {
         }
     }
 
-    fn scheduler_builtin_call_deps(&self, function: Value) -> Result<Vec<NodeId>, PoisonError> {
+    fn scheduler_builtin_call_deps(
+        &self,
+        function: Value,
+        args: &[Value],
+        kwargs: &[(Arc<str>, Value)],
+        kwargs_expr: Option<&Value>,
+    ) -> Result<Vec<NodeId>, PoisonError> {
         let function =
             self.materialize_scheduled_value_shallow(function, "forcing callable surface")?;
         let (function, _) = self.split_obligations(function);
-        let Value::Builtin(builtin) = function else {
-            return Ok(Vec::new());
-        };
-
-        match builtin {
-            BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver }) => {
-                let receiver = self.materialize_scheduled_value_shallow(
-                    *receiver,
-                    "forcing array.flatten receiver",
-                )?;
-                let (receiver, _) = self.split_obligations(receiver);
-                let Value::Array(items) = receiver else {
-                    return Ok(Vec::new());
-                };
-
-                let mut deps = Vec::new();
-                for item in items.iter() {
-                    deps.extend(self.scheduler_pending_shallow(item.clone())?);
+        match function {
+            Value::Partial(partial) => {
+                let mut deps =
+                    self.scheduler_builtin_call_deps(partial.function.clone(), &[], &[], None)?;
+                for value in partial.args.iter().chain(args.iter()) {
+                    deps.extend(self.scheduler_pending_deep(value.clone())?);
                 }
-                Ok(deps)
-            }
-            BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver }) => {
-                let receiver = self.materialize_scheduled_value_shallow(
-                    *receiver,
-                    "forcing array.merge receiver",
-                )?;
-                let (receiver, _) = self.split_obligations(receiver);
-                let Value::Array(items) = receiver else {
-                    return Ok(Vec::new());
-                };
-
-                let mut deps = Vec::new();
-                for item in items.iter() {
-                    deps.extend(self.scheduler_pending_deep(item.clone())?);
+                for (_, value) in partial.kwargs.iter().chain(kwargs.iter()) {
+                    deps.extend(self.scheduler_pending_deep(value.clone())?);
                 }
-                Ok(deps)
+                if let Some(kwargs_expr) = &partial.kwargs_expr {
+                    deps.extend(self.scheduler_pending_deep((**kwargs_expr).clone())?);
+                }
+                if let Some(kwargs_expr) = kwargs_expr {
+                    deps.extend(self.scheduler_pending_deep(kwargs_expr.clone())?);
+                }
+                Ok(Self::dedup_node_ids(deps))
             }
+            Value::Builtin(builtin) => match builtin {
+                BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver }) => {
+                    let receiver = self.materialize_scheduled_value_shallow(
+                        *receiver,
+                        "forcing array.flatten receiver",
+                    )?;
+                    let (receiver, _) = self.split_obligations(receiver);
+                    let Value::Array(items) = receiver else {
+                        return Ok(Vec::new());
+                    };
+
+                    let mut deps = Vec::new();
+                    for item in items.iter() {
+                        deps.extend(self.scheduler_pending_shallow(item.clone())?);
+                    }
+                    Ok(Self::dedup_node_ids(deps))
+                }
+                BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver }) => {
+                    let receiver = self.materialize_scheduled_value_shallow(
+                        *receiver,
+                        "forcing array.merge receiver",
+                    )?;
+                    let (receiver, _) = self.split_obligations(receiver);
+                    let Value::Array(items) = receiver else {
+                        return Ok(Vec::new());
+                    };
+
+                    let mut deps = Vec::new();
+                    for item in items.iter() {
+                        deps.extend(self.scheduler_pending_deep(item.clone())?);
+                    }
+                    Ok(Self::dedup_node_ids(deps))
+                }
+                BuiltinValue::Function(BuiltinFunction::Exec)
+                | BuiltinValue::Function(BuiltinFunction::Discover)
+                | BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
+                    let mut deps = Vec::new();
+                    for value in args {
+                        deps.extend(self.scheduler_pending_deep(value.clone())?);
+                    }
+                    for (_, value) in kwargs {
+                        deps.extend(self.scheduler_pending_deep(value.clone())?);
+                    }
+                    if let Some(kwargs_expr) = kwargs_expr {
+                        deps.extend(self.scheduler_pending_deep(kwargs_expr.clone())?);
+                    }
+                    Ok(Self::dedup_node_ids(deps))
+                }
+                _ => Ok(Vec::new()),
+            },
             _ => Ok(Vec::new()),
         }
     }
@@ -1160,6 +1214,14 @@ impl Engine {
                         other.type_name()
                     ))),
                 }
+            }
+            NodeJob::Demand { demands, result } => {
+                if self.discovery_recording_active() {
+                    let _ = self.force_value(Value::Array(Arc::clone(demands)))?;
+                } else {
+                    let _ = self.resolve_boundary_value(Value::Array(Arc::clone(demands)))?;
+                }
+                result.clone()
             }
             NodeJob::Call {
                 function,
@@ -1850,6 +1912,16 @@ impl Engine {
                     ))),
                 }
             }
+            NodeJob::Demand { demands, result } => {
+                if self.discovery_recording_active() {
+                    for value in demands.iter() {
+                        let _ = self.force_value(value.clone())?;
+                    }
+                } else {
+                    let _ = self.force_many(demands.iter().cloned().collect())?;
+                }
+                result.clone()
+            }
             NodeJob::Call {
                 function,
                 args,
@@ -1913,7 +1985,7 @@ impl Engine {
                 merged_kwargs.extend(kwargs.iter().cloned());
                 let merged_kwargs_expr = match (partial.kwargs_expr.as_ref(), kwargs_expr) {
                     (Some(left), Some(right)) => {
-                        Some(self.merge_keyword_records((**left).clone(), right)?)
+                        Some(self.merge_keyword_records_scheduled((**left).clone(), right)?)
                     }
                     (Some(value), None) => Some((**value).clone()),
                     (None, value) => value,
@@ -2067,6 +2139,7 @@ impl Engine {
 
     fn eval_module_scope(&self) -> Result<HashMap<String, Value>, PoisonError> {
         let mut bindings = HashMap::new();
+        let mut demanded_values = Vec::new();
 
         for (name, overloads) in &self.functions {
             bindings.insert(
@@ -2102,11 +2175,12 @@ impl Engine {
                 }
                 instr::Stmt::Expr(expr) => {
                     let value = self.eval_expr(expr, &bindings, "<module>").into_value()?;
-                    let _ = self.force_value(value)?;
+                    demanded_values.push(value);
                 }
             }
         }
 
+        self.resolve_demanded_values(mem::take(&mut demanded_values))?;
         Ok(bindings)
     }
 
@@ -2117,6 +2191,7 @@ impl Engine {
         current_code_identity: &str,
     ) -> BuildResult {
         let mut local_bindings = bindings.clone();
+        let mut demanded_values = Vec::new();
 
         for (index, stmt) in block.stmts.iter().enumerate() {
             let is_last = index + 1 == block.stmts.len();
@@ -2126,7 +2201,9 @@ impl Engine {
                         BuildResult::Value(value) => {
                             local_bindings.insert(name.clone(), value);
                         }
-                        other => return other,
+                        other => {
+                            return self.finish_demanded_result(other, &mut demanded_values);
+                        }
                     }
                 }
                 instr::Stmt::LetPattern { pattern, value } => {
@@ -2135,18 +2212,31 @@ impl Engine {
                             if let Err(error) =
                                 self.bind_pattern_into(pattern, value, &mut local_bindings)
                             {
-                                return BuildResult::Poisoned(error);
+                                return self.finish_demanded_result(
+                                    BuildResult::Poisoned(error),
+                                    &mut demanded_values,
+                                );
                             }
                         }
-                        other => return other,
+                        other => {
+                            return self.finish_demanded_result(other, &mut demanded_values);
+                        }
                     }
                 }
                 instr::Stmt::Return(expr) => {
                     match self.eval_expr(expr, &local_bindings, current_code_identity) {
                         BuildResult::Value(value) | BuildResult::Returned(value) => {
-                            return BuildResult::Returned(value);
+                            return self.finish_demanded_result(
+                                BuildResult::Returned(value),
+                                &mut demanded_values,
+                            );
                         }
-                        BuildResult::Poisoned(error) => return BuildResult::Poisoned(error),
+                        BuildResult::Poisoned(error) => {
+                            return self.finish_demanded_result(
+                                BuildResult::Poisoned(error),
+                                &mut demanded_values,
+                            );
+                        }
                     }
                 }
                 instr::Stmt::FnDecl(def) => {
@@ -2165,19 +2255,81 @@ impl Engine {
                     match self.eval_expr(expr, &local_bindings, current_code_identity) {
                         BuildResult::Value(value) => {
                             if is_last {
-                                return BuildResult::Value(value);
+                                return self.finish_demanded_result(
+                                    BuildResult::Value(value),
+                                    &mut demanded_values,
+                                );
                             }
-                            if let Err(error) = self.force_value(value) {
-                                return BuildResult::Poisoned(error);
+                            if self.discovery_recording_active() {
+                                if let Err(error) = self.force_value(value) {
+                                    return self.finish_demanded_result(
+                                        BuildResult::Poisoned(error),
+                                        &mut demanded_values,
+                                    );
+                                }
+                            } else {
+                                demanded_values.push(value);
                             }
                         }
-                        other => return other,
+                        other => {
+                            return self.finish_demanded_result(other, &mut demanded_values);
+                        }
                     }
                 }
             }
         }
 
-        BuildResult::Value(Value::Unit)
+        self.finish_demanded_result(BuildResult::Value(Value::Unit), &mut demanded_values)
+    }
+
+    fn finish_demanded_result(
+        &self,
+        result: BuildResult,
+        demanded_values: &mut Vec<Value>,
+    ) -> BuildResult {
+        let demanded_values = mem::take(demanded_values);
+        match result {
+            BuildResult::Value(value) => {
+                BuildResult::Value(self.wrap_demanded_value(demanded_values, Ok(value)))
+            }
+            BuildResult::Returned(value) => {
+                BuildResult::Returned(self.wrap_demanded_value(demanded_values, Ok(value)))
+            }
+            BuildResult::Poisoned(error) => {
+                if let Err(demand_error) = self.resolve_demanded_values(demanded_values) {
+                    return BuildResult::Poisoned(demand_error);
+                }
+                BuildResult::Poisoned(error)
+            }
+        }
+    }
+
+    fn wrap_demanded_value(
+        &self,
+        demanded_values: Vec<Value>,
+        result: Result<Value, PoisonError>,
+    ) -> Value {
+        if demanded_values.is_empty() {
+            return result.expect("demand-free result must be a value");
+        }
+
+        self.pending_value(
+            NodeJob::Demand {
+                demands: Arc::from(demanded_values),
+                result,
+            },
+            "demand(..)".into(),
+            None,
+        )
+    }
+
+    fn resolve_demanded_values(&self, demanded_values: Vec<Value>) -> Result<(), PoisonError> {
+        if demanded_values.is_empty() {
+            return Ok(());
+        }
+
+        let _ = self.resolve_boundary_value(Value::Array(Arc::from(demanded_values)))?;
+        Ok(())
     }
 
     // r[impl eval.forcing]
@@ -3453,6 +3605,15 @@ impl Engine {
         kwargs_expr: Option<Value>,
     ) -> Result<Value, PoisonError> {
         match builtin {
+            BuiltinValue::Function(BuiltinFunction::Exec) => {
+                self.exec_builtin_scheduled(args, kwargs, kwargs_expr)
+            }
+            BuiltinValue::Function(BuiltinFunction::Discover) => {
+                self.discover_builtin_scheduled(args, kwargs, kwargs_expr)
+            }
+            BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
+                self.executor_class_builtin_scheduled(args, kwargs, kwargs_expr)
+            }
             BuiltinValue::Method(BuiltinMethod::ArrayMap { receiver }) => {
                 self.require_no_kwargs("array.map", kwargs)?;
                 self.check_arity("array.map", args, 1)?;
@@ -3862,6 +4023,21 @@ impl Engine {
         self.exec_builtin_local(request)
     }
 
+    fn exec_builtin_scheduled(
+        &self,
+        args: &[Value],
+        kwargs: &[(Arc<str>, Value)],
+        kwargs_expr: Option<Value>,
+    ) -> Result<Value, PoisonError> {
+        let kwargs = self.materialize_kwargs_scheduled(kwargs, kwargs_expr, "exec")?;
+        let request = self.parse_exec_request_scheduled(args, &kwargs)?;
+        if let Some(exec_handler) = &self.exec_handler {
+            let request = self.ship_exec_request(&request)?;
+            return exec_handler(request);
+        }
+        self.exec_builtin_local(request)
+    }
+
     fn discover_builtin(
         &self,
         args: &[Value],
@@ -3890,6 +4066,36 @@ impl Engine {
         self.invoke_discover_probe(probe)
     }
 
+    fn discover_builtin_scheduled(
+        &self,
+        args: &[Value],
+        kwargs: &[(Arc<str>, Value)],
+        kwargs_expr: Option<Value>,
+    ) -> Result<Value, PoisonError> {
+        if kwargs_expr.is_some() {
+            return Err(self.type_error("discover does not accept keyword records"));
+        }
+        self.require_no_kwargs("discover", kwargs)?;
+        self.check_arity("discover", args, 2)?;
+        let class =
+            self.materialize_scheduled_value_deep(args[0].clone(), "forcing discover class")?;
+        let class = self.expect_executor_class(&class, "discover class")?;
+        let probe =
+            self.materialize_scheduled_value_deep(args[1].clone(), "forcing discover probe")?;
+
+        if let Some(discover_handler) = &self.discover_handler {
+            let request = DiscoverRequest {
+                class,
+                demand_chain: self.current_demand_chain(None),
+                module: self.transport_module(),
+                probe: self.ship_function(probe)?,
+            };
+            return discover_handler(request);
+        }
+
+        self.invoke_discover_probe(probe)
+    }
+
     fn executor_class_builtin(
         &self,
         args: &[Value],
@@ -3902,6 +4108,23 @@ impl Engine {
         self.require_no_kwargs("executor_class", kwargs)?;
         self.check_arity("executor_class", args, 1)?;
         let name = self.force_value(args[0].clone())?;
+        let name = self.expect_host_path(&name, "executor_class name")?;
+        Ok(Value::ExecutorClass(Arc::from(name)))
+    }
+
+    fn executor_class_builtin_scheduled(
+        &self,
+        args: &[Value],
+        kwargs: &[(Arc<str>, Value)],
+        kwargs_expr: Option<Value>,
+    ) -> Result<Value, PoisonError> {
+        if kwargs_expr.is_some() {
+            return Err(self.type_error("executor_class does not accept keyword records"));
+        }
+        self.require_no_kwargs("executor_class", kwargs)?;
+        self.check_arity("executor_class", args, 1)?;
+        let name =
+            self.materialize_scheduled_value_deep(args[0].clone(), "forcing executor_class name")?;
         let name = self.expect_host_path(&name, "executor_class name")?;
         Ok(Value::ExecutorClass(Arc::from(name)))
     }
@@ -3943,11 +4166,71 @@ impl Engine {
         Ok(out)
     }
 
+    fn materialize_kwargs_scheduled(
+        &self,
+        kwargs: &[(Arc<str>, Value)],
+        kwargs_expr: Option<Value>,
+        context: &str,
+    ) -> Result<Vec<(Arc<str>, Value)>, PoisonError> {
+        let mut out = kwargs.to_vec();
+        let Some(kwargs_expr) = kwargs_expr else {
+            return Ok(out);
+        };
+
+        let kwargs_expr = self.materialize_scheduled_value_shallow(
+            kwargs_expr,
+            &format!("forcing {context} keyword record"),
+        )?;
+        let (value, obligations) = self.split_obligations(kwargs_expr);
+        let Value::Map(map) = value else {
+            return Err(self.type_error(&format!(
+                "{context} keyword record must be a record/map, got {}",
+                value.type_name()
+            )));
+        };
+
+        for (key, value) in map.entries.iter() {
+            let key = self.materialize_scheduled_value_deep(
+                key.clone(),
+                &format!("forcing {context} keyword key"),
+            )?;
+            let Value::String(name) = key else {
+                return Err(self.type_error(&format!(
+                    "{context} keyword record keys must be String, got {}",
+                    key.type_name()
+                )));
+            };
+            out.push((
+                Arc::from(name.as_ref()),
+                self.attach_obligations(value.clone(), obligations.iter().cloned()),
+            ));
+        }
+
+        Ok(out)
+    }
+
     fn merge_keyword_records(&self, left: Value, right: Value) -> Result<Value, PoisonError> {
         let mut entries = Vec::new();
         let left = self.force_value_shallow(left)?;
         self.extend_record_with_spread(&mut entries, left)?;
         let right = self.force_value_shallow(right)?;
+        self.extend_record_with_spread(&mut entries, right)?;
+        Ok(Value::Map(MapValue {
+            entries: Arc::from(entries),
+        }))
+    }
+
+    fn merge_keyword_records_scheduled(
+        &self,
+        left: Value,
+        right: Value,
+    ) -> Result<Value, PoisonError> {
+        let mut entries = Vec::new();
+        let left =
+            self.materialize_scheduled_value_shallow(left, "forcing keyword record spread")?;
+        self.extend_record_with_spread(&mut entries, left)?;
+        let right =
+            self.materialize_scheduled_value_shallow(right, "forcing keyword record spread")?;
         self.extend_record_with_spread(&mut entries, right)?;
         Ok(Value::Map(MapValue {
             entries: Arc::from(entries),
@@ -4031,6 +4314,107 @@ impl Engine {
         let exec_args = exec_args_raw
             .iter()
             .map(|value| self.parse_exec_arg(value, &mut mounts, &explicit_writable, "exec arg"))
+            .collect::<Result<Vec<_>, _>>()?;
+        if exec_args.is_empty() {
+            return Err(self.type_error("exec requires at least one program argument"));
+        }
+        let writable_roots = if explicit_writable.is_empty() {
+            self.infer_exec_writable_roots(&mounts, &exec_args, &env)
+        } else {
+            explicit_writable
+        };
+
+        Ok(ParsedExecRequest {
+            args: exec_args,
+            env,
+            mounts,
+            writable_roots,
+            observer,
+            verification_obligations: verification_obligations.into_values().collect(),
+        })
+    }
+
+    fn parse_exec_request_scheduled(
+        &self,
+        args: &[Value],
+        kwargs: &[(Arc<str>, Value)],
+    ) -> Result<ParsedExecRequest, PoisonError> {
+        self.check_arity("exec", args, 1)?;
+
+        let mut env_value = None;
+        let mut mounts_value = None;
+        let mut observer_value = None;
+        let mut executor_value = None;
+        let mut writable_value = None;
+
+        for (name, value) in kwargs {
+            match name.as_ref() {
+                "env" => env_value = Some(value.clone()),
+                "mounts" => mounts_value = Some(value.clone()),
+                "observer" => observer_value = Some(value.clone()),
+                "executor" => executor_value = Some(value.clone()),
+                "writable" => writable_value = Some(value.clone()),
+                other => {
+                    return Err(self
+                        .type_error(&format!("exec does not accept keyword argument '{other}'")));
+                }
+            }
+        }
+
+        let args_value =
+            self.materialize_scheduled_value_shallow(args[0].clone(), "forcing exec args")?;
+        let (args_value, top_level_arg_obligations) = self.split_obligations(args_value);
+        let Value::Array(exec_args_raw) = args_value else {
+            return Err(self.type_error(&format!(
+                "exec expects Array[String | Path | Blob | Tree] for args, got {}",
+                args_value.type_name()
+            )));
+        };
+
+        let observer =
+            observer_value.ok_or_else(|| self.type_error("exec requires an observer function"))?;
+        let observer = self.materialize_scheduled_value_deep(observer, "forcing exec observer")?;
+        match self.split_obligations_ref(&observer).0 {
+            Value::Function(_) | Value::Builtin(_) => {}
+            other => {
+                return Err(self.type_error(&format!(
+                    "exec observer must be callable, got {}",
+                    other.type_name()
+                )));
+            }
+        }
+
+        if let Some(executor) = executor_value {
+            let executor =
+                self.materialize_scheduled_value_deep(executor, "forcing exec executor")?;
+            let _ = self.expect_executor_class(&executor, "exec executor")?;
+        }
+
+        let mut verification_obligations = BTreeMap::new();
+        Self::add_obligations(&mut verification_obligations, top_level_arg_obligations);
+        self.collect_value_obligations(
+            &Value::Array(exec_args_raw.clone()),
+            &mut verification_obligations,
+        );
+        if let Some(env_value) = &env_value {
+            self.collect_value_obligations(env_value, &mut verification_obligations);
+        }
+        if let Some(mounts_value) = &mounts_value {
+            self.collect_value_obligations(mounts_value, &mut verification_obligations);
+        }
+        if let Some(writable_value) = &writable_value {
+            self.collect_value_obligations(writable_value, &mut verification_obligations);
+        }
+        self.collect_value_obligations(&observer, &mut verification_obligations);
+
+        let mut mounts = self.exec_mounts_from_value_scheduled(mounts_value)?;
+        let explicit_writable = self.exec_writable_from_value_scheduled(writable_value)?;
+        let env = self.exec_env_from_value_scheduled(env_value, &mut mounts, &explicit_writable)?;
+        let exec_args = exec_args_raw
+            .iter()
+            .map(|value| {
+                self.parse_exec_arg_scheduled(value, &mut mounts, &explicit_writable, "exec arg")
+            })
             .collect::<Result<Vec<_>, _>>()?;
         if exec_args.is_empty() {
             return Err(self.type_error("exec requires at least one program argument"));
@@ -4185,6 +4569,46 @@ impl Engine {
         Ok(mounts)
     }
 
+    fn exec_mounts_from_value_scheduled(
+        &self,
+        value: Option<Value>,
+    ) -> Result<Vec<(PathValue, Value)>, PoisonError> {
+        let Some(value) = value else {
+            return Ok(Vec::new());
+        };
+        let (value, _) = self.split_obligations(
+            self.materialize_scheduled_value_shallow(value, "forcing exec mounts")?,
+        );
+        let Value::Map(map) = value else {
+            return Err(self.type_error(&format!(
+                "exec mounts must be Map, got {}",
+                value.type_name()
+            )));
+        };
+
+        let mut mounts = Vec::with_capacity(map.entries.len());
+        for (key, value) in map.entries.iter() {
+            let key =
+                self.materialize_scheduled_value_deep(key.clone(), "forcing exec mount path")?;
+            let path = self.expect_relative_path(&key, "exec mount path")?;
+            let (value, _) =
+                self.split_obligations(self.materialize_scheduled_value_shallow(
+                    value.clone(),
+                    "forcing exec mount value",
+                )?);
+            match value {
+                Value::Blob(_) | Value::Tree(_) => mounts.push((path, value)),
+                other => {
+                    return Err(self.type_error(&format!(
+                        "exec mount values must be Blob or Tree, got {}",
+                        other.type_name()
+                    )));
+                }
+            }
+        }
+        Ok(mounts)
+    }
+
     fn exec_writable_from_value(
         &self,
         value: Option<Value>,
@@ -4203,6 +4627,32 @@ impl Engine {
         let mut writable = Vec::with_capacity(items.len());
         for item in items.iter() {
             let item = self.force_value(item.clone())?;
+            writable.push(self.expect_relative_path(&item, "exec writable path")?);
+        }
+        Ok(writable)
+    }
+
+    fn exec_writable_from_value_scheduled(
+        &self,
+        value: Option<Value>,
+    ) -> Result<Vec<PathValue>, PoisonError> {
+        let Some(value) = value else {
+            return Ok(Vec::new());
+        };
+        let (value, _) = self.split_obligations(
+            self.materialize_scheduled_value_shallow(value, "forcing exec writable")?,
+        );
+        let Value::Array(items) = value else {
+            return Err(self.type_error(&format!(
+                "exec writable must be Array[Path], got {}",
+                value.type_name()
+            )));
+        };
+
+        let mut writable = Vec::with_capacity(items.len());
+        for item in items.iter() {
+            let item =
+                self.materialize_scheduled_value_deep(item.clone(), "forcing exec writable path")?;
             writable.push(self.expect_relative_path(&item, "exec writable path")?);
         }
         Ok(writable)
@@ -4276,6 +4726,43 @@ impl Engine {
         Ok(env)
     }
 
+    fn exec_env_from_value_scheduled(
+        &self,
+        value: Option<Value>,
+        mounts: &mut Vec<(PathValue, Value)>,
+        writable_roots: &[PathValue],
+    ) -> Result<Vec<(String, ExecArgValue)>, PoisonError> {
+        let Some(value) = value else {
+            return Ok(Vec::new());
+        };
+        let (value, _) = self.split_obligations(
+            self.materialize_scheduled_value_shallow(value, "forcing exec env")?,
+        );
+        let Value::Map(map) = value else {
+            return Err(
+                self.type_error(&format!("exec env must be Map, got {}", value.type_name()))
+            );
+        };
+
+        let mut env = Vec::with_capacity(map.entries.len());
+        for (key, value) in map.entries.iter() {
+            let key = self.materialize_scheduled_value_deep(key.clone(), "forcing exec env key")?;
+            let key = match key {
+                Value::String(key) => key.to_string(),
+                other => {
+                    return Err(self.type_error(&format!(
+                        "exec env keys must be String, got {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            let value =
+                self.parse_exec_arg_scheduled(value, mounts, writable_roots, "exec env value")?;
+            env.push((key, value));
+        }
+        Ok(env)
+    }
+
     fn parse_exec_arg(
         &self,
         value: &Value,
@@ -4284,6 +4771,41 @@ impl Engine {
         context: &str,
     ) -> Result<ExecArgValue, PoisonError> {
         let (value, _) = self.split_obligations(self.force_value(value.clone())?);
+        match value {
+            Value::String(text) => Ok(ExecArgValue::Literal(text.to_string())),
+            Value::Path(path) => {
+                let path = self.expect_relative_path(&Value::Path(path), context)?;
+                Ok(ExecArgValue::Path(path))
+            }
+            Value::ExecPath(path) => self.exec_arg_from_exec_path(mounts, &path),
+            Value::Blob(blob) => Ok(ExecArgValue::Path(
+                self.ensure_blob_exec_mount(mounts, &blob),
+            )),
+            Value::Tree(tree) => Ok(ExecArgValue::Path(
+                self.ensure_tree_exec_mount(mounts, &tree),
+            )),
+            other => {
+                if let Some(text) = self.try_stringify_exec_arg(&other)? {
+                    return Ok(ExecArgValue::Literal(text));
+                }
+                Err(self.type_error(&format!(
+                    "{context} must be String, Path, Blob, Tree, ExecPath, or a value with to_string(), got {}",
+                    other.type_name()
+                )))
+            }
+        }
+    }
+
+    fn parse_exec_arg_scheduled(
+        &self,
+        value: &Value,
+        mounts: &mut Vec<(PathValue, Value)>,
+        _writable_roots: &[PathValue],
+        context: &str,
+    ) -> Result<ExecArgValue, PoisonError> {
+        let (value, _) = self.split_obligations(
+            self.materialize_scheduled_value_deep(value.clone(), &format!("forcing {context}"))?,
+        );
         match value {
             Value::String(text) => Ok(ExecArgValue::Literal(text.to_string())),
             Value::Path(path) => {

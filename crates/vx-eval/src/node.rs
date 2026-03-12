@@ -69,6 +69,10 @@ pub enum NodeJob {
         bindings: Arc<HashMap<String, Value>>,
         scope_identity: Arc<str>,
     },
+    Demand {
+        demands: Arc<[Value]>,
+        result: Result<Value, PoisonError>,
+    },
     Call {
         function: Value,
         args: Arc<[Value]>,
@@ -113,6 +117,11 @@ impl NodeJob {
                 }
             }
             NodeJob::If { cond, .. } => cond.collect_pending(&mut deps),
+            NodeJob::Demand { demands, .. } => {
+                for value in demands.iter() {
+                    value.collect_pending(&mut deps);
+                }
+            }
             NodeJob::Call {
                 function,
                 args,

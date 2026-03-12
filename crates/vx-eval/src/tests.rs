@@ -2706,6 +2706,52 @@ fn array_flatten_schedules_item_containers_concurrently() {
 }
 
 #[test]
+fn exec_schedules_argument_resolution_concurrently() {
+    let engine = engine(
+        r#"fn observe(process: Process, tree: Tree) { process.exit_code }
+           fn build(args: Array) {
+             exec(args) where { observer: observe }
+           }"#,
+    );
+
+    let start = Instant::now();
+    let value = engine
+        .call(
+            "build",
+            vec![Value::Array(Arc::from([
+                engine.sleep_value(200, Value::String(Arc::from("/bin/sh"))),
+                engine.sleep_value(200, Value::String(Arc::from("-c"))),
+                Value::String(Arc::from("true")),
+            ]))],
+        )
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(value, Value::U64(0));
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[test]
+fn discarded_expression_statements_are_demanded_concurrently() {
+    let engine = engine("fn main(x: U64, y: U64) { x; y; 42 }");
+
+    let start = Instant::now();
+    let value = engine
+        .call(
+            "main",
+            vec![
+                engine.sleep_value(200, Value::U64(1)),
+                engine.sleep_value(200, Value::U64(2)),
+            ],
+        )
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(value, Value::U64(42));
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[test]
 fn array_merge_forces_tree_items_concurrently() {
     let engine = engine("fn main(items: Array) { items.merge() }");
     let left = Value::Tree(TreeValue::Inline(Arc::from([(
