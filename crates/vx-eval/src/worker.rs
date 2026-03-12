@@ -648,11 +648,7 @@ impl Engine {
     }
 
     fn scheduler_pending_deep(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
-        Ok(self
-            .inspect_scheduled_value(value)?
-            .pending
-            .into_iter()
-            .collect())
+        Ok(self.inspect_value(value)?.pending.into_iter().collect())
     }
 
     fn scheduler_pending_shallow(&self, value: Value) -> Result<Vec<NodeId>, PoisonError> {
@@ -727,8 +723,7 @@ impl Engine {
         kwargs: &[(Arc<str>, Value)],
         kwargs_expr: Option<&Value>,
     ) -> Result<Vec<NodeId>, PoisonError> {
-        let function =
-            self.materialize_scheduled_value_shallow(function, "forcing callable surface")?;
+        let function = self.materialize_value_shallow(function, "forcing callable surface")?;
         let (function, _) = self.split_obligations(function);
         match function {
             Value::Partial(partial) => {
@@ -759,10 +754,8 @@ impl Engine {
                         return Ok(Self::dedup_node_ids(deps));
                     }
 
-                    let value = self.materialize_scheduled_value_shallow(
-                        args[0].clone(),
-                        "forcing Tree input",
-                    )?;
+                    let value =
+                        self.materialize_value_shallow(args[0].clone(), "forcing Tree input")?;
                     let (value, _) = self.split_obligations(value);
                     match value {
                         Value::Map(map) => {
@@ -784,10 +777,8 @@ impl Engine {
                     Self::dedup_node_ids(self.scheduler_pending_shallow(args[0].clone())?),
                 ),
                 BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver }) => {
-                    let receiver = self.materialize_scheduled_value_shallow(
-                        *receiver,
-                        "forcing array.flatten receiver",
-                    )?;
+                    let receiver = self
+                        .materialize_value_shallow(*receiver, "forcing array.flatten receiver")?;
                     let (receiver, _) = self.split_obligations(receiver);
                     let Value::Array(items) = receiver else {
                         return Ok(Vec::new());
@@ -800,10 +791,8 @@ impl Engine {
                     Ok(Self::dedup_node_ids(deps))
                 }
                 BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver }) => {
-                    let receiver = self.materialize_scheduled_value_shallow(
-                        *receiver,
-                        "forcing array.merge receiver",
-                    )?;
+                    let receiver =
+                        self.materialize_value_shallow(*receiver, "forcing array.merge receiver")?;
                     let (receiver, _) = self.split_obligations(receiver);
                     let Value::Array(items) = receiver else {
                         return Ok(Vec::new());
@@ -829,10 +818,8 @@ impl Engine {
                         return Ok(Self::dedup_node_ids(deps));
                     }
 
-                    let value = self.materialize_scheduled_value_shallow(
-                        args[0].clone(),
-                        "forcing Tree.of input",
-                    )?;
+                    let value =
+                        self.materialize_value_shallow(args[0].clone(), "forcing Tree.of input")?;
                     let (value, _) = self.split_obligations(value);
                     let Value::Map(map) = value else {
                         return Ok(Vec::new());
@@ -864,7 +851,7 @@ impl Engine {
                     ))
                 }
                 BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver }) => {
-                    let receiver = self.materialize_scheduled_value_shallow(
+                    let receiver = self.materialize_value_shallow(
                         *receiver,
                         "forcing option.unwrap_or receiver",
                     )?;
@@ -918,9 +905,8 @@ impl Engine {
 
         match node.try_start_or_wait(Waiter { sender }) {
             Ok(()) => {
-                let result = self.with_scheduler_demand_chain(chain, node_id, || {
-                    self.execute_node_scheduled(&node)
-                });
+                let result =
+                    self.with_scheduler_demand_chain(chain, node_id, || self.execute_node(&node));
                 match result {
                     Ok(value) => {
                         node.resolve(value.clone());
@@ -1169,14 +1155,11 @@ impl Engine {
         })
     }
 
-    pub(crate) fn inspect_scheduled_value(
-        &self,
-        value: Value,
-    ) -> Result<InspectedValue, PoisonError> {
-        self.inspect_scheduled_value_inner(value, &mut Vec::new())
+    pub(crate) fn inspect_value(&self, value: Value) -> Result<InspectedValue, PoisonError> {
+        self.inspect_value_inner(value, &mut Vec::new())
     }
 
-    fn inspect_scheduled_value_inner(
+    fn inspect_value_inner(
         &self,
         value: Value,
         visiting: &mut Vec<NodeId>,
@@ -1200,7 +1183,7 @@ impl Engine {
                         return Err(self.scheduler_demand_depth_exceeded(visiting, node_id));
                     }
                     visiting.push(node_id);
-                    let result = self.inspect_scheduled_value_inner(value, visiting);
+                    let result = self.inspect_value_inner(value, visiting);
                     let popped = visiting.pop();
                     debug_assert_eq!(popped, Some(node_id));
                     result
@@ -1212,7 +1195,7 @@ impl Engine {
                 }),
             },
             Value::Discovered(discovered) => {
-                let inspected = self.inspect_scheduled_value_inner(*discovered.value, visiting)?;
+                let inspected = self.inspect_value_inner(*discovered.value, visiting)?;
                 Ok(InspectedValue {
                     value: self.attach_obligations(
                         inspected.value,
@@ -1224,7 +1207,7 @@ impl Engine {
             }
             Value::Tuple(elems) => {
                 let (elems, pending, errors) =
-                    self.inspect_scheduled_list(elems.iter().cloned(), visiting)?;
+                    self.inspect_list(elems.iter().cloned(), visiting)?;
                 Ok(InspectedValue {
                     value: Value::Tuple(Arc::from(elems)),
                     pending,
@@ -1233,7 +1216,7 @@ impl Engine {
             }
             Value::Array(items) => {
                 let (items, pending, errors) =
-                    self.inspect_scheduled_list(items.iter().cloned(), visiting)?;
+                    self.inspect_list(items.iter().cloned(), visiting)?;
                 Ok(InspectedValue {
                     value: Value::Array(Arc::from(items)),
                     pending,
@@ -1245,8 +1228,8 @@ impl Engine {
                 let mut pending = BTreeSet::new();
                 let mut errors = Vec::new();
                 for (key, value) in map.entries.iter() {
-                    let key = self.inspect_scheduled_value_inner(key.clone(), visiting)?;
-                    let value = self.inspect_scheduled_value_inner(value.clone(), visiting)?;
+                    let key = self.inspect_value_inner(key.clone(), visiting)?;
+                    let value = self.inspect_value_inner(value.clone(), visiting)?;
                     pending.extend(key.pending);
                     pending.extend(value.pending);
                     errors.extend(key.errors);
@@ -1263,7 +1246,7 @@ impl Engine {
             }
             Value::ExecPath(path) => match path {
                 ExecPathValue::InTree { tree, suffix } => {
-                    let tree = self.inspect_scheduled_tree(tree, visiting)?;
+                    let tree = self.inspect_tree(tree, visiting)?;
                     Ok(InspectedValue {
                         value: Value::ExecPath(ExecPathValue::InTree {
                             tree: match tree.value {
@@ -1285,13 +1268,13 @@ impl Engine {
                     Value::ExecPath(ExecPathValue::InBlob { blob, leaf }),
                 )),
             },
-            Value::Tree(tree) => self.inspect_scheduled_tree(tree, visiting),
+            Value::Tree(tree) => self.inspect_tree(tree, visiting),
             Value::Struct(struct_value) => {
                 let mut fields = Vec::with_capacity(struct_value.fields.len());
                 let mut pending = BTreeSet::new();
                 let mut errors = Vec::new();
                 for (name, value) in struct_value.fields.iter() {
-                    let value = self.inspect_scheduled_value_inner(value.clone(), visiting)?;
+                    let value = self.inspect_value_inner(value.clone(), visiting)?;
                     pending.extend(value.pending);
                     errors.extend(value.errors);
                     fields.push((name.clone(), value.value));
@@ -1310,7 +1293,7 @@ impl Engine {
                 let mut pending = BTreeSet::new();
                 let mut errors = Vec::new();
                 for (name, value) in function.captures.iter() {
-                    let value = self.inspect_scheduled_value_inner(value.clone(), visiting)?;
+                    let value = self.inspect_value_inner(value.clone(), visiting)?;
                     pending.extend(value.pending);
                     errors.extend(value.errors);
                     captures.push((name.clone(), value.value));
@@ -1326,23 +1309,21 @@ impl Engine {
                 })
             }
             Value::Partial(partial) => {
-                let function =
-                    self.inspect_scheduled_value_inner(partial.function.clone(), visiting)?;
+                let function = self.inspect_value_inner(partial.function.clone(), visiting)?;
                 let (args, mut pending, mut errors) =
-                    self.inspect_scheduled_list(partial.args.iter().cloned(), visiting)?;
+                    self.inspect_list(partial.args.iter().cloned(), visiting)?;
                 pending.extend(function.pending);
                 errors.extend(function.errors);
                 let mut kwargs = Vec::with_capacity(partial.kwargs.len());
                 for (name, value) in partial.kwargs.iter() {
-                    let value = self.inspect_scheduled_value_inner(value.clone(), visiting)?;
+                    let value = self.inspect_value_inner(value.clone(), visiting)?;
                     pending.extend(value.pending);
                     errors.extend(value.errors);
                     kwargs.push((name.clone(), value.value));
                 }
                 let kwargs_expr = match &partial.kwargs_expr {
                     Some(kwargs_expr) => {
-                        let value =
-                            self.inspect_scheduled_value_inner((**kwargs_expr).clone(), visiting)?;
+                        let value = self.inspect_value_inner((**kwargs_expr).clone(), visiting)?;
                         pending.extend(value.pending);
                         errors.extend(value.errors);
                         Some(Box::new(value.value))
@@ -1361,8 +1342,7 @@ impl Engine {
                 })
             }
             Value::Builtin(builtin) => {
-                let (builtin, pending, errors) =
-                    self.inspect_scheduled_builtin(builtin, visiting)?;
+                let (builtin, pending, errors) = self.inspect_builtin(builtin, visiting)?;
                 Ok(InspectedValue {
                     value: Value::Builtin(builtin),
                     pending,
@@ -1373,7 +1353,7 @@ impl Engine {
         }
     }
 
-    fn inspect_scheduled_list(
+    fn inspect_list(
         &self,
         values: impl IntoIterator<Item = Value>,
         visiting: &mut Vec<NodeId>,
@@ -1382,7 +1362,7 @@ impl Engine {
         let mut pending = BTreeSet::new();
         let mut errors = Vec::new();
         for value in values {
-            let inspected = self.inspect_scheduled_value_inner(value, visiting)?;
+            let inspected = self.inspect_value_inner(value, visiting)?;
             out.push(inspected.value);
             pending.extend(inspected.pending);
             errors.extend(inspected.errors);
@@ -1390,7 +1370,7 @@ impl Engine {
         Ok((out, pending, errors))
     }
 
-    fn inspect_scheduled_tree(
+    fn inspect_tree(
         &self,
         tree: TreeValue,
         visiting: &mut Vec<NodeId>,
@@ -1401,7 +1381,7 @@ impl Engine {
                 let mut pending = BTreeSet::new();
                 let mut errors = Vec::new();
                 for (name, value) in entries.iter() {
-                    let value = self.inspect_scheduled_value_inner(value.clone(), visiting)?;
+                    let value = self.inspect_value_inner(value.clone(), visiting)?;
                     pending.extend(value.pending);
                     errors.extend(value.errors);
                     out.push((name.clone(), value.value));
@@ -1421,7 +1401,7 @@ impl Engine {
         }
     }
 
-    fn inspect_scheduled_builtin(
+    fn inspect_builtin(
         &self,
         builtin: BuiltinValue,
         visiting: &mut Vec<NodeId>,
@@ -1430,7 +1410,7 @@ impl Engine {
             |receiver: Box<Value>,
              visiting: &mut Vec<NodeId>|
              -> Result<(Value, BTreeSet<NodeId>, Vec<PoisonError>), PoisonError> {
-                let inspected = self.inspect_scheduled_value_inner(*receiver, visiting)?;
+                let inspected = self.inspect_value_inner(*receiver, visiting)?;
                 Ok((inspected.value, inspected.pending, inspected.errors))
             };
 
@@ -1685,12 +1665,8 @@ impl Engine {
         }
     }
 
-    fn materialize_scheduled_value_deep(
-        &self,
-        value: Value,
-        context: &str,
-    ) -> Result<Value, PoisonError> {
-        let inspected = self.inspect_scheduled_value(value)?;
+    fn materialize_value_deep(&self, value: Value, context: &str) -> Result<Value, PoisonError> {
+        let inspected = self.inspect_value(value)?;
         if !inspected.errors.is_empty() {
             return Err(self.scheduler_aggregate_poison_errors(context, &[], inspected.errors));
         }
@@ -1708,7 +1684,7 @@ impl Engine {
         Ok(inspected.value)
     }
 
-    fn materialize_scheduled_many_deep(
+    fn materialize_many_deep(
         &self,
         values: Vec<Value>,
         context: &str,
@@ -1717,7 +1693,7 @@ impl Engine {
         let mut pending = BTreeSet::new();
         let mut errors = Vec::new();
         for value in values {
-            let inspected = self.inspect_scheduled_value(value)?;
+            let inspected = self.inspect_value(value)?;
             materialized.push(inspected.value);
             pending.extend(inspected.pending);
             errors.extend(inspected.errors);
@@ -1738,11 +1714,7 @@ impl Engine {
         Ok(materialized)
     }
 
-    fn materialize_scheduled_value_shallow(
-        &self,
-        value: Value,
-        context: &str,
-    ) -> Result<Value, PoisonError> {
+    fn materialize_value_shallow(&self, value: Value, context: &str) -> Result<Value, PoisonError> {
         match value {
             Value::Pending(node_id) => match self.scheduler_node_state(node_id)? {
                 SchedulerNodeState::Pending => Err(self.internal_error(&format!(
@@ -1750,19 +1722,19 @@ impl Engine {
                     node_id.0
                 ))),
                 SchedulerNodeState::Resolved(value) => {
-                    self.materialize_scheduled_value_shallow(value, context)
+                    self.materialize_value_shallow(value, context)
                 }
                 SchedulerNodeState::Poisoned(error) => Err(error),
             },
             Value::Discovered(discovered) => Ok(self.attach_obligations(
-                self.materialize_scheduled_value_shallow(*discovered.value, context)?,
+                self.materialize_value_shallow(*discovered.value, context)?,
                 discovered.obligations.iter().cloned(),
             )),
             other => Ok(other),
         }
     }
 
-    fn materialize_scheduled_template_parts(
+    fn materialize_template_parts(
         &self,
         parts: &[TemplatePartValue],
     ) -> Result<Vec<TemplatePartValue>, PoisonError> {
@@ -1773,7 +1745,7 @@ impl Engine {
                 TemplatePartValue::Expr(value) => Some(value.clone()),
             })
             .collect::<Vec<_>>();
-        let forced = self.materialize_scheduled_many_deep(values, "forcing dependencies")?;
+        let forced = self.materialize_many_deep(values, "forcing dependencies")?;
         let mut forced_iter = forced.into_iter();
         Ok(parts
             .iter()
@@ -1786,10 +1758,10 @@ impl Engine {
             .collect())
     }
 
-    fn execute_node_scheduled(&self, node: &Arc<Node>) -> Result<Value, PoisonError> {
+    fn execute_node(&self, node: &Arc<Node>) -> Result<Value, PoisonError> {
         match &node.job {
             NodeJob::Binary { op, left, right } => {
-                let mut values = self.materialize_scheduled_many_deep(
+                let mut values = self.materialize_many_deep(
                     vec![left.clone(), right.clone()],
                     "forcing dependencies",
                 )?;
@@ -1798,12 +1770,11 @@ impl Engine {
                 self.compute_binary(*op, &left, &right)
             }
             NodeJob::Unary { op, operand } => {
-                let operand =
-                    self.materialize_scheduled_value_deep(operand.clone(), "forcing dependency")?;
+                let operand = self.materialize_value_deep(operand.clone(), "forcing dependency")?;
                 self.compute_unary(*op, &operand)
             }
             NodeJob::Template { kind, parts } => {
-                let values = self.materialize_scheduled_template_parts(parts)?;
+                let values = self.materialize_template_parts(parts)?;
                 match kind {
                     TemplateKind::String => self.interpolate_string_parts(&values),
                     TemplateKind::Path => self.interpolate_path_parts(&values),
@@ -1816,8 +1787,7 @@ impl Engine {
                 bindings,
                 scope_identity,
             } => {
-                let cond =
-                    self.materialize_scheduled_value_deep(cond.clone(), "forcing dependency")?;
+                let cond = self.materialize_value_deep(cond.clone(), "forcing dependency")?;
                 match cond {
                     Value::Bool(true) => self
                         .eval_block(then_branch, bindings.as_ref(), scope_identity.as_ref())
@@ -1832,9 +1802,7 @@ impl Engine {
                 }
             }
             NodeJob::Fallible { value } => {
-                match self
-                    .materialize_scheduled_value_shallow(value.clone(), "forcing fallible operand")
-                {
+                match self.materialize_value_shallow(value.clone(), "forcing fallible operand") {
                     Ok(value) => Ok(self.build_fallible_value(value)),
                     Err(error) => Ok(self.fallible_none_from_error(&error)),
                 }
@@ -1848,7 +1816,7 @@ impl Engine {
                 args,
                 kwargs,
                 kwargs_expr,
-            } => self.execute_call_scheduled(
+            } => self.execute_call(
                 function.clone(),
                 args.clone(),
                 kwargs.clone(),
@@ -1856,15 +1824,12 @@ impl Engine {
             ),
             NodeJob::Invoke { function, args } => self.invoke_function(function, args.clone()),
             NodeJob::Field { receiver, field } => {
-                let receiver = self.materialize_scheduled_value_shallow(
-                    receiver.clone(),
-                    "forcing selector receiver",
-                )?;
+                let receiver =
+                    self.materialize_value_shallow(receiver.clone(), "forcing selector receiver")?;
                 self.select_field(&receiver, field)
             }
             NodeJob::Fail { message } => {
-                let message =
-                    self.materialize_scheduled_value_deep(message.clone(), "forcing dependency")?;
+                let message = self.materialize_value_deep(message.clone(), "forcing dependency")?;
                 Err(PoisonError::new(
                     PoisonKind::UserFail,
                     message.to_string(),
@@ -1881,7 +1846,7 @@ impl Engine {
         }
     }
 
-    fn execute_call_scheduled(
+    fn execute_call(
         &self,
         function: Value,
         args: Arc<[Value]>,
@@ -1889,16 +1854,12 @@ impl Engine {
         kwargs_expr: Option<Value>,
     ) -> Result<Value, PoisonError> {
         let (function, function_obligations) = self.split_obligations(
-            self.materialize_scheduled_value_shallow(function, "forcing callable surface")?,
+            self.materialize_value_shallow(function, "forcing callable surface")?,
         );
         match function {
-            Value::Function(function) => self.finish_execute_call_scheduled(
-                function,
-                args,
-                kwargs,
-                kwargs_expr,
-                function_obligations,
-            ),
+            Value::Function(function) => {
+                self.finish_execute_call(function, args, kwargs, kwargs_expr, function_obligations)
+            }
             Value::Partial(partial) => {
                 let mut merged_args = partial.args.iter().cloned().collect::<Vec<_>>();
                 merged_args.extend(args.iter().cloned());
@@ -1906,13 +1867,13 @@ impl Engine {
                 merged_kwargs.extend(kwargs.iter().cloned());
                 let merged_kwargs_expr = match (partial.kwargs_expr.as_ref(), kwargs_expr) {
                     (Some(left), Some(right)) => {
-                        Some(self.merge_keyword_records_scheduled((**left).clone(), right)?)
+                        Some(self.merge_keyword_records((**left).clone(), right)?)
                     }
                     (Some(value), None) => Some((**value).clone()),
                     (None, value) => value,
                 };
                 self.finish_obligated_result(
-                    self.execute_call_scheduled(
+                    self.execute_call(
                         partial.function.clone(),
                         Arc::from(merged_args),
                         Arc::from(merged_kwargs),
@@ -1922,14 +1883,14 @@ impl Engine {
                 )
             }
             Value::Builtin(builtin) => self.finish_obligated_result(
-                self.invoke_builtin_scheduled(&builtin, &args, &kwargs, kwargs_expr),
+                self.invoke_builtin(&builtin, &args, &kwargs, kwargs_expr),
                 function_obligations,
             ),
             other => Err(self.type_error(&format!("cannot call {}", other.type_name()))),
         }
     }
 
-    fn finish_execute_call_scheduled(
+    fn finish_execute_call(
         &self,
         function: FunctionValue,
         args: Arc<[Value]>,
@@ -3045,7 +3006,7 @@ impl Engine {
         })))
     }
 
-    fn invoke_builtin_scheduled(
+    fn invoke_builtin(
         &self,
         builtin: &BuiltinValue,
         args: &[Value],
@@ -3056,30 +3017,26 @@ impl Engine {
             BuiltinValue::Namespace(BuiltinNamespace::Blob) => {
                 self.require_no_kwargs("Blob", kwargs)?;
                 self.check_arity("Blob", args, 1)?;
-                let value =
-                    self.materialize_scheduled_value_deep(args[0].clone(), "forcing Blob value")?;
+                let value = self.materialize_value_deep(args[0].clone(), "forcing Blob value")?;
                 let text = self.stringify_scalar(&value)?;
                 Ok(Value::Blob(BlobValue::from_string(text)))
             }
             BuiltinValue::Namespace(BuiltinNamespace::Bytes) => {
                 self.require_no_kwargs("Bytes", kwargs)?;
                 self.check_arity("Bytes", args, 1)?;
-                let value =
-                    self.materialize_scheduled_value_deep(args[0].clone(), "forcing Bytes value")?;
+                let value = self.materialize_value_deep(args[0].clone(), "forcing Bytes value")?;
                 let text = self.stringify_scalar(&value)?;
                 Ok(Value::Bytes(Arc::from(text.as_bytes().to_vec())))
             }
             BuiltinValue::Namespace(BuiltinNamespace::Tree) => {
                 self.require_no_kwargs("Tree", kwargs)?;
                 self.check_arity("Tree", args, 1)?;
-                let (value, _) =
-                    self.split_obligations(self.materialize_scheduled_value_shallow(
-                        args[0].clone(),
-                        "forcing Tree input",
-                    )?);
+                let (value, _) = self.split_obligations(
+                    self.materialize_value_shallow(args[0].clone(), "forcing Tree input")?,
+                );
                 match value {
-                    Value::Map(map) => self.tree_from_map_scheduled(&map),
-                    Value::Array(_) => self.array_merge_scheduled(&value),
+                    Value::Map(map) => self.tree_from_map(&map),
+                    Value::Array(_) => self.array_merge(&value),
                     Value::Path(path) => Ok(Value::Tree(TreeValue::FsDir(path))),
                     Value::String(path) => {
                         Ok(Value::Tree(TreeValue::FsDir(PathValue::new(path.as_ref()))))
@@ -3091,18 +3048,18 @@ impl Engine {
                 }
             }
             BuiltinValue::Function(BuiltinFunction::Exec) => {
-                self.exec_builtin_scheduled(args, kwargs, kwargs_expr)
+                self.exec_builtin(args, kwargs, kwargs_expr)
             }
             BuiltinValue::Function(BuiltinFunction::Discover) => {
-                self.discover_builtin_scheduled(args, kwargs, kwargs_expr)
+                self.discover_builtin(args, kwargs, kwargs_expr)
             }
             BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
-                self.executor_class_builtin_scheduled(args, kwargs, kwargs_expr)
+                self.executor_class_builtin(args, kwargs, kwargs_expr)
             }
             BuiltinValue::Function(BuiltinFunction::StructConstructor { type_name, fields }) => {
                 self.require_no_kwargs(type_name.as_ref(), kwargs)?;
                 self.check_arity(type_name.as_ref(), args, 1)?;
-                let (value, _) = self.split_obligations(self.materialize_scheduled_value_shallow(
+                let (value, _) = self.split_obligations(self.materialize_value_shallow(
                     args[0].clone(),
                     &format!("forcing {type_name} payload"),
                 )?);
@@ -3137,36 +3094,31 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::BlobFromString) => {
                 self.require_no_kwargs("Blob.from_string", kwargs)?;
                 self.check_arity("Blob.from_string", args, 1)?;
-                let value = self.materialize_scheduled_value_deep(
-                    args[0].clone(),
-                    "forcing Blob.from_string value",
-                )?;
+                let value =
+                    self.materialize_value_deep(args[0].clone(), "forcing Blob.from_string value")?;
                 let text = self.stringify_scalar(&value)?;
                 Ok(Value::Blob(BlobValue::from_string(text)))
             }
             BuiltinValue::Method(BuiltinMethod::BytesFromString) => {
                 self.require_no_kwargs("Bytes", kwargs)?;
                 self.check_arity("Bytes", args, 1)?;
-                let value = self.materialize_scheduled_value_deep(
-                    args[0].clone(),
-                    "forcing Bytes.from_string value",
-                )?;
+                let value = self
+                    .materialize_value_deep(args[0].clone(), "forcing Bytes.from_string value")?;
                 let text = self.stringify_scalar(&value)?;
                 Ok(Value::Bytes(Arc::from(text.as_bytes().to_vec())))
             }
             BuiltinValue::Method(BuiltinMethod::TreeOf) => {
                 self.require_no_kwargs("Tree.of", kwargs)?;
                 self.check_arity("Tree.of", args, 1)?;
-                let (value, _) = self.split_obligations(self.materialize_scheduled_value_shallow(
-                    args[0].clone(),
-                    "forcing Tree.of input",
-                )?);
+                let (value, _) = self.split_obligations(
+                    self.materialize_value_shallow(args[0].clone(), "forcing Tree.of input")?,
+                );
                 let Value::Map(map) = value else {
                     return Err(
                         self.type_error(&format!("Tree.of expects Map, got {}", value.type_name()))
                     );
                 };
-                self.tree_from_map_scheduled(&map)
+                self.tree_from_map(&map)
             }
             BuiltinValue::Method(BuiltinMethod::TreeEmpty) => {
                 self.require_no_kwargs("Tree.empty", kwargs)?;
@@ -3176,41 +3128,41 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::TreeFromPath) => {
                 self.require_no_kwargs("Tree.from_path", kwargs)?;
                 self.check_arity("Tree.from_path", args, 1)?;
-                let path = self
-                    .materialize_scheduled_value_deep(args[0].clone(), "forcing Tree.from_path")?;
+                let path =
+                    self.materialize_value_deep(args[0].clone(), "forcing Tree.from_path")?;
                 let path = self.expect_path_value(&path, "Tree.from_path path")?;
                 Ok(Value::Tree(TreeValue::FsDir(path)))
             }
             BuiltinValue::Method(BuiltinMethod::ArrayMap { receiver }) => {
                 self.require_no_kwargs("array.map", kwargs)?;
                 self.check_arity("array.map", args, 1)?;
-                self.array_map_scheduled(receiver, args[0].clone())
+                self.array_map(receiver, args[0].clone())
             }
             BuiltinValue::Method(BuiltinMethod::ArrayToMap { receiver }) => {
                 self.require_no_kwargs("array.to_map", kwargs)?;
                 self.check_arity("array.to_map", args, 1)?;
-                self.array_to_map_scheduled(receiver, args[0].clone())
+                self.array_to_map(receiver, args[0].clone())
             }
             BuiltinValue::Method(BuiltinMethod::MapMapValues { receiver }) => {
                 self.require_no_kwargs("map.map_values", kwargs)?;
                 self.check_arity("map.map_values", args, 1)?;
-                self.map_map_values_scheduled(receiver, args[0].clone())
+                self.map_map_values(receiver, args[0].clone())
             }
             BuiltinValue::Method(BuiltinMethod::ArrayFlatten { receiver }) => {
                 self.require_no_kwargs("array.flatten", kwargs)?;
                 self.check_arity("array.flatten", args, 0)?;
-                self.array_flatten_scheduled(receiver)
+                self.array_flatten(receiver)
             }
             BuiltinValue::Method(BuiltinMethod::ArrayMerge { receiver }) => {
                 self.require_no_kwargs("array.merge", kwargs)?;
                 self.check_arity("array.merge", args, 0)?;
-                self.array_merge_scheduled(receiver)
+                self.array_merge(receiver)
             }
             BuiltinValue::Method(BuiltinMethod::BlobToString { receiver }) => {
                 self.require_no_kwargs("blob.to_string", kwargs)?;
                 self.check_arity("blob.to_string", args, 0)?;
                 let (receiver, obligations) =
-                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                    self.split_obligations(self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing blob.to_string receiver",
                     )?);
@@ -3232,7 +3184,7 @@ impl Engine {
                 self.require_no_kwargs("blob.executable", kwargs)?;
                 self.check_arity("blob.executable", args, 0)?;
                 let (receiver, obligations) =
-                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                    self.split_obligations(self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing blob.executable receiver",
                     )?);
@@ -3259,7 +3211,7 @@ impl Engine {
                 self.require_no_kwargs("blob.utf8", kwargs)?;
                 self.check_arity("blob.utf8", args, 0)?;
                 let (receiver, obligations) =
-                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                    self.split_obligations(self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing blob.utf8 receiver",
                     )?);
@@ -3281,7 +3233,7 @@ impl Engine {
                 self.require_no_kwargs("blob.utf8_lossy", kwargs)?;
                 self.check_arity("blob.utf8_lossy", args, 0)?;
                 let (receiver, obligations) =
-                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                    self.split_obligations(self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing blob.utf8_lossy receiver",
                     )?);
@@ -3310,7 +3262,7 @@ impl Engine {
                 self.require_no_kwargs("bytes.utf8", kwargs)?;
                 self.check_arity("bytes.utf8", args, 0)?;
                 let (receiver, obligations) =
-                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                    self.split_obligations(self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing bytes.utf8 receiver",
                     )?);
@@ -3334,7 +3286,7 @@ impl Engine {
                 self.require_no_kwargs("bytes.utf8_lossy", kwargs)?;
                 self.check_arity("bytes.utf8_lossy", args, 0)?;
                 let (receiver, obligations) =
-                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                    self.split_obligations(self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing bytes.utf8_lossy receiver",
                     )?);
@@ -3348,7 +3300,7 @@ impl Engine {
                 self.require_no_kwargs("bytes.blob", kwargs)?;
                 self.check_arity("bytes.blob", args, 0)?;
                 let (receiver, obligations) =
-                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                    self.split_obligations(self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing bytes.blob receiver",
                     )?);
@@ -3366,24 +3318,21 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::StreamCollect { receiver }) => {
                 self.require_no_kwargs("stream.collect", kwargs)?;
                 self.check_arity("stream.collect", args, 0)?;
-                let (receiver, obligations) =
-                    self.split_obligations(self.materialize_scheduled_value_deep(
-                        receiver.as_ref().clone(),
-                        "forcing stream.collect receiver",
-                    )?);
+                let (receiver, obligations) = self.split_obligations(self.materialize_value_deep(
+                    receiver.as_ref().clone(),
+                    "forcing stream.collect receiver",
+                )?);
                 self.finish_obligated_result(Ok(receiver), obligations)
             }
             BuiltinValue::Method(BuiltinMethod::TreeFile { receiver }) => {
                 self.require_no_kwargs("tree.file", kwargs)?;
                 self.check_arity("tree.file", args, 1)?;
-                let (path, path_obligations) =
-                    self.split_obligations(self.materialize_scheduled_value_deep(
-                        args[0].clone(),
-                        "forcing tree.file path",
-                    )?);
+                let (path, path_obligations) = self.split_obligations(
+                    self.materialize_value_deep(args[0].clone(), "forcing tree.file path")?,
+                );
                 let path = self.expect_relative_path(&path, "tree.file path")?;
                 let (receiver, obligations) =
-                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                    self.split_obligations(self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing tree.file receiver",
                     )?);
@@ -3398,16 +3347,14 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::TreeMerge { receiver }) => {
                 self.require_no_kwargs("tree.merge", kwargs)?;
                 self.check_arity("tree.merge", args, 1)?;
-                let (other, other_obligations) =
-                    self.split_obligations(self.materialize_scheduled_value_shallow(
-                        args[0].clone(),
-                        "forcing tree.merge other",
-                    )?);
+                let (other, other_obligations) = self.split_obligations(
+                    self.materialize_value_shallow(args[0].clone(), "forcing tree.merge other")?,
+                );
                 let Value::Tree(other) = other else {
                     return Err(self.type_error("tree.merge expects Tree"));
                 };
                 let (receiver, obligations) =
-                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                    self.split_obligations(self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing tree.merge receiver",
                     )?);
@@ -3422,14 +3369,12 @@ impl Engine {
             BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver }) => {
                 self.require_no_kwargs("tree.subtree", kwargs)?;
                 self.check_arity("tree.subtree", args, 1)?;
-                let (path, path_obligations) =
-                    self.split_obligations(self.materialize_scheduled_value_deep(
-                        args[0].clone(),
-                        "forcing tree.subtree path",
-                    )?);
+                let (path, path_obligations) = self.split_obligations(
+                    self.materialize_value_deep(args[0].clone(), "forcing tree.subtree path")?,
+                );
                 let path = self.expect_relative_path(&path, "tree.subtree path")?;
                 let (receiver, obligations) =
-                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                    self.split_obligations(self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing tree.subtree receiver",
                     )?);
@@ -3445,7 +3390,7 @@ impl Engine {
                 self.require_no_kwargs("option.unwrap_or", kwargs)?;
                 self.check_arity("option.unwrap_or", args, 1)?;
                 let (receiver, obligations) =
-                    self.split_obligations(self.materialize_scheduled_value_shallow(
+                    self.split_obligations(self.materialize_value_shallow(
                         receiver.as_ref().clone(),
                         "forcing option.unwrap_or receiver",
                     )?);
@@ -3473,10 +3418,10 @@ impl Engine {
                 self.require_no_kwargs("host.read", kwargs)?;
                 self.check_arity("host.read", args, 1)?;
                 let (path, obligations) = self.split_obligations(
-                    self.materialize_scheduled_value_deep(args[0].clone(), "forcing host.read")?,
+                    self.materialize_value_deep(args[0].clone(), "forcing host.read")?,
                 );
                 let path = self.expect_host_path(&path, "host.read path")?;
-                let receiver = self.materialize_scheduled_value_shallow(
+                let receiver = self.materialize_value_shallow(
                     receiver.as_ref().clone(),
                     "forcing host.read receiver",
                 )?;
@@ -3489,10 +3434,10 @@ impl Engine {
                 self.require_no_kwargs("host.hash", kwargs)?;
                 self.check_arity("host.hash", args, 1)?;
                 let (path, obligations) = self.split_obligations(
-                    self.materialize_scheduled_value_deep(args[0].clone(), "forcing host.hash")?,
+                    self.materialize_value_deep(args[0].clone(), "forcing host.hash")?,
                 );
                 let path = self.expect_host_path(&path, "host.hash path")?;
-                let receiver = self.materialize_scheduled_value_shallow(
+                let receiver = self.materialize_value_shallow(
                     receiver.as_ref().clone(),
                     "forcing host.hash receiver",
                 )?;
@@ -3505,10 +3450,10 @@ impl Engine {
                 self.require_no_kwargs("host.which", kwargs)?;
                 self.check_arity("host.which", args, 1)?;
                 let (name, obligations) = self.split_obligations(
-                    self.materialize_scheduled_value_deep(args[0].clone(), "forcing host.which")?,
+                    self.materialize_value_deep(args[0].clone(), "forcing host.which")?,
                 );
                 let name = self.expect_host_path(&name, "host.which name")?;
-                let receiver = self.materialize_scheduled_value_shallow(
+                let receiver = self.materialize_value_shallow(
                     receiver.as_ref().clone(),
                     "forcing host.which receiver",
                 )?;
@@ -3520,7 +3465,7 @@ impl Engine {
         }
     }
 
-    fn tree_from_map_scheduled(&self, map: &MapValue) -> Result<Value, PoisonError> {
+    fn tree_from_map(&self, map: &MapValue) -> Result<Value, PoisonError> {
         fn insert_tree_path(
             engine: &Engine,
             entries: &mut BTreeMap<Arc<str>, Value>,
@@ -3572,8 +3517,7 @@ impl Engine {
 
         let mut nested = BTreeMap::<Arc<str>, Value>::new();
         for (key, value) in map.entries.iter() {
-            let key =
-                self.materialize_scheduled_value_deep(key.clone(), "forcing Tree entry path")?;
+            let key = self.materialize_value_deep(key.clone(), "forcing Tree entry path")?;
             let path = self.expect_relative_path(&key, "Tree entry path")?;
             let raw = path.as_str();
             if raw.is_empty() || raw == "." {
@@ -3588,12 +3532,10 @@ impl Engine {
         ))))
     }
 
-    fn array_map_scheduled(&self, receiver: &Value, callback: Value) -> Result<Value, PoisonError> {
-        let (receiver, obligations) =
-            self.split_obligations(self.materialize_scheduled_value_shallow(
-                receiver.clone(),
-                "forcing array.map receiver",
-            )?);
+    fn array_map(&self, receiver: &Value, callback: Value) -> Result<Value, PoisonError> {
+        let (receiver, obligations) = self.split_obligations(
+            self.materialize_value_shallow(receiver.clone(), "forcing array.map receiver")?,
+        );
         let Value::Array(items) = receiver else {
             return Err(self.type_error("array.map receiver must be Array"));
         };
@@ -3606,16 +3548,10 @@ impl Engine {
         Ok(self.attach_obligations(Value::Array(Arc::from(out)), obligations))
     }
 
-    fn array_to_map_scheduled(
-        &self,
-        receiver: &Value,
-        callback: Value,
-    ) -> Result<Value, PoisonError> {
-        let (receiver, obligations) =
-            self.split_obligations(self.materialize_scheduled_value_shallow(
-                receiver.clone(),
-                "forcing array.to_map receiver",
-            )?);
+    fn array_to_map(&self, receiver: &Value, callback: Value) -> Result<Value, PoisonError> {
+        let (receiver, obligations) = self.split_obligations(
+            self.materialize_value_shallow(receiver.clone(), "forcing array.to_map receiver")?,
+        );
         let Value::Array(items) = receiver else {
             return Err(self.type_error("array.to_map receiver must be Array"));
         };
@@ -3638,23 +3574,19 @@ impl Engine {
         ))
     }
 
-    fn array_flatten_scheduled(&self, receiver: &Value) -> Result<Value, PoisonError> {
-        let (receiver, obligations) =
-            self.split_obligations(self.materialize_scheduled_value_shallow(
-                receiver.clone(),
-                "forcing array.flatten receiver",
-            )?);
+    fn array_flatten(&self, receiver: &Value) -> Result<Value, PoisonError> {
+        let (receiver, obligations) = self.split_obligations(
+            self.materialize_value_shallow(receiver.clone(), "forcing array.flatten receiver")?,
+        );
         let Value::Array(items) = receiver else {
             return Err(self.type_error("array.flatten receiver must be Array"));
         };
 
         let mut out = Vec::new();
         for item in items.iter() {
-            let (item, item_obligations) =
-                self.split_obligations(self.materialize_scheduled_value_shallow(
-                    item.clone(),
-                    "forcing array.flatten item",
-                )?);
+            let (item, item_obligations) = self.split_obligations(
+                self.materialize_value_shallow(item.clone(), "forcing array.flatten item")?,
+            );
             let Value::Array(inner) = item else {
                 return Err(self.type_error("array.flatten expects Array items"));
             };
@@ -3666,12 +3598,10 @@ impl Engine {
         Ok(self.attach_obligations(Value::Array(Arc::from(out)), obligations))
     }
 
-    fn array_merge_scheduled(&self, receiver: &Value) -> Result<Value, PoisonError> {
-        let (receiver, receiver_obligations) =
-            self.split_obligations(self.materialize_scheduled_value_shallow(
-                receiver.clone(),
-                "forcing array.merge receiver",
-            )?);
+    fn array_merge(&self, receiver: &Value) -> Result<Value, PoisonError> {
+        let (receiver, receiver_obligations) = self.split_obligations(
+            self.materialize_value_shallow(receiver.clone(), "forcing array.merge receiver")?,
+        );
         let Value::Array(items) = receiver else {
             return Err(self.type_error("array.merge receiver must be Array"));
         };
@@ -3683,10 +3613,8 @@ impl Engine {
             ));
         }
 
-        let mut materialized = self.materialize_scheduled_many_deep(
-            items.iter().cloned().collect(),
-            "forcing array.merge items",
-        )?;
+        let mut materialized = self
+            .materialize_many_deep(items.iter().cloned().collect(), "forcing array.merge items")?;
         let first = materialized.remove(0);
         let (first, mut obligations) = self.split_obligations(first);
         let Value::Tree(mut merged) = first else {
@@ -3714,16 +3642,10 @@ impl Engine {
         Ok(self.attach_obligations(Value::Tree(merged), obligations))
     }
 
-    fn map_map_values_scheduled(
-        &self,
-        receiver: &Value,
-        callback: Value,
-    ) -> Result<Value, PoisonError> {
-        let (receiver, obligations) =
-            self.split_obligations(self.materialize_scheduled_value_shallow(
-                receiver.clone(),
-                "forcing map.map_values receiver",
-            )?);
+    fn map_map_values(&self, receiver: &Value, callback: Value) -> Result<Value, PoisonError> {
+        let (receiver, obligations) = self.split_obligations(
+            self.materialize_value_shallow(receiver.clone(), "forcing map.map_values receiver")?,
+        );
         let Value::Map(map) = receiver else {
             return Err(self.type_error("map.map_values receiver must be Map"));
         };
@@ -3747,14 +3669,14 @@ impl Engine {
         ))
     }
 
-    fn exec_builtin_scheduled(
+    fn exec_builtin(
         &self,
         args: &[Value],
         kwargs: &[(Arc<str>, Value)],
         kwargs_expr: Option<Value>,
     ) -> Result<Value, PoisonError> {
-        let kwargs = self.materialize_kwargs_scheduled(kwargs, kwargs_expr, "exec")?;
-        let request = self.parse_exec_request_scheduled(args, &kwargs)?;
+        let kwargs = self.materialize_kwargs(kwargs, kwargs_expr, "exec")?;
+        let request = self.parse_exec_request(args, &kwargs)?;
         if let Some(exec_handler) = &self.exec_handler {
             let request = self.ship_exec_request(&request)?;
             return exec_handler(request);
@@ -3762,7 +3684,7 @@ impl Engine {
         self.exec_builtin_local(request)
     }
 
-    fn discover_builtin_scheduled(
+    fn discover_builtin(
         &self,
         args: &[Value],
         kwargs: &[(Arc<str>, Value)],
@@ -3773,11 +3695,9 @@ impl Engine {
         }
         self.require_no_kwargs("discover", kwargs)?;
         self.check_arity("discover", args, 2)?;
-        let class =
-            self.materialize_scheduled_value_deep(args[0].clone(), "forcing discover class")?;
+        let class = self.materialize_value_deep(args[0].clone(), "forcing discover class")?;
         let class = self.expect_executor_class(&class, "discover class")?;
-        let probe =
-            self.materialize_scheduled_value_deep(args[1].clone(), "forcing discover probe")?;
+        let probe = self.materialize_value_deep(args[1].clone(), "forcing discover probe")?;
 
         if let Some(discover_handler) = &self.discover_handler {
             let request = DiscoverRequest {
@@ -3792,7 +3712,7 @@ impl Engine {
         self.invoke_discover_probe(probe)
     }
 
-    fn executor_class_builtin_scheduled(
+    fn executor_class_builtin(
         &self,
         args: &[Value],
         kwargs: &[(Arc<str>, Value)],
@@ -3803,13 +3723,12 @@ impl Engine {
         }
         self.require_no_kwargs("executor_class", kwargs)?;
         self.check_arity("executor_class", args, 1)?;
-        let name =
-            self.materialize_scheduled_value_deep(args[0].clone(), "forcing executor_class name")?;
+        let name = self.materialize_value_deep(args[0].clone(), "forcing executor_class name")?;
         let name = self.expect_host_path(&name, "executor_class name")?;
         Ok(Value::ExecutorClass(Arc::from(name)))
     }
 
-    fn materialize_kwargs_scheduled(
+    fn materialize_kwargs(
         &self,
         kwargs: &[(Arc<str>, Value)],
         kwargs_expr: Option<Value>,
@@ -3820,10 +3739,8 @@ impl Engine {
             return Ok(out);
         };
 
-        let kwargs_expr = self.materialize_scheduled_value_shallow(
-            kwargs_expr,
-            &format!("forcing {context} keyword record"),
-        )?;
+        let kwargs_expr = self
+            .materialize_value_shallow(kwargs_expr, &format!("forcing {context} keyword record"))?;
         let (value, obligations) = self.split_obligations(kwargs_expr);
         let Value::Map(map) = value else {
             return Err(self.type_error(&format!(
@@ -3833,10 +3750,8 @@ impl Engine {
         };
 
         for (key, value) in map.entries.iter() {
-            let key = self.materialize_scheduled_value_deep(
-                key.clone(),
-                &format!("forcing {context} keyword key"),
-            )?;
+            let key = self
+                .materialize_value_deep(key.clone(), &format!("forcing {context} keyword key"))?;
             let Value::String(name) = key else {
                 return Err(self.type_error(&format!(
                     "{context} keyword record keys must be String, got {}",
@@ -3852,24 +3767,18 @@ impl Engine {
         Ok(out)
     }
 
-    fn merge_keyword_records_scheduled(
-        &self,
-        left: Value,
-        right: Value,
-    ) -> Result<Value, PoisonError> {
+    fn merge_keyword_records(&self, left: Value, right: Value) -> Result<Value, PoisonError> {
         let mut entries = Vec::new();
-        let left =
-            self.materialize_scheduled_value_shallow(left, "forcing keyword record spread")?;
+        let left = self.materialize_value_shallow(left, "forcing keyword record spread")?;
         self.extend_record_with_spread(&mut entries, left)?;
-        let right =
-            self.materialize_scheduled_value_shallow(right, "forcing keyword record spread")?;
+        let right = self.materialize_value_shallow(right, "forcing keyword record spread")?;
         self.extend_record_with_spread(&mut entries, right)?;
         Ok(Value::Map(MapValue {
             entries: Arc::from(entries),
         }))
     }
 
-    fn parse_exec_request_scheduled(
+    fn parse_exec_request(
         &self,
         args: &[Value],
         kwargs: &[(Arc<str>, Value)],
@@ -3896,8 +3805,7 @@ impl Engine {
             }
         }
 
-        let args_value =
-            self.materialize_scheduled_value_shallow(args[0].clone(), "forcing exec args")?;
+        let args_value = self.materialize_value_shallow(args[0].clone(), "forcing exec args")?;
         let (args_value, top_level_arg_obligations) = self.split_obligations(args_value);
         let Value::Array(exec_args_raw) = args_value else {
             return Err(self.type_error(&format!(
@@ -3908,7 +3816,7 @@ impl Engine {
 
         let observer =
             observer_value.ok_or_else(|| self.type_error("exec requires an observer function"))?;
-        let observer = self.materialize_scheduled_value_deep(observer, "forcing exec observer")?;
+        let observer = self.materialize_value_deep(observer, "forcing exec observer")?;
         match self.split_obligations_ref(&observer).0 {
             Value::Function(_) | Value::Builtin(_) => {}
             other => {
@@ -3920,8 +3828,7 @@ impl Engine {
         }
 
         if let Some(executor) = executor_value {
-            let executor =
-                self.materialize_scheduled_value_deep(executor, "forcing exec executor")?;
+            let executor = self.materialize_value_deep(executor, "forcing exec executor")?;
             let _ = self.expect_executor_class(&executor, "exec executor")?;
         }
 
@@ -3942,14 +3849,12 @@ impl Engine {
         }
         self.collect_value_obligations(&observer, &mut verification_obligations);
 
-        let mut mounts = self.exec_mounts_from_value_scheduled(mounts_value)?;
-        let explicit_writable = self.exec_writable_from_value_scheduled(writable_value)?;
-        let env = self.exec_env_from_value_scheduled(env_value, &mut mounts, &explicit_writable)?;
+        let mut mounts = self.exec_mounts_from_value(mounts_value)?;
+        let explicit_writable = self.exec_writable_from_value(writable_value)?;
+        let env = self.exec_env_from_value(env_value, &mut mounts, &explicit_writable)?;
         let exec_args = exec_args_raw
             .iter()
-            .map(|value| {
-                self.parse_exec_arg_scheduled(value, &mut mounts, &explicit_writable, "exec arg")
-            })
+            .map(|value| self.parse_exec_arg(value, &mut mounts, &explicit_writable, "exec arg"))
             .collect::<Result<Vec<_>, _>>()?;
         if exec_args.is_empty() {
             return Err(self.type_error("exec requires at least one program argument"));
@@ -4070,16 +3975,15 @@ impl Engine {
         self.snapshot_value(observed)
     }
 
-    fn exec_mounts_from_value_scheduled(
+    fn exec_mounts_from_value(
         &self,
         value: Option<Value>,
     ) -> Result<Vec<(PathValue, Value)>, PoisonError> {
         let Some(value) = value else {
             return Ok(Vec::new());
         };
-        let (value, _) = self.split_obligations(
-            self.materialize_scheduled_value_shallow(value, "forcing exec mounts")?,
-        );
+        let (value, _) =
+            self.split_obligations(self.materialize_value_shallow(value, "forcing exec mounts")?);
         let Value::Map(map) = value else {
             return Err(self.type_error(&format!(
                 "exec mounts must be Map, got {}",
@@ -4089,14 +3993,11 @@ impl Engine {
 
         let mut mounts = Vec::with_capacity(map.entries.len());
         for (key, value) in map.entries.iter() {
-            let key =
-                self.materialize_scheduled_value_deep(key.clone(), "forcing exec mount path")?;
+            let key = self.materialize_value_deep(key.clone(), "forcing exec mount path")?;
             let path = self.expect_relative_path(&key, "exec mount path")?;
-            let (value, _) =
-                self.split_obligations(self.materialize_scheduled_value_shallow(
-                    value.clone(),
-                    "forcing exec mount value",
-                )?);
+            let (value, _) = self.split_obligations(
+                self.materialize_value_shallow(value.clone(), "forcing exec mount value")?,
+            );
             match value {
                 Value::Blob(_) | Value::Tree(_) => mounts.push((path, value)),
                 other => {
@@ -4110,16 +4011,15 @@ impl Engine {
         Ok(mounts)
     }
 
-    fn exec_writable_from_value_scheduled(
+    fn exec_writable_from_value(
         &self,
         value: Option<Value>,
     ) -> Result<Vec<PathValue>, PoisonError> {
         let Some(value) = value else {
             return Ok(Vec::new());
         };
-        let (value, _) = self.split_obligations(
-            self.materialize_scheduled_value_shallow(value, "forcing exec writable")?,
-        );
+        let (value, _) =
+            self.split_obligations(self.materialize_value_shallow(value, "forcing exec writable")?);
         let Value::Array(items) = value else {
             return Err(self.type_error(&format!(
                 "exec writable must be Array[Path], got {}",
@@ -4129,8 +4029,7 @@ impl Engine {
 
         let mut writable = Vec::with_capacity(items.len());
         for item in items.iter() {
-            let item =
-                self.materialize_scheduled_value_deep(item.clone(), "forcing exec writable path")?;
+            let item = self.materialize_value_deep(item.clone(), "forcing exec writable path")?;
             writable.push(self.expect_relative_path(&item, "exec writable path")?);
         }
         Ok(writable)
@@ -4170,7 +4069,7 @@ impl Engine {
         roots.into_iter().map(PathValue::new).collect()
     }
 
-    fn exec_env_from_value_scheduled(
+    fn exec_env_from_value(
         &self,
         value: Option<Value>,
         mounts: &mut Vec<(PathValue, Value)>,
@@ -4179,9 +4078,8 @@ impl Engine {
         let Some(value) = value else {
             return Ok(Vec::new());
         };
-        let (value, _) = self.split_obligations(
-            self.materialize_scheduled_value_shallow(value, "forcing exec env")?,
-        );
+        let (value, _) =
+            self.split_obligations(self.materialize_value_shallow(value, "forcing exec env")?);
         let Value::Map(map) = value else {
             return Err(
                 self.type_error(&format!("exec env must be Map, got {}", value.type_name()))
@@ -4190,7 +4088,7 @@ impl Engine {
 
         let mut env = Vec::with_capacity(map.entries.len());
         for (key, value) in map.entries.iter() {
-            let key = self.materialize_scheduled_value_deep(key.clone(), "forcing exec env key")?;
+            let key = self.materialize_value_deep(key.clone(), "forcing exec env key")?;
             let key = match key {
                 Value::String(key) => key.to_string(),
                 other => {
@@ -4200,14 +4098,13 @@ impl Engine {
                     )));
                 }
             };
-            let value =
-                self.parse_exec_arg_scheduled(value, mounts, writable_roots, "exec env value")?;
+            let value = self.parse_exec_arg(value, mounts, writable_roots, "exec env value")?;
             env.push((key, value));
         }
         Ok(env)
     }
 
-    fn parse_exec_arg_scheduled(
+    fn parse_exec_arg(
         &self,
         value: &Value,
         mounts: &mut Vec<(PathValue, Value)>,
@@ -4215,7 +4112,7 @@ impl Engine {
         context: &str,
     ) -> Result<ExecArgValue, PoisonError> {
         let (value, _) = self.split_obligations(
-            self.materialize_scheduled_value_deep(value.clone(), &format!("forcing {context}"))?,
+            self.materialize_value_deep(value.clone(), &format!("forcing {context}"))?,
         );
         match value {
             Value::String(text) => Ok(ExecArgValue::Literal(text.to_string())),

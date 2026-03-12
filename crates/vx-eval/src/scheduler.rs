@@ -49,7 +49,7 @@ impl<'e> Scheduler<'e> {
 
     pub(crate) fn resolve_value(mut self, mut value: Value) -> Result<Value, PoisonError> {
         loop {
-            let inspected = self.engine.inspect_scheduled_value(value)?;
+            let inspected = self.engine.inspect_value(value)?;
             if inspected.pending.is_empty() {
                 if inspected.errors.is_empty() {
                     return Ok(inspected.value);
@@ -202,7 +202,7 @@ impl<'e> Scheduler<'e> {
 
             for (node_id, result) in results {
                 if let Ok(value) = &result {
-                    let inspected = self.engine.inspect_scheduled_value(value.clone())?;
+                    let inspected = self.engine.inspect_value(value.clone())?;
                     let mut path = self.demand_paths.get(&node_id).cloned().unwrap_or_default();
                     path.push(node_id);
                     for pending_id in inspected.pending {
