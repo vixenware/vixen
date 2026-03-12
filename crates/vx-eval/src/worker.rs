@@ -24,7 +24,8 @@ use dashmap::mapref::entry::Entry;
 use tempfile::TempDir;
 
 use crate::exec::{
-    DiscoverRequest, ExecArgValue, ExecMount, ExecRequest, SharedDiscoverHandler, SharedExecHandler,
+    AcquireRequest, DiscoverRequest, ExecArgValue, ExecMount, ExecRequest, SharedAcquireHandler,
+    SharedDiscoverHandler, SharedExecHandler,
 };
 use crate::instr::{self, BinOp, UnaryOp};
 use crate::node::{
@@ -94,6 +95,7 @@ pub struct Engine {
     functions: HashMap<String, Vec<Arc<instr::FnDef>>>,
     function_identities: HashMap<usize, Arc<str>>,
     max_demand_depth: usize,
+    acquire_handler: Option<SharedAcquireHandler>,
     exec_handler: Option<SharedExecHandler>,
     discover_handler: Option<SharedDiscoverHandler>,
 }
@@ -117,6 +119,7 @@ impl Engine {
             functions,
             function_identities,
             max_demand_depth: DEFAULT_MAX_DEMAND_DEPTH,
+            acquire_handler: None,
             exec_handler: None,
             discover_handler: None,
         }
@@ -125,6 +128,11 @@ impl Engine {
     // r[impl eval.demand-depth]
     pub fn with_max_demand_depth(mut self, max_demand_depth: usize) -> Self {
         self.max_demand_depth = max_demand_depth;
+        self
+    }
+
+    pub fn with_acquire_handler(mut self, acquire_handler: SharedAcquireHandler) -> Self {
+        self.acquire_handler = Some(acquire_handler);
         self
     }
 
@@ -862,7 +870,8 @@ impl Engine {
                         _ => Ok(Vec::new()),
                     }
                 }
-                BuiltinValue::Function(BuiltinFunction::Exec)
+                BuiltinValue::Function(BuiltinFunction::Acquire)
+                | BuiltinValue::Function(BuiltinFunction::Exec)
                 | BuiltinValue::Function(BuiltinFunction::Discover)
                 | BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
                     let mut deps = Vec::new();
@@ -3042,6 +3051,9 @@ impl Engine {
                     ))),
                 }
             }
+            BuiltinValue::Function(BuiltinFunction::Acquire) => {
+                self.acquire_builtin(args, kwargs, kwargs_expr)
+            }
             BuiltinValue::Function(BuiltinFunction::Exec) => {
                 self.exec_builtin(args, kwargs, kwargs_expr)
             }
@@ -3662,6 +3674,56 @@ impl Engine {
             }),
             obligations,
         ))
+    }
+
+    fn acquire_builtin(
+        &self,
+        args: &[Value],
+        kwargs: &[(Arc<str>, Value)],
+        kwargs_expr: Option<Value>,
+    ) -> Result<Value, PoisonError> {
+        let kwargs = self.materialize_kwargs(kwargs, kwargs_expr, "acquire")?;
+        self.check_arity("acquire", args, 1)?;
+
+        let url = self.materialize_value_deep(args[0].clone(), "forcing acquire url")?;
+        let url = self.expect_host_path(&url, "acquire url")?;
+
+        let mut digest = None;
+        let mut extract = None;
+        for (name, value) in &kwargs {
+            match name.as_ref() {
+                "digest" => digest = Some(value.clone()),
+                "extract" => extract = Some(value.clone()),
+                other => {
+                    return Err(self.type_error(&format!(
+                        "acquire does not accept keyword argument '{other}'"
+                    )));
+                }
+            }
+        }
+
+        let digest =
+            digest.ok_or_else(|| self.type_error("acquire requires keyword argument 'digest'"))?;
+        let digest = self.materialize_value_deep(digest, "forcing acquire digest")?;
+        let digest = self.expect_host_path(&digest, "acquire digest")?;
+
+        let extract = extract
+            .map(|value| {
+                let value = self.materialize_value_deep(value, "forcing acquire extract")?;
+                self.expect_host_path(&value, "acquire extract")
+            })
+            .transpose()?;
+
+        let Some(acquire_handler) = &self.acquire_handler else {
+            return Err(self.type_error("acquire requires an acquire handler"));
+        };
+
+        acquire_handler(AcquireRequest {
+            url,
+            digest,
+            extract,
+            demand_chain: self.current_demand_chain(None),
+        })
     }
 
     fn exec_builtin(
@@ -5583,6 +5645,7 @@ fn collect_expr_capture_names(
 
 fn builtin_namespace(name: &str) -> Option<BuiltinValue> {
     match name {
+        "acquire" => Some(BuiltinValue::Function(BuiltinFunction::Acquire)),
         "exec" => Some(BuiltinValue::Function(BuiltinFunction::Exec)),
         "discover" => Some(BuiltinValue::Function(BuiltinFunction::Discover)),
         "executor_class" => Some(BuiltinValue::Function(BuiltinFunction::ExecutorClass)),

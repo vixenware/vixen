@@ -18,6 +18,8 @@ use facet::trace;
 use moire::task::FutureExt;
 use picante::HasRuntime;
 use picante::wal::WalWriter;
+use sha2::{Digest as _, Sha256};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::future::Future;
 use std::io::ErrorKind;
@@ -30,9 +32,10 @@ use tokio::task::block_in_place;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use vx_eval::{
-    BlobValue, DemandChain, DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine,
-    ExecArgValue, ExecMount, ExecRequest, MapValue, PathValue, PoisonError, PoisonKind,
-    StructValue, TreeValue, Value, lower_source_file_with_source_id,
+    AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain,
+    DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, ExecArgValue, ExecMount,
+    ExecRequest, MapValue, PathValue, PoisonError, PoisonKind, StructValue, TreeValue, Value,
+    lower_source_file_with_source_id,
 };
 use vx_io::spawn::ServiceHandle;
 use vx_parser::SourceFile;
@@ -48,9 +51,10 @@ use vx_runner_proto::{
 };
 use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
 use vx_store_proto::{
-    Blake3Hash, BlobRef, CasNode, ChunkHash, ContentHash, DirEntryKind, DirectoryNode,
-    EnsureStatus, NodeHash, RustChannel, RustComponent, RustToolchainSpec, ServiceVersion,
-    StoreClient, StoreProgress,
+    Blake3Hash, BlobRef, CasNode, ChunkHash, ContentHash, DirEntry, DirEntryKind, DirectoryNode,
+    EnsureStatus, NodeHash, NodeId, NodeManifest, OutputBlobRef, OutputEntry, RustChannel,
+    RustComponent, RustToolchainSpec, ServiceVersion, StoreClient, StoreProgress, TreeEntryKind,
+    TreeManifest,
 };
 use vxd_proto::{
     ActionType, BuildFailure, BuildRequest, BuildResult, ProgressListenerClient, UnpublishResult,
@@ -846,6 +850,521 @@ async fn store_exec_mounts(
         .map(|(root, _)| Some(root))
 }
 
+#[derive(Clone, Copy)]
+enum AcquireDigest {
+    Sha256([u8; 32]),
+    Blake3([u8; 32]),
+}
+
+impl AcquireDigest {
+    fn parse(value: &str) -> std::result::Result<Self, String> {
+        let (scheme, hex_value) = value
+            .split_once(':')
+            .ok_or_else(|| "acquire digest must be written as scheme:hex".to_string())?;
+
+        match scheme.trim().to_ascii_lowercase().as_str() {
+            "sha256" => {
+                let mut bytes = [0; 32];
+                hex::decode_to_slice(hex_value, &mut bytes)
+                    .map_err(|error| format!("invalid sha256 acquire digest: {error}"))?;
+                Ok(Self::Sha256(bytes))
+            }
+            "blake3" => {
+                let mut bytes = [0; 32];
+                hex::decode_to_slice(hex_value, &mut bytes)
+                    .map_err(|error| format!("invalid blake3 acquire digest: {error}"))?;
+                Ok(Self::Blake3(bytes))
+            }
+            other => Err(format!("unsupported acquire digest scheme '{other}'")),
+        }
+    }
+
+    fn normalized_string(self) -> String {
+        match self {
+            Self::Sha256(bytes) => format!("sha256:{}", hex::encode(bytes)),
+            Self::Blake3(bytes) => format!("blake3:{}", hex::encode(bytes)),
+        }
+    }
+
+    fn verify(self, bytes: &[u8]) -> std::result::Result<(), String> {
+        match self {
+            Self::Sha256(expected) => {
+                let actual = Sha256::digest(bytes);
+                if actual.as_slice() == expected.as_slice() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "acquire digest mismatch: expected sha256:{}, got sha256:{}",
+                        hex::encode(expected),
+                        hex::encode(actual)
+                    ))
+                }
+            }
+            Self::Blake3(expected) => {
+                let actual = *blake3::hash(bytes).as_bytes();
+                if actual == expected {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "acquire digest mismatch: expected blake3:{}, got blake3:{}",
+                        hex::encode(expected),
+                        hex::encode(actual)
+                    ))
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AcquireArchiveFormat {
+    TarGz,
+    TarXz,
+}
+
+impl AcquireArchiveFormat {
+    fn parse(value: &str) -> std::result::Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "tar.gz" => Ok(Self::TarGz),
+            "tar.xz" => Ok(Self::TarXz),
+            other => Err(format!(
+                "unsupported acquire extract format '{other}' (expected tar.gz or tar.xz)"
+            )),
+        }
+    }
+
+    fn cache_key_tag(self) -> &'static str {
+        match self {
+            Self::TarGz => "tar.gz",
+            Self::TarXz => "tar.xz",
+        }
+    }
+
+    fn compression(self) -> vx_tarball::Compression {
+        match self {
+            Self::TarGz => vx_tarball::Compression::Gzip,
+            Self::TarXz => vx_tarball::Compression::Xz,
+        }
+    }
+}
+
+fn acquire_cache_key(url: &str, digest: &str, extract: Option<&str>) -> Blake3Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"acquire-cache-v1\n");
+    hasher.update(b"url:");
+    hasher.update(url.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(b"digest:");
+    hasher.update(digest.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(b"extract:");
+    hasher.update(extract.unwrap_or("").as_bytes());
+    hasher.update(b"\n");
+    Blake3Hash(*hasher.finalize().as_bytes())
+}
+
+fn output_blob_ref_from_blob_ref(blob_ref: &BlobRef) -> OutputBlobRef {
+    match blob_ref {
+        BlobRef::Small { chunk, size } => OutputBlobRef::Small {
+            chunk: *chunk,
+            size: *size,
+        },
+        BlobRef::Large {
+            blob_node,
+            content_hash,
+            size,
+        } => OutputBlobRef::Large {
+            blob_node: *blob_node,
+            content_hash: *content_hash,
+            size: *size,
+        },
+    }
+}
+
+fn blob_ref_from_output_blob_ref(blob_ref: &OutputBlobRef) -> BlobRef {
+    match blob_ref {
+        OutputBlobRef::Small { chunk, size } => BlobRef::Small {
+            chunk: *chunk,
+            size: *size,
+        },
+        OutputBlobRef::Large {
+            blob_node,
+            content_hash,
+            size,
+        } => BlobRef::Large {
+            blob_node: *blob_node,
+            content_hash: *content_hash,
+            size: *size,
+        },
+    }
+}
+
+fn split_tree_entry_path(path: &str) -> (&str, &str) {
+    match path.rfind('/') {
+        Some(index) => (&path[..index], &path[index + 1..]),
+        None => ("", path),
+    }
+}
+
+fn ensure_tree_parent_dirs(dir_entries: &mut BTreeMap<String, Vec<DirEntry>>, dir: &str) {
+    let mut current = dir.to_string();
+    while let Some(index) = current.rfind('/') {
+        current = current[..index].to_string();
+        dir_entries.entry(current.clone()).or_default();
+    }
+    if !current.is_empty() {
+        dir_entries.entry(String::new()).or_default();
+    }
+}
+
+fn acquire_archive_root_prefix(tree: &TreeManifest) -> Option<String> {
+    let mut root: Option<&str> = None;
+    let mut saw_nested_entries = false;
+
+    for entry in &tree.entries {
+        let path = entry.path.as_str();
+        if path.is_empty() {
+            return None;
+        }
+        let (first, rest) = match path.split_once('/') {
+            Some((first, rest)) => (first, Some(rest)),
+            None => (path, None),
+        };
+
+        match root {
+            Some(existing) if existing != first => return None,
+            None => root = Some(first),
+            _ => {}
+        }
+
+        match entry.kind {
+            TreeEntryKind::File { .. } | TreeEntryKind::Symlink { .. } if rest.is_none() => {
+                return None;
+            }
+            TreeEntryKind::File { .. } | TreeEntryKind::Symlink { .. } => saw_nested_entries = true,
+            TreeEntryKind::Directory => {
+                if rest.is_some() {
+                    saw_nested_entries = true;
+                }
+            }
+        }
+    }
+
+    if saw_nested_entries {
+        root.map(str::to_string)
+    } else {
+        None
+    }
+}
+
+fn normalize_acquired_tree_path(path: &str, root_prefix: Option<&str>) -> Option<String> {
+    let Some(root_prefix) = root_prefix else {
+        return Some(path.to_string());
+    };
+
+    if path == root_prefix {
+        return None;
+    }
+
+    path.strip_prefix(root_prefix)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .map(str::to_string)
+}
+
+async fn store_acquired_tree_manifest(
+    store: &StoreClient,
+    tree: &TreeManifest,
+    files: &HashMap<Blake3Hash, BlobRef>,
+) -> std::result::Result<(NodeHash, u64), String> {
+    let root_prefix = acquire_archive_root_prefix(tree);
+    let mut dir_entries: BTreeMap<String, Vec<DirEntry>> = BTreeMap::new();
+
+    for entry in &tree.entries {
+        let Some(path) = normalize_acquired_tree_path(&entry.path, root_prefix.as_deref()) else {
+            continue;
+        };
+
+        match &entry.kind {
+            TreeEntryKind::File {
+                blob, executable, ..
+            } => {
+                let blob_ref = files.get(blob).ok_or_else(|| {
+                    format!("acquire tree file info not found for {}", blob.to_hex())
+                })?;
+                let (parent, name) = split_tree_entry_path(&path);
+                dir_entries
+                    .entry(parent.to_string())
+                    .or_default()
+                    .push(DirEntry {
+                        name: name.to_string(),
+                        kind: exec_blob_kind_from_blob_ref(blob_ref, *executable),
+                    });
+            }
+            TreeEntryKind::Symlink { target } => {
+                let (parent, name) = split_tree_entry_path(&path);
+                dir_entries
+                    .entry(parent.to_string())
+                    .or_default()
+                    .push(DirEntry {
+                        name: name.to_string(),
+                        kind: DirEntryKind::Symlink {
+                            target: target.clone(),
+                        },
+                    });
+            }
+            TreeEntryKind::Directory => {
+                dir_entries.entry(path).or_default();
+            }
+        }
+    }
+
+    if dir_entries.is_empty() {
+        dir_entries.insert(String::new(), Vec::new());
+    }
+
+    let all_dirs = dir_entries.keys().cloned().collect::<Vec<_>>();
+    for dir in &all_dirs {
+        ensure_tree_parent_dirs(&mut dir_entries, dir);
+    }
+
+    let mut dir_list = dir_entries.keys().cloned().collect::<Vec<_>>();
+    dir_list.sort_by(|left, right| {
+        let left_depth = if left.is_empty() {
+            0
+        } else {
+            left.matches('/').count() + 1
+        };
+        let right_depth = if right.is_empty() {
+            0
+        } else {
+            right.matches('/').count() + 1
+        };
+        right_depth.cmp(&left_depth).then_with(|| left.cmp(right))
+    });
+
+    let mut dir_hashes = HashMap::new();
+    for dir_path in &dir_list {
+        let entries = dir_entries
+            .get_mut(dir_path)
+            .ok_or_else(|| format!("missing directory entry list for '{dir_path}'"))?;
+        entries.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+
+        let total_size = entries.iter().fold(0u64, |acc, entry| {
+            acc + match &entry.kind {
+                DirEntryKind::SmallFile { size, .. } | DirEntryKind::LargeFile { size, .. } => {
+                    *size
+                }
+                DirEntryKind::Dir { total_size, .. } => *total_size,
+                DirEntryKind::Symlink { .. } => 0,
+            }
+        });
+
+        let node = CasNode::Directory(DirectoryNode {
+            entries: entries.clone(),
+            total_size,
+        });
+        let (node_bytes, node_hash) = node.to_bytes_and_hash();
+        store
+            .put_node(node_hash, node_bytes)
+            .await
+            .map_err(|error| {
+                format!("failed to store acquire directory node '{dir_path}': {error:?}")
+            })?;
+
+        dir_hashes.insert(dir_path.clone(), (node_hash, total_size));
+
+        if !dir_path.is_empty() {
+            let (parent, name) = split_tree_entry_path(dir_path);
+            dir_entries
+                .entry(parent.to_string())
+                .or_default()
+                .push(DirEntry {
+                    name: name.to_string(),
+                    kind: DirEntryKind::Dir {
+                        hash: node_hash,
+                        total_size,
+                    },
+                });
+        }
+    }
+
+    dir_hashes
+        .get("")
+        .copied()
+        .ok_or_else(|| "acquire tree has no root directory".to_string())
+}
+
+async fn load_acquired_blob_from_manifest(
+    store: &StoreClient,
+    manifest_hash: NodeHash,
+) -> std::result::Result<Value, String> {
+    let node_bytes = store
+        .get_node(manifest_hash)
+        .await
+        .map_err(|error| format!("failed to load acquire manifest: {error:?}"))?
+        .ok_or_else(|| format!("acquire manifest {manifest_hash} not found"))?;
+    let node = CasNode::from_bytes(&node_bytes)
+        .map_err(|error| format!("failed to decode acquire manifest {manifest_hash}: {error}"))?;
+    let CasNode::Manifest(manifest) = node else {
+        return Err(format!(
+            "acquire cache entry {manifest_hash} is not a blob manifest"
+        ));
+    };
+    let [output] = manifest.outputs.as_slice() else {
+        return Err(format!(
+            "acquire blob manifest {manifest_hash} must contain exactly one output"
+        ));
+    };
+    Ok(Value::Blob(BlobValue::Store {
+        blob_ref: blob_ref_from_output_blob_ref(&output.blob),
+        executable: output.executable,
+    }))
+}
+
+async fn publish_acquire_cache_entry(
+    store: &StoreClient,
+    cache_key: Blake3Hash,
+    node_hash: NodeHash,
+) -> std::result::Result<(), String> {
+    let publish = store
+        .publish(cache_key, node_hash)
+        .await
+        .map_err(|error| format!("failed to publish acquire cache entry: {error:?}"))?;
+    if publish.success {
+        Ok(())
+    } else {
+        Err(publish
+            .error
+            .unwrap_or_else(|| "failed to publish acquire cache entry".to_string()))
+    }
+}
+
+pub(crate) async fn run_build_vx_acquire_via_store(
+    store: &StoreClient,
+    request: EvalAcquireRequest,
+) -> std::result::Result<Value, PoisonError> {
+    let demand_chain = request.demand_chain.clone();
+    let digest = AcquireDigest::parse(&request.digest)
+        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    let extract_format = request
+        .extract
+        .as_deref()
+        .map(AcquireArchiveFormat::parse)
+        .transpose()
+        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    let normalized_digest = digest.normalized_string();
+    let cache_key = acquire_cache_key(
+        &request.url,
+        &normalized_digest,
+        extract_format.map(AcquireArchiveFormat::cache_key_tag),
+    );
+
+    let acquired = if let Some(cached) = store.lookup(cache_key).await.map_err(|error| {
+        exec_bridge_poison(PoisonKind::Internal, format!("{error:?}"), &demand_chain)
+    })? {
+        match extract_format {
+            Some(_) => Value::Tree(TreeValue::Store(cached)),
+            None => load_acquired_blob_from_manifest(store, cached)
+                .await
+                .map_err(|message| {
+                    exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
+                })?,
+        }
+    } else {
+        let bytes = vx_http::get_bytes(&request.url).await.map_err(|error| {
+            exec_bridge_poison(
+                PoisonKind::UserFail,
+                format!("failed to acquire {}: {error}", request.url),
+                &demand_chain,
+            )
+        })?;
+        digest
+            .verify(&bytes)
+            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+
+        match extract_format {
+            Some(format) => {
+                let files = Arc::new(SyncMutex::new("vxd/acquire_file_info", HashMap::new()));
+                let files_for_extract = Arc::clone(&files);
+                let tree = vx_tarball::extract_to_tree(
+                    std::io::Cursor::new(bytes),
+                    format.compression(),
+                    0,
+                    async move |data: Vec<u8>| {
+                        let content_hash = ContentHash(Blake3Hash::from_bytes(&data));
+                        let prepared = prepare_blob(&data);
+                        let blob_ref = store_prepared_blob(store, &prepared, &data).await?;
+                        files_for_extract.lock().insert(content_hash.0, blob_ref);
+                        Ok(content_hash.0)
+                    },
+                )
+                .await
+                .map_err(|error| {
+                    exec_bridge_poison(
+                        PoisonKind::UserFail,
+                        format!("failed to extract {}: {error}", request.url),
+                        &demand_chain,
+                    )
+                })?;
+                let files = files.lock().clone();
+                let (root, _) = store_acquired_tree_manifest(store, &tree, &files)
+                    .await
+                    .map_err(|message| {
+                        exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
+                    })?;
+                publish_acquire_cache_entry(store, cache_key, root)
+                    .await
+                    .map_err(|message| {
+                        exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
+                    })?;
+                Value::Tree(TreeValue::Store(root))
+            }
+            None => {
+                let prepared = prepare_blob(&bytes);
+                let blob_ref = store_prepared_blob(store, &prepared, &bytes)
+                    .await
+                    .map_err(|message| {
+                        exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
+                    })?;
+
+                let manifest = NodeManifest {
+                    node_id: NodeId("acquire:blob".to_string()),
+                    cache_key,
+                    produced_at: String::new(),
+                    outputs: vec![OutputEntry {
+                        logical: "blob".to_string(),
+                        filename: "acquired".to_string(),
+                        blob: output_blob_ref_from_blob_ref(&blob_ref),
+                        executable: false,
+                    }],
+                };
+                let (node_bytes, manifest_hash) = CasNode::Manifest(manifest).to_bytes_and_hash();
+                store
+                    .put_node(manifest_hash, node_bytes)
+                    .await
+                    .map_err(|error| {
+                        exec_bridge_poison(
+                            PoisonKind::Internal,
+                            format!("{error:?}"),
+                            &demand_chain,
+                        )
+                    })?;
+                publish_acquire_cache_entry(store, cache_key, manifest_hash)
+                    .await
+                    .map_err(|message| {
+                        exec_bridge_poison(PoisonKind::Internal, message, &demand_chain)
+                    })?;
+                Value::Blob(BlobValue::Store {
+                    blob_ref,
+                    executable: false,
+                })
+            }
+        }
+    };
+
+    hydrate_exec_value_from_store(store, acquired, &demand_chain).await
+}
+
 async fn run_build_vx_exec_via_runner(
     store: &StoreClient,
     exec: &RunnerClient,
@@ -1634,10 +2153,19 @@ impl VxdService {
                 let store = Arc::clone(&self.store);
                 let exec = Arc::clone(&self.exec);
                 let runtime = Handle::current();
+                let acquire_store = Arc::clone(&self.store);
+                let acquire_runtime = runtime.clone();
                 let discover_store = Arc::clone(&self.store);
                 let discover_exec = Arc::clone(&self.exec);
                 let discover_runtime = runtime.clone();
                 let engine = Engine::from_module(&module)
+                    .with_acquire_handler(Arc::new(move |request| {
+                        let store = Arc::clone(&acquire_store);
+                        let runtime = acquire_runtime.clone();
+                        block_in_place(|| {
+                            runtime.block_on(run_build_vx_acquire_via_store(&store, request))
+                        })
+                    }))
                     .with_exec_handler(Arc::new(move |request| {
                         let store = Arc::clone(&store);
                         let exec = Arc::clone(&exec);

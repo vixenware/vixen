@@ -661,24 +661,25 @@ insert_anchor_links = "heading"
 
 > r[exec.acquire]
 >
-> `acquire url where { sha256: digest }` fetches a resource by URL and
-> returns a `Blob`. The digest is currently written as a hex `String`.
-> The hash is always required — the result is content-addressed
-> and cached permanently. The hash is verified; a mismatch poisons.
-> Because acquisition is deterministic (same URL + same hash = same
-> content), `acquire` is ambient — it requires no capability and can be
-> called anywhere. Fetching without a known hash is discovery and must
-> go through `discover`, not `acquire`.
+> `acquire url where { digest: digest }` fetches a resource by URL and
+> returns a `Blob`. The digest is written as a scheme-qualified `String`
+> such as `sha256:...` or `blake3:...`. A digest is always required —
+> the result is content-addressed and cached permanently. The digest is
+> verified; a mismatch poisons. Because acquisition is deterministic
+> (same URL + same digest = same content), `acquire` is ambient — it
+> requires no capability and can be called anywhere. Fetching without a
+> known digest is discovery and must go through `discover`, not
+> `acquire`.
 
 > r[exec.acquire.extract]
 >
-> `acquire url where { sha256: digest, extract: format }` fetches a URL
-> and extracts the archive in one streaming step, returning a `Tree`.
-> Supported formats: `"tar.gz"`, `"tar.xz"`, `"tar.zst"`, `"zip"`.
-> Extraction streams directly to the content-addressable store — the
-> `Tree` is pending until extraction completes, and the entire
-> operation (fetch + extract) is a single cached unit keyed by URL and
-> hash.
+> `acquire url where { digest: digest, extract: format }` fetches a URL
+> and extracts the archive in one cached step, returning a `Tree`.
+> `format` names the archive and compression scheme, for example
+> `"tar.gz"` or `"tar.xz"`. Extraction streams directly to the
+> content-addressable store — the `Tree` is pending until extraction
+> completes, and the entire operation (fetch + extract) is a single
+> cached unit keyed by URL, digest, and extract format.
 
 > r[exec.render]
 >

@@ -56,3 +56,16 @@ pub type DiscoverHandler =
     dyn Fn(DiscoverRequest) -> Result<Value, PoisonError> + Send + Sync + 'static;
 
 pub type SharedDiscoverHandler = Arc<DiscoverHandler>;
+
+#[derive(Debug, Clone)]
+pub struct AcquireRequest {
+    pub url: String,
+    pub digest: String,
+    pub extract: Option<String>,
+    pub demand_chain: DemandChain,
+}
+
+pub type AcquireHandler =
+    dyn Fn(AcquireRequest) -> Result<Value, PoisonError> + Send + Sync + 'static;
+
+pub type SharedAcquireHandler = Arc<AcquireHandler>;

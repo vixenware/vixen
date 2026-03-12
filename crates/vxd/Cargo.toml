@@ -27,6 +27,8 @@ tracing = { workspace = true }
 libc = { workspace = true }
 petgraph = { workspace = true }
 tokio-util = { workspace = true }
+hex = { workspace = true }
+sha2 = "0.10"
 
 vx-store-proto = { workspace = true }
 vx-runner-proto = { workspace = true }
@@ -41,6 +43,7 @@ tokio-test-lite = { workspace = true }
 vx-plan = { workspace = true }
 vx-cache = { workspace = true }
 vx-tarball = { workspace = true }
+vx-http = { workspace = true }
 vx-parser = { workspace = true }
 vx-eval = { workspace = true }
 
@@ -50,6 +53,8 @@ diagnostics = ["moire/diagnostics"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tar = { workspace = true }
+flate2 = "1"
 ariadne = { version = "0.6", features = ["auto-color"] }
 arborium = { path = "/Users/amos/bearcove/arborium/crates/arborium", default-features = false }
 arborium-highlight = { path = "/Users/amos/bearcove/arborium/crates/arborium-highlight" }

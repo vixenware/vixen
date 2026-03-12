@@ -14,7 +14,7 @@ use tempfile::TempDir;
 use vx_parser::{AstNode, Pattern as AstPattern, SourceFile, Stmt as AstStmt};
 use vx_store_proto::{Blake3Hash, BlobRef, ChunkHash, NodeHash};
 
-use crate::exec::ExecArgValue;
+use crate::exec::{AcquireRequest, ExecArgValue};
 use crate::instr::{Block, FnDef};
 use crate::lower::{lower_source_file, lower_source_file_with_source_id};
 use crate::node::{NodeId, NodeJob, TemplateKind, TemplatePartValue};
@@ -2570,6 +2570,68 @@ fn probe() {
         .unwrap()
         .clone()
         .expect("discover request should be captured");
+    let call_entry = request
+        .demand_chain
+        .entries
+        .iter()
+        .find(|entry| entry.description == "call(..)")
+        .expect("call demand entry");
+    let provenance = call_entry.provenance.as_ref().expect("call provenance");
+    assert_eq!(provenance.source_id.as_ref(), "/workspace/build.vx");
+    assert_eq!(provenance.label, "call(..)");
+    assert_eq!(provenance.span.start, u32::from(outer_range.start()));
+    assert_eq!(provenance.span.end, u32::from(outer_range.end()));
+}
+
+#[test]
+fn acquire_handlers_receive_keyword_payloads_and_source_provenance() {
+    let source = r#"
+fn fetch() {
+  acquire("https://example.test/src.tar.gz") where {
+    digest: "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    extract: "tar.gz",
+  }
+}
+"#;
+    let parse = vx_parser::parse(source);
+    assert_eq!(parse.errors(), []);
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("fetch function item") {
+        vx_parser::Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let outer_range = match function.body().expect("function body").statements().next() {
+        Some(vx_parser::Stmt::Expr(vx_parser::Expr::Where(where_expr))) => {
+            where_expr.syntax().text_range()
+        }
+        other => panic!("expected parsed where expr, got {other:?}"),
+    };
+
+    let captured = Arc::new(Mutex::new(None::<AcquireRequest>));
+    let sink = Arc::clone(&captured);
+    let expected = Value::Blob(BlobValue::from_string("cached source"));
+    let engine = engine_with_source_id(source, "/workspace/build.vx").with_acquire_handler(
+        Arc::new(move |request| {
+            *sink.lock().unwrap() = Some(request);
+            Ok(expected.clone())
+        }),
+    );
+
+    let value = engine.call("fetch", vec![]).unwrap();
+    assert_eq!(value, Value::Blob(BlobValue::from_string("cached source")));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("acquire request should be captured");
+    assert_eq!(request.url, "https://example.test/src.tar.gz");
+    assert_eq!(
+        request.digest,
+        "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+    );
+    assert_eq!(request.extract.as_deref(), Some("tar.gz"));
+
     let call_entry = request
         .demand_chain
         .entries

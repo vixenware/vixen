@@ -753,7 +753,7 @@ fn crate_source(pkg: ResolvedCrate) where {
   match pkg.source (
     ResolvedSource.Registry { checksum, download_url } => (
       acquire(download_url) where {
-        sha256: checksum,
+        digest: `sha256:${checksum}`,
         extract: "tar.gz",
       }
     ),

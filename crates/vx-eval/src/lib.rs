@@ -10,8 +10,8 @@ pub use capability::CapabilitySet;
 
 mod exec;
 pub use exec::{
-    DiscoverHandler, DiscoverRequest, ExecArgValue, ExecHandler, ExecMount, ExecRequest,
-    SharedDiscoverHandler, SharedExecHandler,
+    AcquireHandler, AcquireRequest, DiscoverHandler, DiscoverRequest, ExecArgValue, ExecHandler,
+    ExecMount, ExecRequest, SharedAcquireHandler, SharedDiscoverHandler, SharedExecHandler,
 };
 
 mod instr;

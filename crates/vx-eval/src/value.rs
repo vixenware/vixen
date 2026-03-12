@@ -171,6 +171,7 @@ pub enum BuiltinNamespace {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltinFunction {
+    Acquire,
     Exec,
     Discover,
     ExecutorClass,
@@ -572,6 +573,7 @@ impl BuiltinValue {
     fn collect_pending(&self, deps: &mut Vec<NodeId>) {
         match self {
             BuiltinValue::Namespace(_)
+            | BuiltinValue::Function(BuiltinFunction::Acquire)
             | BuiltinValue::Function(BuiltinFunction::Exec)
             | BuiltinValue::Function(BuiltinFunction::Discover)
             | BuiltinValue::Function(BuiltinFunction::ExecutorClass)
@@ -610,6 +612,7 @@ impl BuiltinValue {
     pub fn is_fully_resolved(&self) -> bool {
         match self {
             BuiltinValue::Namespace(_)
+            | BuiltinValue::Function(BuiltinFunction::Acquire)
             | BuiltinValue::Function(BuiltinFunction::Exec)
             | BuiltinValue::Function(BuiltinFunction::Discover)
             | BuiltinValue::Function(BuiltinFunction::ExecutorClass)
@@ -650,6 +653,7 @@ impl BuiltinValue {
             BuiltinValue::Namespace(BuiltinNamespace::Blob) => Some("builtin:Blob".into()),
             BuiltinValue::Namespace(BuiltinNamespace::Bytes) => Some("builtin:Bytes".into()),
             BuiltinValue::Namespace(BuiltinNamespace::Tree) => Some("builtin:Tree".into()),
+            BuiltinValue::Function(BuiltinFunction::Acquire) => Some("builtin:acquire".into()),
             BuiltinValue::Function(BuiltinFunction::Exec) => Some("builtin:exec".into()),
             BuiltinValue::Function(BuiltinFunction::Discover) => Some("builtin:discover".into()),
             BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
@@ -1103,6 +1107,7 @@ impl fmt::Display for BuiltinValue {
             BuiltinValue::Namespace(BuiltinNamespace::Blob) => write!(f, "Blob"),
             BuiltinValue::Namespace(BuiltinNamespace::Bytes) => write!(f, "Bytes"),
             BuiltinValue::Namespace(BuiltinNamespace::Tree) => write!(f, "Tree"),
+            BuiltinValue::Function(BuiltinFunction::Acquire) => write!(f, "acquire"),
             BuiltinValue::Function(BuiltinFunction::Exec) => write!(f, "exec"),
             BuiltinValue::Function(BuiltinFunction::Discover) => write!(f, "discover"),
             BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {

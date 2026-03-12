@@ -1,5 +1,13 @@
 use super::*;
+use flate2::Compression as GzipCompression;
+use flate2::write::GzEncoder;
+use sha2::{Digest as _, Sha256};
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
+use std::time::Duration;
+use tar::Builder as TarBuilder;
 
 use arborium::advanced::{CompiledGrammar, GrammarConfig};
 use arborium::{GrammarStore, Highlighter};
@@ -12,6 +20,7 @@ use std::fs;
 use std::net::TcpListener;
 use tempfile::TempDir;
 use tokio_test_lite::test as vx_test;
+use vx_eval::{AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain, TreeValue, Value};
 use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_report::{GraphEdge, GraphNode, GraphTopology};
 use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
@@ -1078,6 +1087,184 @@ impl StoreTestEnv {
             client: StoreClient::new(virtual_handle),
         }
     }
+}
+
+#[vx_test]
+async fn acquire_blob_reuses_the_persistent_store_cache() {
+    let env = StoreTestEnv::new().await;
+    let body = b"hello acquire cache".to_vec();
+    let digest = format!("sha256:{}", hex::encode(Sha256::digest(&body)));
+    let server = StaticHttpServer::new(body.clone(), "application/octet-stream");
+    let request = EvalAcquireRequest {
+        url: server.url("/blob.txt"),
+        digest,
+        extract: None,
+        demand_chain: DemandChain::new(),
+    };
+
+    let first = crate::service::run_build_vx_acquire_via_store(&env.client, request.clone())
+        .await
+        .expect("first acquire should succeed");
+    let second = crate::service::run_build_vx_acquire_via_store(&env.client, request)
+        .await
+        .expect("second acquire should succeed");
+
+    assert_eq!(server.hit_count(), 1, "expected one network fetch");
+    assert_eq!(
+        first,
+        Value::Blob(BlobValue::from_string("hello acquire cache"))
+    );
+    assert_eq!(
+        second,
+        Value::Blob(BlobValue::from_string("hello acquire cache"))
+    );
+}
+
+#[vx_test]
+async fn acquire_extract_reuses_the_persistent_store_cache() {
+    let env = StoreTestEnv::new().await;
+    let archive = tar_gz_with_single_root(&[
+        ("pkg-1.0/README.txt", b"hello from archive"),
+        ("pkg-1.0/src/lib.c", b"int main(void) { return 0; }\n"),
+    ]);
+    let digest = format!("sha256:{}", hex::encode(Sha256::digest(&archive)));
+    let server = StaticHttpServer::new(archive, "application/gzip");
+    let request = EvalAcquireRequest {
+        url: server.url("/pkg.tar.gz"),
+        digest,
+        extract: Some("tar.gz".to_string()),
+        demand_chain: DemandChain::new(),
+    };
+
+    let first = crate::service::run_build_vx_acquire_via_store(&env.client, request.clone())
+        .await
+        .expect("first extract acquire should succeed");
+    let second = crate::service::run_build_vx_acquire_via_store(&env.client, request)
+        .await
+        .expect("second extract acquire should succeed");
+
+    assert_eq!(server.hit_count(), 1, "expected one archive download");
+    assert_eq!(
+        collect_tree_paths(&first),
+        vec!["README.txt".to_string(), "src/lib.c".to_string()]
+    );
+    assert_eq!(collect_tree_paths(&first), collect_tree_paths(&second));
+}
+
+fn collect_tree_paths(value: &Value) -> Vec<String> {
+    fn walk(value: &Value, prefix: &str, out: &mut Vec<String>) {
+        match value {
+            Value::Tree(TreeValue::Inline(entries)) => {
+                for (name, child) in entries.iter() {
+                    let next = if prefix.is_empty() {
+                        name.to_string()
+                    } else {
+                        format!("{prefix}/{name}")
+                    };
+                    walk(child, &next, out);
+                }
+            }
+            Value::Blob(_) => out.push(prefix.to_string()),
+            _ => panic!("expected tree/blob value, got {}", value.type_name()),
+        }
+    }
+
+    let mut paths = Vec::new();
+    walk(value, "", &mut paths);
+    paths.sort();
+    paths
+}
+
+struct StaticHttpServer {
+    addr: std::net::SocketAddr,
+    hits: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl StaticHttpServer {
+    fn new(body: Vec<u8>, content_type: &'static str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind test http server");
+        listener
+            .set_nonblocking(true)
+            .expect("failed to make test http server nonblocking");
+        let addr = listener
+            .local_addr()
+            .expect("failed to read test http server address");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let hits_for_thread = Arc::clone(&hits);
+        let stop_for_thread = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            while !stop_for_thread.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0u8; 1024];
+                        let _ = stream.read(&mut request);
+                        hits_for_thread.fetch_add(1, Ordering::Relaxed);
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: {}\r\nConnection: close\r\n\r\n",
+                            body.len(),
+                            content_type,
+                        );
+                        stream
+                            .write_all(response.as_bytes())
+                            .expect("failed to write response headers");
+                        stream
+                            .write_all(&body)
+                            .expect("failed to write response body");
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("test http server accept failed: {error}"),
+                }
+            }
+        });
+
+        Self {
+            addr,
+            hits,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://{}{}", self.addr, path)
+    }
+
+    fn hit_count(&self) -> usize {
+        self.hits.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for StaticHttpServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(self.addr);
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("test http server thread should join");
+        }
+    }
+}
+
+fn tar_gz_with_single_root(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let encoder = GzEncoder::new(Vec::new(), GzipCompression::default());
+    let mut builder = TarBuilder::new(encoder);
+
+    for (path, bytes) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, *bytes)
+            .expect("failed to append tar entry");
+    }
+
+    let encoder = builder.into_inner().expect("failed to finish tar archive");
+    encoder.finish().expect("failed to finish gzip stream")
 }
 
 fn dir_entry_kind_from_blob_ref(blob_ref: &BlobRef, executable: bool) -> DirEntryKind {

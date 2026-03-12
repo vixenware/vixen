@@ -17,15 +17,15 @@ fn discover[T](
 
 /// Fetch a fixed-hash resource and return its content as a blob.
 fn acquire(url: String) where {
-  /// Expected SHA-256 digest of the fetched payload, encoded as hex.
-  sha256: String,
+  /// Expected digest of the fetched payload, written as `scheme:hex`.
+  digest: String,
 } -> Blob;
 
 /// Fetch and extract a fixed-hash archive in one cached step.
 fn acquire(url: String) where {
-  /// Expected SHA-256 digest of the fetched archive, encoded as hex.
-  sha256: String,
-  /// Archive format, e.g. `"tar.gz"` or `"tar.xz"`.
+  /// Expected digest of the fetched archive, written as `scheme:hex`.
+  digest: String,
+  /// Archive format selector, e.g. `"tar.gz"` or `"tar.xz"`.
   extract: String,
 } -> Tree;
 
