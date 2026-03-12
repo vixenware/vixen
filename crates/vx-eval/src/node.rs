@@ -69,6 +69,9 @@ pub enum NodeJob {
         bindings: Arc<HashMap<String, Value>>,
         scope_identity: Arc<str>,
     },
+    Fallible {
+        value: Value,
+    },
     Demand {
         demands: Arc<[Value]>,
         result: Result<Value, PoisonError>,
@@ -117,6 +120,7 @@ impl NodeJob {
                 }
             }
             NodeJob::If { cond, .. } => cond.collect_pending(&mut deps),
+            NodeJob::Fallible { value } => value.collect_pending(&mut deps),
             NodeJob::Demand { demands, .. } => {
                 for value in demands.iter() {
                     value.collect_pending(&mut deps);

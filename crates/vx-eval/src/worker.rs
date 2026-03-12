@@ -631,6 +631,7 @@ impl Engine {
                 deps
             }
             NodeJob::If { cond, .. } => self.scheduler_pending_deep(cond.clone())?,
+            NodeJob::Fallible { value } => self.scheduler_pending_shallow(value.clone())?,
             NodeJob::Demand { demands, .. } => {
                 let mut deps = Vec::new();
                 for value in demands.iter() {
@@ -877,6 +878,11 @@ impl Engine {
                 BuiltinValue::Method(BuiltinMethod::TreeMerge { .. }) => Ok(Self::dedup_node_ids(
                     self.scheduler_pending_shallow(args[0].clone())?,
                 )),
+                BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver }) => {
+                    Ok(Self::dedup_node_ids(
+                        self.scheduler_pending_shallow(receiver.as_ref().clone())?,
+                    ))
+                }
                 BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver }) => {
                     let receiver = self.materialize_scheduled_value_shallow(
                         *receiver,
@@ -1309,6 +1315,10 @@ impl Engine {
                     ))),
                 }
             }
+            NodeJob::Fallible { value } => match self.force_value_shallow(value.clone()) {
+                Ok(value) => Ok(self.build_fallible_value(value)),
+                Err(_) => Ok(option_none()),
+            },
             NodeJob::Demand { demands, result } => {
                 if self.discovery_recording_active() {
                     let _ = self.force_value(Value::Array(Arc::clone(demands)))?;
@@ -2006,6 +2016,14 @@ impl Engine {
                     ))),
                 }
             }
+            NodeJob::Fallible { value } => {
+                match self
+                    .materialize_scheduled_value_shallow(value.clone(), "forcing fallible operand")
+                {
+                    Ok(value) => Ok(self.build_fallible_value(value)),
+                    Err(_) => Ok(option_none()),
+                }
+            }
             NodeJob::Demand { demands, result } => {
                 if self.discovery_recording_active() {
                     for value in demands.iter() {
@@ -2426,6 +2444,30 @@ impl Engine {
         Ok(())
     }
 
+    fn build_fallible_value(&self, value: Value) -> Value {
+        let (value, obligations) = self.split_obligations(value);
+        match value {
+            Value::Function(_) | Value::Builtin(_) | Value::Partial(_) => {
+                let value = self.attach_obligations(value, obligations);
+                self.pending_value(
+                    NodeJob::Fallible {
+                        value: self.build_call(value, vec![], None),
+                    },
+                    "fallible(..)".into(),
+                    None,
+                )
+            }
+            Value::Pending(_) => self.pending_value(
+                NodeJob::Fallible {
+                    value: self.attach_obligations(value, obligations),
+                },
+                "fallible(..)".into(),
+                None,
+            ),
+            other => option_some(self.attach_obligations(other, obligations)),
+        }
+    }
+
     // r[impl eval.forcing]
     fn eval_expr(
         &self,
@@ -2787,19 +2829,7 @@ impl Engine {
             instr::Expr::Fallible(expr) => {
                 match self.eval_expr(expr, bindings, current_code_identity) {
                     BuildResult::Value(value) => {
-                        let (inner, _) = self.split_obligations_ref(&value);
-                        if matches!(inner, Value::Function(_) | Value::Builtin(_)) {
-                            return BuildResult::Value(Value::Builtin(BuiltinValue::Method(
-                                BuiltinMethod::FallibleCall {
-                                    receiver: Box::new(value),
-                                },
-                            )));
-                        }
-
-                        match self.force_value(value) {
-                            Ok(value) => BuildResult::Value(option_some(value)),
-                            Err(_) => BuildResult::Value(option_none()),
-                        }
+                        BuildResult::Value(self.build_fallible_value(value))
                     }
                     BuildResult::Poisoned(_) => BuildResult::Value(option_none()),
                     other => other,
@@ -3645,15 +3675,8 @@ impl Engine {
             }
             BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver }) => {
                 self.require_no_kwargs("fallible", kwargs)?;
-                match self.execute_call(
-                    receiver.as_ref().clone(),
-                    Arc::from(args.to_vec()),
-                    Arc::from(kwargs.to_vec()),
-                    None,
-                ) {
-                    Ok(value) => Ok(option_some(value)),
-                    Err(_) => Ok(option_none()),
-                }
+                self.check_arity("fallible", args, 0)?;
+                Ok(self.build_fallible_value(receiver.as_ref().clone()))
             }
             BuiltinValue::Method(BuiltinMethod::HostRead { receiver }) => {
                 self.require_no_kwargs("host.read", kwargs)?;
@@ -4092,6 +4115,11 @@ impl Engine {
                 }?;
                 Ok(self.attach_obligations(result, obligations))
             }
+            BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver }) => {
+                self.require_no_kwargs("fallible", kwargs)?;
+                self.check_arity("fallible", args, 0)?;
+                Ok(self.build_fallible_value(receiver.as_ref().clone()))
+            }
             BuiltinValue::Method(BuiltinMethod::HostRead { receiver }) => {
                 self.require_no_kwargs("host.read", kwargs)?;
                 self.check_arity("host.read", args, 1)?;
@@ -4137,7 +4165,6 @@ impl Engine {
                 };
                 self.host_which(&name)
             }
-            _ => self.invoke_builtin(builtin, args, kwargs, kwargs_expr),
         }
     }
 

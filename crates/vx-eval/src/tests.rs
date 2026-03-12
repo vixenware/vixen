@@ -193,6 +193,18 @@ fn option_unwrap_or_does_not_force_the_default_when_some() {
 }
 
 #[test]
+fn fallible_suffix_invokes_zero_arg_callables() {
+    let value = eval(r#"fn main() { Blob("hello").utf8? }"#, "main").unwrap();
+    assert_eq!(
+        value,
+        Value::Struct(StructValue {
+            type_name: Arc::from("Some"),
+            fields: Arc::from([(Arc::from("value"), Value::String(Arc::from("hello")),)]),
+        })
+    );
+}
+
+#[test]
 // r[verify expr.literal.interpolation]
 fn interpolated_string_literal() {
     let val = eval(r#"fn main() { `hello ${"world"}` }"#, "main").unwrap();
@@ -2788,6 +2800,38 @@ fn array_merge_forces_tree_items_concurrently() {
                 Value::Blob(BlobValue::from_string("right")),
             ),
         ])))
+    );
+    assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
+}
+
+#[test]
+fn fallible_suffix_schedules_independent_operands_concurrently() {
+    let engine = engine("fn main(x: U64, y: U64) { [x?, y?] }");
+
+    let start = Instant::now();
+    let value = engine
+        .call(
+            "main",
+            vec![
+                engine.sleep_value(200, Value::U64(1)),
+                engine.sleep_value(200, Value::U64(2)),
+            ],
+        )
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        value,
+        Value::Array(Arc::from([
+            Value::Struct(StructValue {
+                type_name: Arc::from("Some"),
+                fields: Arc::from([(Arc::from("value"), Value::U64(1))]),
+            }),
+            Value::Struct(StructValue {
+                type_name: Arc::from("Some"),
+                fields: Arc::from([(Arc::from("value"), Value::U64(2))]),
+            }),
+        ]))
     );
     assert!(elapsed.as_millis() < 350, "elapsed = {elapsed:?}");
 }
