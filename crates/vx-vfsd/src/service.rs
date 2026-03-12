@@ -468,9 +468,7 @@ mod tests {
     use std::time::Duration;
 
     use tempfile::TempDir;
-    #[cfg(not(target_os = "windows"))]
-    use vixenfs_proto::ItemId;
-    use vixenfs_proto::{ItemType, errno};
+    use vixenfs_proto::{ItemId, ItemType, errno};
     use vx_io::spawn::{ServiceBuilder, ServiceHandle};
     use vx_store_proto::{CasNode, StoreClient};
 
@@ -602,6 +600,29 @@ mod tests {
             write.error
         );
         (dir_id, create.item_id)
+    }
+
+    async fn item_id_for(env: &TestEnv, prefix_id: &str, rel_path: &str) -> ItemId {
+        let state = env.service.vfs.state.lock();
+        let mut current = state
+            .prefixes
+            .get(prefix_id)
+            .expect("prefix should exist")
+            .root_item_id;
+
+        if rel_path.is_empty() {
+            return current;
+        }
+
+        for component in rel_path.split('/') {
+            current = state
+                .items
+                .lookup_child(current, component)
+                .unwrap_or_else(|| panic!("missing path component {component} in {rel_path}"))
+                .id;
+        }
+
+        current
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -812,5 +833,210 @@ mod tests {
         assert_eq!(stale.entries.len(), 0);
         assert_eq!(stale.next_cookie, 0);
         assert!(stale.verifier != first_page.verifier);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rename_replaces_existing_file() {
+        let env = TestEnv::new().await;
+        env.service
+            .mkdir("/pfx-rename-file/out".to_string())
+            .await
+            .expect("mkdir failed");
+
+        let out_id = item_id_for(&env, "pfx-rename-file", "out").await;
+        let source = env
+            .service
+            .vfs
+            .create(out_id, "source.a".to_string(), ItemType::File)
+            .await;
+        assert_eq!(source.error, errno::OK);
+
+        let target = env
+            .service
+            .vfs
+            .create(out_id, "target.a".to_string(), ItemType::File)
+            .await;
+        assert_eq!(target.error, errno::OK);
+
+        let rename = env
+            .service
+            .vfs
+            .rename(source.item_id, out_id, "target.a".to_string())
+            .await;
+        assert_eq!(rename.error, errno::OK);
+
+        let state = env.service.vfs.state.lock();
+        assert!(state.items.get(&target.item_id).is_none());
+        assert!(state.items.lookup_child(out_id, "source.a").is_none());
+        let renamed = state
+            .items
+            .lookup_child(out_id, "target.a")
+            .expect("target should exist after replacement");
+        assert_eq!(renamed.id, source.item_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rename_file_over_directory_returns_eisdir() {
+        let env = TestEnv::new().await;
+        env.service
+            .mkdir("/pfx-rename-file-dir/out/target".to_string())
+            .await
+            .expect("mkdir failed");
+
+        let out_id = item_id_for(&env, "pfx-rename-file-dir", "out").await;
+        let source = env
+            .service
+            .vfs
+            .create(out_id, "source.a".to_string(), ItemType::File)
+            .await;
+        assert_eq!(source.error, errno::OK);
+
+        let rename = env
+            .service
+            .vfs
+            .rename(source.item_id, out_id, "target".to_string())
+            .await;
+        assert_eq!(rename.error, errno::EISDIR);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rename_directory_over_file_returns_enotdir() {
+        let env = TestEnv::new().await;
+        env.service
+            .mkdir("/pfx-rename-dir-file/out".to_string())
+            .await
+            .expect("mkdir failed");
+
+        let out_id = item_id_for(&env, "pfx-rename-dir-file", "out").await;
+        let source = env
+            .service
+            .vfs
+            .create(out_id, "source".to_string(), ItemType::Directory)
+            .await;
+        assert_eq!(source.error, errno::OK);
+
+        let target = env
+            .service
+            .vfs
+            .create(out_id, "target".to_string(), ItemType::File)
+            .await;
+        assert_eq!(target.error, errno::OK);
+
+        let rename = env
+            .service
+            .vfs
+            .rename(source.item_id, out_id, "target".to_string())
+            .await;
+        assert_eq!(rename.error, errno::ENOTDIR);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rename_directory_over_nonempty_directory_returns_enotempty() {
+        let env = TestEnv::new().await;
+        env.service
+            .mkdir("/pfx-rename-dir-nonempty/out".to_string())
+            .await
+            .expect("mkdir failed");
+
+        let out_id = item_id_for(&env, "pfx-rename-dir-nonempty", "out").await;
+        let source = env
+            .service
+            .vfs
+            .create(out_id, "source".to_string(), ItemType::Directory)
+            .await;
+        assert_eq!(source.error, errno::OK);
+
+        let target = env
+            .service
+            .vfs
+            .create(out_id, "target".to_string(), ItemType::Directory)
+            .await;
+        assert_eq!(target.error, errno::OK);
+
+        let child = env
+            .service
+            .vfs
+            .create(target.item_id, "nested.txt".to_string(), ItemType::File)
+            .await;
+        assert_eq!(child.error, errno::OK);
+
+        let rename = env
+            .service
+            .vfs
+            .rename(source.item_id, out_id, "target".to_string())
+            .await;
+        assert_eq!(rename.error, errno::ENOTEMPTY);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rename_directory_over_empty_directory_replaces_it() {
+        let env = TestEnv::new().await;
+        env.service
+            .mkdir("/pfx-rename-dir-empty/out".to_string())
+            .await
+            .expect("mkdir failed");
+
+        let out_id = item_id_for(&env, "pfx-rename-dir-empty", "out").await;
+        let source = env
+            .service
+            .vfs
+            .create(out_id, "source".to_string(), ItemType::Directory)
+            .await;
+        assert_eq!(source.error, errno::OK);
+
+        let target = env
+            .service
+            .vfs
+            .create(out_id, "target".to_string(), ItemType::Directory)
+            .await;
+        assert_eq!(target.error, errno::OK);
+
+        let rename = env
+            .service
+            .vfs
+            .rename(source.item_id, out_id, "target".to_string())
+            .await;
+        assert_eq!(rename.error, errno::OK);
+
+        let state = env.service.vfs.state.lock();
+        assert!(state.items.get(&target.item_id).is_none());
+        assert!(state.items.lookup_child(out_id, "source").is_none());
+        let renamed = state
+            .items
+            .lookup_child(out_id, "target")
+            .expect("target should exist after replacement");
+        assert_eq!(renamed.id, source.item_id);
+        assert_eq!(renamed.item_type, ItemType::Directory);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rename_directory_into_its_own_subtree_returns_einval() {
+        let env = TestEnv::new().await;
+        env.service
+            .mkdir("/pfx-rename-cycle/out".to_string())
+            .await
+            .expect("mkdir failed");
+
+        let out_id = item_id_for(&env, "pfx-rename-cycle", "out").await;
+        let source = env
+            .service
+            .vfs
+            .create(out_id, "source".to_string(), ItemType::Directory)
+            .await;
+        assert_eq!(source.error, errno::OK);
+
+        let nested = env
+            .service
+            .vfs
+            .create(source.item_id, "nested".to_string(), ItemType::Directory)
+            .await;
+        assert_eq!(nested.error, errno::OK);
+
+        let rename = env
+            .service
+            .vfs
+            .rename(source.item_id, nested.item_id, "source".to_string())
+            .await;
+        assert_eq!(rename.error, errno::EINVAL);
     }
 }

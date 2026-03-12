@@ -204,6 +204,24 @@ impl VfsItems {
             .is_some_and(|kids| kids.contains_key(name))
     }
 
+    /// Check whether `item_id` is within the subtree rooted at `ancestor_id`.
+    fn is_within_subtree(&self, item_id: ItemId, ancestor_id: ItemId) -> bool {
+        let mut current = item_id;
+        loop {
+            if current == ancestor_id {
+                return true;
+            }
+
+            let Some(item) = self.items.get(&current) else {
+                return false;
+            };
+            if item.parent_id == 0 {
+                return false;
+            }
+            current = item.parent_id;
+        }
+    }
+
     /// Rename an item: update the children index for old and new parent.
     fn rename(&mut self, item_id: ItemId, new_parent_id: ItemId, new_name: String) {
         let mut old_parent = None;
@@ -1433,11 +1451,11 @@ impl CasVfs {
 
         let mut state = self.state.lock();
 
-        if !state.items.contains_key(&item_id) {
+        let Some(source_item) = state.items.get(&item_id).cloned() else {
             return VfsResult {
                 error: errno::ENOENT,
             };
-        }
+        };
 
         // Check new parent exists and is directory
         match state.items.get(&new_parent_id) {
@@ -1454,19 +1472,51 @@ impl CasVfs {
             }
         }
 
-        // Check name doesn't exist in new parent (O(1) via index)
-        if state.items.child_exists(new_parent_id, &new_name) {
-            // Could be ourselves moving to same parent with same name — check
-            if let Some(existing) = state.items.lookup_child(new_parent_id, &new_name)
-                && existing.id != item_id
-            {
-                return VfsResult {
-                    error: errno::EEXIST,
-                };
+        if source_item.item_type == ItemType::Directory
+            && state.items.is_within_subtree(new_parent_id, item_id)
+        {
+            return VfsResult {
+                error: errno::EINVAL,
+            };
+        }
+
+        let mut replaced_item_id = None;
+
+        if let Some(existing) = state.items.lookup_child(new_parent_id, &new_name).cloned()
+            && existing.id != item_id
+        {
+            match (source_item.item_type, existing.item_type) {
+                (ItemType::Directory, ItemType::File | ItemType::Symlink) => {
+                    return VfsResult {
+                        error: errno::ENOTDIR,
+                    };
+                }
+                (ItemType::File | ItemType::Symlink, ItemType::Directory) => {
+                    return VfsResult {
+                        error: errno::EISDIR,
+                    };
+                }
+                (ItemType::Directory, ItemType::Directory)
+                    if state.items.has_children(existing.id) =>
+                {
+                    return VfsResult {
+                        error: errno::ENOTEMPTY,
+                    };
+                }
+                _ => {}
             }
+
+            state.items.remove(existing.id);
+            replaced_item_id = Some(existing.id);
         }
 
         state.items.rename(item_id, new_parent_id, new_name);
+        drop(state);
+
+        if let Some(replaced_item_id) = replaced_item_id {
+            self.clear_observed_identity(replaced_item_id);
+        }
+        self.clear_observed_identity(item_id);
         VfsResult { error: errno::OK }
     }
 
