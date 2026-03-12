@@ -955,7 +955,11 @@ fn lower_array(array: &ArrayExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
 fn lower_map(map: &MapExpr, ctx: &mut LowerCtx) -> Option<instr::Expr> {
     let mut entries = Vec::new();
     for entry in map.entries() {
-        let key = lower_expr_with_ctx(&entry.key()?, ctx)?;
+        let key = if let Some(name) = entry.name() {
+            instr::Expr::LitString(name.text().to_string())
+        } else {
+            lower_expr_with_ctx(&entry.key()?, ctx)?
+        };
         let value = lower_expr_with_ctx(&entry.value()?, ctx)?;
         entries.push((key, value));
     }

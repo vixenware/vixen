@@ -14,7 +14,7 @@ use tempfile::TempDir;
 use vx_parser::{AstNode, Pattern as AstPattern, SourceFile, Stmt as AstStmt};
 use vx_store_proto::{Blake3Hash, BlobRef, ChunkHash, NodeHash};
 
-use crate::exec::{AcquireRequest, ExecArgValue};
+use crate::exec::{AcquireRequest, ExecArgValue, RenderRequest};
 use crate::instr::{Block, FnDef};
 use crate::lower::{lower_source_file, lower_source_file_with_source_id};
 use crate::node::{NodeId, NodeJob, TemplateKind, TemplatePartValue};
@@ -2643,6 +2643,152 @@ fn fetch() {
     assert_eq!(provenance.label, "call(..)");
     assert_eq!(provenance.span.start, u32::from(outer_range.start()));
     assert_eq!(provenance.span.end, u32::from(outer_range.end()));
+}
+
+#[test]
+fn render_handlers_receive_template_bindings_and_source_provenance() {
+    let source = r#"
+fn render_header() {
+  return render(@templates/header.h) where {
+    bindings: {
+      NAME: "libpng",
+      ENABLED: true,
+    },
+  };
+}
+"#;
+    let parse = vx_parser::parse(source);
+    assert_eq!(parse.errors(), []);
+    let file = SourceFile::cast_root(parse.syntax());
+    let module = lower_source_file_with_source_id(&file, "/workspace/build.vx");
+    assert!(
+        matches!(
+            module.functions[0].body.stmts.as_slice(),
+            [crate::instr::Stmt::Return(crate::instr::Expr::Call { .. })]
+        ),
+        "expected lowered render function to return a call, got {:?}",
+        module.functions[0].body.stmts
+    );
+    let function = match file.items().next().expect("render_header function item") {
+        vx_parser::Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let outer_range = match function.body().expect("function body").statements().next() {
+        Some(vx_parser::Stmt::Return(stmt)) => match stmt.expr() {
+            Some(vx_parser::Expr::Where(where_expr)) => where_expr.syntax().text_range(),
+            other => panic!("expected return where expr, got {other:?}"),
+        },
+        other => panic!("expected parsed return where expr, got {other:?}"),
+    };
+
+    let captured = Arc::new(Mutex::new(None::<RenderRequest>));
+    let sink = Arc::clone(&captured);
+    let expected = Value::Blob(BlobValue::from_string("rendered header"));
+    let engine = engine_with_source_id(source, "/workspace/build.vx").with_render_handler(
+        Arc::new(move |request| {
+            *sink.lock().unwrap() = Some(request);
+            Ok(expected.clone())
+        }),
+    );
+
+    let value = engine.call("render_header", vec![]).unwrap();
+    assert!(
+        captured.lock().unwrap().is_some(),
+        "render handler should be called"
+    );
+    assert_eq!(
+        value,
+        Value::Blob(BlobValue::from_string("rendered header"))
+    );
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("render request should be captured");
+    assert_eq!(request.template, "templates/header.h");
+    let Value::Map(bindings) = request.bindings else {
+        panic!("expected render bindings to be a map");
+    };
+    let rendered_bindings = bindings
+        .entries
+        .iter()
+        .map(|(key, value)| {
+            let Value::String(key) = key else {
+                panic!("expected string render binding key");
+            };
+            (key.to_string(), value.clone())
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        rendered_bindings.get("NAME"),
+        Some(&Value::String(Arc::from("libpng")))
+    );
+    assert_eq!(rendered_bindings.get("ENABLED"), Some(&Value::Bool(true)));
+
+    let call_entry = request
+        .demand_chain
+        .entries
+        .iter()
+        .find(|entry| entry.description == "call(..)")
+        .expect("call demand entry");
+    let provenance = call_entry.provenance.as_ref().expect("call provenance");
+    assert_eq!(provenance.source_id.as_ref(), "/workspace/build.vx");
+    assert_eq!(provenance.label, "call(..)");
+    assert_eq!(provenance.span.start, u32::from(outer_range.start()));
+    assert_eq!(provenance.span.end, u32::from(outer_range.end()));
+}
+
+#[test]
+fn render_preserves_obligations_from_discovered_bindings() {
+    let source = r#"
+fn render_header(flag: Bool) {
+  return render(@templates/header.h) where {
+    bindings: { FLAG: flag },
+  };
+}
+"#;
+    let engine = engine(source).with_render_handler(Arc::new(|request| {
+        let Value::Map(bindings) = request.bindings else {
+            panic!("expected render bindings to be a map");
+        };
+        let flag = bindings
+            .entries
+            .iter()
+            .find_map(|(key, value)| match key {
+                Value::String(name) if name.as_ref() == "FLAG" => Some(value.clone()),
+                _ => None,
+            })
+            .expect("FLAG binding");
+        let text = match flag {
+            Value::Discovered(discovered) => match discovered.value.as_ref() {
+                Value::Bool(true) => "flag:on",
+                Value::Bool(false) => "flag:off",
+                other => panic!("expected boolean flag binding, got {other:?}"),
+            },
+            Value::Bool(true) => "flag:on",
+            Value::Bool(false) => "flag:off",
+            other => panic!("expected boolean flag binding, got {other:?}"),
+        };
+        Ok(Value::Blob(BlobValue::from_string(text)))
+    }));
+    let observation = HostObservation::Which {
+        name: "cc".to_string(),
+        expected_path: Some("/usr/bin/cc".to_string()),
+    };
+    let flag = Value::Discovered(DiscoveredValue {
+        value: Box::new(Value::Bool(true)),
+        obligations: Arc::from([observation.clone()]),
+    });
+
+    let value = engine.call("render_header", vec![flag]).unwrap();
+    assert_eq!(
+        value,
+        Value::Discovered(DiscoveredValue {
+            value: Box::new(Value::Blob(BlobValue::from_string("flag:on"))),
+            obligations: Arc::from([observation]),
+        })
+    );
 }
 
 #[test]

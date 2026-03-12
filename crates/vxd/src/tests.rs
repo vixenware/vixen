@@ -6,7 +6,6 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::Duration;
 use tar::Builder as TarBuilder;
 
 use arborium::advanced::{CompiledGrammar, GrammarConfig};
@@ -20,7 +19,10 @@ use std::fs;
 use std::net::TcpListener;
 use tempfile::TempDir;
 use tokio_test_lite::test as vx_test;
-use vx_eval::{AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain, TreeValue, Value};
+use vx_eval::{
+    AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain, MapValue,
+    RenderRequest as EvalRenderRequest, TreeValue, Value,
+};
 use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_report::{GraphEdge, GraphNode, GraphTopology};
 use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
@@ -1151,6 +1153,61 @@ async fn acquire_extract_reuses_the_persistent_store_cache() {
     assert_eq!(collect_tree_paths(&first), collect_tree_paths(&second));
 }
 
+#[vx_test]
+async fn render_uses_workspace_relative_templates_and_refreshes_on_content_change() {
+    let env = StoreTestEnv::new().await;
+    let workspace = TempDir::new().expect("workspace tempdir");
+    let workspace_root =
+        Utf8Path::from_path(workspace.path()).expect("workspace path should be valid UTF-8");
+    let template_dir = workspace_root.join("templates");
+    fs::create_dir_all(&template_dir).expect("create template dir");
+    let template_path = template_dir.join("header.txt");
+    fs::write(
+        &template_path,
+        "name={{NAME}}\n{{#if ENABLED}}enabled\n{{/if}}{{#each FLAGS}}- {{this}}\n{{/each}}",
+    )
+    .expect("write template");
+
+    let bindings = Value::Map(MapValue {
+        entries: Arc::from([
+            (
+                Value::String(Arc::from("NAME")),
+                Value::String(Arc::from("libpng")),
+            ),
+            (Value::String(Arc::from("ENABLED")), Value::Bool(true)),
+            (
+                Value::String(Arc::from("FLAGS")),
+                Value::Array(Arc::from([
+                    Value::String(Arc::from("PNG_SHARED")),
+                    Value::String(Arc::from("PNG_STATIC")),
+                ])),
+            ),
+        ]),
+    });
+    let request = EvalRenderRequest {
+        template: "templates/header.txt".to_string(),
+        bindings: bindings.clone(),
+        demand_chain: DemandChain::new(),
+    };
+
+    let first =
+        crate::service::run_build_vx_render_via_store(&env.client, workspace_root, request.clone())
+            .await
+            .expect("first render should succeed");
+    assert_eq!(
+        blob_text(&first),
+        "name=libpng\nenabled\n- PNG_SHARED\n- PNG_STATIC\n"
+    );
+
+    fs::write(&template_path, "short={{NAME}}\n").expect("rewrite template");
+
+    let second =
+        crate::service::run_build_vx_render_via_store(&env.client, workspace_root, request)
+            .await
+            .expect("second render should succeed");
+    assert_eq!(blob_text(&second), "short=libpng\n");
+}
+
 fn collect_tree_paths(value: &Value) -> Vec<String> {
     fn walk(value: &Value, prefix: &str, out: &mut Vec<String>) {
         match value {
@@ -1175,6 +1232,15 @@ fn collect_tree_paths(value: &Value) -> Vec<String> {
     paths
 }
 
+fn blob_text(value: &Value) -> String {
+    let Value::Blob(blob) = value else {
+        panic!("expected blob value, got {}", value.type_name());
+    };
+    blob.to_utf8_string()
+        .expect("blob should be valid UTF-8")
+        .to_string()
+}
+
 struct StaticHttpServer {
     addr: std::net::SocketAddr,
     hits: Arc<AtomicUsize>,
@@ -1185,9 +1251,6 @@ struct StaticHttpServer {
 impl StaticHttpServer {
     fn new(body: Vec<u8>, content_type: &'static str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind test http server");
-        listener
-            .set_nonblocking(true)
-            .expect("failed to make test http server nonblocking");
         let addr = listener
             .local_addr()
             .expect("failed to read test http server address");
@@ -1196,9 +1259,12 @@ impl StaticHttpServer {
         let hits_for_thread = Arc::clone(&hits);
         let stop_for_thread = Arc::clone(&stop);
         let thread = thread::spawn(move || {
-            while !stop_for_thread.load(Ordering::Relaxed) {
+            loop {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        if stop_for_thread.load(Ordering::Relaxed) {
+                            break;
+                        }
                         let mut request = [0u8; 1024];
                         let _ = stream.read(&mut request);
                         hits_for_thread.fetch_add(1, Ordering::Relaxed);
@@ -1213,9 +1279,6 @@ impl StaticHttpServer {
                         stream
                             .write_all(&body)
                             .expect("failed to write response body");
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10));
                     }
                     Err(error) => panic!("test http server accept failed: {error}"),
                 }

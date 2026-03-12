@@ -34,8 +34,8 @@ use tracing::{debug, info, warn};
 use vx_eval::{
     AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain,
     DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, ExecArgValue, ExecMount,
-    ExecRequest, MapValue, PathValue, PoisonError, PoisonKind, StructValue, TreeValue, Value,
-    lower_source_file_with_source_id,
+    ExecRequest, MapValue, PathValue, PoisonError, PoisonKind, RenderRequest as EvalRenderRequest,
+    StructValue, TreeValue, Value, lower_source_file_with_source_id,
 };
 use vx_io::spawn::ServiceHandle;
 use vx_parser::SourceFile;
@@ -60,6 +60,9 @@ use vxd_proto::{
     ActionType, BuildFailure, BuildRequest, BuildResult, ProgressListenerClient, UnpublishResult,
     VXD_PROTOCOL_VERSION, Vxd as VxdRpc,
 };
+
+mod build_vx_render;
+pub(crate) use build_vx_render::run_build_vx_render_via_store;
 
 /// Toolchain information (manifest-only, no materialization)
 pub struct ToolchainInfo {
@@ -2155,6 +2158,9 @@ impl VxdService {
                 let runtime = Handle::current();
                 let acquire_store = Arc::clone(&self.store);
                 let acquire_runtime = runtime.clone();
+                let render_store = Arc::clone(&self.store);
+                let render_runtime = runtime.clone();
+                let render_workspace = request.project_path.clone();
                 let discover_store = Arc::clone(&self.store);
                 let discover_exec = Arc::clone(&self.exec);
                 let discover_runtime = runtime.clone();
@@ -2164,6 +2170,16 @@ impl VxdService {
                         let runtime = acquire_runtime.clone();
                         block_in_place(|| {
                             runtime.block_on(run_build_vx_acquire_via_store(&store, request))
+                        })
+                    }))
+                    .with_render_handler(Arc::new(move |request| {
+                        let store = Arc::clone(&render_store);
+                        let runtime = render_runtime.clone();
+                        let workspace = render_workspace.clone();
+                        block_in_place(|| {
+                            runtime.block_on(run_build_vx_render_via_store(
+                                &store, &workspace, request,
+                            ))
                         })
                     }))
                     .with_exec_handler(Arc::new(move |request| {

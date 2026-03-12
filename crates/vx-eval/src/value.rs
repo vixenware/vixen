@@ -172,6 +172,7 @@ pub enum BuiltinNamespace {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltinFunction {
     Acquire,
+    Render,
     Exec,
     Discover,
     ExecutorClass,
@@ -574,6 +575,7 @@ impl BuiltinValue {
         match self {
             BuiltinValue::Namespace(_)
             | BuiltinValue::Function(BuiltinFunction::Acquire)
+            | BuiltinValue::Function(BuiltinFunction::Render)
             | BuiltinValue::Function(BuiltinFunction::Exec)
             | BuiltinValue::Function(BuiltinFunction::Discover)
             | BuiltinValue::Function(BuiltinFunction::ExecutorClass)
@@ -613,6 +615,7 @@ impl BuiltinValue {
         match self {
             BuiltinValue::Namespace(_)
             | BuiltinValue::Function(BuiltinFunction::Acquire)
+            | BuiltinValue::Function(BuiltinFunction::Render)
             | BuiltinValue::Function(BuiltinFunction::Exec)
             | BuiltinValue::Function(BuiltinFunction::Discover)
             | BuiltinValue::Function(BuiltinFunction::ExecutorClass)
@@ -654,6 +657,7 @@ impl BuiltinValue {
             BuiltinValue::Namespace(BuiltinNamespace::Bytes) => Some("builtin:Bytes".into()),
             BuiltinValue::Namespace(BuiltinNamespace::Tree) => Some("builtin:Tree".into()),
             BuiltinValue::Function(BuiltinFunction::Acquire) => Some("builtin:acquire".into()),
+            BuiltinValue::Function(BuiltinFunction::Render) => Some("builtin:render".into()),
             BuiltinValue::Function(BuiltinFunction::Exec) => Some("builtin:exec".into()),
             BuiltinValue::Function(BuiltinFunction::Discover) => Some("builtin:discover".into()),
             BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
@@ -1108,6 +1112,7 @@ impl fmt::Display for BuiltinValue {
             BuiltinValue::Namespace(BuiltinNamespace::Bytes) => write!(f, "Bytes"),
             BuiltinValue::Namespace(BuiltinNamespace::Tree) => write!(f, "Tree"),
             BuiltinValue::Function(BuiltinFunction::Acquire) => write!(f, "acquire"),
+            BuiltinValue::Function(BuiltinFunction::Render) => write!(f, "render"),
             BuiltinValue::Function(BuiltinFunction::Exec) => write!(f, "exec"),
             BuiltinValue::Function(BuiltinFunction::Discover) => write!(f, "discover"),
             BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {

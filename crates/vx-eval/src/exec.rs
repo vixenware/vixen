@@ -69,3 +69,15 @@ pub type AcquireHandler =
     dyn Fn(AcquireRequest) -> Result<Value, PoisonError> + Send + Sync + 'static;
 
 pub type SharedAcquireHandler = Arc<AcquireHandler>;
+
+#[derive(Debug, Clone)]
+pub struct RenderRequest {
+    pub template: String,
+    pub bindings: Value,
+    pub demand_chain: DemandChain,
+}
+
+pub type RenderHandler =
+    dyn Fn(RenderRequest) -> Result<Value, PoisonError> + Send + Sync + 'static;
+
+pub type SharedRenderHandler = Arc<RenderHandler>;

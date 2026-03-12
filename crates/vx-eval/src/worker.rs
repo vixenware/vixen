@@ -24,8 +24,8 @@ use dashmap::mapref::entry::Entry;
 use tempfile::TempDir;
 
 use crate::exec::{
-    AcquireRequest, DiscoverRequest, ExecArgValue, ExecMount, ExecRequest, SharedAcquireHandler,
-    SharedDiscoverHandler, SharedExecHandler,
+    AcquireRequest, DiscoverRequest, ExecArgValue, ExecMount, ExecRequest, RenderRequest,
+    SharedAcquireHandler, SharedDiscoverHandler, SharedExecHandler, SharedRenderHandler,
 };
 use crate::instr::{self, BinOp, UnaryOp};
 use crate::node::{
@@ -96,6 +96,7 @@ pub struct Engine {
     function_identities: HashMap<usize, Arc<str>>,
     max_demand_depth: usize,
     acquire_handler: Option<SharedAcquireHandler>,
+    render_handler: Option<SharedRenderHandler>,
     exec_handler: Option<SharedExecHandler>,
     discover_handler: Option<SharedDiscoverHandler>,
 }
@@ -120,6 +121,7 @@ impl Engine {
             function_identities,
             max_demand_depth: DEFAULT_MAX_DEMAND_DEPTH,
             acquire_handler: None,
+            render_handler: None,
             exec_handler: None,
             discover_handler: None,
         }
@@ -133,6 +135,11 @@ impl Engine {
 
     pub fn with_acquire_handler(mut self, acquire_handler: SharedAcquireHandler) -> Self {
         self.acquire_handler = Some(acquire_handler);
+        self
+    }
+
+    pub fn with_render_handler(mut self, render_handler: SharedRenderHandler) -> Self {
+        self.render_handler = Some(render_handler);
         self
     }
 
@@ -871,6 +878,7 @@ impl Engine {
                     }
                 }
                 BuiltinValue::Function(BuiltinFunction::Acquire)
+                | BuiltinValue::Function(BuiltinFunction::Render)
                 | BuiltinValue::Function(BuiltinFunction::Exec)
                 | BuiltinValue::Function(BuiltinFunction::Discover)
                 | BuiltinValue::Function(BuiltinFunction::ExecutorClass) => {
@@ -3054,6 +3062,9 @@ impl Engine {
             BuiltinValue::Function(BuiltinFunction::Acquire) => {
                 self.acquire_builtin(args, kwargs, kwargs_expr)
             }
+            BuiltinValue::Function(BuiltinFunction::Render) => {
+                self.render_builtin(args, kwargs, kwargs_expr)
+            }
             BuiltinValue::Function(BuiltinFunction::Exec) => {
                 self.exec_builtin(args, kwargs, kwargs_expr)
             }
@@ -3724,6 +3735,51 @@ impl Engine {
             extract,
             demand_chain: self.current_demand_chain(None),
         })
+    }
+
+    fn render_builtin(
+        &self,
+        args: &[Value],
+        kwargs: &[(Arc<str>, Value)],
+        kwargs_expr: Option<Value>,
+    ) -> Result<Value, PoisonError> {
+        let kwargs = self.materialize_kwargs(kwargs, kwargs_expr, "render")?;
+        self.check_arity("render", args, 1)?;
+
+        let template = self.materialize_value_deep(args[0].clone(), "forcing render template")?;
+        let mut obligations = BTreeMap::new();
+        self.collect_value_obligations(&template, &mut obligations);
+        let template = self.expect_path_value(&template, "render template")?;
+
+        let mut bindings = None;
+        for (name, value) in &kwargs {
+            match name.as_ref() {
+                "bindings" => bindings = Some(value.clone()),
+                other => {
+                    return Err(self.type_error(&format!(
+                        "render does not accept keyword argument '{other}'"
+                    )));
+                }
+            }
+        }
+
+        let bindings = bindings
+            .ok_or_else(|| self.type_error("render requires keyword argument 'bindings'"))?;
+        let bindings = self.materialize_value_deep(bindings, "forcing render bindings")?;
+        self.collect_value_obligations(&bindings, &mut obligations);
+
+        let Some(render_handler) = &self.render_handler else {
+            return Err(self.type_error("render requires a render handler"));
+        };
+
+        self.finish_obligated_result(
+            render_handler(RenderRequest {
+                template: template.as_str().to_string(),
+                bindings,
+                demand_chain: self.current_demand_chain(None),
+            }),
+            obligations.into_values(),
+        )
     }
 
     fn exec_builtin(
@@ -5646,6 +5702,7 @@ fn collect_expr_capture_names(
 fn builtin_namespace(name: &str) -> Option<BuiltinValue> {
     match name {
         "acquire" => Some(BuiltinValue::Function(BuiltinFunction::Acquire)),
+        "render" => Some(BuiltinValue::Function(BuiltinFunction::Render)),
         "exec" => Some(BuiltinValue::Function(BuiltinFunction::Exec)),
         "discover" => Some(BuiltinValue::Function(BuiltinFunction::Discover)),
         "executor_class" => Some(BuiltinValue::Function(BuiltinFunction::ExecutorClass)),
