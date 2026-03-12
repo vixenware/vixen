@@ -254,6 +254,13 @@ fn leaf_group_key(error: &PoisonError, presentation: &LeafPresentation) -> Strin
     format!("{:?}:{}", error.kind, error.message)
 }
 
+struct GroupPrimaryCandidate<'a> {
+    provenance: &'a SourceProvenance,
+    leaf_index: usize,
+    depth: usize,
+    chain_len: usize,
+}
+
 fn group_primary_provenance(group: &LeafGroup<'_>) -> Option<SourceProvenance> {
     if group.presentation.focus == ProvenanceFocus::PathRead
         && !group
@@ -276,14 +283,18 @@ fn group_primary_provenance(group: &LeafGroup<'_>) -> Option<SourceProvenance> {
                 |(best_leaf_index, best_depth, best_chain_len, best_provenance)| {
                     better_group_primary_candidate(
                         group.presentation.focus,
-                        &provenance,
-                        leaf_index,
-                        depth,
-                        chain_len,
-                        best_provenance,
-                        *best_leaf_index,
-                        *best_depth,
-                        *best_chain_len,
+                        GroupPrimaryCandidate {
+                            provenance: &provenance,
+                            leaf_index,
+                            depth,
+                            chain_len,
+                        },
+                        GroupPrimaryCandidate {
+                            provenance: best_provenance,
+                            leaf_index: *best_leaf_index,
+                            depth: *best_depth,
+                            chain_len: *best_chain_len,
+                        },
                     )
                 },
             ) {
@@ -333,27 +344,23 @@ fn grouped_path_read_primary(group: &LeafGroup<'_>) -> Option<SourceProvenance> 
 
 fn better_group_primary_candidate(
     focus: ProvenanceFocus,
-    candidate: &SourceProvenance,
-    candidate_leaf_index: usize,
-    candidate_depth: usize,
-    candidate_chain_len: usize,
-    best: &SourceProvenance,
-    best_leaf_index: usize,
-    best_depth: usize,
-    best_chain_len: usize,
+    candidate: GroupPrimaryCandidate<'_>,
+    best: GroupPrimaryCandidate<'_>,
 ) -> bool {
-    let ordering = primary_rank(focus, candidate)
-        .cmp(&primary_rank(focus, best))
+    let ordering = primary_rank(focus, candidate.provenance)
+        .cmp(&primary_rank(focus, best.provenance))
         .then_with(|| {
             if focus == ProvenanceFocus::PathRead {
-                candidate_chain_len.cmp(&best_chain_len)
+                candidate.chain_len.cmp(&best.chain_len)
             } else {
                 Ordering::Equal
             }
         })
-        .then_with(|| provenance_span_width(best).cmp(&provenance_span_width(candidate)))
-        .then_with(|| candidate_depth.cmp(&best_depth))
-        .then_with(|| best_leaf_index.cmp(&candidate_leaf_index));
+        .then_with(|| {
+            provenance_span_width(best.provenance).cmp(&provenance_span_width(candidate.provenance))
+        })
+        .then_with(|| candidate.depth.cmp(&best.depth))
+        .then_with(|| best.leaf_index.cmp(&candidate.leaf_index));
 
     ordering.is_gt()
 }
@@ -1102,12 +1109,11 @@ fn parse_missing_process_input_path(line: &str) -> Option<String> {
 }
 
 fn parse_quoted_path(value: &str) -> Option<String> {
-    for quote in ['\'', '"'] {
+    ['\'', '"'].into_iter().find_map(|quote| {
         let stripped = value.strip_prefix(quote)?;
         let (path, _) = stripped.split_once(quote)?;
-        return Some(path.to_string());
-    }
-    None
+        Some(path.to_string())
+    })
 }
 
 #[cfg(test)]

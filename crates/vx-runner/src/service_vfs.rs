@@ -214,12 +214,11 @@ fn parse_missing_process_input_line(line: &str) -> Option<String> {
 }
 
 fn parse_quoted_path(value: &str) -> Option<String> {
-    for quote in ['\'', '"'] {
+    ['\'', '"'].into_iter().find_map(|quote| {
         let stripped = value.strip_prefix(quote)?;
         let (path, _) = stripped.split_once(quote)?;
-        return Some(path.to_string());
-    }
-    None
+        Some(path.to_string())
+    })
 }
 
 fn find_similar_sandbox_path(prefix_path: &Utf8Path, missing_path: &str) -> Option<String> {

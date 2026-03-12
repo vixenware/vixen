@@ -58,6 +58,8 @@ pub(crate) struct InspectedValue {
     pub errors: Vec<PoisonError>,
 }
 
+type InspectedList = (Vec<Value>, BTreeSet<NodeId>, Vec<PoisonError>);
+
 impl InspectedValue {
     fn resolved(value: Value) -> Self {
         Self {
@@ -1375,7 +1377,7 @@ impl Engine {
         &self,
         values: impl IntoIterator<Item = Value>,
         visiting: &mut Vec<NodeId>,
-    ) -> Result<(Vec<Value>, BTreeSet<NodeId>, Vec<PoisonError>), PoisonError> {
+    ) -> Result<InspectedList, PoisonError> {
         let mut out = Vec::new();
         let mut pending = BTreeSet::new();
         let mut errors = Vec::new();
