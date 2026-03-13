@@ -643,6 +643,9 @@ async fn ensure_ssh_bootstrap_bare_repo(
 ) -> Result<()> {
     match platform {
         SshBootstrapTargetPlatform::Unix => {
+            let bare_repo_parent = Utf8Path::new(bare_repo_dir).parent().ok_or_else(|| {
+                eyre::eyre!("failed to determine bare repo parent for {bare_repo_dir}")
+            })?;
             ssh_control_output(
                 control_path,
                 target,
@@ -650,7 +653,8 @@ async fn ensure_ssh_bootstrap_bare_repo(
                     "sh",
                     "-lc",
                     &format!(
-                        "mkdir -p $(dirname {dir}) && if [ ! -f {dir}/HEAD ]; then rm -rf {dir}; git init --bare {dir}; fi",
+                        "mkdir -p {parent} && if [ ! -f {dir}/HEAD ]; then rm -rf {dir}; git init --bare {dir}; fi",
+                        parent = shell_quote(bare_repo_parent.as_str()),
                         dir = shell_quote(bare_repo_dir)
                     ),
                 ],
