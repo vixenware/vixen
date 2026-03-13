@@ -1683,6 +1683,50 @@ exit 0
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_vx_reports_unknown_executor_selectors() {
+    let env = BuildServiceTestEnv::new().await;
+    let workspace = TempDir::new().expect("workspace");
+    let workspace_root = Utf8Path::from_path(workspace.path()).expect("utf8 workspace");
+
+    fs::write(
+        workspace.path().join("build.vx"),
+        r#"
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  Tree {
+    @tool.txt: discover(executor_class("linux"), (host) => Blob("present")),
+  }
+}
+"#,
+    )
+    .expect("write build.vx");
+
+    let result = env
+        .service
+        .do_build(BuildRequest {
+            project_path: workspace_root.to_owned(),
+            build_file_path: None,
+            release: false,
+        })
+        .await
+        .expect("build should complete with a structured failure");
+
+    assert!(!result.success, "build unexpectedly succeeded");
+    let failure = result
+        .failure
+        .as_ref()
+        .expect("build should include a structured failure");
+    assert!(
+        failure
+            .reports
+            .iter()
+            .flat_map(|report| report.notes.iter())
+            .any(|note| note.contains("build.vx executor class:linux is not configured")),
+        "unexpected build failure: {:?}",
+        failure,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stabilize_reuses_resolve_output_until_witness_changes() {
     let env = BuildServiceTestEnv::new().await;
     let workspace = TempDir::new().expect("workspace");

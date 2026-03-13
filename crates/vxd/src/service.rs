@@ -35,9 +35,10 @@ use tracing::{debug, info, warn};
 use vx_eval::{
     AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain,
     DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, ExecArgValue, ExecMount,
-    ExecRequest, MapValue, Module as EvalModule, PathValue, PoisonError, PoisonKind,
-    RenderRequest as EvalRenderRequest, StabilizeRequest as EvalStabilizeRequest, StructValue,
-    TransportValue, TreeValue, Value, lower_source_file_with_source_id,
+    ExecRequest, ExecutorBackendKind, ExecutorSelector, MapValue, Module as EvalModule, PathValue,
+    PoisonError, PoisonKind, RenderRequest as EvalRenderRequest,
+    StabilizeRequest as EvalStabilizeRequest, StructValue, TransportValue, TreeValue, Value,
+    lower_source_file_with_source_id,
 };
 use vx_io::spawn::ServiceHandle;
 use vx_parser::SourceFile;
@@ -84,12 +85,85 @@ pub struct AcquiredToolchains {
     pub rust: Option<ToolchainInfo>,
 }
 
+#[derive(Clone)]
+struct BuildVxExecutor {
+    id: String,
+    backend: ExecutorBackendKind,
+}
+
+#[derive(Clone)]
+struct BuildVxExecutors {
+    executors: HashMap<String, BuildVxExecutor>,
+    class_aliases: HashMap<String, String>,
+    runners: HashMap<String, Arc<RunnerClient>>,
+}
+
+impl BuildVxExecutors {
+    fn local_default(runner: Arc<RunnerClient>) -> Self {
+        let executor_id = "local".to_string();
+        let executor = BuildVxExecutor {
+            id: executor_id.clone(),
+            backend: ExecutorBackendKind::Local,
+        };
+        Self {
+            executors: HashMap::from([(executor_id.clone(), executor)]),
+            class_aliases: HashMap::from([("default".to_string(), executor_id.clone())]),
+            runners: HashMap::from([(executor_id, runner)]),
+        }
+    }
+
+    fn resolve_executor_id(
+        &self,
+        selector: &ExecutorSelector,
+    ) -> std::result::Result<&str, String> {
+        match selector.backend {
+            ExecutorBackendKind::Class => self
+                .class_aliases
+                .get(&selector.id)
+                .map(String::as_str)
+                .ok_or_else(|| {
+                    format!(
+                        "build.vx executor {}:{} is not configured",
+                        selector.backend.as_tag(),
+                        selector.id
+                    )
+                }),
+            _ => self
+                .executors
+                .get(&selector.id)
+                .filter(|executor| executor.backend == selector.backend)
+                .map(|executor| executor.id.as_str())
+                .ok_or_else(|| {
+                    format!(
+                        "build.vx executor {}:{} is not configured",
+                        selector.backend.as_tag(),
+                        selector.id
+                    )
+                }),
+        }
+    }
+
+    fn runner_for(
+        &self,
+        selector: &ExecutorSelector,
+    ) -> std::result::Result<Arc<RunnerClient>, String> {
+        let executor_id = self.resolve_executor_id(selector)?;
+        self.runners.get(executor_id).cloned().ok_or_else(|| {
+            format!(
+                "build.vx executor {} is configured without a runner connection",
+                executor_id
+            )
+        })
+    }
+}
+
 /// The daemon service implementation
 // TODO: group some of those locks together?
 #[derive(Clone)]
 pub struct VxdService {
     store: Arc<StoreClient>,
     exec: Arc<RunnerClient>,
+    build_vx_executors: Arc<BuildVxExecutors>,
     _store_handle: Arc<ServiceHandle>,
     _runner_handle: Arc<ServiceHandle>,
 
@@ -1372,10 +1446,13 @@ pub(crate) async fn run_build_vx_acquire_via_store(
 
 async fn run_build_vx_exec_via_runner(
     store: &StoreClient,
-    exec: &RunnerClient,
+    executors: &BuildVxExecutors,
     request: ExecRequest,
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
+    let exec = executors
+        .runner_for(&request.executor)
+        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     let mut args = request.args.into_iter();
     let program = args.next().ok_or_else(|| {
         exec_bridge_poison(
@@ -1459,10 +1536,13 @@ async fn run_build_vx_exec_via_runner(
 
 async fn run_build_vx_discover_via_runner(
     store: &StoreClient,
-    exec: &RunnerClient,
+    executors: &BuildVxExecutors,
     request: EvalDiscoverRequest,
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
+    let exec = executors
+        .runner_for(&request.executor)
+        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     let result = exec
         .discover(RunnerDiscoverRequest {
             executor: request.executor,
@@ -1563,7 +1643,7 @@ pub(crate) fn summarize_build_vx_stabilize_request(request: &EvalStabilizeReques
 #[derive(Clone)]
 struct BuildVxRuntime {
     store: Arc<StoreClient>,
-    exec: Arc<RunnerClient>,
+    executors: Arc<BuildVxExecutors>,
     workspace_root: Utf8PathBuf,
     progress_listener: Option<Arc<ProgressListenerClient>>,
 }
@@ -1640,10 +1720,10 @@ impl BuildVxRuntime {
         let stabilize_runtime_state = self.clone();
         let stabilize_runtime = runtime.clone();
         let exec_store = Arc::clone(&self.store);
-        let exec_runner = Arc::clone(&self.exec);
+        let exec_executors = Arc::clone(&self.executors);
         let exec_runtime = runtime.clone();
         let discover_store = Arc::clone(&self.store);
-        let discover_exec = Arc::clone(&self.exec);
+        let discover_executors = Arc::clone(&self.executors);
         let discover_runtime = runtime;
         let progress_listener = self.progress_listener.clone();
         let acquire_listener = progress_listener.clone();
@@ -1701,7 +1781,7 @@ impl BuildVxRuntime {
                 emit_build_vx_boundary_log(&runtime, &exec_listener, &summary);
                 block_on_runtime(
                     &runtime,
-                    run_build_vx_exec_via_runner(&exec_store, &exec_runner, request),
+                    run_build_vx_exec_via_runner(&exec_store, &exec_executors, request),
                 )
                 .map_err(|error| error.with_context(summary))
             }))
@@ -1711,7 +1791,7 @@ impl BuildVxRuntime {
                 emit_build_vx_boundary_log(&runtime, &discover_listener, &summary);
                 block_on_runtime(
                     &runtime,
-                    run_build_vx_discover_via_runner(&discover_store, &discover_exec, request),
+                    run_build_vx_discover_via_runner(&discover_store, &discover_executors, request),
                 )
                 .map_err(|error| error.with_context(summary))
             }))
@@ -2230,9 +2310,12 @@ impl VxdService {
             }
         };
 
+        let build_vx_executors = Arc::new(BuildVxExecutors::local_default(Arc::clone(&exec)));
+
         Self {
             store,
             exec,
+            build_vx_executors,
             _store_handle: store_handle,
             _runner_handle: runner_handle,
             exec_host_triple,
@@ -2258,6 +2341,7 @@ impl VxdService {
         Self {
             store: self.store.clone(),
             exec: self.exec.clone(),
+            build_vx_executors: self.build_vx_executors.clone(),
             _store_handle: self._store_handle.clone(),
             _runner_handle: self._runner_handle.clone(),
             exec_host_triple: self.exec_host_triple.clone(),
@@ -2471,7 +2555,7 @@ impl VxdService {
                 let module = lower_source_file_with_source_id(&root, build_vx_path.to_string());
                 let build_runtime = BuildVxRuntime {
                     store: Arc::clone(&self.store),
-                    exec: Arc::clone(&self.exec),
+                    executors: Arc::clone(&self.build_vx_executors),
                     workspace_root: request.project_path.clone(),
                     progress_listener: self.progress_listener.lock().clone(),
                 };
