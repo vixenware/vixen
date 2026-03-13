@@ -259,7 +259,13 @@ async fn boot_runner(
     let (store_handle, mut vfsd_handle) =
         tokio::try_join!(store_builder.connect(), vfsd_builder.connect(),)?;
 
-    // Watch for vx-vfsd dying — if it does, we're useless.
+    // Run boot protocol on both services.
+    let (store_virtual, vfsd_virtual) = tokio::try_join!(
+        store_handle.boot_and_connect(),
+        vfsd_handle.boot_and_connect(),
+    )?;
+
+    // Watch for vx-vfsd dying after it has booted successfully — if it does, we're useless.
     if let Some(mut vfsd_child) = vfsd_handle.child.take() {
         moire::task::spawn(
             async move {
@@ -270,12 +276,6 @@ async fn boot_runner(
             .named("vfsd_death_watcher"),
         );
     }
-
-    // Run boot protocol on both services.
-    let (store_virtual, vfsd_virtual) = tokio::try_join!(
-        store_handle.boot_and_connect(),
-        vfsd_handle.boot_and_connect(),
-    )?;
 
     let store = Arc::new(StoreClient::new(store_virtual));
     let vfsd_protocol = vx_vfsd::protocol::VfsdClient::new(vfsd_virtual);
