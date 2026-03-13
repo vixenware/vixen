@@ -1173,6 +1173,34 @@ fn main() {
     assert_eq!(ty, Some(nominal_ty(&types, "Blob")));
 }
 
+#[test]
+fn host_os_returns_string() {
+    let src = r#"
+fn main() {
+    discover(executor_class("default"), (host) => {
+        host.os()
+    })
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, "host.os()");
+    assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::String)));
+}
+
+#[test]
+fn host_arch_returns_string() {
+    let src = r#"
+fn main() {
+    discover(executor_class("default"), (host) => {
+        host.arch()
+    })
+}
+"#;
+    let result = type_check(src);
+    let ty = find_expr_type(&result, src, "host.arch()");
+    assert_eq!(ty, Some(Ty::Scalar(vx_types::Scalar::String)));
+}
+
 // r[exec.verifier.host] — host.hash(...) returns Blob
 #[test]
 fn host_hash_returns_blob() {

@@ -5693,6 +5693,58 @@ fn host_which_poisons_by_default_and_fallible_calls_return_options() {
 }
 
 #[test]
+fn host_os_returns_discovered_string() {
+    let source = r#"fn probe() #discover {
+           discover(executor_class("default"), (host) => host.os())
+         }"#;
+    let engine = engine(source);
+
+    let value = engine.call("probe", vec![]).unwrap();
+    let Value::Discovered(discovered) = value else {
+        panic!("expected discovered value");
+    };
+    assert_eq!(
+        *discovered.value,
+        Value::String(Arc::from(match std::env::consts::OS {
+            "macos" => "darwin",
+            other => other,
+        }))
+    );
+    assert_eq!(
+        discovered.obligations.as_ref(),
+        &[HostObservation::Os {
+            value: match std::env::consts::OS {
+                "macos" => "darwin".to_string(),
+                other => other.to_string(),
+            },
+        }]
+    );
+}
+
+#[test]
+fn host_arch_returns_discovered_string() {
+    let source = r#"fn probe() #discover {
+           discover(executor_class("default"), (host) => host.arch())
+         }"#;
+    let engine = engine(source);
+
+    let value = engine.call("probe", vec![]).unwrap();
+    let Value::Discovered(discovered) = value else {
+        panic!("expected discovered value");
+    };
+    assert_eq!(
+        *discovered.value,
+        Value::String(Arc::from(std::env::consts::ARCH))
+    );
+    assert_eq!(
+        discovered.obligations.as_ref(),
+        &[HostObservation::Arch {
+            value: std::env::consts::ARCH.to_string(),
+        }]
+    );
+}
+
+#[test]
 fn fallible_discovery_preserves_obligations_from_discovered_inputs() {
     let tempdir = TempDir::new().unwrap();
     let input_path = tempdir.path().join("input.bin");

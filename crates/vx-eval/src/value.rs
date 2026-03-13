@@ -131,6 +131,12 @@ pub struct HostValue;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Facet)]
 #[repr(u8)]
 pub enum HostObservation {
+    Os {
+        value: String,
+    },
+    Arch {
+        value: String,
+    },
     Which {
         name: String,
         expected_path: Option<String>,
@@ -231,6 +237,8 @@ pub enum BuiltinMethod {
     TreeSubtree { receiver: Box<Value> },
     OptionUnwrapOr { receiver: Box<Value> },
     FallibleCall { receiver: Box<Value> },
+    HostOs { receiver: Box<Value> },
+    HostArch { receiver: Box<Value> },
     HostRead { receiver: Box<Value> },
     HostHash { receiver: Box<Value> },
     HostWhich { receiver: Box<Value> },
@@ -423,6 +431,8 @@ impl Value {
 impl HostObservation {
     pub fn key(&self) -> String {
         match self {
+            Self::Os { value } => format!("host-os:{value}"),
+            Self::Arch { value } => format!("host-arch:{value}"),
             Self::Which {
                 name,
                 expected_path,
@@ -646,6 +656,8 @@ impl BuiltinValue {
             | BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver })
             | BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver })
             | BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver })
+            | BuiltinValue::Method(BuiltinMethod::HostOs { receiver })
+            | BuiltinValue::Method(BuiltinMethod::HostArch { receiver })
             | BuiltinValue::Method(BuiltinMethod::HostRead { receiver })
             | BuiltinValue::Method(BuiltinMethod::HostHash { receiver })
             | BuiltinValue::Method(BuiltinMethod::HostWhich { receiver }) => {
@@ -693,6 +705,8 @@ impl BuiltinValue {
             | BuiltinValue::Method(BuiltinMethod::TreeSubtree { receiver })
             | BuiltinValue::Method(BuiltinMethod::OptionUnwrapOr { receiver })
             | BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver })
+            | BuiltinValue::Method(BuiltinMethod::HostOs { receiver })
+            | BuiltinValue::Method(BuiltinMethod::HostArch { receiver })
             | BuiltinValue::Method(BuiltinMethod::HostRead { receiver })
             | BuiltinValue::Method(BuiltinMethod::HostHash { receiver })
             | BuiltinValue::Method(BuiltinMethod::HostWhich { receiver }) => {
@@ -805,6 +819,12 @@ impl BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::FallibleCall { receiver }) => {
                 Some(format!("builtin:fallible({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::HostOs { receiver }) => {
+                Some(format!("builtin:host.os({})", receiver.key()?))
+            }
+            BuiltinValue::Method(BuiltinMethod::HostArch { receiver }) => {
+                Some(format!("builtin:host.arch({})", receiver.key()?))
             }
             BuiltinValue::Method(BuiltinMethod::HostRead { receiver }) => {
                 Some(format!("builtin:host.read({})", receiver.key()?))
@@ -1156,6 +1176,14 @@ impl PartialEq for BuiltinMethod {
                 BuiltinMethod::FallibleCall { receiver: right },
             )
             | (
+                BuiltinMethod::HostOs { receiver: left },
+                BuiltinMethod::HostOs { receiver: right },
+            )
+            | (
+                BuiltinMethod::HostArch { receiver: left },
+                BuiltinMethod::HostArch { receiver: right },
+            )
+            | (
                 BuiltinMethod::HostRead { receiver: left },
                 BuiltinMethod::HostRead { receiver: right },
             )
@@ -1321,6 +1349,12 @@ impl fmt::Display for BuiltinValue {
             }
             BuiltinValue::Method(BuiltinMethod::FallibleCall { .. }) => {
                 write!(f, "<bound fallible>")
+            }
+            BuiltinValue::Method(BuiltinMethod::HostOs { .. }) => {
+                write!(f, "<bound host.os>")
+            }
+            BuiltinValue::Method(BuiltinMethod::HostArch { .. }) => {
+                write!(f, "<bound host.arch>")
             }
             BuiltinValue::Method(BuiltinMethod::HostRead { .. }) => {
                 write!(f, "<bound host.read>")

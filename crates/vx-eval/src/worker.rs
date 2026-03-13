@@ -527,6 +527,8 @@ impl Engine {
                 | BuiltinMethod::TreeSubtree { receiver }
                 | BuiltinMethod::OptionUnwrapOr { receiver }
                 | BuiltinMethod::FallibleCall { receiver }
+                | BuiltinMethod::HostOs { receiver }
+                | BuiltinMethod::HostArch { receiver }
                 | BuiltinMethod::HostRead { receiver }
                 | BuiltinMethod::HostHash { receiver }
                 | BuiltinMethod::HostWhich { receiver } => {
@@ -1924,6 +1926,26 @@ impl Engine {
                         errors,
                     ))
                 }
+                BuiltinMethod::HostOs { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::HostOs {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
+                BuiltinMethod::HostArch { receiver } => {
+                    let (value, pending, errors) = inspect_receiver(receiver, visiting)?;
+                    Ok((
+                        BuiltinValue::Method(BuiltinMethod::HostArch {
+                            receiver: Box::new(value),
+                        }),
+                        pending,
+                        errors,
+                    ))
+                }
             },
         }
     }
@@ -3258,6 +3280,16 @@ impl Engine {
                     receiver: Box::new(receiver.clone()),
                 },
             ))),
+            Value::Host(_) if field == "os" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::HostOs {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
+            Value::Host(_) if field == "arch" => Ok(Value::Builtin(BuiltinValue::Method(
+                BuiltinMethod::HostArch {
+                    receiver: Box::new(receiver.clone()),
+                },
+            ))),
             Value::Host(_) if field == "hash" => Ok(Value::Builtin(BuiltinValue::Method(
                 BuiltinMethod::HostHash {
                     receiver: Box::new(receiver.clone()),
@@ -3934,6 +3966,30 @@ impl Engine {
                 self.require_no_kwargs("fallible", kwargs)?;
                 self.check_arity("fallible", args, 0)?;
                 Ok(self.build_fallible_value(receiver.as_ref().clone()))
+            }
+            BuiltinValue::Method(BuiltinMethod::HostOs { receiver }) => {
+                self.require_no_kwargs("host.os", kwargs)?;
+                self.check_arity("host.os", args, 0)?;
+                let receiver = self.materialize_value_shallow(
+                    receiver.as_ref().clone(),
+                    "forcing host.os receiver",
+                )?;
+                let Value::Host(_) = receiver else {
+                    return Err(self.type_error("host.os receiver must be Host"));
+                };
+                Ok(self.host_os())
+            }
+            BuiltinValue::Method(BuiltinMethod::HostArch { receiver }) => {
+                self.require_no_kwargs("host.arch", kwargs)?;
+                self.check_arity("host.arch", args, 0)?;
+                let receiver = self.materialize_value_shallow(
+                    receiver.as_ref().clone(),
+                    "forcing host.arch receiver",
+                )?;
+                let Value::Host(_) = receiver else {
+                    return Err(self.type_error("host.arch receiver must be Host"));
+                };
+                Ok(self.host_arch())
             }
             BuiltinValue::Method(BuiltinMethod::HostRead { receiver }) => {
                 self.require_no_kwargs("host.read", kwargs)?;
@@ -5462,6 +5518,22 @@ impl Engine {
         .with_observations([observation]))
     }
 
+    fn host_os(&self) -> Value {
+        let os = canonical_host_os();
+        self.attach_obligations(
+            Value::String(Arc::from(os.clone())),
+            [HostObservation::Os { value: os }],
+        )
+    }
+
+    fn host_arch(&self) -> Value {
+        let arch = env::consts::ARCH.to_string();
+        self.attach_obligations(
+            Value::String(Arc::from(arch.clone())),
+            [HostObservation::Arch { value: arch }],
+        )
+    }
+
     fn exec_process_value(&self, output: &std::process::Output) -> Value {
         let exit_code = output.status.code().unwrap_or(1).max(0) as u64;
         Value::Struct(StructValue {
@@ -6690,6 +6762,18 @@ fn option_none() -> Value {
 pub fn verify_host_obligations(obligations: &[HostObservation]) -> Result<(), String> {
     for obligation in obligations {
         match obligation {
+            HostObservation::Os { value } => {
+                let actual = canonical_host_os();
+                if &actual != value {
+                    return Err(format!("host.os changed: expected {value}, got {actual}"));
+                }
+            }
+            HostObservation::Arch { value } => {
+                let actual = env::consts::ARCH;
+                if actual != value {
+                    return Err(format!("host.arch changed: expected {value}, got {actual}"));
+                }
+            }
             HostObservation::Which {
                 name,
                 expected_path,
@@ -6744,6 +6828,13 @@ pub fn verify_host_obligations(obligations: &[HostObservation]) -> Result<(), St
 fn hash_host_file(path: &str) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|error| error.to_string())?;
     Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+fn canonical_host_os() -> String {
+    match env::consts::OS {
+        "macos" => "darwin".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn host_lookup_candidate(name: &str) -> Option<&Path> {

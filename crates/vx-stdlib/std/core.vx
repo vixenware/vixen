@@ -193,6 +193,10 @@ namespace Tree {
 }
 
 namespace Host {
+  /// Canonical host operating system name, e.g. `"linux"`, `"darwin"`, or `"windows"`.
+  fn os(self) -> String;
+  /// Canonical host CPU architecture, e.g. `"x86_64"` or `"aarch64"`.
+  fn arch(self) -> String;
   /// Resolve a tool or executable name on the executor host.
   fn which(self, name: String) -> String;
   /// Read a host file.
