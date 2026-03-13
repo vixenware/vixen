@@ -44,6 +44,29 @@ pub struct BootResult {
     pub error: Option<String>,
 }
 
+/// Snapshot of the daemon's current boot status.
+#[derive(Debug, Clone, Facet)]
+pub struct BootStatus {
+    /// Current lifecycle state.
+    pub state: BootStatusState,
+    /// Human-facing boot phase, if available.
+    pub phase: Option<String>,
+    /// Error message if boot failed.
+    pub error: Option<String>,
+}
+
+/// Coarse boot lifecycle state.
+#[repr(u8)]
+#[derive(Debug, Clone, Facet)]
+pub enum BootStatusState {
+    /// Daemon is still initializing.
+    Booting,
+    /// Daemon initialized successfully.
+    Ready,
+    /// Daemon initialization failed.
+    Failed,
+}
+
 /// Boot service — exposed on the root connection of every daemon.
 ///
 /// The protocol is:
@@ -57,6 +80,9 @@ pub trait Boot {
     /// The daemon stays alive regardless of outcome.
     async fn boot(&self) -> BootResult;
 
+    /// Report current boot status without waiting for completion.
+    async fn status(&self) -> BootStatus;
+
     /// Shut the daemon down. Always available, even if boot failed.
     async fn shutdown(&self);
 }
@@ -67,7 +93,7 @@ pub trait Boot {
 #[derive(Clone)]
 pub enum BootState {
     /// Daemon is still initializing.
-    Booting,
+    Booting(Option<String>),
     /// Daemon initialized successfully.
     Ready,
     /// Daemon initialization failed.
@@ -87,19 +113,25 @@ pub struct BootGate<S> {
     service: moire::sync::OnceCell<S>,
 }
 
-/// Sender half — used by the daemon's boot task to signal completion.
+/// Sender half — used by the daemon's boot task to signal progress and completion.
+#[derive(Clone)]
 pub struct BootTx {
     tx: watch::Sender<BootState>,
 }
 
 impl BootTx {
+    /// Publish the current boot phase.
+    pub fn phase(&self, msg: impl Into<String>) {
+        let _ = self.tx.send(BootState::Booting(Some(msg.into())));
+    }
+
     /// Signal that boot succeeded.
-    pub fn ready(self) {
+    pub fn ready(&self) {
         let _ = self.tx.send(BootState::Ready);
     }
 
     /// Signal that boot failed.
-    pub fn failed(self, msg: String) {
+    pub fn failed(&self, msg: String) {
         let _ = self.tx.send(BootState::Failed(msg));
     }
 }
@@ -107,7 +139,7 @@ impl BootTx {
 impl<S: Send + Sync + 'static> BootGate<S> {
     /// Create a new boot gate and its sender.
     pub fn new() -> (Arc<Self>, BootTx) {
-        let (tx, rx) = moire::sync::watch::channel("boot_state", BootState::Booting);
+        let (tx, rx) = moire::sync::watch::channel("boot_state", BootState::Booting(None));
         let gate = Arc::new(Self {
             boot_rx: rx,
             service: moire::sync::OnceCell::new("boot_service"),
@@ -169,7 +201,7 @@ impl<S: GracefulShutdown + Send + Sync + 'static> Boot for BootService<S> {
         loop {
             let state = rx.borrow().clone();
             match state {
-                BootState::Booting => { /* wait */ }
+                BootState::Booting(_) => { /* wait */ }
                 BootState::Ready => {
                     return BootResult {
                         success: true,
@@ -189,6 +221,26 @@ impl<S: GracefulShutdown + Send + Sync + 'static> Boot for BootService<S> {
                     error: Some("boot state channel closed".to_string()),
                 };
             }
+        }
+    }
+
+    async fn status(&self) -> BootStatus {
+        match self.gate.boot_rx.borrow().clone() {
+            BootState::Booting(phase) => BootStatus {
+                state: BootStatusState::Booting,
+                phase,
+                error: None,
+            },
+            BootState::Ready => BootStatus {
+                state: BootStatusState::Ready,
+                phase: None,
+                error: None,
+            },
+            BootState::Failed(error) => BootStatus {
+                state: BootStatusState::Failed,
+                phase: None,
+                error: Some(error),
+            },
         }
     }
 }
@@ -231,4 +283,39 @@ pub async fn boot_and_connect(
     let virtual_caller = driver.caller();
     tokio::spawn(async move { driver.run().await });
     Ok(virtual_caller)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{Boot, BootGate, BootStatusState};
+
+    #[derive(Clone)]
+    struct FakeService;
+
+    impl super::GracefulShutdown for FakeService {
+        async fn graceful_shutdown(&self) {}
+    }
+
+    #[tokio::test]
+    async fn boot_status_reports_current_phase() {
+        let (gate, boot_tx) = BootGate::<Arc<FakeService>>::new();
+        let boot = gate.boot_service();
+
+        let status = boot.status().await;
+        assert!(matches!(status.state, BootStatusState::Booting));
+        assert_eq!(status.phase, None);
+
+        boot_tx.phase("booting vx-store");
+        let status = boot.status().await;
+        assert!(matches!(status.state, BootStatusState::Booting));
+        assert_eq!(status.phase.as_deref(), Some("booting vx-store"));
+
+        gate.set_service(Arc::new(FakeService));
+        boot_tx.ready();
+        let status = boot.status().await;
+        assert!(matches!(status.state, BootStatusState::Ready));
+        assert_eq!(status.phase, None);
+    }
 }

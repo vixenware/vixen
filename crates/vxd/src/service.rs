@@ -140,6 +140,7 @@ type SshBootstrapFactory = Arc<
     dyn Fn(
             String,
             String,
+            Option<Arc<ProgressListenerClient>>,
         ) -> Pin<
             Box<dyn Future<Output = std::result::Result<SshBootstrapExecutor, String>> + Send>,
         > + Send
@@ -178,6 +179,7 @@ impl BuildVxExecutors {
         factory: impl Fn(
             String,
             String,
+            Option<Arc<ProgressListenerClient>>,
         ) -> Pin<
             Box<dyn Future<Output = std::result::Result<SshBootstrapExecutor, String>> + Send>,
         > + Send
@@ -307,6 +309,7 @@ impl BuildVxExecutors {
     async fn ensure_executor(
         &self,
         selector: &ExecutorSelector,
+        progress_listener: Option<Arc<ProgressListenerClient>>,
     ) -> std::result::Result<(), String> {
         {
             let state = self.state.lock().expect("build_vx_executors poisoned");
@@ -337,7 +340,8 @@ impl BuildVxExecutors {
             ));
         };
         let class_label = selector.id.clone();
-        let synthesized = factory(class_label.clone(), target.to_string()).await?;
+        let synthesized =
+            factory(class_label.clone(), target.to_string(), progress_listener).await?;
         let mut state = self.state.lock().expect("build_vx_executors poisoned");
         if self.resolve_executor_locked(&state, selector).is_err() {
             let executor_id = synthesized.id.clone();
@@ -352,8 +356,9 @@ impl BuildVxExecutors {
     async fn runner_for(
         &self,
         selector: &ExecutorSelector,
+        progress_listener: Option<Arc<ProgressListenerClient>>,
     ) -> std::result::Result<Arc<RunnerClient>, String> {
-        self.ensure_executor(selector).await?;
+        self.ensure_executor(selector, progress_listener).await?;
         let state = self.state.lock().expect("build_vx_executors poisoned");
         let executor = self.resolve_executor_locked(&state, selector)?;
         if let Some(runner) = &executor.runner {
@@ -370,8 +375,9 @@ impl BuildVxExecutors {
     async fn store_for(
         &self,
         selector: &ExecutorSelector,
+        progress_listener: Option<Arc<ProgressListenerClient>>,
     ) -> std::result::Result<Option<Arc<StoreClient>>, String> {
-        self.ensure_executor(selector).await?;
+        self.ensure_executor(selector, progress_listener).await?;
         let state = self.state.lock().expect("build_vx_executors poisoned");
         let executor = self.resolve_executor_locked(&state, selector)?;
         Ok(executor.store.clone())
@@ -1988,17 +1994,34 @@ pub(crate) async fn run_build_vx_acquire_via_store(
 async fn run_build_vx_exec_via_runner(
     store: &StoreClient,
     executors: &BuildVxExecutors,
+    progress_listener: Option<Arc<ProgressListenerClient>>,
     request: ExecRequest,
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
+    emit_build_vx_progress_message(
+        &progress_listener,
+        format!(
+            "resolving build.vx executor {}",
+            describe_executor_selector(&request.executor)
+        ),
+    )
+    .await;
     let exec = executors
-        .runner_for(&request.executor)
+        .runner_for(&request.executor, progress_listener.clone())
         .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     let exec_store = executors
-        .store_for(&request.executor)
+        .store_for(&request.executor, progress_listener.clone())
         .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    emit_build_vx_progress_message(
+        &progress_listener,
+        format!(
+            "build.vx executor {} ready",
+            describe_executor_selector(&request.executor)
+        ),
+    )
+    .await;
     let target_store = exec_store.as_deref().unwrap_or(store);
     let mut args = request.args.into_iter();
     let program = args.next().ok_or_else(|| {
@@ -2115,17 +2138,34 @@ async fn run_build_vx_exec_via_runner(
 async fn run_build_vx_discover_via_runner(
     store: &StoreClient,
     executors: &BuildVxExecutors,
+    progress_listener: Option<Arc<ProgressListenerClient>>,
     request: EvalDiscoverRequest,
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
+    emit_build_vx_progress_message(
+        &progress_listener,
+        format!(
+            "resolving build.vx executor {}",
+            describe_executor_selector(&request.executor)
+        ),
+    )
+    .await;
     let exec = executors
-        .runner_for(&request.executor)
+        .runner_for(&request.executor, progress_listener.clone())
         .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     let exec_store = executors
-        .store_for(&request.executor)
+        .store_for(&request.executor, progress_listener.clone())
         .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    emit_build_vx_progress_message(
+        &progress_listener,
+        format!(
+            "build.vx executor {} ready",
+            describe_executor_selector(&request.executor)
+        ),
+    )
+    .await;
     let target_store = exec_store.as_deref().unwrap_or(store);
     let probe = if std::ptr::eq(target_store, store) {
         request.probe
@@ -2284,6 +2324,22 @@ fn emit_build_vx_boundary_log(
     }
 }
 
+async fn emit_build_vx_progress_message(
+    listener: &Option<Arc<ProgressListenerClient>>,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    if let Some(listener) = listener
+        && let Err(error) = listener.log_message(message).await
+    {
+        tracing::warn!("failed to emit build.vx progress message: {error:?}");
+    }
+}
+
+fn describe_executor_selector(selector: &ExecutorSelector) -> String {
+    format!("{}:{}", selector.backend.as_tag(), selector.id)
+}
+
 fn stabilize_cache_key(resolve: &[u8], witness: &[u8]) -> Blake3Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"stabilize-cache-v1\n");
@@ -2399,7 +2455,12 @@ impl BuildVxRuntime {
                 emit_build_vx_boundary_log(&runtime, &exec_listener, &summary);
                 block_on_runtime(
                     &runtime,
-                    run_build_vx_exec_via_runner(&exec_store, &exec_executors, request),
+                    run_build_vx_exec_via_runner(
+                        &exec_store,
+                        &exec_executors,
+                        exec_listener.clone(),
+                        request,
+                    ),
                 )
                 .map_err(|error| error.with_context(summary))
             }))
@@ -2409,7 +2470,12 @@ impl BuildVxRuntime {
                 emit_build_vx_boundary_log(&runtime, &discover_listener, &summary);
                 block_on_runtime(
                     &runtime,
-                    run_build_vx_discover_via_runner(&discover_store, &discover_executors, request),
+                    run_build_vx_discover_via_runner(
+                        &discover_store,
+                        &discover_executors,
+                        discover_listener.clone(),
+                        request,
+                    ),
                 )
                 .map_err(|error| error.with_context(summary))
             }))

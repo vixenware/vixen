@@ -1924,7 +1924,7 @@ async fn build_vx_routes_implicit_ssh_executor_classes() {
                     .with_ssh_bootstrap_factory({
                         let seen = Arc::clone(&seen);
                         let transport = transport.clone();
-                        move |class_label, target| {
+                        move |class_label, target, _listener| {
                             let seen = Arc::clone(&seen);
                             let transport = transport.clone();
                             Box::pin(async move {

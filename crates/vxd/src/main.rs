@@ -39,12 +39,12 @@ use std::net::TcpListener;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use vx_io::boot::{BootDispatcher, BootGate};
+use vx_io::boot::{BootDispatcher, BootGate, BootTx};
 use vx_io::net::{Endpoint, Listener};
 use vx_io::spawn::ServiceHandle;
 use vx_runner_proto::RunnerClient;
 use vx_store_proto::StoreClient;
-use vxd_proto::VxdDispatcher;
+use vxd_proto::{ProgressListenerClient, VxdDispatcher};
 
 use crate::service::VxdServiceDeps;
 pub use db::Database;
@@ -135,6 +135,16 @@ struct SshBootstrapWindowsPaths {
 enum SshBootstrapTargetPlatform {
     Unix,
     Windows,
+}
+
+#[cfg(unix)]
+impl SshBootstrapTargetPlatform {
+    fn as_tag(&self) -> &'static str {
+        match self {
+            Self::Unix => "unix",
+            Self::Windows => "windows",
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -299,6 +309,22 @@ fn ssh_bootstrap_local_tcp_endpoint() -> Result<Endpoint> {
 struct SshBootstrapConnection {
     runner_handle: ServiceHandle,
     store_handle: ServiceHandle,
+}
+
+#[cfg(unix)]
+async fn emit_ssh_bootstrap_progress(
+    listener: &Option<Arc<ProgressListenerClient>>,
+    class_label: &str,
+    message: impl Into<String>,
+) {
+    if let Some(listener) = listener {
+        let _ = listener
+            .log_message(format!(
+                "build.vx executor class:{class_label}: {}",
+                message.into()
+            ))
+            .await;
+    }
 }
 
 #[cfg(unix)]
@@ -611,11 +637,30 @@ async fn connect_ssh_bootstrap_runner(
     vx_home: &Utf8PathBuf,
     class_label: &str,
     target: &str,
+    progress_listener: Option<Arc<ProgressListenerClient>>,
 ) -> Result<SshBootstrapConnection> {
+    emit_ssh_bootstrap_progress(
+        &progress_listener,
+        class_label,
+        format!("checking local Vixen repo for ssh target {target}"),
+    )
+    .await;
     let repo_root = resolve_vixen_repo_root().await?;
     ensure_clean_vixen_repo(&repo_root).await?;
     let commit = command_output("git", &["-C", repo_root.as_str(), "rev-parse", "HEAD"]).await?;
+    emit_ssh_bootstrap_progress(
+        &progress_listener,
+        class_label,
+        format!("probing ssh target {target}"),
+    )
+    .await;
     let target_info = detect_ssh_bootstrap_target(target).await?;
+    emit_ssh_bootstrap_progress(
+        &progress_listener,
+        class_label,
+        format!("detected {} host", target_info.platform.as_tag()),
+    )
+    .await;
     let (local_store_endpoint, local_runner_endpoint, store_remote, runner_remote, remote_command) =
         match target_info.platform {
             SshBootstrapTargetPlatform::Unix => {
@@ -692,6 +737,12 @@ async fn connect_ssh_bootstrap_runner(
         .parent()
         .ok_or_else(|| eyre::eyre!("failed to determine parent directory for {}", repo_root))?;
     let remote_command = remote_command.replace("__REPO_URL__", &repo_url);
+    emit_ssh_bootstrap_progress(
+        &progress_listener,
+        class_label,
+        "starting local git transport",
+    )
+    .await;
 
     let mut git_daemon = moire::process::Command::new("git");
     git_daemon
@@ -727,6 +778,12 @@ async fn connect_ssh_bootstrap_runner(
         .stderr(Stdio::from(ssh_stderr_file))
         .kill_on_drop(true);
     let child = command.spawn()?;
+    emit_ssh_bootstrap_progress(
+        &progress_listener,
+        class_label,
+        format!("waiting for remote store and runner sockets on {target}"),
+    )
+    .await;
 
     let (store_caller, store_session_handle) = connect_endpoint_with_backoff(
         &format!("vx-store[{class_label}]"),
@@ -761,12 +818,29 @@ async fn bootstrap_ssh_executor(
     vx_home: &Utf8PathBuf,
     class_label: &str,
     target: &str,
+    progress_listener: Option<Arc<ProgressListenerClient>>,
 ) -> Result<crate::service::SshBootstrapExecutor> {
-    let connection = connect_ssh_bootstrap_runner(vx_home, class_label, target).await?;
+    emit_ssh_bootstrap_progress(&progress_listener, class_label, "starting ssh bootstrap").await;
+    let connection =
+        connect_ssh_bootstrap_runner(vx_home, class_label, target, progress_listener.clone())
+            .await?;
     let store_handle = Arc::new(connection.store_handle);
     let runner_handle = Arc::new(connection.runner_handle);
+    emit_ssh_bootstrap_progress(
+        &progress_listener,
+        class_label,
+        "waiting for remote vx-store boot",
+    )
+    .await;
     let store_virtual = store_handle.boot_and_connect().await?;
+    emit_ssh_bootstrap_progress(
+        &progress_listener,
+        class_label,
+        "waiting for remote vx-runner boot",
+    )
+    .await;
     let runner_virtual = runner_handle.boot_and_connect().await?;
+    emit_ssh_bootstrap_progress(&progress_listener, class_label, "remote executor ready").await;
     Ok(crate::service::SshBootstrapExecutor {
         id: format!("ssh_bootstrap:{class_label}"),
         backend: vx_eval::ExecutorBackendKind::SshBootstrap,
@@ -908,6 +982,7 @@ impl ConnectionAcceptor for VxdVirtualAcceptor {
 async fn ensure_services(
     args: &Args,
     spawn_tracker: &Arc<SyncMutex<SpawnTracker>>,
+    boot_tx: &BootTx,
 ) -> Result<ServiceClients> {
     use vx_io::spawn::ServiceBuilder;
 
@@ -946,6 +1021,7 @@ async fn ensure_services(
         runner_builder = runner_builder.connect_only();
     }
 
+    boot_tx.phase("connecting to vx-store and vx-runner");
     // Spawn/connect to both services in parallel.
     let (mut store_handle, mut runner_handle) =
         tokio::try_join!(store_builder.connect(), runner_builder.connect(),)?;
@@ -956,6 +1032,7 @@ async fn ensure_services(
         tracker.runner = runner_handle.child.take();
     }
 
+    boot_tx.phase("waiting for vx-store and vx-runner boot");
     // Run boot protocol on both services in parallel.
     let (store_virtual, runner_virtual) = tokio::try_join!(
         store_handle.boot_and_connect(),
@@ -964,6 +1041,7 @@ async fn ensure_services(
 
     let local_store = Arc::new(StoreClient::new(store_virtual));
     let exec = Arc::new(RunnerClient::new(runner_virtual));
+    boot_tx.phase("preparing build executors");
     let mut build_vx_executors = crate::service::BuildVxExecutors::local_default(
         Arc::clone(&local_store),
         Arc::clone(&exec),
@@ -972,10 +1050,10 @@ async fn ensure_services(
     {
         let vx_home = args.vx_home.clone();
         build_vx_executors =
-            build_vx_executors.with_ssh_bootstrap_factory(move |class_label, target| {
+            build_vx_executors.with_ssh_bootstrap_factory(move |class_label, target, listener| {
                 let vx_home = vx_home.clone();
                 Box::pin(async move {
-                    bootstrap_ssh_executor(&vx_home, &class_label, &target)
+                    bootstrap_ssh_executor(&vx_home, &class_label, &target, listener)
                         .await
                         .map_err(|error| error.to_string())
                 })
@@ -1022,7 +1100,8 @@ async fn ensure_services(
                 #[cfg(unix)]
                 {
                     let executor =
-                        bootstrap_ssh_executor(&args.vx_home, &config.class_label, target).await?;
+                        bootstrap_ssh_executor(&args.vx_home, &config.class_label, target, None)
+                            .await?;
                     build_vx_executors
                         .register_class_executor(config.class_label.clone(), executor.into());
                 }
@@ -1217,9 +1296,11 @@ async fn async_main() -> Result<()> {
         moire::task::spawn(
             async move {
                 tracing::info!("Booting services (vx-store, vx-runner)");
-                match ensure_services(&args_for_boot, &spawn_tracker).await {
+                boot_tx.phase("starting vx-store and vx-runner");
+                match ensure_services(&args_for_boot, &spawn_tracker, &boot_tx).await {
                     Ok(clients) => {
                         tracing::info!("Services booted successfully");
+                        boot_tx.phase("finalizing vxd");
                         let daemon = Arc::new(
                             VxdService::new(
                                 vx_home,

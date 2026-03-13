@@ -27,6 +27,7 @@ use crate::{
     cli::{BuildArgs, CleanArgs, Cli, CliCommand, DebugArgs, KillArgs, StartArgs},
     progress_listener::ProgressListenerImpl,
 };
+use vx_io::boot::BootStatusState;
 
 /// Initialize tracing with TUI layer
 fn init_tracing_with_tui(tui: tui::TuiHandle) {
@@ -340,16 +341,32 @@ impl CliContext {
         // Boot protocol: call boot(), then open virtual connection with
         // ProgressListener dispatcher for callbacks from the daemon.
         let boot_client = vx_io::boot::BootClient::new(handle.caller.clone());
-        let boot_result = boot_client
-            .boot()
-            .await
-            .map_err(|e| eyre!("boot RPC failed: {e:?}"))?;
-        if !boot_result.success {
-            let msg = boot_result
-                .error
-                .clone()
-                .unwrap_or_else(|| "unknown boot error".to_string());
-            bail!("{msg}");
+        let mut last_phase = None;
+        loop {
+            let status = boot_client
+                .status()
+                .await
+                .map_err(|e| eyre!("boot status RPC failed: {e:?}"))?;
+            match status.state {
+                BootStatusState::Booting => {
+                    if status.phase != last_phase {
+                        let phase = status
+                            .phase
+                            .clone()
+                            .unwrap_or_else(|| "booting services".to_string());
+                        tracing::info!("vxd: {phase}");
+                        last_phase = status.phase;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+                BootStatusState::Ready => break,
+                BootStatusState::Failed => {
+                    let msg = status
+                        .error
+                        .unwrap_or_else(|| "unknown boot error".to_string());
+                    bail!("{msg}");
+                }
+            }
         }
 
         let progress_listener = ProgressListenerImpl::new(self.mode.clone());
@@ -594,6 +611,7 @@ impl CliContext {
         let endpoint = self.strat.endpoint().clone();
         let builder = ServiceBuilder::new("vxd", endpoint.clone())
             .caller_name("vx")
+            .timeout(tokio::time::Duration::from_millis(200))
             .connect_only();
 
         match builder.connect().await {
