@@ -207,13 +207,13 @@ fn ssh_bootstrap_paths(remote_home: &str, class_label: &str) -> SshBootstrapPath
 }
 
 #[cfg(unix)]
-fn ssh_bootstrap_local_endpoint(vx_home: &Utf8PathBuf, class_label: &str) -> Endpoint {
+fn ssh_bootstrap_local_endpoint(_vx_home: &Utf8PathBuf, class_label: &str) -> Endpoint {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros();
-    Endpoint::Local(vx_home.join(format!(
-        "ssh-bootstrap-{class_label}-{}-{unique}.sock",
+    Endpoint::Local(Utf8PathBuf::from(format!(
+        "/tmp/vx-ssh-{class_label}-{}-{unique}.sock",
         std::process::id()
     )))
 }
@@ -261,6 +261,11 @@ async fn command_output(program: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[cfg(unix)]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 async fn connect_endpoint_with_backoff(
     name: &str,
     endpoint: &Endpoint,
@@ -305,7 +310,23 @@ async fn connect_ssh_bootstrap_runner(
 ) -> Result<ServiceHandle> {
     let repo_url = command_output("git", &["config", "--get", "remote.origin.url"]).await?;
     let commit = command_output("git", &["rev-parse", "HEAD"]).await?;
-    let remote_home = command_output("ssh", &[target, "sh", "-lc", "printf %s \"$HOME\""]).await?;
+    let pushed_refs = command_output(
+        "git",
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "--contains",
+            &commit,
+            "refs/remotes",
+        ],
+    )
+    .await?;
+    if pushed_refs.is_empty() {
+        eyre::bail!(
+            "ssh bootstrap requires a pushed commit; local HEAD {commit} is not advertised by any remote ref"
+        );
+    }
+    let remote_home = command_output("ssh", &[target, "printenv", "HOME"]).await?;
     if remote_home.is_empty() {
         eyre::bail!("ssh bootstrap target {target} returned an empty HOME");
     }
@@ -329,6 +350,18 @@ async fn connect_ssh_bootstrap_runner(
         .append(true)
         .open(&log_path)?;
     let stderr_file = log_file.try_clone()?;
+    let remote_command = format!(
+        "sh -lc {} sh {} {} {} {} {} {} {} {}",
+        shell_quote(SSH_BOOTSTRAP_REMOTE_SCRIPT),
+        shell_quote(&repo_url),
+        shell_quote(&commit),
+        shell_quote(&paths.checkout_dir),
+        shell_quote(&paths.vx_home),
+        shell_quote(&paths.store_root),
+        shell_quote(&paths.store_socket),
+        shell_quote(&paths.vfsd_socket),
+        shell_quote(&paths.runner_socket),
+    );
 
     let mut command = moire::process::Command::new("ssh");
     command
@@ -345,18 +378,7 @@ async fn connect_ssh_bootstrap_runner(
             paths.runner_socket.as_str()
         ))
         .arg(target)
-        .arg("sh")
-        .arg("-lc")
-        .arg(SSH_BOOTSTRAP_REMOTE_SCRIPT)
-        .arg("ssh-bootstrap")
-        .arg(repo_url.as_str())
-        .arg(commit.as_str())
-        .arg(paths.checkout_dir.as_str())
-        .arg(paths.vx_home.as_str())
-        .arg(paths.store_root.as_str())
-        .arg(paths.store_socket.as_str())
-        .arg(paths.vfsd_socket.as_str())
-        .arg(paths.runner_socket.as_str())
+        .arg(remote_command)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(stderr_file))
