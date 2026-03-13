@@ -378,6 +378,7 @@ fn ssh_bootstrap_windows_command(
             "$storeEndpoint = '{store_endpoint}'; ",
             "$vfsdEndpoint = '{vfsd_endpoint}'; ",
             "$runnerEndpoint = '{runner_endpoint}'; ",
+            "Get-Process vx-runner,vx-store,vx-vfsd -ErrorAction SilentlyContinue | Stop-Process -Force; ",
             "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $checkoutDir), $vxHome, $storeRoot | Out-Null; ",
             "if (-not (Test-Path (Join-Path $checkoutDir '.git'))) {{ if (Test-Path $checkoutDir) {{ Remove-Item -Recurse -Force $checkoutDir }}; git clone $repoUrl $checkoutDir }}; ",
             "git -C $checkoutDir remote set-url origin $repoUrl; ",
