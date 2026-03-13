@@ -25,7 +25,7 @@ mod tests;
 
 use ::moire::process::Child;
 use ::moire::sync::SyncMutex;
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use eyre::Result;
 use facet::Facet;
 use figue as args;
@@ -35,6 +35,7 @@ use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
 use roam_stream::StreamLink;
 use roam_types::{ConnectionSettings, Metadata};
 use std::fs::OpenOptions;
+use std::net::TcpListener;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -54,6 +55,7 @@ pub use service::VxdService;
 pub type UpstreamCaller = roam_core::DriverCaller;
 
 const RECOMMENDED_NOFILE_SOFT_LIMIT: u64 = 65_536;
+const VIXEN_REPO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 /// vxd - Build orchestration daemon
 #[derive(Facet, Debug)]
@@ -240,7 +242,8 @@ if [ ! -d "$checkout_dir/.git" ]; then
   rm -rf "$checkout_dir"
   git clone "$repo_url" "$checkout_dir"
 fi
-git -C "$checkout_dir" fetch --all --tags --prune
+git -C "$checkout_dir" remote set-url origin "$repo_url"
+git -C "$checkout_dir" fetch origin --tags --prune
 git -C "$checkout_dir" checkout --detach "$commit"
 cargo build --manifest-path "$checkout_dir/Cargo.toml" -p vx-store -p vx-vfsd -p vx-runner
 rm -f "$store_socket" "$vfsd_socket" "$runner_socket"
@@ -266,6 +269,63 @@ async fn command_output(program: &str, args: &[&str]) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+async fn resolve_vixen_repo_root() -> Result<Utf8PathBuf> {
+    let root = command_output(
+        "git",
+        &[
+            "-C",
+            VIXEN_REPO_MANIFEST_DIR,
+            "rev-parse",
+            "--show-toplevel",
+        ],
+    )
+    .await?;
+    Utf8PathBuf::from_path_buf(std::path::PathBuf::from(root)).map_err(|path| {
+        eyre::eyre!(
+            "vixen source checkout path is not valid UTF-8: {}",
+            path.display()
+        )
+    })
+}
+
+async fn ensure_clean_vixen_repo(repo_root: &Utf8Path) -> Result<()> {
+    let status = command_output(
+        "git",
+        &[
+            "-C",
+            repo_root.as_str(),
+            "status",
+            "--short",
+            "--untracked-files=all",
+        ],
+    )
+    .await?;
+    if status.is_empty() {
+        return Ok(());
+    }
+    eyre::bail!(
+        "ssh bootstrap requires a clean committed Vixen repo at {}; uncommitted changes:\n{}",
+        repo_root,
+        status
+    );
+}
+
+#[cfg(unix)]
+fn ssh_bootstrap_git_url(repo_root: &Utf8Path, port: u16) -> Result<String> {
+    let Some(repo_name) = repo_root.file_name() else {
+        eyre::bail!("failed to determine repo name for {}", repo_root);
+    };
+    Ok(format!("git://127.0.0.1:{port}/{repo_name}"))
+}
+
+#[cfg(unix)]
+fn allocate_loopback_port() -> Result<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
 }
 
 #[cfg(unix)]
@@ -315,24 +375,9 @@ async fn connect_ssh_bootstrap_runner(
     class_label: &str,
     target: &str,
 ) -> Result<SshBootstrapConnection> {
-    let repo_url = command_output("git", &["config", "--get", "remote.origin.url"]).await?;
-    let commit = command_output("git", &["rev-parse", "HEAD"]).await?;
-    let pushed_refs = command_output(
-        "git",
-        &[
-            "for-each-ref",
-            "--format=%(refname:short)",
-            "--contains",
-            &commit,
-            "refs/remotes",
-        ],
-    )
-    .await?;
-    if pushed_refs.is_empty() {
-        eyre::bail!(
-            "ssh bootstrap requires a pushed commit; local HEAD {commit} is not advertised by any remote ref"
-        );
-    }
+    let repo_root = resolve_vixen_repo_root().await?;
+    ensure_clean_vixen_repo(&repo_root).await?;
+    let commit = command_output("git", &["-C", repo_root.as_str(), "rev-parse", "HEAD"]).await?;
     let remote_home = command_output("ssh", &[target, "printenv", "HOME"]).await?;
     if remote_home.is_empty() {
         eyre::bail!("ssh bootstrap target {target} returned an empty HOME");
@@ -359,12 +404,20 @@ async fn connect_ssh_bootstrap_runner(
     }
 
     let paths = ssh_bootstrap_paths(&remote_home, class_label);
+    let git_port = allocate_loopback_port()?;
+    let repo_url = ssh_bootstrap_git_url(&repo_root, git_port)?;
     let log_path = vx_home.join(format!("runner-ssh-bootstrap-{class_label}.log"));
     let log_file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log_path)?;
-    let stderr_file = log_file.try_clone()?;
+    let ssh_stdout_file = log_file.try_clone()?;
+    let ssh_stderr_file = log_file.try_clone()?;
+    let git_stdout_file = log_file.try_clone()?;
+    let git_stderr_file = log_file.try_clone()?;
+    let repo_parent = repo_root
+        .parent()
+        .ok_or_else(|| eyre::eyre!("failed to determine parent directory for {}", repo_root))?;
     let remote_command = format!(
         "sh -lc {} sh {} {} {} {} {} {} {} {}",
         shell_quote(SSH_BOOTSTRAP_REMOTE_SCRIPT),
@@ -378,6 +431,23 @@ async fn connect_ssh_bootstrap_runner(
         shell_quote(&paths.runner_socket),
     );
 
+    let mut git_daemon = moire::process::Command::new("git");
+    git_daemon
+        .arg("daemon")
+        .arg("--reuseaddr")
+        .arg("--listen=127.0.0.1")
+        .arg("--port")
+        .arg(git_port.to_string())
+        .arg("--export-all")
+        .arg("--base-path")
+        .arg(repo_parent.as_str())
+        .arg(repo_root.as_str())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(git_stdout_file))
+        .stderr(Stdio::from(git_stderr_file))
+        .kill_on_drop(true);
+    let git_daemon_child = git_daemon.spawn()?;
+
     let mut command = moire::process::Command::new("ssh");
     command
         .arg("-o")
@@ -386,6 +456,8 @@ async fn connect_ssh_bootstrap_runner(
         .arg("ServerAliveInterval=30")
         .arg("-o")
         .arg("ServerAliveCountMax=3")
+        .arg("-R")
+        .arg(format!("127.0.0.1:{git_port}:127.0.0.1:{git_port}"))
         .arg("-L")
         .arg(format!(
             "{}:{}",
@@ -401,8 +473,8 @@ async fn connect_ssh_bootstrap_runner(
         .arg(target)
         .arg(remote_command)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(stderr_file))
+        .stdout(Stdio::from(ssh_stdout_file))
+        .stderr(Stdio::from(ssh_stderr_file))
         .kill_on_drop(true);
     let child = command.spawn()?;
 
@@ -427,7 +499,7 @@ async fn connect_ssh_bootstrap_runner(
             session_handle: runner_session_handle,
         },
         store_handle: ServiceHandle {
-            child: None,
+            child: Some(git_daemon_child),
             caller: store_caller,
             session_handle: store_session_handle,
         },
@@ -668,8 +740,10 @@ async fn ensure_services(
                     let connection =
                         connect_ssh_bootstrap_runner(&args.vx_home, &config.class_label, target)
                             .await?;
-                    let store_virtual = connection.store_handle.boot_and_connect().await?;
-                    let runner_virtual = connection.runner_handle.boot_and_connect().await?;
+                    let store_handle = Arc::new(connection.store_handle);
+                    let runner_handle = Arc::new(connection.runner_handle);
+                    let store_virtual = store_handle.boot_and_connect().await?;
+                    let runner_virtual = runner_handle.boot_and_connect().await?;
                     let store = Arc::new(StoreClient::new(store_virtual));
                     let runner = Arc::new(RunnerClient::new(runner_virtual));
                     build_vx_executors.register_class_runner_with_store(
@@ -679,7 +753,8 @@ async fn ensure_services(
                         runner,
                         Some(store),
                     );
-                    runner_handles.push(Arc::new(connection.runner_handle));
+                    runner_handles.push(store_handle);
+                    runner_handles.push(runner_handle);
                 }
                 #[cfg(not(unix))]
                 {

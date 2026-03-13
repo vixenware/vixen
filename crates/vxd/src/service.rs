@@ -3059,6 +3059,22 @@ impl VxdService {
 
                 match output {
                     Value::Tree(tree) => tree,
+                    Value::Discovered(discovered) => match *discovered.value {
+                        Value::Tree(tree) => tree,
+                        other => {
+                            return Ok(build_failure_result(
+                                BuildFailure {
+                                    message: format!(
+                                        "build entry must return Tree for `vx build`, got {}",
+                                        other.type_name()
+                                    ),
+                                    sources: Vec::new(),
+                                    reports: Vec::new(),
+                                },
+                                1,
+                            ));
+                        }
+                    },
                     other => {
                         return Ok(build_failure_result(
                             BuildFailure {
@@ -3139,6 +3155,9 @@ impl VxdService {
 
     fn materialize_build_vx_value(&self, path: &Utf8Path, value: &Value) -> Result<()> {
         match value {
+            Value::Discovered(discovered) => {
+                self.materialize_build_vx_value(path, discovered.value.as_ref())
+            }
             Value::Blob(blob) => self.materialize_build_vx_blob(path, blob),
             Value::Tree(tree) => {
                 fs::create_dir_all(path).map_err(|error| VxdError::CreateDir {
