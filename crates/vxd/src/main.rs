@@ -58,6 +58,8 @@ const RECOMMENDED_NOFILE_SOFT_LIMIT: u64 = 65_536;
 const VIXEN_REPO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 #[cfg(unix)]
 const SSH_BOOTSTRAP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+#[cfg(unix)]
+const SSH_BOOTSTRAP_REPO_HOST_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// vxd - Build orchestration daemon
 #[derive(Facet, Debug)]
@@ -511,13 +513,37 @@ fn allocate_loopback_port() -> Result<u16> {
 
 #[cfg(unix)]
 async fn ssh_bootstrap_repo_host(target: &str) -> Result<Option<&'static str>> {
-    let status = moire::process::Command::new("ssh")
+    let mut command = moire::process::Command::new("ssh");
+    command
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=3")
+        .arg("-o")
+        .arg("ServerAliveInterval=3")
+        .arg("-o")
+        .arg("ServerAliveCountMax=1")
         .arg(target)
         .arg("sh")
         .arg("-lc")
         .arg("python3 -c 'import socket, sys; socket.gethostbyname(\"host.docker.internal\"); sys.exit(0)'")
-        .status()
-        .await?;
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+    let status = match tokio::time::timeout(SSH_BOOTSTRAP_REPO_HOST_PROBE_TIMEOUT, child.wait())
+        .await
+    {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => return Err(error.into()),
+        Err(_) => {
+            tracing::warn!(
+                target,
+                timeout_s = SSH_BOOTSTRAP_REPO_HOST_PROBE_TIMEOUT.as_secs(),
+                "timed out probing host.docker.internal reachability; falling back to SSH_CONNECTION",
+            );
+            let _ = child.start_kill();
+            return Ok(None);
+        }
+    };
     if status.success() {
         return Ok(Some("host.docker.internal"));
     }
