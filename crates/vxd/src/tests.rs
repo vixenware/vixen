@@ -96,6 +96,7 @@ fn ssh_bootstrap_paths_use_a_stable_remote_layout() {
     assert_eq!(
         crate::ssh_bootstrap_paths("/home/amos", "linux"),
         crate::SshBootstrapPaths {
+            bare_repo_dir: "/home/amos/.cache/vixen/ssh-bootstrap/linux/repo.git".to_string(),
             checkout_dir: "/home/amos/.cache/vixen/ssh-bootstrap/linux/repo".to_string(),
             vx_home: "/home/amos/.cache/vixen/ssh-bootstrap/linux/vx-home".to_string(),
             store_root: "/home/amos/.cache/vixen/ssh-bootstrap/linux/vx-home/store".to_string(),
@@ -115,6 +116,7 @@ fn ssh_bootstrap_paths_slug_implicit_ssh_class_labels() {
     assert_eq!(
         crate::ssh_bootstrap_paths("/home/amos", "ssh:orb"),
         crate::SshBootstrapPaths {
+            bare_repo_dir: "/home/amos/.cache/vixen/ssh-bootstrap/ssh-orb/repo.git".to_string(),
             checkout_dir: "/home/amos/.cache/vixen/ssh-bootstrap/ssh-orb/repo".to_string(),
             vx_home: "/home/amos/.cache/vixen/ssh-bootstrap/ssh-orb/vx-home".to_string(),
             store_root: "/home/amos/.cache/vixen/ssh-bootstrap/ssh-orb/vx-home/store".to_string(),
@@ -134,6 +136,8 @@ fn ssh_bootstrap_windows_paths_use_tcp_layout() {
     assert_eq!(
         crate::ssh_bootstrap_windows_paths(r"C:\Users\faste", "ssh:toast"),
         crate::SshBootstrapWindowsPaths {
+            bare_repo_dir: r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo.git"
+                .to_string(),
             checkout_dir: r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo".to_string(),
             vx_home: r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\vx-home".to_string(),
             store_root: r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\vx-home\store"
@@ -147,22 +151,26 @@ fn ssh_bootstrap_windows_paths_use_tcp_layout() {
 
 #[cfg(unix)]
 #[test]
-fn ssh_bootstrap_client_ip_parses_ssh_connection() {
-    let client_ip =
-        crate::ssh_bootstrap_client_ip("192.168.1.6 61205 192.168.1.145 22").expect("ip");
-    assert_eq!(client_ip, "192.168.1.6");
-}
+fn ssh_bootstrap_git_push_url_uses_remote_repo_paths() {
+    let unix_url = crate::ssh_bootstrap_git_push_url(
+        "orb",
+        "/home/amos/.cache/vixen/ssh-bootstrap/ssh-orb/repo.git",
+        &crate::SshBootstrapTargetPlatform::Unix,
+    );
+    assert_eq!(
+        unix_url,
+        "ssh://orb/home/amos/.cache/vixen/ssh-bootstrap/ssh-orb/repo.git"
+    );
 
-#[cfg(unix)]
-#[test]
-fn ssh_bootstrap_git_url_uses_repo_basename() {
-    let url = crate::ssh_bootstrap_git_url(
-        Utf8Path::new("/Users/amos/bearcove/vixen"),
-        "host.docker.internal",
-        9418,
-    )
-    .expect("git url should build");
-    assert_eq!(url, "git://host.docker.internal:9418/vixen");
+    let windows_url = crate::ssh_bootstrap_git_push_url(
+        "toast",
+        r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo.git",
+        &crate::SshBootstrapTargetPlatform::Windows,
+    );
+    assert_eq!(
+        windows_url,
+        "ssh://toast/C:/Users/faste/.cache/vixen/ssh-bootstrap/ssh-toast/repo.git"
+    );
 }
 
 #[cfg(unix)]
@@ -171,9 +179,12 @@ fn ssh_bootstrap_remote_script_exports_vx_home_for_runner() {
     assert!(crate::SSH_BOOTSTRAP_REMOTE_SCRIPT.contains("export VX_HOME=\"$vx_home\""));
     assert!(
         crate::SSH_BOOTSTRAP_REMOTE_SCRIPT
-            .contains("git -C \"$checkout_dir\" remote set-url origin \"$repo_url\"")
+            .contains("git -C \"$checkout_dir\" remote set-url origin \"$bare_repo_dir\"")
     );
-    assert!(crate::SSH_BOOTSTRAP_REMOTE_SCRIPT.contains("git -C \"$checkout_dir\" fetch origin"));
+    assert!(
+        crate::SSH_BOOTSTRAP_REMOTE_SCRIPT
+            .contains("git -C \"$checkout_dir\" fetch origin \"refs/vixen-bootstrap/$commit\"")
+    );
     assert!(crate::SSH_BOOTSTRAP_REMOTE_SCRIPT.contains("tree-sitter-vixen"));
 }
 
@@ -181,7 +192,7 @@ fn ssh_bootstrap_remote_script_exports_vx_home_for_runner() {
 #[test]
 fn ssh_bootstrap_windows_command_scrubs_local_tree_sitter_path() {
     let command = crate::ssh_bootstrap_windows_command(
-        "git://192.168.1.6:9418/vixen",
+        r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo.git",
         "deadbeef",
         &crate::ssh_bootstrap_windows_paths(r"C:\Users\faste", "ssh:toast"),
     );

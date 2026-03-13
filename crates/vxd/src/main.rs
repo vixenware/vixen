@@ -58,8 +58,6 @@ const RECOMMENDED_NOFILE_SOFT_LIMIT: u64 = 65_536;
 const VIXEN_REPO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 #[cfg(unix)]
 const SSH_BOOTSTRAP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-#[cfg(unix)]
-const SSH_BOOTSTRAP_REPO_HOST_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// vxd - Build orchestration daemon
 #[derive(Facet, Debug)]
@@ -113,6 +111,7 @@ pub(crate) struct BuildVxExecutorClassConfig {
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SshBootstrapPaths {
+    bare_repo_dir: String,
     checkout_dir: String,
     vx_home: String,
     store_root: String,
@@ -124,6 +123,7 @@ struct SshBootstrapPaths {
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SshBootstrapWindowsPaths {
+    bare_repo_dir: String,
     checkout_dir: String,
     vx_home: String,
     store_root: String,
@@ -154,7 +154,6 @@ impl SshBootstrapTargetPlatform {
 struct SshBootstrapTargetInfo {
     platform: SshBootstrapTargetPlatform,
     home: String,
-    repo_host: String,
 }
 
 pub(crate) fn parse_build_vx_executor_classes(
@@ -261,6 +260,7 @@ fn ssh_bootstrap_paths(remote_home: &str, class_label: &str) -> SshBootstrapPath
     let base = format!("{remote_home}/.cache/vixen/ssh-bootstrap/{class_slug}");
     let vx_home = format!("{base}/vx-home");
     SshBootstrapPaths {
+        bare_repo_dir: format!("{base}/repo.git"),
         checkout_dir: format!("{base}/repo"),
         store_root: format!("{vx_home}/store"),
         store_socket: format!("{vx_home}/store.sock"),
@@ -277,6 +277,7 @@ fn ssh_bootstrap_windows_paths(remote_home: &str, class_label: &str) -> SshBoots
     let vx_home = format!(r"{base}\vx-home");
     let port_base = ssh_bootstrap_remote_port_base(class_label);
     SshBootstrapWindowsPaths {
+        bare_repo_dir: format!(r"{base}\repo.git"),
         checkout_dir: format!(r"{base}\repo"),
         vx_home: vx_home.clone(),
         store_root: format!(r"{vx_home}\store"),
@@ -305,6 +306,19 @@ fn ssh_bootstrap_local_tcp_endpoint() -> Result<Endpoint> {
         host: "127.0.0.1".to_string(),
         port: allocate_loopback_port()?,
     })
+}
+
+#[cfg(unix)]
+fn ssh_bootstrap_control_socket_path(class_label: &str) -> Utf8PathBuf {
+    let class_slug = ssh_bootstrap_label_slug(class_label);
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    Utf8PathBuf::from(format!(
+        "/tmp/vx-ssh-{class_slug}-ctl-{}-{unique}.sock",
+        std::process::id()
+    ))
 }
 
 #[cfg(unix)]
@@ -338,7 +352,7 @@ async fn emit_ssh_bootstrap_progress(
 
 #[cfg(unix)]
 const SSH_BOOTSTRAP_REMOTE_SCRIPT: &str = r#"set -euo pipefail
-repo_url="$1"
+bare_repo_dir="$1"
 commit="$2"
 checkout_dir="$3"
 vx_home="$4"
@@ -347,13 +361,17 @@ store_socket="$6"
 vfsd_socket="$7"
 runner_socket="$8"
 
-mkdir -p "$(dirname "$checkout_dir")" "$vx_home" "$store_root"
+mkdir -p "$(dirname "$bare_repo_dir")" "$(dirname "$checkout_dir")" "$vx_home" "$store_root"
+if [ ! -f "$bare_repo_dir/HEAD" ]; then
+  rm -rf "$bare_repo_dir"
+  git init --bare "$bare_repo_dir"
+fi
 if [ ! -d "$checkout_dir/.git" ]; then
   rm -rf "$checkout_dir"
-  git clone "$repo_url" "$checkout_dir"
+  git clone "$bare_repo_dir" "$checkout_dir"
 fi
-git -C "$checkout_dir" remote set-url origin "$repo_url"
-git -C "$checkout_dir" fetch origin --tags --prune
+git -C "$checkout_dir" remote set-url origin "$bare_repo_dir"
+git -C "$checkout_dir" fetch origin "refs/vixen-bootstrap/$commit"
 git -C "$checkout_dir" checkout --detach "$commit"
 python3 - "$checkout_dir" <<'PY'
 import pathlib
@@ -389,11 +407,11 @@ fn powershell_single_quote(value: &str) -> String {
 
 #[cfg(unix)]
 fn ssh_bootstrap_windows_command(
-    repo_url: &str,
+    bare_repo_dir: &str,
     commit: &str,
     paths: &SshBootstrapWindowsPaths,
 ) -> String {
-    let repo_url = powershell_single_quote(repo_url);
+    let bare_repo_dir = powershell_single_quote(bare_repo_dir);
     let commit = powershell_single_quote(commit);
     let checkout_dir = powershell_single_quote(&paths.checkout_dir);
     let vx_home = powershell_single_quote(&paths.vx_home);
@@ -405,7 +423,7 @@ fn ssh_bootstrap_windows_command(
         concat!(
             "powershell -NoProfile -ExecutionPolicy Bypass -Command ",
             "\"$ErrorActionPreference = 'Stop'; ",
-            "$repoUrl = '{repo_url}'; ",
+            "$bareRepoDir = '{bare_repo_dir}'; ",
             "$commit = '{commit}'; ",
             "$checkoutDir = '{checkout_dir}'; ",
             "$vxHome = '{vx_home}'; ",
@@ -414,10 +432,11 @@ fn ssh_bootstrap_windows_command(
             "$vfsdEndpoint = '{vfsd_endpoint}'; ",
             "$runnerEndpoint = '{runner_endpoint}'; ",
             "Get-Process vx-runner,vx-store,vx-vfsd -ErrorAction SilentlyContinue | Stop-Process -Force; ",
-            "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $checkoutDir), $vxHome, $storeRoot | Out-Null; ",
-            "if (-not (Test-Path (Join-Path $checkoutDir '.git'))) {{ if (Test-Path $checkoutDir) {{ Remove-Item -Recurse -Force $checkoutDir }}; git clone $repoUrl $checkoutDir }}; ",
-            "git -C $checkoutDir remote set-url origin $repoUrl; ",
-            "git -C $checkoutDir fetch origin --tags --prune; ",
+            "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $bareRepoDir), (Split-Path -Parent $checkoutDir), $vxHome, $storeRoot | Out-Null; ",
+            "if (-not (Test-Path (Join-Path $bareRepoDir 'HEAD'))) {{ if (Test-Path $bareRepoDir) {{ Remove-Item -Recurse -Force $bareRepoDir }}; git init --bare $bareRepoDir }}; ",
+            "if (-not (Test-Path (Join-Path $checkoutDir '.git'))) {{ if (Test-Path $checkoutDir) {{ Remove-Item -Recurse -Force $checkoutDir }}; git clone $bareRepoDir $checkoutDir }}; ",
+            "git -C $checkoutDir remote set-url origin $bareRepoDir; ",
+            "git -C $checkoutDir fetch origin ('refs/vixen-bootstrap/' + $commit); ",
             "git -C $checkoutDir checkout --detach $commit; ",
             "$manifests = @((Join-Path $checkoutDir 'crates\\vx\\Cargo.toml'), (Join-Path $checkoutDir 'crates\\vxd\\Cargo.toml')); ",
             "foreach ($manifest in $manifests) {{ if (Test-Path $manifest) {{ $lines = Get-Content $manifest; $updated = @($lines | Where-Object {{ $_ -notlike 'tree-sitter-vixen = *' }}); if ($updated.Count -ne $lines.Count) {{ Set-Content -Path $manifest -Value $updated }} }} }}; ",
@@ -429,7 +448,7 @@ fn ssh_bootstrap_windows_command(
             "try {{ & $runnerExe --vx-home $vxHome --store $storeEndpoint --vfsd $vfsdEndpoint --listen $runnerEndpoint }} ",
             "finally {{ if ($storeProc -and -not $storeProc.HasExited) {{ Stop-Process -Id $storeProc.Id -Force }} }}\""
         ),
-        repo_url = repo_url,
+        bare_repo_dir = bare_repo_dir,
         commit = commit,
         checkout_dir = checkout_dir,
         vx_home = vx_home,
@@ -496,14 +515,6 @@ async fn ensure_clean_vixen_repo(repo_root: &Utf8Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn ssh_bootstrap_git_url(repo_root: &Utf8Path, host: &str, port: u16) -> Result<String> {
-    let Some(repo_name) = repo_root.file_name() else {
-        eyre::bail!("failed to determine repo name for {}", repo_root);
-    };
-    Ok(format!("git://{host}:{port}/{repo_name}"))
-}
-
-#[cfg(unix)]
 fn allocate_loopback_port() -> Result<u16> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
@@ -512,67 +523,66 @@ fn allocate_loopback_port() -> Result<u16> {
 }
 
 #[cfg(unix)]
-async fn ssh_bootstrap_repo_host(target: &str) -> Result<Option<&'static str>> {
+fn ssh_control_command(control_path: &Utf8Path, target: &str) -> moire::process::Command {
     let mut command = moire::process::Command::new("ssh");
+    command.arg("-S").arg(control_path).arg(target);
     command
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("ConnectTimeout=3")
-        .arg("-o")
-        .arg("ServerAliveInterval=3")
-        .arg("-o")
-        .arg("ServerAliveCountMax=1")
-        .arg(target)
-        .arg("sh")
-        .arg("-lc")
-        .arg("python3 -c 'import socket, sys; socket.gethostbyname(\"host.docker.internal\"); sys.exit(0)'")
-        .kill_on_drop(true);
-    let mut child = command.spawn()?;
-    let status = match tokio::time::timeout(SSH_BOOTSTRAP_REPO_HOST_PROBE_TIMEOUT, child.wait())
-        .await
-    {
-        Ok(Ok(status)) => status,
-        Ok(Err(error)) => return Err(error.into()),
-        Err(_) => {
-            tracing::warn!(
-                target,
-                timeout_s = SSH_BOOTSTRAP_REPO_HOST_PROBE_TIMEOUT.as_secs(),
-                "timed out probing host.docker.internal reachability; falling back to SSH_CONNECTION",
-            );
-            let _ = child.start_kill();
-            return Ok(None);
+}
+
+#[cfg(unix)]
+async fn ssh_control_output(
+    control_path: &Utf8Path,
+    target: &str,
+    args: &[&str],
+) -> Result<String> {
+    let mut command = ssh_control_command(control_path, target);
+    command.args(args);
+    let output = command.output().await?;
+    if !output.status.success() {
+        eyre::bail!(
+            "ssh to {target} failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(unix)]
+async fn wait_for_ssh_control_master(control_path: &Utf8Path, target: &str) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut command = moire::process::Command::new("ssh");
+        command
+            .arg("-S")
+            .arg(control_path)
+            .arg("-O")
+            .arg("check")
+            .arg(target);
+        match command.output().await {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(_) | Err(_) if tokio::time::Instant::now() >= deadline => {
+                eyre::bail!("ssh control master for {target} did not become ready")
+            }
+            Ok(_) | Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
         }
-    };
-    if status.success() {
-        return Ok(Some("host.docker.internal"));
     }
-    Ok(None)
 }
 
 #[cfg(unix)]
-fn ssh_bootstrap_client_ip(ssh_connection: &str) -> Result<String> {
-    let Some(client_ip) = ssh_connection.split_whitespace().next() else {
-        eyre::bail!("failed to parse SSH_CONNECTION: {ssh_connection:?}");
-    };
-    if client_ip.is_empty() {
-        eyre::bail!("failed to parse SSH_CONNECTION: {ssh_connection:?}");
-    }
-    Ok(client_ip.to_string())
-}
-
-#[cfg(unix)]
-async fn detect_ssh_bootstrap_target(target: &str) -> Result<SshBootstrapTargetInfo> {
-    let windows_version = moire::process::Command::new("ssh")
-        .arg(target)
+async fn detect_ssh_bootstrap_target(
+    control_path: &Utf8Path,
+    target: &str,
+) -> Result<SshBootstrapTargetInfo> {
+    let windows_version = ssh_control_command(control_path, target)
         .arg("ver")
         .output()
         .await?;
     if windows_version.status.success() {
-        let home = command_output(
-            "ssh",
+        let home = ssh_control_output(
+            control_path,
+            target,
             &[
-                target,
                 "powershell",
                 "-NoProfile",
                 "-Command",
@@ -580,39 +590,20 @@ async fn detect_ssh_bootstrap_target(target: &str) -> Result<SshBootstrapTargetI
             ],
         )
         .await?;
-        let ssh_connection = command_output(
-            "ssh",
-            &[
-                target,
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                "$env:SSH_CONNECTION",
-            ],
-        )
-        .await?;
         return Ok(SshBootstrapTargetInfo {
             platform: SshBootstrapTargetPlatform::Windows,
             home,
-            repo_host: ssh_bootstrap_client_ip(&ssh_connection)?,
         });
     }
 
-    let home = command_output("ssh", &[target, "printenv", "HOME"]).await?;
+    let home = ssh_control_output(control_path, target, &["printenv", "HOME"]).await?;
     if home.is_empty() {
         eyre::bail!("ssh bootstrap target {target} returned an empty HOME");
     }
-    let repo_host = if let Some(host) = ssh_bootstrap_repo_host(target).await? {
-        host.to_string()
-    } else {
-        let ssh_connection = command_output("ssh", &[target, "printenv", "SSH_CONNECTION"]).await?;
-        ssh_bootstrap_client_ip(&ssh_connection)?
-    };
 
     Ok(SshBootstrapTargetInfo {
         platform: SshBootstrapTargetPlatform::Unix,
         home,
-        repo_host,
     })
 }
 
@@ -627,6 +618,97 @@ fn ssh_forward_spec(local: &Endpoint, remote: &str) -> Result<String> {
         Endpoint::Local(path) => Ok(format!("{}:{remote}", path.as_str())),
         Endpoint::Tcp { host, port } => Ok(format!("{host}:{port}:{remote}")),
     }
+}
+
+#[cfg(unix)]
+fn ssh_bootstrap_git_push_url(
+    target: &str,
+    bare_repo_dir: &str,
+    platform: &SshBootstrapTargetPlatform,
+) -> String {
+    match platform {
+        SshBootstrapTargetPlatform::Unix => format!("ssh://{target}{bare_repo_dir}"),
+        SshBootstrapTargetPlatform::Windows => {
+            format!("ssh://{target}/{}", bare_repo_dir.replace('\\', "/"))
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn ensure_ssh_bootstrap_bare_repo(
+    control_path: &Utf8Path,
+    target: &str,
+    bare_repo_dir: &str,
+    platform: &SshBootstrapTargetPlatform,
+) -> Result<()> {
+    match platform {
+        SshBootstrapTargetPlatform::Unix => {
+            ssh_control_output(
+                control_path,
+                target,
+                &[
+                    "sh",
+                    "-lc",
+                    &format!(
+                        "mkdir -p $(dirname {dir}) && if [ ! -f {dir}/HEAD ]; then rm -rf {dir}; git init --bare {dir}; fi",
+                        dir = shell_quote(bare_repo_dir)
+                    ),
+                ],
+            )
+            .await?;
+        }
+        SshBootstrapTargetPlatform::Windows => {
+            ssh_control_output(
+                control_path,
+                target,
+                &[
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    &format!(
+                        "$ErrorActionPreference = 'Stop'; $dir = '{}'; New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dir) | Out-Null; if (-not (Test-Path (Join-Path $dir 'HEAD'))) {{ if (Test-Path $dir) {{ Remove-Item -Recurse -Force $dir }}; git init --bare $dir }}",
+                        powershell_single_quote(bare_repo_dir)
+                    ),
+                ],
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn push_vixen_repo_over_ssh(
+    repo_root: &Utf8Path,
+    target: &str,
+    control_path: &Utf8Path,
+    bare_repo_dir: &str,
+    platform: &SshBootstrapTargetPlatform,
+    commit: &str,
+) -> Result<()> {
+    let remote_url = ssh_bootstrap_git_push_url(target, bare_repo_dir, platform);
+    let mut command = moire::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(repo_root)
+        .arg("-c")
+        .arg(format!(
+            "core.sshCommand=ssh -S {} -o ControlMaster=no",
+            control_path
+        ))
+        .arg("push")
+        .arg("--force")
+        .arg(remote_url)
+        .arg(format!("{commit}:refs/vixen-bootstrap/{commit}"));
+    let output = command.output().await?;
+    if !output.status.success() {
+        eyre::bail!(
+            "git push for ssh bootstrap failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 async fn connect_endpoint_with_backoff(
@@ -683,6 +765,45 @@ async fn connect_ssh_bootstrap_runner(
     let repo_root = resolve_vixen_repo_root().await?;
     ensure_clean_vixen_repo(&repo_root).await?;
     let commit = command_output("git", &["-C", repo_root.as_str(), "rev-parse", "HEAD"]).await?;
+    let class_slug = ssh_bootstrap_label_slug(class_label);
+    let log_path = vx_home.join(format!("runner-ssh-bootstrap-{class_slug}.log"));
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let master_stdout_file = log_file.try_clone()?;
+    let master_stderr_file = log_file.try_clone()?;
+    let ssh_stdout_file = log_file.try_clone()?;
+    let ssh_stderr_file = log_file.try_clone()?;
+    let control_path = ssh_bootstrap_control_socket_path(class_label);
+    emit_ssh_bootstrap_progress(
+        boot_tx,
+        &progress_listener,
+        class_label,
+        format!("opening ssh control connection to {target}"),
+    )
+    .await;
+    let mut master = moire::process::Command::new("ssh");
+    master
+        .arg("-M")
+        .arg("-N")
+        .arg("-S")
+        .arg(&control_path)
+        .arg("-o")
+        .arg("ControlMaster=yes")
+        .arg("-o")
+        .arg("ControlPersist=no")
+        .arg("-o")
+        .arg("ServerAliveInterval=30")
+        .arg("-o")
+        .arg("ServerAliveCountMax=3")
+        .arg(target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(master_stdout_file))
+        .stderr(Stdio::from(master_stderr_file))
+        .kill_on_drop(true);
+    let master_child = master.spawn()?;
+    wait_for_ssh_control_master(&control_path, target).await?;
     emit_ssh_bootstrap_progress(
         boot_tx,
         &progress_listener,
@@ -690,7 +811,7 @@ async fn connect_ssh_bootstrap_runner(
         format!("probing ssh target {target}"),
     )
     .await;
-    let target_info = detect_ssh_bootstrap_target(target).await?;
+    let target_info = detect_ssh_bootstrap_target(&control_path, target).await?;
     emit_ssh_bootstrap_progress(
         boot_tx,
         &progress_listener,
@@ -726,7 +847,7 @@ async fn connect_ssh_bootstrap_runner(
                 let remote_command = format!(
                     "sh -lc {} sh {} {} {} {} {} {} {} {}",
                     shell_quote(SSH_BOOTSTRAP_REMOTE_SCRIPT),
-                    shell_quote("__REPO_URL__"),
+                    shell_quote(&paths.bare_repo_dir),
                     shell_quote(&commit),
                     shell_quote(&paths.checkout_dir),
                     shell_quote(&paths.vx_home),
@@ -747,7 +868,8 @@ async fn connect_ssh_bootstrap_runner(
                 let local_store_endpoint = ssh_bootstrap_local_tcp_endpoint()?;
                 let local_runner_endpoint = ssh_bootstrap_local_tcp_endpoint()?;
                 let paths = ssh_bootstrap_windows_paths(&target_info.home, class_label);
-                let remote_command = ssh_bootstrap_windows_command("__REPO_URL__", &commit, &paths);
+                let remote_command =
+                    ssh_bootstrap_windows_command(&paths.bare_repo_dir, &commit, &paths);
                 (
                     local_store_endpoint,
                     local_runner_endpoint,
@@ -758,47 +880,37 @@ async fn connect_ssh_bootstrap_runner(
             }
         };
 
-    let git_port = allocate_loopback_port()?;
-    let repo_url = ssh_bootstrap_git_url(&repo_root, &target_info.repo_host, git_port)?;
-    let class_slug = ssh_bootstrap_label_slug(class_label);
-    let log_path = vx_home.join(format!("runner-ssh-bootstrap-{class_slug}.log"));
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-    let ssh_stdout_file = log_file.try_clone()?;
-    let ssh_stderr_file = log_file.try_clone()?;
-    let git_stdout_file = log_file.try_clone()?;
-    let git_stderr_file = log_file.try_clone()?;
-    let repo_parent = repo_root
-        .parent()
-        .ok_or_else(|| eyre::eyre!("failed to determine parent directory for {}", repo_root))?;
-    let remote_command = remote_command.replace("__REPO_URL__", &repo_url);
     emit_ssh_bootstrap_progress(
         boot_tx,
         &progress_listener,
         class_label,
-        "starting local git transport",
+        format!("syncing local Vixen repo to {target}"),
     )
     .await;
-
-    let mut git_daemon = moire::process::Command::new("git");
-    git_daemon
-        .arg("daemon")
-        .arg("--reuseaddr")
-        .arg("--listen=0.0.0.0")
-        .arg(format!("--port={git_port}"))
-        .arg("--export-all")
-        .arg(format!("--base-path={}", repo_parent.as_str()))
-        .arg(repo_root.as_str())
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(git_stdout_file))
-        .stderr(Stdio::from(git_stderr_file))
-        .kill_on_drop(true);
-    let git_daemon_child = git_daemon.spawn()?;
+    let bare_repo_dir = match target_info.platform {
+        SshBootstrapTargetPlatform::Unix => {
+            ssh_bootstrap_paths(&target_info.home, class_label).bare_repo_dir
+        }
+        SshBootstrapTargetPlatform::Windows => {
+            ssh_bootstrap_windows_paths(&target_info.home, class_label).bare_repo_dir
+        }
+    };
+    ensure_ssh_bootstrap_bare_repo(&control_path, target, &bare_repo_dir, &target_info.platform)
+        .await?;
+    push_vixen_repo_over_ssh(
+        &repo_root,
+        target,
+        &control_path,
+        &bare_repo_dir,
+        &target_info.platform,
+        &commit,
+    )
+    .await?;
 
     let mut command = moire::process::Command::new("ssh");
     command
+        .arg("-S")
+        .arg(&control_path)
         .arg("-o")
         .arg("ExitOnForwardFailure=yes")
         .arg("-o")
@@ -845,7 +957,7 @@ async fn connect_ssh_bootstrap_runner(
             session_handle: runner_session_handle,
         },
         store_handle: ServiceHandle {
-            child: Some(git_daemon_child),
+            child: Some(master_child),
             caller: store_caller,
             session_handle: store_session_handle,
         },
