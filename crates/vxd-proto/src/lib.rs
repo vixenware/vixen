@@ -8,6 +8,8 @@
 //!
 //! The CLI is a thin client that just asks the daemon to do things.
 
+use std::fmt;
+
 use camino::Utf8PathBuf;
 use facet::Facet;
 use vx_store_proto::CacheKey;
@@ -28,7 +30,7 @@ pub struct BuildRequest {
 }
 
 /// Result of a build
-#[derive(Debug, Clone, Facet)]
+#[derive(Clone, Facet)]
 pub struct BuildResult {
     /// Whether the build succeeded
     pub success: bool,
@@ -55,7 +57,7 @@ pub struct BuildResult {
 }
 
 /// Structured details for a user-facing build failure.
-#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[derive(Clone, PartialEq, Eq, Facet)]
 pub struct BuildFailure {
     /// One-line fallback summary.
     pub message: String,
@@ -121,6 +123,86 @@ pub struct BuildDiagnosticLabel {
 pub enum BuildDiagnosticLabelKind {
     Primary,
     Secondary,
+}
+
+impl fmt::Display for BuildResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.success {
+            write!(f, "{}", self.message)?;
+            if let Some(output_path) = &self.output_path {
+                write!(f, "\noutput: {output_path}")?;
+            }
+            if self.cached {
+                write!(f, "\ncache: hit")?;
+            } else if self.duration_ms > 0 {
+                write!(f, "\nduration_ms: {}", self.duration_ms)?;
+            }
+            return Ok(());
+        }
+
+        if let Some(failure) = &self.failure {
+            return fmt::Display::fmt(failure, f);
+        }
+
+        if let Some(error) = &self.error {
+            return f.write_str(error);
+        }
+
+        f.write_str(&self.message)
+    }
+}
+
+impl fmt::Debug for BuildResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl fmt::Display for BuildFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)?;
+        for report in &self.reports {
+            write!(
+                f,
+                "\n\n{}: {}",
+                severity_name(report.severity),
+                report.message
+            )?;
+            write!(
+                f,
+                "\n  at {}:{}-{}",
+                report.primary_span.source_id, report.primary_span.start, report.primary_span.end
+            )?;
+            for message in report
+                .labels
+                .iter()
+                .filter_map(|label| label.message.as_deref())
+            {
+                write!(f, "\n  {message}")?;
+            }
+            for note in &report.notes {
+                write!(f, "\n  note: {}", indent_note(note))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for BuildFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+fn severity_name(severity: BuildDiagnosticSeverity) -> &'static str {
+    match severity {
+        BuildDiagnosticSeverity::Error => "error",
+        BuildDiagnosticSeverity::Advice => "advice",
+    }
+}
+
+fn indent_note(note: &str) -> String {
+    note.replace('\n', "\n        ")
 }
 
 /// Action type being tracked
@@ -239,6 +321,58 @@ pub trait ProgressListener {
 mod tests {
     use super::*;
     use facet_postcard::{from_slice, to_vec};
+
+    #[test]
+    fn build_failure_debug_uses_display_format() {
+        let failure = BuildFailure {
+            message: "build evaluation failed".to_string(),
+            sources: Vec::new(),
+            reports: vec![BuildDiagnosticReport {
+                severity: BuildDiagnosticSeverity::Error,
+                message: "scheduler stalled".to_string(),
+                primary_span: BuildDiagnosticSpan {
+                    source_id: "build.vx".to_string(),
+                    start: 10,
+                    end: 20,
+                },
+                labels: vec![BuildDiagnosticLabel {
+                    span: BuildDiagnosticSpan {
+                        source_id: "build.vx".to_string(),
+                        start: 10,
+                        end: 20,
+                    },
+                    kind: BuildDiagnosticLabelKind::Primary,
+                    message: Some("this expression failed".to_string()),
+                }],
+                notes: vec!["build.vx exec[class:default]: cc -c foo.c".to_string()],
+            }],
+        };
+
+        assert_eq!(format!("{failure}"), format!("{failure:?}"));
+    }
+
+    #[test]
+    fn build_result_debug_uses_display_format() {
+        let result = BuildResult {
+            success: false,
+            message: "build failed".to_string(),
+            cached: false,
+            duration_ms: 0,
+            output_path: None,
+            error: None,
+            failure: Some(BuildFailure {
+                message: "build evaluation failed".to_string(),
+                sources: Vec::new(),
+                reports: Vec::new(),
+            }),
+            total_actions: 1,
+            cache_hits: 0,
+            rebuilt: 1,
+            cancelled: 0,
+        };
+
+        assert_eq!(format!("{result}"), format!("{result:?}"));
+    }
 
     #[test]
     fn test_build_result_roundtrip() {
