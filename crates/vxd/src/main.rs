@@ -436,11 +436,9 @@ async fn connect_ssh_bootstrap_runner(
         .arg("daemon")
         .arg("--reuseaddr")
         .arg("--listen=127.0.0.1")
-        .arg("--port")
-        .arg(git_port.to_string())
+        .arg(format!("--port={git_port}"))
         .arg("--export-all")
-        .arg("--base-path")
-        .arg(repo_parent.as_str())
+        .arg(format!("--base-path={}", repo_parent.as_str()))
         .arg(repo_root.as_str())
         .stdin(Stdio::null())
         .stdout(Stdio::from(git_stdout_file))
@@ -457,7 +455,7 @@ async fn connect_ssh_bootstrap_runner(
         .arg("-o")
         .arg("ServerAliveCountMax=3")
         .arg("-R")
-        .arg(format!("127.0.0.1:{git_port}:127.0.0.1:{git_port}"))
+        .arg(format!("{git_port}:127.0.0.1:{git_port}"))
         .arg("-L")
         .arg(format!(
             "{}:{}",
