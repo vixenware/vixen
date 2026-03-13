@@ -530,7 +530,7 @@ fn ssh_control_command(control_path: &Utf8Path, target: &str) -> moire::process:
 }
 
 #[cfg(unix)]
-async fn ssh_control_output(
+async fn ssh_control_output_unix(
     control_path: &Utf8Path,
     target: &str,
     args: &[&str],
@@ -539,6 +539,43 @@ async fn ssh_control_output(
     let remote_command = args
         .iter()
         .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    command.arg(remote_command);
+    let output = command.output().await?;
+    if !output.status.success() {
+        eyre::bail!(
+            "ssh to {target} failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(unix)]
+fn cmd_quote(value: &str) -> String {
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '&' | '|' | '(' | ')' | '<' | '>'))
+    {
+        format!("\"{}\"", value.replace('"', "\\\""))
+    } else {
+        value.to_string()
+    }
+}
+
+#[cfg(unix)]
+async fn ssh_control_output_windows(
+    control_path: &Utf8Path,
+    target: &str,
+    args: &[&str],
+) -> Result<String> {
+    let mut command = ssh_control_command(control_path, target);
+    let remote_command = args
+        .iter()
+        .map(|arg| cmd_quote(arg))
         .collect::<Vec<_>>()
         .join(" ");
     command.arg(remote_command);
@@ -584,7 +621,7 @@ async fn detect_ssh_bootstrap_target(
         .output()
         .await?;
     if windows_version.status.success() {
-        let home = ssh_control_output(
+        let home = ssh_control_output_windows(
             control_path,
             target,
             &[
@@ -601,7 +638,7 @@ async fn detect_ssh_bootstrap_target(
         });
     }
 
-    let home = ssh_control_output(control_path, target, &["printenv", "HOME"]).await?;
+    let home = ssh_control_output_unix(control_path, target, &["printenv", "HOME"]).await?;
     if home.is_empty() {
         eyre::bail!("ssh bootstrap target {target} returned an empty HOME");
     }
@@ -651,7 +688,7 @@ async fn ensure_ssh_bootstrap_bare_repo(
             let bare_repo_parent = Utf8Path::new(bare_repo_dir).parent().ok_or_else(|| {
                 eyre::eyre!("failed to determine bare repo parent for {bare_repo_dir}")
             })?;
-            ssh_control_output(
+            ssh_control_output_unix(
                 control_path,
                 target,
                 &[
@@ -667,7 +704,7 @@ async fn ensure_ssh_bootstrap_bare_repo(
             .await?;
         }
         SshBootstrapTargetPlatform::Windows => {
-            ssh_control_output(
+            ssh_control_output_windows(
                 control_path,
                 target,
                 &[
