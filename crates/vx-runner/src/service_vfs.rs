@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::time::Instant;
 use tokio::task::spawn_blocking;
 use tracing::{debug, info};
-use vx_eval::{HostObservation, PathValue};
+use vx_eval::{HostObservation, PathValue, TransportPoisonError};
 use vx_runner_proto::{
     CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, DiscoverRequest,
     DiscoverResult, RunArg, RunFailureKind, RunFileMount, RunOutput, RunRequest, RunResult,
@@ -131,7 +131,7 @@ fn run_failure_result(
     stderr: String,
     error: Option<String>,
 ) -> RunResult {
-    run_failure_result_with_kind(start, exit_code, stdout, stderr, None, error)
+    run_failure_result_with_kind(start, exit_code, stdout, stderr, None, error, None)
 }
 
 fn run_failure_result_with_kind(
@@ -141,6 +141,7 @@ fn run_failure_result_with_kind(
     stderr: String,
     error_kind: Option<RunFailureKind>,
     error: Option<String>,
+    poison: Option<TransportPoisonError>,
 ) -> RunResult {
     RunResult {
         success: false,
@@ -150,6 +151,7 @@ fn run_failure_result_with_kind(
         duration_ms: start.elapsed().as_millis() as u64,
         output_manifest: None,
         observer_value: None,
+        poison,
         error_kind,
         error,
     }
@@ -171,6 +173,7 @@ fn run_success_result(
         duration_ms: start.elapsed().as_millis() as u64,
         output_manifest,
         observer_value,
+        poison: None,
         error_kind: None,
         error: None,
     }
@@ -378,9 +381,17 @@ impl ActionContext {
 }
 
 impl RunnerService {
-    pub async fn discover_vfs(&self, request: DiscoverRequest) -> Result<DiscoverResult, String> {
-        let value = evaluate_shipped_discover(self.cas.as_ref(), &request).await?;
-        Ok(DiscoverResult { value })
+    pub async fn discover_vfs(&self, request: DiscoverRequest) -> DiscoverResult {
+        match evaluate_shipped_discover(self.cas.as_ref(), &request).await {
+            Ok(value) => DiscoverResult {
+                value: Some(value),
+                poison: None,
+            },
+            Err(poison) => DiscoverResult {
+                value: None,
+                poison: Some(poison),
+            },
+        }
     }
 
     // r[impl exec.arg]
@@ -2039,22 +2050,23 @@ impl RunnerService {
             has_eval = request.eval.is_some(),
             "starting shipped observer evaluation"
         );
-        let observer_result: Result<Option<TransportValue>, String> = match request.eval.as_ref() {
-            Some(eval) => match evaluate_shipped_observer(
-                self.cas.as_ref(),
-                eval,
-                exit_code,
-                &output.stdout,
-                &output.stderr,
-                &PathValue::new(action.prefix_path.as_str()),
-            )
-            .await
-            {
-                Ok(observer_value) => Ok(observer_value),
-                Err(error) => Err(error),
-            },
-            None => Ok(None),
-        };
+        let observer_result: Result<Option<TransportValue>, TransportPoisonError> =
+            match request.eval.as_ref() {
+                Some(eval) => match evaluate_shipped_observer(
+                    self.cas.as_ref(),
+                    eval,
+                    exit_code,
+                    &output.stdout,
+                    &output.stderr,
+                    &PathValue::new(action.prefix_path.as_str()),
+                )
+                .await
+                {
+                    Ok(observer_value) => Ok(observer_value),
+                    Err(error) => Err(error),
+                },
+                None => Ok(None),
+            };
         info!(
             action.prefix_id = %action.prefix_id,
             action_desc,
@@ -2084,7 +2096,7 @@ impl RunnerService {
             let mut message = format!("exec verification failed: {error}");
             if let Err(observer_error) = &observer_result {
                 message.push_str("\nobserver error:\n");
-                message.push_str(observer_error);
+                message.push_str(&observer_error.to_string());
             }
             let message = append_process_output(message, &output.stdout, &output.stderr);
             self.remove_action_prefix(&action.prefix_id).await;
@@ -2095,6 +2107,7 @@ impl RunnerService {
                 output.stderr.clone(),
                 Some(RunFailureKind::VerificationFailure),
                 Some(message),
+                None,
             );
         }
 
@@ -2126,6 +2139,7 @@ impl RunnerService {
                     output.stderr.clone(),
                     Some(RunFailureKind::User),
                     Some(message),
+                    Some(error),
                 );
             }
         };

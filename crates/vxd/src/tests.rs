@@ -109,6 +109,12 @@ fn ssh_bootstrap_paths_use_a_stable_remote_layout() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn ssh_bootstrap_remote_script_exports_vx_home_for_runner() {
+    assert!(crate::SSH_BOOTSTRAP_REMOTE_SCRIPT.contains("export VX_HOME=\"$vx_home\""));
+}
+
 static COLOR_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
 static TEST_SERVICE_BINARIES_READY: OnceLock<()> = OnceLock::new();
 
@@ -1391,6 +1397,7 @@ impl Runner for FakeRunner {
                 duration_ms: 0,
                 output_manifest: None,
                 observer_value: None,
+                poison: None,
                 error_kind: None,
                 error: Some(
                     "fake runner was unexpectedly asked to run a build.vx exec request".to_string(),
@@ -1399,17 +1406,15 @@ impl Runner for FakeRunner {
         }
     }
 
-    async fn discover(
-        &self,
-        _request: DiscoverRequest,
-    ) -> std::result::Result<DiscoverResult, String> {
+    async fn discover(&self, _request: DiscoverRequest) -> DiscoverResult {
         match &self.behavior {
             FakeRunnerBehavior::PanicOnBoundaryUse => {
                 panic!("fake runner discover should not be used in daemon-only build.vx tests");
             }
-            FakeRunnerBehavior::Discover(value) => Ok(DiscoverResult {
-                value: value.clone(),
-            }),
+            FakeRunnerBehavior::Discover(value) => DiscoverResult {
+                value: Some(value.clone()),
+                poison: None,
+            },
         }
     }
 }
@@ -1538,7 +1543,7 @@ impl BuildServiceDaemonTestEnv {
         build_vx_executors: F,
     ) -> Self
     where
-        F: FnOnce(Arc<RunnerClient>) -> crate::service::BuildVxExecutors,
+        F: FnOnce(Arc<StoreClient>, Arc<RunnerClient>) -> crate::service::BuildVxExecutors,
     {
         let lock = lock_test_file("build-service");
         let binaries = copy_test_service_binaries();
@@ -1567,8 +1572,10 @@ impl BuildServiceDaemonTestEnv {
 
         let store_handle = Arc::new(store_handle);
         let runner_handle = Arc::new(runner_handle);
+        let store_client = Arc::new(StoreClient::new(store_virtual));
         let runner_client = Arc::new(RunnerClient::new(runner_virtual));
-        let build_vx_executors = build_vx_executors(Arc::clone(&runner_client));
+        let build_vx_executors =
+            build_vx_executors(Arc::clone(&store_client), Arc::clone(&runner_client));
 
         let service = VxdService::new(
             Utf8Path::from_path(vx_home.path())
@@ -1580,7 +1587,7 @@ impl BuildServiceDaemonTestEnv {
                     "vxd-build-vx-tests/spawn_tracker",
                     SpawnTracker::default(),
                 )),
-                store: Arc::new(StoreClient::new(store_virtual)),
+                store: store_client,
                 exec: runner_client,
                 build_vx_executors,
                 store_handle: Arc::clone(&store_handle),
@@ -1774,9 +1781,11 @@ async fn build_vx_routes_configured_daemon_executor_classes() {
 
     let env = BuildServiceDaemonTestEnv::with_build_vx_executor_factory(
         FakeRunnerBehavior::Discover(transport),
-        |runner_client| {
-            let mut build_vx_executors =
-                crate::service::BuildVxExecutors::local_default(Arc::clone(&runner_client));
+        |store_client, runner_client| {
+            let mut build_vx_executors = crate::service::BuildVxExecutors::local_default(
+                store_client,
+                Arc::clone(&runner_client),
+            );
             build_vx_executors.register_class_runner(
                 "linux",
                 "daemon:linux",
@@ -1827,9 +1836,9 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 async fn build_vx_reports_unimplemented_ssh_bootstrap_executor_classes() {
     let env = BuildServiceDaemonTestEnv::with_build_vx_executor_factory(
         FakeRunnerBehavior::PanicOnBoundaryUse,
-        |runner_client| {
+        |store_client, runner_client| {
             let mut build_vx_executors =
-                crate::service::BuildVxExecutors::local_default(runner_client);
+                crate::service::BuildVxExecutors::local_default(store_client, runner_client);
             build_vx_executors.register_class_unavailable(
                 "linux",
                 "ssh_bootstrap:linux",

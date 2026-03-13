@@ -207,15 +207,21 @@ fn ssh_bootstrap_paths(remote_home: &str, class_label: &str) -> SshBootstrapPath
 }
 
 #[cfg(unix)]
-fn ssh_bootstrap_local_endpoint(_vx_home: &Utf8PathBuf, class_label: &str) -> Endpoint {
+fn ssh_bootstrap_local_endpoint(class_label: &str, service_name: &str) -> Endpoint {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros();
     Endpoint::Local(Utf8PathBuf::from(format!(
-        "/tmp/vx-ssh-{class_label}-{}-{unique}.sock",
+        "/tmp/vx-ssh-{class_label}-{service_name}-{}-{unique}.sock",
         std::process::id()
     )))
+}
+
+#[cfg(unix)]
+struct SshBootstrapConnection {
+    runner_handle: ServiceHandle,
+    store_handle: ServiceHandle,
 }
 
 #[cfg(unix)]
@@ -240,6 +246,7 @@ cargo build --manifest-path "$checkout_dir/Cargo.toml" -p vx-store -p vx-vfsd -p
 rm -f "$store_socket" "$vfsd_socket" "$runner_socket"
 trap 'jobs -p | xargs -r kill || true' EXIT
 "$checkout_dir/target/debug/vx-store" --root "$store_root" --listen "unix:$store_socket" &
+export VX_HOME="$vx_home"
 exec "$checkout_dir/target/debug/vx-runner" \
   --vx-home "$vx_home" \
   --store "unix:$store_socket" \
@@ -307,7 +314,7 @@ async fn connect_ssh_bootstrap_runner(
     vx_home: &Utf8PathBuf,
     class_label: &str,
     target: &str,
-) -> Result<ServiceHandle> {
+) -> Result<SshBootstrapConnection> {
     let repo_url = command_output("git", &["config", "--get", "remote.origin.url"]).await?;
     let commit = command_output("git", &["rev-parse", "HEAD"]).await?;
     let pushed_refs = command_output(
@@ -331,16 +338,24 @@ async fn connect_ssh_bootstrap_runner(
         eyre::bail!("ssh bootstrap target {target} returned an empty HOME");
     }
 
-    let local_endpoint = ssh_bootstrap_local_endpoint(vx_home, class_label);
-    let local_socket = match &local_endpoint {
+    let local_runner_endpoint = ssh_bootstrap_local_endpoint(class_label, "runner");
+    let local_runner_socket = match &local_runner_endpoint {
         Endpoint::Local(path) => path.clone(),
         Endpoint::Tcp { .. } => unreachable!("ssh bootstrap uses local sockets on unix"),
     };
-    if let Some(parent) = local_socket.parent() {
+    let local_store_endpoint = ssh_bootstrap_local_endpoint(class_label, "store");
+    let local_store_socket = match &local_store_endpoint {
+        Endpoint::Local(path) => path.clone(),
+        Endpoint::Tcp { .. } => unreachable!("ssh bootstrap uses local sockets on unix"),
+    };
+    if let Some(parent) = local_runner_socket.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if local_socket.exists() {
-        let _ = std::fs::remove_file(local_socket.as_std_path());
+    if local_runner_socket.exists() {
+        let _ = std::fs::remove_file(local_runner_socket.as_std_path());
+    }
+    if local_store_socket.exists() {
+        let _ = std::fs::remove_file(local_store_socket.as_std_path());
     }
 
     let paths = ssh_bootstrap_paths(&remote_home, class_label);
@@ -374,7 +389,13 @@ async fn connect_ssh_bootstrap_runner(
         .arg("-L")
         .arg(format!(
             "{}:{}",
-            local_socket.as_str(),
+            local_store_socket.as_str(),
+            paths.store_socket.as_str()
+        ))
+        .arg("-L")
+        .arg(format!(
+            "{}:{}",
+            local_runner_socket.as_str(),
             paths.runner_socket.as_str()
         ))
         .arg(target)
@@ -385,17 +406,31 @@ async fn connect_ssh_bootstrap_runner(
         .kill_on_drop(true);
     let child = command.spawn()?;
 
-    let (caller, session_handle) = connect_endpoint_with_backoff(
-        &format!("vx-runner[{class_label}]"),
-        &local_endpoint,
+    let (store_caller, store_session_handle) = connect_endpoint_with_backoff(
+        &format!("vx-store[{class_label}]"),
+        &local_store_endpoint,
         Duration::from_secs(60),
     )
     .await?;
 
-    Ok(ServiceHandle {
-        child: Some(child),
-        caller,
-        session_handle,
+    let (runner_caller, runner_session_handle) = connect_endpoint_with_backoff(
+        &format!("vx-runner[{class_label}]"),
+        &local_runner_endpoint,
+        Duration::from_secs(60),
+    )
+    .await?;
+
+    Ok(SshBootstrapConnection {
+        runner_handle: ServiceHandle {
+            child: Some(child),
+            caller: runner_caller,
+            session_handle: runner_session_handle,
+        },
+        store_handle: ServiceHandle {
+            child: None,
+            caller: store_caller,
+            session_handle: store_session_handle,
+        },
     })
 }
 
@@ -584,8 +619,12 @@ async fn ensure_services(
         runner_handle.boot_and_connect(),
     )?;
 
+    let local_store = Arc::new(StoreClient::new(store_virtual));
     let exec = Arc::new(RunnerClient::new(runner_virtual));
-    let mut build_vx_executors = crate::service::BuildVxExecutors::local_default(Arc::clone(&exec));
+    let mut build_vx_executors = crate::service::BuildVxExecutors::local_default(
+        Arc::clone(&local_store),
+        Arc::clone(&exec),
+    );
     let mut runner_handles = vec![Arc::new(runner_handle)];
 
     for config in &args.build_vx_executor_classes {
@@ -626,18 +665,21 @@ async fn ensure_services(
                     .expect("ssh bootstrap executor target should be present");
                 #[cfg(unix)]
                 {
-                    let handle =
+                    let connection =
                         connect_ssh_bootstrap_runner(&args.vx_home, &config.class_label, target)
                             .await?;
-                    let virtual_handle = handle.boot_and_connect().await?;
-                    let runner = Arc::new(RunnerClient::new(virtual_handle));
-                    build_vx_executors.register_class_runner(
+                    let store_virtual = connection.store_handle.boot_and_connect().await?;
+                    let runner_virtual = connection.runner_handle.boot_and_connect().await?;
+                    let store = Arc::new(StoreClient::new(store_virtual));
+                    let runner = Arc::new(RunnerClient::new(runner_virtual));
+                    build_vx_executors.register_class_runner_with_store(
                         config.class_label.clone(),
                         format!("ssh_bootstrap:{}", config.class_label),
                         vx_eval::ExecutorBackendKind::SshBootstrap,
                         runner,
+                        Some(store),
                     );
-                    runner_handles.push(Arc::new(handle));
+                    runner_handles.push(Arc::new(connection.runner_handle));
                 }
                 #[cfg(not(unix))]
                 {
@@ -657,7 +699,7 @@ async fn ensure_services(
     }
 
     Ok(ServiceClients {
-        store: Arc::new(StoreClient::new(store_virtual)),
+        store: local_store,
         exec,
         build_vx_executors,
         store_handle: Arc::new(store_handle),

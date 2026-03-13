@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use crate::instr::SourceProvenance;
 use crate::node::NodeId;
+use crate::transport::TransportSourceProvenance;
 use crate::value::HostObservation;
+use facet::Facet;
 
 // r[impl error.poison]
 /// The error carried by a poisoned node.
@@ -67,6 +69,43 @@ pub struct DemandEntry {
     pub node_id: NodeId,
     pub description: String,
     pub provenance: Option<SourceProvenance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TransportDemandChain {
+    pub entries: Vec<TransportDemandEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct TransportDemandEntry {
+    pub node_id: u64,
+    pub description: String,
+    pub provenance: Option<TransportSourceProvenance>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
+pub enum TransportPoisonKind {
+    TypeError,
+    UnresolvedName,
+    ArithmeticError,
+    CapabilityViolation,
+    UserFail,
+    VerificationFailure,
+    CircularDependency,
+    DemandDepthExceeded,
+    Multiple,
+    Internal,
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct TransportPoisonError {
+    pub kind: TransportPoisonKind,
+    pub message: String,
+    pub demand_chain: TransportDemandChain,
+    pub causes: Vec<TransportPoisonError>,
+    pub contexts: Vec<String>,
+    pub observations: Vec<HostObservation>,
 }
 
 impl DemandChain {
@@ -195,5 +234,152 @@ impl fmt::Display for PoisonError {
             }
         }
         Ok(())
+    }
+}
+
+impl From<&DemandChain> for TransportDemandChain {
+    fn from(chain: &DemandChain) -> Self {
+        Self {
+            entries: chain
+                .entries
+                .iter()
+                .map(TransportDemandEntry::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<TransportDemandChain> for DemandChain {
+    fn from(chain: TransportDemandChain) -> Self {
+        Self {
+            entries: chain.entries.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<&DemandEntry> for TransportDemandEntry {
+    fn from(entry: &DemandEntry) -> Self {
+        Self {
+            node_id: entry.node_id.0,
+            description: entry.description.clone(),
+            provenance: entry
+                .provenance
+                .as_ref()
+                .map(TransportSourceProvenance::from),
+        }
+    }
+}
+
+impl From<TransportDemandEntry> for DemandEntry {
+    fn from(entry: TransportDemandEntry) -> Self {
+        Self {
+            node_id: NodeId(entry.node_id),
+            description: entry.description,
+            provenance: entry.provenance.map(Into::into),
+        }
+    }
+}
+
+impl From<&PoisonError> for TransportPoisonError {
+    fn from(error: &PoisonError) -> Self {
+        Self {
+            kind: TransportPoisonKind::from(&error.kind),
+            message: error.message.clone(),
+            demand_chain: TransportDemandChain::from(&error.demand_chain),
+            causes: error
+                .causes
+                .iter()
+                .map(TransportPoisonError::from)
+                .collect(),
+            contexts: error.contexts.iter().cloned().collect(),
+            observations: error.observations.iter().cloned().collect(),
+        }
+    }
+}
+
+impl From<TransportPoisonError> for PoisonError {
+    fn from(error: TransportPoisonError) -> Self {
+        Self {
+            kind: PoisonKind::from(error.kind),
+            message: error.message,
+            demand_chain: error.demand_chain.into(),
+            causes: Arc::from(
+                error
+                    .causes
+                    .into_iter()
+                    .map(PoisonError::from)
+                    .collect::<Vec<_>>(),
+            ),
+            contexts: Arc::from(error.contexts),
+            observations: Arc::from(error.observations),
+        }
+    }
+}
+
+impl From<&PoisonKind> for TransportPoisonKind {
+    fn from(kind: &PoisonKind) -> Self {
+        match kind {
+            PoisonKind::TypeError => Self::TypeError,
+            PoisonKind::UnresolvedName => Self::UnresolvedName,
+            PoisonKind::ArithmeticError => Self::ArithmeticError,
+            PoisonKind::CapabilityViolation => Self::CapabilityViolation,
+            PoisonKind::UserFail => Self::UserFail,
+            PoisonKind::VerificationFailure => Self::VerificationFailure,
+            PoisonKind::CircularDependency => Self::CircularDependency,
+            PoisonKind::DemandDepthExceeded => Self::DemandDepthExceeded,
+            PoisonKind::Multiple => Self::Multiple,
+            PoisonKind::Internal => Self::Internal,
+        }
+    }
+}
+
+impl From<TransportPoisonKind> for PoisonKind {
+    fn from(kind: TransportPoisonKind) -> Self {
+        match kind {
+            TransportPoisonKind::TypeError => Self::TypeError,
+            TransportPoisonKind::UnresolvedName => Self::UnresolvedName,
+            TransportPoisonKind::ArithmeticError => Self::ArithmeticError,
+            TransportPoisonKind::CapabilityViolation => Self::CapabilityViolation,
+            TransportPoisonKind::UserFail => Self::UserFail,
+            TransportPoisonKind::VerificationFailure => Self::VerificationFailure,
+            TransportPoisonKind::CircularDependency => Self::CircularDependency,
+            TransportPoisonKind::DemandDepthExceeded => Self::DemandDepthExceeded,
+            TransportPoisonKind::Multiple => Self::Multiple,
+            TransportPoisonKind::Internal => Self::Internal,
+        }
+    }
+}
+
+impl fmt::Display for TransportPoisonError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        PoisonError::from(self.clone()).fmt(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_poison_roundtrips_structure() {
+        let mut demand_chain = DemandChain::new();
+        demand_chain.push(NodeId(7), "call(..)".to_string(), None);
+
+        let error = PoisonError::new(PoisonKind::UserFail, "boom", demand_chain)
+            .with_context("build.vx discover[class:orb]")
+            .with_observations([HostObservation::Which {
+                name: "cc".to_string(),
+                expected_path: None,
+            }]);
+
+        let transport = TransportPoisonError::from(&error);
+        let roundtrip = PoisonError::from(transport);
+
+        assert_eq!(roundtrip.kind, PoisonKind::UserFail);
+        assert_eq!(roundtrip.message, "boom");
+        assert_eq!(roundtrip.contexts(), ["build.vx discover[class:orb]"]);
+        assert_eq!(roundtrip.demand_chain.entries.len(), 1);
+        assert_eq!(roundtrip.demand_chain.entries[0].description, "call(..)");
+        assert_eq!(roundtrip.observations().len(), 1);
     }
 }

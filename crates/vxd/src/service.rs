@@ -36,9 +36,9 @@ use vx_eval::{
     AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain,
     DiscoverRequest as EvalDiscoverRequest, DiscoveredValue, Engine, ExecArgValue, ExecMount,
     ExecRequest, ExecutorBackendKind, ExecutorSelector, MapValue, Module as EvalModule, PathValue,
-    PoisonError, PoisonKind, RenderRequest as EvalRenderRequest,
-    StabilizeRequest as EvalStabilizeRequest, StructValue, TransportValue, TreeValue, Value,
-    lower_source_file_with_source_id,
+    PoisonError, PoisonKind, RenderRequest as EvalRenderRequest, ShippedFunction,
+    StabilizeRequest as EvalStabilizeRequest, StructValue, TransportBlob, TransportBuiltinValue,
+    TransportTree, TransportValue, TreeValue, Value, lower_source_file_with_source_id,
 };
 use vx_io::spawn::ServiceHandle;
 use vx_parser::SourceFile;
@@ -90,6 +90,7 @@ pub(crate) struct BuildVxExecutor {
     id: String,
     backend: ExecutorBackendKind,
     runner: Option<Arc<RunnerClient>>,
+    store: Option<Arc<StoreClient>>,
     unavailable_reason: Option<String>,
 }
 
@@ -100,12 +101,13 @@ pub(crate) struct BuildVxExecutors {
 }
 
 impl BuildVxExecutors {
-    pub(crate) fn local_default(runner: Arc<RunnerClient>) -> Self {
+    pub(crate) fn local_default(store: Arc<StoreClient>, runner: Arc<RunnerClient>) -> Self {
         let executor_id = "local".to_string();
         let executor = BuildVxExecutor {
             id: executor_id.clone(),
             backend: ExecutorBackendKind::Local,
             runner: Some(runner),
+            store: Some(store),
             unavailable_reason: None,
         };
         Self {
@@ -136,6 +138,17 @@ impl BuildVxExecutors {
         backend: ExecutorBackendKind,
         runner: Arc<RunnerClient>,
     ) {
+        self.register_class_runner_with_store(class_label, executor_id, backend, runner, None);
+    }
+
+    pub(crate) fn register_class_runner_with_store(
+        &mut self,
+        class_label: impl Into<String>,
+        executor_id: impl Into<String>,
+        backend: ExecutorBackendKind,
+        runner: Arc<RunnerClient>,
+        store: Option<Arc<StoreClient>>,
+    ) {
         let executor_id = executor_id.into();
         self.executors.insert(
             executor_id.clone(),
@@ -143,6 +156,7 @@ impl BuildVxExecutors {
                 id: executor_id.clone(),
                 backend,
                 runner: Some(runner),
+                store,
                 unavailable_reason: None,
             },
         );
@@ -164,21 +178,22 @@ impl BuildVxExecutors {
                 id: executor_id.clone(),
                 backend,
                 runner: None,
+                store: None,
                 unavailable_reason: Some(unavailable_reason.into()),
             },
         );
         self.class_aliases.insert(class_label.into(), executor_id);
     }
 
-    fn resolve_executor_id(
+    fn resolve_executor(
         &self,
         selector: &ExecutorSelector,
-    ) -> std::result::Result<&str, String> {
+    ) -> std::result::Result<&BuildVxExecutor, String> {
         match selector.backend {
             ExecutorBackendKind::Class => self
                 .class_aliases
                 .get(&selector.id)
-                .map(String::as_str)
+                .and_then(|executor_id| self.executors.get(executor_id))
                 .ok_or_else(|| {
                     format!(
                         "build.vx executor {}:{} is not configured",
@@ -190,7 +205,6 @@ impl BuildVxExecutors {
                 .executors
                 .get(&selector.id)
                 .filter(|executor| executor.backend == selector.backend)
-                .map(|executor| executor.id.as_str())
                 .ok_or_else(|| {
                     format!(
                         "build.vx executor {}:{} is not configured",
@@ -205,23 +219,336 @@ impl BuildVxExecutors {
         &self,
         selector: &ExecutorSelector,
     ) -> std::result::Result<Arc<RunnerClient>, String> {
-        let executor_id = self.resolve_executor_id(selector)?;
-        let executor = self.executors.get(executor_id).ok_or_else(|| {
-            format!(
-                "build.vx executor {} is configured without executor metadata",
-                executor_id
-            )
-        })?;
+        let executor = self.resolve_executor(selector)?;
         if let Some(runner) = &executor.runner {
             return Ok(Arc::clone(runner));
         }
         Err(executor.unavailable_reason.clone().unwrap_or_else(|| {
             format!(
                 "build.vx executor {} is configured without a runner connection",
-                executor_id
+                executor.id
             )
         }))
     }
+
+    fn store_for(
+        &self,
+        selector: &ExecutorSelector,
+    ) -> std::result::Result<Option<Arc<StoreClient>>, String> {
+        let executor = self.resolve_executor(selector)?;
+        Ok(executor.store.clone())
+    }
+}
+
+async fn mirror_chunk(
+    source: &StoreClient,
+    dest: &StoreClient,
+    hash: ChunkHash,
+) -> std::result::Result<(), String> {
+    if dest
+        .has_chunk(hash)
+        .await
+        .map_err(|error| format!("{error:?}"))?
+    {
+        return Ok(());
+    }
+
+    let data = source
+        .get_chunk(hash)
+        .await
+        .map_err(|error| format!("{error:?}"))?
+        .ok_or_else(|| format!("chunk {} not found in source store", hash.to_hex()))?;
+    dest.put_chunk(hash, data)
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+    Ok(())
+}
+
+async fn mirror_blob_ref(
+    source: &StoreClient,
+    dest: &StoreClient,
+    blob_ref: &BlobRef,
+) -> std::result::Result<(), String> {
+    match blob_ref {
+        BlobRef::Small { chunk, .. } => mirror_chunk(source, dest, *chunk).await,
+        BlobRef::Large { blob_node, .. } => mirror_node(source, dest, *blob_node).await,
+    }
+}
+
+async fn mirror_output_blob_ref(
+    source: &StoreClient,
+    dest: &StoreClient,
+    blob_ref: &OutputBlobRef,
+) -> std::result::Result<(), String> {
+    match blob_ref {
+        OutputBlobRef::Small { chunk, .. } => mirror_chunk(source, dest, *chunk).await,
+        OutputBlobRef::Large { blob_node, .. } => mirror_node(source, dest, *blob_node).await,
+    }
+}
+
+fn mirror_directory_entry_kind<'a>(
+    source: &'a StoreClient,
+    dest: &'a StoreClient,
+    kind: &'a DirEntryKind,
+) -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send + 'a>> {
+    Box::pin(async move {
+        match kind {
+            DirEntryKind::SmallFile { content_hash, .. } => {
+                mirror_chunk(source, dest, ChunkHash(content_hash.0)).await
+            }
+            DirEntryKind::LargeFile { blob_node, .. } => {
+                mirror_node(source, dest, *blob_node).await
+            }
+            DirEntryKind::Dir { hash, .. } => mirror_node(source, dest, *hash).await,
+            DirEntryKind::Symlink { .. } => Ok(()),
+        }
+    })
+}
+
+fn mirror_node<'a>(
+    source: &'a StoreClient,
+    dest: &'a StoreClient,
+    hash: NodeHash,
+) -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send + 'a>> {
+    Box::pin(async move {
+        if dest
+            .get_node(hash)
+            .await
+            .map_err(|error| format!("{error:?}"))?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let bytes = source
+            .get_node(hash)
+            .await
+            .map_err(|error| format!("{error:?}"))?
+            .ok_or_else(|| format!("node {} not found in source store", hash.to_hex()))?;
+        let node = CasNode::from_bytes(&bytes).map_err(|error| error.to_string())?;
+
+        match &node {
+            CasNode::Blob(blob) => {
+                for chunk in &blob.chunks {
+                    mirror_chunk(source, dest, chunk.hash).await?;
+                }
+            }
+            CasNode::Directory(directory) => {
+                for entry in &directory.entries {
+                    mirror_directory_entry_kind(source, dest, &entry.kind).await?;
+                }
+            }
+            CasNode::Manifest(manifest) => {
+                for output in &manifest.outputs {
+                    mirror_output_blob_ref(source, dest, &output.blob).await?;
+                }
+            }
+            _ => {}
+        }
+
+        dest.put_node(hash, bytes)
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        Ok(())
+    })
+}
+
+fn mirror_transport_value_store_refs<'a>(
+    source: &'a StoreClient,
+    dest: &'a StoreClient,
+    value: TransportValue,
+) -> Pin<Box<dyn Future<Output = std::result::Result<TransportValue, String>> + Send + 'a>> {
+    Box::pin(async move {
+        match value {
+            TransportValue::Blob(blob) => match blob {
+                TransportBlob::Inline { .. } => Ok(TransportValue::Blob(blob)),
+                TransportBlob::Store {
+                    blob_ref,
+                    executable,
+                } => {
+                    mirror_blob_ref(source, dest, &blob_ref).await?;
+                    Ok(TransportValue::Blob(TransportBlob::Store {
+                        blob_ref,
+                        executable,
+                    }))
+                }
+            },
+            TransportValue::Tree(tree) => match tree {
+                TransportTree::Inline(entries) => {
+                    let mut mirrored = Vec::with_capacity(entries.len());
+                    for (name, value) in entries {
+                        mirrored.push((
+                            name,
+                            mirror_transport_value_store_refs(source, dest, value).await?,
+                        ));
+                    }
+                    Ok(TransportValue::Tree(TransportTree::Inline(mirrored)))
+                }
+                TransportTree::Store(root) => {
+                    mirror_node(source, dest, root).await?;
+                    Ok(TransportValue::Tree(TransportTree::Store(root)))
+                }
+            },
+            TransportValue::Discovered { value, obligations } => {
+                let value = mirror_transport_value_store_refs(source, dest, *value).await?;
+                Ok(TransportValue::Discovered {
+                    value: Box::new(value),
+                    obligations,
+                })
+            }
+            TransportValue::Tuple(values) => {
+                let mut mirrored = Vec::with_capacity(values.len());
+                for value in values {
+                    mirrored.push(mirror_transport_value_store_refs(source, dest, value).await?);
+                }
+                Ok(TransportValue::Tuple(mirrored))
+            }
+            TransportValue::Array(values) => {
+                let mut mirrored = Vec::with_capacity(values.len());
+                for value in values {
+                    mirrored.push(mirror_transport_value_store_refs(source, dest, value).await?);
+                }
+                Ok(TransportValue::Array(mirrored))
+            }
+            TransportValue::Map(entries) => {
+                let mut mirrored = Vec::with_capacity(entries.len());
+                for (key, value) in entries {
+                    mirrored.push((
+                        mirror_transport_value_store_refs(source, dest, key).await?,
+                        mirror_transport_value_store_refs(source, dest, value).await?,
+                    ));
+                }
+                Ok(TransportValue::Map(mirrored))
+            }
+            TransportValue::Struct(struct_value) => {
+                let mut fields = Vec::with_capacity(struct_value.fields.len());
+                for (name, value) in struct_value.fields {
+                    fields.push((
+                        name,
+                        mirror_transport_value_store_refs(source, dest, value).await?,
+                    ));
+                }
+                Ok(TransportValue::Struct(vx_eval::TransportStruct {
+                    type_name: struct_value.type_name,
+                    fields,
+                }))
+            }
+            TransportValue::Function(function) => Ok(TransportValue::Function(
+                mirror_shipped_function_store_refs(source, dest, function).await?,
+            )),
+            TransportValue::Builtin(builtin) => Ok(TransportValue::Builtin(
+                mirror_transport_builtin_value_store_refs(source, dest, builtin).await?,
+            )),
+            other => Ok(other),
+        }
+    })
+}
+
+fn mirror_transport_builtin_value_store_refs<'a>(
+    source: &'a StoreClient,
+    dest: &'a StoreClient,
+    builtin: TransportBuiltinValue,
+) -> Pin<Box<dyn Future<Output = std::result::Result<TransportBuiltinValue, String>> + Send + 'a>> {
+    Box::pin(async move {
+        match builtin {
+            TransportBuiltinValue::BlobToString { receiver } => {
+                Ok(TransportBuiltinValue::BlobToString {
+                    receiver: Box::new(
+                        mirror_transport_value_store_refs(source, dest, *receiver).await?,
+                    ),
+                })
+            }
+            TransportBuiltinValue::BlobExecutable { receiver } => {
+                Ok(TransportBuiltinValue::BlobExecutable {
+                    receiver: Box::new(
+                        mirror_transport_value_store_refs(source, dest, *receiver).await?,
+                    ),
+                })
+            }
+            TransportBuiltinValue::BlobUtf8 { receiver } => Ok(TransportBuiltinValue::BlobUtf8 {
+                receiver: Box::new(
+                    mirror_transport_value_store_refs(source, dest, *receiver).await?,
+                ),
+            }),
+            TransportBuiltinValue::BlobUtf8Lossy { receiver } => {
+                Ok(TransportBuiltinValue::BlobUtf8Lossy {
+                    receiver: Box::new(
+                        mirror_transport_value_store_refs(source, dest, *receiver).await?,
+                    ),
+                })
+            }
+            TransportBuiltinValue::BytesUtf8 { receiver } => Ok(TransportBuiltinValue::BytesUtf8 {
+                receiver: Box::new(
+                    mirror_transport_value_store_refs(source, dest, *receiver).await?,
+                ),
+            }),
+            TransportBuiltinValue::BytesUtf8Lossy { receiver } => {
+                Ok(TransportBuiltinValue::BytesUtf8Lossy {
+                    receiver: Box::new(
+                        mirror_transport_value_store_refs(source, dest, *receiver).await?,
+                    ),
+                })
+            }
+            TransportBuiltinValue::BytesBlob { receiver } => Ok(TransportBuiltinValue::BytesBlob {
+                receiver: Box::new(
+                    mirror_transport_value_store_refs(source, dest, *receiver).await?,
+                ),
+            }),
+            TransportBuiltinValue::StreamCollect { receiver } => {
+                Ok(TransportBuiltinValue::StreamCollect {
+                    receiver: Box::new(
+                        mirror_transport_value_store_refs(source, dest, *receiver).await?,
+                    ),
+                })
+            }
+            TransportBuiltinValue::TreeFile { receiver } => Ok(TransportBuiltinValue::TreeFile {
+                receiver: Box::new(
+                    mirror_transport_value_store_refs(source, dest, *receiver).await?,
+                ),
+            }),
+            TransportBuiltinValue::TreeMerge { receiver } => Ok(TransportBuiltinValue::TreeMerge {
+                receiver: Box::new(
+                    mirror_transport_value_store_refs(source, dest, *receiver).await?,
+                ),
+            }),
+            TransportBuiltinValue::TreeSubtree { receiver } => {
+                Ok(TransportBuiltinValue::TreeSubtree {
+                    receiver: Box::new(
+                        mirror_transport_value_store_refs(source, dest, *receiver).await?,
+                    ),
+                })
+            }
+            TransportBuiltinValue::FallibleCall { receiver } => {
+                Ok(TransportBuiltinValue::FallibleCall {
+                    receiver: Box::new(
+                        mirror_transport_value_store_refs(source, dest, *receiver).await?,
+                    ),
+                })
+            }
+            other => Ok(other),
+        }
+    })
+}
+
+fn mirror_shipped_function_store_refs<'a>(
+    source: &'a StoreClient,
+    dest: &'a StoreClient,
+    function: ShippedFunction,
+) -> Pin<Box<dyn Future<Output = std::result::Result<ShippedFunction, String>> + Send + 'a>> {
+    Box::pin(async move {
+        let mut captures = Vec::with_capacity(function.captures.len());
+        for (name, value) in function.captures {
+            captures.push((
+                name,
+                mirror_transport_value_store_refs(source, dest, value).await?,
+            ));
+        }
+        Ok(ShippedFunction {
+            code_identity: function.code_identity,
+            def: function.def,
+            captures,
+        })
+    })
 }
 
 /// The daemon service implementation
@@ -1529,6 +1856,10 @@ async fn run_build_vx_exec_via_runner(
     let exec = executors
         .runner_for(&request.executor)
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    let exec_store = executors
+        .store_for(&request.executor)
+        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    let target_store = exec_store.as_deref().unwrap_or(store);
     let mut args = request.args.into_iter();
     let program = args.next().ok_or_else(|| {
         exec_bridge_poison(
@@ -1540,7 +1871,21 @@ async fn run_build_vx_exec_via_runner(
     let root_mount = store_exec_mounts(store, &request.mounts)
         .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    if !std::ptr::eq(target_store, store)
+        && let Some(root) = root_mount
+    {
+        mirror_node(store, target_store, root)
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    }
     let progress = roam::Tx::<StoreProgress>::unbound();
+    let observer = if std::ptr::eq(target_store, store) {
+        request.observer
+    } else {
+        mirror_shipped_function_store_refs(store, target_store, request.observer)
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
+    };
 
     let result = exec
         .run(
@@ -1573,7 +1918,7 @@ async fn run_build_vx_exec_via_runner(
                 clear_env: false,
                 eval: Some(RunEvalPayload {
                     module: request.module,
-                    observer: Some(request.observer),
+                    observer: Some(observer),
                     verification_obligations: request.verification_obligations,
                 }),
                 macos_commandlinetools_version: None,
@@ -1586,6 +1931,16 @@ async fn run_build_vx_exec_via_runner(
         })?;
 
     if !result.success {
+        if let Some(poison) = result.poison {
+            let mut error = PoisonError::from(poison);
+            if !result.stderr.trim().is_empty() {
+                error = error.with_context(format!("process stderr:\n{}", result.stderr.trim()));
+            }
+            if !result.stdout.trim().is_empty() {
+                error = error.with_context(format!("process stdout:\n{}", result.stdout.trim()));
+            }
+            return Err(error);
+        }
         let kind = match result.error_kind {
             Some(RunFailureKind::VerificationFailure) => PoisonKind::VerificationFailure,
             _ => PoisonKind::UserFail,
@@ -1604,6 +1959,13 @@ async fn run_build_vx_exec_via_runner(
             &demand_chain,
         )
     })?;
+    let observer_value = if std::ptr::eq(target_store, store) {
+        observer_value
+    } else {
+        mirror_transport_value_store_refs(target_store, store, observer_value)
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
+    };
     let value = Value::try_from(observer_value).map_err(|error| {
         exec_bridge_poison(PoisonKind::UserFail, error.to_string(), &demand_chain)
     })?;
@@ -1619,18 +1981,56 @@ async fn run_build_vx_discover_via_runner(
     let exec = executors
         .runner_for(&request.executor)
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    let exec_store = executors
+        .store_for(&request.executor)
+        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    let target_store = exec_store.as_deref().unwrap_or(store);
+    let probe = if std::ptr::eq(target_store, store) {
+        request.probe
+    } else {
+        mirror_shipped_function_store_refs(store, target_store, request.probe)
+            .await
+            .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
+    };
     let result = exec
         .discover(RunnerDiscoverRequest {
             executor: request.executor,
             module: request.module,
-            probe: request.probe,
+            probe,
         })
         .await
         .map_err(|error| {
             exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}"), &demand_chain)
         })?;
 
-    let value = Value::try_from(result.value).map_err(|error| {
+    if let Some(poison) = result.poison {
+        return Err(PoisonError::from(poison));
+    }
+
+    let value = if std::ptr::eq(target_store, store) {
+        result.value.ok_or_else(|| {
+            exec_bridge_poison(
+                PoisonKind::UserFail,
+                "runner did not return a discovery value",
+                &demand_chain,
+            )
+        })?
+    } else {
+        mirror_transport_value_store_refs(
+            target_store,
+            store,
+            result.value.ok_or_else(|| {
+                exec_bridge_poison(
+                    PoisonKind::UserFail,
+                    "runner did not return a discovery value",
+                    &demand_chain,
+                )
+            })?,
+        )
+        .await
+        .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
+    };
+    let value = Value::try_from(value).map_err(|error| {
         exec_bridge_poison(PoisonKind::UserFail, error.to_string(), &demand_chain)
     })?;
     hydrate_exec_value_from_store(store, value, &demand_chain).await

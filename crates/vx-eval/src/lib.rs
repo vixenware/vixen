@@ -27,7 +27,10 @@ mod node;
 pub use node::{NodeId, NodeKey};
 
 mod poison;
-pub use poison::{DemandChain, PoisonError, PoisonKind};
+pub use poison::{
+    DemandChain, PoisonError, PoisonKind, TransportDemandChain, TransportDemandEntry,
+    TransportPoisonError,
+};
 
 mod scheduler;
 

@@ -47,7 +47,7 @@ impl RunnerService {
             .await
     }
 
-    async fn discover(&self, request: DiscoverRequest) -> Result<DiscoverResult, String> {
+    async fn discover(&self, request: DiscoverRequest) -> DiscoverResult {
         self.discover_vfs(request)
             .named("runner.discover_vfs")
             .await
@@ -87,7 +87,7 @@ impl Runner for RunnerService {
         RunnerService::run(self, request, progress).await
     }
 
-    async fn discover(&self, request: DiscoverRequest) -> Result<DiscoverResult, String> {
+    async fn discover(&self, request: DiscoverRequest) -> DiscoverResult {
         RunnerService::discover(self, request).await
     }
 }

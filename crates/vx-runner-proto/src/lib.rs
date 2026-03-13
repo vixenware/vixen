@@ -23,14 +23,14 @@ use facet::Facet;
 pub use vx_eval::{
     ExecutorBackendKind, ExecutorSelector, HostObservation, ShippedFunction, TransportBinOp,
     TransportBlob, TransportBlock, TransportBuiltinValue, TransportExpr, TransportFnDef,
-    TransportModule, TransportParam, TransportStmt, TransportStruct, TransportTree,
-    TransportUnaryOp, TransportValue,
+    TransportModule, TransportParam, TransportPoisonError, TransportStmt, TransportStruct,
+    TransportTree, TransportUnaryOp, TransportValue,
 };
 use vx_store_proto::{ManifestHash, ServiceVersion, StoreProgress};
 
 /// Runner protocol version.
 /// Bump this when making breaking changes to the Runner RPC interface.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 10;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 11;
 
 // =============================================================================
 // Rust Compilation
@@ -327,7 +327,8 @@ pub struct DiscoverRequest {
 /// Result of evaluating a shipped discovery probe on the executor.
 #[derive(Debug, Clone, Facet)]
 pub struct DiscoverResult {
-    pub value: TransportValue,
+    pub value: Option<TransportValue>,
+    pub poison: Option<TransportPoisonError>,
 }
 
 #[derive(Debug, Clone, Facet, PartialEq, Eq)]
@@ -399,6 +400,7 @@ pub struct RunResult {
     pub duration_ms: u64,
     pub output_manifest: Option<ManifestHash>,
     pub observer_value: Option<TransportValue>,
+    pub poison: Option<TransportPoisonError>,
     pub error_kind: Option<RunFailureKind>,
     pub error: Option<String>,
 }
@@ -465,7 +467,7 @@ pub trait Runner {
     async fn run(&self, request: RunRequest, progress: roam::Tx<StoreProgress>) -> RunResult;
 
     /// Evaluate a shipped discovery probe on the executor host.
-    async fn discover(&self, request: DiscoverRequest) -> Result<DiscoverResult, String>;
+    async fn discover(&self, request: DiscoverRequest) -> DiscoverResult;
 }
 
 #[cfg(test)]

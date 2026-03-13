@@ -4534,7 +4534,7 @@ impl Engine {
                 .mounts
                 .iter()
                 .map(|(path, value)| {
-                    Ok(ExecMount {
+                    Ok::<ExecMount, PoisonError>(ExecMount {
                         path: path.clone(),
                         value: self.snapshot_value(value.clone())?,
                     })

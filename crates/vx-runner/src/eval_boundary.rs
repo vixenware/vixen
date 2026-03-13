@@ -13,8 +13,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use vx_eval::{
-    BlobValue, DiscoveredValue, Engine, MapValue, PathValue, StructValue, TransportValue,
-    TreeValue, Value, verify_host_obligations,
+    BlobValue, DemandChain, DiscoveredValue, Engine, MapValue, PathValue, PoisonError, PoisonKind,
+    StructValue, TransportPoisonError, TransportValue, TreeValue, Value, verify_host_obligations,
 };
 use vx_runner_proto::{DiscoverRequest, RunEvalPayload};
 use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
@@ -22,7 +22,8 @@ use vx_store_proto::{
     BlobRef, CasNode, ContentHash, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient,
 };
 
-type BoundaryFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
+type BoundaryFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, TransportPoisonError>> + Send + 'a>>;
 
 // r[impl exec.observer.materialization]
 pub fn commit_value_to_transport<'a>(
@@ -31,7 +32,7 @@ pub fn commit_value_to_transport<'a>(
 ) -> BoundaryFuture<'a, TransportValue> {
     Box::pin(async move {
         let value = commit_value(cas, value).await?;
-        TransportValue::try_from(&value)
+        TransportValue::try_from(&value).map_err(boundary_user_poison)
     })
 }
 
@@ -57,7 +58,7 @@ pub fn evaluate_shipped_observer<'a>(
                 sandbox_tree_value(sandbox_root),
             ],
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| TransportPoisonError::from(&error))?;
 
         commit_value_to_transport(cas, observed).await.map(Some)
     })
@@ -75,20 +76,32 @@ pub fn evaluate_shipped_discover<'a>(
 ) -> BoundaryFuture<'a, TransportValue> {
     Box::pin(async move {
         let discovered = Engine::invoke_shipped_discover(&request.module, &request.probe)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| TransportPoisonError::from(&error))?;
         commit_value_to_transport(cas, discovered).await
     })
+}
+
+fn boundary_user_poison(message: impl Into<String>) -> TransportPoisonError {
+    TransportPoisonError::from(&PoisonError::new(
+        PoisonKind::UserFail,
+        message,
+        DemandChain::default(),
+    ))
 }
 
 fn commit_value<'a>(cas: &'a StoreClient, value: Value) -> BoundaryFuture<'a, Value> {
     Box::pin(async move {
         match value {
-            Value::Pending(_) => Err("pending values cannot cross the executor boundary".into()),
-            Value::Path(path) => Err(format!(
+            Value::Pending(_) => Err(boundary_user_poison(
+                "pending values cannot cross the executor boundary",
+            )),
+            Value::Path(path) => Err(boundary_user_poison(format!(
                 "Path values cannot cross the executor boundary: {}",
                 path.as_str()
+            ))),
+            Value::Host(_) => Err(boundary_user_poison(
+                "Host values cannot cross the executor boundary",
             )),
-            Value::Host(_) => Err("Host values cannot cross the executor boundary".into()),
             Value::Discovered(discovered) => {
                 let value = commit_value(cas, *discovered.value).await?;
                 Ok(Value::Discovered(DiscoveredValue {
@@ -170,8 +183,9 @@ fn commit_blob<'a>(cas: &'a StoreClient, blob: BlobValue) -> BoundaryFuture<'a, 
                 (store_blob_bytes(cas, bytes.as_ref()).await?, executable)
             }
             BlobValue::FsFile { path, executable } => {
-                let bytes = fs::read(path.as_str())
-                    .map_err(|error| format!("failed to read {}: {error}", path.as_str()))?;
+                let bytes = fs::read(path.as_str()).map_err(|error| {
+                    boundary_user_poison(format!("failed to read {}: {error}", path.as_str()))
+                })?;
                 (store_blob_bytes(cas, &bytes).await?, executable)
             }
             BlobValue::Store {
@@ -208,9 +222,11 @@ fn commit_inline_tree<'a>(
         let mut dir_entries = Vec::with_capacity(sorted.len());
         let mut total_size = 0u64;
         for (name, value) in sorted {
-            validate_tree_entry_name(name.as_ref())?;
+            validate_tree_entry_name(name.as_ref()).map_err(boundary_user_poison)?;
             if !names.insert(name.to_string()) {
-                return Err(format!("duplicate tree entry '{name}'"));
+                return Err(boundary_user_poison(format!(
+                    "duplicate tree entry '{name}'"
+                )));
             }
             let (kind, size) = commit_tree_entry(cas, value).await?;
             total_size += size;
@@ -228,14 +244,13 @@ fn commit_fs_tree<'a>(
     root: PathValue,
 ) -> BoundaryFuture<'a, (NodeHash, u64)> {
     Box::pin(async move {
-        let mut read_dir = fs::read_dir(root.as_str())
-            .map_err(|error| format!("failed to read {}: {error}", root.as_str()))?;
+        let mut read_dir = fs::read_dir(root.as_str()).map_err(|error| {
+            boundary_user_poison(format!("failed to read {}: {error}", root.as_str()))
+        })?;
         let mut names = Vec::new();
-        while let Some(entry) = read_dir
-            .next()
-            .transpose()
-            .map_err(|error| format!("failed to read {}: {error}", root.as_str()))?
-        {
+        while let Some(entry) = read_dir.next().transpose().map_err(|error| {
+            boundary_user_poison(format!("failed to read {}: {error}", root.as_str()))
+        })? {
             names.push(entry.file_name().to_string_lossy().to_string());
         }
         names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
@@ -243,18 +258,21 @@ fn commit_fs_tree<'a>(
         let mut dir_entries = Vec::with_capacity(names.len());
         let mut total_size = 0u64;
         for name in names {
-            validate_tree_entry_name(&name)?;
+            validate_tree_entry_name(&name).map_err(boundary_user_poison)?;
             let child = root.join(&name);
-            let metadata = fs::metadata(child.as_str())
-                .map_err(|error| format!("failed to stat {}: {error}", child.as_str()))?;
+            let metadata = fs::metadata(child.as_str()).map_err(|error| {
+                boundary_user_poison(format!("failed to stat {}: {error}", child.as_str()))
+            })?;
             let (kind, size) = if metadata.is_dir() {
                 let (hash, total_size) = commit_fs_tree(cas, child).await?;
                 (DirEntryKind::Dir { hash, total_size }, total_size)
             } else {
-                let bytes = fs::read(child.as_str())
-                    .map_err(|error| format!("failed to read {}: {error}", child.as_str()))?;
+                let bytes = fs::read(child.as_str()).map_err(|error| {
+                    boundary_user_poison(format!("failed to read {}: {error}", child.as_str()))
+                })?;
                 let blob_ref = store_blob_bytes(cas, &bytes).await?;
-                let executable = is_executable_path(child.as_str())?;
+                let executable =
+                    is_executable_path(child.as_str()).map_err(boundary_user_poison)?;
                 let size = blob_ref_size(&blob_ref);
                 (dir_entry_kind_from_blob_ref(&blob_ref, executable), size)
             };
@@ -278,7 +296,10 @@ fn commit_tree_entry<'a>(
                     }
                     BlobValue::FsFile { path, executable } => {
                         let bytes = fs::read(path.as_str()).map_err(|error| {
-                            format!("failed to read {}: {error}", path.as_str())
+                            boundary_user_poison(format!(
+                                "failed to read {}: {error}",
+                                path.as_str()
+                            ))
                         })?;
                         (store_blob_bytes(cas, &bytes).await?, executable)
                     }
@@ -294,24 +315,29 @@ fn commit_tree_entry<'a>(
                 let (hash, total_size) = commit_tree(cas, tree).await?;
                 Ok((DirEntryKind::Dir { hash, total_size }, total_size))
             }
-            other => Err(format!(
+            other => Err(boundary_user_poison(format!(
                 "tree entries must be Blob or Tree, got {}",
                 other.type_name()
-            )),
+            ))),
         }
     })
 }
 
-async fn store_blob_bytes(cas: &StoreClient, bytes: &[u8]) -> Result<BlobRef, String> {
+async fn store_blob_bytes(
+    cas: &StoreClient,
+    bytes: &[u8],
+) -> Result<BlobRef, TransportPoisonError> {
     let prepared = prepare_blob(bytes);
-    store_prepared_blob(cas, &prepared, bytes).await
+    store_prepared_blob(cas, &prepared, bytes)
+        .await
+        .map_err(boundary_user_poison)
 }
 
 async fn store_directory_node(
     cas: &StoreClient,
     entries: Vec<DirEntry>,
     total_size: u64,
-) -> Result<(NodeHash, u64), String> {
+) -> Result<(NodeHash, u64), TransportPoisonError> {
     let directory = CasNode::Directory(DirectoryNode {
         entries,
         total_size,
@@ -319,20 +345,27 @@ async fn store_directory_node(
     let (bytes, hash) = directory.to_bytes_and_hash();
     cas.put_node(hash, bytes)
         .await
-        .map_err(|error| format!("{error:?}"))?;
+        .map_err(|error| boundary_user_poison(format!("{error:?}")))?;
     Ok((hash, total_size))
 }
 
-async fn directory_total_size(cas: &StoreClient, root: NodeHash) -> Result<u64, String> {
+async fn directory_total_size(
+    cas: &StoreClient,
+    root: NodeHash,
+) -> Result<u64, TransportPoisonError> {
     let bytes = cas
         .get_node(root)
         .await
-        .map_err(|error| format!("{error:?}"))?
-        .ok_or_else(|| format!("directory node {root} not found in CAS"))?;
-    let node = CasNode::from_bytes(&bytes).map_err(|error| error.to_string())?;
+        .map_err(|error| boundary_user_poison(format!("{error:?}")))?
+        .ok_or_else(|| boundary_user_poison(format!("directory node {root} not found in CAS")))?;
+    let node =
+        CasNode::from_bytes(&bytes).map_err(|error| boundary_user_poison(error.to_string()))?;
     match node {
         CasNode::Directory(directory) => Ok(directory.total_size),
-        other => Err(format!("expected DirectoryNode at {root}, got {:?}", other)),
+        other => Err(boundary_user_poison(format!(
+            "expected DirectoryNode at {root}, got {:?}",
+            other
+        ))),
     }
 }
 
@@ -505,7 +538,7 @@ mod tests {
             .await
             .expect_err("path should be rejected");
 
-        assert!(error.contains("Path values cannot cross"));
+        assert!(error.message.contains("Path values cannot cross"));
     }
 
     #[tokio::test]
