@@ -536,7 +536,12 @@ async fn ssh_control_output(
     args: &[&str],
 ) -> Result<String> {
     let mut command = ssh_control_command(control_path, target);
-    command.args(args);
+    let remote_command = args
+        .iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    command.arg(remote_command);
     let output = command.output().await?;
     if !output.status.success() {
         eyre::bail!(
