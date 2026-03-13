@@ -1850,6 +1850,96 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_vx_routes_implicit_ssh_executor_classes() {
+    let discovered = Value::Discovered(vx_eval::DiscoveredValue {
+        value: Box::new(Value::Blob(BlobValue::from_string("present"))),
+        obligations: Arc::from([]),
+    });
+    let transport = TransportValue::try_from(&discovered)
+        .expect("discovered value should serialize for fake runner");
+    let seen = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+
+    let env = BuildServiceDaemonTestEnv::with_build_vx_executor_factory(
+        FakeRunnerBehavior::PanicOnBoundaryUse,
+        {
+            let seen = Arc::clone(&seen);
+            move |store_client, runner_client| {
+                crate::service::BuildVxExecutors::local_default(store_client, runner_client)
+                    .with_ssh_bootstrap_factory({
+                        let seen = Arc::clone(&seen);
+                        let transport = transport.clone();
+                        move |class_label, target| {
+                            let seen = Arc::clone(&seen);
+                            let transport = transport.clone();
+                            Box::pin(async move {
+                                seen.lock()
+                                    .expect("seen lock")
+                                    .push((class_label.clone(), target));
+                                let fake_runner =
+                                    FakeRunnerHandle::new(FakeRunnerBehavior::Discover(transport))
+                                        .await;
+                                let runner_handle = Arc::new(fake_runner.connect().await);
+                                let runner_virtual = runner_handle
+                                    .boot_and_connect()
+                                    .await
+                                    .expect("failed to boot/connect fake runner");
+                                std::mem::forget(fake_runner);
+                                Ok(crate::service::SshBootstrapExecutor {
+                                    id: format!("ssh_bootstrap:{class_label}"),
+                                    backend: vx_eval::ExecutorBackendKind::SshBootstrap,
+                                    runner: Arc::new(RunnerClient::new(runner_virtual)),
+                                    store: None,
+                                    runner_handle: Some(runner_handle),
+                                    store_handle: None,
+                                })
+                            })
+                        }
+                    })
+            }
+        },
+    )
+    .await;
+    let workspace = TempDir::new().expect("workspace");
+    let workspace_root = Utf8Path::from_path(workspace.path()).expect("utf8 workspace");
+
+    fs::write(
+        workspace.path().join("build.vx"),
+        r#"
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  Tree {
+    @tool.txt: discover(executor_class("ssh:toast"), (host) => host.read("C:/Windows/win.ini")),
+  }
+}
+"#,
+    )
+    .expect("write build.vx");
+
+    let result = env
+        .service
+        .do_build(BuildRequest {
+            project_path: workspace_root.to_owned(),
+            build_file_path: None,
+            release: false,
+        })
+        .await
+        .expect("build should succeed");
+
+    assert!(
+        result.success,
+        "build unexpectedly failed: {:?}",
+        result.failure
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(".vx/build/tool.txt")).expect("output"),
+        "present"
+    );
+    assert_eq!(
+        seen.lock().expect("seen lock").as_slice(),
+        &[("ssh:toast".to_string(), "toast".to_string())]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn build_vx_accepts_discovered_top_level_trees() {
     let discovered = Value::Discovered(vx_eval::DiscoveredValue {
         value: Box::new(Value::Tree(TreeValue::Inline(Arc::from([(

@@ -92,12 +92,64 @@ pub(crate) struct BuildVxExecutor {
     runner: Option<Arc<RunnerClient>>,
     store: Option<Arc<StoreClient>>,
     unavailable_reason: Option<String>,
+    _runner_handle: Option<Arc<ServiceHandle>>,
+    _store_handle: Option<Arc<ServiceHandle>>,
 }
 
 #[derive(Clone)]
 pub(crate) struct BuildVxExecutors {
+    state: Arc<std::sync::Mutex<BuildVxExecutorsState>>,
+    ssh_bootstrap_factory: Option<SshBootstrapFactory>,
+}
+
+struct BuildVxExecutorsState {
     executors: HashMap<String, BuildVxExecutor>,
     class_aliases: HashMap<String, String>,
+}
+
+pub(crate) struct SshBootstrapExecutor {
+    pub(crate) id: String,
+    pub(crate) backend: ExecutorBackendKind,
+    pub(crate) runner: Arc<RunnerClient>,
+    pub(crate) store: Option<Arc<StoreClient>>,
+    pub(crate) runner_handle: Option<Arc<ServiceHandle>>,
+    pub(crate) store_handle: Option<Arc<ServiceHandle>>,
+}
+
+impl SshBootstrapExecutor {
+    fn into_build_vx_executor(self) -> BuildVxExecutor {
+        BuildVxExecutor {
+            id: self.id,
+            backend: self.backend,
+            runner: Some(self.runner),
+            store: self.store,
+            unavailable_reason: None,
+            _runner_handle: self.runner_handle,
+            _store_handle: self.store_handle,
+        }
+    }
+}
+
+impl From<SshBootstrapExecutor> for BuildVxExecutor {
+    fn from(value: SshBootstrapExecutor) -> Self {
+        value.into_build_vx_executor()
+    }
+}
+
+type SshBootstrapFactory = Arc<
+    dyn Fn(
+            String,
+            String,
+        ) -> Pin<
+            Box<dyn Future<Output = std::result::Result<SshBootstrapExecutor, String>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+fn implicit_ssh_class_target(class_label: &str) -> Option<&str> {
+    class_label
+        .strip_prefix("ssh:")
+        .filter(|target| !target.is_empty())
 }
 
 impl BuildVxExecutors {
@@ -109,11 +161,31 @@ impl BuildVxExecutors {
             runner: Some(runner),
             store: Some(store),
             unavailable_reason: None,
+            _runner_handle: None,
+            _store_handle: None,
         };
         Self {
-            executors: HashMap::from([(executor_id.clone(), executor)]),
-            class_aliases: HashMap::from([("default".to_string(), executor_id.clone())]),
+            state: Arc::new(std::sync::Mutex::new(BuildVxExecutorsState {
+                executors: HashMap::from([(executor_id.clone(), executor)]),
+                class_aliases: HashMap::from([("default".to_string(), executor_id.clone())]),
+            })),
+            ssh_bootstrap_factory: None,
         }
+    }
+
+    pub(crate) fn with_ssh_bootstrap_factory(
+        mut self,
+        factory: impl Fn(
+            String,
+            String,
+        ) -> Pin<
+            Box<dyn Future<Output = std::result::Result<SshBootstrapExecutor, String>> + Send>,
+        > + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.ssh_bootstrap_factory = Some(Arc::new(factory));
+        self
     }
 
     pub(crate) fn register_class_alias(
@@ -121,12 +193,14 @@ impl BuildVxExecutors {
         class_label: impl Into<String>,
         executor_id: &str,
     ) -> std::result::Result<(), String> {
-        if !self.executors.contains_key(executor_id) {
+        let mut state = self.state.lock().expect("build_vx_executors poisoned");
+        if !state.executors.contains_key(executor_id) {
             return Err(format!(
                 "cannot alias build.vx executor class to unknown executor {executor_id}"
             ));
         }
-        self.class_aliases
+        state
+            .class_aliases
             .insert(class_label.into(), executor_id.to_string());
         Ok(())
     }
@@ -149,18 +223,29 @@ impl BuildVxExecutors {
         runner: Arc<RunnerClient>,
         store: Option<Arc<StoreClient>>,
     ) {
-        let executor_id = executor_id.into();
-        self.executors.insert(
-            executor_id.clone(),
+        self.register_class_executor(
+            class_label,
             BuildVxExecutor {
-                id: executor_id.clone(),
+                id: executor_id.into(),
                 backend,
                 runner: Some(runner),
                 store,
                 unavailable_reason: None,
+                _runner_handle: None,
+                _store_handle: None,
             },
         );
-        self.class_aliases.insert(class_label.into(), executor_id);
+    }
+
+    pub(crate) fn register_class_executor(
+        &mut self,
+        class_label: impl Into<String>,
+        executor: BuildVxExecutor,
+    ) {
+        let executor_id = executor.id.clone();
+        let mut state = self.state.lock().expect("build_vx_executors poisoned");
+        state.executors.insert(executor_id.clone(), executor);
+        state.class_aliases.insert(class_label.into(), executor_id);
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -172,7 +257,8 @@ impl BuildVxExecutors {
         unavailable_reason: impl Into<String>,
     ) {
         let executor_id = executor_id.into();
-        self.executors.insert(
+        let mut state = self.state.lock().expect("build_vx_executors poisoned");
+        state.executors.insert(
             executor_id.clone(),
             BuildVxExecutor {
                 id: executor_id.clone(),
@@ -180,20 +266,23 @@ impl BuildVxExecutors {
                 runner: None,
                 store: None,
                 unavailable_reason: Some(unavailable_reason.into()),
+                _runner_handle: None,
+                _store_handle: None,
             },
         );
-        self.class_aliases.insert(class_label.into(), executor_id);
+        state.class_aliases.insert(class_label.into(), executor_id);
     }
 
-    fn resolve_executor(
+    fn resolve_executor_locked<'a>(
         &self,
+        state: &'a BuildVxExecutorsState,
         selector: &ExecutorSelector,
-    ) -> std::result::Result<&BuildVxExecutor, String> {
+    ) -> std::result::Result<&'a BuildVxExecutor, String> {
         match selector.backend {
-            ExecutorBackendKind::Class => self
+            ExecutorBackendKind::Class => state
                 .class_aliases
                 .get(&selector.id)
-                .and_then(|executor_id| self.executors.get(executor_id))
+                .and_then(|executor_id| state.executors.get(executor_id))
                 .ok_or_else(|| {
                     format!(
                         "build.vx executor {}:{} is not configured",
@@ -201,7 +290,7 @@ impl BuildVxExecutors {
                         selector.id
                     )
                 }),
-            _ => self
+            _ => state
                 .executors
                 .get(&selector.id)
                 .filter(|executor| executor.backend == selector.backend)
@@ -215,11 +304,58 @@ impl BuildVxExecutors {
         }
     }
 
-    fn runner_for(
+    async fn ensure_executor(
+        &self,
+        selector: &ExecutorSelector,
+    ) -> std::result::Result<(), String> {
+        {
+            let state = self.state.lock().expect("build_vx_executors poisoned");
+            if self.resolve_executor_locked(&state, selector).is_ok() {
+                return Ok(());
+            }
+        }
+
+        if selector.backend != ExecutorBackendKind::Class {
+            return Err(format!(
+                "build.vx executor {}:{} is not configured",
+                selector.backend.as_tag(),
+                selector.id
+            ));
+        }
+
+        let Some(target) = implicit_ssh_class_target(&selector.id) else {
+            return Err(format!(
+                "build.vx executor {}:{} is not configured",
+                selector.backend.as_tag(),
+                selector.id
+            ));
+        };
+        let Some(factory) = &self.ssh_bootstrap_factory else {
+            return Err(format!(
+                "build.vx executor class:{} is not available on this host",
+                selector.id
+            ));
+        };
+        let class_label = selector.id.clone();
+        let synthesized = factory(class_label.clone(), target.to_string()).await?;
+        let mut state = self.state.lock().expect("build_vx_executors poisoned");
+        if self.resolve_executor_locked(&state, selector).is_err() {
+            let executor_id = synthesized.id.clone();
+            state
+                .executors
+                .insert(executor_id.clone(), synthesized.into_build_vx_executor());
+            state.class_aliases.insert(class_label, executor_id);
+        }
+        Ok(())
+    }
+
+    async fn runner_for(
         &self,
         selector: &ExecutorSelector,
     ) -> std::result::Result<Arc<RunnerClient>, String> {
-        let executor = self.resolve_executor(selector)?;
+        self.ensure_executor(selector).await?;
+        let state = self.state.lock().expect("build_vx_executors poisoned");
+        let executor = self.resolve_executor_locked(&state, selector)?;
         if let Some(runner) = &executor.runner {
             return Ok(Arc::clone(runner));
         }
@@ -231,11 +367,13 @@ impl BuildVxExecutors {
         }))
     }
 
-    fn store_for(
+    async fn store_for(
         &self,
         selector: &ExecutorSelector,
     ) -> std::result::Result<Option<Arc<StoreClient>>, String> {
-        let executor = self.resolve_executor(selector)?;
+        self.ensure_executor(selector).await?;
+        let state = self.state.lock().expect("build_vx_executors poisoned");
+        let executor = self.resolve_executor_locked(&state, selector)?;
         Ok(executor.store.clone())
     }
 }
@@ -1855,9 +1993,11 @@ async fn run_build_vx_exec_via_runner(
     let demand_chain = request.demand_chain.clone();
     let exec = executors
         .runner_for(&request.executor)
+        .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     let exec_store = executors
         .store_for(&request.executor)
+        .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     let target_store = exec_store.as_deref().unwrap_or(store);
     let mut args = request.args.into_iter();
@@ -1980,9 +2120,11 @@ async fn run_build_vx_discover_via_runner(
     let demand_chain = request.demand_chain.clone();
     let exec = executors
         .runner_for(&request.executor)
+        .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     let exec_store = executors
         .store_for(&request.executor)
+        .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     let target_store = exec_store.as_deref().unwrap_or(store);
     let probe = if std::ptr::eq(target_store, store) {

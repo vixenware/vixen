@@ -520,6 +520,27 @@ async fn connect_ssh_bootstrap_runner(
     })
 }
 
+#[cfg(unix)]
+async fn bootstrap_ssh_executor(
+    vx_home: &Utf8PathBuf,
+    class_label: &str,
+    target: &str,
+) -> Result<crate::service::SshBootstrapExecutor> {
+    let connection = connect_ssh_bootstrap_runner(vx_home, class_label, target).await?;
+    let store_handle = Arc::new(connection.store_handle);
+    let runner_handle = Arc::new(connection.runner_handle);
+    let store_virtual = store_handle.boot_and_connect().await?;
+    let runner_virtual = runner_handle.boot_and_connect().await?;
+    Ok(crate::service::SshBootstrapExecutor {
+        id: format!("ssh_bootstrap:{class_label}"),
+        backend: vx_eval::ExecutorBackendKind::SshBootstrap,
+        runner: Arc::new(RunnerClient::new(runner_virtual)),
+        store: Some(Arc::new(StoreClient::new(store_virtual))),
+        runner_handle: Some(runner_handle),
+        store_handle: Some(store_handle),
+    })
+}
+
 /// Resolve CLI args + env vars + defaults into concrete Args.
 fn resolve_args(cli: CliArgs) -> Result<Args> {
     let vx_home = cli
@@ -711,6 +732,19 @@ async fn ensure_services(
         Arc::clone(&local_store),
         Arc::clone(&exec),
     );
+    #[cfg(unix)]
+    {
+        let vx_home = args.vx_home.clone();
+        build_vx_executors =
+            build_vx_executors.with_ssh_bootstrap_factory(move |class_label, target| {
+                let vx_home = vx_home.clone();
+                Box::pin(async move {
+                    bootstrap_ssh_executor(&vx_home, &class_label, &target)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+            });
+    }
     let mut runner_handles = vec![Arc::new(runner_handle)];
 
     for config in &args.build_vx_executor_classes {
@@ -751,24 +785,10 @@ async fn ensure_services(
                     .expect("ssh bootstrap executor target should be present");
                 #[cfg(unix)]
                 {
-                    let connection =
-                        connect_ssh_bootstrap_runner(&args.vx_home, &config.class_label, target)
-                            .await?;
-                    let store_handle = Arc::new(connection.store_handle);
-                    let runner_handle = Arc::new(connection.runner_handle);
-                    let store_virtual = store_handle.boot_and_connect().await?;
-                    let runner_virtual = runner_handle.boot_and_connect().await?;
-                    let store = Arc::new(StoreClient::new(store_virtual));
-                    let runner = Arc::new(RunnerClient::new(runner_virtual));
-                    build_vx_executors.register_class_runner_with_store(
-                        config.class_label.clone(),
-                        format!("ssh_bootstrap:{}", config.class_label),
-                        vx_eval::ExecutorBackendKind::SshBootstrap,
-                        runner,
-                        Some(store),
-                    );
-                    runner_handles.push(store_handle);
-                    runner_handles.push(runner_handle);
+                    let executor =
+                        bootstrap_ssh_executor(&args.vx_home, &config.class_label, target).await?;
+                    build_vx_executors
+                        .register_class_executor(config.class_label.clone(), executor.into());
                 }
                 #[cfg(not(unix))]
                 {
