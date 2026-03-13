@@ -499,7 +499,7 @@ async fn detect_ssh_bootstrap_target(target: &str) -> Result<SshBootstrapTargetI
                 "powershell",
                 "-NoProfile",
                 "-Command",
-                "[Environment]::GetFolderPath(\"UserProfile\")",
+                "[Environment]::GetFolderPath('UserProfile')",
             ],
         )
         .await?;
