@@ -195,8 +195,20 @@ pub(crate) fn parse_build_vx_executor_classes(
 }
 
 #[cfg(unix)]
+fn ssh_bootstrap_label_slug(class_label: &str) -> String {
+    class_label
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => ch,
+            _ => '-',
+        })
+        .collect()
+}
+
+#[cfg(unix)]
 fn ssh_bootstrap_paths(remote_home: &str, class_label: &str) -> SshBootstrapPaths {
-    let base = format!("{remote_home}/.cache/vixen/ssh-bootstrap/{class_label}");
+    let class_slug = ssh_bootstrap_label_slug(class_label);
+    let base = format!("{remote_home}/.cache/vixen/ssh-bootstrap/{class_slug}");
     let vx_home = format!("{base}/vx-home");
     SshBootstrapPaths {
         checkout_dir: format!("{base}/repo"),
@@ -210,12 +222,13 @@ fn ssh_bootstrap_paths(remote_home: &str, class_label: &str) -> SshBootstrapPath
 
 #[cfg(unix)]
 fn ssh_bootstrap_local_endpoint(class_label: &str, service_name: &str) -> Endpoint {
+    let class_slug = ssh_bootstrap_label_slug(class_label);
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros();
     Endpoint::Local(Utf8PathBuf::from(format!(
-        "/tmp/vx-ssh-{class_label}-{service_name}-{}-{unique}.sock",
+        "/tmp/vx-ssh-{class_slug}-{service_name}-{}-{unique}.sock",
         std::process::id()
     )))
 }
@@ -332,9 +345,9 @@ fn allocate_loopback_port() -> Result<u16> {
 async fn ssh_bootstrap_repo_host(target: &str) -> Result<Option<&'static str>> {
     let status = moire::process::Command::new("ssh")
         .arg(target)
-        .arg("python3")
-        .arg("-c")
-        .arg("import socket, sys; socket.gethostbyname('host.docker.internal'); sys.exit(0)")
+        .arg("sh")
+        .arg("-lc")
+        .arg("python3 -c 'import socket, sys; socket.gethostbyname(\"host.docker.internal\"); sys.exit(0)'")
         .status()
         .await?;
     if status.success() {
@@ -424,7 +437,8 @@ async fn connect_ssh_bootstrap_runner(
         .await?
         .unwrap_or("127.0.0.1");
     let repo_url = ssh_bootstrap_git_url(&repo_root, git_host, git_port)?;
-    let log_path = vx_home.join(format!("runner-ssh-bootstrap-{class_label}.log"));
+    let class_slug = ssh_bootstrap_label_slug(class_label);
+    let log_path = vx_home.join(format!("runner-ssh-bootstrap-{class_slug}.log"));
     let log_file = OpenOptions::new()
         .create(true)
         .append(true)

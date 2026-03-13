@@ -111,6 +111,25 @@ fn ssh_bootstrap_paths_use_a_stable_remote_layout() {
 
 #[cfg(unix)]
 #[test]
+fn ssh_bootstrap_paths_slug_implicit_ssh_class_labels() {
+    assert_eq!(
+        crate::ssh_bootstrap_paths("/home/amos", "ssh:orb"),
+        crate::SshBootstrapPaths {
+            checkout_dir: "/home/amos/.cache/vixen/ssh-bootstrap/ssh-orb/repo".to_string(),
+            vx_home: "/home/amos/.cache/vixen/ssh-bootstrap/ssh-orb/vx-home".to_string(),
+            store_root: "/home/amos/.cache/vixen/ssh-bootstrap/ssh-orb/vx-home/store".to_string(),
+            store_socket: "/home/amos/.cache/vixen/ssh-bootstrap/ssh-orb/vx-home/store.sock"
+                .to_string(),
+            vfsd_socket: "/home/amos/.cache/vixen/ssh-bootstrap/ssh-orb/vx-home/vfsd.sock"
+                .to_string(),
+            runner_socket: "/home/amos/.cache/vixen/ssh-bootstrap/ssh-orb/vx-home/runner.sock"
+                .to_string(),
+        }
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn ssh_bootstrap_git_url_uses_repo_basename() {
     let url = crate::ssh_bootstrap_git_url(
         Utf8Path::new("/Users/amos/bearcove/vixen"),
