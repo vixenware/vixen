@@ -384,7 +384,7 @@ fn ssh_bootstrap_windows_command(
             "git -C $checkoutDir fetch origin --tags --prune; ",
             "git -C $checkoutDir checkout --detach $commit; ",
             "$manifests = @((Join-Path $checkoutDir 'crates\\vx\\Cargo.toml'), (Join-Path $checkoutDir 'crates\\vxd\\Cargo.toml')); ",
-            "foreach ($manifest in $manifests) {{ if (Test-Path $manifest) {{ $text = Get-Content $manifest -Raw; $updated = $text -replace 'tree-sitter-vixen = \\{{ path = \"/Users/amos/bearcove/tree-sitter-vixen\" \\}}\\r?\\n?', ''; if ($updated -ne $text) {{ Set-Content -Path $manifest -Value $updated -NoNewline }} }} }}; ",
+            "foreach ($manifest in $manifests) {{ if (Test-Path $manifest) {{ $lines = Get-Content $manifest; $updated = @($lines | Where-Object {{ $_ -notlike 'tree-sitter-vixen = *' }}); if ($updated.Count -ne $lines.Count) {{ Set-Content -Path $manifest -Value $updated }} }} }}; ",
             "cargo build --manifest-path (Join-Path $checkoutDir 'Cargo.toml') -p vx-store -p vx-vfsd -p vx-runner; ",
             "$env:VX_HOME = $vxHome; ",
             "$storeExe = Join-Path $checkoutDir 'target\\debug\\vx-store.exe'; ",
