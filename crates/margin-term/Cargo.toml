@@ -11,7 +11,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 margin = { workspace = true }
 unicode-width = { workspace = true }
-arborium-theme = { path = "/Users/amos/bearcove/arborium/crates/arborium-theme" }
+arborium-theme = { workspace = true }
 
 [lints]
 workspace = true

@@ -113,6 +113,9 @@ owo-colors = { version = "4", features = ["supports-color"] }
 strip-ansi-escapes = "0.2"
 unicode-width = "0.2"
 indicatif = "0.18"
+arborium = { version = "2.16.0", default-features = false }
+arborium-highlight = "2.16.0"
+arborium-theme = "2.16.0"
 
 # build utilities
 petgraph = "0.8"

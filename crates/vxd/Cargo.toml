@@ -57,9 +57,9 @@ tempfile = { workspace = true }
 tar = { workspace = true }
 flate2 = "1"
 ariadne = { version = "0.6", features = ["auto-color"] }
-arborium = { path = "/Users/amos/bearcove/arborium/crates/arborium", default-features = false }
-arborium-highlight = { path = "/Users/amos/bearcove/arborium/crates/arborium-highlight" }
-arborium-theme = { path = "/Users/amos/bearcove/arborium/crates/arborium-theme" }
+arborium = { workspace = true }
+arborium-highlight = { workspace = true }
+arborium-theme = { workspace = true }
 concolor = { version = "0.1", features = ["api"] }
 tree-sitter-vixen = { path = "/Users/amos/bearcove/tree-sitter-vixen" }
 
