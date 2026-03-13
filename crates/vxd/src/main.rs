@@ -119,6 +119,32 @@ struct SshBootstrapPaths {
     runner_socket: String,
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SshBootstrapWindowsPaths {
+    checkout_dir: String,
+    vx_home: String,
+    store_root: String,
+    store_endpoint: String,
+    vfsd_endpoint: String,
+    runner_endpoint: String,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SshBootstrapTargetPlatform {
+    Unix,
+    Windows,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SshBootstrapTargetInfo {
+    platform: SshBootstrapTargetPlatform,
+    home: String,
+    repo_host: String,
+}
+
 pub(crate) fn parse_build_vx_executor_classes(
     value: &str,
 ) -> Result<Vec<BuildVxExecutorClassConfig>> {
@@ -208,6 +234,16 @@ fn ssh_bootstrap_label_slug(class_label: &str) -> String {
 }
 
 #[cfg(unix)]
+fn ssh_bootstrap_remote_port_base(class_label: &str) -> u16 {
+    let mut hash = 2_166_136_261_u32;
+    for byte in class_label.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    40_000 + (hash % 20_000) as u16
+}
+
+#[cfg(unix)]
 fn ssh_bootstrap_paths(remote_home: &str, class_label: &str) -> SshBootstrapPaths {
     let class_slug = ssh_bootstrap_label_slug(class_label);
     let base = format!("{remote_home}/.cache/vixen/ssh-bootstrap/{class_slug}");
@@ -223,7 +259,23 @@ fn ssh_bootstrap_paths(remote_home: &str, class_label: &str) -> SshBootstrapPath
 }
 
 #[cfg(unix)]
-fn ssh_bootstrap_local_endpoint(class_label: &str, service_name: &str) -> Endpoint {
+fn ssh_bootstrap_windows_paths(remote_home: &str, class_label: &str) -> SshBootstrapWindowsPaths {
+    let class_slug = ssh_bootstrap_label_slug(class_label);
+    let base = format!(r"{remote_home}\.cache\vixen\ssh-bootstrap\{class_slug}");
+    let vx_home = format!(r"{base}\vx-home");
+    let port_base = ssh_bootstrap_remote_port_base(class_label);
+    SshBootstrapWindowsPaths {
+        checkout_dir: format!(r"{base}\repo"),
+        vx_home: vx_home.clone(),
+        store_root: format!(r"{vx_home}\store"),
+        store_endpoint: format!("127.0.0.1:{port_base}"),
+        vfsd_endpoint: format!("127.0.0.1:{}", port_base + 1),
+        runner_endpoint: format!("127.0.0.1:{}", port_base + 2),
+    }
+}
+
+#[cfg(unix)]
+fn ssh_bootstrap_local_socket_endpoint(class_label: &str, service_name: &str) -> Endpoint {
     let class_slug = ssh_bootstrap_label_slug(class_label);
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -233,6 +285,14 @@ fn ssh_bootstrap_local_endpoint(class_label: &str, service_name: &str) -> Endpoi
         "/tmp/vx-ssh-{class_slug}-{service_name}-{}-{unique}.sock",
         std::process::id()
     )))
+}
+
+#[cfg(unix)]
+fn ssh_bootstrap_local_tcp_endpoint() -> Result<Endpoint> {
+    Ok(Endpoint::Tcp {
+        host: "127.0.0.1".to_string(),
+        port: allocate_loopback_port()?,
+    })
 }
 
 #[cfg(unix)]
@@ -271,6 +331,61 @@ exec "$checkout_dir/target/debug/vx-runner" \
   --vfsd "unix:$vfsd_socket" \
   --listen "unix:$runner_socket"
 "#;
+
+#[cfg(unix)]
+fn powershell_single_quote(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+#[cfg(unix)]
+fn ssh_bootstrap_windows_command(
+    repo_url: &str,
+    commit: &str,
+    paths: &SshBootstrapWindowsPaths,
+) -> String {
+    let repo_url = powershell_single_quote(repo_url);
+    let commit = powershell_single_quote(commit);
+    let checkout_dir = powershell_single_quote(&paths.checkout_dir);
+    let vx_home = powershell_single_quote(&paths.vx_home);
+    let store_root = powershell_single_quote(&paths.store_root);
+    let store_endpoint = powershell_single_quote(&paths.store_endpoint);
+    let vfsd_endpoint = powershell_single_quote(&paths.vfsd_endpoint);
+    let runner_endpoint = powershell_single_quote(&paths.runner_endpoint);
+    format!(
+        concat!(
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command ",
+            "\"$ErrorActionPreference = 'Stop'; ",
+            "$repoUrl = '{repo_url}'; ",
+            "$commit = '{commit}'; ",
+            "$checkoutDir = '{checkout_dir}'; ",
+            "$vxHome = '{vx_home}'; ",
+            "$storeRoot = '{store_root}'; ",
+            "$storeEndpoint = '{store_endpoint}'; ",
+            "$vfsdEndpoint = '{vfsd_endpoint}'; ",
+            "$runnerEndpoint = '{runner_endpoint}'; ",
+            "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $checkoutDir), $vxHome, $storeRoot | Out-Null; ",
+            "if (-not (Test-Path (Join-Path $checkoutDir '.git'))) {{ if (Test-Path $checkoutDir) {{ Remove-Item -Recurse -Force $checkoutDir }}; git clone $repoUrl $checkoutDir }}; ",
+            "git -C $checkoutDir remote set-url origin $repoUrl; ",
+            "git -C $checkoutDir fetch origin --tags --prune; ",
+            "git -C $checkoutDir checkout --detach $commit; ",
+            "cargo build --manifest-path (Join-Path $checkoutDir 'Cargo.toml') -p vx-store -p vx-vfsd -p vx-runner; ",
+            "$env:VX_HOME = $vxHome; ",
+            "$storeExe = Join-Path $checkoutDir 'target\\debug\\vx-store.exe'; ",
+            "$runnerExe = Join-Path $checkoutDir 'target\\debug\\vx-runner.exe'; ",
+            "$storeProc = Start-Process -FilePath $storeExe -ArgumentList @('--root', $storeRoot, '--listen', $storeEndpoint) -PassThru; ",
+            "try {{ & $runnerExe --vx-home $vxHome --store $storeEndpoint --vfsd $vfsdEndpoint --listen $runnerEndpoint }} ",
+            "finally {{ if ($storeProc -and -not $storeProc.HasExited) {{ Stop-Process -Id $storeProc.Id -Force }} }}\""
+        ),
+        repo_url = repo_url,
+        commit = commit,
+        checkout_dir = checkout_dir,
+        vx_home = vx_home,
+        store_root = store_root,
+        store_endpoint = store_endpoint,
+        vfsd_endpoint = vfsd_endpoint,
+        runner_endpoint = runner_endpoint,
+    )
+}
 
 async fn command_output(program: &str, args: &[&str]) -> Result<String> {
     let mut command = moire::process::Command::new(program);
@@ -359,8 +474,82 @@ async fn ssh_bootstrap_repo_host(target: &str) -> Result<Option<&'static str>> {
 }
 
 #[cfg(unix)]
+fn ssh_bootstrap_client_ip(ssh_connection: &str) -> Result<String> {
+    let Some(client_ip) = ssh_connection.split_whitespace().next() else {
+        eyre::bail!("failed to parse SSH_CONNECTION: {ssh_connection:?}");
+    };
+    if client_ip.is_empty() {
+        eyre::bail!("failed to parse SSH_CONNECTION: {ssh_connection:?}");
+    }
+    Ok(client_ip.to_string())
+}
+
+#[cfg(unix)]
+async fn detect_ssh_bootstrap_target(target: &str) -> Result<SshBootstrapTargetInfo> {
+    let windows_version = moire::process::Command::new("ssh")
+        .arg(target)
+        .arg("ver")
+        .output()
+        .await?;
+    if windows_version.status.success() {
+        let home = command_output(
+            "ssh",
+            &[
+                target,
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "[Environment]::GetFolderPath(\"UserProfile\")",
+            ],
+        )
+        .await?;
+        let ssh_connection = command_output(
+            "ssh",
+            &[
+                target,
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "$env:SSH_CONNECTION",
+            ],
+        )
+        .await?;
+        return Ok(SshBootstrapTargetInfo {
+            platform: SshBootstrapTargetPlatform::Windows,
+            home,
+            repo_host: ssh_bootstrap_client_ip(&ssh_connection)?,
+        });
+    }
+
+    let home = command_output("ssh", &[target, "printenv", "HOME"]).await?;
+    if home.is_empty() {
+        eyre::bail!("ssh bootstrap target {target} returned an empty HOME");
+    }
+    let repo_host = if let Some(host) = ssh_bootstrap_repo_host(target).await? {
+        host.to_string()
+    } else {
+        let ssh_connection = command_output("ssh", &[target, "printenv", "SSH_CONNECTION"]).await?;
+        ssh_bootstrap_client_ip(&ssh_connection)?
+    };
+
+    Ok(SshBootstrapTargetInfo {
+        platform: SshBootstrapTargetPlatform::Unix,
+        home,
+        repo_host,
+    })
+}
+
+#[cfg(unix)]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(unix)]
+fn ssh_forward_spec(local: &Endpoint, remote: &str) -> Result<String> {
+    match local {
+        Endpoint::Local(path) => Ok(format!("{}:{remote}", path.as_str())),
+        Endpoint::Tcp { host, port } => Ok(format!("{host}:{port}:{remote}")),
+    }
 }
 
 async fn connect_endpoint_with_backoff(
@@ -408,37 +597,69 @@ async fn connect_ssh_bootstrap_runner(
     let repo_root = resolve_vixen_repo_root().await?;
     ensure_clean_vixen_repo(&repo_root).await?;
     let commit = command_output("git", &["-C", repo_root.as_str(), "rev-parse", "HEAD"]).await?;
-    let remote_home = command_output("ssh", &[target, "printenv", "HOME"]).await?;
-    if remote_home.is_empty() {
-        eyre::bail!("ssh bootstrap target {target} returned an empty HOME");
-    }
+    let target_info = detect_ssh_bootstrap_target(target).await?;
+    let (local_store_endpoint, local_runner_endpoint, store_remote, runner_remote, remote_command) =
+        match target_info.platform {
+            SshBootstrapTargetPlatform::Unix => {
+                let local_runner_endpoint =
+                    ssh_bootstrap_local_socket_endpoint(class_label, "runner");
+                let local_runner_socket = match &local_runner_endpoint {
+                    Endpoint::Local(path) => path.clone(),
+                    Endpoint::Tcp { .. } => unreachable!("unix ssh bootstrap uses local sockets"),
+                };
+                let local_store_endpoint =
+                    ssh_bootstrap_local_socket_endpoint(class_label, "store");
+                let local_store_socket = match &local_store_endpoint {
+                    Endpoint::Local(path) => path.clone(),
+                    Endpoint::Tcp { .. } => unreachable!("unix ssh bootstrap uses local sockets"),
+                };
+                if let Some(parent) = local_runner_socket.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                if local_runner_socket.exists() {
+                    let _ = std::fs::remove_file(local_runner_socket.as_std_path());
+                }
+                if local_store_socket.exists() {
+                    let _ = std::fs::remove_file(local_store_socket.as_std_path());
+                }
+                let paths = ssh_bootstrap_paths(&target_info.home, class_label);
+                let remote_command = format!(
+                    "sh -lc {} sh {} {} {} {} {} {} {} {}",
+                    shell_quote(SSH_BOOTSTRAP_REMOTE_SCRIPT),
+                    shell_quote("__REPO_URL__"),
+                    shell_quote(&commit),
+                    shell_quote(&paths.checkout_dir),
+                    shell_quote(&paths.vx_home),
+                    shell_quote(&paths.store_root),
+                    shell_quote(&paths.store_socket),
+                    shell_quote(&paths.vfsd_socket),
+                    shell_quote(&paths.runner_socket),
+                );
+                (
+                    local_store_endpoint,
+                    local_runner_endpoint,
+                    paths.store_socket,
+                    paths.runner_socket,
+                    remote_command,
+                )
+            }
+            SshBootstrapTargetPlatform::Windows => {
+                let local_store_endpoint = ssh_bootstrap_local_tcp_endpoint()?;
+                let local_runner_endpoint = ssh_bootstrap_local_tcp_endpoint()?;
+                let paths = ssh_bootstrap_windows_paths(&target_info.home, class_label);
+                let remote_command = ssh_bootstrap_windows_command("__REPO_URL__", &commit, &paths);
+                (
+                    local_store_endpoint,
+                    local_runner_endpoint,
+                    paths.store_endpoint,
+                    paths.runner_endpoint,
+                    remote_command,
+                )
+            }
+        };
 
-    let local_runner_endpoint = ssh_bootstrap_local_endpoint(class_label, "runner");
-    let local_runner_socket = match &local_runner_endpoint {
-        Endpoint::Local(path) => path.clone(),
-        Endpoint::Tcp { .. } => unreachable!("ssh bootstrap uses local sockets on unix"),
-    };
-    let local_store_endpoint = ssh_bootstrap_local_endpoint(class_label, "store");
-    let local_store_socket = match &local_store_endpoint {
-        Endpoint::Local(path) => path.clone(),
-        Endpoint::Tcp { .. } => unreachable!("ssh bootstrap uses local sockets on unix"),
-    };
-    if let Some(parent) = local_runner_socket.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if local_runner_socket.exists() {
-        let _ = std::fs::remove_file(local_runner_socket.as_std_path());
-    }
-    if local_store_socket.exists() {
-        let _ = std::fs::remove_file(local_store_socket.as_std_path());
-    }
-
-    let paths = ssh_bootstrap_paths(&remote_home, class_label);
     let git_port = allocate_loopback_port()?;
-    let git_host = ssh_bootstrap_repo_host(target)
-        .await?
-        .unwrap_or("127.0.0.1");
-    let repo_url = ssh_bootstrap_git_url(&repo_root, git_host, git_port)?;
+    let repo_url = ssh_bootstrap_git_url(&repo_root, &target_info.repo_host, git_port)?;
     let class_slug = ssh_bootstrap_label_slug(class_label);
     let log_path = vx_home.join(format!("runner-ssh-bootstrap-{class_slug}.log"));
     let log_file = OpenOptions::new()
@@ -452,18 +673,7 @@ async fn connect_ssh_bootstrap_runner(
     let repo_parent = repo_root
         .parent()
         .ok_or_else(|| eyre::eyre!("failed to determine parent directory for {}", repo_root))?;
-    let remote_command = format!(
-        "sh -lc {} sh {} {} {} {} {} {} {} {}",
-        shell_quote(SSH_BOOTSTRAP_REMOTE_SCRIPT),
-        shell_quote(&repo_url),
-        shell_quote(&commit),
-        shell_quote(&paths.checkout_dir),
-        shell_quote(&paths.vx_home),
-        shell_quote(&paths.store_root),
-        shell_quote(&paths.store_socket),
-        shell_quote(&paths.vfsd_socket),
-        shell_quote(&paths.runner_socket),
-    );
+    let remote_command = remote_command.replace("__REPO_URL__", &repo_url);
 
     let mut git_daemon = moire::process::Command::new("git");
     git_daemon
@@ -489,17 +699,9 @@ async fn connect_ssh_bootstrap_runner(
         .arg("-o")
         .arg("ServerAliveCountMax=3")
         .arg("-L")
-        .arg(format!(
-            "{}:{}",
-            local_store_socket.as_str(),
-            paths.store_socket.as_str()
-        ))
+        .arg(ssh_forward_spec(&local_store_endpoint, &store_remote)?)
         .arg("-L")
-        .arg(format!(
-            "{}:{}",
-            local_runner_socket.as_str(),
-            paths.runner_socket.as_str()
-        ))
+        .arg(ssh_forward_spec(&local_runner_endpoint, &runner_remote)?)
         .arg(target)
         .arg(remote_command)
         .stdin(Stdio::null())

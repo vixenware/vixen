@@ -130,6 +130,31 @@ fn ssh_bootstrap_paths_slug_implicit_ssh_class_labels() {
 
 #[cfg(unix)]
 #[test]
+fn ssh_bootstrap_windows_paths_use_tcp_layout() {
+    assert_eq!(
+        crate::ssh_bootstrap_windows_paths(r"C:\Users\faste", "ssh:toast"),
+        crate::SshBootstrapWindowsPaths {
+            checkout_dir: r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo".to_string(),
+            vx_home: r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\vx-home".to_string(),
+            store_root: r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\vx-home\store"
+                .to_string(),
+            store_endpoint: "127.0.0.1:57164".to_string(),
+            vfsd_endpoint: "127.0.0.1:57165".to_string(),
+            runner_endpoint: "127.0.0.1:57166".to_string(),
+        }
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_bootstrap_client_ip_parses_ssh_connection() {
+    let client_ip =
+        crate::ssh_bootstrap_client_ip("192.168.1.6 61205 192.168.1.145 22").expect("ip");
+    assert_eq!(client_ip, "192.168.1.6");
+}
+
+#[cfg(unix)]
+#[test]
 fn ssh_bootstrap_git_url_uses_repo_basename() {
     let url = crate::ssh_bootstrap_git_url(
         Utf8Path::new("/Users/amos/bearcove/vixen"),
