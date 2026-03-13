@@ -676,6 +676,34 @@ fn ssh_bootstrap_git_push_url(
     }
 }
 
+fn write_windows_git_ssh_wrapper(control_path: &Utf8Path) -> Result<Utf8PathBuf> {
+    let wrapper_path = Utf8PathBuf::from(format!("{control_path}.windows-git-ssh.sh"));
+    std::fs::write(
+        &wrapper_path,
+        format!(
+            r#"#!/bin/sh
+set -eu
+host=$1
+cmd=${{2-}}
+case "$cmd" in
+  git-upload-pack\ \'*\'|git-receive-pack\ \'*\')
+    prog=${{cmd%% *}}
+    path=${{cmd#*\'}}
+    path=${{path%\'}}
+    case "$path" in
+      /?:/*) path=${{path#/}} ;;
+    esac
+    cmd="$prog \"$path\""
+    ;;
+esac
+exec ssh -S {control_path} -o ControlMaster=no "$host" "$cmd"
+"#,
+            control_path = shell_quote(control_path.as_str()),
+        ),
+    )?;
+    Ok(wrapper_path)
+}
+
 #[cfg(unix)]
 async fn ensure_ssh_bootstrap_bare_repo(
     control_path: &Utf8Path,
@@ -733,20 +761,30 @@ async fn push_vixen_repo_over_ssh(
     commit: &str,
 ) -> Result<()> {
     let remote_url = ssh_bootstrap_git_push_url(target, bare_repo_dir, platform);
+    let core_ssh_command = match platform {
+        SshBootstrapTargetPlatform::Unix => {
+            format!("ssh -S {control_path} -o ControlMaster=no")
+        }
+        SshBootstrapTargetPlatform::Windows => {
+            let wrapper_path = write_windows_git_ssh_wrapper(control_path)?;
+            format!("sh {}", shell_quote(wrapper_path.as_str()),)
+        }
+    };
     let mut command = moire::process::Command::new("git");
     command
         .arg("-C")
         .arg(repo_root)
         .arg("-c")
-        .arg(format!(
-            "core.sshCommand=ssh -S {} -o ControlMaster=no",
-            control_path
-        ))
+        .arg(format!("core.sshCommand={core_ssh_command}"))
         .arg("push")
         .arg("--force")
         .arg(remote_url)
         .arg(format!("{commit}:refs/vixen-bootstrap/{commit}"));
     let output = command.output().await?;
+    if matches!(platform, SshBootstrapTargetPlatform::Windows) {
+        let wrapper_path = Utf8PathBuf::from(format!("{control_path}.windows-git-ssh.sh"));
+        let _ = std::fs::remove_file(wrapper_path.as_std_path());
+    }
     if !output.status.success() {
         eyre::bail!(
             "git push for ssh bootstrap failed with {}: {}",
