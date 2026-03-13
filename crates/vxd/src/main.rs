@@ -56,6 +56,8 @@ pub type UpstreamCaller = roam_core::DriverCaller;
 
 const RECOMMENDED_NOFILE_SOFT_LIMIT: u64 = 65_536;
 const VIXEN_REPO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
+#[cfg(unix)]
+const SSH_BOOTSTRAP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// vxd - Build orchestration daemon
 #[derive(Facet, Debug)]
@@ -509,14 +511,14 @@ async fn connect_ssh_bootstrap_runner(
     let (store_caller, store_session_handle) = connect_endpoint_with_backoff(
         &format!("vx-store[{class_label}]"),
         &local_store_endpoint,
-        Duration::from_secs(60),
+        SSH_BOOTSTRAP_CONNECT_TIMEOUT,
     )
     .await?;
 
     let (runner_caller, runner_session_handle) = connect_endpoint_with_backoff(
         &format!("vx-runner[{class_label}]"),
         &local_runner_endpoint,
-        Duration::from_secs(60),
+        SSH_BOOTSTRAP_CONNECT_TIMEOUT,
     )
     .await?;
 
