@@ -174,6 +174,18 @@ fn ssh_bootstrap_remote_script_exports_vx_home_for_runner() {
             .contains("git -C \"$checkout_dir\" remote set-url origin \"$repo_url\"")
     );
     assert!(crate::SSH_BOOTSTRAP_REMOTE_SCRIPT.contains("git -C \"$checkout_dir\" fetch origin"));
+    assert!(crate::SSH_BOOTSTRAP_REMOTE_SCRIPT.contains("tree-sitter-vixen"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_bootstrap_windows_command_scrubs_local_tree_sitter_path() {
+    let command = crate::ssh_bootstrap_windows_command(
+        "git://192.168.1.6:9418/vixen",
+        "deadbeef",
+        &crate::ssh_bootstrap_windows_paths(r"C:\Users\faste", "ssh:toast"),
+    );
+    assert!(command.contains("tree-sitter-vixen"));
 }
 
 static COLOR_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());

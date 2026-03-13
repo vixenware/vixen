@@ -320,6 +320,21 @@ fi
 git -C "$checkout_dir" remote set-url origin "$repo_url"
 git -C "$checkout_dir" fetch origin --tags --prune
 git -C "$checkout_dir" checkout --detach "$commit"
+python3 - "$checkout_dir" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+needle = 'tree-sitter-vixen = { path = "/Users/amos/bearcove/tree-sitter-vixen" }\n'
+for rel in ("crates/vx/Cargo.toml", "crates/vxd/Cargo.toml"):
+    path = root / rel
+    if not path.exists():
+        continue
+    text = path.read_text()
+    updated = text.replace(needle, "")
+    if updated != text:
+        path.write_text(updated)
+PY
 cargo build --manifest-path "$checkout_dir/Cargo.toml" -p vx-store -p vx-vfsd -p vx-runner
 rm -f "$store_socket" "$vfsd_socket" "$runner_socket"
 trap 'jobs -p | xargs -r kill || true' EXIT
@@ -368,6 +383,8 @@ fn ssh_bootstrap_windows_command(
             "git -C $checkoutDir remote set-url origin $repoUrl; ",
             "git -C $checkoutDir fetch origin --tags --prune; ",
             "git -C $checkoutDir checkout --detach $commit; ",
+            "$manifests = @((Join-Path $checkoutDir 'crates\\vx\\Cargo.toml'), (Join-Path $checkoutDir 'crates\\vxd\\Cargo.toml')); ",
+            "foreach ($manifest in $manifests) {{ if (Test-Path $manifest) {{ $text = Get-Content $manifest -Raw; $updated = $text -replace 'tree-sitter-vixen = \\{{ path = \"/Users/amos/bearcove/tree-sitter-vixen\" \\}}\\r?\\n?', ''; if ($updated -ne $text) {{ Set-Content -Path $manifest -Value $updated -NoNewline }} }} }}; ",
             "cargo build --manifest-path (Join-Path $checkoutDir 'Cargo.toml') -p vx-store -p vx-vfsd -p vx-runner; ",
             "$env:VX_HOME = $vxHome; ",
             "$storeExe = Join-Path $checkoutDir 'target\\debug\\vx-store.exe'; ",
