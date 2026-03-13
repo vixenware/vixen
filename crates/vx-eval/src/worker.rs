@@ -2082,13 +2082,18 @@ impl Engine {
                 scope_identity,
             } => {
                 let cond = self.materialize_value_deep(cond.clone(), "forcing dependency")?;
+                let (cond, obligations) = self.split_obligations(cond);
                 match cond {
-                    Value::Bool(true) => self
-                        .eval_block(then_branch, bindings.as_ref(), scope_identity.as_ref())
-                        .into_value(),
-                    Value::Bool(false) => self
-                        .eval_block(else_branch, bindings.as_ref(), scope_identity.as_ref())
-                        .into_value(),
+                    Value::Bool(true) => self.finish_obligated_result(
+                        self.eval_block(then_branch, bindings.as_ref(), scope_identity.as_ref())
+                            .into_value(),
+                        obligations,
+                    ),
+                    Value::Bool(false) => self.finish_obligated_result(
+                        self.eval_block(else_branch, bindings.as_ref(), scope_identity.as_ref())
+                            .into_value(),
+                        obligations,
+                    ),
                     other => Err(self.type_error(&format!(
                         "if condition must be Bool, got {}",
                         other.type_name()
@@ -2631,14 +2636,23 @@ impl Engine {
                     BuildResult::Value(value) => value,
                     other => return other,
                 };
+                let (cond, obligations) = self.split_obligations(cond);
 
                 match cond {
-                    Value::Bool(true) => {
-                        self.eval_block(then_branch, bindings, current_code_identity)
-                    }
-                    Value::Bool(false) => {
-                        self.eval_block(else_branch, bindings, current_code_identity)
-                    }
+                    Value::Bool(true) => BuildResult::from_result(
+                        self.finish_obligated_result(
+                            self.eval_block(then_branch, bindings, current_code_identity)
+                                .into_value(),
+                            obligations,
+                        ),
+                    ),
+                    Value::Bool(false) => BuildResult::from_result(
+                        self.finish_obligated_result(
+                            self.eval_block(else_branch, bindings, current_code_identity)
+                                .into_value(),
+                            obligations,
+                        ),
+                    ),
                     Value::Pending(_) => BuildResult::Value(self.pending_value(
                         NodeJob::If {
                             cond,
