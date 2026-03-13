@@ -313,15 +313,22 @@ struct SshBootstrapConnection {
 
 #[cfg(unix)]
 async fn emit_ssh_bootstrap_progress(
+    boot_tx: Option<&BootTx>,
     listener: &Option<Arc<ProgressListenerClient>>,
     class_label: &str,
     message: impl Into<String>,
 ) {
+    let message = message.into();
+    if let Some(boot_tx) = boot_tx {
+        boot_tx.phase(format!(
+            "bootstrapping build executor class:{class_label}: {message}"
+        ));
+    }
     if let Some(listener) = listener {
         let _ = listener
             .log_message(format!(
                 "build.vx executor class:{class_label}: {}",
-                message.into()
+                message
             ))
             .await;
     }
@@ -637,9 +644,11 @@ async fn connect_ssh_bootstrap_runner(
     vx_home: &Utf8PathBuf,
     class_label: &str,
     target: &str,
+    boot_tx: Option<&BootTx>,
     progress_listener: Option<Arc<ProgressListenerClient>>,
 ) -> Result<SshBootstrapConnection> {
     emit_ssh_bootstrap_progress(
+        boot_tx,
         &progress_listener,
         class_label,
         format!("checking local Vixen repo for ssh target {target}"),
@@ -649,6 +658,7 @@ async fn connect_ssh_bootstrap_runner(
     ensure_clean_vixen_repo(&repo_root).await?;
     let commit = command_output("git", &["-C", repo_root.as_str(), "rev-parse", "HEAD"]).await?;
     emit_ssh_bootstrap_progress(
+        boot_tx,
         &progress_listener,
         class_label,
         format!("probing ssh target {target}"),
@@ -656,6 +666,7 @@ async fn connect_ssh_bootstrap_runner(
     .await;
     let target_info = detect_ssh_bootstrap_target(target).await?;
     emit_ssh_bootstrap_progress(
+        boot_tx,
         &progress_listener,
         class_label,
         format!("detected {} host", target_info.platform.as_tag()),
@@ -738,6 +749,7 @@ async fn connect_ssh_bootstrap_runner(
         .ok_or_else(|| eyre::eyre!("failed to determine parent directory for {}", repo_root))?;
     let remote_command = remote_command.replace("__REPO_URL__", &repo_url);
     emit_ssh_bootstrap_progress(
+        boot_tx,
         &progress_listener,
         class_label,
         "starting local git transport",
@@ -779,6 +791,7 @@ async fn connect_ssh_bootstrap_runner(
         .kill_on_drop(true);
     let child = command.spawn()?;
     emit_ssh_bootstrap_progress(
+        boot_tx,
         &progress_listener,
         class_label,
         format!("waiting for remote store and runner sockets on {target}"),
@@ -818,15 +831,28 @@ async fn bootstrap_ssh_executor(
     vx_home: &Utf8PathBuf,
     class_label: &str,
     target: &str,
+    boot_tx: Option<&BootTx>,
     progress_listener: Option<Arc<ProgressListenerClient>>,
 ) -> Result<crate::service::SshBootstrapExecutor> {
-    emit_ssh_bootstrap_progress(&progress_listener, class_label, "starting ssh bootstrap").await;
-    let connection =
-        connect_ssh_bootstrap_runner(vx_home, class_label, target, progress_listener.clone())
-            .await?;
+    emit_ssh_bootstrap_progress(
+        boot_tx,
+        &progress_listener,
+        class_label,
+        "starting ssh bootstrap",
+    )
+    .await;
+    let connection = connect_ssh_bootstrap_runner(
+        vx_home,
+        class_label,
+        target,
+        boot_tx,
+        progress_listener.clone(),
+    )
+    .await?;
     let store_handle = Arc::new(connection.store_handle);
     let runner_handle = Arc::new(connection.runner_handle);
     emit_ssh_bootstrap_progress(
+        boot_tx,
         &progress_listener,
         class_label,
         "waiting for remote vx-store boot",
@@ -834,13 +860,20 @@ async fn bootstrap_ssh_executor(
     .await;
     let store_virtual = store_handle.boot_and_connect().await?;
     emit_ssh_bootstrap_progress(
+        boot_tx,
         &progress_listener,
         class_label,
         "waiting for remote vx-runner boot",
     )
     .await;
     let runner_virtual = runner_handle.boot_and_connect().await?;
-    emit_ssh_bootstrap_progress(&progress_listener, class_label, "remote executor ready").await;
+    emit_ssh_bootstrap_progress(
+        boot_tx,
+        &progress_listener,
+        class_label,
+        "remote executor ready",
+    )
+    .await;
     Ok(crate::service::SshBootstrapExecutor {
         id: format!("ssh_bootstrap:{class_label}"),
         backend: vx_eval::ExecutorBackendKind::SshBootstrap,
@@ -1041,7 +1074,7 @@ async fn ensure_services(
 
     let local_store = Arc::new(StoreClient::new(store_virtual));
     let exec = Arc::new(RunnerClient::new(runner_virtual));
-    boot_tx.phase("preparing build executors");
+    boot_tx.phase("preparing local build executor registry");
     let mut build_vx_executors = crate::service::BuildVxExecutors::local_default(
         Arc::clone(&local_store),
         Arc::clone(&exec),
@@ -1053,7 +1086,7 @@ async fn ensure_services(
             build_vx_executors.with_ssh_bootstrap_factory(move |class_label, target, listener| {
                 let vx_home = vx_home.clone();
                 Box::pin(async move {
-                    bootstrap_ssh_executor(&vx_home, &class_label, &target, listener)
+                    bootstrap_ssh_executor(&vx_home, &class_label, &target, None, listener)
                         .await
                         .map_err(|error| error.to_string())
                 })
@@ -1064,11 +1097,23 @@ async fn ensure_services(
     for config in &args.build_vx_executor_classes {
         match config.backend {
             vx_eval::ExecutorBackendKind::Local => {
+                boot_tx.phase(format!(
+                    "registering build executor class:{} -> local",
+                    config.class_label
+                ));
                 build_vx_executors
                     .register_class_alias(config.class_label.clone(), "local")
                     .map_err(eyre::Report::msg)?;
             }
             vx_eval::ExecutorBackendKind::Daemon => {
+                let target = config
+                    .target
+                    .as_deref()
+                    .expect("daemon executor target should be present");
+                boot_tx.phase(format!(
+                    "connecting configured build executor class:{} ({target})",
+                    config.class_label
+                ));
                 let endpoint = Endpoint::parse(
                     config
                         .target
@@ -1097,11 +1142,20 @@ async fn ensure_services(
                     .target
                     .as_deref()
                     .expect("ssh bootstrap executor target should be present");
+                boot_tx.phase(format!(
+                    "starting configured ssh bootstrap for class:{} -> {target}",
+                    config.class_label
+                ));
                 #[cfg(unix)]
                 {
-                    let executor =
-                        bootstrap_ssh_executor(&args.vx_home, &config.class_label, target, None)
-                            .await?;
+                    let executor = bootstrap_ssh_executor(
+                        &args.vx_home,
+                        &config.class_label,
+                        target,
+                        Some(boot_tx),
+                        None,
+                    )
+                    .await?;
                     build_vx_executors
                         .register_class_executor(config.class_label.clone(), executor.into());
                 }
