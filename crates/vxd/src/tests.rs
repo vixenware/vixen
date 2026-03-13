@@ -16,6 +16,11 @@ use arborium_theme::theme::builtin;
 use ariadne::{Color as AriadneColor, Config as AriadneConfig, Label, Report, ReportKind, Source};
 use camino::Utf8Path;
 use concolor::ColorChoice;
+use moire::task::FutureExt;
+use roam_core::acceptor;
+use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
+use roam_stream::StreamLink;
+use roam_types::{ConnectionSettings, Metadata};
 use std::fs;
 use std::fs::OpenOptions;
 use std::net::TcpListener;
@@ -29,11 +34,19 @@ use vx_eval::{
     RenderRequest as EvalRenderRequest, ShippedFunction, TransportBlock, TransportFnDef, TreeValue,
     Value,
 };
+use vx_io::boot::{BootDispatcher, BootGate, GracefulShutdown};
+use vx_io::net::Listener;
 use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_report::{GraphEdge, GraphNode, GraphTopology};
-use vx_runner_proto::RunnerClient;
+use vx_runner_proto::{
+    CcCompileRequest, CcCompileResult, CcLinkRequest, CcLinkResult, DiscoverRequest,
+    DiscoverResult, RUNNER_PROTOCOL_VERSION, RunRequest, RunResult, Runner, RunnerClient,
+    RunnerDispatcher, RustCompileRequest, RustCompileResult,
+};
 use vx_store_proto::chunking::{prepare_blob, store_prepared_blob};
-use vx_store_proto::{Blake3Hash, BlobRef, ContentHash, DirEntryKind, StoreClient};
+use vx_store_proto::{
+    Blake3Hash, BlobRef, ContentHash, DirEntryKind, ServiceVersion, StoreClient, StoreProgress,
+};
 use vxd_proto::BuildRequest;
 
 /// Create a fresh database for testing
@@ -66,20 +79,10 @@ fn ensure_test_service_binaries_built() {
     TEST_SERVICE_BINARIES_READY.get_or_init(|| {
         let _lock = lock_test_service_binary_build();
         let mut command = std::process::Command::new("cargo");
-        command.args([
-            "build",
-            "-p",
-            "vx-store",
-            "-p",
-            "vx-runner",
-            "-p",
-            "vx-vfsd",
-        ]);
-        #[cfg(target_os = "macos")]
-        command.args(["-p", "vx-reaper"]);
+        command.args(["build", "-p", "vx-store"]);
         let status = command
             .status()
-            .expect("failed to build vx-store/vx-runner/vx-vfsd test service binaries");
+            .expect("failed to build vx-store test service binary");
         assert!(
             status.success(),
             "test service binary build failed with {status}"
@@ -127,8 +130,6 @@ fn lock_test_file(name: &str) -> TestFileLock {
 struct TestServiceBinaries {
     _dir: TempDir,
     store: String,
-    runner: String,
-    bin_dir: String,
 }
 
 fn copy_test_service_binaries() -> TestServiceBinaries {
@@ -138,17 +139,8 @@ fn copy_test_service_binaries() -> TestServiceBinaries {
     fs::create_dir_all(&bin_dir).expect("create test service binary dir");
 
     let store = copy_test_service_binary(&resolve_vx_store_binary(), &bin_dir, "vx-store");
-    let runner = copy_test_service_binary(&resolve_vx_runner_binary(), &bin_dir, "vx-runner");
-    copy_test_service_binary(&resolve_vx_vfsd_binary(), &bin_dir, "vx-vfsd");
-    #[cfg(target_os = "macos")]
-    copy_test_service_binary(&resolve_vx_reaper_binary(), &bin_dir, "vx-reaper");
 
-    TestServiceBinaries {
-        _dir: dir,
-        store,
-        runner,
-        bin_dir: bin_dir.to_string_lossy().into_owned(),
-    }
+    TestServiceBinaries { _dir: dir, store }
 }
 
 fn copy_test_service_binary(source: &str, bin_dir: &std::path::Path, name: &str) -> String {
@@ -1282,31 +1274,200 @@ impl StoreTestEnv {
     }
 }
 
-struct BuildServiceTestEnv {
+#[derive(Clone)]
+struct FakeRunner {
+    panic_on_boundary_use: bool,
+}
+
+impl GracefulShutdown for FakeRunner {
+    async fn graceful_shutdown(&self) {}
+}
+
+impl Runner for FakeRunner {
+    async fn version(&self) -> ServiceVersion {
+        ServiceVersion {
+            service: "fake-vx-runner".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: RUNNER_PROTOCOL_VERSION,
+        }
+    }
+
+    async fn compile_rust(
+        &self,
+        _request: RustCompileRequest,
+        _progress: roam::Tx<StoreProgress>,
+    ) -> RustCompileResult {
+        panic!("fake runner compile_rust should not be used in daemon-only build.vx tests");
+    }
+
+    async fn compile_cc(
+        &self,
+        _request: CcCompileRequest,
+        _progress: roam::Tx<StoreProgress>,
+    ) -> CcCompileResult {
+        panic!("fake runner compile_cc should not be used in daemon-only build.vx tests");
+    }
+
+    async fn link_cc(
+        &self,
+        _request: CcLinkRequest,
+        _progress: roam::Tx<StoreProgress>,
+    ) -> CcLinkResult {
+        panic!("fake runner link_cc should not be used in daemon-only build.vx tests");
+    }
+
+    async fn run(&self, _request: RunRequest, _progress: roam::Tx<StoreProgress>) -> RunResult {
+        assert!(
+            !self.panic_on_boundary_use,
+            "fake runner run should not be used in daemon-only build.vx tests"
+        );
+        RunResult {
+            success: false,
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "fake runner was unexpectedly asked to run a build.vx exec request".to_string(),
+            duration_ms: 0,
+            output_manifest: None,
+            observer_value: None,
+            error_kind: None,
+            error: Some(
+                "fake runner was unexpectedly asked to run a build.vx exec request".to_string(),
+            ),
+        }
+    }
+
+    async fn discover(
+        &self,
+        _request: DiscoverRequest,
+    ) -> std::result::Result<DiscoverResult, String> {
+        assert!(
+            !self.panic_on_boundary_use,
+            "fake runner discover should not be used in daemon-only build.vx tests"
+        );
+        Err("fake runner was unexpectedly asked to run a build.vx discover request".to_string())
+    }
+}
+
+#[derive(Clone)]
+struct FakeRunnerVirtualAcceptor {
+    boot_service: vx_io::boot::BootService<FakeRunner>,
+}
+
+impl ConnectionAcceptor for FakeRunnerVirtualAcceptor {
+    fn accept(
+        &self,
+        _conn_id: roam_types::ConnectionId,
+        peer_settings: &ConnectionSettings,
+        _metadata: &[roam_types::MetadataEntry],
+    ) -> std::result::Result<AcceptedConnection, Metadata<'static>> {
+        let Some(runner) = self.boot_service.gate().service().cloned() else {
+            return Err(vec![]);
+        };
+
+        let parity = peer_settings.parity.other();
+        Ok(AcceptedConnection {
+            settings: ConnectionSettings {
+                parity,
+                max_concurrent_requests: peer_settings.max_concurrent_requests,
+            },
+            metadata: vec![],
+            setup: Box::new(move |handle| {
+                let dispatcher = RunnerDispatcher::new(runner);
+                moire::task::spawn(
+                    async move {
+                        let mut driver = Driver::new(handle, dispatcher);
+                        driver.run().await;
+                    }
+                    .named("fake_runner_virtual_driver"),
+                );
+            }),
+        })
+    }
+}
+
+struct FakeRunnerHandle {
+    endpoint: vx_io::net::Endpoint,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl FakeRunnerHandle {
+    async fn new() -> Self {
+        let endpoint = free_local_endpoint();
+        let mut listener = Listener::bind(&endpoint)
+            .await
+            .expect("failed to bind fake runner endpoint");
+        let (gate, boot_tx) = BootGate::<FakeRunner>::new();
+        gate.set_service(FakeRunner {
+            panic_on_boundary_use: true,
+        });
+        boot_tx.ready();
+        let boot_service = gate.boot_service();
+
+        let task = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("fake runner listener should accept");
+                let boot_service = boot_service.clone();
+                moire::task::spawn(
+                    async move {
+                        let (reader, writer) = tokio::io::split(stream);
+                        let conduit = BareConduit::<roam_types::MessageFamily, _>::new(
+                            StreamLink::new(reader, writer),
+                        );
+                        let boot_dispatcher = BootDispatcher::new(boot_service.clone());
+                        let (caller, session_handle) = acceptor(conduit)
+                            .on_connection(FakeRunnerVirtualAcceptor { boot_service })
+                            .establish::<roam_core::NoopCaller>(boot_dispatcher)
+                            .await
+                            .expect("fake runner handshake should succeed");
+                        vx_io::net::park_session(caller, session_handle).await;
+                    }
+                    .named("fake_runner_connection"),
+                );
+            }
+        });
+
+        Self { endpoint, task }
+    }
+
+    async fn connect(&self) -> ServiceHandle {
+        ServiceBuilder::new("fake-vx-runner", self.endpoint.clone())
+            .caller_name("vxd-build-vx-daemon-tests")
+            .timeout(std::time::Duration::from_secs(10))
+            .connect_only()
+            .connect()
+            .await
+            .expect("failed to connect to fake runner")
+    }
+}
+
+impl Drop for FakeRunnerHandle {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+struct BuildServiceDaemonTestEnv {
     _store_root: TempDir,
     _vx_home: TempDir,
     _binaries: TestServiceBinaries,
     _lock: TestFileLock,
     _store_handle: Arc<ServiceHandle>,
+    _fake_runner: FakeRunnerHandle,
     _runner_handle: Arc<ServiceHandle>,
     service: VxdService,
 }
 
-impl BuildServiceTestEnv {
+impl BuildServiceDaemonTestEnv {
     async fn new() -> Self {
-        Self::with_runner_path_prefix(None).await
-    }
-
-    async fn with_runner_path_prefix(path_prefix: Option<&Utf8Path>) -> Self {
         let lock = lock_test_file("build-service");
         let binaries = copy_test_service_binaries();
         let store_root = TempDir::new().expect("failed to create store root tempdir");
         let vx_home = TempDir::new().expect("failed to create vx_home tempdir");
         let store_endpoint = free_local_endpoint();
-        let runner_endpoint = free_local_endpoint();
-        let vfsd_endpoint = free_local_endpoint();
         let store_root_str = store_root.path().to_string_lossy().into_owned();
-        let vx_home_str = vx_home.path().to_string_lossy().into_owned();
 
         let store_handle = ServiceBuilder::new(&binaries.store, store_endpoint.clone())
             .caller_name("vxd-build-vx-tests")
@@ -1317,33 +1478,8 @@ impl BuildServiceTestEnv {
             .await
             .expect("failed to spawn/connect vx-store");
 
-        let mut runner_builder = ServiceBuilder::new(&binaries.runner, runner_endpoint.clone())
-            .caller_name("vxd-build-vx-tests")
-            .args(&[
-                "--store",
-                &store_endpoint.display(),
-                "--vfsd",
-                &vfsd_endpoint.display(),
-                "--vx-home",
-                &vx_home_str,
-            ])
-            .env("VX_TEST", "1")
-            .env("VX_HOME", &vx_home_str)
-            .timeout(std::time::Duration::from_secs(30));
-        let path = std::env::var("PATH").unwrap_or_default();
-        let mut path_entries = Vec::new();
-        if let Some(path_prefix) = path_prefix {
-            path_entries.push(path_prefix.as_str().to_string());
-        }
-        path_entries.push(binaries.bin_dir.clone());
-        if !path.is_empty() {
-            path_entries.push(path);
-        }
-        runner_builder = runner_builder.env("PATH", path_entries.join(":"));
-        let runner_handle = runner_builder
-            .connect()
-            .await
-            .expect("failed to spawn/connect vx-runner");
+        let fake_runner = FakeRunnerHandle::new().await;
+        let runner_handle = fake_runner.connect().await;
 
         let (store_virtual, runner_virtual) = tokio::try_join!(
             store_handle.boot_and_connect(),
@@ -1376,21 +1512,10 @@ impl BuildServiceTestEnv {
             _binaries: binaries,
             _lock: lock,
             _store_handle: store_handle,
+            _fake_runner: fake_runner,
             _runner_handle: runner_handle,
             service,
         }
-    }
-}
-
-fn write_executable_script(path: &std::path::Path, body: &str) {
-    fs::write(path, body).expect("write script");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut perms = fs::metadata(path).expect("script metadata").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(path, perms).expect("set script permissions");
     }
 }
 
@@ -1512,179 +1637,8 @@ async fn render_uses_workspace_relative_templates_and_refreshes_on_content_chang
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn libpng_build_vx_runs_end_to_end_with_local_archives() {
-    let fake_tools = TempDir::new().expect("fake tool tempdir");
-    write_executable_script(
-        &fake_tools.path().join("cc"),
-        r#"#!/bin/sh
-if [ "$1" = "-dumpmachine" ]; then
-  echo x86_64-unknown-linux-gnu
-  exit 0
-fi
-out=""
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "-o" ]; then
-    out="$arg"
-    break
-  fi
-  prev="$arg"
-done
-if [ -z "$out" ]; then
-  echo "missing -o output" >&2
-  exit 1
-fi
-mkdir -p "$(dirname "$out")"
-printf 'artifact\n' > "$out"
-exit 0
-"#,
-    );
-    write_executable_script(
-        &fake_tools.path().join("ar"),
-        r#"#!/bin/sh
-out="$2"
-if [ -z "$out" ]; then
-  echo "missing archive output" >&2
-  exit 1
-fi
-mkdir -p "$(dirname "$out")"
-printf 'archive\n' > "$out"
-exit 0
-"#,
-    );
-
-    let env = BuildServiceTestEnv::with_runner_path_prefix(Some(
-        Utf8Path::from_path(fake_tools.path()).expect("fake tool path should be valid UTF-8"),
-    ))
-    .await;
-    let workspace = TempDir::new().expect("workspace tempdir");
-    let workspace_root =
-        Utf8Path::from_path(workspace.path()).expect("workspace path should be valid UTF-8");
-
-    let zlib_archive = tar_gz_with_single_root(&[
-        ("zlib-1.3.1/adler32.c", b""),
-        ("zlib-1.3.1/compress.c", b""),
-        ("zlib-1.3.1/crc32.c", b""),
-        ("zlib-1.3.1/deflate.c", b""),
-        ("zlib-1.3.1/gzclose.c", b""),
-        ("zlib-1.3.1/gzlib.c", b""),
-        ("zlib-1.3.1/gzread.c", b""),
-        ("zlib-1.3.1/gzwrite.c", b""),
-        ("zlib-1.3.1/inflate.c", b""),
-        ("zlib-1.3.1/infback.c", b""),
-        ("zlib-1.3.1/inftrees.c", b""),
-        ("zlib-1.3.1/inffast.c", b""),
-        ("zlib-1.3.1/trees.c", b""),
-        ("zlib-1.3.1/uncompr.c", b""),
-        ("zlib-1.3.1/zutil.c", b""),
-        ("zlib-1.3.1/zlib.h", b"/* stub zlib.h */\n"),
-        ("zlib-1.3.1/zconf.h", b"/* stub zconf.h */\n"),
-    ]);
-    let libpng_archive = tar_gz_with_single_root(&[
-        ("libpng-1.6.43/png.c", b""),
-        ("libpng-1.6.43/pngerror.c", b""),
-        ("libpng-1.6.43/pngget.c", b""),
-        ("libpng-1.6.43/pngmem.c", b""),
-        ("libpng-1.6.43/pngpread.c", b""),
-        ("libpng-1.6.43/pngread.c", b""),
-        ("libpng-1.6.43/pngrio.c", b""),
-        ("libpng-1.6.43/pngrtran.c", b""),
-        ("libpng-1.6.43/pngrutil.c", b""),
-        ("libpng-1.6.43/pngset.c", b""),
-        ("libpng-1.6.43/pngtrans.c", b""),
-        ("libpng-1.6.43/pngwio.c", b""),
-        ("libpng-1.6.43/pngwrite.c", b""),
-        ("libpng-1.6.43/pngwtran.c", b""),
-        ("libpng-1.6.43/pngwutil.c", b""),
-        ("libpng-1.6.43/arm/arm_init.c", b""),
-        ("libpng-1.6.43/arm/filter_neon_intrinsics.c", b""),
-        ("libpng-1.6.43/arm/palette_neon_intrinsics.c", b""),
-        ("libpng-1.6.43/arm/filter_neon.S", b""),
-        ("libpng-1.6.43/intel/intel_init.c", b""),
-        ("libpng-1.6.43/intel/filter_sse2_intrinsics.c", b""),
-        ("libpng-1.6.43/png.h", b"/* stub png.h */\n"),
-        ("libpng-1.6.43/pngconf.h", b"/* stub pngconf.h */\n"),
-        (
-            "libpng-1.6.43/scripts/pnglibconf.h.prebuilt",
-            b"/* stub pnglibconf.h */\n",
-        ),
-        ("libpng-1.6.43/libpng.vers", b"{ global: *; };\n"),
-    ]);
-
-    let zlib_digest = format!("sha256:{}", hex::encode(Sha256::digest(&zlib_archive)));
-    let libpng_digest = format!("sha256:{}", hex::encode(Sha256::digest(&libpng_archive)));
-    let zlib_server = StaticHttpServer::new(zlib_archive, "application/gzip");
-    let libpng_server = StaticHttpServer::new(libpng_archive, "application/gzip");
-
-    let source = fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/libpng.vx"),
-    )
-    .expect("read libpng sketch");
-    let source = source
-        .replace(
-            "https://zlib.net/fossils/zlib-1.3.1.tar.gz",
-            &zlib_server.url("/zlib-1.3.1.tar.gz"),
-        )
-        .replace(
-            "sha256:9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",
-            &zlib_digest,
-        )
-        .replace(
-            "https://download.sourceforge.net/libpng/libpng-1.6.43.tar.xz",
-            &libpng_server.url("/libpng-1.6.43.tar.gz"),
-        )
-        .replace(
-            "sha256:6a5ca0652392a2d7c9db2ae5b40210843c0bbc081cbd410825ab00cc59f14a6c",
-            &libpng_digest,
-        )
-        .replace("extract: \"tar.xz\"", "extract: \"tar.gz\"");
-    fs::write(workspace.path().join("build.vx"), source).expect("write test build.vx");
-
-    let request = BuildRequest {
-        project_path: workspace_root.to_owned(),
-        build_file_path: None,
-        release: false,
-    };
-
-    let first = env
-        .service
-        .do_build(request.clone())
-        .await
-        .expect("first libpng build should succeed");
-    assert!(first.success, "first build failed: {:?}", first.failure);
-
-    let second = env
-        .service
-        .do_build(request)
-        .await
-        .expect("second libpng build should succeed");
-    assert!(second.success, "second build failed: {:?}", second.failure);
-
-    assert_eq!(zlib_server.hit_count(), 1, "expected cached zlib acquire");
-    assert_eq!(
-        libpng_server.hit_count(),
-        1,
-        "expected cached libpng acquire"
-    );
-    assert_eq!(
-        collect_fs_paths(&workspace.path().join(".vx/build")),
-        vec![
-            "libpng/include/png.h".to_string(),
-            "libpng/include/pngconf.h".to_string(),
-            "libpng/include/pnglibconf.h".to_string(),
-            "libpng/lib/libpng16.a".to_string(),
-            "libpng/lib/libpng16.so".to_string(),
-            "zlib/include/zconf.h".to_string(),
-            "zlib/include/zlib.h".to_string(),
-            "zlib/lib/libz.a".to_string(),
-            "zlib/lib/libz.so".to_string(),
-        ]
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn build_vx_reports_unknown_executor_selectors() {
-    let env = BuildServiceTestEnv::new().await;
+    let env = BuildServiceDaemonTestEnv::new().await;
     let workspace = TempDir::new().expect("workspace");
     let workspace_root = Utf8Path::from_path(workspace.path()).expect("utf8 workspace");
 
@@ -1728,7 +1682,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stabilize_reuses_resolve_output_until_witness_changes() {
-    let env = BuildServiceTestEnv::new().await;
+    let env = BuildServiceDaemonTestEnv::new().await;
     let workspace = TempDir::new().expect("workspace");
     let workspace_root = Utf8Path::from_path(workspace.path()).expect("utf8 workspace");
 
@@ -1819,30 +1773,6 @@ fn collect_tree_paths(value: &Value) -> Vec<String> {
 
     let mut paths = Vec::new();
     walk(value, "", &mut paths);
-    paths.sort();
-    paths
-}
-
-fn collect_fs_paths(root: &std::path::Path) -> Vec<String> {
-    fn walk(root: &std::path::Path, current: &std::path::Path, out: &mut Vec<String>) {
-        for entry in fs::read_dir(current).expect("read_dir") {
-            let entry = entry.expect("dir entry");
-            let path = entry.path();
-            if path.is_dir() {
-                walk(root, &path, out);
-            } else {
-                out.push(
-                    path.strip_prefix(root)
-                        .expect("path under root")
-                        .to_string_lossy()
-                        .replace('\\', "/"),
-                );
-            }
-        }
-    }
-
-    let mut paths = Vec::new();
-    walk(root, root, &mut paths);
     paths.sort();
     paths
 }
@@ -1977,28 +1907,6 @@ fn free_local_endpoint() -> vx_io::net::Endpoint {
 fn resolve_vx_store_binary() -> String {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/debug/vx-store")
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn resolve_vx_runner_binary() -> String {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/debug/vx-runner")
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn resolve_vx_vfsd_binary() -> String {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/debug/vx-vfsd")
-        .to_string_lossy()
-        .into_owned()
-}
-
-#[cfg(target_os = "macos")]
-fn resolve_vx_reaper_binary() -> String {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/debug/vx-reaper")
         .to_string_lossy()
         .into_owned()
 }

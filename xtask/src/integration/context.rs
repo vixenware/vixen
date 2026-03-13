@@ -397,6 +397,15 @@ impl IntegrationContext {
         self.shared.keep_temp
     }
 
+    pub(crate) fn prepend_path(&mut self, dir: &Path) -> Result<()> {
+        let joined = env::join_paths(
+            std::iter::once(dir.to_path_buf()).chain(env::split_paths(&self.path_env)),
+        )
+        .with_context(|| format!("failed to prepend {} to PATH", dir.display()))?;
+        self.path_env = joined;
+        Ok(())
+    }
+
     pub(crate) fn write_project_file(&self, relative_path: &str, contents: &str) -> Result<()> {
         self.write_file(&self.project_dir, relative_path, contents)
     }

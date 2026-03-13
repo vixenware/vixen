@@ -16,6 +16,7 @@ mod cache_basics;
 mod context;
 mod error_handling;
 mod json_output;
+mod libpng;
 mod lua;
 mod multi_crate;
 mod scaffold;
@@ -108,6 +109,10 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "lua",
         run: lua::run,
+    },
+    Scenario {
+        name: "libpng",
+        run: libpng::run,
     },
     Scenario {
         name: "cache-basics/fresh-build-succeeds",

@@ -4525,8 +4525,12 @@ dependencies = [
  "eyre",
  "facet",
  "figue",
+ "flate2",
+ "hex",
  "indicatif",
  "owo-colors",
+ "sha2",
+ "tar",
  "tempfile",
  "tokio",
 ]
