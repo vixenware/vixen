@@ -34,8 +34,10 @@ use roam_core::acceptor;
 use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
 use roam_stream::StreamLink;
 use roam_types::{ConnectionSettings, Metadata};
+use std::fs::OpenOptions;
+use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use vx_io::boot::{BootDispatcher, BootGate};
 use vx_io::net::{Endpoint, Listener};
 use vx_io::spawn::ServiceHandle;
@@ -43,6 +45,7 @@ use vx_runner_proto::RunnerClient;
 use vx_store_proto::StoreClient;
 use vxd_proto::VxdDispatcher;
 
+use crate::service::VxdServiceDeps;
 pub use db::Database;
 pub use inputs::*;
 pub use queries::*;
@@ -89,6 +92,289 @@ struct Args {
 
     /// Bind endpoint
     bind: Endpoint,
+
+    /// Additional build.vx executor class mappings.
+    build_vx_executor_classes: Vec<BuildVxExecutorClassConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BuildVxExecutorClassConfig {
+    pub(crate) class_label: String,
+    pub(crate) backend: vx_eval::ExecutorBackendKind,
+    pub(crate) target: Option<String>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SshBootstrapPaths {
+    checkout_dir: String,
+    vx_home: String,
+    store_root: String,
+    store_socket: String,
+    vfsd_socket: String,
+    runner_socket: String,
+}
+
+pub(crate) fn parse_build_vx_executor_classes(
+    value: &str,
+) -> Result<Vec<BuildVxExecutorClassConfig>> {
+    let mut configs = Vec::new();
+    let mut seen = std::collections::HashSet::<String>::new();
+
+    for raw_entry in value.split(';') {
+        let entry = raw_entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (class_label, raw_spec) = entry.split_once('=').ok_or_else(|| {
+            eyre::eyre!(
+                "invalid VX_BUILD_EXECUTOR_CLASSES entry {entry:?} (expected class=backend[:target])"
+            )
+        })?;
+        let class_label = class_label.trim();
+        let raw_spec = raw_spec.trim();
+        if class_label.is_empty() {
+            eyre::bail!("invalid VX_BUILD_EXECUTOR_CLASSES entry {entry:?} (empty class label)");
+        }
+        if !seen.insert(class_label.to_string()) {
+            eyre::bail!(
+                "invalid VX_BUILD_EXECUTOR_CLASSES: class {class_label:?} appears more than once"
+            );
+        }
+
+        let (backend, target) = if raw_spec == "local" {
+            (vx_eval::ExecutorBackendKind::Local, None)
+        } else {
+            let (backend_tag, target) = raw_spec.split_once(':').ok_or_else(|| {
+                eyre::eyre!(
+                    "invalid VX_BUILD_EXECUTOR_CLASSES spec {raw_spec:?} for class {class_label:?}"
+                )
+            })?;
+            let backend = vx_eval::ExecutorBackendKind::from_tag(backend_tag.trim())
+                .ok_or_else(|| eyre::eyre!("unknown build.vx executor backend {backend_tag:?}"))?;
+            (backend, Some(target.trim().to_string()))
+        };
+
+        match backend {
+            vx_eval::ExecutorBackendKind::Local => {
+                if target.is_some() {
+                    eyre::bail!(
+                        "invalid VX_BUILD_EXECUTOR_CLASSES spec {raw_spec:?}: local executors do not take a target"
+                    );
+                }
+            }
+            vx_eval::ExecutorBackendKind::Daemon | vx_eval::ExecutorBackendKind::SshBootstrap => {
+                let Some(target) = target.as_ref() else {
+                    eyre::bail!(
+                        "invalid VX_BUILD_EXECUTOR_CLASSES spec {raw_spec:?}: backend {} requires a target",
+                        backend.as_tag()
+                    );
+                };
+                if target.is_empty() {
+                    eyre::bail!(
+                        "invalid VX_BUILD_EXECUTOR_CLASSES spec {raw_spec:?}: backend {} requires a non-empty target",
+                        backend.as_tag()
+                    );
+                }
+            }
+            vx_eval::ExecutorBackendKind::Class => {
+                eyre::bail!("VX_BUILD_EXECUTOR_CLASSES only accepts concrete backends, not class");
+            }
+        }
+
+        configs.push(BuildVxExecutorClassConfig {
+            class_label: class_label.to_string(),
+            backend,
+            target,
+        });
+    }
+
+    Ok(configs)
+}
+
+#[cfg(unix)]
+fn ssh_bootstrap_paths(remote_home: &str, class_label: &str) -> SshBootstrapPaths {
+    let base = format!("{remote_home}/.cache/vixen/ssh-bootstrap/{class_label}");
+    let vx_home = format!("{base}/vx-home");
+    SshBootstrapPaths {
+        checkout_dir: format!("{base}/repo"),
+        store_root: format!("{vx_home}/store"),
+        store_socket: format!("{vx_home}/store.sock"),
+        vfsd_socket: format!("{vx_home}/vfsd.sock"),
+        runner_socket: format!("{vx_home}/runner.sock"),
+        vx_home,
+    }
+}
+
+#[cfg(unix)]
+fn ssh_bootstrap_local_endpoint(vx_home: &Utf8PathBuf, class_label: &str) -> Endpoint {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    Endpoint::Local(vx_home.join(format!(
+        "ssh-bootstrap-{class_label}-{}-{unique}.sock",
+        std::process::id()
+    )))
+}
+
+#[cfg(unix)]
+const SSH_BOOTSTRAP_REMOTE_SCRIPT: &str = r#"set -euo pipefail
+repo_url="$1"
+commit="$2"
+checkout_dir="$3"
+vx_home="$4"
+store_root="$5"
+store_socket="$6"
+vfsd_socket="$7"
+runner_socket="$8"
+
+mkdir -p "$(dirname "$checkout_dir")" "$vx_home" "$store_root"
+if [ ! -d "$checkout_dir/.git" ]; then
+  rm -rf "$checkout_dir"
+  git clone "$repo_url" "$checkout_dir"
+fi
+git -C "$checkout_dir" fetch --all --tags --prune
+git -C "$checkout_dir" checkout --detach "$commit"
+cargo build --manifest-path "$checkout_dir/Cargo.toml" -p vx-store -p vx-vfsd -p vx-runner
+rm -f "$store_socket" "$vfsd_socket" "$runner_socket"
+trap 'jobs -p | xargs -r kill || true' EXIT
+"$checkout_dir/target/debug/vx-store" --root "$store_root" --listen "unix:$store_socket" &
+exec "$checkout_dir/target/debug/vx-runner" \
+  --vx-home "$vx_home" \
+  --store "unix:$store_socket" \
+  --vfsd "unix:$vfsd_socket" \
+  --listen "unix:$runner_socket"
+"#;
+
+async fn command_output(program: &str, args: &[&str]) -> Result<String> {
+    let mut command = moire::process::Command::new(program);
+    command.args(args);
+    let output = command.output().await?;
+    if !output.status.success() {
+        eyre::bail!(
+            "{program} failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+async fn connect_endpoint_with_backoff(
+    name: &str,
+    endpoint: &Endpoint,
+    timeout: Duration,
+) -> Result<(roam_core::DriverCaller, roam_core::SessionHandle)> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let backoff_ms = [10, 25, 50, 100, 250, 500, 1000];
+    let mut last_err = None;
+
+    for delay in backoff_ms.iter().copied().chain(std::iter::repeat(1000)) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+
+        match tokio::time::timeout(
+            remaining.min(Duration::from_secs(1)),
+            vx_io::net::connect_session(endpoint),
+        )
+        .await
+        {
+            Ok(Ok(session)) => return Ok(session),
+            Ok(Err(error)) => last_err = Some(error.to_string()),
+            Err(_) => last_err = Some("connection timed out".to_string()),
+        }
+
+        if tokio::time::Instant::now() + Duration::from_millis(delay) > deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
+
+    let err_detail = last_err.unwrap_or_else(|| "unknown error".to_string());
+    eyre::bail!("{name} unreachable after {timeout:?} at {endpoint}: {err_detail}");
+}
+
+#[cfg(unix)]
+async fn connect_ssh_bootstrap_runner(
+    vx_home: &Utf8PathBuf,
+    class_label: &str,
+    target: &str,
+) -> Result<ServiceHandle> {
+    let repo_url = command_output("git", &["config", "--get", "remote.origin.url"]).await?;
+    let commit = command_output("git", &["rev-parse", "HEAD"]).await?;
+    let remote_home = command_output("ssh", &[target, "sh", "-lc", "printf %s \"$HOME\""]).await?;
+    if remote_home.is_empty() {
+        eyre::bail!("ssh bootstrap target {target} returned an empty HOME");
+    }
+
+    let local_endpoint = ssh_bootstrap_local_endpoint(vx_home, class_label);
+    let local_socket = match &local_endpoint {
+        Endpoint::Local(path) => path.clone(),
+        Endpoint::Tcp { .. } => unreachable!("ssh bootstrap uses local sockets on unix"),
+    };
+    if let Some(parent) = local_socket.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if local_socket.exists() {
+        let _ = std::fs::remove_file(local_socket.as_std_path());
+    }
+
+    let paths = ssh_bootstrap_paths(&remote_home, class_label);
+    let log_path = vx_home.join(format!("runner-ssh-bootstrap-{class_label}.log"));
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let stderr_file = log_file.try_clone()?;
+
+    let mut command = moire::process::Command::new("ssh");
+    command
+        .arg("-o")
+        .arg("ExitOnForwardFailure=yes")
+        .arg("-o")
+        .arg("ServerAliveInterval=30")
+        .arg("-o")
+        .arg("ServerAliveCountMax=3")
+        .arg("-L")
+        .arg(format!(
+            "{}:{}",
+            local_socket.as_str(),
+            paths.runner_socket.as_str()
+        ))
+        .arg(target)
+        .arg("sh")
+        .arg("-lc")
+        .arg(SSH_BOOTSTRAP_REMOTE_SCRIPT)
+        .arg("ssh-bootstrap")
+        .arg(repo_url.as_str())
+        .arg(commit.as_str())
+        .arg(paths.checkout_dir.as_str())
+        .arg(paths.vx_home.as_str())
+        .arg(paths.store_root.as_str())
+        .arg(paths.store_socket.as_str())
+        .arg(paths.vfsd_socket.as_str())
+        .arg(paths.runner_socket.as_str())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(stderr_file))
+        .kill_on_drop(true);
+    let child = command.spawn()?;
+
+    let (caller, session_handle) = connect_endpoint_with_backoff(
+        &format!("vx-runner[{class_label}]"),
+        &local_endpoint,
+        Duration::from_secs(60),
+    )
+    .await?;
+
+    Ok(ServiceHandle {
+        child: Some(child),
+        caller,
+        session_handle,
+    })
 }
 
 /// Resolve CLI args + env vars + defaults into concrete Args.
@@ -122,11 +408,19 @@ fn resolve_args(cli: CliArgs) -> Result<Args> {
         None => vx_io::net::default_local_endpoint(&vx_home, "vxd"),
     };
 
+    let build_vx_executor_classes = std::env::var("VX_BUILD_EXECUTOR_CLASSES")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| parse_build_vx_executor_classes(&value))
+        .transpose()?
+        .unwrap_or_default();
+
     Ok(Args {
         vx_home,
         store_endpoint,
         exec_endpoint,
         bind,
+        build_vx_executor_classes,
     })
 }
 
@@ -161,8 +455,9 @@ impl SpawnTracker {
 struct ServiceClients {
     store: Arc<StoreClient>,
     exec: Arc<RunnerClient>,
+    build_vx_executors: crate::service::BuildVxExecutors,
     store_handle: Arc<ServiceHandle>,
-    runner_handle: Arc<ServiceHandle>,
+    runner_handles: Arc<[Arc<ServiceHandle>]>,
 }
 
 #[derive(Clone)]
@@ -267,11 +562,84 @@ async fn ensure_services(
         runner_handle.boot_and_connect(),
     )?;
 
+    let exec = Arc::new(RunnerClient::new(runner_virtual));
+    let mut build_vx_executors = crate::service::BuildVxExecutors::local_default(Arc::clone(&exec));
+    let mut runner_handles = vec![Arc::new(runner_handle)];
+
+    for config in &args.build_vx_executor_classes {
+        match config.backend {
+            vx_eval::ExecutorBackendKind::Local => {
+                build_vx_executors
+                    .register_class_alias(config.class_label.clone(), "local")
+                    .map_err(eyre::Report::msg)?;
+            }
+            vx_eval::ExecutorBackendKind::Daemon => {
+                let endpoint = Endpoint::parse(
+                    config
+                        .target
+                        .as_deref()
+                        .expect("daemon executor target should be present"),
+                )?;
+                let handle =
+                    ServiceBuilder::new(format!("vx-runner[{}]", config.class_label), endpoint)
+                        .caller_name("vxd")
+                        .timeout(Duration::from_secs(30))
+                        .connect_only()
+                        .connect()
+                        .await?;
+                let virtual_handle = handle.boot_and_connect().await?;
+                let runner = Arc::new(RunnerClient::new(virtual_handle));
+                build_vx_executors.register_class_runner(
+                    config.class_label.clone(),
+                    format!("daemon:{}", config.class_label),
+                    vx_eval::ExecutorBackendKind::Daemon,
+                    runner,
+                );
+                runner_handles.push(Arc::new(handle));
+            }
+            vx_eval::ExecutorBackendKind::SshBootstrap => {
+                let target = config
+                    .target
+                    .as_deref()
+                    .expect("ssh bootstrap executor target should be present");
+                #[cfg(unix)]
+                {
+                    let handle =
+                        connect_ssh_bootstrap_runner(&args.vx_home, &config.class_label, target)
+                            .await?;
+                    let virtual_handle = handle.boot_and_connect().await?;
+                    let runner = Arc::new(RunnerClient::new(virtual_handle));
+                    build_vx_executors.register_class_runner(
+                        config.class_label.clone(),
+                        format!("ssh_bootstrap:{}", config.class_label),
+                        vx_eval::ExecutorBackendKind::SshBootstrap,
+                        runner,
+                    );
+                    runner_handles.push(Arc::new(handle));
+                }
+                #[cfg(not(unix))]
+                {
+                    build_vx_executors.register_class_unavailable(
+                        config.class_label.clone(),
+                        format!("ssh_bootstrap:{}", config.class_label),
+                        vx_eval::ExecutorBackendKind::SshBootstrap,
+                        format!(
+                            "build.vx executor ssh_bootstrap:{} is configured for {target}, but SSH bootstrap is only implemented on unix hosts",
+                            config.class_label
+                        ),
+                    );
+                }
+            }
+            vx_eval::ExecutorBackendKind::Class => unreachable!(),
+        }
+    }
+
     Ok(ServiceClients {
         store: Arc::new(StoreClient::new(store_virtual)),
-        exec: Arc::new(RunnerClient::new(runner_virtual)),
+        exec,
+        build_vx_executors,
         store_handle: Arc::new(store_handle),
-        runner_handle: Arc::new(runner_handle),
+        runner_handles: Arc::from(runner_handles),
     })
 }
 
@@ -430,6 +798,7 @@ async fn async_main() -> Result<()> {
             store_endpoint: args.store_endpoint.clone(),
             exec_endpoint: args.exec_endpoint.clone(),
             bind: args.bind.clone(),
+            build_vx_executor_classes: args.build_vx_executor_classes.clone(),
         };
         let spawn_tracker = spawn_tracker.clone();
         let gate = Arc::clone(&gate);
@@ -446,11 +815,14 @@ async fn async_main() -> Result<()> {
                             VxdService::new(
                                 vx_home,
                                 exec_host_triple,
-                                spawn_tracker,
-                                clients.store,
-                                clients.exec,
-                                clients.store_handle,
-                                clients.runner_handle,
+                                VxdServiceDeps {
+                                    spawn_tracker,
+                                    store: clients.store,
+                                    exec: clients.exec,
+                                    build_vx_executors: clients.build_vx_executors,
+                                    store_handle: clients.store_handle,
+                                    runner_handles: clients.runner_handles,
+                                },
                             )
                             .await,
                         );

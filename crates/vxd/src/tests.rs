@@ -31,8 +31,8 @@ use tokio_test_lite::test as vx_test;
 use vx_eval::{
     AcquireRequest as EvalAcquireRequest, BlobValue, DemandChain,
     DiscoverRequest as EvalDiscoverRequest, ExecArgValue, ExecRequest, MapValue, PathValue,
-    RenderRequest as EvalRenderRequest, ShippedFunction, TransportBlock, TransportFnDef, TreeValue,
-    Value,
+    RenderRequest as EvalRenderRequest, ShippedFunction, TransportBlock, TransportFnDef,
+    TransportValue, TreeValue, Value,
 };
 use vx_io::boot::{BootDispatcher, BootGate, GracefulShutdown};
 use vx_io::net::Listener;
@@ -52,6 +52,61 @@ use vxd_proto::BuildRequest;
 /// Create a fresh database for testing
 fn test_db() -> Database {
     Database::new()
+}
+
+#[test]
+fn parse_build_vx_executor_classes_accepts_local_daemon_and_ssh_bootstrap() {
+    let parsed = crate::parse_build_vx_executor_classes(
+        "default=local;linux=daemon:tcp://127.0.0.1:7777;windows=ssh_bootstrap:amos@winbox",
+    )
+    .expect("config should parse");
+
+    assert_eq!(
+        parsed,
+        vec![
+            crate::BuildVxExecutorClassConfig {
+                class_label: "default".to_string(),
+                backend: vx_eval::ExecutorBackendKind::Local,
+                target: None,
+            },
+            crate::BuildVxExecutorClassConfig {
+                class_label: "linux".to_string(),
+                backend: vx_eval::ExecutorBackendKind::Daemon,
+                target: Some("tcp://127.0.0.1:7777".to_string()),
+            },
+            crate::BuildVxExecutorClassConfig {
+                class_label: "windows".to_string(),
+                backend: vx_eval::ExecutorBackendKind::SshBootstrap,
+                target: Some("amos@winbox".to_string()),
+            },
+        ]
+    );
+}
+
+#[test]
+fn parse_build_vx_executor_classes_rejects_duplicate_labels() {
+    let error = crate::parse_build_vx_executor_classes("linux=local;linux=daemon:127.0.0.1:7777")
+        .expect_err("duplicate labels should be rejected");
+    assert!(error.to_string().contains("appears more than once"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_bootstrap_paths_use_a_stable_remote_layout() {
+    assert_eq!(
+        crate::ssh_bootstrap_paths("/home/amos", "linux"),
+        crate::SshBootstrapPaths {
+            checkout_dir: "/home/amos/.cache/vixen/ssh-bootstrap/linux/repo".to_string(),
+            vx_home: "/home/amos/.cache/vixen/ssh-bootstrap/linux/vx-home".to_string(),
+            store_root: "/home/amos/.cache/vixen/ssh-bootstrap/linux/vx-home/store".to_string(),
+            store_socket: "/home/amos/.cache/vixen/ssh-bootstrap/linux/vx-home/store.sock"
+                .to_string(),
+            vfsd_socket: "/home/amos/.cache/vixen/ssh-bootstrap/linux/vx-home/vfsd.sock"
+                .to_string(),
+            runner_socket: "/home/amos/.cache/vixen/ssh-bootstrap/linux/vx-home/runner.sock"
+                .to_string(),
+        }
+    );
 }
 
 static COLOR_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
@@ -1275,8 +1330,14 @@ impl StoreTestEnv {
 }
 
 #[derive(Clone)]
+enum FakeRunnerBehavior {
+    PanicOnBoundaryUse,
+    Discover(TransportValue),
+}
+
+#[derive(Clone)]
 struct FakeRunner {
-    panic_on_boundary_use: bool,
+    behavior: FakeRunnerBehavior,
 }
 
 impl GracefulShutdown for FakeRunner {
@@ -1317,22 +1378,24 @@ impl Runner for FakeRunner {
     }
 
     async fn run(&self, _request: RunRequest, _progress: roam::Tx<StoreProgress>) -> RunResult {
-        assert!(
-            !self.panic_on_boundary_use,
-            "fake runner run should not be used in daemon-only build.vx tests"
-        );
-        RunResult {
-            success: false,
-            exit_code: 1,
-            stdout: String::new(),
-            stderr: "fake runner was unexpectedly asked to run a build.vx exec request".to_string(),
-            duration_ms: 0,
-            output_manifest: None,
-            observer_value: None,
-            error_kind: None,
-            error: Some(
-                "fake runner was unexpectedly asked to run a build.vx exec request".to_string(),
-            ),
+        match &self.behavior {
+            FakeRunnerBehavior::PanicOnBoundaryUse => {
+                panic!("fake runner run should not be used in daemon-only build.vx tests");
+            }
+            FakeRunnerBehavior::Discover(_) => RunResult {
+                success: false,
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: "fake runner was unexpectedly asked to run a build.vx exec request"
+                    .to_string(),
+                duration_ms: 0,
+                output_manifest: None,
+                observer_value: None,
+                error_kind: None,
+                error: Some(
+                    "fake runner was unexpectedly asked to run a build.vx exec request".to_string(),
+                ),
+            },
         }
     }
 
@@ -1340,11 +1403,14 @@ impl Runner for FakeRunner {
         &self,
         _request: DiscoverRequest,
     ) -> std::result::Result<DiscoverResult, String> {
-        assert!(
-            !self.panic_on_boundary_use,
-            "fake runner discover should not be used in daemon-only build.vx tests"
-        );
-        Err("fake runner was unexpectedly asked to run a build.vx discover request".to_string())
+        match &self.behavior {
+            FakeRunnerBehavior::PanicOnBoundaryUse => {
+                panic!("fake runner discover should not be used in daemon-only build.vx tests");
+            }
+            FakeRunnerBehavior::Discover(value) => Ok(DiscoverResult {
+                value: value.clone(),
+            }),
+        }
     }
 }
 
@@ -1391,15 +1457,13 @@ struct FakeRunnerHandle {
 }
 
 impl FakeRunnerHandle {
-    async fn new() -> Self {
+    async fn new(behavior: FakeRunnerBehavior) -> Self {
         let endpoint = free_local_endpoint();
         let mut listener = Listener::bind(&endpoint)
             .await
             .expect("failed to bind fake runner endpoint");
         let (gate, boot_tx) = BootGate::<FakeRunner>::new();
-        gate.set_service(FakeRunner {
-            panic_on_boundary_use: true,
-        });
+        gate.set_service(FakeRunner { behavior });
         boot_tx.ready();
         let boot_service = gate.boot_service();
 
@@ -1462,6 +1526,20 @@ struct BuildServiceDaemonTestEnv {
 
 impl BuildServiceDaemonTestEnv {
     async fn new() -> Self {
+        Self::with_build_vx_executor_factory(
+            FakeRunnerBehavior::PanicOnBoundaryUse,
+            crate::service::BuildVxExecutors::local_default,
+        )
+        .await
+    }
+
+    async fn with_build_vx_executor_factory<F>(
+        fake_runner_behavior: FakeRunnerBehavior,
+        build_vx_executors: F,
+    ) -> Self
+    where
+        F: FnOnce(Arc<RunnerClient>) -> crate::service::BuildVxExecutors,
+    {
         let lock = lock_test_file("build-service");
         let binaries = copy_test_service_binaries();
         let store_root = TempDir::new().expect("failed to create store root tempdir");
@@ -1478,7 +1556,7 @@ impl BuildServiceDaemonTestEnv {
             .await
             .expect("failed to spawn/connect vx-store");
 
-        let fake_runner = FakeRunnerHandle::new().await;
+        let fake_runner = FakeRunnerHandle::new(fake_runner_behavior).await;
         let runner_handle = fake_runner.connect().await;
 
         let (store_virtual, runner_virtual) = tokio::try_join!(
@@ -1489,20 +1567,25 @@ impl BuildServiceDaemonTestEnv {
 
         let store_handle = Arc::new(store_handle);
         let runner_handle = Arc::new(runner_handle);
+        let runner_client = Arc::new(RunnerClient::new(runner_virtual));
+        let build_vx_executors = build_vx_executors(Arc::clone(&runner_client));
 
         let service = VxdService::new(
             Utf8Path::from_path(vx_home.path())
                 .expect("vx_home path should be valid UTF-8")
                 .to_owned(),
             "test-host".to_string(),
-            Arc::new(SyncMutex::new(
-                "vxd-build-vx-tests/spawn_tracker",
-                SpawnTracker::default(),
-            )),
-            Arc::new(StoreClient::new(store_virtual)),
-            Arc::new(RunnerClient::new(runner_virtual)),
-            Arc::clone(&store_handle),
-            Arc::clone(&runner_handle),
+            crate::service::VxdServiceDeps {
+                spawn_tracker: Arc::new(SyncMutex::new(
+                    "vxd-build-vx-tests/spawn_tracker",
+                    SpawnTracker::default(),
+                )),
+                store: Arc::new(StoreClient::new(store_virtual)),
+                exec: runner_client,
+                build_vx_executors,
+                store_handle: Arc::clone(&store_handle),
+                runner_handles: Arc::from([Arc::clone(&runner_handle)]),
+            },
         )
         .await;
 
@@ -1675,6 +1758,124 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
             .iter()
             .flat_map(|report| report.notes.iter())
             .any(|note| note.contains("build.vx executor class:linux is not configured")),
+        "unexpected build failure: {:?}",
+        failure,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_vx_routes_configured_daemon_executor_classes() {
+    let discovered = Value::Discovered(vx_eval::DiscoveredValue {
+        value: Box::new(Value::Blob(BlobValue::from_string("present"))),
+        obligations: Arc::from([]),
+    });
+    let transport = TransportValue::try_from(&discovered)
+        .expect("discovered value should serialize for fake runner");
+
+    let env = BuildServiceDaemonTestEnv::with_build_vx_executor_factory(
+        FakeRunnerBehavior::Discover(transport),
+        |runner_client| {
+            let mut build_vx_executors =
+                crate::service::BuildVxExecutors::local_default(Arc::clone(&runner_client));
+            build_vx_executors.register_class_runner(
+                "linux",
+                "daemon:linux",
+                vx_eval::ExecutorBackendKind::Daemon,
+                runner_client,
+            );
+            build_vx_executors
+        },
+    )
+    .await;
+    let workspace = TempDir::new().expect("workspace");
+    let workspace_root = Utf8Path::from_path(workspace.path()).expect("utf8 workspace");
+
+    fs::write(
+        workspace.path().join("build.vx"),
+        r#"
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  Tree {
+    @tool.txt: discover(executor_class("linux"), (host) => host.read("/tmp/tool")),
+  }
+}
+"#,
+    )
+    .expect("write build.vx");
+
+    let result = env
+        .service
+        .do_build(BuildRequest {
+            project_path: workspace_root.to_owned(),
+            build_file_path: None,
+            release: false,
+        })
+        .await
+        .expect("build should succeed");
+
+    assert!(
+        result.success,
+        "build unexpectedly failed: {:?}",
+        result.failure
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(".vx/build/tool.txt")).expect("output"),
+        "present"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn build_vx_reports_unimplemented_ssh_bootstrap_executor_classes() {
+    let env = BuildServiceDaemonTestEnv::with_build_vx_executor_factory(
+        FakeRunnerBehavior::PanicOnBoundaryUse,
+        |runner_client| {
+            let mut build_vx_executors =
+                crate::service::BuildVxExecutors::local_default(runner_client);
+            build_vx_executors.register_class_unavailable(
+                "linux",
+                "ssh_bootstrap:linux",
+                vx_eval::ExecutorBackendKind::SshBootstrap,
+                "build.vx executor ssh_bootstrap:linux is configured for amos@example, but SSH bootstrap is not implemented yet",
+            );
+            build_vx_executors
+        },
+    )
+    .await;
+    let workspace = TempDir::new().expect("workspace");
+    let workspace_root = Utf8Path::from_path(workspace.path()).expect("utf8 workspace");
+
+    fs::write(
+        workspace.path().join("build.vx"),
+        r#"
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  Tree {
+    @tool.txt: discover(executor_class("linux"), (host) => Blob("present")),
+  }
+}
+"#,
+    )
+    .expect("write build.vx");
+
+    let result = env
+        .service
+        .do_build(BuildRequest {
+            project_path: workspace_root.to_owned(),
+            build_file_path: None,
+            release: false,
+        })
+        .await
+        .expect("build should complete with a structured failure");
+
+    assert!(!result.success, "build unexpectedly succeeded");
+    let failure = result
+        .failure
+        .as_ref()
+        .expect("build should include a structured failure");
+    assert!(
+        failure
+            .reports
+            .iter()
+            .flat_map(|report| report.notes.iter())
+            .any(|note| note.contains("SSH bootstrap is not implemented yet")),
         "unexpected build failure: {:?}",
         failure,
     );

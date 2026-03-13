@@ -86,30 +86,88 @@ pub struct AcquiredToolchains {
 }
 
 #[derive(Clone)]
-struct BuildVxExecutor {
+pub(crate) struct BuildVxExecutor {
     id: String,
     backend: ExecutorBackendKind,
+    runner: Option<Arc<RunnerClient>>,
+    unavailable_reason: Option<String>,
 }
 
 #[derive(Clone)]
-struct BuildVxExecutors {
+pub(crate) struct BuildVxExecutors {
     executors: HashMap<String, BuildVxExecutor>,
     class_aliases: HashMap<String, String>,
-    runners: HashMap<String, Arc<RunnerClient>>,
 }
 
 impl BuildVxExecutors {
-    fn local_default(runner: Arc<RunnerClient>) -> Self {
+    pub(crate) fn local_default(runner: Arc<RunnerClient>) -> Self {
         let executor_id = "local".to_string();
         let executor = BuildVxExecutor {
             id: executor_id.clone(),
             backend: ExecutorBackendKind::Local,
+            runner: Some(runner),
+            unavailable_reason: None,
         };
         Self {
             executors: HashMap::from([(executor_id.clone(), executor)]),
             class_aliases: HashMap::from([("default".to_string(), executor_id.clone())]),
-            runners: HashMap::from([(executor_id, runner)]),
         }
+    }
+
+    pub(crate) fn register_class_alias(
+        &mut self,
+        class_label: impl Into<String>,
+        executor_id: &str,
+    ) -> std::result::Result<(), String> {
+        if !self.executors.contains_key(executor_id) {
+            return Err(format!(
+                "cannot alias build.vx executor class to unknown executor {executor_id}"
+            ));
+        }
+        self.class_aliases
+            .insert(class_label.into(), executor_id.to_string());
+        Ok(())
+    }
+
+    pub(crate) fn register_class_runner(
+        &mut self,
+        class_label: impl Into<String>,
+        executor_id: impl Into<String>,
+        backend: ExecutorBackendKind,
+        runner: Arc<RunnerClient>,
+    ) {
+        let executor_id = executor_id.into();
+        self.executors.insert(
+            executor_id.clone(),
+            BuildVxExecutor {
+                id: executor_id.clone(),
+                backend,
+                runner: Some(runner),
+                unavailable_reason: None,
+            },
+        );
+        self.class_aliases.insert(class_label.into(), executor_id);
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn register_class_unavailable(
+        &mut self,
+        class_label: impl Into<String>,
+        executor_id: impl Into<String>,
+        backend: ExecutorBackendKind,
+        unavailable_reason: impl Into<String>,
+    ) {
+        let executor_id = executor_id.into();
+        self.executors.insert(
+            executor_id.clone(),
+            BuildVxExecutor {
+                id: executor_id.clone(),
+                backend,
+                runner: None,
+                unavailable_reason: Some(unavailable_reason.into()),
+            },
+        );
+        self.class_aliases.insert(class_label.into(), executor_id);
     }
 
     fn resolve_executor_id(
@@ -148,12 +206,21 @@ impl BuildVxExecutors {
         selector: &ExecutorSelector,
     ) -> std::result::Result<Arc<RunnerClient>, String> {
         let executor_id = self.resolve_executor_id(selector)?;
-        self.runners.get(executor_id).cloned().ok_or_else(|| {
+        let executor = self.executors.get(executor_id).ok_or_else(|| {
+            format!(
+                "build.vx executor {} is configured without executor metadata",
+                executor_id
+            )
+        })?;
+        if let Some(runner) = &executor.runner {
+            return Ok(Arc::clone(runner));
+        }
+        Err(executor.unavailable_reason.clone().unwrap_or_else(|| {
             format!(
                 "build.vx executor {} is configured without a runner connection",
                 executor_id
             )
-        })
+        }))
     }
 }
 
@@ -165,7 +232,7 @@ pub struct VxdService {
     exec: Arc<RunnerClient>,
     build_vx_executors: Arc<BuildVxExecutors>,
     _store_handle: Arc<ServiceHandle>,
-    _runner_handle: Arc<ServiceHandle>,
+    _runner_handles: Arc<[Arc<ServiceHandle>]>,
 
     /// The host triple of the execd machine (used for toolchain selection + cache keys).
     exec_host_triple: String,
@@ -201,6 +268,15 @@ pub struct VxdService {
     /// Cancellation token for the build active on this session (if any).
     /// Per-connection: when the CLI disconnects, only this session's build is cancelled.
     active_build_cancel: Arc<SyncMutex<Option<CancellationToken>>>,
+}
+
+pub(crate) struct VxdServiceDeps {
+    pub(crate) spawn_tracker: Arc<SyncMutex<SpawnTracker>>,
+    pub(crate) store: Arc<StoreClient>,
+    pub(crate) exec: Arc<RunnerClient>,
+    pub(crate) build_vx_executors: BuildVxExecutors,
+    pub(crate) store_handle: Arc<ServiceHandle>,
+    pub(crate) runner_handles: Arc<[Arc<ServiceHandle>]>,
 }
 
 fn rule_plan_bridge_enabled() -> bool {
@@ -2252,15 +2328,19 @@ impl VxdService {
     }
 
     /// Create a new daemon service
-    pub async fn new(
+    pub(crate) async fn new(
         vx_home: Utf8PathBuf,
         exec_host_triple: String,
-        spawn_tracker: Arc<SyncMutex<SpawnTracker>>,
-        store: Arc<StoreClient>,
-        exec: Arc<RunnerClient>,
-        store_handle: Arc<ServiceHandle>,
-        runner_handle: Arc<ServiceHandle>,
+        deps: VxdServiceDeps,
     ) -> Self {
+        let VxdServiceDeps {
+            spawn_tracker,
+            store,
+            exec,
+            build_vx_executors,
+            store_handle,
+            runner_handles,
+        } = deps;
         let db = Database::new();
         let cache_path = vx_home.join("picante.cache");
         let wal_path = vx_home.join("picante.wal");
@@ -2310,14 +2390,12 @@ impl VxdService {
             }
         };
 
-        let build_vx_executors = Arc::new(BuildVxExecutors::local_default(Arc::clone(&exec)));
-
         Self {
             store,
             exec,
-            build_vx_executors,
+            build_vx_executors: Arc::new(build_vx_executors),
             _store_handle: store_handle,
-            _runner_handle: runner_handle,
+            _runner_handles: runner_handles,
             exec_host_triple,
             vx_home,
             db: Arc::new(db),
@@ -2343,7 +2421,7 @@ impl VxdService {
             exec: self.exec.clone(),
             build_vx_executors: self.build_vx_executors.clone(),
             _store_handle: self._store_handle.clone(),
-            _runner_handle: self._runner_handle.clone(),
+            _runner_handles: self._runner_handles.clone(),
             exec_host_triple: self.exec_host_triple.clone(),
             vx_home: self.vx_home.clone(),
             db: Arc::new(Database::new()),

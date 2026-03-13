@@ -931,6 +931,16 @@ impl PartialEq for Value {
 impl Eq for Value {}
 
 impl ExecutorBackendKind {
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "class" => Some(Self::Class),
+            "local" => Some(Self::Local),
+            "ssh_bootstrap" => Some(Self::SshBootstrap),
+            "daemon" => Some(Self::Daemon),
+            _ => None,
+        }
+    }
+
     pub fn as_tag(&self) -> &'static str {
         match self {
             Self::Class => "class",
