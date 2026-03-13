@@ -2245,6 +2245,7 @@ impl RunnerService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vx_eval::ExecutorSelector;
     use vx_store_proto::Blake3Hash;
 
     #[test]
@@ -2346,6 +2347,7 @@ mod tests {
     #[test]
     fn parent_dirs_are_derived_from_path_inputs() {
         let request = RunRequest {
+            executor: ExecutorSelector::class("default"),
             toolchain_manifest: Blake3Hash([0; 32]),
             program_rel: String::new(),
             program: Some(RunArg::literal("cc")),

@@ -45,8 +45,8 @@ pub enum Value {
     // r[impl store.tree]
     /// A directory-like content handle.
     Tree(TreeValue),
-    /// A logical executor class label.
-    ExecutorClass(Arc<str>),
+    /// An explicit executor selector used by runtime boundaries.
+    Executor(ExecutorSelector),
     /// An executor-local verifier handle.
     Host(HostValue),
     /// A value with hidden discovery verification obligations.
@@ -104,6 +104,23 @@ pub enum TreeValue {
     Inline(Arc<[(Arc<str>, Value)]>),
     FsDir(PathValue),
     Store(NodeHash),
+}
+
+/// How the orchestrator reaches and manages an executor.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Facet)]
+#[repr(u8)]
+pub enum ExecutorBackendKind {
+    Class,
+    Local,
+    SshBootstrap,
+    Daemon,
+}
+
+/// A concrete executor selector understood by runtime boundaries.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Facet)]
+pub struct ExecutorSelector {
+    pub id: String,
+    pub backend: ExecutorBackendKind,
 }
 
 /// An opaque verifier-only view of the executor host.
@@ -240,7 +257,7 @@ impl Value {
             Value::Blob(_) => "Blob",
             Value::Bytes(_) => "Bytes",
             Value::Tree(_) => "Tree",
-            Value::ExecutorClass(_) => "ExecutorClass",
+            Value::Executor(_) => "ExecutorClass",
             Value::Host(_) => "Host",
             Value::Discovered(discovered) => discovered.value.type_name(),
             Value::Unit => "()",
@@ -298,7 +315,7 @@ impl Value {
             | Value::Path(_)
             | Value::Blob(_)
             | Value::Bytes(_)
-            | Value::ExecutorClass(_)
+            | Value::Executor(_)
             | Value::Host(_)
             | Value::Unit => {}
         }
@@ -359,7 +376,11 @@ impl Value {
             Value::Blob(blob) => blob.key(),
             Value::Bytes(bytes) => Some(format!("bytes:{}", hex_bytes(bytes))),
             Value::Tree(tree) => tree.key(),
-            Value::ExecutorClass(label) => Some(format!("executor_class:{label}")),
+            Value::Executor(selector) => Some(format!(
+                "executor:{}:{}",
+                selector.backend.as_tag(),
+                selector.id
+            )),
             Value::Host(_) => None,
             Value::Discovered(discovered) => {
                 let obligations = discovered
@@ -812,7 +833,7 @@ impl fmt::Display for Value {
             Value::Blob(blob) => write!(f, "{blob}"),
             Value::Bytes(bytes) => write!(f, "<bytes {} bytes>", bytes.len()),
             Value::Tree(tree) => write!(f, "{tree}"),
-            Value::ExecutorClass(label) => write!(f, "{label}"),
+            Value::Executor(selector) => write!(f, "{}", selector.id),
             Value::Host(_) => write!(f, "<host>"),
             Value::Discovered(discovered) => write!(f, "{}", discovered.value),
             Value::Unit => write!(f, "()"),
@@ -883,7 +904,7 @@ impl PartialEq for Value {
             (Value::Blob(a), Value::Blob(b)) => a == b,
             (Value::Bytes(a), Value::Bytes(b)) => a == b,
             (Value::Tree(a), Value::Tree(b)) => a == b,
-            (Value::ExecutorClass(a), Value::ExecutorClass(b)) => a == b,
+            (Value::Executor(a), Value::Executor(b)) => a == b,
             (Value::Host(a), Value::Host(b)) => a == b,
             (Value::Unit, Value::Unit) => true,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
@@ -908,6 +929,26 @@ impl PartialEq for Value {
 }
 
 impl Eq for Value {}
+
+impl ExecutorBackendKind {
+    pub fn as_tag(&self) -> &'static str {
+        match self {
+            Self::Class => "class",
+            Self::Local => "local",
+            Self::SshBootstrap => "ssh_bootstrap",
+            Self::Daemon => "daemon",
+        }
+    }
+}
+
+impl ExecutorSelector {
+    pub fn class(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            backend: ExecutorBackendKind::Class,
+        }
+    }
+}
 
 impl PartialEq for ExecPathValue {
     fn eq(&self, other: &Self) -> bool {

@@ -40,8 +40,8 @@ pub use transport::{
 
 mod value;
 pub use value::{
-    BlobValue, DiscoveredValue, ExecPathValue, HostObservation, HostValue, MapValue, PathValue,
-    StructValue, TreeValue, Value,
+    BlobValue, DiscoveredValue, ExecPathValue, ExecutorBackendKind, ExecutorSelector,
+    HostObservation, HostValue, MapValue, PathValue, StructValue, TreeValue, Value,
 };
 
 mod worker;

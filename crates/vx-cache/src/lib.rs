@@ -20,7 +20,8 @@ pub const CC_CACHE_KEY_VERSION: u32 = 2;
 /// Current cache key schema version for generic tool execution.
 /// Version 5: Added direct program hashing for executor-side exec requests.
 /// Version 6: Hash shipped observers directly instead of serializing whole modules.
-pub const RUN_CACHE_KEY_VERSION: u32 = 6;
+/// Version 7: Include executor selector identity.
+pub const RUN_CACHE_KEY_VERSION: u32 = 7;
 
 /// Compute a cache key for a Rust compile request.
 ///
@@ -225,6 +226,12 @@ pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
     hasher.update(&RUN_CACHE_KEY_VERSION.to_le_bytes());
     hasher.update(b"\n");
 
+    hasher.update(b"executor:");
+    hasher.update(request.executor.backend.as_tag().as_bytes());
+    hasher.update(b":");
+    hasher.update(request.executor.id.as_bytes());
+    hasher.update(b"\n");
+
     hasher.update(b"toolchain:");
     hasher.update(&request.toolchain_manifest.0);
     hasher.update(b"\n");
@@ -364,8 +371,9 @@ pub fn run_cache_key(request: &RunRequest) -> Blake3Hash {
 mod tests {
     use super::*;
     use vx_runner_proto::{
-        RunArg, RunEvalPayload, RunRequest, RustDep, ShippedFunction, TransportBlock,
-        TransportExpr, TransportFnDef, TransportModule, TransportParam, TransportStmt,
+        ExecutorSelector, RunArg, RunEvalPayload, RunRequest, RustDep, ShippedFunction,
+        TransportBlock, TransportExpr, TransportFnDef, TransportModule, TransportParam,
+        TransportStmt,
     };
 
     #[test]
@@ -437,6 +445,7 @@ mod tests {
     #[test]
     fn run_cache_key_distinguishes_literal_and_path_args() {
         let request = RunRequest {
+            executor: ExecutorSelector::class("default"),
             toolchain_manifest: Blake3Hash([1; 32]),
             program_rel: "bin/rustc".to_string(),
             program: None,
@@ -462,6 +471,7 @@ mod tests {
     #[test]
     fn run_cache_key_includes_evaluator_payload() {
         let request = RunRequest {
+            executor: ExecutorSelector::class("default"),
             toolchain_manifest: Blake3Hash([1; 32]),
             program_rel: "bin/tool".to_string(),
             program: None,
@@ -525,6 +535,7 @@ mod tests {
     #[test]
     fn run_cache_key_includes_direct_program_identity() {
         let request = RunRequest {
+            executor: ExecutorSelector::class("default"),
             toolchain_manifest: Blake3Hash([1; 32]),
             program_rel: "bin/tool".to_string(),
             program: None,
@@ -550,6 +561,7 @@ mod tests {
     #[test]
     fn run_cache_key_handles_shipped_observer_payloads() {
         let request = RunRequest {
+            executor: ExecutorSelector::class("default"),
             toolchain_manifest: Blake3Hash([1; 32]),
             program_rel: String::new(),
             program: Some(RunArg::literal("/usr/bin/cc")),

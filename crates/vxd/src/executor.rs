@@ -13,6 +13,7 @@ use std::time::Instant;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
+use vx_eval::ExecutorSelector;
 
 use crate::action_graph::{Action, ActionGraph};
 use crate::error::VxdError;
@@ -1935,6 +1936,7 @@ async fn execute_action(
             }
 
             let request = RunRequest {
+                executor: ExecutorSelector::class("default"),
                 toolchain_manifest,
                 program_rel,
                 program: None,

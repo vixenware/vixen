@@ -1392,6 +1392,7 @@ async fn run_build_vx_exec_via_runner(
     let result = exec
         .run(
             RunRequest {
+                executor: request.executor.clone(),
                 toolchain_manifest: Blake3Hash([0; 32]),
                 program_rel: String::new(),
                 program: Some(exec_arg_to_run_arg(&program)),
@@ -1464,7 +1465,7 @@ async fn run_build_vx_discover_via_runner(
     let demand_chain = request.demand_chain.clone();
     let result = exec
         .discover(RunnerDiscoverRequest {
-            class: request.class,
+            executor: request.executor,
             module: request.module,
             probe: request.probe,
         })
@@ -1517,7 +1518,9 @@ pub(crate) fn summarize_build_vx_exec_request(request: &ExecRequest) -> String {
         .collect::<Vec<_>>();
 
     format!(
-        "build.vx exec: {} (mounts: {}; writable: {})",
+        "build.vx exec[{}:{}]: {} (mounts: {}; writable: {})",
+        request.executor.backend.as_tag(),
+        request.executor.id,
         summarize_items(&argv, 10),
         summarize_items(&mounts, 6),
         summarize_items(&writable_roots, 6),
@@ -1525,7 +1528,11 @@ pub(crate) fn summarize_build_vx_exec_request(request: &ExecRequest) -> String {
 }
 
 pub(crate) fn summarize_build_vx_discover_request(request: &EvalDiscoverRequest) -> String {
-    format!("build.vx discover: class={}", request.class)
+    format!(
+        "build.vx discover[{}:{}]",
+        request.executor.backend.as_tag(),
+        request.executor.id
+    )
 }
 
 pub(crate) fn summarize_build_vx_acquire_request(request: &EvalAcquireRequest) -> String {

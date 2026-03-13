@@ -231,6 +231,7 @@ fn build_vx_exec_summary_includes_args_mounts_and_writable_roots() {
             value: Value::Blob(BlobValue::from_string("int main(void) { return 0; }\n")),
         }],
         writable_roots: vec![PathValue::new("out")],
+        executor: vx_eval::ExecutorSelector::class("default"),
         demand_chain: DemandChain::new(),
         module: empty_module,
         observer: empty_function,
@@ -239,7 +240,7 @@ fn build_vx_exec_summary_includes_args_mounts_and_writable_roots() {
 
     assert_eq!(
         summary,
-        "build.vx exec: /usr/bin/cc, -x, c, probe.c, -c, -o, out/probe.o (mounts: probe.c; writable: out)"
+        "build.vx exec[class:default]: /usr/bin/cc, -x, c, probe.c, -c, -o, out/probe.o (mounts: probe.c; writable: out)"
     );
 }
 
@@ -260,13 +261,13 @@ fn build_vx_discover_summary_includes_executor_class() {
         captures: Vec::new(),
     };
     let summary = crate::service::summarize_build_vx_discover_request(&EvalDiscoverRequest {
-        class: "default".to_string(),
+        executor: vx_eval::ExecutorSelector::class("default"),
         demand_chain: DemandChain::new(),
         module: empty_module,
         probe,
     });
 
-    assert_eq!(summary, "build.vx discover: class=default");
+    assert_eq!(summary, "build.vx discover[class:default]");
 }
 
 #[test]

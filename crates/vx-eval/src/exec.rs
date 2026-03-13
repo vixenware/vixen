@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::poison::DemandChain;
 use crate::poison::PoisonError;
 use crate::transport::{ShippedFunction, TransportModule};
-use crate::value::{HostObservation, PathValue, Value};
+use crate::value::{ExecutorSelector, HostObservation, PathValue, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecArgValue {
@@ -34,6 +34,7 @@ pub struct ExecRequest {
     pub env: Vec<(String, ExecArgValue)>,
     pub mounts: Vec<ExecMount>,
     pub writable_roots: Vec<PathValue>,
+    pub executor: ExecutorSelector,
     pub demand_chain: DemandChain,
     pub module: TransportModule,
     pub observer: ShippedFunction,
@@ -46,7 +47,7 @@ pub type SharedExecHandler = Arc<ExecHandler>;
 
 #[derive(Debug, Clone)]
 pub struct DiscoverRequest {
-    pub class: String,
+    pub executor: ExecutorSelector,
     pub demand_chain: DemandChain,
     pub module: TransportModule,
     pub probe: ShippedFunction,

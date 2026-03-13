@@ -21,9 +21,10 @@
 
 use facet::Facet;
 pub use vx_eval::{
-    HostObservation, ShippedFunction, TransportBinOp, TransportBlob, TransportBlock,
-    TransportBuiltinValue, TransportExpr, TransportFnDef, TransportModule, TransportParam,
-    TransportStmt, TransportStruct, TransportTree, TransportUnaryOp, TransportValue,
+    ExecutorBackendKind, ExecutorSelector, HostObservation, ShippedFunction, TransportBinOp,
+    TransportBlob, TransportBlock, TransportBuiltinValue, TransportExpr, TransportFnDef,
+    TransportModule, TransportParam, TransportStmt, TransportStruct, TransportTree,
+    TransportUnaryOp, TransportValue,
 };
 use vx_store_proto::{ManifestHash, ServiceVersion, StoreProgress};
 
@@ -315,8 +316,8 @@ pub struct RunEvalPayload {
 /// Executor-side discovery request shipped to the runner.
 #[derive(Debug, Clone, Facet)]
 pub struct DiscoverRequest {
-    /// Target executor class. Current runners may ignore this if they only expose one class.
-    pub class: String,
+    /// Target executor selector. Current runners may ignore this if they only expose one executor.
+    pub executor: ExecutorSelector,
     /// Lowered module used to resolve global calls from the shipped closure.
     pub module: TransportModule,
     /// Discovery probe closure to run with Host access.
@@ -341,6 +342,9 @@ pub enum RunFailureKind {
 /// This is the generic building block that language-specific front-ends can lower into.
 #[derive(Debug, Clone, Facet)]
 pub struct RunRequest {
+    /// Target executor selector. Current runners may ignore this if they are the selected executor.
+    pub executor: ExecutorSelector,
+
     /// Toolchain manifest hash (runner materializes locally).
     /// Ignored when `program` is set and no `${VX_TOOLCHAIN}` placeholders are used.
     pub toolchain_manifest: ManifestHash,

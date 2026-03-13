@@ -8,7 +8,8 @@ use vx_store_proto::{BlobRef, NodeHash};
 use crate::instr;
 use crate::value::{
     BlobValue, BuiltinFunction, BuiltinMethod, BuiltinNamespace, BuiltinValue, DiscoveredValue,
-    FunctionValue, HostObservation, MapValue, PathValue, StructValue, TreeValue, Value,
+    ExecutorSelector, FunctionValue, HostObservation, MapValue, PathValue, StructValue, TreeValue,
+    Value,
 };
 
 #[derive(Debug, Clone, PartialEq, Facet)]
@@ -230,7 +231,7 @@ pub enum TransportValue {
     Blob(TransportBlob),
     Bytes(Vec<u8>),
     Tree(TransportTree),
-    ExecutorClass(String),
+    Executor(ExecutorSelector),
     Discovered {
         value: Box<TransportValue>,
         obligations: Vec<HostObservation>,
@@ -978,7 +979,7 @@ impl TryFrom<&Value> for TransportValue {
             Value::Blob(blob) => Ok(Self::Blob(TransportBlob::try_from(blob)?)),
             Value::Bytes(bytes) => Ok(Self::Bytes(bytes.as_ref().to_vec())),
             Value::Tree(tree) => Ok(Self::Tree(TransportTree::try_from(tree)?)),
-            Value::ExecutorClass(label) => Ok(Self::ExecutorClass(label.to_string())),
+            Value::Executor(selector) => Ok(Self::Executor(selector.clone())),
             Value::Host(_) => Err("cannot transport Host values".into()),
             Value::Discovered(discovered) => Ok(Self::Discovered {
                 value: Box::new(TransportValue::try_from(discovered.value.as_ref())?),
@@ -1030,7 +1031,7 @@ impl TryFrom<TransportValue> for Value {
             TransportValue::Blob(blob) => Ok(Self::Blob(blob.into())),
             TransportValue::Bytes(bytes) => Ok(Self::Bytes(Arc::from(bytes))),
             TransportValue::Tree(tree) => Ok(Self::Tree(tree.try_into()?)),
-            TransportValue::ExecutorClass(label) => Ok(Self::ExecutorClass(Arc::from(label))),
+            TransportValue::Executor(selector) => Ok(Self::Executor(selector)),
             TransportValue::Discovered { value, obligations } => {
                 Ok(Self::Discovered(DiscoveredValue {
                     value: Box::new(Value::try_from(*value)?),

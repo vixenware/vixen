@@ -392,8 +392,8 @@ mod tests {
 
     use tempfile::TempDir;
     use vx_eval::{
-        BlobValue, Engine, HostObservation, PathValue, TransportTree, TreeValue, Value,
-        lower_source_file_with_source_id,
+        BlobValue, Engine, ExecutorSelector, HostObservation, PathValue, TransportTree, TreeValue,
+        Value, lower_source_file_with_source_id,
     };
     use vx_io::spawn::{ServiceBuilder, ServiceHandle};
     use vx_parser::SourceFile;
@@ -751,7 +751,7 @@ mod tests {
         );
         let engine = shipped_function_engine(&source);
         let request = DiscoverRequest {
-            class: "default".to_string(),
+            executor: ExecutorSelector::class("default"),
             module: engine.transport_module(),
             probe: engine
                 .ship_function(engine.call("make", vec![]).expect("make should evaluate"))
@@ -766,16 +766,10 @@ mod tests {
             vx_eval::TransportValue::Discovered { value, obligations } => {
                 assert_eq!(
                     obligations,
-                    vec![
-                        HostObservation::Hash {
-                            path: tool_path.to_string_lossy().to_string(),
-                            content_hash: expected_hash.clone(),
-                        },
-                        HostObservation::Read {
-                            path: tool_path.to_string_lossy().to_string(),
-                            content_hash: expected_hash,
-                        },
-                    ]
+                    vec![HostObservation::Read {
+                        path: tool_path.to_string_lossy().to_string(),
+                        content_hash: expected_hash,
+                    }]
                 );
                 match *value {
                     vx_eval::TransportValue::Blob(vx_eval::TransportBlob::Store { .. }) => {}

@@ -37,8 +37,8 @@ use crate::scheduler::Scheduler;
 use crate::transport::{ShippedFunction, TransportModule, TransportValue};
 use crate::value::{
     BlobValue, BuiltinFunction, BuiltinMethod, BuiltinNamespace, BuiltinValue, DiscoveredValue,
-    ExecPathValue, FunctionValue, HostObservation, HostValue, MapValue, PartialValue, PathValue,
-    StructValue, TreeValue, Value,
+    ExecPathValue, ExecutorSelector, FunctionValue, HostObservation, HostValue, MapValue,
+    PartialValue, PathValue, StructValue, TreeValue, Value,
 };
 
 thread_local! {
@@ -85,6 +85,7 @@ struct ParsedExecRequest {
     env: Vec<(String, ExecArgValue)>,
     mounts: Vec<(PathValue, Value)>,
     writable_roots: Vec<PathValue>,
+    executor: ExecutorSelector,
     observer: Value,
     verification_obligations: Vec<HostObservation>,
 }
@@ -4341,13 +4342,13 @@ impl Engine {
         }
         self.require_no_kwargs("discover", kwargs)?;
         self.check_arity("discover", args, 2)?;
-        let class = self.materialize_value_deep(args[0].clone(), "forcing discover class")?;
-        let class = self.expect_executor_class(&class, "discover class")?;
+        let executor = self.materialize_value_deep(args[0].clone(), "forcing discover executor")?;
+        let executor = self.expect_executor_selector(&executor, "discover executor")?;
         let probe = self.materialize_value_deep(args[1].clone(), "forcing discover probe")?;
 
         if let Some(discover_handler) = &self.discover_handler {
             let request = DiscoverRequest {
-                class,
+                executor,
                 demand_chain: self.current_demand_chain(None),
                 module: self.transport_module(),
                 probe: self.ship_function(probe)?,
@@ -4371,7 +4372,7 @@ impl Engine {
         self.check_arity("executor_class", args, 1)?;
         let name = self.materialize_value_deep(args[0].clone(), "forcing executor_class name")?;
         let name = self.expect_host_path(&name, "executor_class name")?;
-        Ok(Value::ExecutorClass(Arc::from(name)))
+        Ok(Value::Executor(ExecutorSelector::class(name)))
     }
 
     fn materialize_kwargs(
@@ -4473,10 +4474,13 @@ impl Engine {
             }
         }
 
-        if let Some(executor) = executor_value {
-            let executor = self.materialize_value_deep(executor, "forcing exec executor")?;
-            let _ = self.expect_executor_class(&executor, "exec executor")?;
-        }
+        let executor = match executor_value {
+            Some(executor) => {
+                let executor = self.materialize_value_deep(executor, "forcing exec executor")?;
+                self.expect_executor_selector(&executor, "exec executor")?
+            }
+            None => ExecutorSelector::class("default"),
+        };
 
         let mut verification_obligations = BTreeMap::new();
         Self::add_obligations(&mut verification_obligations, top_level_arg_obligations);
@@ -4516,6 +4520,7 @@ impl Engine {
             env,
             mounts,
             writable_roots,
+            executor,
             observer,
             verification_obligations: verification_obligations.into_values().collect(),
         })
@@ -4536,6 +4541,7 @@ impl Engine {
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             writable_roots: request.writable_roots.clone(),
+            executor: request.executor.clone(),
             demand_chain: self.current_demand_chain(None),
             module: self.transport_module(),
             observer: self.ship_function(request.observer.clone())?,
@@ -5338,11 +5344,15 @@ impl Engine {
         }
     }
 
-    fn expect_executor_class(&self, value: &Value, context: &str) -> Result<String, PoisonError> {
+    fn expect_executor_selector(
+        &self,
+        value: &Value,
+        context: &str,
+    ) -> Result<ExecutorSelector, PoisonError> {
         let (value, _) = self.split_obligations_ref(value);
         match value {
-            Value::ExecutorClass(label) => Ok(label.to_string()),
-            Value::String(label) => Ok(label.to_string()),
+            Value::Executor(selector) => Ok(selector.clone()),
+            Value::String(label) => Ok(ExecutorSelector::class(label.as_ref())),
             other => Err(self.type_error(&format!(
                 "{context} must be ExecutorClass, got {}",
                 other.type_name()
@@ -5490,7 +5500,7 @@ impl Engine {
             | Value::Blob(BlobValue::Store { .. })
             | Value::Bytes(_)
             | Value::Path(_)
-            | Value::ExecutorClass(_)
+            | Value::Executor(_)
             | Value::U64(_)
             | Value::I64(_)
             | Value::F64(_)
