@@ -313,11 +313,11 @@ async fn ensure_clean_vixen_repo(repo_root: &Utf8Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn ssh_bootstrap_git_url(repo_root: &Utf8Path, port: u16) -> Result<String> {
+fn ssh_bootstrap_git_url(repo_root: &Utf8Path, host: &str, port: u16) -> Result<String> {
     let Some(repo_name) = repo_root.file_name() else {
         eyre::bail!("failed to determine repo name for {}", repo_root);
     };
-    Ok(format!("git://127.0.0.1:{port}/{repo_name}"))
+    Ok(format!("git://{host}:{port}/{repo_name}"))
 }
 
 #[cfg(unix)]
@@ -326,6 +326,21 @@ fn allocate_loopback_port() -> Result<u16> {
     let port = listener.local_addr()?.port();
     drop(listener);
     Ok(port)
+}
+
+#[cfg(unix)]
+async fn ssh_bootstrap_repo_host(target: &str) -> Result<Option<&'static str>> {
+    let status = moire::process::Command::new("ssh")
+        .arg(target)
+        .arg("python3")
+        .arg("-c")
+        .arg("import socket, sys; socket.gethostbyname('host.docker.internal'); sys.exit(0)")
+        .status()
+        .await?;
+    if status.success() {
+        return Ok(Some("host.docker.internal"));
+    }
+    Ok(None)
 }
 
 #[cfg(unix)]
@@ -405,7 +420,10 @@ async fn connect_ssh_bootstrap_runner(
 
     let paths = ssh_bootstrap_paths(&remote_home, class_label);
     let git_port = allocate_loopback_port()?;
-    let repo_url = ssh_bootstrap_git_url(&repo_root, git_port)?;
+    let git_host = ssh_bootstrap_repo_host(target)
+        .await?
+        .unwrap_or("127.0.0.1");
+    let repo_url = ssh_bootstrap_git_url(&repo_root, git_host, git_port)?;
     let log_path = vx_home.join(format!("runner-ssh-bootstrap-{class_label}.log"));
     let log_file = OpenOptions::new()
         .create(true)
@@ -435,7 +453,7 @@ async fn connect_ssh_bootstrap_runner(
     git_daemon
         .arg("daemon")
         .arg("--reuseaddr")
-        .arg("--listen=127.0.0.1")
+        .arg("--listen=0.0.0.0")
         .arg(format!("--port={git_port}"))
         .arg("--export-all")
         .arg(format!("--base-path={}", repo_parent.as_str()))
@@ -454,8 +472,6 @@ async fn connect_ssh_bootstrap_runner(
         .arg("ServerAliveInterval=30")
         .arg("-o")
         .arg("ServerAliveCountMax=3")
-        .arg("-R")
-        .arg(format!("{git_port}:127.0.0.1:{git_port}"))
         .arg("-L")
         .arg(format!(
             "{}:{}",

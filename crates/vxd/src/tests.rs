@@ -112,9 +112,13 @@ fn ssh_bootstrap_paths_use_a_stable_remote_layout() {
 #[cfg(unix)]
 #[test]
 fn ssh_bootstrap_git_url_uses_repo_basename() {
-    let url = crate::ssh_bootstrap_git_url(Utf8Path::new("/Users/amos/bearcove/vixen"), 9418)
-        .expect("git url should build");
-    assert_eq!(url, "git://127.0.0.1:9418/vixen");
+    let url = crate::ssh_bootstrap_git_url(
+        Utf8Path::new("/Users/amos/bearcove/vixen"),
+        "host.docker.internal",
+        9418,
+    )
+    .expect("git url should build");
+    assert_eq!(url, "git://host.docker.internal:9418/vixen");
 }
 
 #[cfg(unix)]
