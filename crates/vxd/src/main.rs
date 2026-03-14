@@ -365,6 +365,10 @@ store_socket="$6"
 vfsd_socket="$7"
 runner_socket="$8"
 
+restore_scrubbed_files() {
+  git -C "$checkout_dir" checkout -- Cargo.lock crates/vx/Cargo.toml crates/vxd/Cargo.toml || true
+}
+
 mkdir -p "$(dirname "$bare_repo_dir")" "$(dirname "$checkout_dir")" "$vx_home" "$store_root"
 if [ ! -f "$bare_repo_dir/HEAD" ]; then
   rm -rf "$bare_repo_dir"
@@ -375,6 +379,7 @@ if [ ! -d "$checkout_dir/.git" ]; then
   git clone "$bare_repo_dir" "$checkout_dir"
 fi
 git -C "$checkout_dir" remote set-url origin "$bare_repo_dir"
+restore_scrubbed_files
 git -C "$checkout_dir" fetch origin "refs/vixen-bootstrap/$commit"
 git -C "$checkout_dir" checkout --detach "$commit"
 python3 - "$checkout_dir" <<'PY'
@@ -399,8 +404,9 @@ while pgrep -f "$checkout_dir/target/debug/vx-runner" >/dev/null; do sleep 0.1; 
 while pgrep -f "$checkout_dir/target/debug/vx-store" >/dev/null; do sleep 0.1; done
 while pgrep -f "$checkout_dir/target/debug/vx-vfsd" >/dev/null; do sleep 0.1; done
 cargo build --manifest-path "$checkout_dir/Cargo.toml" -p vx-store -p vx-vfsd -p vx-runner -p landlock-exec
+restore_scrubbed_files
 rm -f "$store_socket" "$vfsd_socket" "$runner_socket"
-trap 'jobs -p | xargs -r kill || true' EXIT
+trap 'restore_scrubbed_files; jobs -p | xargs -r kill || true' EXIT
 "$checkout_dir/target/debug/vx-store" --root "$store_root" --listen "unix:$store_socket" &
 export VX_HOME="$vx_home"
 exec "$checkout_dir/target/debug/vx-runner" \
@@ -454,17 +460,20 @@ fn ssh_bootstrap_windows_command(
             "if (-not (Test-Path (Join-Path $bareRepoDir 'HEAD'))) {{ if (Test-Path $bareRepoDir) {{ Remove-Item -Recurse -Force $bareRepoDir }}; git init --bare $bareRepoDir }}; ",
             "if (-not (Test-Path (Join-Path $checkoutDir '.git'))) {{ if (Test-Path $checkoutDir) {{ Remove-Item -Recurse -Force $checkoutDir }}; git clone $bareRepoDir $checkoutDir }}; ",
             "git -C $checkoutDir remote set-url origin $bareRepoDir; ",
+            "git -C $checkoutDir checkout -- Cargo.lock crates/vx/Cargo.toml crates/vxd/Cargo.toml *> $null; ",
             "git -C $checkoutDir fetch origin ('refs/vixen-bootstrap/' + $commit); ",
             "git -C $checkoutDir checkout --detach $commit; ",
             "$manifests = @((Join-Path $checkoutDir 'crates\\vx\\Cargo.toml'), (Join-Path $checkoutDir 'crates\\vxd\\Cargo.toml')); ",
             "foreach ($manifest in $manifests) {{ if (Test-Path $manifest) {{ $lines = Get-Content $manifest; $updated = @($lines | Where-Object {{ $_ -notlike 'tree-sitter-vixen = *' }}); if ($updated.Count -ne $lines.Count) {{ Set-Content -Path $manifest -Value $updated }} }} }}; ",
             "cargo build --manifest-path (Join-Path $checkoutDir 'Cargo.toml') -p vx-store -p vx-vfsd -p vx-runner; ",
+            "git -C $checkoutDir checkout -- Cargo.lock crates/vx/Cargo.toml crates/vxd/Cargo.toml; ",
             "$env:VX_HOME = $vxHome; ",
             "$storeExe = Join-Path $checkoutDir 'target\\debug\\vx-store.exe'; ",
             "$runnerExe = Join-Path $checkoutDir 'target\\debug\\vx-runner.exe'; ",
             "$storeProc = Start-Process -FilePath $storeExe -ArgumentList @('--root', $storeRoot, '--listen', $storeEndpoint) -PassThru; ",
             "try {{ & $runnerExe --vx-home $vxHome --store $storeEndpoint --vfsd $vfsdEndpoint --listen $runnerEndpoint }} ",
-            "finally {{ if ($storeProc -and -not $storeProc.HasExited) {{ Stop-Process -Id $storeProc.Id -Force }} }}\""
+            "finally {{ git -C $checkoutDir checkout -- Cargo.lock crates/vx/Cargo.toml crates/vxd/Cargo.toml *> $null; ",
+            "if ($storeProc -and -not $storeProc.HasExited) {{ Stop-Process -Id $storeProc.Id -Force }} }}\""
         ),
         bare_repo_dir = bare_repo_dir,
         commit = commit,
