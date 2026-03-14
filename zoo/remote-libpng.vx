@@ -70,7 +70,7 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
             "/nologo",
             "/c",
             @(src/{file}),
-            `/Foout\\obj\\${file}.obj`,
+            `/Foout\\${file}.obj`,
             ..includes.map((include) => ["/I", include]).flatten(),
             ..defines.map((define) => `/D${define}`),
             "/O2",
