@@ -677,6 +677,47 @@ async fn detect_ssh_bootstrap_target(
 }
 
 #[cfg(unix)]
+async fn allocate_windows_ssh_bootstrap_ports(
+    control_path: &Utf8Path,
+    target: &str,
+) -> Result<(u16, u16, u16)> {
+    let output = ssh_control_output_windows(
+        control_path,
+        target,
+        &[
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            concat!(
+                "$listeners = @(); ",
+                "1..3 | ForEach-Object { ",
+                "  $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0); ",
+                "  $listener.Start(); ",
+                "  $listeners += $listener; ",
+                "}; ",
+                "$ports = $listeners | ForEach-Object { $_.LocalEndpoint.Port }; ",
+                "$listeners | ForEach-Object { $_.Stop() }; ",
+                "$ports -join ','"
+            ),
+        ],
+    )
+    .await?;
+
+    let ports = output
+        .split(',')
+        .map(str::trim)
+        .map(str::parse::<u16>)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| eyre::eyre!("failed to parse remote Windows bootstrap ports: {error}"))?;
+
+    let [store_port, vfsd_port, runner_port]: [u16; 3] =
+        ports.try_into().map_err(|ports: Vec<u16>| {
+            eyre::eyre!("expected three remote Windows bootstrap ports, got {ports:?}")
+        })?;
+    Ok((store_port, vfsd_port, runner_port))
+}
+
+#[cfg(unix)]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -982,9 +1023,8 @@ async fn connect_ssh_bootstrap_runner(
             SshBootstrapTargetPlatform::Windows => {
                 let local_store_endpoint = ssh_bootstrap_local_tcp_endpoint()?;
                 let local_runner_endpoint = ssh_bootstrap_local_tcp_endpoint()?;
-                let remote_store_port = allocate_loopback_port()?;
-                let remote_vfsd_port = allocate_loopback_port()?;
-                let remote_runner_port = allocate_loopback_port()?;
+                let (remote_store_port, remote_vfsd_port, remote_runner_port) =
+                    allocate_windows_ssh_bootstrap_ports(&control_path, target).await?;
                 let paths = ssh_bootstrap_windows_paths(
                     &target_info.home,
                     class_label,
