@@ -1998,12 +1998,10 @@ async fn run_build_vx_exec_via_runner(
     request: ExecRequest,
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
+    let executor_summary = describe_executor_selector(&request.executor);
     emit_build_vx_progress_message(
         &progress_listener,
-        format!(
-            "resolving build.vx executor {}",
-            describe_executor_selector(&request.executor)
-        ),
+        format!("resolving build.vx executor {}", executor_summary),
     )
     .await;
     let exec = executors
@@ -2016,10 +2014,7 @@ async fn run_build_vx_exec_via_runner(
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     emit_build_vx_progress_message(
         &progress_listener,
-        format!(
-            "build.vx executor {} ready",
-            describe_executor_selector(&request.executor)
-        ),
+        format!("build.vx executor {} ready", executor_summary),
     )
     .await;
     let target_store = exec_store.as_deref().unwrap_or(store);
@@ -2092,6 +2087,12 @@ async fn run_build_vx_exec_via_runner(
         .map_err(|error| {
             exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}"), &demand_chain)
         })?;
+    tracing::info!(
+        executor = %executor_summary,
+        success = result.success,
+        has_observer_value = result.observer_value.is_some(),
+        "build.vx exec returned from runner"
+    );
 
     if !result.success {
         if let Some(poison) = result.poison {
@@ -2122,6 +2123,7 @@ async fn run_build_vx_exec_via_runner(
             &demand_chain,
         )
     })?;
+    tracing::info!(executor = %executor_summary, "build.vx exec starting observer-value bridge");
     let observer_value = if std::ptr::eq(target_store, store) {
         observer_value
     } else {
@@ -2129,10 +2131,14 @@ async fn run_build_vx_exec_via_runner(
             .await
             .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
     };
+    tracing::info!(executor = %executor_summary, "build.vx exec finished observer-value bridge");
     let value = Value::try_from(observer_value).map_err(|error| {
         exec_bridge_poison(PoisonKind::UserFail, error.to_string(), &demand_chain)
     })?;
-    hydrate_exec_value_from_store(store, value, &demand_chain).await
+    tracing::info!(executor = %executor_summary, "build.vx exec starting hydration");
+    let value = hydrate_exec_value_from_store(store, value, &demand_chain).await?;
+    tracing::info!(executor = %executor_summary, "build.vx exec finished hydration");
+    Ok(value)
 }
 
 async fn run_build_vx_discover_via_runner(
