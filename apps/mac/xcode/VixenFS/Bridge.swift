@@ -356,6 +356,10 @@ actor VfsConnection {
             .sorted()
     }
 
+    func defaultSessionID() -> String? {
+        defaultSid
+    }
+
     private func establishClient(for sid: String) async throws -> VfsClient {
         let ticket = try await requestTicket(sid: sid)
         debugLog("bootstrap control socket established sid=\(sid)")

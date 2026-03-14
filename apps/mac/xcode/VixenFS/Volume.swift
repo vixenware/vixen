@@ -371,6 +371,13 @@ final class Volume: FSVolume, @unchecked Sendable {
         }
     }
 
+    private func resolvedSID(from sid: String?) async -> String? {
+        if let sid {
+            return sid
+        }
+        return await VfsConnection.shared.defaultSessionID()
+    }
+
     private func routedBackendItemID(sid: String, backendItemID: UInt64) -> UInt64 {
         let key = "\(sid):\(backendItemID)"
         _routedItemIDLock.lock()
@@ -506,7 +513,13 @@ extension Volume: FSVolume.Operations {
             mode: result.attrs.mode
         )
 
-        let root = Item(itemId: rootId, name: "", attributes: rootAttrs)
+        let root = Item(
+            itemId: rootId,
+            name: "",
+            attributes: rootAttrs,
+            sid: await resolvedSID(from: nil),
+            backendItemId: rootId
+        )
         cacheItem(root)
         await LifecycleTrace.shared.mark(
             log, event: "volume.activate.done", details: "rootId=\(rootId)")
