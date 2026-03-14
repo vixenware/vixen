@@ -61,16 +61,17 @@ fn build_lua(workspace: Path, class: ExecutorClass) {
   };
 
   fn compile(file: Path) -> Tree (
-    cexec [
-      tc.cc,
-      "/nologo",
-      "/c",
-      "/O2",
-      `/Foout\\obj\\${file}.obj`,
-      @(src/{file}),
-    ] where {
-      mounts: { @src: src_tree },
-      writable: [@out],
+      cexec [
+        tc.cc,
+        "/nologo",
+        "/c",
+        "/O2",
+        "/Isrc",
+        `/Foout\\obj\\${file}.obj`,
+        @(src/{file}),
+      ] where {
+        mounts: { @src: src_tree },
+        writable: [@out],
     }
   );
 

@@ -83,6 +83,7 @@ fn build_lua(workspace: Path, class: ExecutorClass) {
         "/nologo",
         "/c",
         "/O2",
+        "/Isrc",
         `/Foout\\obj\\${file}.obj`,
         @(src/{file}),
       ] where {
