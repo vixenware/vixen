@@ -134,7 +134,7 @@ fn ssh_bootstrap_paths_slug_implicit_ssh_class_labels() {
 #[test]
 fn ssh_bootstrap_windows_paths_use_tcp_layout() {
     assert_eq!(
-        crate::ssh_bootstrap_windows_paths(r"C:\Users\faste", "ssh:toast"),
+        crate::ssh_bootstrap_windows_paths(r"C:\Users\faste", "ssh:toast", 57164, 57165, 57166),
         crate::SshBootstrapWindowsPaths {
             bare_repo_dir: r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo.git"
                 .to_string(),
@@ -194,7 +194,7 @@ fn ssh_bootstrap_windows_command_scrubs_local_tree_sitter_path() {
     let command = crate::ssh_bootstrap_windows_command(
         r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo.git",
         "deadbeef",
-        &crate::ssh_bootstrap_windows_paths(r"C:\Users\faste", "ssh:toast"),
+        &crate::ssh_bootstrap_windows_paths(r"C:\Users\faste", "ssh:toast", 57164, 57165, 57166),
     );
     assert!(command.contains("tree-sitter-vixen"));
 }

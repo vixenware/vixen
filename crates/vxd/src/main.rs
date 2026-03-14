@@ -245,16 +245,6 @@ fn ssh_bootstrap_label_slug(class_label: &str) -> String {
 }
 
 #[cfg(unix)]
-fn ssh_bootstrap_remote_port_base(class_label: &str) -> u16 {
-    let mut hash = 2_166_136_261_u32;
-    for byte in class_label.bytes() {
-        hash ^= u32::from(byte);
-        hash = hash.wrapping_mul(16_777_619);
-    }
-    40_000 + (hash % 20_000) as u16
-}
-
-#[cfg(unix)]
 fn ssh_bootstrap_paths(remote_home: &str, class_label: &str) -> SshBootstrapPaths {
     let class_slug = ssh_bootstrap_label_slug(class_label);
     let base = format!("{remote_home}/.cache/vixen/ssh-bootstrap/{class_slug}");
@@ -271,19 +261,24 @@ fn ssh_bootstrap_paths(remote_home: &str, class_label: &str) -> SshBootstrapPath
 }
 
 #[cfg(unix)]
-fn ssh_bootstrap_windows_paths(remote_home: &str, class_label: &str) -> SshBootstrapWindowsPaths {
+fn ssh_bootstrap_windows_paths(
+    remote_home: &str,
+    class_label: &str,
+    store_port: u16,
+    vfsd_port: u16,
+    runner_port: u16,
+) -> SshBootstrapWindowsPaths {
     let class_slug = ssh_bootstrap_label_slug(class_label);
     let base = format!(r"{remote_home}\.cache\vixen\ssh-bootstrap\{class_slug}");
     let vx_home = format!(r"{base}\vx-home");
-    let port_base = ssh_bootstrap_remote_port_base(class_label);
     SshBootstrapWindowsPaths {
         bare_repo_dir: format!(r"{base}\repo.git"),
         checkout_dir: format!(r"{base}\repo"),
         vx_home: vx_home.clone(),
         store_root: format!(r"{vx_home}\store"),
-        store_endpoint: format!("127.0.0.1:{port_base}"),
-        vfsd_endpoint: format!("127.0.0.1:{}", port_base + 1),
-        runner_endpoint: format!("127.0.0.1:{}", port_base + 2),
+        store_endpoint: format!("127.0.0.1:{store_port}"),
+        vfsd_endpoint: format!("127.0.0.1:{vfsd_port}"),
+        runner_endpoint: format!("127.0.0.1:{runner_port}"),
     }
 }
 
@@ -965,7 +960,16 @@ async fn connect_ssh_bootstrap_runner(
             SshBootstrapTargetPlatform::Windows => {
                 let local_store_endpoint = ssh_bootstrap_local_tcp_endpoint()?;
                 let local_runner_endpoint = ssh_bootstrap_local_tcp_endpoint()?;
-                let paths = ssh_bootstrap_windows_paths(&target_info.home, class_label);
+                let remote_store_port = allocate_loopback_port()?;
+                let remote_vfsd_port = allocate_loopback_port()?;
+                let remote_runner_port = allocate_loopback_port()?;
+                let paths = ssh_bootstrap_windows_paths(
+                    &target_info.home,
+                    class_label,
+                    remote_store_port,
+                    remote_vfsd_port,
+                    remote_runner_port,
+                );
                 let remote_command =
                     ssh_bootstrap_windows_command(&paths.bare_repo_dir, &commit, &paths);
                 (
@@ -990,7 +994,7 @@ async fn connect_ssh_bootstrap_runner(
             ssh_bootstrap_paths(&target_info.home, class_label).bare_repo_dir
         }
         SshBootstrapTargetPlatform::Windows => {
-            ssh_bootstrap_windows_paths(&target_info.home, class_label).bare_repo_dir
+            ssh_bootstrap_windows_paths(&target_info.home, class_label, 0, 0, 0).bare_repo_dir
         }
     };
     ensure_ssh_bootstrap_bare_repo(&control_path, target, &bare_repo_dir, &target_info.platform)
