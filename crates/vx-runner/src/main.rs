@@ -611,8 +611,11 @@ impl RunnerService {
     }
 
     /// Create the output directory in a prefix
-    pub(crate) async fn create_output_dir_in_prefix(&self, prefix_id: &str) {
-        self.vfs.add_dir_to_prefix(prefix_id, "out").await;
+    pub(crate) async fn create_output_dir_in_prefix(&self, prefix_id: &str) -> RunnerResult<()> {
+        self.vfs
+            .add_dir_to_prefix(prefix_id, "out")
+            .await
+            .map_err(RunnerError::VfsMount)
     }
 
     /// Flush all written files in a prefix to CAS

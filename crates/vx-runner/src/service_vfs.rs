@@ -662,7 +662,10 @@ impl RunnerService {
         }
 
         // 5. Create output directory
-        self.create_output_dir_in_prefix(&action.prefix_id).await;
+        if let Err(e) = self.create_output_dir_in_prefix(&action.prefix_id).await {
+            self.remove_action_prefix(&action.prefix_id).await;
+            return cleanup_and_error(&action.prefix_id, e.to_string(), start);
+        }
 
         // 6. Build rustc command
         let rustc_path = toolchain_path.join(format!("bin/rustc{}", std::env::consts::EXE_SUFFIX));
@@ -1003,7 +1006,19 @@ impl RunnerService {
         }
 
         // 4. Create output directory
-        self.create_output_dir_in_prefix(&action.prefix_id).await;
+        if let Err(e) = self.create_output_dir_in_prefix(&action.prefix_id).await {
+            self.remove_action_prefix(&action.prefix_id).await;
+            return CcCompileResult {
+                success: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                output_manifest: None,
+                discovered_deps: vec![],
+                error: Some(e.to_string()),
+            };
+        }
 
         // 5. Build zig cc command
         let zig_path = toolchain_path.join("zig");
@@ -1258,8 +1273,30 @@ impl RunnerService {
             }
         };
 
-        self.vfs.add_dir_to_prefix(&action.prefix_id, "obj").await;
-        self.create_output_dir_in_prefix(&action.prefix_id).await;
+        if let Err(e) = self.vfs.add_dir_to_prefix(&action.prefix_id, "obj").await {
+            self.remove_action_prefix(&action.prefix_id).await;
+            return CcLinkResult {
+                success: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                output_manifest: None,
+                error: Some(format!("failed to create object dir: {e}")),
+            };
+        }
+        if let Err(e) = self.create_output_dir_in_prefix(&action.prefix_id).await {
+            self.remove_action_prefix(&action.prefix_id).await;
+            return CcLinkResult {
+                success: false,
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: start.elapsed().as_millis() as u64,
+                output_manifest: None,
+                error: Some(e.to_string()),
+            };
+        }
 
         // Build directory node with all object files
         use vx_store_proto::{ContentHash, DirEntry, DirEntryKind, DirectoryNode};
@@ -1880,11 +1917,29 @@ impl RunnerService {
 
         // r[impl exec.writable]
         for root in &request.writable_roots {
-            self.vfs.add_dir_to_prefix(&action.prefix_id, root).await;
+            if let Err(e) = self.vfs.add_dir_to_prefix(&action.prefix_id, root).await {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return run_failure_result(
+                    start,
+                    -1,
+                    String::new(),
+                    String::new(),
+                    Some(format!("failed to create writable root '{root}': {e}")),
+                );
+            }
         }
         let parent_dirs = parent_dirs_to_materialize(&request);
         for dir in &parent_dirs {
-            self.vfs.add_dir_to_prefix(&action.prefix_id, dir).await;
+            if let Err(e) = self.vfs.add_dir_to_prefix(&action.prefix_id, dir).await {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return run_failure_result(
+                    start,
+                    -1,
+                    String::new(),
+                    String::new(),
+                    Some(format!("failed to create writable dir '{dir}': {e}")),
+                );
+            }
         }
 
         info!(

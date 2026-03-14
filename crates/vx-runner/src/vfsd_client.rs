@@ -43,9 +43,13 @@ impl VfsdClient {
     }
 
     /// Add a directory to a prefix
-    pub async fn add_dir_to_prefix(&self, prefix_id: &str, rel_path: &str) {
+    pub async fn add_dir_to_prefix(&self, prefix_id: &str, rel_path: &str) -> Result<(), String> {
         let path = format!("/{}/{}", prefix_id, rel_path);
-        let _ = self.client.mkdir(path).await;
+        self.client
+            .mkdir(path)
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"))
     }
 
     /// Add a file to a prefix from CAS
