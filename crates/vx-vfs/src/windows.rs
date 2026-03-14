@@ -287,9 +287,23 @@ impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjectedFileSystemSource f
         byte_offset: usize,
         length: usize,
     ) -> io::Result<Box<dyn Read>> {
-        tracing::debug!(?path, byte_offset, length, "ProjFS stream_file_content");
+        let normalized_path = self
+            .normalize_projfs_path(path)
+            .map(|components| Self::display_components(&components))
+            .unwrap_or_else(|| "<invalid>".to_string());
+        tracing::info!(
+            ?path,
+            normalized_path = %normalized_path,
+            byte_offset,
+            length,
+            "ProjFS stream_file_content"
+        );
         let Some(file_id) = self.resolve_path(path) else {
-            tracing::error!(?path, "stream_file_content: path resolution failed");
+            tracing::error!(
+                ?path,
+                normalized_path = %normalized_path,
+                "stream_file_content: path resolution failed"
+            );
             // Return zero-filled buffer — constructing a proper windows_projfs::Error
             // requires the `windows` crate as a direct dependency. CAS read failures
             // should be extremely rare.
@@ -303,11 +317,20 @@ impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjectedFileSystemSource f
             tracing::error!(
                 error = result.error,
                 ?path,
+                normalized_path = %normalized_path,
+                file_id,
                 "stream_file_content: read failed"
             );
             return Ok(Box::new(Cursor::new(vec![0u8; length])));
         }
 
+        tracing::info!(
+            ?path,
+            normalized_path = %normalized_path,
+            file_id,
+            bytes_returned = result.data.len(),
+            "ProjFS stream_file_content result"
+        );
         Ok(Box::new(Cursor::new(result.data)))
     }
 
