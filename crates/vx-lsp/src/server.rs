@@ -651,7 +651,10 @@ impl LanguageServer for VxLanguageServer {
 
                 // Show type signature for functions
                 if let Some(sig) = state.types.fn_sig_for_def(def) {
-                    markdown.push_str(&format!("\n\nReturns `{}`", sig.ret));
+                    markdown.push_str(&format!(
+                        "\n\nReturns `{}`",
+                        sig.ret.display_with_env(&state.types.env)
+                    ));
                 }
 
                 // Show inferred type for parameters and bindings from the type checker
@@ -670,7 +673,11 @@ impl LanguageServer for VxLanguageServer {
                         vx_types::TypeDef::Struct(s) if !s.fields.is_empty() => {
                             markdown.push_str("\n\n**Fields:**\n");
                             for f in &s.fields {
-                                markdown.push_str(&format!("- `{}`: `{}`\n", f.name, f.ty));
+                                markdown.push_str(&format!(
+                                    "- `{}`: `{}`\n",
+                                    f.name,
+                                    f.ty.display_with_env(&state.types.env)
+                                ));
                             }
                         }
                         vx_types::TypeDef::Enum(e) if !e.variants.is_empty() => {
@@ -1982,7 +1989,7 @@ fn struct_fields_from_ty(ty: &vx_types::Ty, state: &DocumentState) -> Option<Vec
                     .map(|f| CompletionItem {
                         label: f.name.clone(),
                         kind: Some(CompletionItemKind::FIELD),
-                        detail: Some(format!("{}", f.ty)),
+                        detail: Some(f.ty.display_with_env(&state.types.env).to_string()),
                         ..Default::default()
                     })
                     .collect();
@@ -2251,7 +2258,7 @@ fn collect_inlay_hints(state: &DocumentState) -> Vec<InlayHint> {
         let pos = state.line_index.position(name_tok.text_range().end());
         hints.push(InlayHint {
             position: Position::new(pos.line, pos.col),
-            label: InlayHintLabel::String(format!(": {ty}")),
+            label: InlayHintLabel::String(format!(": {}", ty.display_with_env(&state.types.env))),
             kind: Some(InlayHintKind::TYPE),
             text_edits: None,
             tooltip: None,
@@ -2683,5 +2690,26 @@ fn demo() {
             .collect::<Vec<_>>();
 
         assert!(hints.contains(&(String::from("label:"), hint_position(text, "\"default\""))));
+    }
+
+    #[test]
+    fn binding_type_inlay_hints_use_named_opaque_types() {
+        let text = r#"
+fn demo() {
+  let class = executor_class("default");
+}
+"#;
+
+        let state = DocumentState::new(text.to_string());
+        let hints = collect_inlay_hints(&state)
+            .into_iter()
+            .filter_map(|hint| match hint.label {
+                InlayHintLabel::String(label) => Some(label),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(hints.iter().any(|label| label == ": ExecutorClass"));
+        assert!(!hints.iter().any(|label| label.contains("<opaque#")));
     }
 }
