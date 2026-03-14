@@ -388,9 +388,12 @@ for rel in ("crates/vx/Cargo.toml", "crates/vxd/Cargo.toml"):
     if updated != text:
         path.write_text(updated)
 PY
-pkill -f "$checkout_dir/target/debug/vx-runner" || true
-pkill -f "$checkout_dir/target/debug/vx-store" || true
-pkill -f "$checkout_dir/target/debug/vx-vfsd" || true
+pkill -9 -f "$checkout_dir/target/debug/vx-runner" || true
+pkill -9 -f "$checkout_dir/target/debug/vx-store" || true
+pkill -9 -f "$checkout_dir/target/debug/vx-vfsd" || true
+while pgrep -f "$checkout_dir/target/debug/vx-runner" >/dev/null; do sleep 0.1; done
+while pgrep -f "$checkout_dir/target/debug/vx-store" >/dev/null; do sleep 0.1; done
+while pgrep -f "$checkout_dir/target/debug/vx-vfsd" >/dev/null; do sleep 0.1; done
 cargo build --manifest-path "$checkout_dir/Cargo.toml" -p vx-store -p vx-vfsd -p vx-runner -p landlock-exec
 rm -f "$store_socket" "$vfsd_socket" "$runner_socket"
 trap 'jobs -p | xargs -r kill || true' EXIT
