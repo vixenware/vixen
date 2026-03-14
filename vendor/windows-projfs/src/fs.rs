@@ -115,13 +115,17 @@ pub struct ProjectionContext {
 
 impl ProjectionContext {
     pub fn register_enumeration(&mut self, target: PathBuf, id: u128) {
+        let entries = self.source.list_directory(&target);
+        log::info!(
+            target: "vx_vfs::windows",
+            "ProjFS register_enumeration id={:X} path={} entry_count={}",
+            id,
+            target.to_string_lossy(),
+            entries.len()
+        );
         let old_enumeration = self.directory_enumerations.insert(
             id,
-            DirectoryIteration::from_unsorted(
-                &*self.library,
-                id,
-                self.source.list_directory(&target),
-            ),
+            DirectoryIteration::from_unsorted(&*self.library, id, entries),
         );
 
         if let Some(enumeration) = old_enumeration {
@@ -130,6 +134,11 @@ impl ProjectionContext {
     }
 
     pub fn finish_enumeration(&mut self, id: u128) -> bool {
+        log::info!(
+            target: "vx_vfs::windows",
+            "ProjFS finish_enumeration id={:X}",
+            id
+        );
         self.directory_enumerations.remove(&id).is_some()
     }
 }
@@ -349,6 +358,12 @@ mod native {
 
         callback_data.execute(move |callback_data| {
             let target = callback_data.file_path.clone().unwrap_or_default();
+            log::info!(
+                target: "vx_vfs::windows",
+                "ProjFS start_directory_enumeration id={:X} path={}",
+                enumeration_id.to_u128(),
+                target.to_string_lossy()
+            );
             let mut context = callback_data.context.lock();
             context.register_enumeration(target, enumeration_id.to_u128());
 
@@ -463,6 +478,15 @@ mod native {
                 };
 
                 if file_match {
+                    log::info!(
+                        target: "vx_vfs::windows",
+                        "ProjFS get_directory_enumeration emit id={:X} path={} entry={} index={} flags=0x{:X}",
+                        enumeration_id.to_u128(),
+                        callback_data.path.to_string_lossy(),
+                        entry.name(),
+                        enumeration.current_entry,
+                        callback_data.flags.0
+                    );
                     let result = unsafe {
                         library.prj_fill_dir_entry_buffer2(
                             dir_entry_buffer_handle,
