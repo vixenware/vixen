@@ -1019,6 +1019,7 @@ async fn connect_ssh_bootstrap_runner(
         format!("detected {} host", target_info.platform.as_tag()),
     )
     .await;
+    let mut windows_checkout = None;
     let (local_store_endpoint, local_runner_endpoint, store_remote, runner_remote, remote_command) =
         match target_info.platform {
             SshBootstrapTargetPlatform::Unix => {
@@ -1069,26 +1070,10 @@ async fn connect_ssh_bootstrap_runner(
                 )
             }
             SshBootstrapTargetPlatform::Windows => {
-                let checkout_dir =
-                    ssh_bootstrap_windows_paths(&target_info.home, class_label, 0, 0, 0)
-                        .checkout_dir;
-                let bare_repo_dir =
-                    ssh_bootstrap_windows_paths(&target_info.home, class_label, 0, 0, 0)
-                        .bare_repo_dir;
-                let vx_home =
-                    ssh_bootstrap_windows_paths(&target_info.home, class_label, 0, 0, 0).vx_home;
-                let store_root =
-                    ssh_bootstrap_windows_paths(&target_info.home, class_label, 0, 0, 0).store_root;
-                prepare_ssh_bootstrap_windows_checkout(
-                    &control_path,
-                    target,
-                    &bare_repo_dir,
-                    &commit,
-                    &checkout_dir,
-                    &vx_home,
-                    &store_root,
-                )
-                .await?;
+                let checkout_paths =
+                    ssh_bootstrap_windows_paths(&target_info.home, class_label, 0, 0, 0);
+                let checkout_dir = checkout_paths.checkout_dir.clone();
+                windows_checkout = Some(checkout_paths);
                 let local_store_endpoint = ssh_bootstrap_local_tcp_endpoint()?;
                 let local_runner_endpoint = ssh_bootstrap_local_tcp_endpoint()?;
                 let (remote_store_port, remote_vfsd_port, remote_runner_port) =
@@ -1137,6 +1122,19 @@ async fn connect_ssh_bootstrap_runner(
         &commit,
     )
     .await?;
+
+    if let Some(paths) = &windows_checkout {
+        prepare_ssh_bootstrap_windows_checkout(
+            &control_path,
+            target,
+            &paths.bare_repo_dir,
+            &commit,
+            &paths.checkout_dir,
+            &paths.vx_home,
+            &paths.store_root,
+        )
+        .await?;
+    }
 
     let mut command = moire::process::Command::new("ssh");
     command
