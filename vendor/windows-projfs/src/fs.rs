@@ -117,6 +117,7 @@ impl ProjectionContext {
     pub fn register_enumeration(&mut self, target: PathBuf, id: u128) {
         let entries = self.source.list_directory(&target);
         tracing::info!(
+            target: "vx_vfs::windows",
             "ProjFS register_enumeration id={:X} path={} entry_count={}",
             id,
             target.to_string_lossy(),
@@ -133,7 +134,7 @@ impl ProjectionContext {
     }
 
     pub fn finish_enumeration(&mut self, id: u128) -> bool {
-        tracing::info!("ProjFS finish_enumeration id={:X}", id);
+        tracing::info!(target: "vx_vfs::windows", "ProjFS finish_enumeration id={:X}", id);
         self.directory_enumerations.remove(&id).is_some()
     }
 }
@@ -354,6 +355,7 @@ mod native {
         callback_data.execute(move |callback_data| {
             let target = callback_data.file_path.clone().unwrap_or_default();
             tracing::info!(
+                target: "vx_vfs::windows",
                 "ProjFS start_directory_enumeration id={:X} path={}",
                 enumeration_id.to_u128(),
                 target.to_string_lossy()
@@ -427,6 +429,7 @@ mod native {
                 .ok_or(STATUS_SUCCESS.to_hresult())?;
 
             tracing::info!(
+                target: "vx_vfs::windows",
                 "ProjFS get_directory_enumeration id={:X} path={} flags=0x{:X} search_expression={:?} current_entry={} total_entries={}",
                 enumeration_id.to_u128(),
                 callback_data.path.to_string_lossy(),
@@ -472,6 +475,7 @@ mod native {
 
                 if file_match {
                     tracing::info!(
+                        target: "vx_vfs::windows",
                         "ProjFS get_directory_enumeration emit id={:X} path={} entry={} index={} flags=0x{:X}",
                         enumeration_id.to_u128(),
                         callback_data.path.to_string_lossy(),
