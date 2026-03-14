@@ -2002,9 +2002,9 @@ impl CasVfs {
     pub async fn dump_state(&self, prefix_id: &str) {
         let state = self.state.lock();
 
-        tracing::debug!("=== VFS STATE DUMP ===");
-        tracing::debug!("Total items: {}", state.items.len());
-        tracing::debug!("Total prefixes: {}", state.prefixes.len());
+        tracing::info!("=== VFS STATE DUMP ===");
+        tracing::info!("Total items: {}", state.items.len());
+        tracing::info!("Total prefixes: {}", state.prefixes.len());
 
         // Show root children
         let root_children: Vec<_> = state
@@ -2012,11 +2012,11 @@ impl CasVfs {
             .children_of(ROOT_ITEM_ID)
             .map(|i| format!("{} (id={})", i.name, i.id))
             .collect();
-        tracing::debug!("Root children: {:?}", root_children);
+        tracing::info!("Root children: {:?}", root_children);
 
         // Show prefix info
         if let Some(prefix) = state.prefixes.get(prefix_id) {
-            tracing::debug!(
+            tracing::info!(
                 "Prefix '{}' root_item_id={}",
                 prefix_id,
                 prefix.root_item_id
@@ -2027,7 +2027,16 @@ impl CasVfs {
                 .children_of(prefix.root_item_id)
                 .map(|i| format!("{} (id={}, type={:?})", i.name, i.id, i.item_type))
                 .collect();
-            tracing::debug!("Prefix children: {:?}", prefix_children);
+            tracing::info!("Prefix children: {:?}", prefix_children);
+
+            if let Some(src) = state.items.lookup_child(prefix.root_item_id, "src") {
+                let src_children: Vec<_> = state
+                    .items
+                    .children_of(src.id)
+                    .map(|i| format!("{} (id={}, type={:?})", i.name, i.id, i.item_type))
+                    .collect();
+                tracing::info!("src/ children: {:?}", src_children);
+            }
 
             if let Some(toolchain) = state.items.lookup_child(prefix.root_item_id, "toolchain") {
                 let tc_id = toolchain.id;
@@ -2036,7 +2045,7 @@ impl CasVfs {
                     .children_of(tc_id)
                     .map(|i| format!("{} (id={})", i.name, i.id))
                     .collect();
-                tracing::debug!("toolchain/ children: {:?}", tc_children);
+                tracing::info!("toolchain/ children: {:?}", tc_children);
 
                 if let Some(bin) = state.items.lookup_child(tc_id, "bin") {
                     let bin_children: Vec<_> = state
@@ -2044,13 +2053,13 @@ impl CasVfs {
                         .children_of(bin.id)
                         .map(|i| format!("{} (id={})", i.name, i.id))
                         .collect();
-                    tracing::debug!("toolchain/bin/ children: {:?}", bin_children);
+                    tracing::info!("toolchain/bin/ children: {:?}", bin_children);
                 }
             }
         } else {
-            tracing::debug!("Prefix '{}' NOT FOUND in prefixes map!", prefix_id);
+            tracing::info!("Prefix '{}' NOT FOUND in prefixes map!", prefix_id);
         }
-        tracing::debug!("=== END VFS STATE DUMP ===");
+        tracing::info!("=== END VFS STATE DUMP ===");
     }
 
     /// Build the path from an item up to (but not including) a root
