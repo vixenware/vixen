@@ -1502,6 +1502,29 @@ fn libpng_sketch_resolves_and_typechecks() {
 }
 
 #[test]
+fn remote_libpng_sketch_resolves_and_typechecks() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zoo/remote-libpng.vx");
+    let file = parse_file_path(&path);
+
+    let resolution = resolve_with_stdlib(&file);
+    assert!(
+        resolution.errors.is_empty(),
+        "resolve errors in {}: {:?}",
+        path.display(),
+        resolution.errors
+    );
+
+    let types = collect_types_with_stdlib(&file);
+    let checked = crate::type_check(&file, &resolution, &types);
+    assert!(
+        checked.errors.is_empty(),
+        "type errors in {}: {:?}",
+        path.display(),
+        checked.errors
+    );
+}
+
+#[test]
 fn pipe_placeholder_does_not_produce_resolve_errors() {
     let file = parse_file(
         r#"
