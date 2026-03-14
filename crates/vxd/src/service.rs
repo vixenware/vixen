@@ -2036,7 +2036,21 @@ async fn run_build_vx_exec_via_runner(
             .await
             .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     }
-    let progress = roam::Tx::<StoreProgress>::unbound();
+    let (progress, mut progress_rx) = roam::channel::<StoreProgress>();
+    let progress_listener_for_exec = progress_listener.clone();
+    let executor_summary_for_progress = executor_summary.clone();
+    let progress_handle = moire::task::spawn(
+        async move {
+            while let Ok(Some(update)) = progress_rx.recv().await {
+                let message = format!(
+                    "build.vx executor {}: {}",
+                    executor_summary_for_progress, update.message
+                );
+                emit_build_vx_progress_message(&progress_listener_for_exec, message).await;
+            }
+        }
+        .named("build_vx_exec_progress_fwd"),
+    );
     let observer = if std::ptr::eq(target_store, store) {
         request.observer
     } else {
@@ -2087,6 +2101,7 @@ async fn run_build_vx_exec_via_runner(
         .map_err(|error| {
             exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}"), &demand_chain)
         })?;
+    let _ = progress_handle.await;
     tracing::info!(
         executor = %executor_summary,
         success = result.success,
