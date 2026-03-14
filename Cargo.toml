@@ -190,6 +190,7 @@ strip = "none"
 # roam-local = { path = "/Users/amos/bearcove/roam/rust/roam-local" }
 # roam-codegen = { path = "/Users/amos/bearcove/roam/rust/roam-codegen" }
 # ur-taking-me-with-you = { path = "/Users/amos/bearcove/roam/rust/ur-taking-me-with-you" }
+windows-projfs = { path = "vendor/windows-projfs" }
 
 [profile.samply]
 inherits = "release"

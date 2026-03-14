@@ -1,0 +1,32 @@
+[package]
+name = "windows-projfs"
+version = "0.1.7"
+edition = "2021"
+authors = ["M. Hadenfeldt <git@did.science>"]
+description = "A rust library for the Windows projected file system API"
+repository = "https://github.com/WolverinDEV/windows-projfs"
+license = "GPL-2.0"
+readme = "../README.MD"
+
+[dependencies]
+log = "0.4.20"
+parking_lot = "0.12.1"
+thiserror = "1.0.52"
+windows = { version = "0.52.0", features = [
+    "Win32_Storage_ProjectedFileSystem",
+    "Win32_Foundation",
+] }
+libloading = { version = "0.8.1", optional = true }
+
+[dev-dependencies]
+tempdir = "0.3.7"
+anyhow = "1.0.77"
+env_logger = "0.10.1"
+
+[features]
+dynamic-import = ["dep:libloading"]
+
+[package.metadata.docs.rs]
+features = ["dynamic-import"]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc"]
