@@ -190,13 +190,13 @@ fn ssh_bootstrap_remote_script_exports_vx_home_for_runner() {
 
 #[cfg(unix)]
 #[test]
-fn ssh_bootstrap_windows_command_scrubs_local_tree_sitter_path() {
+fn ssh_bootstrap_windows_command_announces_endpoints() {
     let command = crate::ssh_bootstrap_windows_command(
-        r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo.git",
-        "deadbeef",
+        r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo",
         &crate::ssh_bootstrap_windows_paths(r"C:\Users\faste", "ssh:toast", 57164, 57165, 57166),
     );
-    assert!(command.contains("tree-sitter-vixen"));
+    assert!(command.contains("vx-bootstrap endpoints"));
+    assert!(command.contains("$runnerEndpoint"));
 }
 
 static COLOR_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
