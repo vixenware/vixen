@@ -396,6 +396,16 @@ mod native {
                 Some(expression)
             }
         };
+        let search_expression_text = search_expression.as_ref().map(|expression| {
+            let expression = if expression.last() == Some(&0) {
+                &expression[..expression.len().saturating_sub(1)]
+            } else {
+                expression.as_slice()
+            };
+            OsString::from_wide(expression)
+                .to_string_lossy()
+                .into_owned()
+        });
 
         callback_data.execute(move |callback_data| {
             let mut context = callback_data.context.lock();
@@ -406,6 +416,16 @@ mod native {
                 .get_mut(&enumeration_id.to_u128())
                 /* Return STATUS_SUCCESS to indicate that the enumeration has ended (as it can not be found). */
                 .ok_or(STATUS_SUCCESS.to_hresult())?;
+
+            log::info!(
+                "ProjFS get_directory_enumeration id={:X} path={} flags=0x{:X} search_expression={:?} current_entry={} total_entries={}",
+                enumeration_id.to_u128(),
+                callback_data.path.to_string_lossy(),
+                callback_data.flags.0,
+                search_expression_text,
+                enumeration.current_entry,
+                enumeration.entries.len()
+            );
 
             if callback_data.flags.0 & PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN.0 > 0 {
                 enumeration.reset_enumeration();
