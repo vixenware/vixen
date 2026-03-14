@@ -50,6 +50,12 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
     ) else (
       ["Z_HAVE_UNISTD_H"]
     );
+  let libpng_defines =
+    if tc.arch == "aarch64" (
+      ["PNG_ARM_NEON_OPT=0"]
+    ) else (
+      []
+    );
 
   let cexec = partial exec where {
     executor: class,
@@ -150,6 +156,7 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
       generated: { @pnglibconf.h: pnglibconf_h },
       mounts: { @deps/zlib: zlib_install },
       includes: [@gen, @src, @deps/zlib/include],
+      defines: libpng_defines,
     };
 
   let libpng_archive_name =
