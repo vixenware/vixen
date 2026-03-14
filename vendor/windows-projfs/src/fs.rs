@@ -418,6 +418,7 @@ mod native {
                 .ok_or(STATUS_SUCCESS.to_hresult())?;
 
             log::info!(
+                target: "vx_vfs::windows",
                 "ProjFS get_directory_enumeration id={:X} path={} flags=0x{:X} search_expression={:?} current_entry={} total_entries={}",
                 enumeration_id.to_u128(),
                 callback_data.path.to_string_lossy(),
