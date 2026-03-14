@@ -573,6 +573,11 @@ async fn cleanup_session_dir(sid: &str) {
 /// `FileManager.containerURL(forSecurityApplicationGroupIdentifier:)` and
 /// return the resolved path. This lets VXRunner (a plain Rust binary) discover
 /// the shared container without needing its own App Group entitlement.
+///
+/// TODO(persistent-vixenfs): Remove this helper lookup once pre-mount SHM
+/// bootstrap no longer depends on an App Group socket path. The control socket
+/// must exist before `vx_fskit::setup` mounts the extension, so
+/// `/.vixenfs/health.json` cannot be the bootstrap source yet.
 pub async fn resolve_app_group_path() -> Result<PathBuf, String> {
     let output = Command::new(VIXEN_MOUNT_HELPER_PATH)
         .arg("--app-group-path")
