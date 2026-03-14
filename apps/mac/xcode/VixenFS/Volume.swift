@@ -122,28 +122,6 @@ actor ReadTelemetry {
     }
 }
 
-struct RoutedPrefix {
-    let prefix: String
-    let sid: String
-}
-
-struct RoutedRouteMap {
-    static func build(from routes: [RoutedPrefix]) -> [String: String] {
-        var map: [String: String] = [:]
-        for route in routes {
-            // Deterministic winner when multiple sessions publish the same prefix.
-            if map[route.prefix] == nil {
-                map[route.prefix] = route.sid
-            }
-        }
-        return map
-    }
-
-    static func removingSid(_ sid: String, from map: [String: String]) -> [String: String] {
-        map.filter { _, ownerSID in ownerSID != sid }
-    }
-}
-
 /// FSKit Volume implementation that delegates to the VFS client.
 final class Volume: FSVolume, @unchecked Sendable {
 
@@ -156,11 +134,6 @@ final class Volume: FSVolume, @unchecked Sendable {
     /// We use NSLock because Item doesn't conform to Sendable (ObjC base class).
     private let _itemsLock = NSLock()
     private var _items: [UInt64: Item] = [:]
-
-    /// Stable synthetic IDs for dynamically routed session prefixes.
-    private let _prefixIDLock = NSLock()
-    private var _prefixIDs: [String: UInt64] = [:]
-    private var _nextPrefixID: UInt64 = 0xFFFF_FFFF_FFFD_0000
 
     /// Stable synthetic IDs for routed backend items keyed by SID + backend item ID.
     private let _routedItemIDLock = NSLock()
@@ -398,75 +371,6 @@ final class Volume: FSVolume, @unchecked Sendable {
         }
     }
 
-    private func sanitizePrefix(_ prefix: String) -> String? {
-        let trimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        guard !trimmed.contains("/") else { return nil }
-        guard trimmed != "." && trimmed != ".." else { return nil }
-        return trimmed
-    }
-
-    private func discoveredRoutedPrefixes() async -> [RoutedPrefix] {
-        let sids = await VfsConnection.shared.candidateSessionIDs()
-        var out: [RoutedPrefix] = []
-
-        for sid in sids {
-            do {
-                let result = try await withMappedClientCall(sid: sid) {
-                    try await $0.readDir(itemId: rootId, cookie: 0, verifier: 0)
-                }
-                guard result.error == 0 else {
-                    continue
-                }
-
-                for entry in result.entries {
-                    guard entry.itemType == .directory else {
-                        continue
-                    }
-                    guard entry.name != Volume.vixenfsDirName else {
-                        continue
-                    }
-                    guard let sanitized = sanitizePrefix(entry.name) else {
-                        continue
-                    }
-                    out.append(RoutedPrefix(prefix: sanitized, sid: sid))
-                }
-            } catch {
-                // If this SID cannot be queried, treat it as having no visible routed prefixes.
-                continue
-            }
-        }
-
-        out.sort { lhs, rhs in
-            if lhs.prefix == rhs.prefix {
-                return lhs.sid < rhs.sid
-            }
-            return lhs.prefix < rhs.prefix
-        }
-        return out
-    }
-
-    private func currentRouteMap() async -> [String: String] {
-        RoutedRouteMap.build(from: await discoveredRoutedPrefixes())
-    }
-
-    private func sidForPrefix(_ prefix: String) async -> String? {
-        await currentRouteMap()[prefix]
-    }
-
-    private func routedPrefixItemID(prefix: String, sid: String) -> UInt64 {
-        let key = "\(sid):\(prefix)"
-        _prefixIDLock.lock()
-        defer { _prefixIDLock.unlock() }
-        if let existing = _prefixIDs[key] {
-            return existing
-        }
-        _nextPrefixID &+= 1
-        let allocated = _nextPrefixID
-        _prefixIDs[key] = allocated
-        return allocated
-    }
-
     private func routedBackendItemID(sid: String, backendItemID: UInt64) -> UInt64 {
         let key = "\(sid):\(backendItemID)"
         _routedItemIDLock.lock()
@@ -487,18 +391,6 @@ final class Volume: FSVolume, @unchecked Sendable {
         return routedBackendItemID(sid: sid, backendItemID: backendItemID)
     }
 
-    private func routedPrefixAttributes(itemID: UInt64) -> FSItem.Attributes {
-        FSItem.Attributes.fromVfs(
-            itemId: itemID,
-            parentId: rootId,
-            itemType: .directory,
-            size: 0,
-            modifiedTime: 0,
-            createdTime: 0,
-            mode: 0o755
-        )
-    }
-
     private func purgeItems(forSid sid: String) {
         _itemsLock.lock()
         _items = _items.filter { _, item in
@@ -506,12 +398,6 @@ final class Volume: FSVolume, @unchecked Sendable {
             return itemSID != sid
         }
         _itemsLock.unlock()
-
-        _prefixIDLock.lock()
-        _prefixIDs = _prefixIDs.filter { key, _ in
-            !key.hasPrefix("\(sid):")
-        }
-        _prefixIDLock.unlock()
 
         _routedItemIDLock.lock()
         _routedItemIDs = _routedItemIDs.filter { key, _ in
@@ -831,29 +717,6 @@ extension Volume: FSVolume.Operations {
             throw fs_errorForPOSIXError(POSIXError.ENOENT.rawValue)
         }
 
-        // Strict per-session routed prefix lookup at root.
-        if dirItem.itemId == rootId {
-            guard let sid = await sidForPrefix(nameStr) else {
-                throw fs_errorForPOSIXError(POSIXError.ENOENT.rawValue)
-            }
-            let routedID = routedPrefixItemID(prefix: nameStr, sid: sid)
-            let routedAttrs = routedPrefixAttributes(itemID: routedID)
-            if let existing = getCachedItem(routedID) {
-                existing.updateAttributes(routedAttrs)
-                return (existing, existing.name)
-            }
-            let routedItem = Item(
-                itemId: routedID,
-                name: nameStr,
-                attributes: routedAttrs,
-                prefix: nameStr,
-                sid: sid,
-                backendItemId: rootId
-            )
-            cacheItem(routedItem)
-            return (routedItem, routedItem.name)
-        }
-
         let dirSID = dirItem.sid
         let dirBackendID = dirItem.backendItemId
         let result = try await withMappedClientCall(sid: dirSID) {
@@ -1130,45 +993,6 @@ extension Volume: FSVolume.Operations {
                     )
                 }
                 logOpSuccess(op, details: "itemId=\(dirItem.itemId) source=virtual")
-                return FSDirectoryVerifier(0)
-            }
-
-            if dirItem.itemId == rootId {
-                let sortedRoutes = (await currentRouteMap()).sorted { lhs, rhs in
-                    lhs.key < rhs.key
-                }
-                var index = Int(cookieValue)
-                while index < sortedRoutes.count {
-                    let (prefix, sid) = sortedRoutes[index]
-                    let routedID = routedPrefixItemID(prefix: prefix, sid: sid)
-                    let routedAttrs = routedPrefixAttributes(itemID: routedID)
-                    if let existing = getCachedItem(routedID) {
-                        existing.updateAttributes(routedAttrs)
-                    } else {
-                        let routedItem = Item(
-                            itemId: routedID,
-                            name: prefix,
-                            attributes: routedAttrs,
-                            prefix: prefix,
-                            sid: sid,
-                            backendItemId: rootId
-                        )
-                        cacheItem(routedItem)
-                    }
-
-                    let shouldContinue = packer.packEntry(
-                        name: FSFileName(string: prefix),
-                        itemType: .directory,
-                        itemID: routedAttrs.fileID,
-                        nextCookie: FSDirectoryCookie(UInt64(index + 1)),
-                        attributes: attributes != nil ? routedAttrs : nil
-                    )
-                    if !shouldContinue {
-                        break
-                    }
-                    index += 1
-                }
-                logOpSuccess(op, details: "itemId=\(dirItem.itemId) source=session-prefixes")
                 return FSDirectoryVerifier(0)
             }
 
