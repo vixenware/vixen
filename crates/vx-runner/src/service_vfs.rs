@@ -174,13 +174,13 @@ fn summarize_prefix_disk_view(prefix_path: &Utf8Path) -> String {
 #[cfg(windows)]
 fn summarize_windows_path_inputs(
     cwd: &Utf8Path,
-    program: &RunArg,
+    program: Option<&RunArg>,
     args: &[RunArg],
     env: &[(String, RunArg)],
 ) -> String {
     let mut candidates = Vec::new();
 
-    if let RunArg::Path(path) = program {
+    if let Some(RunArg::Path(path)) = program {
         candidates.push(("program".to_string(), path.to_string()));
     }
 
@@ -2124,7 +2124,7 @@ impl RunnerService {
             action_desc,
             path_inputs = %summarize_windows_path_inputs(
                 &cwd,
-                &request.program,
+                request.program.as_ref(),
                 &request.args,
                 &request.env,
             ),
