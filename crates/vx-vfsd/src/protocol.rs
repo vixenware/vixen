@@ -1,6 +1,23 @@
 //! RPC protocol between vx-runner and vx-vfsd.
 
+use facet::Facet;
 use vx_store_proto::Blake3Hash;
+
+#[derive(Debug, Clone, Facet)]
+pub struct VfsPrefixStateSummary {
+    pub prefix_id: String,
+    pub prefix_found: bool,
+    pub total_items: u64,
+    pub total_prefixes: u64,
+    pub path_mappings_count: u64,
+    pub root_children: Vec<String>,
+    pub prefix_children: Vec<String>,
+    pub src_children: Vec<String>,
+    pub toolchain_children: Vec<String>,
+    pub toolchain_bin_children: Vec<String>,
+    pub path_mappings_sample: Vec<String>,
+    pub src_path_mappings_sample: Vec<String>,
+}
 
 /// VFS daemon RPC service.
 ///
@@ -55,4 +72,14 @@ pub trait Vfsd {
     /// # Arguments
     /// - `prefix_id`: The prefix to dump (e.g., "build-xyz")
     async fn dump_state(&self, prefix_id: String) -> Result<(), String>;
+
+    /// Return a structured summary of VFS state for a specific prefix.
+    ///
+    /// This is useful for durable product diagnostics, since callers can log
+    /// the returned summary in their own process rather than scraping `vx-vfsd`
+    /// logs separately.
+    async fn describe_prefix_state(
+        &self,
+        prefix_id: String,
+    ) -> Result<VfsPrefixStateSummary, String>;
 }

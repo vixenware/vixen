@@ -1,6 +1,6 @@
 //! RPC service implementation for vx-vfsd.
 
-use crate::protocol::Vfsd;
+use crate::protocol::{VfsPrefixStateSummary, Vfsd};
 use crate::vfs::CasVfs;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -329,6 +329,13 @@ impl VfsdService {
         self.vfs.dump_state(&prefix_id).await;
         Ok(())
     }
+
+    async fn describe_prefix_state(
+        &self,
+        prefix_id: String,
+    ) -> Result<VfsPrefixStateSummary, String> {
+        Ok(self.vfs.describe_prefix_state(&prefix_id).await)
+    }
 }
 
 impl Vfsd for VfsdService {
@@ -354,6 +361,13 @@ impl Vfsd for VfsdService {
 
     async fn dump_state(&self, prefix_id: String) -> Result<(), String> {
         VfsdService::dump_state(self, prefix_id).await
+    }
+
+    async fn describe_prefix_state(
+        &self,
+        prefix_id: String,
+    ) -> Result<VfsPrefixStateSummary, String> {
+        VfsdService::describe_prefix_state(self, prefix_id).await
     }
 }
 
@@ -470,7 +484,10 @@ mod tests {
     use tempfile::TempDir;
     use vixenfs_proto::{ItemId, ItemType, errno};
     use vx_io::spawn::{ServiceBuilder, ServiceHandle};
-    use vx_store_proto::{CasNode, StoreClient};
+    use vx_store_proto::{
+        Blake3Hash, CasNode, ChunkHash, ContentHash, DirEntry as CasDirEntry, DirEntryKind,
+        DirectoryNode, StoreClient,
+    };
 
     use super::*;
     use crate::vfs::CasVfs;
@@ -625,6 +642,64 @@ mod tests {
         current
     }
 
+    async fn store_directory_node(
+        cas: &StoreClient,
+        entries: Vec<CasDirEntry>,
+        total_size: u64,
+    ) -> Blake3Hash {
+        let node = CasNode::Directory(DirectoryNode {
+            entries,
+            total_size,
+        });
+        let (bytes, hash) = node.to_bytes_and_hash();
+        cas.put_node(hash, bytes)
+            .await
+            .expect("failed to store DirectoryNode");
+        hash.0
+    }
+
+    async fn store_small_file_tree(cas: &StoreClient, rel_path: &str, data: &[u8]) -> Blake3Hash {
+        let content_hash = Blake3Hash::from_bytes(data);
+        cas.put_chunk(ChunkHash(content_hash), data.to_vec())
+            .await
+            .expect("failed to store file chunk");
+
+        let leaf_name = rel_path
+            .rsplit('/')
+            .next()
+            .expect("relative path should contain a file name");
+        let mut current_hash = store_directory_node(
+            cas,
+            vec![CasDirEntry {
+                name: leaf_name.to_string(),
+                kind: DirEntryKind::SmallFile {
+                    content_hash: ContentHash(content_hash),
+                    size: data.len() as u64,
+                    executable: false,
+                },
+            }],
+            data.len() as u64,
+        )
+        .await;
+
+        for component in rel_path.split('/').rev().skip(1) {
+            current_hash = store_directory_node(
+                cas,
+                vec![CasDirEntry {
+                    name: component.to_string(),
+                    kind: DirEntryKind::Dir {
+                        hash: vx_store_proto::NodeHash(current_hash),
+                        total_size: data.len() as u64,
+                    },
+                }],
+                data.len() as u64,
+            )
+            .await;
+        }
+
+        current_hash
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn flush_prefix_root_without_files_returns_empty_directory_node() {
         let env = TestEnv::new().await;
@@ -652,6 +727,48 @@ mod tests {
         };
         assert!(dir.entries.is_empty(), "expected no entries");
         assert_eq!(dir.total_size, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn describe_prefix_state_reports_mounted_src_files() {
+        let env = TestEnv::new().await;
+        let root_hash = store_small_file_tree(&env.cas, "src/lua.c", b"int lua_main(void);").await;
+
+        env.service
+            .mount("/pfx-src".to_string(), root_hash)
+            .await
+            .expect("mount failed");
+
+        let summary = env
+            .service
+            .describe_prefix_state("pfx-src".to_string())
+            .await
+            .expect("describe_prefix_state failed");
+
+        assert!(summary.prefix_found, "expected prefix summary to exist");
+        assert!(
+            summary
+                .prefix_children
+                .iter()
+                .any(|entry| entry.starts_with("src ")),
+            "expected src directory in prefix summary, got {:?}",
+            summary.prefix_children
+        );
+        assert!(
+            summary
+                .src_children
+                .iter()
+                .any(|entry| entry.starts_with("lua.c ")),
+            "expected lua.c in src summary, got {:?}",
+            summary.src_children
+        );
+        assert!(
+            summary
+                .src_path_mappings_sample
+                .contains(&"src/lua.c".to_string()),
+            "expected src/lua.c path mapping, got {:?}",
+            summary.src_path_mappings_sample
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

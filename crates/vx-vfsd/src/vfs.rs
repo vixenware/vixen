@@ -43,6 +43,8 @@ use vixenfs_proto::{
 };
 use vx_store_proto::{Blake3Hash, BlobNode, CasNode, ChunkHash, NodeHash, StoreClient};
 
+use crate::protocol::VfsPrefixStateSummary;
+
 /// A virtual filesystem item
 #[derive(Debug, Clone)]
 pub struct VfsItem {
@@ -2000,66 +2002,124 @@ impl CasVfs {
     }
 
     pub async fn dump_state(&self, prefix_id: &str) {
-        let state = self.state.lock();
+        let summary = self.describe_prefix_state(prefix_id).await;
 
         tracing::info!("=== VFS STATE DUMP ===");
-        tracing::info!("Total items: {}", state.items.len());
-        tracing::info!("Total prefixes: {}", state.prefixes.len());
+        tracing::info!("Total items: {}", summary.total_items);
+        tracing::info!("Total prefixes: {}", summary.total_prefixes);
+        tracing::info!("Root children: {:?}", summary.root_children);
 
-        // Show root children
-        let root_children: Vec<_> = state
-            .items
-            .children_of(ROOT_ITEM_ID)
-            .map(|i| format!("{} (id={})", i.name, i.id))
-            .collect();
-        tracing::info!("Root children: {:?}", root_children);
-
-        // Show prefix info
-        if let Some(prefix) = state.prefixes.get(prefix_id) {
+        if summary.prefix_found {
+            tracing::info!("Prefix '{}': found", summary.prefix_id);
+            tracing::info!("Prefix children: {:?}", summary.prefix_children);
+            tracing::info!("src/ children: {:?}", summary.src_children);
+            tracing::info!("toolchain/ children: {:?}", summary.toolchain_children);
             tracing::info!(
-                "Prefix '{}' root_item_id={}",
-                prefix_id,
-                prefix.root_item_id
+                "toolchain/bin/ children: {:?}",
+                summary.toolchain_bin_children
             );
-
-            let prefix_children: Vec<_> = state
-                .items
-                .children_of(prefix.root_item_id)
-                .map(|i| format!("{} (id={}, type={:?})", i.name, i.id, i.item_type))
-                .collect();
-            tracing::info!("Prefix children: {:?}", prefix_children);
-
-            if let Some(src) = state.items.lookup_child(prefix.root_item_id, "src") {
-                let src_children: Vec<_> = state
-                    .items
-                    .children_of(src.id)
-                    .map(|i| format!("{} (id={}, type={:?})", i.name, i.id, i.item_type))
-                    .collect();
-                tracing::info!("src/ children: {:?}", src_children);
-            }
-
-            if let Some(toolchain) = state.items.lookup_child(prefix.root_item_id, "toolchain") {
-                let tc_id = toolchain.id;
-                let tc_children: Vec<_> = state
-                    .items
-                    .children_of(tc_id)
-                    .map(|i| format!("{} (id={})", i.name, i.id))
-                    .collect();
-                tracing::info!("toolchain/ children: {:?}", tc_children);
-
-                if let Some(bin) = state.items.lookup_child(tc_id, "bin") {
-                    let bin_children: Vec<_> = state
-                        .items
-                        .children_of(bin.id)
-                        .map(|i| format!("{} (id={})", i.name, i.id))
-                        .collect();
-                    tracing::info!("toolchain/bin/ children: {:?}", bin_children);
-                }
-            }
+            tracing::info!("path mappings (sample): {:?}", summary.path_mappings_sample);
+            tracing::info!(
+                "src path mappings (sample): {:?}",
+                summary.src_path_mappings_sample
+            );
         } else {
-            tracing::info!("Prefix '{}' NOT FOUND in prefixes map!", prefix_id);
+            tracing::info!("Prefix '{}' NOT FOUND in prefixes map!", summary.prefix_id);
         }
         tracing::info!("=== END VFS STATE DUMP ===");
+    }
+
+    fn sorted_prefix_entries(
+        state: &VfsState,
+        parent_id: ItemId,
+        include_type: bool,
+    ) -> Vec<String> {
+        state
+            .items
+            .children_of(parent_id)
+            .map(|item| {
+                if include_type {
+                    format!("{} (id={}, type={:?})", item.name, item.id, item.item_type)
+                } else {
+                    format!("{} (id={})", item.name, item.id)
+                }
+            })
+            .collect()
+    }
+
+    fn sorted_path_mappings(paths: impl Iterator<Item = String>) -> Vec<String> {
+        let mut paths: Vec<_> = paths.collect();
+        paths.sort();
+        paths
+    }
+
+    pub async fn describe_prefix_state(&self, prefix_id: &str) -> VfsPrefixStateSummary {
+        let state = self.state.lock();
+        let root_children = Self::sorted_prefix_entries(&state, ROOT_ITEM_ID, false);
+
+        let Some(prefix) = state.prefixes.get(prefix_id) else {
+            return VfsPrefixStateSummary {
+                prefix_id: prefix_id.to_string(),
+                prefix_found: false,
+                total_items: state.items.len() as u64,
+                total_prefixes: state.prefixes.len() as u64,
+                path_mappings_count: 0,
+                root_children,
+                prefix_children: Vec::new(),
+                src_children: Vec::new(),
+                toolchain_children: Vec::new(),
+                toolchain_bin_children: Vec::new(),
+                path_mappings_sample: Vec::new(),
+                src_path_mappings_sample: Vec::new(),
+            };
+        };
+
+        let prefix_children = Self::sorted_prefix_entries(&state, prefix.root_item_id, true);
+        let src_children = state
+            .items
+            .lookup_child(prefix.root_item_id, "src")
+            .map(|src| Self::sorted_prefix_entries(&state, src.id, true))
+            .unwrap_or_default();
+        let toolchain_children = state
+            .items
+            .lookup_child(prefix.root_item_id, "toolchain")
+            .map(|toolchain| Self::sorted_prefix_entries(&state, toolchain.id, false))
+            .unwrap_or_default();
+        let toolchain_bin_children = state
+            .items
+            .lookup_child(prefix.root_item_id, "toolchain")
+            .and_then(|toolchain| state.items.lookup_child(toolchain.id, "bin"))
+            .map(|bin| Self::sorted_prefix_entries(&state, bin.id, false))
+            .unwrap_or_default();
+        let path_mappings_sample = Self::sorted_path_mappings(prefix.path_mappings.keys().cloned())
+            .into_iter()
+            .take(16)
+            .collect();
+        let src_path_mappings_sample = Self::sorted_path_mappings(
+            prefix
+                .path_mappings
+                .keys()
+                .filter(|path| path == &"src" || path.starts_with("src/"))
+                .cloned(),
+        )
+        .into_iter()
+        .take(32)
+        .collect();
+
+        VfsPrefixStateSummary {
+            prefix_id: prefix_id.to_string(),
+            prefix_found: true,
+            total_items: state.items.len() as u64,
+            total_prefixes: state.prefixes.len() as u64,
+            path_mappings_count: prefix.path_mappings.len() as u64,
+            root_children,
+            prefix_children,
+            src_children,
+            toolchain_children,
+            toolchain_bin_children,
+            path_mappings_sample,
+            src_path_mappings_sample,
+        }
     }
 
     /// Build the path from an item up to (but not including) a root

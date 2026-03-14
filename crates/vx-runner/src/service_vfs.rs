@@ -1781,14 +1781,36 @@ impl RunnerService {
         );
 
         #[cfg(windows)]
-        if !request.tree_mounts.is_empty()
-            && let Err(error) = self.vfs.dump_state(&action.prefix_id).await
-        {
-            info!(
-                action.prefix_id = %action.prefix_id,
-                %error,
-                "failed to dump VFS state after preparing inputs"
-            );
+        if !request.tree_mounts.is_empty() {
+            match self.vfs.describe_prefix_state(&action.prefix_id).await {
+                Ok(summary) => {
+                    info!(
+                        action.prefix_id = %action.prefix_id,
+                        prefix_found = summary.prefix_found,
+                        total_items = summary.total_items,
+                        total_prefixes = summary.total_prefixes,
+                        path_mappings_count = summary.path_mappings_count,
+                        root_children = %summarize_list(&summary.root_children, 12),
+                        prefix_children = %summarize_list(&summary.prefix_children, 12),
+                        src_children = %summarize_list(&summary.src_children, 12),
+                        toolchain_children = %summarize_list(&summary.toolchain_children, 12),
+                        toolchain_bin_children = %summarize_list(&summary.toolchain_bin_children, 12),
+                        path_mappings_sample = %summarize_list(&summary.path_mappings_sample, 12),
+                        src_path_mappings_sample = %summarize_list(
+                            &summary.src_path_mappings_sample,
+                            16
+                        ),
+                        "VFS prefix state after preparing inputs"
+                    );
+                }
+                Err(error) => {
+                    info!(
+                        action.prefix_id = %action.prefix_id,
+                        %error,
+                        "failed to describe VFS state after preparing inputs"
+                    );
+                }
+            }
         }
 
         if !outputs_stay_within_writable_roots(&request.outputs, &request.writable_roots) {

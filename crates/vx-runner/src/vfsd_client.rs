@@ -5,6 +5,7 @@ use std::sync::Arc;
 use vx_store_proto::{
     Blake3Hash, CasNode, ContentHash, DirEntry, DirEntryKind, DirectoryNode, NodeHash, StoreClient,
 };
+use vx_vfsd::protocol::VfsPrefixStateSummary;
 
 type RpcClient = vx_vfsd::protocol::VfsdClient;
 
@@ -135,6 +136,16 @@ impl VfsdClient {
     pub async fn dump_state(&self, prefix_id: &str) -> Result<(), String> {
         self.client
             .dump_state(prefix_id.to_string())
+            .await
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    pub async fn describe_prefix_state(
+        &self,
+        prefix_id: &str,
+    ) -> Result<VfsPrefixStateSummary, String> {
+        self.client
+            .describe_prefix_state(prefix_id.to_string())
             .await
             .map_err(|e| format!("{e:?}"))
     }
