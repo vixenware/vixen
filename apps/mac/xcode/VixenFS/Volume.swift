@@ -122,13 +122,30 @@ actor ReadTelemetry {
     }
 }
 
-private struct RoutedPrefix {
+struct RoutedPrefix {
     let prefix: String
     let sid: String
 }
 
+struct RoutedRouteMap {
+    static func build(from routes: [RoutedPrefix]) -> [String: String] {
+        var map: [String: String] = [:]
+        for route in routes {
+            // Deterministic winner when multiple sessions publish the same prefix.
+            if map[route.prefix] == nil {
+                map[route.prefix] = route.sid
+            }
+        }
+        return map
+    }
+
+    static func removingSid(_ sid: String, from map: [String: String]) -> [String: String] {
+        map.filter { _, ownerSID in ownerSID != sid }
+    }
+}
+
 /// FSKit Volume implementation that delegates to the VFS client.
-final class Volume: FSVolume {
+final class Volume: FSVolume, @unchecked Sendable {
 
     private let log = Logger(subsystem: VixenFSConstants.subsystem, category: "Volume")
     private let readTelemetry = ReadTelemetry()
@@ -144,6 +161,11 @@ final class Volume: FSVolume {
     private let _prefixIDLock = NSLock()
     private var _prefixIDs: [String: UInt64] = [:]
     private var _nextPrefixID: UInt64 = 0xFFFF_FFFF_FFFD_0000
+
+    /// Stable synthetic IDs for routed backend items keyed by SID + backend item ID.
+    private let _routedItemIDLock = NSLock()
+    private var _routedItemIDs: [String: UInt64] = [:]
+    private var _nextRoutedItemID: UInt64 = 0xFFFF_FFFF_FFFC_0000
 
     /// Root item ID (always 1 in our VFS protocol)
     private let rootId: UInt64 = 1
@@ -205,7 +227,7 @@ final class Volume: FSVolume {
         )
     }
 
-    private var sessionDeathObserverID: UUID?
+    private let sessionDeathObserverID = UUID()
 
     init() {
         let volumeId = FSVolume.Identifier(uuid: UUID())
@@ -213,16 +235,19 @@ final class Volume: FSVolume {
         log.notice("Volume init")
         super.init(volumeID: volumeId, volumeName: volumeName)
 
-        sessionDeathObserverID = VfsConnection.shared.observeSessionDeath { [weak self] sid in
-            self?.purgeItems(forSid: sid)
+        let observerID = sessionDeathObserverID
+        let owner = self
+        Task {
+            await VfsConnection.shared.observeSessionDeath(id: observerID) { sid in
+                owner.purgeItems(forSid: sid)
+            }
         }
     }
 
     deinit {
-        if let observerID = sessionDeathObserverID {
-            Task {
-                await VfsConnection.shared.removeSessionDeathObserver(observerID)
-            }
+        let observerID = sessionDeathObserverID
+        Task {
+            await VfsConnection.shared.removeSessionDeathObserver(observerID)
         }
     }
 
@@ -382,7 +407,7 @@ final class Volume: FSVolume {
     }
 
     private func discoveredRoutedPrefixes() async -> [RoutedPrefix] {
-        let sids = await VfsConnection.shared.liveSessionIDs()
+        let sids = await VfsConnection.shared.candidateSessionIDs()
         var out: [RoutedPrefix] = []
 
         for sid in sids {
@@ -422,14 +447,7 @@ final class Volume: FSVolume {
     }
 
     private func currentRouteMap() async -> [String: String] {
-        var map: [String: String] = [:]
-        for route in await discoveredRoutedPrefixes() {
-            // Deterministic winner when multiple sessions publish the same prefix.
-            if map[route.prefix] == nil {
-                map[route.prefix] = route.sid
-            }
-        }
-        return map
+        RoutedRouteMap.build(from: await discoveredRoutedPrefixes())
     }
 
     private func sidForPrefix(_ prefix: String) async -> String? {
@@ -447,6 +465,26 @@ final class Volume: FSVolume {
         let allocated = _nextPrefixID
         _prefixIDs[key] = allocated
         return allocated
+    }
+
+    private func routedBackendItemID(sid: String, backendItemID: UInt64) -> UInt64 {
+        let key = "\(sid):\(backendItemID)"
+        _routedItemIDLock.lock()
+        defer { _routedItemIDLock.unlock() }
+        if let existing = _routedItemIDs[key] {
+            return existing
+        }
+        _nextRoutedItemID &+= 1
+        let allocated = _nextRoutedItemID
+        _routedItemIDs[key] = allocated
+        return allocated
+    }
+
+    private func localItemID(for sid: String?, backendItemID: UInt64) -> UInt64 {
+        guard let sid else {
+            return backendItemID
+        }
+        return routedBackendItemID(sid: sid, backendItemID: backendItemID)
     }
 
     private func routedPrefixAttributes(itemID: UInt64) -> FSItem.Attributes {
@@ -474,6 +512,12 @@ final class Volume: FSVolume {
             !key.hasPrefix("\(sid):")
         }
         _prefixIDLock.unlock()
+
+        _routedItemIDLock.lock()
+        _routedItemIDs = _routedItemIDs.filter { key, _ in
+            !key.hasPrefix("\(sid):")
+        }
+        _routedItemIDLock.unlock()
     }
 
     private static func isImmutableFile(_ attrs: FSItem.Attributes) -> Bool {
@@ -822,9 +866,10 @@ extension Volume: FSVolume.Operations {
         }
 
         let attrs = result.attrs
+        let localItemID = localItemID(for: dirSID, backendItemID: attrs.itemId)
 
         let fsAttrs = FSItem.Attributes.fromVfs(
-            itemId: attrs.itemId,
+            itemId: localItemID,
             parentId: dirItem.itemId,
             itemType: attrs.itemType,
             size: attrs.size,
@@ -834,13 +879,13 @@ extension Volume: FSVolume.Operations {
         )
 
         // Check if we already have this item cached
-        if let existing = getCachedItem(attrs.itemId) {
+        if let existing = getCachedItem(localItemID) {
             existing.updateAttributes(fsAttrs)
             return (existing, existing.name)
         }
 
         let item = Item(
-            itemId: attrs.itemId,
+            itemId: localItemID,
             name: nameStr,
             attributes: fsAttrs,
             prefix: dirItem.prefix,
@@ -899,8 +944,10 @@ extension Volume: FSVolume.Operations {
             try await $0.getAttributes(itemId: result.itemId)
         }
 
+        let localItemID = localItemID(for: dirSID, backendItemID: result.itemId)
+
         let fsAttrs = FSItem.Attributes.fromVfs(
-            itemId: result.itemId,
+            itemId: localItemID,
             parentId: dirItem.itemId,
             itemType: vfsType,
             size: attrsResult.attrs.size,
@@ -910,7 +957,7 @@ extension Volume: FSVolume.Operations {
         )
 
         let item = Item(
-            itemId: result.itemId,
+            itemId: localItemID,
             name: nameStr,
             attributes: fsAttrs,
             prefix: dirItem.prefix,
@@ -1143,8 +1190,10 @@ extension Volume: FSVolume.Operations {
 
             var nextCookie: UInt64 = cookieValue + 1
             for entry in result.entries {
+                let localItemID = localItemID(for: dirSID, backendItemID: entry.itemId)
+
                 let entryAttrs = FSItem.Attributes.fromVfs(
-                    itemId: entry.itemId,
+                    itemId: localItemID,
                     parentId: dirItem.itemId,
                     itemType: entry.itemType,
                     size: entry.size,
@@ -1154,7 +1203,7 @@ extension Volume: FSVolume.Operations {
                 )
 
                 let entryItem = Item(
-                    itemId: entry.itemId,
+                    itemId: localItemID,
                     name: entry.name,
                     attributes: entryAttrs,
                     prefix: dirItem.prefix,

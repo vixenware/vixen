@@ -341,10 +341,8 @@ actor VfsConnection {
         return client
     }
 
-    func observeSessionDeath(_ observer: @escaping @Sendable (String) -> Void) -> UUID {
-        let id = UUID()
+    func observeSessionDeath(id: UUID, _ observer: @escaping @Sendable (String) -> Void) {
         sessionDeathObservers[id] = observer
-        return id
     }
 
     func removeSessionDeathObserver(_ id: UUID) {
@@ -356,6 +354,53 @@ actor VfsConnection {
             .filter { _, peer in peer.client != nil }
             .map { sid, _ in sid }
             .sorted()
+    }
+
+    func candidateSessionIDs() -> [String] {
+        var sids = Set<String>()
+        if let defaultSid {
+            sids.insert(defaultSid)
+        }
+        for sid in peers.keys {
+            sids.insert(sid)
+        }
+        for sid in bootstrapSessionIDs() {
+            sids.insert(sid)
+        }
+        return sids.sorted()
+    }
+
+    private func bootstrapSessionIDs() -> [String] {
+        guard
+            let appGroupURL = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: VixenFSConstants.appGroupIdentifier)
+        else {
+            return []
+        }
+        let sessionsURL = appGroupURL.appendingPathComponent("sessions", isDirectory: true)
+        guard
+            let entries = try? FileManager.default.contentsOfDirectory(
+                at: sessionsURL,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles])
+        else {
+            return []
+        }
+
+        var sids: [String] = []
+        for entry in entries {
+            let sid = entry.lastPathComponent
+            guard isValidSid(sid) else {
+                continue
+            }
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: entry.path, isDirectory: &isDir), isDir.boolValue
+            else {
+                continue
+            }
+            sids.append(sid)
+        }
+        return sids
     }
 
     private func establishClient(for sid: String) async throws -> VfsClient {

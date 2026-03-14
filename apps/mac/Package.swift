@@ -46,5 +46,10 @@ let package = Package(
                 .linkedFramework("FSKit")
             ]
         ),
+        .testTarget(
+            name: "VixenFSTests",
+            dependencies: ["VixenFS"],
+            path: "tests/VixenFSTests"
+        ),
     ]
 )
