@@ -45,9 +45,13 @@ fn toolchain(class: ExecutorClass) {
   })
 }
 
-fn build_lua(class: ExecutorClass) {
+fn build_lua(workspace: Path, class: ExecutorClass) {
   let tc = toolchain(class);
-  let src_tree = Tree(@zoo/lua-src);
+  let src_tree =
+    stabilize(
+      () => Tree(workspace / @zoo/lua-src),
+      (tree) => tree,
+    );
   let unix_cflags =
     if tc.os == "linux" (
       ["-Wall", "-O2", "-std=c99", "-DLUA_USE_LINUX"]
@@ -172,8 +176,8 @@ fn build_lua(class: ExecutorClass) {
 
 fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
   Tree {
-    @local: build_lua(executor_class("default")),
-    @orb: build_lua(executor_class("ssh:orb")),
-    @toast: build_lua(executor_class("ssh:toast")),
+    @local: build_lua(workspace, executor_class("default")),
+    @orb: build_lua(workspace, executor_class("ssh:orb")),
+    @toast: build_lua(workspace, executor_class("ssh:toast")),
   }
 }
