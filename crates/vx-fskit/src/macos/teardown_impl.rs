@@ -115,31 +115,33 @@ pub async fn teardown(mount_path: &Utf8PathBuf) -> FsKitResult {
         }
     }
 
-    // --- Kill stale VixenFS extension if still running ---
-
-    if probe::probe_pgrep(&mut log).await {
-        log.info("VixenFS extension still running after unmount, sending SIGTERM");
-        let _ = Command::new("pkill").args(["-x", "VixenFS"]).output().await;
-        // Give it a moment to exit
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        if probe::probe_pgrep(&mut log).await {
-            log.fail("VixenFS extension still running after SIGTERM");
-        } else {
-            log.ok("VixenFS extension exited");
-        }
-    }
-
     // --- Verify ---
 
     let after = probe::probe(mount_path, &candidates, &mut log, false).await;
 
     if after.is_clean() {
+        if probe::probe_pgrep(&mut log).await {
+            log.info("VixenFS extension still running after clean unmount, leaving it running");
+        }
         // Clean up the stale directory if it exists
         if moire::fs::metadata(mount_path.as_std_path()).await.is_ok() {
             let _ = moire::fs::remove_dir(mount_path.as_std_path()).await;
         }
         log.ok("teardown complete: mount is clean");
         return FsKitResult::success(log.into_entries());
+    }
+
+    // --- Last-resort kill of stale VixenFS extension ---
+
+    if probe::probe_pgrep(&mut log).await {
+        log.info("mount still unhealthy after unmount, sending SIGTERM to VixenFS extension");
+        let _ = Command::new("pkill").args(["-x", "VixenFS"]).output().await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if probe::probe_pgrep(&mut log).await {
+            log.fail("VixenFS extension still running after SIGTERM");
+        } else {
+            log.ok("VixenFS extension exited");
+        }
     }
 
     log.fail("mount is still present after unmount attempt");
