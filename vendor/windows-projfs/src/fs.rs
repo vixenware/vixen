@@ -266,6 +266,46 @@ impl Drop for ProjectedFileSystem {
 
 #[cfg(test)]
 mod tests {
+    fn advance_enumeration(
+        current_entry: usize,
+        active_search: Option<&str>,
+        incoming_search: Option<&str>,
+        restart_scan: bool,
+        matches: &[bool],
+        return_single_entry: bool,
+    ) -> (usize, usize, Option<String>) {
+        let mut current_entry = current_entry;
+        let mut active_search = active_search.map(str::to_string);
+        let mut emitted = 0;
+
+        if restart_scan {
+            current_entry = 0;
+            active_search = None;
+        }
+
+        if let Some(incoming_search) = incoming_search {
+            if active_search.as_deref() != Some(incoming_search) {
+                current_entry = 0;
+            }
+            active_search = Some(incoming_search.to_string());
+        }
+
+        while let Some(file_match) = matches.get(current_entry).copied() {
+            let mut emitted_entry = false;
+            if file_match {
+                emitted += 1;
+                emitted_entry = true;
+            }
+
+            current_entry += 1;
+            if return_single_entry && emitted_entry {
+                break;
+            }
+        }
+
+        (current_entry, emitted, active_search)
+    }
+
     fn simulate_single_entry_scan(matches: &[bool]) -> (usize, usize) {
         let mut current_entry = 0;
         let mut emitted = 0;
@@ -292,6 +332,27 @@ mod tests {
         let (current_entry, emitted) = simulate_single_entry_scan(&[false, false, true, true]);
         assert_eq!(current_entry, 3);
         assert_eq!(emitted, 1);
+    }
+
+    #[test]
+    fn null_search_expression_keeps_existing_enumeration_cursor() {
+        let (current_entry, emitted, active_search) =
+            advance_enumeration(0, None, Some("*"), false, &[true, true, true], true);
+        assert_eq!(current_entry, 1);
+        assert_eq!(emitted, 1);
+        assert_eq!(active_search.as_deref(), Some("*"));
+
+        let (current_entry, emitted, active_search) = advance_enumeration(
+            current_entry,
+            active_search.as_deref(),
+            None,
+            false,
+            &[true, true, true],
+            false,
+        );
+        assert_eq!(current_entry, 3);
+        assert_eq!(emitted, 2);
+        assert_eq!(active_search.as_deref(), Some("*"));
     }
 }
 
@@ -484,8 +545,6 @@ mod native {
                     enumeration.reset_enumeration();
                 }
                 enumeration.search_expression = Some(search_expression);
-            } else if enumeration.search_expression.is_some() {
-                enumeration.reset_enumeration();
             }
 
             let return_single_entry =
