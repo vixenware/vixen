@@ -39,7 +39,7 @@ pub(crate) enum HealthProbe {
 impl ProbeResult {
     /// Nothing is mounted here — clean state.
     pub fn is_clean(&self) -> bool {
-        !self.mkdir_ebusy && !self.in_df && !self.extension_running
+        !self.mkdir_ebusy && !self.in_df
     }
 
     /// Something is mounted and healthy (health.json says connected: true).
@@ -49,7 +49,7 @@ impl ProbeResult {
 
     /// Something is mounted (EBUSY or in df) or extension is still running, but not healthy.
     pub fn is_broken_mount(&self) -> bool {
-        (self.mkdir_ebusy || self.in_df || self.extension_running) && !self.is_healthy()
+        (self.mkdir_ebusy || self.in_df) && !self.is_healthy()
     }
 }
 
@@ -207,5 +207,48 @@ async fn probe_health(mount_path: &Utf8PathBuf, log: &mut Log) -> HealthProbe {
             let _ = child.kill();
             HealthProbe::Timeout
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HealthProbe, ProbeResult};
+
+    #[test]
+    fn extension_process_alone_is_a_clean_state() {
+        let result = ProbeResult {
+            mkdir_ebusy: false,
+            in_df: false,
+            extension_running: true,
+            health: HealthProbe::NotAttempted,
+        };
+
+        assert!(result.is_clean());
+        assert!(!result.is_broken_mount());
+    }
+
+    #[test]
+    fn mounted_but_unhealthy_state_is_broken() {
+        let result = ProbeResult {
+            mkdir_ebusy: true,
+            in_df: false,
+            extension_running: true,
+            health: HealthProbe::Failed("nope".to_string()),
+        };
+
+        assert!(!result.is_clean());
+        assert!(result.is_broken_mount());
+    }
+
+    #[test]
+    fn healthy_mount_is_not_broken() {
+        let result = ProbeResult {
+            mkdir_ebusy: true,
+            in_df: true,
+            extension_running: true,
+            health: HealthProbe::Ok("{\"connected\":true}".to_string()),
+        };
+
+        assert!(!result.is_broken_mount());
     }
 }
