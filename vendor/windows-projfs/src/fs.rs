@@ -264,6 +264,37 @@ impl Drop for ProjectedFileSystem {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    fn simulate_single_entry_scan(matches: &[bool]) -> (usize, usize) {
+        let mut current_entry = 0;
+        let mut emitted = 0;
+        let return_single_entry = true;
+
+        while let Some(file_match) = matches.get(current_entry).copied() {
+            let mut emitted_entry = false;
+            if file_match {
+                emitted += 1;
+                emitted_entry = true;
+            }
+
+            current_entry += 1;
+            if return_single_entry && emitted_entry {
+                break;
+            }
+        }
+
+        (current_entry, emitted)
+    }
+
+    #[test]
+    fn single_entry_enumeration_skips_non_matches_until_first_emit() {
+        let (current_entry, emitted) = simulate_single_entry_scan(&[false, false, true, true]);
+        assert_eq!(current_entry, 3);
+        assert_eq!(emitted, 1);
+    }
+}
+
 mod native {
     use std::{
         ffi::{OsString, c_void},
@@ -432,7 +463,7 @@ mod native {
                 target: "vx_vfs::windows",
                 "ProjFS get_directory_enumeration id={:X} path={} flags=0x{:X} search_expression={:?} current_entry={} total_entries={}",
                 enumeration_id.to_u128(),
-                callback_data.path.to_string_lossy(),
+                callback_data.file_path.clone().unwrap_or_default().to_string_lossy(),
                 callback_data.flags.0,
                 search_expression_text,
                 enumeration.current_entry,
@@ -457,6 +488,8 @@ mod native {
                 enumeration.reset_enumeration();
             }
 
+            let return_single_entry =
+                callback_data.flags.0 & PRJ_CB_DATA_FLAG_ENUM_RETURN_SINGLE_ENTRY.0 > 0;
             let name_cache = enumeration.name_cache.clone();
             while let Some(entry) = enumeration.peek_entry() {
                 let basic_info = entry.get_basic_info();
@@ -473,12 +506,13 @@ mod native {
                     true
                 };
 
+                let mut emitted_entry = false;
                 if file_match {
                     tracing::info!(
                         target: "vx_vfs::windows",
                         "ProjFS get_directory_enumeration emit id={:X} path={} entry={} index={} flags=0x{:X}",
                         enumeration_id.to_u128(),
-                        callback_data.path.to_string_lossy(),
+                        callback_data.file_path.clone().unwrap_or_default().to_string_lossy(),
                         entry.name(),
                         enumeration.current_entry,
                         callback_data.flags.0
@@ -501,10 +535,12 @@ mod native {
                         /* unexpected... */
                         return Err(err.code());
                     }
+
+                    emitted_entry = true;
                 }
 
                 enumeration.consume_entry();
-                if callback_data.flags.0 & PRJ_CB_DATA_FLAG_ENUM_RETURN_SINGLE_ENTRY.0 > 0 {
+                if return_single_entry && emitted_entry {
                     break;
                 }
             }
