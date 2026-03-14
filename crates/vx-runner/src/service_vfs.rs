@@ -124,6 +124,53 @@ fn parent_dirs_to_materialize(request: &RunRequest) -> Vec<String> {
         .collect()
 }
 
+#[cfg(windows)]
+fn summarize_disk_dir(path: &Utf8Path) -> String {
+    const SAMPLE_LIMIT: usize = 8;
+
+    let read_dir = match std::fs::read_dir(path) {
+        Ok(read_dir) => read_dir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return "<missing>".to_string();
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {
+            return "<not-a-directory>".to_string();
+        }
+        Err(error) => return format!("<error: {error}>"),
+    };
+
+    let mut names = read_dir
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    names.sort();
+
+    if names.len() > SAMPLE_LIMIT {
+        let remaining = names.len() - SAMPLE_LIMIT;
+        names.truncate(SAMPLE_LIMIT);
+        names.push(format!("... (+{remaining} more)"));
+    }
+
+    if names.is_empty() {
+        "-".to_string()
+    } else {
+        names.join(", ")
+    }
+}
+
+#[cfg(windows)]
+fn summarize_prefix_disk_view(prefix_path: &Utf8Path) -> String {
+    let src_path = prefix_path.join("src");
+    let out_path = prefix_path.join("out");
+
+    format!(
+        "root_children=[{}]; src_children=[{}]; out_children=[{}]",
+        summarize_disk_dir(prefix_path),
+        summarize_disk_dir(&src_path),
+        summarize_disk_dir(&out_path),
+    )
+}
+
 fn uses_toolchain_placeholder(value: &RunArg) -> bool {
     value.as_str().contains("${VX_TOOLCHAIN}")
 }
@@ -2011,6 +2058,13 @@ impl RunnerService {
             env = %summarize_list(&expanded_env, 8),
             clear_env = request.clear_env,
             "executing sandboxed command"
+        );
+        #[cfg(windows)]
+        info!(
+            action.prefix_id = %action.prefix_id,
+            action_desc,
+            disk_view = %summarize_prefix_disk_view(&action.prefix_path),
+            "Windows VFS disk view before command"
         );
         let command_start = Instant::now();
 
