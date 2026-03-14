@@ -5,7 +5,7 @@
 
 use std::io::{self, Cursor, Read};
 use std::ops::ControlFlow;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use vixenfs_proto::{ItemType, Vfs, VfsDiskNotify};
 use windows_projfs::{
@@ -30,27 +30,67 @@ fn unix_to_filetime(unix_seconds: u64) -> u64 {
 struct ProjFsBridge<T> {
     vfs: T,
     handle: tokio::runtime::Handle,
+    mount_path: PathBuf,
 }
 
 impl<T> ProjFsBridge<T> {
-    fn new(vfs: T, handle: tokio::runtime::Handle) -> Self {
-        Self { vfs, handle }
+    fn new(vfs: T, handle: tokio::runtime::Handle, mount_path: PathBuf) -> Self {
+        Self {
+            vfs,
+            handle,
+            mount_path,
+        }
     }
 }
 
 impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjFsBridge<T> {
+    fn normalize_projfs_path(&self, path: &Path) -> Option<Vec<String>> {
+        let relative = path.strip_prefix(&self.mount_path).unwrap_or(path);
+        let mut normalized = Vec::new();
+
+        for component in relative.components() {
+            match component {
+                Component::Normal(name) => normalized.push(name.to_string_lossy().to_string()),
+                Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+                Component::ParentDir => {
+                    tracing::warn!(
+                        ?path,
+                        mount_path = ?self.mount_path,
+                        "resolve_path: refusing to traverse parent directory component"
+                    );
+                    return None;
+                }
+            }
+        }
+
+        tracing::trace!(
+            ?path,
+            mount_path = ?self.mount_path,
+            normalized = ?normalized,
+            "resolve_path: normalized ProjFS path"
+        );
+
+        Some(normalized)
+    }
+
     /// Resolve a relative path (from ProjFS) to a VFS ItemId by walking
     /// from the root (ItemId 1) through each path component via `lookup()`.
     fn resolve_path(&self, path: &Path) -> Option<u64> {
         let mut current_id: u64 = 1; // root
 
-        for component in path.components() {
-            let name = component.as_os_str().to_string_lossy().to_string();
+        let components = self.normalize_projfs_path(path)?;
+        for name in components {
             let result = self
                 .handle
                 .block_on(self.vfs.lookup(current_id, name.clone()));
             if result.error != 0 {
-                tracing::debug!(?path, %name, current_id, error = result.error, "resolve_path: lookup failed");
+                tracing::debug!(
+                    ?path,
+                    %name,
+                    current_id,
+                    error = result.error,
+                    "resolve_path: lookup failed"
+                );
                 return None;
             }
             current_id = result.attrs.item_id;
@@ -258,7 +298,7 @@ where
     std::thread::Builder::new()
         .name("projfs-runtime".into())
         .spawn(move || {
-            let bridge = ProjFsBridge::new(vfs, handle);
+            let bridge = ProjFsBridge::new(vfs, handle, mount_path.as_std_path().to_path_buf());
 
             let _fs = match ProjectedFileSystem::new(mount_path.as_std_path(), bridge) {
                 Ok(fs) => fs,
