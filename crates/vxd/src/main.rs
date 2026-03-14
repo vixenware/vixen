@@ -296,6 +296,15 @@ fn ssh_bootstrap_local_socket_endpoint(class_label: &str, service_name: &str) ->
 }
 
 #[cfg(unix)]
+fn ssh_bootstrap_unique_suffix() -> String {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    format!("{}-{unique}", std::process::id())
+}
+
+#[cfg(unix)]
 fn ssh_bootstrap_local_tcp_endpoint() -> Result<Endpoint> {
     Ok(Endpoint::Tcp {
         host: "127.0.0.1".to_string(),
@@ -937,6 +946,10 @@ async fn connect_ssh_bootstrap_runner(
                     let _ = std::fs::remove_file(local_store_socket.as_std_path());
                 }
                 let paths = ssh_bootstrap_paths(&target_info.home, class_label);
+                let socket_suffix = ssh_bootstrap_unique_suffix();
+                let store_socket = format!("{}/store-{socket_suffix}.sock", paths.vx_home);
+                let vfsd_socket = format!("{}/vfsd-{socket_suffix}.sock", paths.vx_home);
+                let runner_socket = format!("{}/runner-{socket_suffix}.sock", paths.vx_home);
                 let remote_command = format!(
                     "sh -lc {} sh {} {} {} {} {} {} {} {}",
                     shell_quote(SSH_BOOTSTRAP_REMOTE_SCRIPT),
@@ -945,15 +958,15 @@ async fn connect_ssh_bootstrap_runner(
                     shell_quote(&paths.checkout_dir),
                     shell_quote(&paths.vx_home),
                     shell_quote(&paths.store_root),
-                    shell_quote(&paths.store_socket),
-                    shell_quote(&paths.vfsd_socket),
-                    shell_quote(&paths.runner_socket),
+                    shell_quote(&store_socket),
+                    shell_quote(&vfsd_socket),
+                    shell_quote(&runner_socket),
                 );
                 (
                     local_store_endpoint,
                     local_runner_endpoint,
-                    paths.store_socket,
-                    paths.runner_socket,
+                    store_socket,
+                    runner_socket,
                     remote_command,
                 )
             }
