@@ -22,6 +22,13 @@ const UNIX_TO_FILETIME_EPOCH_OFFSET: u64 = 11_644_473_600;
 /// FILETIME ticks per second (100-nanosecond intervals).
 const FILETIME_TICKS_PER_SECOND: u64 = 10_000_000;
 
+/// Minimal Windows attributes for projected files we synthesize ourselves.
+///
+/// Zero is not a safe default for ProjFS entries; use the normal basic file
+/// type bits so projected placeholders enumerate consistently.
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x20;
+
 /// Convert a Unix timestamp (seconds since epoch) to a Windows FILETIME value.
 fn unix_to_filetime(unix_seconds: u64) -> u64 {
     (unix_seconds + UNIX_TO_FILETIME_EPOCH_OFFSET) * FILETIME_TICKS_PER_SECOND
@@ -131,7 +138,7 @@ impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjectedFileSystemSource f
                         entries.push(DirectoryEntry::File(FileInfo {
                             file_name: entry.name.clone(),
                             file_size: entry.size,
-                            file_attributes: 0,
+                            file_attributes: FILE_ATTRIBUTE_ARCHIVE,
                             creation_time: ft_created,
                             last_access_time: ft_modified,
                             last_write_time: ft_modified,
@@ -140,7 +147,7 @@ impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjectedFileSystemSource f
                     ItemType::Directory => {
                         entries.push(DirectoryEntry::Directory(DirectoryInfo {
                             directory_name: entry.name.clone(),
-                            directory_attributes: 0,
+                            directory_attributes: FILE_ATTRIBUTE_DIRECTORY,
                             creation_time: ft_created,
                             last_access_time: ft_modified,
                             last_write_time: ft_modified,
@@ -191,14 +198,14 @@ impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjectedFileSystemSource f
             ItemType::File | ItemType::Symlink => DirectoryEntry::File(FileInfo {
                 file_name,
                 file_size: attrs.size,
-                file_attributes: 0,
+                file_attributes: FILE_ATTRIBUTE_ARCHIVE,
                 creation_time: ft_created,
                 last_access_time: ft_modified,
                 last_write_time: ft_modified,
             }),
             ItemType::Directory => DirectoryEntry::Directory(DirectoryInfo {
                 directory_name: file_name,
-                directory_attributes: 0,
+                directory_attributes: FILE_ATTRIBUTE_DIRECTORY,
                 creation_time: ft_created,
                 last_access_time: ft_modified,
                 last_write_time: ft_modified,
