@@ -368,6 +368,7 @@ fn build_vx_exec_summary_includes_args_mounts_and_writable_roots() {
             value: Value::Blob(BlobValue::from_string("int main(void) { return 0; }\n")),
         }],
         writable_roots: vec![PathValue::new("out")],
+        create_dirs: vec![PathValue::new("out/obj")],
         executor: vx_eval::ExecutorSelector::class("default"),
         demand_chain: DemandChain::new(),
         module: empty_module,
@@ -377,7 +378,7 @@ fn build_vx_exec_summary_includes_args_mounts_and_writable_roots() {
 
     assert_eq!(
         summary,
-        "build.vx exec[class:default]: /usr/bin/cc, -x, c, probe.c, -c, -o, out/probe.o (mounts: probe.c; writable: out)"
+        "build.vx exec[class:default]: /usr/bin/cc, -x, c, probe.c, -c, -o, out/probe.o (mounts: probe.c; writable: out; create_dirs: out/obj)"
     );
 }
 

@@ -1949,6 +1949,7 @@ async fn execute_action(
                 file_mounts: resolved_file_mounts,
                 outputs,
                 writable_roots,
+                create_dirs: Vec::new(),
                 macos_commandlinetools_version: macos_commandlinetools_version.clone(),
             };
 

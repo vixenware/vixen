@@ -2193,6 +2193,11 @@ async fn run_build_vx_exec_via_runner(
                     .iter()
                     .map(|path| path.as_str().to_string())
                     .collect(),
+                create_dirs: request
+                    .create_dirs
+                    .iter()
+                    .map(|path| path.as_str().to_string())
+                    .collect(),
                 cwd: None,
                 env: request
                     .env
@@ -2453,14 +2458,20 @@ pub(crate) fn summarize_build_vx_exec_request(request: &ExecRequest) -> String {
         .iter()
         .map(|path| path.as_str().to_string())
         .collect::<Vec<_>>();
+    let create_dirs = request
+        .create_dirs
+        .iter()
+        .map(|path| path.as_str().to_string())
+        .collect::<Vec<_>>();
 
     format!(
-        "build.vx exec[{}:{}]: {} (mounts: {}; writable: {})",
+        "build.vx exec[{}:{}]: {} (mounts: {}; writable: {}; create_dirs: {})",
         request.executor.backend.as_tag(),
         request.executor.id,
         summarize_items(&argv, 10),
         summarize_items(&mounts, 6),
         summarize_items(&writable_roots, 6),
+        summarize_items(&create_dirs, 6),
     )
 }
 

@@ -85,6 +85,7 @@ struct ParsedExecRequest {
     env: Vec<(String, ExecArgValue)>,
     mounts: Vec<(PathValue, Value)>,
     writable_roots: Vec<PathValue>,
+    create_dirs: Vec<PathValue>,
     executor: ExecutorSelector,
     observer: Value,
     verification_obligations: Vec<HostObservation>,
@@ -4507,6 +4508,7 @@ impl Engine {
         let mut observer_value = None;
         let mut executor_value = None;
         let mut writable_value = None;
+        let mut create_dirs_value = None;
 
         for (name, value) in kwargs {
             match name.as_ref() {
@@ -4515,6 +4517,7 @@ impl Engine {
                 "observer" => observer_value = Some(value.clone()),
                 "executor" => executor_value = Some(value.clone()),
                 "writable" => writable_value = Some(value.clone()),
+                "create_dirs" => create_dirs_value = Some(value.clone()),
                 other => {
                     return Err(self
                         .type_error(&format!("exec does not accept keyword argument '{other}'")));
@@ -4567,6 +4570,9 @@ impl Engine {
         if let Some(writable_value) = &writable_value {
             self.collect_value_obligations(writable_value, &mut verification_obligations);
         }
+        if let Some(create_dirs_value) = &create_dirs_value {
+            self.collect_value_obligations(create_dirs_value, &mut verification_obligations);
+        }
         self.collect_value_obligations(&observer, &mut verification_obligations);
 
         let mut mounts = self.exec_mounts_from_value(mounts_value)?;
@@ -4584,12 +4590,14 @@ impl Engine {
         } else {
             explicit_writable
         };
+        let create_dirs = self.exec_create_dirs_from_value(create_dirs_value, &writable_roots)?;
 
         Ok(ParsedExecRequest {
             args: exec_args,
             env,
             mounts,
             writable_roots,
+            create_dirs,
             executor,
             observer,
             verification_obligations: verification_obligations.into_values().collect(),
@@ -4611,6 +4619,7 @@ impl Engine {
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             writable_roots: request.writable_roots.clone(),
+            create_dirs: request.create_dirs.clone(),
             executor: request.executor.clone(),
             demand_chain: self.current_demand_chain(None),
             module: self.transport_module(),
@@ -4630,6 +4639,9 @@ impl Engine {
         }
         for root in &request.writable_roots {
             self.ensure_dir(&sandbox_root.join(root.as_str()))?;
+        }
+        for dir in &request.create_dirs {
+            self.ensure_dir(&sandbox_root.join(dir.as_str()))?;
         }
 
         let verification_task = if request.verification_obligations.is_empty() {
@@ -4755,6 +4767,44 @@ impl Engine {
             writable.push(self.expect_relative_path(&item, "exec writable path")?);
         }
         Ok(writable)
+    }
+
+    fn exec_create_dirs_from_value(
+        &self,
+        value: Option<Value>,
+        writable_roots: &[PathValue],
+    ) -> Result<Vec<PathValue>, PoisonError> {
+        let Some(value) = value else {
+            return Ok(Vec::new());
+        };
+        let (value, _) = self
+            .split_obligations(self.materialize_value_shallow(value, "forcing exec create_dirs")?);
+        let Value::Array(items) = value else {
+            return Err(self.type_error(&format!(
+                "exec create_dirs must be Array[Path], got {}",
+                value.type_name()
+            )));
+        };
+
+        let mut create_dirs = Vec::with_capacity(items.len());
+        for item in items.iter() {
+            let item =
+                self.materialize_value_deep(item.clone(), "forcing exec create_dirs path")?;
+            let path = self.expect_relative_path(&item, "exec create_dirs path")?;
+            if !writable_roots.iter().any(|root| {
+                path == *root
+                    || path
+                        .as_str()
+                        .starts_with(&(root.as_str().to_string() + "/"))
+            }) {
+                return Err(self.type_error(&format!(
+                    "exec create_dirs path '{}' must be within a writable root",
+                    path.as_str()
+                )));
+            }
+            create_dirs.push(path);
+        }
+        Ok(create_dirs)
     }
 
     fn infer_exec_writable_roots(

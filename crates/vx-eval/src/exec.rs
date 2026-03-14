@@ -34,6 +34,7 @@ pub struct ExecRequest {
     pub env: Vec<(String, ExecArgValue)>,
     pub mounts: Vec<ExecMount>,
     pub writable_roots: Vec<PathValue>,
+    pub create_dirs: Vec<PathValue>,
     pub executor: ExecutorSelector,
     pub demand_chain: DemandChain,
     pub module: TransportModule,

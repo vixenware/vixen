@@ -132,6 +132,13 @@ fn parent_dirs_to_materialize(request: &RunRequest) -> Vec<String> {
         .collect()
 }
 
+fn explicit_dirs_to_materialize(request: &RunRequest) -> Vec<String> {
+    let mut dirs = request.create_dirs.clone();
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
 fn resolve_program_path(program: &RunArg, expanded: String, cwd: &Utf8Path) -> String {
     match program {
         RunArg::Path(_) => {
@@ -1936,6 +1943,19 @@ impl RunnerService {
                 );
             }
         }
+        let create_dirs = explicit_dirs_to_materialize(&request);
+        for dir in &create_dirs {
+            if let Err(e) = self.vfs.add_dir_to_prefix(&action.prefix_id, dir).await {
+                self.remove_action_prefix(&action.prefix_id).await;
+                return run_failure_result(
+                    start,
+                    -1,
+                    String::new(),
+                    String::new(),
+                    Some(format!("failed to create explicit dir '{dir}': {e}")),
+                );
+            }
+        }
         let parent_dirs = parent_dirs_to_materialize(&request);
         for dir in &parent_dirs {
             if let Err(e) = self.vfs.add_dir_to_prefix(&action.prefix_id, dir).await {
@@ -1969,6 +1989,7 @@ impl RunnerService {
                 6
             ),
             writable_roots = %summarize_list(&request.writable_roots, 6),
+            create_dirs = %summarize_list(&create_dirs, 6),
             parent_dirs = %summarize_list(&parent_dirs, 6),
             elapsed_secs = mount_start.elapsed().as_secs_f32(),
             "prepared VFS inputs"
@@ -2637,6 +2658,7 @@ mod tests {
                 executable: false,
             }],
             writable_roots: vec!["out".to_string()],
+            create_dirs: Vec::new(),
             cwd: Some("build/tmp".to_string()),
             env: vec![("LUA_OUTPUT".to_string(), RunArg::path("gen/config.h"))],
             clear_env: false,
@@ -2683,6 +2705,7 @@ mod tests {
                 executable: false,
             }],
             writable_roots: vec!["out".to_string()],
+            create_dirs: Vec::new(),
             cwd: Some("build/tmp".to_string()),
             env: vec![("CONFIG".to_string(), RunArg::path("gen/config.h"))],
             clear_env: false,
@@ -2716,6 +2739,7 @@ mod tests {
             file_mounts: Vec::new(),
             outputs: Vec::new(),
             writable_roots: vec!["out".to_string()],
+            create_dirs: Vec::new(),
             cwd: None,
             env: Vec::new(),
             clear_env: false,
@@ -2727,6 +2751,45 @@ mod tests {
             parent_dirs_to_materialize(&request),
             vec!["out/obj".to_string()]
         );
+    }
+
+    #[test]
+    fn explicit_create_dirs_are_preserved() {
+        let request = RunRequest {
+            executor: ExecutorSelector::class("default"),
+            toolchain_manifest: Blake3Hash([0; 32]),
+            program_rel: String::new(),
+            program: Some(RunArg::literal("cl.exe")),
+            args: vec![
+                RunArg::literal("/nologo"),
+                RunArg::literal("/c"),
+                RunArg::path("src/hello.c"),
+                RunArg::literal("/Foout\\obj\\hello.obj"),
+            ],
+            tree_mounts: vec![RunTreeMount {
+                mount: "src".to_string(),
+                manifest: Blake3Hash([1; 32]),
+            }],
+            file_mounts: Vec::new(),
+            outputs: Vec::new(),
+            writable_roots: vec!["out".to_string()],
+            create_dirs: vec![
+                "out/obj".to_string(),
+                "out/obj".to_string(),
+                "out/obj/nested".to_string(),
+            ],
+            cwd: None,
+            env: Vec::new(),
+            clear_env: false,
+            eval: None,
+            macos_commandlinetools_version: None,
+        };
+
+        assert_eq!(
+            explicit_dirs_to_materialize(&request),
+            vec!["out/obj".to_string(), "out/obj/nested".to_string()],
+        );
+        assert!(parent_dirs_to_materialize(&request).is_empty());
     }
 
     #[test]

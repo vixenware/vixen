@@ -6200,3 +6200,38 @@ fn exec_can_be_routed_through_a_host_handler() {
     assert!(request.verification_obligations.is_empty());
     assert_eq!(request.module.functions.len(), 2);
 }
+
+#[test]
+fn exec_captures_explicit_create_dirs() {
+    let captured = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let engine = engine(indoc! {r#"
+            fn observe(process: Process, tree: Tree) {
+              process.exit_code
+            }
+
+            fn build() {
+              exec(["cl.exe", "/nologo", "/c", @src/hello.c, "/Foout\\obj\\hello.obj"]) where {
+                mounts: { @src/hello.c: Blob("int main(void) { return 0; }\n") },
+                writable: [@out],
+                create_dirs: [@out/obj],
+                observer: observe,
+              }
+            }
+        "#})
+    .with_exec_handler(Arc::new(move |request| {
+        *sink.lock().unwrap() = Some(request);
+        Ok(Value::U64(0))
+    }));
+
+    let value = engine.call("build", vec![]).unwrap();
+    assert_eq!(value, Value::U64(0));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("exec request should be captured");
+    assert_eq!(request.writable_roots, vec![PathValue::new("out")]);
+    assert_eq!(request.create_dirs, vec![PathValue::new("out/obj")]);
+}

@@ -76,13 +76,14 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
             "/nologo",
             "/c",
             @(src/{file}),
-            `/Foout\\${file}.obj`,
+            `/Foout\\obj\\${file}.obj`,
             ..includes.map((include) => ["/I", include]).flatten(),
             ..defines.map((define) => `/D${define}`),
             "/O2",
           ] where {
             mounts: { @src: src, @gen: Tree(generated), ..mounts },
             writable: [@out],
+            create_dirs: [@out/obj],
           }
         ) else (
           cexec [
@@ -90,7 +91,7 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
             "-c",
             @(src/{file}),
             "-o",
-            @(out/{file}.o),
+            @(out/obj/{file}.o),
             ..includes.map((include) => ["-I", include]).flatten(),
             ..defines.map((define) => `-D${define}`),
             "-O2",
