@@ -171,6 +171,58 @@ fn summarize_prefix_disk_view(prefix_path: &Utf8Path) -> String {
     )
 }
 
+#[cfg(windows)]
+fn summarize_windows_path_inputs(
+    cwd: &Utf8Path,
+    program: &RunArg,
+    args: &[RunArg],
+    env: &[(String, RunArg)],
+) -> String {
+    let mut candidates = Vec::new();
+
+    if let RunArg::Path(path) = program {
+        candidates.push(("program".to_string(), path.to_string()));
+    }
+
+    for (index, arg) in args.iter().enumerate() {
+        if let RunArg::Path(path) = arg {
+            candidates.push((format!("arg[{index}]"), path.to_string()));
+        }
+    }
+
+    for (key, value) in env {
+        if let RunArg::Path(path) = value {
+            candidates.push((format!("env:{key}"), path.to_string()));
+        }
+    }
+
+    if candidates.is_empty() {
+        return "-".to_string();
+    }
+
+    candidates
+        .into_iter()
+        .map(|(label, path)| {
+            let absolute = if Utf8Path::new(&path).is_absolute() {
+                Utf8PathBuf::from(&path)
+            } else {
+                cwd.join(&path)
+            };
+
+            match std::fs::metadata(absolute.as_std_path()) {
+                Ok(metadata) => format!(
+                    "{label}={path} -> exists(file={}, dir={}, len={})",
+                    metadata.is_file(),
+                    metadata.is_dir(),
+                    metadata.len()
+                ),
+                Err(error) => format!("{label}={path} -> missing({error})"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 fn uses_toolchain_placeholder(value: &RunArg) -> bool {
     value.as_str().contains("${VX_TOOLCHAIN}")
 }
@@ -2065,6 +2117,18 @@ impl RunnerService {
             action_desc,
             disk_view = %summarize_prefix_disk_view(&action.prefix_path),
             "Windows VFS disk view before command"
+        );
+        #[cfg(windows)]
+        info!(
+            action.prefix_id = %action.prefix_id,
+            action_desc,
+            path_inputs = %summarize_windows_path_inputs(
+                &cwd,
+                &request.program,
+                &request.args,
+                &request.env,
+            ),
+            "Windows VFS path inputs before command"
         );
         let command_start = Instant::now();
 
