@@ -491,19 +491,32 @@ mod native {
             let return_single_entry =
                 callback_data.flags.0 & PRJ_CB_DATA_FLAG_ENUM_RETURN_SINGLE_ENTRY.0 > 0;
             let name_cache = enumeration.name_cache.clone();
-            while let Some(entry) = enumeration.peek_entry() {
-                let basic_info = entry.get_basic_info();
-                let extended_info = entry.get_extended_info();
+            while enumeration.current_entry < enumeration.entries.len() {
+                let current_index = enumeration.current_entry;
+                let search_expression = enumeration.search_expression.clone();
+                let (entry_name, basic_info, extended_info, file_match) = {
+                    let entry = &enumeration.entries[current_index];
+                    let basic_info = entry.get_basic_info();
+                    let extended_info = entry.get_extended_info();
+                    let entry_name = entry.name().to_string();
 
-                let mut name_cache = name_cache.borrow_mut();
-                let name = name_cache.get_or_cache(entry.name().to_string());
+                    let mut name_cache = name_cache.borrow_mut();
+                    let name = name_cache.get_or_cache(entry_name.clone());
 
-                let file_match = if let Some(search_expression) = enumeration.search_expression.as_ref() {
-                    unsafe {
-                        library.prj_file_name_match(PCWSTR(name.as_ptr()), PCWSTR(search_expression.as_ptr())).as_bool()
-                    }
-                } else {
-                    true
+                    let file_match = if let Some(search_expression) = search_expression.as_ref() {
+                        unsafe {
+                            library
+                                .prj_file_name_match(
+                                    PCWSTR(name.as_ptr()),
+                                    PCWSTR(search_expression.as_ptr()),
+                                )
+                                .as_bool()
+                        }
+                    } else {
+                        true
+                    };
+
+                    (entry_name, basic_info, extended_info, file_match)
                 };
 
                 let mut emitted_entry = false;
@@ -513,10 +526,12 @@ mod native {
                         "ProjFS get_directory_enumeration emit id={:X} path={} entry={} index={} flags=0x{:X}",
                         enumeration_id.to_u128(),
                         callback_data.file_path.clone().unwrap_or_default().to_string_lossy(),
-                        entry.name(),
-                        enumeration.current_entry,
+                        entry_name,
+                        current_index,
                         callback_data.flags.0
                     );
+                    let mut name_cache = name_cache.borrow_mut();
+                    let name = name_cache.get_or_cache(entry_name);
                     let result = unsafe {
                         library.prj_fill_dir_entry_buffer2(
                             dir_entry_buffer_handle,
