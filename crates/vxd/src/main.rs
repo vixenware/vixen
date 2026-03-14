@@ -388,7 +388,7 @@ for rel in ("crates/vx/Cargo.toml", "crates/vxd/Cargo.toml"):
     if updated != text:
         path.write_text(updated)
 PY
-cargo build --manifest-path "$checkout_dir/Cargo.toml" -p vx-store -p vx-vfsd -p vx-runner
+cargo build --manifest-path "$checkout_dir/Cargo.toml" -p vx-store -p vx-vfsd -p vx-runner -p landlock-exec
 rm -f "$store_socket" "$vfsd_socket" "$runner_socket"
 trap 'jobs -p | xargs -r kill || true' EXIT
 "$checkout_dir/target/debug/vx-store" --root "$store_root" --listen "unix:$store_socket" &
