@@ -1,0 +1,39 @@
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  let class = executor_class("ssh:toast");
+  let cl =
+    discover(class, (host) => host.which("cl.exe"));
+
+  let source = Tree {
+    @main.c: Blob(`
+#include "header.h"
+
+int main(void) {
+  return HEADER_VALUE;
+}
+`),
+    @header.h: Blob(`
+#define HEADER_VALUE 42
+`),
+  };
+
+  exec(
+    [
+      cl,
+      "/nologo",
+      "/c",
+      "/showIncludes",
+      "/Isrc",
+      "/Foout\\main.obj",
+      @src/main.c,
+    ]
+  ) where {
+    executor: class,
+    mounts: {
+      @src: source,
+    },
+    writable: [@out],
+    observer: (_proc, _vfs) => (
+      fail `skip flush`
+    ),
+  };
+}
