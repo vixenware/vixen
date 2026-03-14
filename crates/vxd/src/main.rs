@@ -83,7 +83,7 @@ struct CliArgs {
     builtins: args::FigueBuiltins,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Args {
     /// VX_HOME directory
     vx_home: Utf8PathBuf,
@@ -1223,10 +1223,8 @@ impl SpawnTracker {
 
 struct ServiceClients {
     store: Arc<StoreClient>,
-    exec: Arc<RunnerClient>,
     build_vx_executors: crate::service::BuildVxExecutors,
     store_handle: Arc<ServiceHandle>,
-    runner_handles: Arc<[Arc<ServiceHandle>]>,
 }
 
 #[derive(Clone)]
@@ -1272,13 +1270,10 @@ impl ConnectionAcceptor for VxdVirtualAcceptor {
     }
 }
 
-/// Ensure services are running (spawning them if necessary), run the boot
-/// protocol on each, and return connected roam clients.
-async fn ensure_services(
+async fn connect_local_runner(
     args: &Args,
     spawn_tracker: &Arc<SyncMutex<SpawnTracker>>,
-    boot_tx: &BootTx,
-) -> Result<ServiceClients> {
+) -> Result<crate::service::BuildVxExecutor> {
     use vx_io::spawn::ServiceBuilder;
 
     let store_endpoint = args
@@ -1290,15 +1285,6 @@ async fn ensure_services(
         .clone()
         .unwrap_or_else(|| vx_io::net::default_local_endpoint(&args.vx_home, "runner"));
     let vfsd_endpoint = vx_io::net::default_local_endpoint(&args.vx_home, "vfsd");
-    let store_root = args.vx_home.join("store");
-
-    let mut store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone())
-        .caller_name("vxd")
-        .args(&["--root", store_root.as_str()])
-        .log_path(args.vx_home.join("store.log"));
-    if args.store_endpoint.is_some() {
-        store_builder = store_builder.connect_only();
-    }
 
     let mut runner_builder = ServiceBuilder::new("vx-runner", exec_endpoint.clone())
         .caller_name("vxd")
@@ -1316,31 +1302,71 @@ async fn ensure_services(
         runner_builder = runner_builder.connect_only();
     }
 
-    boot_tx.phase("connecting to vx-store and vx-runner");
-    // Spawn/connect to both services in parallel.
-    let (mut store_handle, mut runner_handle) =
-        tokio::try_join!(store_builder.connect(), runner_builder.connect(),)?;
+    let mut runner_handle = runner_builder.connect().await?;
+    {
+        let mut tracker = spawn_tracker.lock();
+        tracker.runner = runner_handle.child.take();
+    }
+    let runner_virtual = runner_handle.boot_and_connect().await?;
+    Ok(crate::service::BuildVxExecutor::local(
+        Arc::new(RunnerClient::new(runner_virtual)),
+        Some(Arc::new(runner_handle)),
+    ))
+}
+
+/// Ensure services are running (spawning them if necessary), run the boot
+/// protocol on each, and return connected roam clients.
+async fn ensure_services(
+    args: &Args,
+    spawn_tracker: &Arc<SyncMutex<SpawnTracker>>,
+    boot_tx: &BootTx,
+) -> Result<ServiceClients> {
+    use vx_io::spawn::ServiceBuilder;
+
+    let store_endpoint = args
+        .store_endpoint
+        .clone()
+        .unwrap_or_else(|| vx_io::net::default_local_endpoint(&args.vx_home, "store"));
+    let store_root = args.vx_home.join("store");
+
+    let mut store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone())
+        .caller_name("vxd")
+        .args(&["--root", store_root.as_str()])
+        .log_path(args.vx_home.join("store.log"));
+    if args.store_endpoint.is_some() {
+        store_builder = store_builder.connect_only();
+    }
+
+    boot_tx.phase("connecting to vx-store");
+    let mut store_handle = store_builder.connect().await?;
 
     {
         let mut tracker = spawn_tracker.lock();
         tracker.store = store_handle.child.take();
-        tracker.runner = runner_handle.child.take();
     }
 
-    boot_tx.phase("waiting for vx-store and vx-runner boot");
-    // Run boot protocol on both services in parallel.
-    let (store_virtual, runner_virtual) = tokio::try_join!(
-        store_handle.boot_and_connect(),
-        runner_handle.boot_and_connect(),
-    )?;
+    boot_tx.phase("waiting for vx-store boot");
+    let store_virtual = store_handle.boot_and_connect().await?;
 
     let local_store = Arc::new(StoreClient::new(store_virtual));
-    let exec = Arc::new(RunnerClient::new(runner_virtual));
     boot_tx.phase("preparing local build executor registry");
-    let mut build_vx_executors = crate::service::BuildVxExecutors::local_default(
-        Arc::clone(&local_store),
-        Arc::clone(&exec),
-    );
+    let mut build_vx_executors = crate::service::BuildVxExecutors::local_lazy({
+        let args = args.clone();
+        let spawn_tracker = Arc::clone(spawn_tracker);
+        let local_store = Arc::clone(&local_store);
+        move |_listener| {
+            let args = args.clone();
+            let spawn_tracker = Arc::clone(&spawn_tracker);
+            let local_store = Arc::clone(&local_store);
+            Box::pin(async move {
+                let mut executor = connect_local_runner(&args, &spawn_tracker)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                executor.attach_store(Arc::clone(&local_store));
+                Ok(executor)
+            })
+        }
+    });
     #[cfg(unix)]
     {
         let vx_home = args.vx_home.clone();
@@ -1354,8 +1380,6 @@ async fn ensure_services(
                 })
             });
     }
-    let mut runner_handles = vec![Arc::new(runner_handle)];
-
     for config in &args.build_vx_executor_classes {
         match config.backend {
             vx_eval::ExecutorBackendKind::Local => {
@@ -1391,13 +1415,14 @@ async fn ensure_services(
                         .await?;
                 let virtual_handle = handle.boot_and_connect().await?;
                 let runner = Arc::new(RunnerClient::new(virtual_handle));
-                build_vx_executors.register_class_runner(
+                build_vx_executors.register_class_executor(
                     config.class_label.clone(),
-                    format!("daemon:{}", config.class_label),
-                    vx_eval::ExecutorBackendKind::Daemon,
-                    runner,
+                    crate::service::BuildVxExecutor::daemon(
+                        format!("daemon:{}", config.class_label),
+                        runner,
+                        Some(Arc::new(handle)),
+                    ),
                 );
-                runner_handles.push(Arc::new(handle));
             }
             vx_eval::ExecutorBackendKind::SshBootstrap => {
                 let target = config
@@ -1440,10 +1465,8 @@ async fn ensure_services(
 
     Ok(ServiceClients {
         store: local_store,
-        exec,
         build_vx_executors,
         store_handle: Arc::new(store_handle),
-        runner_handles: Arc::from(runner_handles),
     })
 }
 
@@ -1611,8 +1634,8 @@ async fn async_main() -> Result<()> {
         let boot_failed = boot_failed.clone();
         moire::task::spawn(
             async move {
-                tracing::info!("Booting services (vx-store, vx-runner)");
-                boot_tx.phase("starting vx-store and vx-runner");
+                tracing::info!("Booting services (vx-store, lazy local runner)");
+                boot_tx.phase("starting vx-store");
                 match ensure_services(&args_for_boot, &spawn_tracker, &boot_tx).await {
                     Ok(clients) => {
                         tracing::info!("Services booted successfully");
@@ -1624,10 +1647,8 @@ async fn async_main() -> Result<()> {
                                 VxdServiceDeps {
                                     spawn_tracker,
                                     store: clients.store,
-                                    exec: clients.exec,
                                     build_vx_executors: clients.build_vx_executors,
                                     store_handle: clients.store_handle,
-                                    runner_handles: clients.runner_handles,
                                 },
                             )
                             .await,

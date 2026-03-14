@@ -1703,10 +1703,8 @@ impl BuildServiceDaemonTestEnv {
                     SpawnTracker::default(),
                 )),
                 store: store_client,
-                exec: runner_client,
                 build_vx_executors,
                 store_handle: Arc::clone(&store_handle),
-                runner_handles: Arc::from([Arc::clone(&runner_handle)]),
             },
         )
         .await;
@@ -1722,6 +1720,44 @@ impl BuildServiceDaemonTestEnv {
             service,
         }
     }
+}
+
+#[vx_test]
+async fn build_vx_local_executor_is_lazy_and_reused() {
+    let fake_runner = FakeRunnerHandle::new(FakeRunnerBehavior::PanicOnBoundaryUse).await;
+    let runner_handle = fake_runner.connect().await;
+    let runner_virtual = runner_handle
+        .boot_and_connect()
+        .await
+        .expect("failed to boot/connect fake runner");
+    let runner_client = Arc::new(RunnerClient::new(runner_virtual));
+    let syntheses = Arc::new(AtomicUsize::new(0));
+
+    let executors = crate::service::BuildVxExecutors::local_lazy({
+        let syntheses = Arc::clone(&syntheses);
+        let runner_client = Arc::clone(&runner_client);
+        move |_listener| {
+            let syntheses = Arc::clone(&syntheses);
+            let runner_client = Arc::clone(&runner_client);
+            Box::pin(async move {
+                syntheses.fetch_add(1, Ordering::SeqCst);
+                Ok(crate::service::BuildVxExecutor::local(runner_client, None))
+            })
+        }
+    });
+
+    let selector = vx_eval::ExecutorSelector::class("default");
+    let runner_a = executors
+        .runner_for(&selector, None)
+        .await
+        .expect("default executor should synthesize");
+    let runner_b = executors
+        .runner_for(&selector, None)
+        .await
+        .expect("default executor should be reused");
+
+    assert_eq!(syntheses.load(Ordering::SeqCst), 1);
+    assert!(Arc::ptr_eq(&runner_a, &runner_b));
 }
 
 #[vx_test]

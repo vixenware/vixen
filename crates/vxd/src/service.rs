@@ -97,10 +97,48 @@ pub(crate) struct BuildVxExecutor {
     _store_handle: Option<Arc<ServiceHandle>>,
 }
 
+impl BuildVxExecutor {
+    pub(crate) fn local(
+        runner: Arc<RunnerClient>,
+        runner_handle: Option<Arc<ServiceHandle>>,
+    ) -> Self {
+        Self {
+            id: "local".to_string(),
+            backend: ExecutorBackendKind::Local,
+            runner: Some(runner),
+            store: None,
+            unavailable_reason: None,
+            _runner_handle: runner_handle,
+            _store_handle: None,
+        }
+    }
+
+    pub(crate) fn daemon(
+        id: impl Into<String>,
+        runner: Arc<RunnerClient>,
+        runner_handle: Option<Arc<ServiceHandle>>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            backend: ExecutorBackendKind::Daemon,
+            runner: Some(runner),
+            store: None,
+            unavailable_reason: None,
+            _runner_handle: runner_handle,
+            _store_handle: None,
+        }
+    }
+
+    pub(crate) fn attach_store(&mut self, store: Arc<StoreClient>) {
+        self.store = Some(store);
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct BuildVxExecutors {
     state: Arc<std::sync::Mutex<BuildVxExecutorsState>>,
     ssh_bootstrap_factory: Option<SshBootstrapFactory>,
+    local_factory: Option<LocalExecutorFactory>,
 }
 
 struct BuildVxExecutorsState {
@@ -148,6 +186,15 @@ type SshBootstrapFactory = Arc<
         + Sync,
 >;
 
+type LocalExecutorFactory = Arc<
+    dyn Fn(
+            Option<Arc<ProgressListenerClient>>,
+        )
+            -> Pin<Box<dyn Future<Output = std::result::Result<BuildVxExecutor, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 fn implicit_ssh_class_target(class_label: &str) -> Option<&str> {
     class_label
         .strip_prefix("ssh:")
@@ -155,6 +202,7 @@ fn implicit_ssh_class_target(class_label: &str) -> Option<&str> {
 }
 
 impl BuildVxExecutors {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn local_default(store: Arc<StoreClient>, runner: Arc<RunnerClient>) -> Self {
         let executor_id = "local".to_string();
         let executor = BuildVxExecutor {
@@ -172,6 +220,26 @@ impl BuildVxExecutors {
                 class_aliases: HashMap::from([("default".to_string(), executor_id.clone())]),
             })),
             ssh_bootstrap_factory: None,
+            local_factory: None,
+        }
+    }
+
+    pub(crate) fn local_lazy(
+        factory: impl Fn(
+            Option<Arc<ProgressListenerClient>>,
+        ) -> Pin<
+            Box<dyn Future<Output = std::result::Result<BuildVxExecutor, String>> + Send>,
+        > + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            state: Arc::new(std::sync::Mutex::new(BuildVxExecutorsState {
+                executors: HashMap::new(),
+                class_aliases: HashMap::from([("default".to_string(), "local".to_string())]),
+            })),
+            ssh_bootstrap_factory: None,
+            local_factory: Some(Arc::new(factory)),
         }
     }
 
@@ -191,13 +259,16 @@ impl BuildVxExecutors {
         self
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn register_class_alias(
         &mut self,
         class_label: impl Into<String>,
         executor_id: &str,
     ) -> std::result::Result<(), String> {
         let mut state = self.state.lock().expect("build_vx_executors poisoned");
-        if !state.executors.contains_key(executor_id) {
+        if !(state.executors.contains_key(executor_id)
+            || executor_id == "local" && self.local_factory.is_some())
+        {
             return Err(format!(
                 "cannot alias build.vx executor class to unknown executor {executor_id}"
             ));
@@ -208,6 +279,7 @@ impl BuildVxExecutors {
         Ok(())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn register_class_runner(
         &mut self,
         class_label: impl Into<String>,
@@ -218,6 +290,7 @@ impl BuildVxExecutors {
         self.register_class_runner_with_store(class_label, executor_id, backend, runner, None);
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn register_class_runner_with_store(
         &mut self,
         class_label: impl Into<String>,
@@ -319,6 +392,29 @@ impl BuildVxExecutors {
             }
         }
 
+        let is_pending_local_class = if selector.backend == ExecutorBackendKind::Class {
+            let state = self.state.lock().expect("build_vx_executors poisoned");
+            state
+                .class_aliases
+                .get(&selector.id)
+                .is_some_and(|executor_id| executor_id == "local")
+        } else {
+            false
+        };
+
+        if ((selector.backend == ExecutorBackendKind::Local && selector.id == "local")
+            || is_pending_local_class)
+            && let Some(factory) = &self.local_factory
+        {
+            let synthesized = factory(progress_listener).await?;
+            let mut state = self.state.lock().expect("build_vx_executors poisoned");
+            state
+                .executors
+                .entry("local".to_string())
+                .or_insert_with(|| synthesized);
+            return Ok(());
+        }
+
         if selector.backend != ExecutorBackendKind::Class {
             return Err(format!(
                 "build.vx executor {}:{} is not configured",
@@ -354,7 +450,7 @@ impl BuildVxExecutors {
         Ok(())
     }
 
-    async fn runner_for(
+    pub(crate) async fn runner_for(
         &self,
         selector: &ExecutorSelector,
         progress_listener: Option<Arc<ProgressListenerClient>>,
@@ -373,7 +469,7 @@ impl BuildVxExecutors {
         }))
     }
 
-    async fn store_for(
+    pub(crate) async fn store_for(
         &self,
         selector: &ExecutorSelector,
         progress_listener: Option<Arc<ProgressListenerClient>>,
@@ -701,10 +797,8 @@ fn mirror_shipped_function_store_refs<'a>(
 #[derive(Clone)]
 pub struct VxdService {
     store: Arc<StoreClient>,
-    exec: Arc<RunnerClient>,
     build_vx_executors: Arc<BuildVxExecutors>,
     _store_handle: Arc<ServiceHandle>,
-    _runner_handles: Arc<[Arc<ServiceHandle>]>,
 
     /// The host triple of the execd machine (used for toolchain selection + cache keys).
     exec_host_triple: String,
@@ -745,10 +839,8 @@ pub struct VxdService {
 pub(crate) struct VxdServiceDeps {
     pub(crate) spawn_tracker: Arc<SyncMutex<SpawnTracker>>,
     pub(crate) store: Arc<StoreClient>,
-    pub(crate) exec: Arc<RunnerClient>,
     pub(crate) build_vx_executors: BuildVxExecutors,
     pub(crate) store_handle: Arc<ServiceHandle>,
-    pub(crate) runner_handles: Arc<[Arc<ServiceHandle>]>,
 }
 
 fn rule_plan_bridge_enabled() -> bool {
@@ -3021,6 +3113,14 @@ fn build_rule_plan_from_crate_graph(graph: &CrateGraph) -> RulePlan {
 }
 
 impl VxdService {
+    async fn local_runner(&self) -> Result<Arc<RunnerClient>> {
+        let listener = self.progress_listener.lock().clone();
+        self.build_vx_executors
+            .runner_for(&ExecutorSelector::class("default"), listener)
+            .await
+            .map_err(VxdError::ExecRpc)
+    }
+
     /// Report progress to CLI if connected
     async fn report_start_action(&self, action_type: ActionType) -> Option<u64> {
         let listener = self.progress_listener.lock().clone();
@@ -3059,10 +3159,8 @@ impl VxdService {
         let VxdServiceDeps {
             spawn_tracker,
             store,
-            exec,
             build_vx_executors,
             store_handle,
-            runner_handles,
         } = deps;
         let db = Database::new();
         let cache_path = vx_home.join("picante.cache");
@@ -3115,10 +3213,8 @@ impl VxdService {
 
         Self {
             store,
-            exec,
             build_vx_executors: Arc::new(build_vx_executors),
             _store_handle: store_handle,
-            _runner_handles: runner_handles,
             exec_host_triple,
             vx_home,
             db: Arc::new(db),
@@ -3141,10 +3237,8 @@ impl VxdService {
     pub fn new_session(&self) -> Self {
         Self {
             store: self.store.clone(),
-            exec: self.exec.clone(),
             build_vx_executors: self.build_vx_executors.clone(),
             _store_handle: self._store_handle.clone(),
-            _runner_handles: self._runner_handles.clone(),
             exec_host_triple: self.exec_host_triple.clone(),
             vx_home: self.vx_home.clone(),
             db: Arc::new(Database::new()),
@@ -3834,12 +3928,13 @@ impl VxdService {
 
                 let progress_listener = self.progress_listener.lock().clone();
                 let session_id = self.session_id().await;
+                let exec = self.local_runner().await?;
 
                 let mut executor = crate::executor::Executor::new(
                     graph,
                     progress_listener,
                     self.store.clone(),
-                    self.exec.clone(),
+                    exec,
                     self.db.clone(),
                     project_dir.to_path_buf(),
                     target_triple.clone(),
@@ -4321,12 +4416,13 @@ impl VxdService {
         // Get current progress listener (clones the Option<Arc<...>> inside the RwLock)
         let progress_listener = self.progress_listener.lock().clone();
         let session_id = self.session_id().await;
+        let exec = self.local_runner().await?;
 
         let mut executor = Executor::new(
             action_graph,
             progress_listener,
             self.store.clone(),
-            self.exec.clone(),
+            exec,
             self.db.clone(),
             graph.workspace_root.clone(),
             target_triple.clone(),
