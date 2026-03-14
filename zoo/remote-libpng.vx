@@ -44,6 +44,12 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
   let zlib_src = Tree(workspace / @zoo/zlib-src);
   let libpng_src = Tree(workspace / @zoo/libpng-src);
   let pnglibconf_h = libpng_src.file @scripts/pnglibconf.h.prebuilt;
+  let zlib_defines =
+    if tc.os == "windows" (
+      []
+    ) else (
+      ["Z_HAVE_UNISTD_H"]
+    );
 
   let cexec = partial exec where {
     executor: class,
@@ -113,6 +119,7 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
   let zlib_objects =
     compile_objects(zlib_src, zlib_sources) where {
       includes: [@src],
+      defines: zlib_defines,
     };
 
   let zlib_archive_name =
