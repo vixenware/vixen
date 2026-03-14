@@ -24,7 +24,7 @@ macro_rules! log {
         eprintln!(
             "{} {} {}",
             std::process::id(),
-            jiff::Zoned::now(),
+            log_timestamp(),
             format_args!($($arg)*)
         );
     }};
@@ -32,6 +32,8 @@ macro_rules! log {
 
 #[cfg(target_os = "macos")]
 use figue as args;
+#[cfg(target_os = "macos")]
+use jiff::{Timestamp, tz::TimeZone};
 
 /// vx-reaper - Process group reaper for macOS
 #[cfg(target_os = "macos")]
@@ -52,6 +54,11 @@ struct Args {
     /// Standard CLI options
     #[facet(flatten)]
     builtins: args::FigueBuiltins,
+}
+
+#[cfg(target_os = "macos")]
+fn log_timestamp() -> jiff::Zoned {
+    Timestamp::now().to_zoned(TimeZone::UTC)
 }
 
 #[cfg(target_os = "macos")]
