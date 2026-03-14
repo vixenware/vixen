@@ -84,7 +84,7 @@ fn build_lua(workspace: Path, class: ExecutorClass) {
         "/c",
         "/O2",
         "/Isrc",
-        `/Foout\\obj\\${file}.obj`,
+        `/Foout\\${file}.obj`,
         @(src/{file}),
       ] where {
         mounts: { @src: src_tree },

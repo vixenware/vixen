@@ -11,7 +11,7 @@ fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
       "/c",
       "/showIncludes",
       "/Isrc",
-      "/Foout\\obj\\lua.c.obj",
+      "/Foout\\lua.c.obj",
       @src/lua.c,
     ]
   ) where {
