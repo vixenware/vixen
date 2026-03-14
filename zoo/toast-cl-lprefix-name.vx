@@ -1,0 +1,46 @@
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  let class = executor_class("ssh:toast");
+  let cl =
+    discover(class, (host) => host.which("cl.exe"));
+
+  let src = Tree {
+    @main.c: Blob(`
+#include "lprefix.h"
+
+int answer(void) {
+  return LPREFIX_VALUE;
+}
+`),
+    @lprefix.h: Blob(`
+#define LPREFIX_VALUE 42
+`),
+  };
+
+  let output =
+    exec(
+      [
+        cl,
+        "/nologo",
+        "/c",
+        "/showIncludes",
+        "/Isrc",
+        "/Foout\\main.obj",
+        @src/main.c,
+      ]
+    ) where {
+      executor: class,
+      mounts: { @src: src },
+      writable: [@out],
+      observer: (proc, _vfs) => (
+        Tree {
+          @stdout.txt: proc.stdout.collect().blob(),
+          @artifacts: vfs.subtree(@out),
+        }
+      ),
+    };
+
+  Tree {
+    @stdout.txt: output.file(@stdout.txt),
+    @artifacts: output.subtree(@artifacts),
+  }
+}
