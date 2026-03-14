@@ -28,6 +28,7 @@ use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::runtime::Handle;
 use tokio::task::block_in_place;
 use tokio_util::sync::CancellationToken;
@@ -2002,6 +2003,7 @@ async fn run_build_vx_exec_via_runner(
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
     let executor_summary = describe_executor_selector(&request.executor);
+    let exec_started = Instant::now();
     emit_build_vx_progress_message(
         &progress_listener,
         format!("resolving build.vx executor {}", executor_summary),
@@ -2045,6 +2047,15 @@ async fn run_build_vx_exec_via_runner(
             .await
             .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     }
+    emit_build_vx_progress_message(
+        &progress_listener,
+        format!(
+            "build.vx executor {}: prepared exec inputs ({})",
+            executor_summary,
+            format_progress_elapsed(exec_started.elapsed())
+        ),
+    )
+    .await;
     let (progress, mut progress_rx) = roam::channel::<StoreProgress>();
     let progress_listener_for_exec = progress_listener.clone();
     let executor_summary_for_progress = executor_summary.clone();
@@ -2111,6 +2122,15 @@ async fn run_build_vx_exec_via_runner(
             exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}"), &demand_chain)
         })?;
     let _ = progress_handle.await;
+    emit_build_vx_progress_message(
+        &progress_listener,
+        format!(
+            "build.vx executor {}: exec returned ({})",
+            executor_summary,
+            format_progress_elapsed(exec_started.elapsed())
+        ),
+    )
+    .await;
     tracing::info!(
         executor = %executor_summary,
         success = result.success,
@@ -2147,6 +2167,15 @@ async fn run_build_vx_exec_via_runner(
             &demand_chain,
         )
     })?;
+    let observer_bridge_started = Instant::now();
+    emit_build_vx_progress_message(
+        &progress_listener,
+        format!(
+            "build.vx executor {}: bridging observer value",
+            executor_summary
+        ),
+    )
+    .await;
     tracing::info!(executor = %executor_summary, "build.vx exec starting observer-value bridge");
     let observer_value = if std::ptr::eq(target_store, store) {
         observer_value
@@ -2156,12 +2185,36 @@ async fn run_build_vx_exec_via_runner(
             .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
     };
     tracing::info!(executor = %executor_summary, "build.vx exec finished observer-value bridge");
+    emit_build_vx_progress_message(
+        &progress_listener,
+        format!(
+            "build.vx executor {}: observer value ready ({})",
+            executor_summary,
+            format_progress_elapsed(observer_bridge_started.elapsed())
+        ),
+    )
+    .await;
     let value = Value::try_from(observer_value).map_err(|error| {
         exec_bridge_poison(PoisonKind::UserFail, error.to_string(), &demand_chain)
     })?;
+    let hydration_started = Instant::now();
+    emit_build_vx_progress_message(
+        &progress_listener,
+        format!("build.vx executor {}: hydrating result", executor_summary),
+    )
+    .await;
     tracing::info!(executor = %executor_summary, "build.vx exec starting hydration");
     let value = hydrate_exec_value_from_store(store, value, &demand_chain).await?;
     tracing::info!(executor = %executor_summary, "build.vx exec finished hydration");
+    emit_build_vx_progress_message(
+        &progress_listener,
+        format!(
+            "build.vx executor {}: hydration finished ({})",
+            executor_summary,
+            format_progress_elapsed(hydration_started.elapsed())
+        ),
+    )
+    .await;
     Ok(value)
 }
 
@@ -2172,12 +2225,11 @@ async fn run_build_vx_discover_via_runner(
     request: EvalDiscoverRequest,
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
+    let discover_started = Instant::now();
+    let executor_summary = describe_executor_selector(&request.executor);
     emit_build_vx_progress_message(
         &progress_listener,
-        format!(
-            "resolving build.vx executor {}",
-            describe_executor_selector(&request.executor)
-        ),
+        format!("resolving build.vx executor {}", executor_summary),
     )
     .await;
     let exec = executors
@@ -2190,10 +2242,7 @@ async fn run_build_vx_discover_via_runner(
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     emit_build_vx_progress_message(
         &progress_listener,
-        format!(
-            "build.vx executor {} ready",
-            describe_executor_selector(&request.executor)
-        ),
+        format!("build.vx executor {} ready", executor_summary),
     )
     .await;
     let target_store = exec_store.as_deref().unwrap_or(store);
@@ -2214,6 +2263,15 @@ async fn run_build_vx_discover_via_runner(
         .map_err(|error| {
             exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}"), &demand_chain)
         })?;
+    emit_build_vx_progress_message(
+        &progress_listener,
+        format!(
+            "build.vx executor {}: discover returned ({})",
+            executor_summary,
+            format_progress_elapsed(discover_started.elapsed())
+        ),
+    )
+    .await;
 
     if let Some(poison) = result.poison {
         return Err(PoisonError::from(poison));
@@ -2245,7 +2303,26 @@ async fn run_build_vx_discover_via_runner(
     let value = Value::try_from(value).map_err(|error| {
         exec_bridge_poison(PoisonKind::UserFail, error.to_string(), &demand_chain)
     })?;
-    hydrate_exec_value_from_store(store, value, &demand_chain).await
+    let hydration_started = Instant::now();
+    emit_build_vx_progress_message(
+        &progress_listener,
+        format!(
+            "build.vx executor {}: hydrating discovery result",
+            executor_summary
+        ),
+    )
+    .await;
+    let value = hydrate_exec_value_from_store(store, value, &demand_chain).await?;
+    emit_build_vx_progress_message(
+        &progress_listener,
+        format!(
+            "build.vx executor {}: discovery hydration finished ({})",
+            executor_summary,
+            format_progress_elapsed(hydration_started.elapsed())
+        ),
+    )
+    .await;
+    Ok(value)
 }
 
 fn exec_bridge_poison(
@@ -2363,6 +2440,14 @@ async fn emit_build_vx_progress_message(
         && let Err(error) = listener.log_message(message).await
     {
         tracing::warn!("failed to emit build.vx progress message: {error:?}");
+    }
+}
+
+fn format_progress_elapsed(elapsed: std::time::Duration) -> String {
+    if elapsed.as_secs_f64() >= 1.0 {
+        format!("{:.2}s", elapsed.as_secs_f64())
+    } else {
+        format!("{}ms", elapsed.as_millis())
     }
 }
 
