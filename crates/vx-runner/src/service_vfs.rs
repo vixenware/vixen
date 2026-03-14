@@ -124,6 +124,20 @@ fn parent_dirs_to_materialize(request: &RunRequest) -> Vec<String> {
         .collect()
 }
 
+fn resolve_program_path(program: &RunArg, expanded: String, cwd: &Utf8Path) -> String {
+    match program {
+        RunArg::Path(_) => {
+            let path = Utf8Path::new(&expanded);
+            if path.is_absolute() {
+                expanded
+            } else {
+                cwd.join(path).as_str().to_string()
+            }
+        }
+        RunArg::Literal(_) => expanded,
+    }
+}
+
 #[cfg(windows)]
 fn summarize_disk_dir(path: &Utf8Path) -> String {
     const SAMPLE_LIMIT: usize = 8;
@@ -2020,8 +2034,18 @@ impl RunnerService {
             );
         }
 
+        let cwd = request
+            .cwd
+            .as_deref()
+            .map(|p| action.prefix_path.join(p))
+            .unwrap_or_else(|| action.prefix_path.clone());
+
         let program_path = match &request.program {
-            Some(program) => Self::expand_run_arg(program, toolchain_path_str.as_deref()),
+            Some(program) => resolve_program_path(
+                program,
+                Self::expand_run_arg(program, toolchain_path_str.as_deref()),
+                &cwd,
+            ),
             None => {
                 let toolchain_path = toolchain_path
                     .as_ref()
@@ -2045,12 +2069,6 @@ impl RunnerService {
         for arg in &expanded_args {
             cmd.arg(arg);
         }
-
-        let cwd = request
-            .cwd
-            .as_deref()
-            .map(|p| action.prefix_path.join(p))
-            .unwrap_or_else(|| action.prefix_path.clone());
         cmd.current_dir(cwd.as_str());
 
         if request.clear_env {
@@ -2613,6 +2631,25 @@ mod tests {
             parent_dirs_to_materialize(&request),
             vec!["build".to_string(), "out/obj".to_string()],
         );
+    }
+
+    #[test]
+    fn relative_program_paths_resolve_within_sandbox_cwd() {
+        let cwd = Utf8Path::new("/sandbox/prefix");
+        let program = RunArg::path("bin/lua");
+
+        assert_eq!(
+            resolve_program_path(&program, "bin/lua".to_string(), cwd),
+            "/sandbox/prefix/bin/lua"
+        );
+    }
+
+    #[test]
+    fn literal_programs_do_not_resolve_within_sandbox_cwd() {
+        let cwd = Utf8Path::new("/sandbox/prefix");
+        let program = RunArg::literal("cc");
+
+        assert_eq!(resolve_program_path(&program, "cc".to_string(), cwd), "cc");
     }
 
     #[test]
