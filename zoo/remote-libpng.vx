@@ -182,7 +182,7 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
 #include <png.h>
 
 int main(void) {
-  printf("%lu\n", (unsigned long)png_access_version_number());
+  printf("%lu\\n", (unsigned long)png_access_version_number());
   return 0;
 }
 `),
