@@ -1772,11 +1772,6 @@ impl RunnerService {
             "prepared VFS inputs"
         );
 
-        #[cfg(windows)]
-        if !request.tree_mounts.is_empty() {
-            self.vfs.dump_state(&action.prefix_id).await;
-        }
-
         if !outputs_stay_within_writable_roots(&request.outputs, &request.writable_roots) {
             let offending = request
                 .outputs
