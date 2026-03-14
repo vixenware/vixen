@@ -1761,6 +1761,57 @@ async fn build_vx_local_executor_is_lazy_and_reused() {
 }
 
 #[vx_test]
+async fn build_vx_implicit_ssh_executor_does_not_synthesize_local_runner() {
+    let local_syntheses = Arc::new(AtomicUsize::new(0));
+    let ssh_syntheses = Arc::new(AtomicUsize::new(0));
+
+    let executors = crate::service::BuildVxExecutors::local_lazy({
+        let local_syntheses = Arc::clone(&local_syntheses);
+        move |_listener| {
+            let local_syntheses = Arc::clone(&local_syntheses);
+            Box::pin(async move {
+                local_syntheses.fetch_add(1, Ordering::SeqCst);
+                Err("local executor should stay lazy".to_string())
+            })
+        }
+    })
+    .with_ssh_bootstrap_factory({
+        let ssh_syntheses = Arc::clone(&ssh_syntheses);
+        move |class_label, _target, _listener| {
+            let ssh_syntheses = Arc::clone(&ssh_syntheses);
+            Box::pin(async move {
+                ssh_syntheses.fetch_add(1, Ordering::SeqCst);
+                let fake_runner =
+                    FakeRunnerHandle::new(FakeRunnerBehavior::PanicOnBoundaryUse).await;
+                let runner_handle = Arc::new(fake_runner.connect().await);
+                let runner_virtual = runner_handle
+                    .boot_and_connect()
+                    .await
+                    .expect("failed to boot/connect fake runner");
+                std::mem::forget(fake_runner);
+                Ok(crate::service::SshBootstrapExecutor {
+                    id: format!("ssh_bootstrap:{class_label}"),
+                    backend: vx_eval::ExecutorBackendKind::SshBootstrap,
+                    runner: Arc::new(RunnerClient::new(runner_virtual)),
+                    store: None,
+                    runner_handle: Some(runner_handle),
+                    store_handle: None,
+                })
+            })
+        }
+    });
+
+    let selector = vx_eval::ExecutorSelector::class("ssh:toast");
+    executors
+        .runner_for(&selector, None)
+        .await
+        .expect("ssh executor should synthesize without local runner");
+
+    assert_eq!(local_syntheses.load(Ordering::SeqCst), 0);
+    assert_eq!(ssh_syntheses.load(Ordering::SeqCst), 1);
+}
+
+#[vx_test]
 async fn acquire_blob_reuses_the_persistent_store_cache() {
     let env = StoreTestEnv::new().await;
     let body = b"hello acquire cache".to_vec();
