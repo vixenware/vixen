@@ -1,0 +1,29 @@
+fn build(workspace: Path, args: Array[String], env: Map[String, String]) {
+  let class = executor_class("ssh:toast");
+  let cl =
+    discover(class, (host) => host.which("cl.exe"));
+
+  exec(
+    [
+      cl,
+      "/nologo",
+      "/TC",
+      "/c",
+      "/showIncludes",
+      "/Isrc",
+      "/Foout\\obj\\lua.c.obj",
+      @src/lua.c,
+    ]
+  ) where {
+    executor: class,
+    mounts: { @src: Tree(workspace / @zoo/lua-src) },
+    writable: [@out],
+    observer: (proc, _vfs) => (
+      if proc.exit_code != 0 (
+        fail `process failed`
+      ) else (
+        true
+      )
+    ),
+  };
+}
