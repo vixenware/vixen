@@ -4,7 +4,7 @@ use futures_util::{StreamExt, future::join};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use vx_store_proto::chunking::prepare_blob;
 use vx_store_proto::{
     Blake3Hash, BlobRef, CDC_MAX_CHUNK, CasNode, ChunkHash, ContentHash, DirEntry, DirEntryKind,
@@ -38,9 +38,20 @@ type RustComponentKey = (ToolchainSpecKey, RustComponent);
 type InflightComponentFuture = Arc<moire::sync::OnceCell<EnsureRustToolchainComponentResult>>;
 
 const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_millis(25);
+const PROGRESS_BIND_GRACE_PERIOD: Duration = Duration::from_secs(1);
+const PROGRESS_BIND_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 async fn send_progress_best_effort(progress: &roam::Tx<StoreProgress>, update: StoreProgress) {
-    let _ = tokio::time::timeout(PROGRESS_SEND_TIMEOUT, progress.send(update)).await;
+    let deadline = Instant::now() + PROGRESS_BIND_GRACE_PERIOD;
+    loop {
+        match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, progress.send(update.clone())).await {
+            Ok(Ok(())) => return,
+            Ok(Err(roam::TxError::Unbound)) if Instant::now() < deadline => {
+                tokio::time::sleep(PROGRESS_BIND_RETRY_INTERVAL).await;
+            }
+            _ => return,
+        }
+    }
 }
 
 // =============================================================================

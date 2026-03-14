@@ -1,6 +1,7 @@
 use crate::registry::download_crate;
 use crate::types::StoreService;
 use moire::task::FutureExt;
+use std::time::{Duration, Instant};
 use vx_store_proto::Store as StoreRpc;
 use vx_store_proto::chunking::{PreparedBlob, prepare_blob};
 use vx_store_proto::{
@@ -15,6 +16,22 @@ use vx_store_proto::{
 
 const CRATES_IO_REGISTRY: &str = "https://crates.io";
 const MATERIALIZATION_LAYOUT_VERSION: u32 = 2;
+const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_millis(25);
+const PROGRESS_BIND_GRACE_PERIOD: Duration = Duration::from_secs(1);
+const PROGRESS_BIND_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+
+async fn send_progress_best_effort(progress: &roam::Tx<StoreProgress>, update: StoreProgress) {
+    let deadline = Instant::now() + PROGRESS_BIND_GRACE_PERIOD;
+    loop {
+        match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, progress.send(update.clone())).await {
+            Ok(Ok(())) => return,
+            Ok(Err(roam::TxError::Unbound)) if Instant::now() < deadline => {
+                tokio::time::sleep(PROGRESS_BIND_RETRY_INTERVAL).await;
+            }
+            _ => return,
+        }
+    }
+}
 
 impl StoreService {
     async fn version(&self) -> ServiceVersion {
@@ -300,13 +317,15 @@ impl StoreService {
                         .flatten()
                 },
                 async move || {
-                    let _ = progress
-                        .send(StoreProgress {
+                    send_progress_best_effort(
+                        &progress,
+                        StoreProgress {
                             message: format!("downloading {}@{}", spec.name, spec.version),
                             current: None,
                             total: None,
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
 
                     // Download tarball
                     let tarball_bytes =
@@ -322,13 +341,15 @@ impl StoreService {
                             }
                         };
 
-                    let _ = progress
-                        .send(StoreProgress {
+                    send_progress_best_effort(
+                        &progress,
+                        StoreProgress {
                             message: format!("storing {}@{}", spec.name, spec.version),
                             current: None,
                             total: None,
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
 
                     // Store tarball as chunks
                     let prepared = prepare_blob(&tarball_bytes);

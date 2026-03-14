@@ -19,7 +19,7 @@ use camino::Utf8Path;
 use moire::process::Command;
 use moire::task::FutureExt;
 use std::process::ExitStatus;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use vx_store_proto::StoreProgress;
 
@@ -33,6 +33,22 @@ const DEFAULT_LINK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// How often to send progress updates (if the last line changed).
 const PROGRESS_TICK_INTERVAL: Duration = Duration::from_millis(250);
+const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_millis(25);
+const PROGRESS_BIND_GRACE_PERIOD: Duration = Duration::from_secs(1);
+const PROGRESS_BIND_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+
+async fn send_progress_best_effort(progress: &roam::Tx<StoreProgress>, update: StoreProgress) {
+    let deadline = Instant::now() + PROGRESS_BIND_GRACE_PERIOD;
+    loop {
+        match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, progress.send(update.clone())).await {
+            Ok(Ok(())) => return,
+            Ok(Err(roam::TxError::Unbound)) if Instant::now() < deadline => {
+                tokio::time::sleep(PROGRESS_BIND_RETRY_INTERVAL).await;
+            }
+            _ => return,
+        }
+    }
+}
 
 /// What kind of action is being executed (affects default timeout).
 #[derive(Debug)]
@@ -221,13 +237,15 @@ pub async fn run_sandboxed_command(
                 interval.tick().await;
                 let current = latest_for_tick.lock().clone();
                 if current != last_sent && !current.is_empty() {
-                    let _ = progress
-                        .send(StoreProgress {
+                    send_progress_best_effort(
+                        &progress,
+                        StoreProgress {
                             message: format!("{action_desc_owned}: {current}"),
                             current: None,
                             total: None,
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                     last_sent = current;
                 }
             }
