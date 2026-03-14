@@ -53,6 +53,34 @@ impl<T> ProjFsBridge<T> {
 }
 
 impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjFsBridge<T> {
+    fn summarize_directory_entries(entries: &[DirectoryEntry]) -> String {
+        const SAMPLE_LIMIT: usize = 8;
+
+        let mut sample = entries
+            .iter()
+            .take(SAMPLE_LIMIT)
+            .map(|entry| entry.name().to_string())
+            .collect::<Vec<_>>();
+
+        if entries.len() > SAMPLE_LIMIT {
+            sample.push(format!("... (+{} more)", entries.len() - SAMPLE_LIMIT));
+        }
+
+        if sample.is_empty() {
+            "-".to_string()
+        } else {
+            sample.join(", ")
+        }
+    }
+
+    fn display_components(components: &[String]) -> String {
+        if components.is_empty() {
+            "<root>".to_string()
+        } else {
+            components.join("/")
+        }
+    }
+
     fn normalize_projfs_path(&self, path: &Path) -> Option<Vec<String>> {
         let relative = path.strip_prefix(&self.mount_path).unwrap_or(path);
         let mut normalized = Vec::new();
@@ -112,8 +140,16 @@ impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjFsBridge<T> {
 impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjectedFileSystemSource for ProjFsBridge<T> {
     fn list_directory(&self, path: &Path) -> Vec<DirectoryEntry> {
         tracing::debug!(?path, "ProjFS list_directory");
+        let Some(normalized_components) = self.normalize_projfs_path(path) else {
+            tracing::warn!(?path, "ProjFS list_directory: normalize_projfs_path failed");
+            return vec![];
+        };
         let Some(dir_id) = self.resolve_path(path) else {
-            tracing::warn!(?path, "ProjFS list_directory: resolve_path failed");
+            tracing::warn!(
+                ?path,
+                normalized_path = %Self::display_components(&normalized_components),
+                "ProjFS list_directory: resolve_path failed"
+            );
             return vec![];
         };
 
@@ -166,6 +202,14 @@ impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjectedFileSystemSource f
 
         // ProjFS requires entries sorted by name
         entries.sort();
+        tracing::info!(
+            ?path,
+            normalized_path = %Self::display_components(&normalized_components),
+            dir_id,
+            entry_count = entries.len(),
+            entries = %Self::summarize_directory_entries(&entries),
+            "ProjFS list_directory result"
+        );
         entries
     }
 
@@ -173,6 +217,10 @@ impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjectedFileSystemSource f
         tracing::debug!(?path, "ProjFS get_directory_entry");
         let parent = path.parent().unwrap_or_else(|| Path::new(""));
         let file_name = path.file_name()?.to_string_lossy().to_string();
+        let normalized_path = self
+            .normalize_projfs_path(path)
+            .map(|components| Self::display_components(&components))
+            .unwrap_or_else(|| "<invalid>".to_string());
 
         let parent_id = match self.resolve_path(parent) {
             Some(id) => id,
@@ -180,6 +228,7 @@ impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjectedFileSystemSource f
                 tracing::warn!(
                     ?path,
                     ?parent,
+                    normalized_path = %normalized_path,
                     "ProjFS get_directory_entry: parent resolve failed"
                 );
                 return None;
@@ -189,6 +238,14 @@ impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjectedFileSystemSource f
             .handle
             .block_on(self.vfs.lookup(parent_id, file_name.clone()));
         if result.error != 0 {
+            tracing::warn!(
+                ?path,
+                normalized_path = %normalized_path,
+                parent_id,
+                %file_name,
+                error = result.error,
+                "ProjFS get_directory_entry: lookup failed"
+            );
             return None;
         }
 
@@ -196,7 +253,7 @@ impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjectedFileSystemSource f
         let ft_created = unix_to_filetime(attrs.created_time);
         let ft_modified = unix_to_filetime(attrs.modified_time);
 
-        Some(match attrs.item_type {
+        let entry = match attrs.item_type {
             ItemType::File | ItemType::Symlink => DirectoryEntry::File(FileInfo {
                 file_name,
                 file_size: attrs.size,
@@ -212,7 +269,16 @@ impl<T: Vfs + VfsDiskNotify + Send + Sync + 'static> ProjectedFileSystemSource f
                 last_access_time: ft_modified,
                 last_write_time: ft_modified,
             }),
-        })
+        };
+        tracing::info!(
+            ?path,
+            normalized_path = %normalized_path,
+            parent_id,
+            item_id = attrs.item_id,
+            item_type = ?attrs.item_type,
+            "ProjFS get_directory_entry result"
+        );
+        Some(entry)
     }
 
     fn stream_file_content(
