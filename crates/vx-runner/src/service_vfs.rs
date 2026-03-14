@@ -107,6 +107,23 @@ fn parent_dirs_for_request(request: &RunRequest) -> Vec<String> {
     dirs.into_iter().collect()
 }
 
+fn parent_dirs_to_materialize(request: &RunRequest) -> Vec<String> {
+    parent_dirs_for_request(request)
+        .into_iter()
+        .filter(|dir| {
+            !request.writable_roots.iter().any(|root| root == dir)
+                && !request
+                    .tree_mounts
+                    .iter()
+                    .any(|mount| covers_path(&mount.mount, dir))
+                && !request
+                    .file_mounts
+                    .iter()
+                    .any(|mount| covers_path(dir, &mount.path))
+        })
+        .collect()
+}
+
 fn uses_toolchain_placeholder(value: &RunArg) -> bool {
     value.as_str().contains("${VX_TOOLCHAIN}")
 }
@@ -1752,8 +1769,9 @@ impl RunnerService {
         for root in &request.writable_roots {
             self.vfs.add_dir_to_prefix(&action.prefix_id, root).await;
         }
-        for dir in parent_dirs_for_request(&request) {
-            self.vfs.add_dir_to_prefix(&action.prefix_id, &dir).await;
+        let parent_dirs = parent_dirs_to_materialize(&request);
+        for dir in &parent_dirs {
+            self.vfs.add_dir_to_prefix(&action.prefix_id, dir).await;
         }
 
         info!(
@@ -1775,7 +1793,7 @@ impl RunnerService {
                 6
             ),
             writable_roots = %summarize_list(&request.writable_roots, 6),
-            parent_dirs = %summarize_list(&parent_dirs_for_request(&request), 6),
+            parent_dirs = %summarize_list(&parent_dirs, 6),
             elapsed_secs = mount_start.elapsed().as_secs_f32(),
             "prepared VFS inputs"
         );
@@ -2435,6 +2453,47 @@ mod tests {
                 "out/obj".to_string(),
                 "src".to_string(),
             ],
+        );
+    }
+
+    #[test]
+    fn parent_dirs_skip_paths_already_provided_by_mounts() {
+        let request = RunRequest {
+            executor: ExecutorSelector::class("default"),
+            toolchain_manifest: Blake3Hash([0; 32]),
+            program_rel: String::new(),
+            program: Some(RunArg::literal("cc")),
+            args: vec![
+                RunArg::literal("-c"),
+                RunArg::path("src/lua.c"),
+                RunArg::literal("-o"),
+                RunArg::path("out/obj/lua.c.o"),
+            ],
+            tree_mounts: vec![RunTreeMount {
+                mount: "src".to_string(),
+                manifest: Blake3Hash([1; 32]),
+            }],
+            file_mounts: vec![RunFileMount {
+                path: "gen/config.h".to_string(),
+                manifest: Blake3Hash([2; 32]),
+                logical: "config".to_string(),
+            }],
+            outputs: vec![RunOutput {
+                logical: "object".to_string(),
+                path: "out/obj/lua.c.o".to_string(),
+                executable: false,
+            }],
+            writable_roots: vec!["out".to_string()],
+            cwd: Some("build/tmp".to_string()),
+            env: vec![("CONFIG".to_string(), RunArg::path("gen/config.h"))],
+            clear_env: false,
+            eval: None,
+            macos_commandlinetools_version: None,
+        };
+
+        assert_eq!(
+            parent_dirs_to_materialize(&request),
+            vec!["build".to_string(), "out/obj".to_string()],
         );
     }
 
