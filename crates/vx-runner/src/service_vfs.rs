@@ -111,11 +111,19 @@ fn parent_dirs_to_materialize(request: &RunRequest) -> Vec<String> {
     parent_dirs_for_request(request)
         .into_iter()
         .filter(|dir| {
-            !request.writable_roots.iter().any(|root| root == dir)
-                && !request
-                    .tree_mounts
-                    .iter()
-                    .any(|mount| covers_path(&mount.mount, dir))
+            let within_writable_root = request
+                .writable_roots
+                .iter()
+                .any(|root| covers_path(root, dir));
+
+            if within_writable_root {
+                return !request.writable_roots.iter().any(|root| root == dir);
+            }
+
+            !request
+                .tree_mounts
+                .iter()
+                .any(|mount| covers_path(&mount.mount, dir))
                 && !request
                     .file_mounts
                     .iter()
@@ -2685,6 +2693,39 @@ mod tests {
         assert_eq!(
             parent_dirs_to_materialize(&request),
             vec!["build".to_string(), "out/obj".to_string()],
+        );
+    }
+
+    #[test]
+    fn root_tree_mount_does_not_hide_nested_writable_dirs() {
+        let request = RunRequest {
+            executor: ExecutorSelector::class("default"),
+            toolchain_manifest: Blake3Hash([0; 32]),
+            program_rel: String::new(),
+            program: Some(RunArg::literal("cc")),
+            args: vec![
+                RunArg::literal("-c"),
+                RunArg::path("src/hello.c"),
+                RunArg::literal("-o"),
+                RunArg::path("out/obj/hello.o"),
+            ],
+            tree_mounts: vec![RunTreeMount {
+                mount: String::new(),
+                manifest: Blake3Hash([1; 32]),
+            }],
+            file_mounts: Vec::new(),
+            outputs: Vec::new(),
+            writable_roots: vec!["out".to_string()],
+            cwd: None,
+            env: Vec::new(),
+            clear_env: false,
+            eval: None,
+            macos_commandlinetools_version: None,
+        };
+
+        assert_eq!(
+            parent_dirs_to_materialize(&request),
+            vec!["out/obj".to_string()]
         );
     }
 
