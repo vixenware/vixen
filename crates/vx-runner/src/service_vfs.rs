@@ -1508,6 +1508,14 @@ impl RunnerService {
             command = %command_name,
             cwd = request.cwd.as_deref().unwrap_or("."),
             tree_mounts = request.tree_mounts.len(),
+            tree_mount_specs = %summarize_list(
+                &request
+                    .tree_mounts
+                    .iter()
+                    .map(|mount| format!("{}@{}", mount.mount, mount.manifest))
+                    .collect::<Vec<_>>(),
+                6
+            ),
             file_mounts = request.file_mounts.len(),
             writable_roots = request.writable_roots.len(),
             outputs = request.outputs.len(),
@@ -1771,6 +1779,17 @@ impl RunnerService {
             elapsed_secs = mount_start.elapsed().as_secs_f32(),
             "prepared VFS inputs"
         );
+
+        #[cfg(windows)]
+        if !request.tree_mounts.is_empty()
+            && let Err(error) = self.vfs.dump_state(&action.prefix_id).await
+        {
+            info!(
+                action.prefix_id = %action.prefix_id,
+                %error,
+                "failed to dump VFS state after preparing inputs"
+            );
+        }
 
         if !outputs_stay_within_writable_roots(&request.outputs, &request.writable_roots) {
             let offending = request

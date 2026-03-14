@@ -132,6 +132,13 @@ impl VfsdClient {
             .map_err(|e| format!("{e:?}"))
     }
 
+    pub async fn dump_state(&self, prefix_id: &str) -> Result<(), String> {
+        self.client
+            .dump_state(prefix_id.to_string())
+            .await
+            .map_err(|e| format!("{e:?}"))
+    }
+
     /// Flush all written files in a prefix to CAS
     pub async fn flush_prefix_to_cas(&self, prefix_id: &str) -> HashMap<String, (Blake3Hash, u64)> {
         // Call vx-vfsd's flush to get the root DirectoryNode hash

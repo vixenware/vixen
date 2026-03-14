@@ -2032,6 +2032,12 @@ async fn run_build_vx_exec_via_runner(
     let root_mount = store_exec_mounts(store, &request.mounts)
         .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
+    tracing::info!(
+        executor = %describe_executor_selector(&request.executor),
+        root_mount = ?root_mount.map(|hash| hash.0),
+        cross_store = !std::ptr::eq(target_store, store),
+        "build.vx exec prepared root mount"
+    );
     if !std::ptr::eq(target_store, store)
         && let Some(root) = root_mount
     {
