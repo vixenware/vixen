@@ -381,6 +381,37 @@ fn build_vx_exec_summary_includes_args_mounts_and_writable_roots() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn store_exec_mounts_accepts_discovered_blob_leaves() {
+    let env = StoreTestEnv::new().await;
+    let blob = BlobValue::Inline {
+        bytes: Arc::from("echo".as_bytes()),
+        executable: true,
+    };
+    let mounts = vec![vx_eval::ExecMount {
+        path: PathValue::new("bin"),
+        value: Value::Tree(TreeValue::Inline(Arc::from([(
+            Arc::from("tool"),
+            Value::Discovered(vx_eval::DiscoveredValue {
+                value: Box::new(Value::Blob(blob)),
+                obligations: Arc::from([]),
+            }),
+        )]))),
+    }];
+
+    let root = crate::service::store_exec_mounts(&env.client, &mounts)
+        .await
+        .expect("discovered executable blob leaf should store successfully")
+        .expect("mount tree root");
+    let materialized = TempDir::new().expect("materialize root");
+    let output_root = Utf8Path::from_path(materialized.path()).expect("utf8 tempdir");
+
+    crate::service::materialize_store_tree_into_dir(&env.client, root, output_root)
+        .expect("materialize stored mount tree");
+
+    assert!(materialized.path().join("bin/tool").exists());
+}
+
 #[test]
 fn build_vx_discover_summary_includes_executor_class() {
     let empty_module = vx_eval::TransportModule {

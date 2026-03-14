@@ -1339,7 +1339,7 @@ fn host_path_is_executable(_path: &PathValue) -> std::result::Result<bool, Strin
     Ok(false)
 }
 
-async fn store_exec_mounts(
+pub(crate) async fn store_exec_mounts(
     store: &StoreClient,
     mounts: &[ExecMount],
 ) -> std::result::Result<Option<NodeHash>, String> {
@@ -1358,6 +1358,9 @@ async fn store_exec_mounts(
     while let Some(item) = pending.pop() {
         match item {
             PendingMount::Value(path, value) => match value {
+                Value::Discovered(discovered) => {
+                    pending.push(PendingMount::Value(path, *discovered.value));
+                }
                 Value::Blob(blob) => files.push(crate::cas_tree::TreeFile {
                     path,
                     kind: store_exec_blob(store, &blob).await?,
