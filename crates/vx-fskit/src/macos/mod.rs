@@ -69,6 +69,8 @@ pub struct HealthPayload {
     #[facet(default)]
     pub ever_connected: bool,
     #[facet(default)]
+    pub app_group_path: Option<String>,
+    #[facet(default)]
     pub connected_at: Option<String>,
     #[facet(default)]
     pub disconnected_at: Option<String>,

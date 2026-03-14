@@ -214,6 +214,12 @@ actor ConnectionHealth {
         json += "  \"connected\": \(currentlyConnected),\n"
         json += "  \"ever_connected\": \(everConnected),\n"
 
+        if let appGroupPath = resolveAppGroupPath() {
+            json += "  \"app_group_path\": \"\(appGroupPath)\",\n"
+        } else {
+            json += "  \"app_group_path\": null,\n"
+        }
+
         if let t = connectedAt {
             json += "  \"connected_at\": \"\(iso.string(from: t))\",\n"
         } else {
@@ -244,6 +250,12 @@ actor ConnectionHealth {
 
         json += "}\n"
         return Data(json.utf8)
+    }
+
+    private func resolveAppGroupPath() -> String? {
+        FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: VixenFSConstants.appGroupIdentifier
+        )?.path
     }
 }
 
