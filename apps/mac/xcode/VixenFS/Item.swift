@@ -11,6 +11,18 @@ final class Item: FSItem {
     /// File name (immutable after init — set once during lookup/create)
     let name: FSFileName
 
+    /// Routed prefix for dynamic per-session routing.
+    /// Nil for synthetic/admin items.
+    let prefix: String?
+
+    /// Routed session SID for dynamic per-session routing.
+    /// Nil for synthetic/admin items.
+    let sid: String?
+
+    /// Backend item ID in the routed session.
+    /// For non-routed items, this matches `itemId`.
+    let backendItemId: UInt64
+
     /// Cached attributes, protected by lock for concurrent access.
     /// We use NSLock instead of OSAllocatedUnfairLock because FSItem.Attributes
     /// is an ObjC class that doesn't conform to Sendable.
@@ -24,9 +36,19 @@ final class Item: FSItem {
         return _cachedAttributes
     }
 
-    init(itemId: UInt64, name: String, attributes: FSItem.Attributes) {
+    init(
+        itemId: UInt64,
+        name: String,
+        attributes: FSItem.Attributes,
+        prefix: String? = nil,
+        sid: String? = nil,
+        backendItemId: UInt64? = nil
+    ) {
         self.itemId = itemId
         self.name = FSFileName(string: name)
+        self.prefix = prefix
+        self.sid = sid
+        self.backendItemId = backendItemId ?? itemId
         self._cachedAttributes = attributes
         self._lastAttributesValidationNs = DispatchTime.now().uptimeNanoseconds
     }

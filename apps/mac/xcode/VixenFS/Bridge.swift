@@ -263,35 +263,102 @@ actor ConnectionHealth {
 actor VfsConnection {
     static let shared = VfsConnection()
 
-    private var client: VfsClient?
-    private var driverTask: Task<Void, Never>?
+    private struct PeerConnection {
+        var client: VfsClient?
+        var driverTask: Task<Void, Never>?
+        var terminalError: NSError?
+    }
+
+    private var peers: [String: PeerConnection] = [:]
+    private var defaultSid: String?
     private var disconnectRequested = false
     private var debugEnabled = false
-    private var terminalConnectionError: NSError?
     private let log = Logger(subsystem: VixenFSConstants.subsystem, category: "VfsConnection")
+    private var sessionDeathObservers: [UUID: @Sendable (String) -> Void] = [:]
 
     func connect(url: URL) async throws {
-        if client != nil {
-            log.info("Already connected")
-            return
-        }
         await LifecycleTrace.shared.mark(
             log, event: "vfs.connect.begin", details: "url=\(url.absoluteString)")
 
         guard let mountOptions = parseMountOptions(from: url) else {
             throw POSIXError(.EINVAL)
         }
-        let sid = mountOptions.sid
+
+        defaultSid = mountOptions.sid
         debugEnabled = mountOptions.debug
+        disconnectRequested = false
+
         await SwiftmoireClient.shared.configure(
             dashboardAddr: mountOptions.moireDashboard,
             debugFrames: mountOptions.debug
         )
-        if debugEnabled {
-            log.notice("mount debug enabled for sid=\(sid, privacy: .public)")
-        }
-        log.info("Connecting over SHM sid=\(sid, privacy: .public)")
 
+        if debugEnabled {
+            log.notice("mount debug enabled for sid=\(mountOptions.sid, privacy: .public)")
+        }
+
+        _ = try await getClient(for: mountOptions.sid)
+        log.info("Connected to \(url.absoluteString)")
+        await LifecycleTrace.shared.mark(
+            log, event: "vfs.connect.ready", details: "url=\(url.absoluteString)")
+    }
+
+    func disconnect() async {
+        await LifecycleTrace.shared.mark(log, event: "vfs.disconnect")
+        disconnectRequested = true
+        debugEnabled = false
+        await SwiftmoireClient.shared.configure(dashboardAddr: nil, debugFrames: false)
+
+        for (sid, peer) in peers {
+            peer.driverTask?.cancel()
+            notifySessionDeath(sid: sid)
+        }
+        peers.removeAll()
+        await ConnectionHealth.shared.recordDisconnected(reason: "requested")
+    }
+
+    func getClient(for sid: String? = nil) async throws -> VfsClient {
+        let targetSid: String
+        if let sid {
+            targetSid = sid
+        } else if let defaultSid {
+            targetSid = defaultSid
+        } else {
+            throw POSIXError(.ENOTCONN)
+        }
+
+        if let existing = peers[targetSid], let client = existing.client {
+            return client
+        }
+
+        if let existing = peers[targetSid], let terminalError = existing.terminalError {
+            throw terminalError
+        }
+
+        log.info("Connecting over SHM sid=\(targetSid, privacy: .public)")
+        let client = try await establishClient(for: targetSid)
+        await ConnectionHealth.shared.recordConnected()
+        return client
+    }
+
+    func observeSessionDeath(_ observer: @escaping @Sendable (String) -> Void) -> UUID {
+        let id = UUID()
+        sessionDeathObservers[id] = observer
+        return id
+    }
+
+    func removeSessionDeathObserver(_ id: UUID) {
+        sessionDeathObservers.removeValue(forKey: id)
+    }
+
+    func liveSessionIDs() -> [String] {
+        peers
+            .filter { _, peer in peer.client != nil }
+            .map { sid, _ in sid }
+            .sorted()
+    }
+
+    private func establishClient(for sid: String) async throws -> VfsClient {
         let ticket = try await requestTicket(sid: sid)
         debugLog("bootstrap control socket established sid=\(sid)")
         log.info(
@@ -315,70 +382,67 @@ actor VfsConnection {
             dispatcher: NoopDispatcher()
         )
 
-        disconnectRequested = false
-        terminalConnectionError = nil
         let logger = log
-        driverTask = Task { [weak self] in
+        let driverTask = Task { [weak self] in
             do {
                 try await driver.run()
                 logger.error("Roam driver exited cleanly — server is gone")
                 NSLog("VixenFS: Roam SHM driver exited cleanly (server gone)")
-                await self?.handleDriverExit(reason: "driver_exit_clean")
+                await self?.handleDriverExit(sid: sid, reason: "driver_exit_clean")
             } catch {
                 logger.error(
                     "Roam driver exited with error: \(String(describing: error), privacy: .public)")
                 NSLog("VixenFS: Roam SHM driver exited with error: \(String(describing: error))")
                 await self?.handleDriverExit(
-                    reason: "driver_exit_error:\(String(describing: error))")
+                    sid: sid,
+                    reason: "driver_exit_error:\(String(describing: error))"
+                )
             }
         }
-        client = VfsClient(connection: handle, timeout: 28.0)
-        await ConnectionHealth.shared.recordConnected()
-        log.info("Connected to \(url.absoluteString)")
-        await LifecycleTrace.shared.mark(
-            log, event: "vfs.connect.ready", details: "url=\(url.absoluteString)")
+
+        peers[sid] = PeerConnection(
+            client: VfsClient(connection: handle, timeout: 28.0),
+            driverTask: driverTask,
+            terminalError: nil
+        )
+        return peers[sid]!.client!
     }
 
-    func disconnect() async {
-        await LifecycleTrace.shared.mark(log, event: "vfs.disconnect")
-        await ConnectionHealth.shared.recordDisconnected(reason: "requested")
-        disconnectRequested = true
-        terminalConnectionError = nil
-        debugEnabled = false
-        await SwiftmoireClient.shared.configure(dashboardAddr: nil, debugFrames: false)
-        driverTask?.cancel()
-        driverTask = nil
-        client = nil
-    }
+    private func handleDriverExit(sid: String, reason: String) async {
+        var peer = peers[sid] ?? PeerConnection(client: nil, driverTask: nil, terminalError: nil)
+        peer.client = nil
+        peer.driverTask = nil
 
-    func getClient() throws -> VfsClient {
-        guard let client = client else {
-            if let terminalConnectionError {
-                throw terminalConnectionError
-            }
-            throw POSIXError(.ENOTCONN)
-        }
-        return client
-    }
-
-    private func handleDriverExit(reason: String) async {
         if disconnectRequested {
-            log.info("VFS connection closed during normal unload")
+            log.info("VFS connection closed during normal unload sid=\(sid, privacy: .public)")
             NSLog("VixenFS: SHM connection closed during unload")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.normal")
+            peers.removeValue(forKey: sid)
         } else {
-            terminalConnectionError = NSError(
+            peer.terminalError = NSError(
                 domain: NSPOSIXErrorDomain,
                 code: Int(POSIXError.ECONNRESET.rawValue),
                 userInfo: [NSLocalizedDescriptionKey: reason]
             )
-            await ConnectionHealth.shared.recordDisconnected(reason: reason)
-            log.error("Connection to VFS server lost; waiting for FSKit to unload/deactivate")
+            peers[sid] = peer
+            log.error(
+                "Connection to VFS server lost for sid=\(sid, privacy: .public); waiting for FSKit to unload/deactivate"
+            )
             NSLog("VixenFS: SHM connection dropped unexpectedly (driver_exit)")
             await LifecycleTrace.shared.mark(log, event: "vfs.driver.exit.unexpected")
         }
-        client = nil
-        driverTask = nil
+
+        if peers.values.allSatisfy({ $0.client == nil }) {
+            await ConnectionHealth.shared.recordDisconnected(reason: reason)
+        }
+
+        notifySessionDeath(sid: sid)
+    }
+
+    private func notifySessionDeath(sid: String) {
+        for observer in sessionDeathObservers.values {
+            observer(sid)
+        }
     }
 
     private func requestTicket(sid: String) async throws -> ShmBootstrapTicket {
