@@ -84,7 +84,7 @@ fn build_libpng(workspace: Path, class: ExecutorClass) {
             "-c",
             @(src/{file}),
             "-o",
-            @(out/obj/{file}.o),
+            @(out/{file}.o),
             ..includes.map((include) => ["-I", include]).flatten(),
             ..defines.map((define) => `-D${define}`),
             "-O2",
