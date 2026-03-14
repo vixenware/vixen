@@ -116,8 +116,7 @@ pub struct ProjectionContext {
 impl ProjectionContext {
     pub fn register_enumeration(&mut self, target: PathBuf, id: u128) {
         let entries = self.source.list_directory(&target);
-        log::info!(
-            target: "vx_vfs::windows",
+        tracing::info!(
             "ProjFS register_enumeration id={:X} path={} entry_count={}",
             id,
             target.to_string_lossy(),
@@ -134,11 +133,7 @@ impl ProjectionContext {
     }
 
     pub fn finish_enumeration(&mut self, id: u128) -> bool {
-        log::info!(
-            target: "vx_vfs::windows",
-            "ProjFS finish_enumeration id={:X}",
-            id
-        );
+        tracing::info!("ProjFS finish_enumeration id={:X}", id);
         self.directory_enumerations.remove(&id).is_some()
     }
 }
@@ -358,8 +353,7 @@ mod native {
 
         callback_data.execute(move |callback_data| {
             let target = callback_data.file_path.clone().unwrap_or_default();
-            log::info!(
-                target: "vx_vfs::windows",
+            tracing::info!(
                 "ProjFS start_directory_enumeration id={:X} path={}",
                 enumeration_id.to_u128(),
                 target.to_string_lossy()
@@ -432,8 +426,7 @@ mod native {
                 /* Return STATUS_SUCCESS to indicate that the enumeration has ended (as it can not be found). */
                 .ok_or(STATUS_SUCCESS.to_hresult())?;
 
-            log::info!(
-                target: "vx_vfs::windows",
+            tracing::info!(
                 "ProjFS get_directory_enumeration id={:X} path={} flags=0x{:X} search_expression={:?} current_entry={} total_entries={}",
                 enumeration_id.to_u128(),
                 callback_data.path.to_string_lossy(),
@@ -478,8 +471,7 @@ mod native {
                 };
 
                 if file_match {
-                    log::info!(
-                        target: "vx_vfs::windows",
+                    tracing::info!(
                         "ProjFS get_directory_enumeration emit id={:X} path={} entry={} index={} flags=0x{:X}",
                         enumeration_id.to_u128(),
                         callback_data.path.to_string_lossy(),

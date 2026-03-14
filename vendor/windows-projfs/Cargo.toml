@@ -37,6 +37,9 @@ version = "0.12.1"
 [dependencies.thiserror]
 version = "1.0.52"
 
+[dependencies.tracing]
+version = "0.1.41"
+
 [dependencies.windows]
 version = "0.52.0"
 features = [
