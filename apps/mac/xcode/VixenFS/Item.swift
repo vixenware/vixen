@@ -11,6 +11,14 @@ final class Item: FSItem {
     /// File name (immutable after init — set once during lookup/create)
     let name: FSFileName
 
+    /// Optional prefix for dynamically routed items.
+    /// Nil for legacy single-backend items and synthetic admin paths.
+    let prefix: String?
+
+    /// Optional backend peer sid for dynamically routed items.
+    /// Nil for legacy single-backend items and synthetic admin paths.
+    let sid: String?
+
     /// Cached attributes, protected by lock for concurrent access.
     /// We use NSLock instead of OSAllocatedUnfairLock because FSItem.Attributes
     /// is an ObjC class that doesn't conform to Sendable.
@@ -24,9 +32,17 @@ final class Item: FSItem {
         return _cachedAttributes
     }
 
-    init(itemId: UInt64, name: String, attributes: FSItem.Attributes) {
+    init(
+        itemId: UInt64,
+        name: String,
+        attributes: FSItem.Attributes,
+        prefix: String? = nil,
+        sid: String? = nil
+    ) {
         self.itemId = itemId
         self.name = FSFileName(string: name)
+        self.prefix = prefix
+        self.sid = sid
         self._cachedAttributes = attributes
         self._lastAttributesValidationNs = DispatchTime.now().uptimeNanoseconds
     }
