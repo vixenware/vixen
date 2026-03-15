@@ -396,6 +396,41 @@ async fn emit_ssh_bootstrap_progress(
 }
 
 #[cfg(unix)]
+async fn with_ssh_bootstrap_heartbeat<F, T>(
+    boot_tx: Option<&BootTx>,
+    listener: &Option<Arc<ProgressListenerClient>>,
+    class_label: &str,
+    base_message: &str,
+    interval: Duration,
+    future: F,
+) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    tokio::pin!(future);
+    let start = tokio::time::Instant::now();
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
+
+    loop {
+        tokio::select! {
+            result = &mut future => return result,
+            _ = ticker.tick() => {
+                let elapsed = start.elapsed().as_secs();
+                emit_ssh_bootstrap_progress(
+                    boot_tx,
+                    listener,
+                    class_label,
+                    format!("{base_message} ({elapsed}s elapsed)"),
+                )
+                .await;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
 const SSH_BOOTSTRAP_REMOTE_SCRIPT: &str = r#"set -euo pipefail
 bare_repo_dir="$1"
 commit="$2"
@@ -1240,14 +1275,28 @@ async fn connect_ssh_bootstrap_runner(
     .await?;
 
     if let Some(paths) = &windows_checkout {
-        prepare_ssh_bootstrap_windows_checkout(
-            &control_path,
-            target,
-            &paths.bare_repo_dir,
-            &commit,
-            &paths.checkout_dir,
-            &paths.vx_home,
-            &paths.store_root,
+        emit_ssh_bootstrap_progress(
+            boot_tx,
+            &progress_listener,
+            class_label,
+            format!("building remote Vixen bootstrap checkout on {target}"),
+        )
+        .await;
+        with_ssh_bootstrap_heartbeat(
+            boot_tx,
+            &progress_listener,
+            class_label,
+            &format!("building remote Vixen bootstrap checkout on {target}"),
+            Duration::from_secs(5),
+            prepare_ssh_bootstrap_windows_checkout(
+                &control_path,
+                target,
+                &paths.bare_repo_dir,
+                &commit,
+                &paths.checkout_dir,
+                &paths.vx_home,
+                &paths.store_root,
+            ),
         )
         .await?;
     }
