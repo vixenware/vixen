@@ -19,7 +19,7 @@ struct MountFailureDiagnosis {
 ///
 /// Checks prerequisites (app installed, codesign, extension registered+enabled),
 /// cleans up broken mounts, mounts, and verifies via health.json.
-pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitResult {
+pub async fn setup(_sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitResult {
     let mut log = Log::new();
     let candidates = mount_path_candidates(mount_path).await;
 
@@ -141,16 +141,20 @@ pub async fn setup(sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitRes
         );
     }
     // Build the source URL
-    let mut source = format!("vixen://session?sid={sid}");
+    let mut source = "vixen://session".to_string();
+    let mut query_items = Vec::new();
     if debug {
-        source.push_str("&debug=1");
+        query_items.push("debug=1".to_string());
     }
     if let Ok(addr) = std::env::var("moire_DASHBOARD") {
         let trimmed = addr.trim();
         if !trimmed.is_empty() {
-            source.push_str("&moire_dashboard=");
-            source.push_str(trimmed);
+            query_items.push(format!("moire_dashboard={trimmed}"));
         }
+    }
+    if !query_items.is_empty() {
+        source.push('?');
+        source.push_str(&query_items.join("&"));
     }
 
     let mount_output = match Command::new("/sbin/mount")

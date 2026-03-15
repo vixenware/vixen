@@ -27,7 +27,6 @@ struct Config {
     static let appGroupIdentifier = "B2N6FSRTPV.vixenfs"
 
     let mountPoint: String
-    let sid: String
     let scheme: String
     let fsType: String
     let preload: Bool
@@ -38,23 +37,22 @@ struct Config {
         var components = URLComponents()
         components.scheme = scheme
         components.host = "session"
-        var items = [URLQueryItem(name: "sid", value: sid)]
+        var items: [URLQueryItem] = []
         if preload {
             items.append(URLQueryItem(name: "preload", value: "1"))
         }
         if debug {
             items.append(URLQueryItem(name: "debug", value: "1"))
         }
-        components.queryItems = items
+        components.queryItems = items.isEmpty ? nil : items
         if let source = components.string {
             return source
         }
-        return "\(scheme)://session?sid=\(sid)"
+        return "\(scheme)://session"
     }
 
     static func parse(from args: [String]) throws -> Command {
         var mountPoint: String?
-        var sid: String?
         var scheme = "vixen"
         let fsType = "vixenfs"
         var preload = false
@@ -73,14 +71,6 @@ struct Config {
                 mountArgumentsProvided = true
                 index += 1
                 mountPoint = try valueArg(args, index: index, name: "--mount-point")
-            case "--sid":
-                mountArgumentsProvided = true
-                index += 1
-                let value = try valueArg(args, index: index, name: "--sid")
-                guard isValidSid(value) else {
-                    throw MountError.invalidArgument("--sid must be 32 hex chars or UUID format")
-                }
-                sid = value
             case "--scheme":
                 mountArgumentsProvided = true
                 index += 1
@@ -132,14 +122,10 @@ struct Config {
         guard let mountPoint else {
             throw MountError.invalidArgument("Missing required --mount-point argument")
         }
-        guard let sid else {
-            throw MountError.invalidArgument("Missing required --sid argument")
-        }
 
         return .mount(
             Config(
                 mountPoint: mountPoint,
-                sid: sid,
                 scheme: scheme,
                 fsType: fsType,
                 preload: preload,
@@ -155,30 +141,6 @@ struct Config {
         return args[index]
     }
 
-    private static func isValidSid(_ sid: String) -> Bool {
-        if sid.count == 32 {
-            return sid.unicodeScalars.allSatisfy {
-                CharacterSet(charactersIn: "0123456789abcdefABCDEF").contains($0)
-            }
-        }
-        if sid.count == 36 {
-            let chars = Array(sid)
-            let hyphenPositions: Set<Int> = [8, 13, 18, 23]
-            for i in 0..<chars.count {
-                if hyphenPositions.contains(i) {
-                    if chars[i] != "-" {
-                        return false
-                    }
-                    continue
-                }
-                if !chars[i].isHexDigit {
-                    return false
-                }
-            }
-            return true
-        }
-        return false
-    }
 }
 
 enum MountError: Error, CustomStringConvertible {
@@ -201,7 +163,7 @@ enum MountError: Error, CustomStringConvertible {
                 Usage:
                   vixenfs-mount --health [--json]
                   vixenfs-mount --app-group-path
-                  vixenfs-mount --sid <sid> --mount-point <path> [--scheme <scheme>] [--debug] [--log-file <path>]
+                  vixenfs-mount --mount-point <path> [--scheme <scheme>] [--debug] [--log-file <path>]
                 """
         }
     }
