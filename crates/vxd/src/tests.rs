@@ -199,6 +199,19 @@ fn ssh_bootstrap_windows_command_announces_endpoints() {
     assert!(command.contains("$runnerEndpoint"));
 }
 
+#[cfg(unix)]
+#[test]
+fn ssh_control_master_not_ready_message_includes_log_detail() {
+    let message = crate::ssh_control_master_not_ready_message(
+        "toast",
+        Some("Connection timed out during banner exchange"),
+    );
+    assert_eq!(
+        message,
+        "ssh control master for toast did not become ready: Connection timed out during banner exchange"
+    );
+}
+
 static COLOR_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
 static TEST_SERVICE_BINARIES_READY: OnceLock<()> = OnceLock::new();
 

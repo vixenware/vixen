@@ -34,6 +34,7 @@ use roam_core::acceptor;
 use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
 use roam_stream::StreamLink;
 use roam_types::{ConnectionSettings, Metadata};
+use std::fs;
 use std::fs::OpenOptions;
 use std::net::TcpListener;
 use std::process::Stdio;
@@ -676,11 +677,38 @@ async fn wait_for_ssh_control_master(control_path: &Utf8Path, target: &str) -> R
         match command.output().await {
             Ok(output) if output.status.success() => return Ok(()),
             Ok(_) | Err(_) if tokio::time::Instant::now() >= deadline => {
-                eyre::bail!("ssh control master for {target} did not become ready")
+                eyre::bail!("{}", ssh_control_master_not_ready_message(target, None))
             }
             Ok(_) | Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
         }
     }
+}
+
+#[cfg(unix)]
+fn ssh_control_master_not_ready_message(target: &str, log_detail: Option<&str>) -> String {
+    match log_detail
+        .map(str::trim)
+        .filter(|detail| !detail.is_empty())
+    {
+        Some(detail) => {
+            format!("ssh control master for {target} did not become ready: {detail}")
+        }
+        None => format!("ssh control master for {target} did not become ready"),
+    }
+}
+
+#[cfg(unix)]
+fn ssh_bootstrap_log_detail(log_path: &Utf8Path) -> Option<String> {
+    fs::read_to_string(log_path.as_std_path())
+        .ok()
+        .and_then(|contents| {
+            let trimmed = contents.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
 }
 
 #[cfg(unix)]
@@ -994,6 +1022,10 @@ async fn connect_ssh_bootstrap_runner(
         .arg("-o")
         .arg("ControlPersist=no")
         .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=5")
+        .arg("-o")
         .arg("ServerAliveInterval=30")
         .arg("-o")
         .arg("ServerAliveCountMax=3")
@@ -1003,7 +1035,15 @@ async fn connect_ssh_bootstrap_runner(
         .stderr(Stdio::from(master_stderr_file))
         .kill_on_drop(true);
     let master_child = master.spawn()?;
-    wait_for_ssh_control_master(&control_path, target).await?;
+    if wait_for_ssh_control_master(&control_path, target)
+        .await
+        .is_err()
+    {
+        let log_detail = ssh_bootstrap_log_detail(&log_path);
+        let message = ssh_control_master_not_ready_message(target, log_detail.as_deref());
+        drop(master_child);
+        eyre::bail!(message);
+    }
     emit_ssh_bootstrap_progress(
         boot_tx,
         &progress_listener,
