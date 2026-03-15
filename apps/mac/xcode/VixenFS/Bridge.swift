@@ -270,7 +270,6 @@ actor VfsConnection {
     }
 
     private var peers: [String: PeerConnection] = [:]
-    private var defaultSid: String?
     private var disconnectRequested = false
     private var debugEnabled = false
     private let log = Logger(subsystem: VixenFSConstants.subsystem, category: "VfsConnection")
@@ -284,7 +283,6 @@ actor VfsConnection {
             throw POSIXError(.EINVAL)
         }
 
-        defaultSid = mountOptions.sid
         debugEnabled = mountOptions.debug
         disconnectRequested = false
 
@@ -294,10 +292,9 @@ actor VfsConnection {
         )
 
         if debugEnabled {
-            log.notice("mount debug enabled for sid=\(mountOptions.sid, privacy: .public)")
+            log.notice("mount debug enabled")
         }
 
-        _ = try await getClient(for: mountOptions.sid)
         log.info("Connected to \(url.absoluteString)")
         await LifecycleTrace.shared.mark(
             log, event: "vfs.connect.ready", details: "url=\(url.absoluteString)")
@@ -318,12 +315,7 @@ actor VfsConnection {
     }
 
     func getClient(for sid: String? = nil) async throws -> VfsClient {
-        let targetSid: String
-        if let sid {
-            targetSid = sid
-        } else if let defaultSid {
-            targetSid = defaultSid
-        } else {
+        guard let targetSid = sid else {
             throw POSIXError(.ENOTCONN)
         }
 
@@ -357,10 +349,6 @@ actor VfsConnection {
             .filter { _, peer in peer.client != nil }
             .map { sid, _ in sid }
             .sorted()
-    }
-
-    func defaultSessionID() -> String? {
-        defaultSid
     }
 
     private func establishClient(for sid: String) async throws -> VfsClient {
@@ -543,7 +531,6 @@ actor VfsConnection {
     }
 
     private struct MountOptions {
-        let sid: String
         let debug: Bool
         let moireDashboard: String?
     }
@@ -551,41 +538,22 @@ actor VfsConnection {
     private func parseMountOptions(from url: URL) -> MountOptions? {
         guard
             let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-            let items = components.queryItems,
-            let sid = items.first(where: { $0.name == "sid" })?.value,
-            isValidSid(sid)
+            components.scheme == "vixen",
+            components.host == "session"
         else {
             return nil
         }
+        let items = components.queryItems ?? []
+
+        // Hard cut: sid=... bootstrap URLs are no longer accepted.
+        if items.contains(where: { $0.name == "sid" }) {
+            return nil
+        }
+
         let debugValue = items.first(where: { $0.name == "debug" })?.value?.lowercased()
         let debug = debugValue == "1" || debugValue == "true" || debugValue == "yes"
         let moireDashboard = items.first(where: { $0.name == "moire_dashboard" })?.value
-        return MountOptions(sid: sid, debug: debug, moireDashboard: moireDashboard)
-    }
-
-    private func isValidSid(_ sid: String) -> Bool {
-        if sid.count == 32 {
-            return sid.unicodeScalars.allSatisfy {
-                CharacterSet(charactersIn: "0123456789abcdefABCDEF").contains($0)
-            }
-        }
-        if sid.count == 36 {
-            let chars = Array(sid)
-            let hyphenPositions: Set<Int> = [8, 13, 18, 23]
-            for i in 0..<chars.count {
-                if hyphenPositions.contains(i) {
-                    if chars[i] != "-" {
-                        return false
-                    }
-                    continue
-                }
-                if !chars[i].isHexDigit {
-                    return false
-                }
-            }
-            return true
-        }
-        return false
+        return MountOptions(debug: debug, moireDashboard: moireDashboard)
     }
 
     private func debugLog(_ message: String) {
@@ -765,7 +733,7 @@ final class Bridge: FSUnaryFileSystem, FSUnaryFileSystemOperations, @unchecked S
     // MARK: - URL Resource Handling
 
     /// Extract the vixen:// URL from an FSGenericURLResource.
-    /// Expected URL format: vixen://session?sid=<sid>
+    /// Expected URL format: vixen://session[?debug=1][&moire_dashboard=...]
     private func extractVixenURL(from resource: FSResource) -> URL? {
         guard let urlResource = resource as? FSGenericURLResource else {
             return nil
