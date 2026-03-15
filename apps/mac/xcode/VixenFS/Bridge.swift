@@ -183,6 +183,26 @@ final class NoopDispatcher: ServiceDispatcher, @unchecked Sendable {
     }
 }
 
+struct ConnectionHealthSnapshot: Codable {
+    let connected: Bool
+    let everConnected: Bool
+    let appGroupPath: String?
+    let connectedAt: String?
+    let disconnectedAt: String?
+    let uptimeSeconds: Double?
+    let disconnectReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case connected
+        case everConnected = "ever_connected"
+        case appGroupPath = "app_group_path"
+        case connectedAt = "connected_at"
+        case disconnectedAt = "disconnected_at"
+        case uptimeSeconds = "uptime_seconds"
+        case disconnectReason = "disconnect_reason"
+    }
+}
+
 actor ConnectionHealth {
     static let shared = ConnectionHealth()
 
@@ -206,51 +226,47 @@ actor ConnectionHealth {
         disconnectReason = reason
     }
 
-    func toJSON() -> Data {
-        let iso = ISO8601DateFormatter()
-        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    func snapshot() -> ConnectionHealthSnapshot {
+        let connectedAtString = connectedAt.map { Self.iso8601Formatter.string(from: $0) }
+        let disconnectedAtString = disconnectedAt.map { Self.iso8601Formatter.string(from: $0) }
 
-        var json = "{\n"
-        json += "  \"connected\": \(currentlyConnected),\n"
-        json += "  \"ever_connected\": \(everConnected),\n"
-
-        if let appGroupPath = resolveAppGroupPath() {
-            json += "  \"app_group_path\": \"\(appGroupPath)\",\n"
-        } else {
-            json += "  \"app_group_path\": null,\n"
-        }
-
-        if let t = connectedAt {
-            json += "  \"connected_at\": \"\(iso.string(from: t))\",\n"
-        } else {
-            json += "  \"connected_at\": null,\n"
-        }
-
-        if let t = disconnectedAt {
-            json += "  \"disconnected_at\": \"\(iso.string(from: t))\",\n"
-        } else {
-            json += "  \"disconnected_at\": null,\n"
-        }
-
+        let uptimeSeconds: Double?
         if currentlyConnected, let start = connectedAt {
-            let seconds = Date().timeIntervalSince(start)
-            json += "  \"uptime_seconds\": \(String(format: "%.3f", seconds)),\n"
+            uptimeSeconds = Date().timeIntervalSince(start)
         } else if let start = connectedAt, let end = disconnectedAt {
-            let seconds = end.timeIntervalSince(start)
-            json += "  \"uptime_seconds\": \(String(format: "%.3f", seconds)),\n"
+            uptimeSeconds = end.timeIntervalSince(start)
         } else {
-            json += "  \"uptime_seconds\": null,\n"
+            uptimeSeconds = nil
         }
 
-        if let reason = disconnectReason {
-            json += "  \"disconnect_reason\": \"\(reason)\"\n"
-        } else {
-            json += "  \"disconnect_reason\": null\n"
-        }
-
-        json += "}\n"
-        return Data(json.utf8)
+        return ConnectionHealthSnapshot(
+            connected: currentlyConnected,
+            everConnected: everConnected,
+            appGroupPath: resolveAppGroupPath(),
+            connectedAt: connectedAtString,
+            disconnectedAt: disconnectedAtString,
+            uptimeSeconds: uptimeSeconds,
+            disconnectReason: disconnectReason
+        )
     }
+
+    func toJSON() -> Data {
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            var data = try encoder.encode(snapshot())
+            data.append(0x0A)
+            return data
+        } catch {
+            return Data("{}\n".utf8)
+        }
+    }
+
+    private static let iso8601Formatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 
     private func resolveAppGroupPath() -> String? {
         FileManager.default.containerURL(

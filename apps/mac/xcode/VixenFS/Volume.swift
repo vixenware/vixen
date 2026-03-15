@@ -2,6 +2,59 @@ import FSKit
 import Foundation
 import os
 
+struct TelemetryStats: Codable {
+    let total: UInt64
+    let min: UInt64
+    let max: UInt64
+    let avg: Double
+}
+
+struct ReadTelemetrySnapshot: Codable {
+    let readCount: UInt64
+    let errorCount: UInt64
+    let requestedBytes: TelemetryStats
+    let returnedBytes: TelemetryStats
+    let latencyNs: TelemetryStats
+
+    enum CodingKeys: String, CodingKey {
+        case readCount = "read_count"
+        case errorCount = "error_count"
+        case requestedBytes = "requested_bytes"
+        case returnedBytes = "returned_bytes"
+        case latencyNs = "latency_ns"
+    }
+}
+
+struct StatusPayloadSnapshot: Codable {
+    let readCount: UInt64
+    let errorCount: UInt64
+    let requestedBytes: TelemetryStats
+    let returnedBytes: TelemetryStats
+    let latencyNs: TelemetryStats
+    let connected: Bool
+    let everConnected: Bool
+    let appGroupPath: String?
+    let connectedAt: String?
+    let disconnectedAt: String?
+    let uptimeSeconds: Double?
+    let disconnectReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case readCount = "read_count"
+        case errorCount = "error_count"
+        case requestedBytes = "requested_bytes"
+        case returnedBytes = "returned_bytes"
+        case latencyNs = "latency_ns"
+        case connected
+        case everConnected = "ever_connected"
+        case appGroupPath = "app_group_path"
+        case connectedAt = "connected_at"
+        case disconnectedAt = "disconnected_at"
+        case uptimeSeconds = "uptime_seconds"
+        case disconnectReason = "disconnect_reason"
+    }
+}
+
 actor ReadTelemetry {
     private var readCount: UInt64 = 0
     private var errorCount: UInt64 = 0
@@ -63,48 +116,48 @@ actor ReadTelemetry {
         )
     }
 
+    func snapshot() -> ReadTelemetrySnapshot {
+        let divisor = Double(max(readCount, 1))
+        let hasSamples = readCount > 0
+
+        let requestedBytes = TelemetryStats(
+            total: totalRequestedBytes,
+            min: hasSamples ? minRequestedBytes : 0,
+            max: hasSamples ? maxRequestedBytes : 0,
+            avg: Double(totalRequestedBytes) / divisor
+        )
+        let returnedBytes = TelemetryStats(
+            total: totalBytes,
+            min: hasSamples ? minBytes : 0,
+            max: hasSamples ? maxBytes : 0,
+            avg: Double(totalBytes) / divisor
+        )
+        let latencyNs = TelemetryStats(
+            total: totalLatencyNs,
+            min: hasSamples ? minLatencyNs : 0,
+            max: hasSamples ? maxLatencyNs : 0,
+            avg: Double(totalLatencyNs) / divisor
+        )
+
+        return ReadTelemetrySnapshot(
+            readCount: readCount,
+            errorCount: errorCount,
+            requestedBytes: requestedBytes,
+            returnedBytes: returnedBytes,
+            latencyNs: latencyNs
+        )
+    }
+
     func toJSON() -> Data {
-        var json = "{\n"
-        json += "  \"read_count\": \(readCount),\n"
-        json += "  \"error_count\": \(errorCount),\n"
-        json += "  \"requested_bytes\": {\n"
-        json += "    \"total\": \(totalRequestedBytes),\n"
-        if readCount > 0 {
-            json += "    \"min\": \(minRequestedBytes),\n"
-            json += "    \"max\": \(maxRequestedBytes),\n"
-            json += "    \"avg\": \(Double(totalRequestedBytes) / Double(readCount))\n"
-        } else {
-            json += "    \"min\": 0,\n"
-            json += "    \"max\": 0,\n"
-            json += "    \"avg\": 0\n"
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            var data = try encoder.encode(snapshot())
+            data.append(0x0A)
+            return data
+        } catch {
+            return Data("{}\n".utf8)
         }
-        json += "  },\n"
-        json += "  \"returned_bytes\": {\n"
-        json += "    \"total\": \(totalBytes),\n"
-        if readCount > 0 {
-            json += "    \"min\": \(minBytes),\n"
-            json += "    \"max\": \(maxBytes),\n"
-            json += "    \"avg\": \(Double(totalBytes) / Double(readCount))\n"
-        } else {
-            json += "    \"min\": 0,\n"
-            json += "    \"max\": 0,\n"
-            json += "    \"avg\": 0\n"
-        }
-        json += "  },\n"
-        json += "  \"latency_ns\": {\n"
-        json += "    \"total\": \(totalLatencyNs),\n"
-        if readCount > 0 {
-            json += "    \"min\": \(minLatencyNs),\n"
-            json += "    \"max\": \(maxLatencyNs),\n"
-            json += "    \"avg\": \(Double(totalLatencyNs) / Double(readCount))\n"
-        } else {
-            json += "    \"min\": 0,\n"
-            json += "    \"max\": 0,\n"
-            json += "    \"avg\": 0\n"
-        }
-        json += "  }\n"
-        json += "}\n"
-        return Data(json.utf8)
     }
 
     func reset() {
@@ -172,30 +225,33 @@ final class Volume: FSVolume, @unchecked Sendable {
     }
 
     private func statusJsonData() async -> Data {
-        let telemetryData = await readTelemetry.toJSON()
-        let healthData = await ConnectionHealth.shared.toJSON()
+        let telemetry = await readTelemetry.snapshot()
+        let health = await ConnectionHealth.shared.snapshot()
 
-        guard var statusObject =
-            (try? JSONSerialization.jsonObject(with: telemetryData, options: [])) as? [String: Any],
-            let healthObject =
-                (try? JSONSerialization.jsonObject(with: healthData, options: [])) as? [String: Any]
-        else {
+        let payload = StatusPayloadSnapshot(
+            readCount: telemetry.readCount,
+            errorCount: telemetry.errorCount,
+            requestedBytes: telemetry.requestedBytes,
+            returnedBytes: telemetry.returnedBytes,
+            latencyNs: telemetry.latencyNs,
+            connected: health.connected,
+            everConnected: health.everConnected,
+            appGroupPath: health.appGroupPath,
+            connectedAt: health.connectedAt,
+            disconnectedAt: health.disconnectedAt,
+            uptimeSeconds: health.uptimeSeconds,
+            disconnectReason: health.disconnectReason
+        )
+
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            var data = try encoder.encode(payload)
+            data.append(0x0A)
+            return data
+        } catch {
             return Data("{}\n".utf8)
         }
-
-        for (key, value) in healthObject {
-            statusObject[key] = value
-        }
-
-        guard var data = try? JSONSerialization.data(
-            withJSONObject: statusObject,
-            options: [.prettyPrinted, .sortedKeys]
-        ) else {
-            return Data("{}\n".utf8)
-        }
-
-        data.append(0x0A)
-        return data
     }
 
     private func statusJsonAttributes() async -> FSItem.Attributes {
