@@ -78,8 +78,14 @@ impl ConnectionAcceptor for RunnerVirtualAcceptor {
 }
 
 pub(crate) fn runner_mount_base() -> Utf8PathBuf {
-    // Global long-lived VixenFS mount path. vx-vfsd owns mount lifecycle.
-    Utf8PathBuf::from("/tmp/vx/vfs")
+    if cfg!(target_os = "macos") {
+        // Global long-lived VixenFS mount path. vx-vfsd owns mount lifecycle.
+        Utf8PathBuf::from("/tmp/vx/vfs")
+    } else if let Ok(vx_home) = std::env::var("VX_HOME") {
+        Utf8PathBuf::from(vx_home).join("vfs")
+    } else {
+        Utf8PathBuf::from("/tmp/vx/vfs")
+    }
 }
 
 /// vx-runner - Worker daemon
@@ -240,7 +246,12 @@ async fn boot_runner(
 
     let vfsd_builder = ServiceBuilder::new("vx-vfsd", vfsd_endpoint.clone())
         .caller_name("vx-runner")
-        .args(&["--store", &store_endpoint.display()])
+        .args(&[
+            "--store",
+            &store_endpoint.display(),
+            "--mount",
+            runner_mount_base().as_str(),
+        ])
         .log_path(vx_home.join("vfsd.log"))
         .env("VX_HOME", vx_home.as_str());
 
@@ -753,6 +764,8 @@ mod tests {
 
     #[test]
     fn runner_mount_base_is_stable_global_path() {
-        assert_eq!(runner_mount_base().as_str(), "/tmp/vx/vfs");
+        if cfg!(target_os = "macos") {
+            assert_eq!(runner_mount_base().as_str(), "/tmp/vx/vfs");
+        }
     }
 }

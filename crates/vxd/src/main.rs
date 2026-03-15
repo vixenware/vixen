@@ -486,6 +486,11 @@ restore_scrubbed_files
 rm -f "$store_socket" "$vfsd_socket" "$runner_socket"
 trap 'restore_scrubbed_files; jobs -p | xargs -r kill || true' EXIT
 "$checkout_dir/target/debug/vx-store" --root "$store_root" --listen "unix:$store_socket" &
+for _ in $(seq 1 200); do
+  [ -S "$store_socket" ] && break
+  sleep 0.1
+done
+[ -S "$store_socket" ] || { echo "vx-store did not create $store_socket" >&2; exit 1; }
 export VX_HOME="$vx_home"
 exec "$checkout_dir/target/debug/vx-runner" \
   --vx-home "$vx_home" \
@@ -552,6 +557,15 @@ fn ssh_bootstrap_windows_command(checkout_dir: &str, paths: &SshBootstrapWindows
             "$storeExe = Join-Path $checkoutDir 'target\\debug\\vx-store.exe'; ",
             "$runnerExe = Join-Path $checkoutDir 'target\\debug\\vx-runner.exe'; ",
             "$storeProc = Start-Process -FilePath $storeExe -ArgumentList @('--root', $storeRoot, '--listen', $storeEndpoint) -PassThru; ",
+            "$storeReady = $false; ",
+            "for ($i = 0; $i -lt 200; $i++) {{ ",
+            "  try {{ ",
+            "    $client = [System.Net.Sockets.TcpClient]::new(); ",
+            "    try {{ $client.Connect('127.0.0.1', [int]($storeEndpoint.Split(':')[1])); $storeReady = $true; break }} ",
+            "    finally {{ $client.Dispose() }} ",
+            "  }} catch {{ Start-Sleep -Milliseconds 100 }} ",
+            "}}; ",
+            "if (-not $storeReady) {{ throw ('vx-store did not start listening on ' + $storeEndpoint) }}; ",
             "try {{ & $runnerExe --vx-home $vxHome --store $storeEndpoint --vfsd $vfsdEndpoint --listen $runnerEndpoint }} ",
             "finally {{ ",
             "if ($storeProc -and -not $storeProc.HasExited) {{ Stop-Process -Id $storeProc.Id -Force }} }}"
