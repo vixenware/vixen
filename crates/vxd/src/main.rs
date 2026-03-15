@@ -1026,6 +1026,8 @@ async fn push_vixen_repo_over_ssh(
         .arg("-C")
         .arg(repo_root)
         .arg("-c")
+        .arg("core.hooksPath=/dev/null")
+        .arg("-c")
         .arg(format!("core.sshCommand={core_ssh_command}"))
         .arg("push")
         .arg("--force")
