@@ -477,6 +477,7 @@ pub struct ActionContext {
     pub mount_base: Utf8PathBuf,
     pub prefix_path: Utf8PathBuf,
     pub out_path: Utf8PathBuf,
+    pub write_path: Utf8PathBuf,
     pub allowed_host_exec_paths: Vec<Utf8PathBuf>,
 }
 
@@ -519,10 +520,35 @@ impl ActionContext {
                 cmd.env(var, val);
             }
         }
-        cmd.env("TMPDIR", self.out_path.as_str());
-        cmd.env("TMP", self.out_path.as_str());
-        cmd.env("TEMP", self.out_path.as_str());
+        cmd.env("TMPDIR", self.write_path.as_str());
+        cmd.env("TMP", self.write_path.as_str());
+        cmd.env("TEMP", self.write_path.as_str());
     }
+}
+
+fn common_relative_ancestor(paths: &[String]) -> Option<String> {
+    let mut iter = paths.iter();
+    let first = iter.next()?;
+    let mut common = first.split('/').collect::<Vec<_>>();
+
+    for path in iter {
+        let segments = path.split('/').collect::<Vec<_>>();
+        let shared_len = common
+            .iter()
+            .zip(segments.iter())
+            .take_while(|(left, right)| left == right)
+            .count();
+        common.truncate(shared_len);
+        if common.is_empty() {
+            return None;
+        }
+    }
+
+    Some(common.join("/"))
+}
+
+fn sandbox_write_root(request: &RunRequest) -> Option<String> {
+    common_relative_ancestor(&request.writable_roots)
 }
 
 impl RunnerService {
@@ -562,7 +588,8 @@ impl RunnerService {
             prefix_id,
             mount_base,
             prefix_path,
-            out_path,
+            out_path: out_path.clone(),
+            write_path: out_path.clone(),
             allowed_host_exec_paths: Vec::new(),
         }
     }
@@ -1671,6 +1698,9 @@ impl RunnerService {
             .create_action_context()
             .named("runner.run_vfs.create_action_context")
             .await;
+        action.write_path = sandbox_write_root(&request)
+            .map(|path| action.prefix_path.join(path))
+            .unwrap_or_else(|| action.prefix_path.clone());
         action.allowed_host_exec_paths = Self::allowed_host_exec_paths(&request);
 
         let needs_toolchain = request.program.is_none()
@@ -2790,6 +2820,75 @@ mod tests {
             vec!["out/obj".to_string(), "out/obj/nested".to_string()],
         );
         assert!(parent_dirs_to_materialize(&request).is_empty());
+    }
+
+    #[test]
+    fn sandbox_write_root_uses_single_writable_root() {
+        let request = RunRequest {
+            executor: ExecutorSelector::class("default"),
+            toolchain_manifest: Blake3Hash([0; 32]),
+            program_rel: String::new(),
+            program: Some(RunArg::path("bin/png-version")),
+            args: Vec::new(),
+            tree_mounts: Vec::new(),
+            file_mounts: Vec::new(),
+            outputs: Vec::new(),
+            writable_roots: vec!["bin".to_string()],
+            create_dirs: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            clear_env: false,
+            eval: None,
+            macos_commandlinetools_version: None,
+        };
+
+        assert_eq!(sandbox_write_root(&request), Some("bin".to_string()));
+    }
+
+    #[test]
+    fn sandbox_write_root_uses_common_ancestor_for_multiple_roots() {
+        let request = RunRequest {
+            executor: ExecutorSelector::class("default"),
+            toolchain_manifest: Blake3Hash([0; 32]),
+            program_rel: String::new(),
+            program: Some(RunArg::literal("tool")),
+            args: Vec::new(),
+            tree_mounts: Vec::new(),
+            file_mounts: Vec::new(),
+            outputs: Vec::new(),
+            writable_roots: vec!["out/bin".to_string(), "out/lib".to_string()],
+            create_dirs: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            clear_env: false,
+            eval: None,
+            macos_commandlinetools_version: None,
+        };
+
+        assert_eq!(sandbox_write_root(&request), Some("out".to_string()));
+    }
+
+    #[test]
+    fn sandbox_write_root_falls_back_when_roots_do_not_share_prefix() {
+        let request = RunRequest {
+            executor: ExecutorSelector::class("default"),
+            toolchain_manifest: Blake3Hash([0; 32]),
+            program_rel: String::new(),
+            program: Some(RunArg::literal("tool")),
+            args: Vec::new(),
+            tree_mounts: Vec::new(),
+            file_mounts: Vec::new(),
+            outputs: Vec::new(),
+            writable_roots: vec!["out".to_string(), "bin".to_string()],
+            create_dirs: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            clear_env: false,
+            eval: None,
+            macos_commandlinetools_version: None,
+        };
+
+        assert_eq!(sandbox_write_root(&request), None);
     }
 
     #[test]

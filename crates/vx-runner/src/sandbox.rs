@@ -504,7 +504,7 @@ pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
     tracing::trace!(
         program,
         vfs_root = %action.mount_base,
-        write_dir = %action.out_path,
+        write_dir = %action.write_path,
         profile_len = profile.len(),
         "sandboxed_command: wrapping with sandbox-exec"
     );
@@ -514,7 +514,7 @@ pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
     cmd.arg("-p").arg(&profile);
 
     // Pass both /tmp and /private/tmp variants since macOS may resolve either way
-    let write_dir = action.out_path.to_string();
+    let write_dir = action.write_path.to_string();
     let write_dir_alt = write_dir.replace("/tmp", "/private/tmp");
     let vfs_root = action.mount_base.to_string();
     let vfs_root_alt = vfs_root.replace("/tmp", "/private/tmp");
@@ -528,7 +528,7 @@ pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
 
     tracing::trace!(
         sandbox_exec = "/usr/bin/sandbox-exec",
-        write_dir = %action.out_path,
+        write_dir = %action.write_path,
         vfs_root = %action.mount_base,
         program,
         "spawning sandboxed command"
@@ -542,7 +542,7 @@ pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
     tracing::trace!(
         program,
         vfs_root = %action.mount_base,
-        write_dir = %action.out_path,
+        write_dir = %action.write_path,
         "sandboxed_command: wrapping with landlock-exec"
     );
 
@@ -562,15 +562,15 @@ pub fn sandboxed_command(program: &str, action: &ActionContext) -> Command {
     cmd.arg("--vfs-root")
         .arg(action.mount_base.as_str())
         .arg("--write-dir")
-        .arg(action.out_path.as_str())
+        .arg(action.write_path.as_str())
         .arg("--")
         .arg(program);
 
     tracing::trace!(
         landlock_exec = "landlock-exec",
-        write_dir = %action.out_path,
+        write_dir = %action.write_path,
         vfs_root = %action.mount_base,
-        tmpdir = %action.out_path,
+        tmpdir = %action.write_path,
         program,
         "spawning sandboxed command"
     );
@@ -618,6 +618,7 @@ mod tests {
             mount_base: Utf8PathBuf::from("/tmp/vx/vfs"),
             prefix_path: Utf8PathBuf::from("/tmp/vx/vfs/build-123"),
             out_path: Utf8PathBuf::from("/tmp/vx/vfs/build-123/out"),
+            write_path: Utf8PathBuf::from("/tmp/vx/vfs/build-123/out"),
             allowed_host_exec_paths: vec![Utf8PathBuf::from("/tmp/tools/cc")],
         };
         let profile = build_seatbelt_profile(&action);
