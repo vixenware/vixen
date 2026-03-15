@@ -69,6 +69,32 @@ fn effective_mount_path(configured_mount: &Utf8PathBuf) -> Utf8PathBuf {
     }
 }
 
+fn is_sid_segment(value: &str) -> bool {
+    if value.len() == 32 {
+        return value.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    if value.len() == 36 {
+        for (idx, c) in value.chars().enumerate() {
+            if matches!(idx, 8 | 13 | 18 | 23) {
+                if c != '-' {
+                    return false;
+                }
+            } else if !c.is_ascii_hexdigit() {
+                return false;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+fn select_smoke_sid<'a>(entries: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    entries
+        .into_iter()
+        .filter(|entry| is_sid_segment(entry))
+        .min()
+}
+
 impl SharedVfs {
     fn new(inner: Arc<CasVfs>) -> Self {
         let name = format!(".vfs-smoke-{:016x}", fastrand::u64(..));
@@ -497,16 +523,48 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
             }) => {
                 tracing::debug!("VFS mounted at {mount_path}");
 
-                // Smoke test: read the canary file through the real filesystem.
-                let canary_fs_path = mount_path.join(&canary.name);
-                tracing::debug!("Trying to read canary from {canary_fs_path}");
-
+                // Smoke test: read the canary file through the real filesystem using
+                // the active SID namespace (mount/<sid>/<canary>). Root no longer
+                // routes backend files directly.
                 const MAX_ATTEMPTS: u32 = 10;
                 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
                 let smoke_timeout = std::time::Duration::from_secs(5);
 
                 let mut smoke_err = None;
                 for attempt in 1..=MAX_ATTEMPTS {
+                    let mut dir_entries = tokio::fs::read_dir(mount_path.as_std_path())
+                        .await
+                        .map_err(|e| format!("failed to list mount root {mount_path}: {e}"))?;
+                    let mut names = Vec::new();
+                    while let Some(entry) = dir_entries
+                        .next_entry()
+                        .await
+                        .map_err(|e| format!("failed to read mount root {mount_path}: {e}"))?
+                    {
+                        if let Some(name) = entry.file_name().to_str() {
+                            names.push(name.to_string());
+                        }
+                    }
+
+                    let Some(sid) = select_smoke_sid(names.iter().map(String::as_str)) else {
+                        smoke_err = Some(format!(
+                            "no SID directory found under mount root {}",
+                            mount_path
+                        ));
+                        if attempt < MAX_ATTEMPTS {
+                            tracing::debug!(
+                                attempt,
+                                error = smoke_err.as_deref().unwrap_or("unknown"),
+                                "canary read failed, retrying"
+                            );
+                            tokio::time::sleep(RETRY_DELAY).await;
+                        }
+                        continue;
+                    };
+
+                    let canary_fs_path = mount_path.join(sid).join(&canary.name);
+                    tracing::debug!(attempt, sid, "Trying to read canary from {canary_fs_path}");
+
                     let read_result = tokio::time::timeout(
                         smoke_timeout,
                         moire::fs::read(canary_fs_path.as_std_path()),
@@ -515,7 +573,7 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
 
                     match read_result {
                         Ok(Ok(actual)) if actual == canary.content => {
-                            tracing::debug!(attempt, "VFS smoke test passed");
+                            tracing::debug!(attempt, sid, "VFS smoke test passed");
                             smoke_err = None;
                             break;
                         }
