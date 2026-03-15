@@ -257,6 +257,22 @@ fn ssh_bootstrap_windows_command_announces_endpoints() {
 
 #[cfg(unix)]
 #[test]
+fn windows_git_ssh_wrapper_rewrites_git_pack_commands_and_passthroughs_ssh_probes() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let control_path =
+        camino::Utf8PathBuf::from_path_buf(temp_dir.path().join("toast-ctl.sock")).expect("utf8");
+    let wrapper_path =
+        crate::write_windows_git_ssh_wrapper(&control_path).expect("wrapper path should build");
+    let wrapper = std::fs::read_to_string(wrapper_path.as_std_path()).expect("read wrapper");
+
+    assert!(wrapper.contains("if [ \"$#\" -gt 0 ] && [ \"${1#-}\" != \"$1\" ]; then"));
+    assert!(wrapper.contains("git-upload-pack\\ *|git-receive-pack\\ *"));
+    assert!(wrapper.contains("case \"$path\" in"));
+    assert!(wrapper.contains("/?:/*) path=${path#/} ;;"));
+}
+
+#[cfg(unix)]
+#[test]
 fn ssh_bootstrap_windows_checkout_script_fetches_commit_refspec_via_variable() {
     let script = crate::ssh_bootstrap_windows_prepare_checkout_script(
         r"X:\vixen\ssh-bootstrap\ssh-toast\repo.git",

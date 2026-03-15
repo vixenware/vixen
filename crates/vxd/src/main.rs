@@ -957,13 +957,19 @@ fn write_windows_git_ssh_wrapper(control_path: &Utf8Path) -> Result<Utf8PathBuf>
         format!(
             r#"#!/bin/sh
 set -eu
+if [ "$#" -gt 0 ] && [ "${{1#-}}" != "$1" ]; then
+  exec ssh -S {control_path} -o ControlMaster=no "$@"
+fi
 host=$1
 cmd=${{2-}}
 case "$cmd" in
-  git-upload-pack\ \'*\'|git-receive-pack\ \'*\')
+  git-upload-pack\ *|git-receive-pack\ *)
     prog=${{cmd%% *}}
-    path=${{cmd#*\'}}
-    path=${{path%\'}}
+    path=${{cmd#"$prog "}}
+    case "$path" in
+      \'*\') path=${{path#\'}}; path=${{path%\'}} ;;
+      \"*\") path=${{path#\"}}; path=${{path%\"}} ;;
+    esac
     case "$path" in
       /?:/*) path=${{path#/}} ;;
     esac
