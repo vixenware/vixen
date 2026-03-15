@@ -472,7 +472,8 @@ fn powershell_encoded_command(script: &str) -> String {
 
 #[cfg(unix)]
 fn powershell_command_line(script: &str) -> String {
-    let encoded = powershell_encoded_command(script);
+    let wrapped = format!("$ProgressPreference = 'SilentlyContinue'; {script}");
+    let encoded = powershell_encoded_command(&wrapped);
     format!("powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}")
 }
 
@@ -783,7 +784,7 @@ async fn detect_ssh_bootstrap_target(
                 "  'TMP=' + (Get-VxEnv 'TMP'), ",
                 "  'TEMP=' + (Get-VxEnv 'TEMP')",
                 "); ",
-                "$pairs | ForEach-Object { Write-Output $_ }"
+                "[Console]::Out.Write([string]::Join(\"`n\", $pairs))"
             ),
         )
         .await?;
