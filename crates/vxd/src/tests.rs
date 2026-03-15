@@ -133,8 +133,9 @@ fn ssh_bootstrap_paths_slug_implicit_ssh_class_labels() {
 #[cfg(unix)]
 #[test]
 fn ssh_bootstrap_windows_paths_use_tcp_layout() {
+    let bootstrap_root = r"C:\Users\faste\.cache\vixen\ssh-bootstrap";
     assert_eq!(
-        crate::ssh_bootstrap_windows_paths(r"C:\Users\faste", "ssh:toast", 57164, 57165, 57166),
+        crate::ssh_bootstrap_windows_paths(bootstrap_root, "ssh:toast", 57164, 57165, 57166),
         crate::SshBootstrapWindowsPaths {
             bare_repo_dir: r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo.git"
                 .to_string(),
@@ -146,6 +147,30 @@ fn ssh_bootstrap_windows_paths_use_tcp_layout() {
             vfsd_endpoint: "127.0.0.1:57165".to_string(),
             runner_endpoint: "127.0.0.1:57166".to_string(),
         }
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn windows_bootstrap_root_prefers_cargo_home_drive() {
+    assert_eq!(
+        crate::windows_bootstrap_root(
+            r"C:\Users\faste",
+            Some(r"X:\cargo"),
+            Some(r"Y:\rustup"),
+            Some(r"Z:\tmp"),
+            Some(r"W:\temp"),
+        ),
+        r"X:\vixen\ssh-bootstrap"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn windows_bootstrap_root_falls_back_to_home_cache() {
+    assert_eq!(
+        crate::windows_bootstrap_root(r"C:\Users\faste", None, Some(r"rustup"), Some(r"tmp"), None,),
+        r"C:\Users\faste\.cache\vixen\ssh-bootstrap"
     );
 }
 
@@ -191,9 +216,10 @@ fn ssh_bootstrap_remote_script_exports_vx_home_for_runner() {
 #[cfg(unix)]
 #[test]
 fn ssh_bootstrap_windows_command_announces_endpoints() {
+    let bootstrap_root = r"C:\Users\faste\.cache\vixen\ssh-bootstrap";
     let command = crate::ssh_bootstrap_windows_command(
         r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo",
-        &crate::ssh_bootstrap_windows_paths(r"C:\Users\faste", "ssh:toast", 57164, 57165, 57166),
+        &crate::ssh_bootstrap_windows_paths(bootstrap_root, "ssh:toast", 57164, 57165, 57166),
     );
     assert!(command.contains("vx-bootstrap endpoints"));
     assert!(command.contains("$runnerEndpoint"));

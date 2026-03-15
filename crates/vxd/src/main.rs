@@ -151,10 +151,20 @@ impl SshBootstrapTargetPlatform {
 }
 
 #[cfg(unix)]
+impl SshBootstrapTargetInfo {
+    fn windows_bootstrap_root(&self) -> &str {
+        self.windows_bootstrap_root
+            .as_deref()
+            .expect("windows bootstrap root only exists for Windows targets")
+    }
+}
+
+#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SshBootstrapTargetInfo {
     platform: SshBootstrapTargetPlatform,
     home: String,
+    windows_bootstrap_root: Option<String>,
 }
 
 pub(crate) fn parse_build_vx_executor_classes(
@@ -263,14 +273,14 @@ fn ssh_bootstrap_paths(remote_home: &str, class_label: &str) -> SshBootstrapPath
 
 #[cfg(unix)]
 fn ssh_bootstrap_windows_paths(
-    remote_home: &str,
+    bootstrap_root: &str,
     class_label: &str,
     store_port: u16,
     vfsd_port: u16,
     runner_port: u16,
 ) -> SshBootstrapWindowsPaths {
     let class_slug = ssh_bootstrap_label_slug(class_label);
-    let base = format!(r"{remote_home}\.cache\vixen\ssh-bootstrap\{class_slug}");
+    let base = format!(r"{bootstrap_root}\{class_slug}");
     let vx_home = format!(r"{base}\vx-home");
     SshBootstrapWindowsPaths {
         bare_repo_dir: format!(r"{base}\repo.git"),
@@ -280,6 +290,34 @@ fn ssh_bootstrap_windows_paths(
         store_endpoint: format!("127.0.0.1:{store_port}"),
         vfsd_endpoint: format!("127.0.0.1:{vfsd_port}"),
         runner_endpoint: format!("127.0.0.1:{runner_port}"),
+    }
+}
+
+#[cfg(unix)]
+fn windows_drive_prefix(path: &str) -> Option<&str> {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        Some(&path[..2])
+    } else {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn windows_bootstrap_root(
+    remote_home: &str,
+    cargo_home: Option<&str>,
+    rustup_home: Option<&str>,
+    tmp: Option<&str>,
+    temp: Option<&str>,
+) -> String {
+    let preferred_drive = [cargo_home, rustup_home, tmp, temp]
+        .into_iter()
+        .flatten()
+        .find_map(windows_drive_prefix);
+    match preferred_drive {
+        Some(drive) => format!(r"{drive}\vixen\ssh-bootstrap"),
+        None => format!(r"{remote_home}\.cache\vixen\ssh-bootstrap"),
     }
 }
 
@@ -721,20 +759,64 @@ async fn detect_ssh_bootstrap_target(
         .output()
         .await?;
     if windows_version.status.success() {
-        let home = ssh_control_output_windows(
+        let env_dump = ssh_control_output_windows(
             control_path,
             target,
             &[
                 "powershell",
                 "-NoProfile",
                 "-Command",
-                "[Environment]::GetFolderPath('UserProfile')",
+                concat!(
+                    "$pairs = @(",
+                    "  'HOME=' + [Environment]::GetFolderPath('UserProfile'), ",
+                    "  'CARGO_HOME=' + $env:CARGO_HOME, ",
+                    "  'RUSTUP_HOME=' + $env:RUSTUP_HOME, ",
+                    "  'TMP=' + $env:TMP, ",
+                    "  'TEMP=' + $env:TEMP",
+                    "); ",
+                    "$pairs | ForEach-Object { Write-Output $_ }"
+                ),
             ],
         )
         .await?;
+        let mut home = None::<String>;
+        let mut cargo_home = None::<String>;
+        let mut rustup_home = None::<String>;
+        let mut tmp = None::<String>;
+        let mut temp = None::<String>;
+        for line in env_dump.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let value = value.trim();
+            let value = if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            };
+            match key {
+                "HOME" => home = value,
+                "CARGO_HOME" => cargo_home = value,
+                "RUSTUP_HOME" => rustup_home = value,
+                "TMP" => tmp = value,
+                "TEMP" => temp = value,
+                _ => {}
+            }
+        }
+        let home = home.ok_or_else(|| {
+            eyre::eyre!("ssh bootstrap target {target} returned an empty Windows home")
+        })?;
+        let bootstrap_root = windows_bootstrap_root(
+            &home,
+            cargo_home.as_deref(),
+            rustup_home.as_deref(),
+            tmp.as_deref(),
+            temp.as_deref(),
+        );
         return Ok(SshBootstrapTargetInfo {
             platform: SshBootstrapTargetPlatform::Windows,
             home,
+            windows_bootstrap_root: Some(bootstrap_root),
         });
     }
 
@@ -746,6 +828,7 @@ async fn detect_ssh_bootstrap_target(
     Ok(SshBootstrapTargetInfo {
         platform: SshBootstrapTargetPlatform::Unix,
         home,
+        windows_bootstrap_root: None,
     })
 }
 
@@ -1110,8 +1193,13 @@ async fn connect_ssh_bootstrap_runner(
                 )
             }
             SshBootstrapTargetPlatform::Windows => {
-                let checkout_paths =
-                    ssh_bootstrap_windows_paths(&target_info.home, class_label, 0, 0, 0);
+                let checkout_paths = ssh_bootstrap_windows_paths(
+                    target_info.windows_bootstrap_root(),
+                    class_label,
+                    0,
+                    0,
+                    0,
+                );
                 let checkout_dir = checkout_paths.checkout_dir.clone();
                 windows_checkout = Some(checkout_paths);
                 let local_store_endpoint = ssh_bootstrap_local_tcp_endpoint()?;
@@ -1119,7 +1207,7 @@ async fn connect_ssh_bootstrap_runner(
                 let (remote_store_port, remote_vfsd_port, remote_runner_port) =
                     allocate_windows_ssh_bootstrap_ports(&control_path, target).await?;
                 let paths = ssh_bootstrap_windows_paths(
-                    &target_info.home,
+                    target_info.windows_bootstrap_root(),
                     class_label,
                     remote_store_port,
                     remote_vfsd_port,
@@ -1148,7 +1236,8 @@ async fn connect_ssh_bootstrap_runner(
             ssh_bootstrap_paths(&target_info.home, class_label).bare_repo_dir
         }
         SshBootstrapTargetPlatform::Windows => {
-            ssh_bootstrap_windows_paths(&target_info.home, class_label, 0, 0, 0).bare_repo_dir
+            ssh_bootstrap_windows_paths(target_info.windows_bootstrap_root(), class_label, 0, 0, 0)
+                .bare_repo_dir
         }
     };
     ensure_ssh_bootstrap_bare_repo(&control_path, target, &bare_repo_dir, &target_info.platform)
