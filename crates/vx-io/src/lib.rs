@@ -77,8 +77,23 @@ pub async fn atomic_write(
     match moire::fs::rename(temp_path.as_std_path(), path.as_std_path()).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let _ = moire::fs::remove_file(temp_path.as_std_path()).await;
-            Ok(())
+            match moire::fs::read(path.as_std_path()).await {
+                Ok(existing) if existing == contents => {
+                    let _ = moire::fs::remove_file(temp_path.as_std_path()).await;
+                    Ok(())
+                }
+                Ok(_) => {
+                    moire::fs::remove_file(path.as_std_path()).await?;
+                    moire::fs::rename(temp_path.as_std_path(), path.as_std_path()).await
+                }
+                Err(read_error) if read_error.kind() == std::io::ErrorKind::NotFound => {
+                    moire::fs::rename(temp_path.as_std_path(), path.as_std_path()).await
+                }
+                Err(read_error) => {
+                    let _ = moire::fs::remove_file(temp_path.as_std_path()).await;
+                    Err(read_error)
+                }
+            }
         }
         Err(error) => {
             let _ = moire::fs::remove_file(temp_path.as_std_path()).await;
@@ -125,6 +140,24 @@ mod tests {
         let path = Utf8PathBuf::from_path_buf(temp_dir.path().join("node.bin")).expect("utf8");
         let contents = b"hello atomic write";
 
+        atomic_write(&path, contents, false)
+            .await
+            .expect("atomic_write");
+
+        let actual = moire::fs::read(path.as_std_path()).await.expect("read");
+        assert_eq!(actual, contents);
+    }
+
+    #[tokio::test]
+    async fn atomic_write_repairs_corrupt_existing_bytes() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = Utf8PathBuf::from_path_buf(temp_dir.path().join("node.bin")).expect("utf8");
+
+        moire::fs::write(path.as_std_path(), b"\0\0\0\0")
+            .await
+            .expect("seed corrupt bytes");
+
+        let contents = b"hello atomic write";
         atomic_write(&path, contents, false)
             .await
             .expect("atomic_write");
