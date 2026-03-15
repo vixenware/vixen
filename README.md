@@ -52,7 +52,7 @@ The FSKit extension host lives in `apps/mac` as `Vixen.app`.
 
 - App bundle id: `eu.bearcove.vixen`
 - Extension bundle id: `eu.bearcove.vixenfs`
-- Mount helper expected by `vx-vfs`: `/Applications/Vixen.app/Contents/Helpers/vixenfs-mount`
+- App Group helper expected by `vx-vfs`: `/Applications/Vixen.app/Contents/Helpers/vixenfs-mount` (`--app-group-path` only)
 
 ## Limitations (v0)
 

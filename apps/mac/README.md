@@ -2,7 +2,7 @@
 
 ![Vixen fox logo](../../art/fox.svg)
 
-`apps/mac` contains the macOS app, FSKit extension, and mount helper used by `vx-vfs`.
+`apps/mac` contains the macOS app, FSKit extension, and the App Group path helper used by `vx-vfs`.
 
 Brand accent color: `#E88602`.
 
@@ -74,5 +74,5 @@ The release flow:
 `vx-vfs` expects:
 
 - App path: `/Applications/Vixen.app`
-- Mount helper: `/Applications/Vixen.app/Contents/Helpers/vixenfs-mount`
+- App Group helper (`--app-group-path`): `/Applications/Vixen.app/Contents/Helpers/vixenfs-mount`
 - Extension id visible in `pluginkit`: `eu.bearcove.vixenfs`
