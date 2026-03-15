@@ -135,8 +135,16 @@ fn ssh_bootstrap_paths_slug_implicit_ssh_class_labels() {
 #[test]
 fn ssh_bootstrap_windows_paths_use_tcp_layout() {
     let bootstrap_root = r"C:\Users\faste\.cache\vixen\ssh-bootstrap";
+    let remote_home = r"C:\Users\faste";
     assert_eq!(
-        crate::ssh_bootstrap_windows_paths(bootstrap_root, "ssh:toast", 57164, 57165, 57166),
+        crate::ssh_bootstrap_windows_paths(
+            bootstrap_root,
+            remote_home,
+            "ssh:toast",
+            57164,
+            57165,
+            57166
+        ),
         crate::SshBootstrapWindowsPaths {
             bare_repo_dir: r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo.git"
                 .to_string(),
@@ -218,9 +226,17 @@ fn ssh_bootstrap_remote_script_exports_vx_home_for_runner() {
 #[test]
 fn ssh_bootstrap_windows_command_announces_endpoints() {
     let bootstrap_root = r"C:\Users\faste\.cache\vixen\ssh-bootstrap";
+    let remote_home = r"C:\Users\faste";
     let command = crate::ssh_bootstrap_windows_command(
         r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo",
-        &crate::ssh_bootstrap_windows_paths(bootstrap_root, "ssh:toast", 57164, 57165, 57166),
+        &crate::ssh_bootstrap_windows_paths(
+            bootstrap_root,
+            remote_home,
+            "ssh:toast",
+            57164,
+            57165,
+            57166,
+        ),
     );
     assert!(command.contains("-EncodedCommand "));
     let encoded = command

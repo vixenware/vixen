@@ -276,6 +276,7 @@ fn ssh_bootstrap_paths(remote_home: &str, class_label: &str) -> SshBootstrapPath
 #[cfg(unix)]
 fn ssh_bootstrap_windows_paths(
     bootstrap_root: &str,
+    remote_home: &str,
     class_label: &str,
     store_port: u16,
     vfsd_port: u16,
@@ -283,7 +284,8 @@ fn ssh_bootstrap_windows_paths(
 ) -> SshBootstrapWindowsPaths {
     let class_slug = ssh_bootstrap_label_slug(class_label);
     let base = format!(r"{bootstrap_root}\{class_slug}");
-    let vx_home = format!(r"{base}\vx-home");
+    let state_base = format!(r"{remote_home}\.cache\vixen\ssh-bootstrap\{class_slug}");
+    let vx_home = format!(r"{state_base}\vx-home");
     SshBootstrapWindowsPaths {
         bare_repo_dir: format!(r"{base}\repo.git"),
         checkout_dir: format!(r"{base}\repo"),
@@ -1217,6 +1219,7 @@ async fn connect_ssh_bootstrap_runner(
             SshBootstrapTargetPlatform::Windows => {
                 let checkout_paths = ssh_bootstrap_windows_paths(
                     target_info.windows_bootstrap_root(),
+                    &target_info.home,
                     class_label,
                     0,
                     0,
@@ -1230,6 +1233,7 @@ async fn connect_ssh_bootstrap_runner(
                     allocate_windows_ssh_bootstrap_ports(&control_path, target).await?;
                 let paths = ssh_bootstrap_windows_paths(
                     target_info.windows_bootstrap_root(),
+                    &target_info.home,
                     class_label,
                     remote_store_port,
                     remote_vfsd_port,
@@ -1258,8 +1262,15 @@ async fn connect_ssh_bootstrap_runner(
             ssh_bootstrap_paths(&target_info.home, class_label).bare_repo_dir
         }
         SshBootstrapTargetPlatform::Windows => {
-            ssh_bootstrap_windows_paths(target_info.windows_bootstrap_root(), class_label, 0, 0, 0)
-                .bare_repo_dir
+            ssh_bootstrap_windows_paths(
+                target_info.windows_bootstrap_root(),
+                &target_info.home,
+                class_label,
+                0,
+                0,
+                0,
+            )
+            .bare_repo_dir
         }
     };
     ensure_ssh_bootstrap_bare_repo(&control_path, target, &bare_repo_dir, &target_info.platform)
