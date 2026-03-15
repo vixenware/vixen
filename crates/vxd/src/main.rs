@@ -35,6 +35,7 @@ use roam_core::acceptor;
 use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
 use roam_stream::StreamLink;
 use roam_types::{ConnectionSettings, Metadata};
+use serde_json::Value as JsonValue;
 use std::fs;
 use std::fs::OpenOptions;
 use std::net::TcpListener;
@@ -777,41 +778,32 @@ async fn detect_ssh_bootstrap_target(
                 "  if ([string]::IsNullOrEmpty($value)) { $value = [Environment]::GetEnvironmentVariable($name, 'Machine') }; ",
                 "  $value ",
                 "}; ",
-                "$pairs = @(",
-                "  'HOME=' + [Environment]::GetFolderPath('UserProfile'), ",
-                "  'CARGO_HOME=' + (Get-VxEnv 'CARGO_HOME'), ",
-                "  'RUSTUP_HOME=' + (Get-VxEnv 'RUSTUP_HOME'), ",
-                "  'TMP=' + (Get-VxEnv 'TMP'), ",
-                "  'TEMP=' + (Get-VxEnv 'TEMP')",
-                "); ",
-                "[Console]::Out.Write([string]::Join(\"`n\", $pairs))"
+                "$envInfo = [ordered]@{ ",
+                "  HOME = [Environment]::GetFolderPath('UserProfile'); ",
+                "  CARGO_HOME = (Get-VxEnv 'CARGO_HOME'); ",
+                "  RUSTUP_HOME = (Get-VxEnv 'RUSTUP_HOME'); ",
+                "  TMP = (Get-VxEnv 'TMP'); ",
+                "  TEMP = (Get-VxEnv 'TEMP') ",
+                "}; ",
+                "[Console]::Out.Write(($envInfo | ConvertTo-Json -Compress))"
             ),
         )
         .await?;
-        let mut home = None::<String>;
-        let mut cargo_home = None::<String>;
-        let mut rustup_home = None::<String>;
-        let mut tmp = None::<String>;
-        let mut temp = None::<String>;
-        for line in env_dump.lines() {
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            let value = value.trim();
-            let value = if value.is_empty() {
-                None
-            } else {
-                Some(value.to_string())
-            };
-            match key {
-                "HOME" => home = value,
-                "CARGO_HOME" => cargo_home = value,
-                "RUSTUP_HOME" => rustup_home = value,
-                "TMP" => tmp = value,
-                "TEMP" => temp = value,
-                _ => {}
-            }
-        }
+        let env_dump = serde_json::from_str::<JsonValue>(&env_dump)
+            .map_err(|error| eyre::eyre!("failed to parse Windows target env dump: {error}"))?;
+        let json_string = |key: &str| {
+            env_dump
+                .get(key)
+                .and_then(JsonValue::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        };
+        let home = json_string("HOME");
+        let cargo_home = json_string("CARGO_HOME");
+        let rustup_home = json_string("RUSTUP_HOME");
+        let tmp = json_string("TMP");
+        let temp = json_string("TEMP");
         let home = home.ok_or_else(|| {
             eyre::eyre!("ssh bootstrap target {target} returned an empty Windows home")
         })?;

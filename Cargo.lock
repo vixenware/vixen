@@ -4020,6 +4020,7 @@ dependencies = [
  "roam-core",
  "roam-stream",
  "roam-types",
+ "serde_json",
  "sha2",
  "tar",
  "tempfile",
