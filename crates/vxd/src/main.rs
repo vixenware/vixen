@@ -30,6 +30,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use eyre::{Result, WrapErr};
 use facet::Facet;
 use figue as args;
+use flate2::Compression as GzipCompression;
+use flate2::write::GzEncoder;
 use moire::task::FutureExt;
 use roam_core::acceptor;
 use roam_core::{AcceptedConnection, BareConduit, ConnectionAcceptor, Driver};
@@ -39,6 +41,7 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::fs;
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::TcpListener;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -1086,7 +1089,7 @@ async fn ensure_local_unix_vx_bootstrap_binary(
 }
 
 #[cfg(unix)]
-fn ssh_bootstrap_unix_loader_command(bootstrap_path: &str, binary_size: usize) -> String {
+fn ssh_bootstrap_unix_loader_command(bootstrap_path: &str, compressed_size: usize) -> String {
     format!(
         "sh -lc {} sh {} {}",
         shell_quote(
@@ -1095,14 +1098,14 @@ dest="$1"
 size="$2"
 mkdir -p "$(dirname "$dest")"
 tmp="${dest}.tmp.$$"
-dd of="$tmp" bs=1 count="$size" status=none
+head -c "$size" | gzip -dc > "$tmp"
 chmod +x "$tmp"
 mv "$tmp" "$dest"
 exec "$dest" --stdio
 "#
         ),
         shell_quote(bootstrap_path),
-        shell_quote(&binary_size.to_string()),
+        shell_quote(&compressed_size.to_string()),
     )
 }
 
@@ -1205,6 +1208,17 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
             })
         },
     )?;
+    let compressed_bootstrap_bytes = trace.complete(
+        "compress_local_vx_bootstrap_binary",
+        serde_json::json!({
+            "raw_bytes": bootstrap_bytes.len(),
+        }),
+        || -> Result<Vec<u8>> {
+            let mut encoder = GzEncoder::new(Vec::new(), GzipCompression::default());
+            encoder.write_all(&bootstrap_bytes)?;
+            Ok(encoder.finish()?)
+        },
+    )?;
     let local_source_files = trace.complete(
         "walk_local_source_manifest",
         serde_json::json!({
@@ -1220,7 +1234,7 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
     let paths = ssh_bootstrap_paths(&target_info.home, class_label);
     let remote_bootstrap_path = format!("{}/vx-bootstrap", paths.vx_home);
     let remote_command =
-        ssh_bootstrap_unix_loader_command(&remote_bootstrap_path, bootstrap_bytes.len());
+        ssh_bootstrap_unix_loader_command(&remote_bootstrap_path, compressed_bootstrap_bytes.len());
 
     let mut command = ssh_control_command(control_path, target);
     command
@@ -1248,9 +1262,10 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
         .complete_async(
             "upload_vx_bootstrap_binary",
             serde_json::json!({
-                "bytes": bootstrap_bytes.len(),
+                "compressed_bytes": compressed_bootstrap_bytes.len(),
+                "raw_bytes": bootstrap_bytes.len(),
             }),
-            stdin.write_all(&bootstrap_bytes),
+            stdin.write_all(&compressed_bootstrap_bytes),
         )
         .await?;
     trace
