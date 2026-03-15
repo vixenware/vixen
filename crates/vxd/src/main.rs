@@ -1052,7 +1052,7 @@ fn local_vx_bootstrap_binary_path(repo_root: &Utf8Path, target_triple: &str) -> 
     repo_root
         .join("target")
         .join(target_triple)
-        .join("debug")
+        .join("release")
         .join("vx-bootstrap")
 }
 
@@ -1067,6 +1067,7 @@ async fn ensure_local_unix_vx_bootstrap_binary(
         .arg("zigbuild")
         .arg("-p")
         .arg("vx-bootstrap")
+        .arg("--release")
         .arg("--target")
         .arg(target_triple)
         .current_dir(repo_root)

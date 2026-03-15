@@ -358,6 +358,7 @@ pub fn build_source_tree(request: &BuildSourceTreeRequest) -> Result<BuildSource
         let manifest_path = checkout_dir.join(&request.build_manifest_relpath);
         let mut cargo_args = vec![
             "build".to_string(),
+            "--release".to_string(),
             "--manifest-path".to_string(),
             manifest_path.as_str().to_string(),
         ];
