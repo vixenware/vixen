@@ -558,7 +558,7 @@ async fn prepare_ssh_bootstrap_windows_checkout(
             "if (-not (Test-Path (Join-Path $bareRepoDir 'HEAD'))) {{ if (Test-Path $bareRepoDir) {{ Remove-Item -Recurse -Force $bareRepoDir }}; git init --bare $bareRepoDir; if ($LASTEXITCODE -ne 0) {{ throw 'git init --bare failed' }} }}; ",
             "if (-not (Test-Path (Join-Path $checkoutDir '.git'))) {{ if (Test-Path $checkoutDir) {{ Remove-Item -Recurse -Force $checkoutDir }}; git clone $bareRepoDir $checkoutDir; if ($LASTEXITCODE -ne 0) {{ throw 'git clone failed' }} }}; ",
             "git -C $checkoutDir remote set-url origin $bareRepoDir; if ($LASTEXITCODE -ne 0) {{ throw 'git remote set-url failed' }}; ",
-            "git -C $checkoutDir checkout -- Cargo.lock crates/vx/Cargo.toml crates/vxd/Cargo.toml *> $null; if ($LASTEXITCODE -ne 0) {{ throw 'git checkout restore failed' }}; ",
+            "git -C $checkoutDir checkout -- Cargo.lock crates/vx/Cargo.toml crates/vxd/Cargo.toml *> $null; ",
             "git -C $checkoutDir fetch origin ('refs/vixen-bootstrap/' + $commit); if ($LASTEXITCODE -ne 0) {{ throw 'git fetch failed' }}; ",
             "git -C $checkoutDir checkout --detach $commit; if ($LASTEXITCODE -ne 0) {{ throw 'git checkout --detach failed' }}; ",
             "$manifests = @((Join-Path $checkoutDir 'crates\\vx\\Cargo.toml'), (Join-Path $checkoutDir 'crates\\vxd\\Cargo.toml')); ",
