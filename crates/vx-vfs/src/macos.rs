@@ -16,6 +16,7 @@ use roam_core::acceptor;
 use roam_shm::bootstrap::{self, decode_request};
 use roam_shm::{HostHub, Segment, SegmentConfig, SizeClassConfig};
 use shm_primitives::FileCleanup;
+use std::io::ErrorKind;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -219,6 +220,7 @@ where
                 if moire::fs::try_exists(&shm_path).await.unwrap_or(false)
                     && let Err(error) = moire::fs::remove_file(&shm_path).await
                 {
+                    cleanup_session_dir(session_paths.sid()).await;
                     let _ = sid_tx.send(Err(format!(
                         "failed to remove stale shm file {}: {error}",
                         shm_path.display()
@@ -244,6 +246,7 @@ where
                 ) {
                     Ok(segment) => std::sync::Arc::new(segment),
                     Err(error) => {
+                        cleanup_session_dir(session_paths.sid()).await;
                         let _ = sid_tx.send(Err(format!(
                             "failed to create SHM hub {}: {error}",
                             shm_path.display()
@@ -260,6 +263,7 @@ where
                     .unwrap_or(false)
                     && let Err(error) = moire::fs::remove_file(&control_sock_path).await
                 {
+                    cleanup_session_dir(session_paths.sid()).await;
                     let _ = sid_tx.send(Err(format!(
                         "failed to remove stale SHM control socket {}: {error}",
                         control_sock_path.display()
@@ -270,6 +274,7 @@ where
                 let control_listener = match tokio::net::UnixListener::bind(&control_sock_path) {
                     Ok(listener) => listener,
                     Err(error) => {
+                        cleanup_session_dir(session_paths.sid()).await;
                         let _ = sid_tx.send(Err(format!(
                             "failed to bind SHM control socket {}: {error}",
                             control_sock_path.display()
@@ -284,8 +289,11 @@ where
                     let (mut control_stream, _peer) = match control_listener.accept().await {
                         Ok(parts) => parts,
                         Err(error) => {
-                            tracing::warn!(%error, "failed to accept SHM control connection");
-                            continue;
+                            if error.kind() == ErrorKind::Interrupted {
+                                continue;
+                            }
+                            tracing::error!(%error, "SHM control listener failed");
+                            break;
                         }
                     };
 
@@ -366,13 +374,13 @@ where
                                 }
                             };
                             tracing::debug!(peer = %peer_id.get(), "SHM peer driver established");
-                            let _caller = caller;
-                            let _session_handle = session_handle;
-                            std::future::pending::<()>().await;
+                            vx_io::net::park_session(caller, session_handle).await;
                         }
                         .named("shm_host_driver"),
                     );
                 }
+
+                cleanup_session_dir(session_paths.sid()).await;
             });
             let _ = vfs_dead_tx_for_shutdown.send(true);
         })

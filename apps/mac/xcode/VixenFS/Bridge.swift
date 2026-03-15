@@ -332,7 +332,10 @@ actor VfsConnection {
         }
 
         if let existing = peers[targetSid], let terminalError = existing.terminalError {
-            throw terminalError
+            log.notice(
+                "Retrying SHM connect after terminal session error sid=\(targetSid, privacy: .public): \(terminalError.localizedDescription, privacy: .public)"
+            )
+            peers.removeValue(forKey: targetSid)
         }
 
         log.info("Connecting over SHM sid=\(targetSid, privacy: .public)")

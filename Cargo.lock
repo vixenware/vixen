@@ -3913,6 +3913,7 @@ dependencies = [
  "tracing",
  "vixenfs-proto",
  "vx-fskit",
+ "vx-io",
  "vx-vfs-types",
  "windows-projfs",
 ]
