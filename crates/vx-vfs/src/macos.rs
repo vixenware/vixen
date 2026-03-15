@@ -96,7 +96,7 @@ where
     tracing::debug!(%sid, mount_path = %config.mount_path, debug_mode, "calling vx_fskit::setup");
 
     // vx_fskit::setup handles: prerequisites, stale mount cleanup, mkdir,
-    // /sbin/mount -F -t vixenfs, and health.json verification.
+    // /sbin/mount -F -t vixenfs, and status.json verification.
     let fskit_result = vx_fskit::setup(&config.mount_path, debug_mode).await;
 
     if let Some(ref error) = fskit_result.error {
@@ -129,7 +129,7 @@ where
         });
     }
 
-    // Mount syscall succeeded and health.json confirms the extension is up.
+    // Mount syscall succeeded and status.json confirms the extension is up.
     // Now wait for the SHM connection (extension connecting to our SHM segment).
     tracing::debug!("fskit mount ok, waiting for SHM readiness");
 
@@ -585,7 +585,7 @@ async fn cleanup_session_dir(sid: &str) {
 /// TODO(persistent-vixenfs): Remove this helper lookup once pre-mount SHM
 /// bootstrap no longer depends on an App Group socket path. The control socket
 /// must exist before `vx_fskit::setup` mounts the extension, so
-/// `/.vixenfs/health.json` cannot be the bootstrap source yet.
+/// `/.vixenfs/status.json` cannot be the bootstrap source yet.
 pub async fn resolve_app_group_path() -> Result<PathBuf, String> {
     let output = Command::new(VIXEN_MOUNT_HELPER_PATH)
         .arg("--app-group-path")

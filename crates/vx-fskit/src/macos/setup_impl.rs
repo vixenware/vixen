@@ -1,7 +1,7 @@
 use camino::Utf8PathBuf;
 use moire::process::Command;
 
-use super::probe::{self, HealthProbe};
+use super::probe::{self, StatusProbe};
 use super::{FsKitResult, Log, VIXEN_APP_PATH, VIXEN_EXTENSION_IDENTIFIER, mount_path_candidates};
 
 const RESTART_FSKIT_COMMAND: &str = "sudo killall fskitd fskit_agent";
@@ -18,7 +18,7 @@ struct MountFailureDiagnosis {
 /// Mount a VixenFS filesystem.
 ///
 /// Checks prerequisites (app installed, codesign, extension registered+enabled),
-/// cleans up broken mounts, mounts, and verifies via health.json.
+/// cleans up broken mounts, mounts, and verifies via status.json.
 pub async fn setup(mount_path: &Utf8PathBuf, debug: bool) -> FsKitResult {
     let mut log = Log::new();
     let candidates = mount_path_candidates(mount_path).await;
@@ -199,20 +199,20 @@ pub async fn setup(mount_path: &Utf8PathBuf, debug: bool) -> FsKitResult {
         return FsKitResult::failure(log.into_entries(), diagnosis.summary, diagnosis.remediation);
     }
 
-    // --- Verify via health.json ---
+    // --- Verify via status.json ---
 
     // Retry a few times — the extension needs time to start up and connect.
     for attempt in 1..=5 {
-        log.info(format!("health check attempt {attempt}/5"));
-        let health = probe::probe(mount_path, &candidates, &mut log, true).await;
-        match &health.health {
-            HealthProbe::Ok(json) => match facet_json::from_str::<super::HealthPayload>(json) {
+        log.info(format!("status check attempt {attempt}/5"));
+        let status = probe::probe(mount_path, &candidates, &mut log, true).await;
+        match &status.status {
+            StatusProbe::Ok(json) => match facet_json::from_str::<super::StatusPayload>(json) {
                 Ok(payload) if payload.connected => {
-                    log.ok("health.json: connected=true, mount is healthy");
+                    log.ok("status.json: connected=true, mount is healthy");
                     return FsKitResult::success(log.into_entries());
                 }
                 Ok(_payload) => {
-                    log.info("health.json: connected=false");
+                    log.info("status.json: connected=false");
                     if attempt < 5 {
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         continue;
@@ -224,34 +224,34 @@ pub async fn setup(mount_path: &Utf8PathBuf, debug: bool) -> FsKitResult {
                     );
                 }
                 Err(e) => {
-                    log.fail(format!("health.json: parse error: {e}"));
+                    log.fail(format!("status.json: parse error: {e}"));
                     if attempt < 5 {
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         continue;
                     }
                     return FsKitResult::failure(
                         log.into_entries(),
-                        format!("health.json parse error: {e}"),
+                        format!("status.json parse error: {e}"),
                         vec!["sudo killall fskitd fskit_agent".to_string()],
                     );
                 }
             },
-            HealthProbe::Timeout => {
-                log.fail("health.json: timed out (mount is zombied)");
+            StatusProbe::Timeout => {
+                log.fail("status.json: timed out (mount is zombied)");
                 return FsKitResult::failure(
                     log.into_entries(),
-                    "mount is zombied — /bin/cat health.json timed out",
+                    "mount is zombied — /bin/cat status.json timed out",
                     vec!["sudo killall fskitd fskit_agent".to_string()],
                 );
             }
-            HealthProbe::Failed(_) | HealthProbe::NotAttempted => {
+            StatusProbe::Failed(_) | StatusProbe::NotAttempted => {
                 if attempt < 5 {
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     continue;
                 }
                 return FsKitResult::failure(
                     log.into_entries(),
-                    "mount failed — could not read health.json after 5 attempts",
+                    "mount failed — could not read status.json after 5 attempts",
                     vec!["sudo killall fskitd fskit_agent".to_string()],
                 );
             }

@@ -147,19 +147,16 @@ final class Volume: FSVolume, @unchecked Sendable {
     // Virtual items served entirely from the Swift side (never hit vx-vfsd).
     // IDs chosen high to avoid collision with vx-vfsd's allocator (starts at 2).
     private static let vixenfsDirId: UInt64 = 0xFFFF_FFFF_FFFE_0001
-    private static let statsJsonId: UInt64 = 0xFFFF_FFFF_FFFE_0002
-    private static let healthJsonId: UInt64 = 0xFFFF_FFFF_FFFE_0003
+    private static let statusJsonId: UInt64 = 0xFFFF_FFFF_FFFE_0002
     private static let vixenfsDirName = ".vixenfs"
-    private static let statsJsonName = "stats.json"
-    private static let healthJsonName = "health.json"
+    private static let statusJsonName = "status.json"
     private static let volumeStatsLogIntervalNs: UInt64 = 2_000_000_000
     private static let volumeStatsLogLock = NSLock()
     nonisolated(unsafe) private static var volumeStatsLastLogNs: UInt64 = 0
     nonisolated(unsafe) private static var volumeStatsSuppressed: UInt64 = 0
 
     private func isVirtualItem(_ itemId: UInt64) -> Bool {
-        itemId == Volume.vixenfsDirId || itemId == Volume.statsJsonId
-            || itemId == Volume.healthJsonId
+        itemId == Volume.vixenfsDirId || itemId == Volume.statusJsonId
     }
 
     private func vixenfsDirAttributes() -> FSItem.Attributes {
@@ -174,23 +171,37 @@ final class Volume: FSVolume, @unchecked Sendable {
         )
     }
 
-    private func statsJsonAttributes() async -> FSItem.Attributes {
-        let data = await readTelemetry.toJSON()
-        return FSItem.Attributes.fromVfs(
-            itemId: Volume.statsJsonId,
-            parentId: Volume.vixenfsDirId,
-            itemType: .file,
-            size: UInt64(data.count),
-            modifiedTime: 0,
-            createdTime: 0,
-            mode: 0o444
-        )
+    private func statusJsonData() async -> Data {
+        let telemetryData = await readTelemetry.toJSON()
+        let healthData = await ConnectionHealth.shared.toJSON()
+
+        guard var statusObject =
+            (try? JSONSerialization.jsonObject(with: telemetryData, options: [])) as? [String: Any],
+            let healthObject =
+                (try? JSONSerialization.jsonObject(with: healthData, options: [])) as? [String: Any]
+        else {
+            return Data("{}\n".utf8)
+        }
+
+        for (key, value) in healthObject {
+            statusObject[key] = value
+        }
+
+        guard var data = try? JSONSerialization.data(
+            withJSONObject: statusObject,
+            options: [.prettyPrinted, .sortedKeys]
+        ) else {
+            return Data("{}\n".utf8)
+        }
+
+        data.append(0x0A)
+        return data
     }
 
-    private func healthJsonAttributes() async -> FSItem.Attributes {
-        let data = await ConnectionHealth.shared.toJSON()
+    private func statusJsonAttributes() async -> FSItem.Attributes {
+        let data = await statusJsonData()
         return FSItem.Attributes.fromVfs(
-            itemId: Volume.healthJsonId,
+            itemId: Volume.statusJsonId,
             parentId: Volume.vixenfsDirId,
             itemType: .file,
             size: UInt64(data.count),
@@ -591,14 +602,8 @@ extension Volume: FSVolume.Operations {
                 logOpSuccess(op, details: "itemId=\(item.itemId) source=virtual")
                 return attrs
             }
-            if item.itemId == Volume.statsJsonId {
-                let attrs = await statsJsonAttributes()
-                item.updateAttributes(attrs)
-                logOpSuccess(op, details: "itemId=\(item.itemId) source=virtual")
-                return attrs
-            }
-            if item.itemId == Volume.healthJsonId {
-                let attrs = await healthJsonAttributes()
+            if item.itemId == Volume.statusJsonId {
+                let attrs = await statusJsonAttributes()
                 item.updateAttributes(attrs)
                 logOpSuccess(op, details: "itemId=\(item.itemId) source=virtual")
                 return attrs
@@ -755,28 +760,15 @@ extension Volume: FSVolume.Operations {
             return (item, item.name)
         }
 
-        // Virtual stats.json under .vixenfs
-        if dirItem.itemId == Volume.vixenfsDirId && nameStr == Volume.statsJsonName {
-            let attrs = await statsJsonAttributes()
-            if let existing = getCachedItem(Volume.statsJsonId) {
+        // Virtual status.json under .vixenfs
+        if dirItem.itemId == Volume.vixenfsDirId && nameStr == Volume.statusJsonName {
+            let attrs = await statusJsonAttributes()
+            if let existing = getCachedItem(Volume.statusJsonId) {
                 existing.updateAttributes(attrs)
                 return (existing, existing.name)
             }
             let item = Item(
-                itemId: Volume.statsJsonId, name: Volume.statsJsonName, attributes: attrs)
-            cacheItem(item)
-            return (item, item.name)
-        }
-
-        // Virtual health.json under .vixenfs
-        if dirItem.itemId == Volume.vixenfsDirId && nameStr == Volume.healthJsonName {
-            let attrs = await healthJsonAttributes()
-            if let existing = getCachedItem(Volume.healthJsonId) {
-                existing.updateAttributes(attrs)
-                return (existing, existing.name)
-            }
-            let item = Item(
-                itemId: Volume.healthJsonId, name: Volume.healthJsonName, attributes: attrs)
+                itemId: Volume.statusJsonId, name: Volume.statusJsonName, attributes: attrs)
             cacheItem(item)
             return (item, item.name)
         }
@@ -1071,45 +1063,17 @@ extension Volume: FSVolume.Operations {
             // Virtual .vixenfs directory: list virtual files
             if dirItem.itemId == Volume.vixenfsDirId {
                 if cookieValue == 0 {
-                    let statsAttrs = await statsJsonAttributes()
-                    let statsItem = Item(
-                        itemId: Volume.statsJsonId, name: Volume.statsJsonName,
-                        attributes: statsAttrs)
-                    cacheItem(statsItem)
-                    let shouldContinue = packer.packEntry(
-                        name: FSFileName(string: Volume.statsJsonName),
-                        itemType: .file,
-                        itemID: statsAttrs.fileID,
-                        nextCookie: FSDirectoryCookie(1),
-                        attributes: attributes != nil ? statsAttrs : nil
-                    )
-                    if shouldContinue {
-                        let healthAttrs = await healthJsonAttributes()
-                        let healthItem = Item(
-                            itemId: Volume.healthJsonId, name: Volume.healthJsonName,
-                            attributes: healthAttrs)
-                        cacheItem(healthItem)
-                        _ = packer.packEntry(
-                            name: FSFileName(string: Volume.healthJsonName),
-                            itemType: .file,
-                            itemID: healthAttrs.fileID,
-                            nextCookie: FSDirectoryCookie(2),
-                            attributes: attributes != nil ? healthAttrs : nil
-                        )
-                    }
-                }
-                if cookieValue == 1 {
-                    let healthAttrs = await healthJsonAttributes()
-                    let healthItem = Item(
-                        itemId: Volume.healthJsonId, name: Volume.healthJsonName,
-                        attributes: healthAttrs)
-                    cacheItem(healthItem)
+                    let statusAttrs = await statusJsonAttributes()
+                    let statusItem = Item(
+                        itemId: Volume.statusJsonId, name: Volume.statusJsonName,
+                        attributes: statusAttrs)
+                    cacheItem(statusItem)
                     _ = packer.packEntry(
-                        name: FSFileName(string: Volume.healthJsonName),
+                        name: FSFileName(string: Volume.statusJsonName),
                         itemType: .file,
-                        itemID: healthAttrs.fileID,
-                        nextCookie: FSDirectoryCookie(2),
-                        attributes: attributes != nil ? healthAttrs : nil
+                        itemID: statusAttrs.fileID,
+                        nextCookie: FSDirectoryCookie(1),
+                        attributes: attributes != nil ? statusAttrs : nil
                     )
                 }
                 logOpSuccess(op, details: "itemId=\(dirItem.itemId) source=virtual")
@@ -1197,13 +1161,8 @@ extension Volume: FSVolume.ReadWriteOperations {
         log.debug("read: itemId=\(item.itemId) offset=\(offset) length=\(length)")
 
         // Virtual files under .vixenfs: serve directly
-        if item.itemId == Volume.statsJsonId || item.itemId == Volume.healthJsonId {
-            let data: Data
-            if item.itemId == Volume.statsJsonId {
-                data = await readTelemetry.toJSON()
-            } else {
-                data = await ConnectionHealth.shared.toJSON()
-            }
+        if item.itemId == Volume.statusJsonId {
+            let data = await statusJsonData()
             let start = min(Int(offset), data.count)
             let end = min(start + max(length, 0), data.count)
             let slice = data[start..<end]
