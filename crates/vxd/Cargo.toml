@@ -29,6 +29,7 @@ libc = { workspace = true }
 petgraph = { workspace = true }
 tokio-util = { workspace = true }
 hex = { workspace = true }
+base64 = "0.22"
 sha2 = "0.10"
 
 vx-store-proto = { workspace = true }

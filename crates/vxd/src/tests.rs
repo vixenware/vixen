@@ -1,4 +1,5 @@
 use super::*;
+use base64::Engine;
 use flate2::Compression as GzipCompression;
 use flate2::write::GzEncoder;
 use moire::sync::SyncMutex;
@@ -221,8 +222,21 @@ fn ssh_bootstrap_windows_command_announces_endpoints() {
         r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo",
         &crate::ssh_bootstrap_windows_paths(bootstrap_root, "ssh:toast", 57164, 57165, 57166),
     );
-    assert!(command.contains("vx-bootstrap endpoints"));
-    assert!(command.contains("$runnerEndpoint"));
+    assert!(command.contains("-EncodedCommand "));
+    let encoded = command
+        .split_once("-EncodedCommand ")
+        .map(|(_, encoded)| encoded)
+        .expect("encoded PowerShell command");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .expect("base64 decode");
+    let utf16 = bytes
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    let script = String::from_utf16(&utf16).expect("utf16 decode");
+    assert!(script.contains("vx-bootstrap endpoints"));
+    assert!(script.contains("$runnerEndpoint"));
 }
 
 #[cfg(unix)]

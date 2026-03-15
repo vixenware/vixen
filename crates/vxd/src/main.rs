@@ -25,6 +25,7 @@ mod tests;
 
 use ::moire::process::Child;
 use ::moire::sync::SyncMutex;
+use base64::Engine;
 use camino::{Utf8Path, Utf8PathBuf};
 use eyre::Result;
 use facet::Facet;
@@ -461,6 +462,21 @@ fn powershell_single_quote(value: &str) -> String {
 }
 
 #[cfg(unix)]
+fn powershell_encoded_command(script: &str) -> String {
+    let utf16le = script
+        .encode_utf16()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect::<Vec<_>>();
+    base64::engine::general_purpose::STANDARD.encode(utf16le)
+}
+
+#[cfg(unix)]
+fn powershell_command_line(script: &str) -> String {
+    let encoded = powershell_encoded_command(script);
+    format!("powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}")
+}
+
+#[cfg(unix)]
 fn ssh_bootstrap_windows_command(checkout_dir: &str, paths: &SshBootstrapWindowsPaths) -> String {
     let checkout_dir = powershell_single_quote(checkout_dir);
     let vx_home = powershell_single_quote(&paths.vx_home);
@@ -468,10 +484,9 @@ fn ssh_bootstrap_windows_command(checkout_dir: &str, paths: &SshBootstrapWindows
     let store_endpoint = powershell_single_quote(&paths.store_endpoint);
     let vfsd_endpoint = powershell_single_quote(&paths.vfsd_endpoint);
     let runner_endpoint = powershell_single_quote(&paths.runner_endpoint);
-    format!(
+    let script = format!(
         concat!(
-            "powershell -NoProfile -ExecutionPolicy Bypass -Command ",
-            "\"$ErrorActionPreference = 'Stop'; ",
+            "$ErrorActionPreference = 'Stop'; ",
             "$vxHome = '{vx_home}'; ",
             "$storeRoot = '{store_root}'; ",
             "$storeEndpoint = '{store_endpoint}'; ",
@@ -500,7 +515,7 @@ fn ssh_bootstrap_windows_command(checkout_dir: &str, paths: &SshBootstrapWindows
             "$storeProc = Start-Process -FilePath $storeExe -ArgumentList @('--root', $storeRoot, '--listen', $storeEndpoint) -PassThru; ",
             "try {{ & $runnerExe --vx-home $vxHome --store $storeEndpoint --vfsd $vfsdEndpoint --listen $runnerEndpoint }} ",
             "finally {{ ",
-            "if ($storeProc -and -not $storeProc.HasExited) {{ Stop-Process -Id $storeProc.Id -Force }} }}\""
+            "if ($storeProc -and -not $storeProc.HasExited) {{ Stop-Process -Id $storeProc.Id -Force }} }}"
         ),
         vx_home = vx_home,
         store_root = store_root,
@@ -508,7 +523,8 @@ fn ssh_bootstrap_windows_command(checkout_dir: &str, paths: &SshBootstrapWindows
         vfsd_endpoint = vfsd_endpoint,
         runner_endpoint = runner_endpoint,
         checkout_dir = checkout_dir,
-    )
+    );
+    powershell_command_line(&script)
 }
 
 #[cfg(unix)]
@@ -521,52 +537,43 @@ async fn prepare_ssh_bootstrap_windows_checkout(
     vx_home: &str,
     store_root: &str,
 ) -> Result<()> {
-    ssh_control_output_windows(
-        control_path,
-        target,
-        &[
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            &format!(
-                concat!(
-                    "$ErrorActionPreference = 'Stop'; ",
-                    "$bareRepoDir = '{bare_repo_dir}'; ",
-                    "$commit = '{commit}'; ",
-                    "$checkoutDir = '{checkout_dir}'; ",
-                    "$vxHome = '{vx_home}'; ",
-                    "$storeRoot = '{store_root}'; ",
-                    "$existing = Get-Process vx-runner,vx-store,vx-vfsd -ErrorAction SilentlyContinue; ",
-                    "if ($existing) {{ ",
-                    "  $existing | Stop-Process -Force; ",
-                    "  for ($i = 0; $i -lt 200; $i++) {{ ",
-                    "    if (-not (Get-Process vx-runner,vx-store,vx-vfsd -ErrorAction SilentlyContinue)) {{ break }}; ",
-                    "    Start-Sleep -Milliseconds 100; ",
-                    "  }}; ",
-                    "  if (Get-Process vx-runner,vx-store,vx-vfsd -ErrorAction SilentlyContinue) {{ throw 'timed out waiting for prior bootstrap processes to exit' }}; ",
-                    "}}; ",
-                    "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $bareRepoDir), (Split-Path -Parent $checkoutDir), $vxHome, $storeRoot | Out-Null; ",
-                    "if (-not (Test-Path (Join-Path $bareRepoDir 'HEAD'))) {{ if (Test-Path $bareRepoDir) {{ Remove-Item -Recurse -Force $bareRepoDir }}; git init --bare $bareRepoDir; if ($LASTEXITCODE -ne 0) {{ throw 'git init --bare failed' }} }}; ",
-                    "if (-not (Test-Path (Join-Path $checkoutDir '.git'))) {{ if (Test-Path $checkoutDir) {{ Remove-Item -Recurse -Force $checkoutDir }}; git clone $bareRepoDir $checkoutDir; if ($LASTEXITCODE -ne 0) {{ throw 'git clone failed' }} }}; ",
-                    "git -C $checkoutDir remote set-url origin $bareRepoDir; if ($LASTEXITCODE -ne 0) {{ throw 'git remote set-url failed' }}; ",
-                    "git -C $checkoutDir checkout -- Cargo.lock crates/vx/Cargo.toml crates/vxd/Cargo.toml *> $null; if ($LASTEXITCODE -ne 0) {{ throw 'git checkout restore failed' }}; ",
-                    "git -C $checkoutDir fetch origin ('refs/vixen-bootstrap/' + $commit); if ($LASTEXITCODE -ne 0) {{ throw 'git fetch failed' }}; ",
-                    "git -C $checkoutDir checkout --detach $commit; if ($LASTEXITCODE -ne 0) {{ throw 'git checkout --detach failed' }}; ",
-                    "$manifests = @((Join-Path $checkoutDir 'crates\\vx\\Cargo.toml'), (Join-Path $checkoutDir 'crates\\vxd\\Cargo.toml')); ",
-                    "foreach ($manifest in $manifests) {{ if (Test-Path $manifest) {{ $lines = Get-Content $manifest; $updated = @($lines | Where-Object {{ $_ -notlike 'tree-sitter-vixen = *' }}); if ($updated.Count -ne $lines.Count) {{ Set-Content -Path $manifest -Value $updated }} }} }}; ",
-                    "cargo build --manifest-path (Join-Path $checkoutDir 'Cargo.toml') -p vx-store -p vx-vfsd -p vx-runner; if ($LASTEXITCODE -ne 0) {{ throw 'cargo build failed' }}; ",
-                    "git -C $checkoutDir checkout -- Cargo.lock crates/vx/Cargo.toml crates/vxd/Cargo.toml *> $null; if ($LASTEXITCODE -ne 0) {{ throw 'git checkout restore failed' }}; ",
-                    "Write-Output $checkoutDir"
-                ),
-                bare_repo_dir = powershell_single_quote(bare_repo_dir),
-                commit = powershell_single_quote(commit),
-                checkout_dir = powershell_single_quote(checkout_dir),
-                vx_home = powershell_single_quote(vx_home),
-                store_root = powershell_single_quote(store_root),
-            ),
-        ],
-    )
-    .await?;
+    let script = format!(
+        concat!(
+            "$ErrorActionPreference = 'Stop'; ",
+            "$bareRepoDir = '{bare_repo_dir}'; ",
+            "$commit = '{commit}'; ",
+            "$checkoutDir = '{checkout_dir}'; ",
+            "$vxHome = '{vx_home}'; ",
+            "$storeRoot = '{store_root}'; ",
+            "$existing = Get-Process vx-runner,vx-store,vx-vfsd -ErrorAction SilentlyContinue; ",
+            "if ($existing) {{ ",
+            "  $existing | Stop-Process -Force; ",
+            "  for ($i = 0; $i -lt 200; $i++) {{ ",
+            "    if (-not (Get-Process vx-runner,vx-store,vx-vfsd -ErrorAction SilentlyContinue)) {{ break }}; ",
+            "    Start-Sleep -Milliseconds 100; ",
+            "  }}; ",
+            "  if (Get-Process vx-runner,vx-store,vx-vfsd -ErrorAction SilentlyContinue) {{ throw 'timed out waiting for prior bootstrap processes to exit' }}; ",
+            "}}; ",
+            "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $bareRepoDir), (Split-Path -Parent $checkoutDir), $vxHome, $storeRoot | Out-Null; ",
+            "if (-not (Test-Path (Join-Path $bareRepoDir 'HEAD'))) {{ if (Test-Path $bareRepoDir) {{ Remove-Item -Recurse -Force $bareRepoDir }}; git init --bare $bareRepoDir; if ($LASTEXITCODE -ne 0) {{ throw 'git init --bare failed' }} }}; ",
+            "if (-not (Test-Path (Join-Path $checkoutDir '.git'))) {{ if (Test-Path $checkoutDir) {{ Remove-Item -Recurse -Force $checkoutDir }}; git clone $bareRepoDir $checkoutDir; if ($LASTEXITCODE -ne 0) {{ throw 'git clone failed' }} }}; ",
+            "git -C $checkoutDir remote set-url origin $bareRepoDir; if ($LASTEXITCODE -ne 0) {{ throw 'git remote set-url failed' }}; ",
+            "git -C $checkoutDir checkout -- Cargo.lock crates/vx/Cargo.toml crates/vxd/Cargo.toml *> $null; if ($LASTEXITCODE -ne 0) {{ throw 'git checkout restore failed' }}; ",
+            "git -C $checkoutDir fetch origin ('refs/vixen-bootstrap/' + $commit); if ($LASTEXITCODE -ne 0) {{ throw 'git fetch failed' }}; ",
+            "git -C $checkoutDir checkout --detach $commit; if ($LASTEXITCODE -ne 0) {{ throw 'git checkout --detach failed' }}; ",
+            "$manifests = @((Join-Path $checkoutDir 'crates\\vx\\Cargo.toml'), (Join-Path $checkoutDir 'crates\\vxd\\Cargo.toml')); ",
+            "foreach ($manifest in $manifests) {{ if (Test-Path $manifest) {{ $lines = Get-Content $manifest; $updated = @($lines | Where-Object {{ $_ -notlike 'tree-sitter-vixen = *' }}); if ($updated.Count -ne $lines.Count) {{ Set-Content -Path $manifest -Value $updated }} }} }}; ",
+            "cargo build --manifest-path (Join-Path $checkoutDir 'Cargo.toml') -p vx-store -p vx-vfsd -p vx-runner; if ($LASTEXITCODE -ne 0) {{ throw 'cargo build failed' }}; ",
+            "git -C $checkoutDir checkout -- Cargo.lock crates/vx/Cargo.toml crates/vxd/Cargo.toml *> $null; if ($LASTEXITCODE -ne 0) {{ throw 'git checkout restore failed' }}; ",
+            "Write-Output $checkoutDir"
+        ),
+        bare_repo_dir = powershell_single_quote(bare_repo_dir),
+        commit = powershell_single_quote(commit),
+        checkout_dir = powershell_single_quote(checkout_dir),
+        vx_home = powershell_single_quote(vx_home),
+        store_root = powershell_single_quote(store_root),
+    );
+    ssh_control_output_windows(control_path, target, &script).await?;
     Ok(())
 }
 
@@ -665,31 +672,13 @@ async fn ssh_control_output_unix(
 }
 
 #[cfg(unix)]
-fn cmd_quote(value: &str) -> String {
-    if value.is_empty()
-        || value
-            .chars()
-            .any(|ch| ch.is_whitespace() || matches!(ch, '&' | '|' | '(' | ')' | '<' | '>'))
-    {
-        format!("\"{}\"", value.replace('"', "\\\""))
-    } else {
-        value.to_string()
-    }
-}
-
-#[cfg(unix)]
 async fn ssh_control_output_windows(
     control_path: &Utf8Path,
     target: &str,
-    args: &[&str],
+    script: &str,
 ) -> Result<String> {
     let mut command = ssh_control_command(control_path, target);
-    let remote_command = args
-        .iter()
-        .map(|arg| cmd_quote(arg))
-        .collect::<Vec<_>>()
-        .join(" ");
-    command.arg(remote_command);
+    command.arg(powershell_command_line(script));
     let output = command.output().await?;
     if !output.status.success() {
         eyre::bail!(
@@ -762,27 +751,22 @@ async fn detect_ssh_bootstrap_target(
         let env_dump = ssh_control_output_windows(
             control_path,
             target,
-            &[
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                concat!(
-                    "function Get-VxEnv([string]$name) { ",
-                    "  $value = [Environment]::GetEnvironmentVariable($name, 'Process'); ",
-                    "  if ([string]::IsNullOrEmpty($value)) { $value = [Environment]::GetEnvironmentVariable($name, 'User') }; ",
-                    "  if ([string]::IsNullOrEmpty($value)) { $value = [Environment]::GetEnvironmentVariable($name, 'Machine') }; ",
-                    "  $value ",
-                    "}; ",
-                    "$pairs = @(",
-                    "  'HOME=' + [Environment]::GetFolderPath('UserProfile'), ",
-                    "  'CARGO_HOME=' + (Get-VxEnv 'CARGO_HOME'), ",
-                    "  'RUSTUP_HOME=' + (Get-VxEnv 'RUSTUP_HOME'), ",
-                    "  'TMP=' + (Get-VxEnv 'TMP'), ",
-                    "  'TEMP=' + (Get-VxEnv 'TEMP')",
-                    "); ",
-                    "$pairs | ForEach-Object { Write-Output $_ }"
-                ),
-            ],
+            concat!(
+                "function Get-VxEnv([string]$name) { ",
+                "  $value = [Environment]::GetEnvironmentVariable($name, 'Process'); ",
+                "  if ([string]::IsNullOrEmpty($value)) { $value = [Environment]::GetEnvironmentVariable($name, 'User') }; ",
+                "  if ([string]::IsNullOrEmpty($value)) { $value = [Environment]::GetEnvironmentVariable($name, 'Machine') }; ",
+                "  $value ",
+                "}; ",
+                "$pairs = @(",
+                "  'HOME=' + [Environment]::GetFolderPath('UserProfile'), ",
+                "  'CARGO_HOME=' + (Get-VxEnv 'CARGO_HOME'), ",
+                "  'RUSTUP_HOME=' + (Get-VxEnv 'RUSTUP_HOME'), ",
+                "  'TMP=' + (Get-VxEnv 'TMP'), ",
+                "  'TEMP=' + (Get-VxEnv 'TEMP')",
+                "); ",
+                "$pairs | ForEach-Object { Write-Output $_ }"
+            ),
         )
         .await?;
         let mut home = None::<String>;
@@ -846,25 +830,20 @@ async fn allocate_windows_ssh_bootstrap_ports(
     let output = ssh_control_output_windows(
         control_path,
         target,
-        &[
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            concat!(
-                "$listeners = @(); ",
-                "for ($port = 30000; $port -lt 49152 -and $listeners.Count -lt 3; $port++) { ",
-                "  try { ",
-                "    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port); ",
-                "    $listener.Start(); ",
-                "    $listeners += $listener; ",
-                "  } catch { } ",
-                "}; ",
-                "if ($listeners.Count -ne 3) { throw 'failed to reserve three Windows bootstrap ports outside the dynamic range' }; ",
-                "$ports = $listeners | ForEach-Object { $_.LocalEndpoint.Port }; ",
-                "$listeners | ForEach-Object { $_.Stop() }; ",
-                "$ports -join ','"
-            ),
-        ],
+        concat!(
+            "$listeners = @(); ",
+            "for ($port = 30000; $port -lt 49152 -and $listeners.Count -lt 3; $port++) { ",
+            "  try { ",
+            "    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port); ",
+            "    $listener.Start(); ",
+            "    $listeners += $listener; ",
+            "  } catch { } ",
+            "}; ",
+            "if ($listeners.Count -ne 3) { throw 'failed to reserve three Windows bootstrap ports outside the dynamic range' }; ",
+            "$ports = $listeners | ForEach-Object { $_.LocalEndpoint.Port }; ",
+            "$listeners | ForEach-Object { $_.Stop() }; ",
+            "$ports -join ','"
+        ),
     )
     .await?;
 
@@ -965,20 +944,11 @@ async fn ensure_ssh_bootstrap_bare_repo(
             .await?;
         }
         SshBootstrapTargetPlatform::Windows => {
-            ssh_control_output_windows(
-                control_path,
-                target,
-                &[
-                    "powershell",
-                    "-NoProfile",
-                    "-Command",
-                    &format!(
-                        "$ErrorActionPreference = 'Stop'; $dir = '{}'; New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dir) | Out-Null; if (-not (Test-Path (Join-Path $dir 'HEAD'))) {{ if (Test-Path $dir) {{ Remove-Item -Recurse -Force $dir }}; git init --bare $dir }}",
-                        powershell_single_quote(bare_repo_dir)
-                    ),
-                ],
-            )
-            .await?;
+            let script = format!(
+                "$ErrorActionPreference = 'Stop'; $dir = '{}'; New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dir) | Out-Null; if (-not (Test-Path (Join-Path $dir 'HEAD'))) {{ if (Test-Path $dir) {{ Remove-Item -Recurse -Force $dir }}; git init --bare $dir }}",
+                powershell_single_quote(bare_repo_dir)
+            );
+            ssh_control_output_windows(control_path, target, &script).await?;
         }
     }
     Ok(())
