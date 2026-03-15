@@ -78,13 +78,8 @@ impl ConnectionAcceptor for RunnerVirtualAcceptor {
 }
 
 pub(crate) fn runner_mount_base() -> Utf8PathBuf {
-    // Option 1: VX_HOME-based path (works with FSKit, but has system policy restrictions on unsigned binaries)
-    let vx_home = Utf8PathBuf::from(
-        std::env::var("VX_HOME")
-            .expect("VX_HOME not set — vx-runner must be launched by `vx` or with VX_HOME set"),
-    );
-
-    vx_home.join("vfs")
+    // Global long-lived VixenFS mount path. vx-vfsd owns mount lifecycle.
+    Utf8PathBuf::from("/tmp/vx/vfs")
 }
 
 /// vx-runner - Worker daemon
@@ -238,7 +233,6 @@ async fn boot_runner(
 
     let store_endpoint = Endpoint::parse(store_addr)?;
     let vfsd_endpoint = Endpoint::parse(vfsd_addr)?;
-    let mount_path = runner_mount_base();
 
     let store_builder = ServiceBuilder::new("vx-store", store_endpoint.clone())
         .caller_name("vx-runner")
@@ -246,12 +240,7 @@ async fn boot_runner(
 
     let vfsd_builder = ServiceBuilder::new("vx-vfsd", vfsd_endpoint.clone())
         .caller_name("vx-runner")
-        .args(&[
-            "--mount",
-            mount_path.as_str(),
-            "--store",
-            &store_endpoint.display(),
-        ])
+        .args(&["--store", &store_endpoint.display()])
         .log_path(vx_home.join("vfsd.log"))
         .env("VX_HOME", vx_home.as_str());
 
@@ -665,8 +654,7 @@ pub(crate) fn register_child_pgroup(pgid: u32) {
 /// Spawns vx-reaper which watches our PID via kqueue. vx-runner writes
 /// child process group IDs to the reaper's stdin as it spawns them.
 /// If vx-runner dies for any reason (including SIGKILL), the reaper
-/// kills all known child process groups, preventing orphaned compiler
-/// subprocesses from getting stuck on a dead FSKit mount.
+/// kills all known child process groups to avoid orphaned compilers.
 #[cfg(target_os = "macos")]
 fn spawn_reaper() {
     use std::process::Command;
@@ -684,18 +672,16 @@ fn spawn_reaper() {
         return;
     };
 
-    let mount_path = runner_mount_base();
-    let log_file = mount_path
+    let mount_base = runner_mount_base();
+    let log_file = mount_base
         .as_std_path()
         .parent()
-        .unwrap_or(mount_path.as_std_path())
+        .unwrap_or(mount_base.as_std_path())
         .join("vx-reaper.log");
 
     match Command::new(&reaper_path)
         .arg("--parent-pid")
         .arg(my_pid.to_string())
-        .arg("--mount-path")
-        .arg(mount_path.as_str())
         .arg("--log-file")
         .arg(&log_file)
         .stdin(std::process::Stdio::piped())

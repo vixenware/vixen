@@ -285,8 +285,8 @@ struct Args {
     #[facet(args::named, default = "127.0.0.1:0")]
     listen: String,
 
-    /// FUSE mount point
-    #[facet(args::named)]
+    /// VFS mount point (defaults to stable global path)
+    #[facet(args::named, default = "/tmp/vx/vfs")]
     mount: Utf8PathBuf,
 
     /// vx-store RPC address
