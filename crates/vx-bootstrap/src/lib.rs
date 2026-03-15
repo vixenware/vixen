@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
+use std::time::UNIX_EPOCH;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use eyre::{Context, Result};
@@ -28,13 +29,23 @@ pub struct SourceFileEntry {
     pub blake3_hex: String,
     pub executable: bool,
     pub size: u64,
+    pub modified_unix_millis: Option<u64>,
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct GetCachedSourceManifestRequest {
+    pub checkout_dir: String,
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct GetCachedSourceManifestResponse {
+    pub files: Vec<SourceFileEntry>,
 }
 
 #[derive(Debug, Clone, Facet)]
 pub struct PlanSourceSyncRequest {
     pub checkout_dir: String,
     pub files: Vec<SourceFileEntry>,
-    pub preserve_roots: Vec<String>,
 }
 
 #[derive(Debug, Clone, Facet)]
@@ -84,6 +95,7 @@ pub struct BootstrapError {
 #[repr(u8)]
 pub enum BootstrapRequest {
     Hello,
+    GetCachedSourceManifest(GetCachedSourceManifestRequest),
     PlanSourceSync(PlanSourceSyncRequest),
     PutSourceFile(PutSourceFileRequest),
     BuildSourceTree(BuildSourceTreeRequest),
@@ -95,6 +107,7 @@ pub enum BootstrapRequest {
 #[repr(u8)]
 pub enum BootstrapResponse {
     Hello(HostFacts),
+    GetCachedSourceManifest(GetCachedSourceManifestResponse),
     PlanSourceSync(PlanSourceSyncResponse),
     PutSourceFileAck,
     BuildSourceTree(BuildSourceTreeResponse),
@@ -216,6 +229,15 @@ pub fn serve_stdio() -> Result<()> {
 fn handle_request(request: BootstrapRequest) -> BootstrapResponse {
     match request {
         BootstrapRequest::Hello => BootstrapResponse::Hello(detect_host_facts()),
+        BootstrapRequest::GetCachedSourceManifest(request) => {
+            match get_cached_source_manifest(&request) {
+                Ok(response) => BootstrapResponse::GetCachedSourceManifest(response),
+                Err(error) => BootstrapResponse::Error(BootstrapError {
+                    kind: "get_cached_source_manifest".to_string(),
+                    message: format!("{error:#}"),
+                }),
+            }
+        }
         BootstrapRequest::PlanSourceSync(request) => match plan_source_sync(&request) {
             Ok(response) => BootstrapResponse::PlanSourceSync(response),
             Err(error) => BootstrapResponse::Error(BootstrapError {
@@ -245,6 +267,16 @@ fn handle_request(request: BootstrapRequest) -> BootstrapResponse {
     }
 }
 
+pub fn get_cached_source_manifest(
+    request: &GetCachedSourceManifestRequest,
+) -> Result<GetCachedSourceManifestResponse> {
+    let checkout_dir = Utf8Path::new(&request.checkout_dir);
+    let files = load_cached_source_manifest(checkout_dir)?
+        .into_values()
+        .collect::<Vec<_>>();
+    Ok(GetCachedSourceManifestResponse { files })
+}
+
 pub fn plan_source_sync(request: &PlanSourceSyncRequest) -> Result<PlanSourceSyncResponse> {
     let checkout_dir = Utf8Path::new(&request.checkout_dir);
     if let Some(parent) = checkout_dir.parent() {
@@ -265,6 +297,7 @@ pub fn plan_source_sync(request: &PlanSourceSyncRequest) -> Result<PlanSourceSyn
                         blake3_hex: entry.blake3_hex.clone(),
                         executable: entry.executable,
                         size: entry.size,
+                        modified_unix_millis: entry.modified_unix_millis,
                     },
                 )
             })
@@ -400,6 +433,14 @@ fn cached_source_manifest_path(checkout_dir: &Utf8Path) -> Utf8PathBuf {
         .join("source-manifest.postcard")
 }
 
+#[derive(Debug, Clone, Facet)]
+struct LegacySourceFileEntry {
+    path: String,
+    blake3_hex: String,
+    executable: bool,
+    size: u64,
+}
+
 fn load_cached_source_manifest(
     checkout_dir: &Utf8Path,
 ) -> Result<BTreeMap<String, SourceFileEntry>> {
@@ -408,8 +449,20 @@ fn load_cached_source_manifest(
         return Ok(BTreeMap::new());
     }
     let bytes = fs::read(&path).wrap_err_with(|| format!("failed to read {}", path))?;
-    let entries = facet_postcard::from_slice::<Vec<SourceFileEntry>>(&bytes)
-        .wrap_err_with(|| format!("failed to decode cached source manifest {}", path))?;
+    let entries = match facet_postcard::from_slice::<Vec<SourceFileEntry>>(&bytes) {
+        Ok(entries) => entries,
+        Err(_) => facet_postcard::from_slice::<Vec<LegacySourceFileEntry>>(&bytes)
+            .wrap_err_with(|| format!("failed to decode cached source manifest {}", path))?
+            .into_iter()
+            .map(|entry| SourceFileEntry {
+                path: entry.path,
+                blake3_hex: entry.blake3_hex,
+                executable: entry.executable,
+                size: entry.size,
+                modified_unix_millis: None,
+            })
+            .collect(),
+    };
     Ok(entries
         .into_iter()
         .map(|entry| (entry.path.clone(), entry))
@@ -429,6 +482,12 @@ fn save_cached_source_manifest(
         facet_postcard::to_vec(&entries).wrap_err("failed to encode cached source manifest")?;
     fs::write(&path, bytes).wrap_err_with(|| format!("failed to write {}", path))?;
     Ok(())
+}
+
+pub fn file_modified_unix_millis(metadata: &fs::Metadata) -> Option<u64> {
+    let modified = metadata.modified().ok()?;
+    let duration = modified.duration_since(UNIX_EPOCH).ok()?;
+    u64::try_from(duration.as_millis()).ok()
 }
 
 fn snapshot_scrubbed_files(
@@ -561,8 +620,8 @@ mod tests {
                 blake3_hex: "deadbeef".to_string(),
                 executable: false,
                 size: 17,
+                modified_unix_millis: Some(123),
             }],
-            preserve_roots: vec!["target".to_string()],
         });
         let payload = facet_postcard::to_vec(&request).expect("encode request");
         let mut framed = Vec::new();
@@ -600,6 +659,7 @@ mod tests {
                         blake3_hex: blake3::hash(b"old").to_hex().to_string(),
                         executable: false,
                         size: 3,
+                        modified_unix_millis: Some(1),
                     },
                 ),
                 (
@@ -609,6 +669,7 @@ mod tests {
                         blake3_hex: blake3::hash(b"stale").to_hex().to_string(),
                         executable: false,
                         size: 5,
+                        modified_unix_millis: Some(2),
                     },
                 ),
             ]),
@@ -625,15 +686,16 @@ mod tests {
                         .to_string(),
                     executable: false,
                     size: 22,
+                    modified_unix_millis: Some(3),
                 },
                 SourceFileEntry {
                     path: "src/lib.rs".to_string(),
                     blake3_hex: blake3::hash(b"new").to_hex().to_string(),
                     executable: false,
                     size: 3,
+                    modified_unix_millis: Some(4),
                 },
             ],
-            preserve_roots: vec!["target".to_string()],
         };
         let response = plan_source_sync(&request).expect("plan source sync");
         assert_eq!(
@@ -658,6 +720,7 @@ mod tests {
                 blake3_hex: blake3::hash(b"fn main() {}\n").to_hex().to_string(),
                 executable: false,
                 size: 13,
+                modified_unix_millis: Some(123),
             },
             contents: b"fn main() {}\n".to_vec(),
         })

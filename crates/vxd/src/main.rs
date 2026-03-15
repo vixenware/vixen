@@ -50,8 +50,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use vx_bootstrap::{
-    BootstrapRequest, BootstrapResponse, BuildSourceTreeRequest, PlanSourceSyncRequest,
-    PutSourceFileRequest, SourceFileEntry,
+    BootstrapRequest, BootstrapResponse, BuildSourceTreeRequest, GetCachedSourceManifestRequest,
+    PlanSourceSyncRequest, PutSourceFileRequest, SourceFileEntry, file_modified_unix_millis,
 };
 use vx_io::boot::{BootDispatcher, BootGate, BootTx};
 use vx_io::net::{Endpoint, Listener};
@@ -1133,10 +1133,19 @@ fn should_skip_local_bootstrap_source_path(relpath: &Utf8Path) -> bool {
 }
 
 #[cfg(unix)]
+#[derive(Debug, Clone, Copy, Default)]
+struct LocalBootstrapSourceManifestStats {
+    reused_count: usize,
+    hashed_count: usize,
+}
+
+#[cfg(unix)]
 fn collect_local_bootstrap_source_files(
     repo_root: &Utf8Path,
     current: &Utf8Path,
+    cached_manifest: &BTreeMap<String, SourceFileEntry>,
     files: &mut Vec<SourceFileEntry>,
+    stats: &mut LocalBootstrapSourceManifestStats,
 ) -> Result<()> {
     for entry in fs::read_dir(current).wrap_err_with(|| format!("failed to read {}", current))? {
         let entry = entry.wrap_err_with(|| format!("failed to read entry under {}", current))?;
@@ -1155,29 +1164,54 @@ fn collect_local_bootstrap_source_files(
             continue;
         }
         if metadata.is_dir() {
-            collect_local_bootstrap_source_files(repo_root, &path, files)?;
+            collect_local_bootstrap_source_files(repo_root, &path, cached_manifest, files, stats)?;
             continue;
         }
         if !metadata.is_file() {
             continue;
         }
+        let relpath_string = relpath.as_str().to_string();
+        let executable = metadata.permissions().mode() & 0o111 != 0;
+        let modified_unix_millis = file_modified_unix_millis(&metadata);
+        if let Some(cached_entry) = cached_manifest.get(&relpath_string)
+            && cached_entry.size == metadata.len()
+            && cached_entry.executable == executable
+            && modified_unix_millis.is_some()
+            && cached_entry.modified_unix_millis == modified_unix_millis
+        {
+            files.push(cached_entry.clone());
+            stats.reused_count += 1;
+            continue;
+        }
         let contents = fs::read(&path).wrap_err_with(|| format!("failed to read {}", path))?;
         files.push(SourceFileEntry {
-            path: relpath.as_str().to_string(),
+            path: relpath_string,
             blake3_hex: blake3::hash(&contents).to_hex().to_string(),
-            executable: metadata.permissions().mode() & 0o111 != 0,
+            executable,
             size: metadata.len(),
+            modified_unix_millis,
         });
+        stats.hashed_count += 1;
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn local_bootstrap_source_files(repo_root: &Utf8Path) -> Result<Vec<SourceFileEntry>> {
+fn local_bootstrap_source_files(
+    repo_root: &Utf8Path,
+    cached_manifest: &BTreeMap<String, SourceFileEntry>,
+) -> Result<(Vec<SourceFileEntry>, LocalBootstrapSourceManifestStats)> {
     let mut files = Vec::new();
-    collect_local_bootstrap_source_files(repo_root, repo_root, &mut files)?;
+    let mut stats = LocalBootstrapSourceManifestStats::default();
+    collect_local_bootstrap_source_files(
+        repo_root,
+        repo_root,
+        cached_manifest,
+        &mut files,
+        &mut stats,
+    )?;
     files.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(files)
+    Ok((files, stats))
 }
 
 #[cfg(unix)]
@@ -1220,18 +1254,6 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
             Ok(encoder.finish()?)
         },
     )?;
-    let local_source_files = trace.complete(
-        "walk_local_source_manifest",
-        serde_json::json!({
-            "repo_root": repo_root.as_str(),
-        }),
-        || local_bootstrap_source_files(repo_root),
-    )?;
-    let local_source_map = local_source_files
-        .iter()
-        .cloned()
-        .map(|entry| (entry.path.clone(), entry))
-        .collect::<BTreeMap<_, _>>();
     let paths = ssh_bootstrap_paths(&target_info.home, class_label);
     let remote_bootstrap_path = format!("{}/vx-bootstrap", paths.vx_home);
     let remote_command =
@@ -1285,11 +1307,64 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
             ),
             other => eyre::bail!("unexpected vx-bootstrap hello response: {other:?}"),
         })?;
+    let cached_manifest_entries = trace
+        .complete_async(
+            "remote_get_cached_source_manifest",
+            serde_json::json!({}),
+            async {
+                write_bootstrap_request_frame(
+                    &mut stdin,
+                    &BootstrapRequest::GetCachedSourceManifest(GetCachedSourceManifestRequest {
+                        checkout_dir: paths.checkout_dir.clone(),
+                    }),
+                )
+                .await?;
+                read_bootstrap_response_frame(&mut stdout).await
+            },
+        )
+        .await?
+        .ok_or_else(|| {
+            eyre::eyre!("vx-bootstrap closed before get_cached_source_manifest response")
+        })
+        .and_then(|response| match response {
+            BootstrapResponse::GetCachedSourceManifest(response) => Ok(response.files),
+            BootstrapResponse::Error(error) => eyre::bail!(
+                "vx-bootstrap get_cached_source_manifest failed: {}: {}",
+                error.kind,
+                error.message
+            ),
+            other => eyre::bail!(
+                "unexpected vx-bootstrap get_cached_source_manifest response: {other:?}"
+            ),
+        })?;
+    let cached_manifest = cached_manifest_entries
+        .into_iter()
+        .map(|entry| (entry.path.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let (local_source_files, manifest_stats) = trace.complete(
+        "walk_local_source_manifest",
+        serde_json::json!({
+            "repo_root": repo_root.as_str(),
+            "cached_entries": cached_manifest.len(),
+        }),
+        || local_bootstrap_source_files(repo_root, &cached_manifest),
+    )?;
+    trace.instant(
+        "walk_local_source_manifest_summary",
+        serde_json::json!({
+            "reused_count": manifest_stats.reused_count,
+            "hashed_count": manifest_stats.hashed_count,
+        }),
+    );
+    let local_source_map = local_source_files
+        .iter()
+        .cloned()
+        .map(|entry| (entry.path.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
 
     let request = PlanSourceSyncRequest {
         checkout_dir: paths.checkout_dir.clone(),
         files: local_source_files,
-        preserve_roots: vec!["target".to_string()],
     };
     let plan_file_count = request.files.len();
     let plan_response = trace
