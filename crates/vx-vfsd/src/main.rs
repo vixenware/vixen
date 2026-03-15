@@ -59,6 +59,15 @@ struct Canary {
 /// but NOT u64::MAX because FSItem.Identifier(rawValue:) returns nil for that value.
 const CANARY_ITEM_ID: ItemId = 0xFFFF_FFFF_FFFD_0001;
 const ROOT_ITEM_ID: ItemId = 1;
+const MACOS_GLOBAL_MOUNT_PATH: &str = "/tmp/vx/vfs";
+
+fn effective_mount_path(configured_mount: &Utf8PathBuf) -> Utf8PathBuf {
+    if cfg!(target_os = "macos") {
+        Utf8PathBuf::from(MACOS_GLOBAL_MOUNT_PATH)
+    } else {
+        configured_mount.clone()
+    }
+}
 
 impl SharedVfs {
     fn new(inner: Arc<CasVfs>) -> Self {
@@ -317,9 +326,18 @@ async fn async_main() -> Result<()> {
         return Ok(());
     }
 
+    let mount = effective_mount_path(&args.mount);
+    if cfg!(target_os = "macos") && mount != args.mount {
+        tracing::info!(
+            configured_mount = %args.mount,
+            mount = %mount,
+            "ignoring configured mount path on macOS; using stable global mount path",
+        );
+    }
+
     tracing::debug!(
         listen = %args.listen,
-        mount = %args.mount,
+        mount = %mount,
         store = %args.store,
         "starting vx-vfsd"
     );
@@ -345,7 +363,7 @@ async fn async_main() -> Result<()> {
     {
         let gate = Arc::clone(&gate);
         let store_addr = args.store.clone();
-        let mount = args.mount.clone();
+        let mount = mount.clone();
         moire::task::spawn(
             async move {
                 tracing::info!("Booting vx-vfsd");
