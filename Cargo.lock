@@ -3900,6 +3900,7 @@ dependencies = [
  "cfg-if",
  "facet",
  "facet-error",
+ "facet-json",
  "fastrand",
  "fuse3",
  "futures-util",

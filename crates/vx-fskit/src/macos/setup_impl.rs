@@ -207,20 +207,29 @@ pub async fn setup(mount_path: &Utf8PathBuf, debug: bool) -> FsKitResult {
         let status = probe::probe(mount_path, &candidates, &mut log, true).await;
         match &status.status {
             StatusProbe::Ok(json) => match facet_json::from_str::<super::StatusPayload>(json) {
-                Ok(payload) if payload.connected => {
-                    log.ok("status.json: connected=true, mount is healthy");
-                    return FsKitResult::success(log.into_entries());
-                }
-                Ok(_payload) => {
-                    log.info("status.json: connected=false");
+                Ok(payload) => {
+                    let has_app_group_path = payload
+                        .app_group_path
+                        .as_deref()
+                        .map(str::trim)
+                        .is_some_and(|path| !path.is_empty());
+                    if has_app_group_path {
+                        log.ok(format!(
+                            "status.json: app_group_path present (connected={})",
+                            payload.connected
+                        ));
+                        return FsKitResult::success(log.into_entries());
+                    }
+
+                    log.info("status.json: app_group_path missing");
                     if attempt < 5 {
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         continue;
                     }
                     return FsKitResult::failure(
                         log.into_entries(),
-                        "extension running but backend not connected",
-                        vec![],
+                        "mount failed — status.json missing app_group_path",
+                        vec!["sudo killall fskitd fskit_agent".to_string()],
                     );
                 }
                 Err(e) => {

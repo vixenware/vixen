@@ -7,6 +7,7 @@
 //! - `vx-vfs`, which serves VFS connections over SHM.
 
 use crate::types::{VfsConfig, VfsError, VfsStart};
+use camino::Utf8Path;
 use moire::process::Command;
 use moire::sync::mpsc;
 use moire::sync::watch;
@@ -21,7 +22,7 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use vixenfs_proto::{Vfs, VfsDiskNotify, VfsDispatcher};
-use vx_vfs_types::{VIXEN_MOUNT_HELPER_PATH, VfsAction, VfsDiagnostic, VfsIssueCode};
+use vx_vfs_types::{VfsAction, VfsDiagnostic, VfsIssueCode};
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_GC_AGE: Duration = Duration::from_secs(6 * 60 * 60);
 const SHM_MAX_PAYLOAD_SIZE: u32 = 2_u32 * 1024 * 1024 * 1024;
@@ -87,20 +88,13 @@ where
 {
     tracing::debug!(mount_path = %config.mount_path, "entering macos vfs startup");
 
-    let (mount_ready_tx, mut mount_ready_rx) = moire::sync::mpsc::channel("mount_ready", 2);
-    let (vfs_dead_tx, vfs_dead_rx) = moire::sync::watch::channel("vfs_dead", false);
-    let sid = spawn_shm_loop(vfs, mount_ready_tx, vfs_dead_tx)?;
-
     let debug_mode = std::env::var("VIXENFS_DEBUG").as_deref() == Ok("1");
-
-    tracing::debug!(%sid, mount_path = %config.mount_path, debug_mode, "calling vx_fskit::setup");
 
     // vx_fskit::setup handles: prerequisites, stale mount cleanup, mkdir,
     // /sbin/mount -F -t vixenfs, and status.json verification.
     let fskit_result = vx_fskit::setup(&config.mount_path, debug_mode).await;
 
     if let Some(ref error) = fskit_result.error {
-        cleanup_session_dir(&sid).await;
         let log_detail = fskit_result
             .log
             .iter()
@@ -129,9 +123,24 @@ where
         });
     }
 
-    // Mount syscall succeeded and status.json confirms the extension is up.
-    // Now wait for the SHM connection (extension connecting to our SHM segment).
-    tracing::debug!("fskit mount ok, waiting for SHM readiness");
+    let app_group_root = resolve_app_group_path(&config.mount_path)
+        .await
+        .map_err(|message| VfsError::CommandFailed {
+            program: "vx-vfs",
+            message,
+            _diagnostics: vec![],
+        })?;
+
+    let (mount_ready_tx, mut mount_ready_rx) = moire::sync::mpsc::channel("mount_ready", 2);
+    let (vfs_dead_tx, vfs_dead_rx) = moire::sync::watch::channel("vfs_dead", false);
+    let sid = spawn_shm_loop(vfs, app_group_root.clone(), mount_ready_tx, vfs_dead_tx)?;
+
+    if let Err(error) = poke_sid_mount(&config.mount_path, &sid).await {
+        tracing::warn!(%sid, %error, "failed to poke sid path after SHM setup");
+    }
+
+    // Mount syscall succeeded, status.json is readable, and SHM socket is now live.
+    tracing::debug!(%sid, mount_path = %config.mount_path, "fskit mount ok, waiting for SHM readiness");
 
     match tokio::time::timeout(MOUNT_TIMEOUT, mount_ready_rx.recv()).await {
         Ok(Some(())) => {
@@ -142,7 +151,7 @@ where
             })
         }
         Ok(None) => {
-            cleanup_session_dir(&sid).await;
+            cleanup_session_dir(&app_group_root, &sid).await;
             Err(VfsError::CommandFailed {
                 program: "vx-vfs",
                 message: "SHM readiness channel closed before extension connected".to_string(),
@@ -150,7 +159,7 @@ where
             })
         }
         Err(_) => {
-            cleanup_session_dir(&sid).await;
+            cleanup_session_dir(&app_group_root, &sid).await;
             Err(VfsError::CommandFailed {
                 program: "vx-vfs",
                 message: format!(
@@ -164,6 +173,7 @@ where
 
 fn spawn_shm_loop<T>(
     vfs: T,
+    app_group_root: PathBuf,
     mount_ready_tx: mpsc::Sender<()>,
     vfs_dead_tx: watch::Sender<bool>,
 ) -> Result<String, VfsError>
@@ -183,14 +193,6 @@ where
                 .build()
                 .expect("failed to create VFS tokio runtime");
             rt.block_on(async move {
-                let app_group_root = match resolve_app_group_path().await {
-                    Ok(path) => path,
-                    Err(error) => {
-                        let _ = sid_tx.send(Err(format!("failed to resolve App Group path: {error}")));
-                        return;
-                    }
-                };
-
                 let sid = random_sid_hex();
                 let session_paths = match SessionPaths::new(&app_group_root, sid.clone()) {
                     Ok(paths) => paths,
@@ -220,7 +222,7 @@ where
                 if moire::fs::try_exists(&shm_path).await.unwrap_or(false)
                     && let Err(error) = moire::fs::remove_file(&shm_path).await
                 {
-                    cleanup_session_dir(session_paths.sid()).await;
+                    cleanup_session_dir(&app_group_root, session_paths.sid()).await;
                     let _ = sid_tx.send(Err(format!(
                         "failed to remove stale shm file {}: {error}",
                         shm_path.display()
@@ -246,7 +248,7 @@ where
                 ) {
                     Ok(segment) => std::sync::Arc::new(segment),
                     Err(error) => {
-                        cleanup_session_dir(session_paths.sid()).await;
+                        cleanup_session_dir(&app_group_root, session_paths.sid()).await;
                         let _ = sid_tx.send(Err(format!(
                             "failed to create SHM hub {}: {error}",
                             shm_path.display()
@@ -263,7 +265,7 @@ where
                     .unwrap_or(false)
                     && let Err(error) = moire::fs::remove_file(&control_sock_path).await
                 {
-                    cleanup_session_dir(session_paths.sid()).await;
+                    cleanup_session_dir(&app_group_root, session_paths.sid()).await;
                     let _ = sid_tx.send(Err(format!(
                         "failed to remove stale SHM control socket {}: {error}",
                         control_sock_path.display()
@@ -274,7 +276,7 @@ where
                 let control_listener = match tokio::net::UnixListener::bind(&control_sock_path) {
                     Ok(listener) => listener,
                     Err(error) => {
-                        cleanup_session_dir(session_paths.sid()).await;
+                        cleanup_session_dir(&app_group_root, session_paths.sid()).await;
                         let _ = sid_tx.send(Err(format!(
                             "failed to bind SHM control socket {}: {error}",
                             control_sock_path.display()
@@ -380,7 +382,7 @@ where
                     );
                 }
 
-                cleanup_session_dir(session_paths.sid()).await;
+                cleanup_session_dir(&app_group_root, session_paths.sid()).await;
             });
             let _ = vfs_dead_tx_for_shutdown.send(true);
         })
@@ -519,15 +521,8 @@ fn control_socket_path_for_sid(root: &Path, sid: &str) -> PathBuf {
     root.join(format!("c-{sid}.sock"))
 }
 
-async fn cleanup_session_dir(sid: &str) {
-    let app_group_root = match resolve_app_group_path().await {
-        Ok(path) => path,
-        Err(error) => {
-            tracing::warn!(%sid, %error, "failed to resolve App Group path for SHM cleanup");
-            return;
-        }
-    };
-    let control_sock_path = control_socket_path_for_sid(&app_group_root, sid);
+async fn cleanup_session_dir(app_group_root: &Path, sid: &str) {
+    let control_sock_path = control_socket_path_for_sid(app_group_root, sid);
     match moire::fs::remove_file(&control_sock_path).await {
         Ok(()) => tracing::debug!(
             %sid,
@@ -547,7 +542,7 @@ async fn cleanup_session_dir(sid: &str) {
         tracing::warn!(%sid, "invalid sid during SHM cleanup");
         return;
     }
-    let session_paths = match SessionPaths::new(&app_group_root, sid.to_string()) {
+    let session_paths = match SessionPaths::new(app_group_root, sid.to_string()) {
         Ok(paths) => paths,
         Err(error) => {
             tracing::warn!(%sid, %error, "failed to construct SHM cleanup paths");
@@ -575,39 +570,62 @@ async fn cleanup_session_dir(sid: &str) {
     }
 }
 
-/// Resolve the App Group container path via the `vixenfs-mount` helper.
-///
-/// The helper is codesigned with the App Group entitlement, so it can call
-/// `FileManager.containerURL(forSecurityApplicationGroupIdentifier:)` and
-/// return the resolved path. This lets VXRunner (a plain Rust binary) discover
-/// the shared container without needing its own App Group entitlement.
-///
-/// TODO(persistent-vixenfs): Remove this helper lookup once pre-mount SHM
-/// bootstrap no longer depends on an App Group socket path. The control socket
-/// must exist before `vx_fskit::setup` mounts the extension, so
-/// `/.vixenfs/status.json` cannot be the bootstrap source yet.
-pub async fn resolve_app_group_path() -> Result<PathBuf, String> {
-    let output = Command::new(VIXEN_MOUNT_HELPER_PATH)
-        .arg("--app-group-path")
+/// Resolve the App Group container path from the mounted VixenFS status payload.
+pub async fn resolve_app_group_path(mount_path: &Utf8Path) -> Result<PathBuf, String> {
+    let status_json = read_status_json(mount_path).await?;
+    let payload = facet_json::from_str::<vx_fskit::StatusPayload>(&status_json)
+        .map_err(|e| format!("failed to parse .vixenfs/status.json: {e}"))?;
+
+    let path = payload
+        .app_group_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| {
+            "status.json missing non-empty app_group_path after mount verification".to_string()
+        })?;
+
+    Ok(PathBuf::from(path))
+}
+
+async fn read_status_json(mount_path: &Utf8Path) -> Result<String, String> {
+    let status_path = format!("{mount_path}/.vixenfs/status.json");
+    let output = Command::new("/bin/cat")
+        .arg(&status_path)
         .output()
         .await
-        .map_err(|e| format!("failed to run {VIXEN_MOUNT_HELPER_PATH}: {e}"))?;
+        .map_err(|e| format!("failed to read {status_path}: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
-            "vixenfs-mount --app-group-path failed (status={:?}): {}",
+            "reading {status_path} failed (status={:?}): {}",
             output.status.code(),
             stderr.trim()
         ));
     }
 
-    let path = String::from_utf8(output.stdout)
-        .map_err(|e| format!("vixenfs-mount --app-group-path returned invalid UTF-8: {e}"))?;
-    let path = path.trim();
-    if path.is_empty() {
-        return Err("vixenfs-mount --app-group-path returned empty path".to_string());
+    String::from_utf8(output.stdout)
+        .map_err(|e| format!("{status_path} returned invalid UTF-8: {e}"))
+}
+
+async fn poke_sid_mount(mount_path: &Utf8Path, sid: &str) -> Result<(), String> {
+    let sid_path = format!("{mount_path}/{sid}");
+    let output = Command::new("/bin/ls")
+        .arg("-1")
+        .arg(&sid_path)
+        .output()
+        .await
+        .map_err(|e| format!("failed to list {sid_path}: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "listing {sid_path} failed (status={:?}): {}",
+            output.status.code(),
+            stderr.trim()
+        ));
     }
 
-    Ok(PathBuf::from(path))
+    Ok(())
 }
