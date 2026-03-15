@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -46,8 +46,7 @@ pub struct PlanSourceSyncResponse {
 #[derive(Debug, Clone, Facet)]
 pub struct PutSourceFileRequest {
     pub checkout_dir: String,
-    pub path: String,
-    pub executable: bool,
+    pub file: SourceFileEntry,
     pub contents: Vec<u8>,
 }
 
@@ -254,11 +253,6 @@ pub fn plan_source_sync(request: &PlanSourceSyncRequest) -> Result<PlanSourceSyn
     fs::create_dir_all(checkout_dir)
         .wrap_err_with(|| format!("failed to create {}", checkout_dir))?;
 
-    let preserve_roots = request
-        .preserve_roots
-        .iter()
-        .map(|path| normalize_relative_path(path))
-        .collect::<Result<BTreeSet<_>>>()?;
     let manifest = request
         .files
         .iter()
@@ -276,20 +270,35 @@ pub fn plan_source_sync(request: &PlanSourceSyncRequest) -> Result<PlanSourceSyn
             })
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
+    let mut cached_manifest = load_cached_source_manifest(checkout_dir)?;
 
     let mut deleted_paths = Vec::new();
-    let remote_paths = collect_checkout_files(checkout_dir, &preserve_roots)?;
-    for remote_path in remote_paths {
-        if !manifest.contains_key(&remote_path) {
-            let full_path = checkout_dir.join(&remote_path);
-            fs::remove_file(&full_path)
-                .wrap_err_with(|| format!("failed to remove {}", full_path))?;
-            deleted_paths.push(remote_path);
+    for cached_path in cached_manifest.keys().cloned().collect::<Vec<_>>() {
+        if !manifest.contains_key(&cached_path) {
+            let full_path = checkout_dir.join(&cached_path);
+            match fs::remove_file(&full_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).wrap_err_with(|| format!("failed to remove {}", full_path));
+                }
+            }
+            deleted_paths.push(cached_path.clone());
+            cached_manifest.remove(&cached_path);
         }
     }
+    save_cached_source_manifest(checkout_dir, &cached_manifest)?;
 
     let mut missing_paths = Vec::new();
     for (path, entry) in &manifest {
+        let Some(cached_entry) = cached_manifest.get(path) else {
+            missing_paths.push(path.clone());
+            continue;
+        };
+        if cached_entry != entry {
+            missing_paths.push(path.clone());
+            continue;
+        }
         let full_path = checkout_dir.join(path);
         if !full_path.is_file() {
             missing_paths.push(path.clone());
@@ -297,14 +306,7 @@ pub fn plan_source_sync(request: &PlanSourceSyncRequest) -> Result<PlanSourceSyn
         }
         let metadata =
             fs::metadata(&full_path).wrap_err_with(|| format!("failed to stat {}", full_path))?;
-        if metadata.len() != entry.size {
-            missing_paths.push(path.clone());
-            continue;
-        }
-        let bytes =
-            fs::read(&full_path).wrap_err_with(|| format!("failed to read {}", full_path))?;
-        let hash = blake3::hash(&bytes).to_hex().to_string();
-        if hash != entry.blake3_hex || file_is_executable(&metadata) != entry.executable {
+        if metadata.len() != entry.size || file_is_executable(&metadata) != entry.executable {
             missing_paths.push(path.clone());
         }
     }
@@ -317,7 +319,7 @@ pub fn plan_source_sync(request: &PlanSourceSyncRequest) -> Result<PlanSourceSyn
 
 pub fn put_source_file(request: &PutSourceFileRequest) -> Result<()> {
     let checkout_dir = Utf8Path::new(&request.checkout_dir);
-    let relpath = normalize_relative_path(&request.path)?;
+    let relpath = normalize_relative_path(&request.file.path)?;
     let path = checkout_dir.join(&relpath);
     let parent = path
         .parent()
@@ -330,9 +332,12 @@ pub fn put_source_file(request: &PutSourceFileRequest) -> Result<()> {
     ));
     fs::write(&temp_path, &request.contents)
         .wrap_err_with(|| format!("failed to write {}", temp_path))?;
-    set_file_executable(&temp_path, request.executable)?;
+    set_file_executable(&temp_path, request.file.executable)?;
     fs::rename(&temp_path, &path)
         .wrap_err_with(|| format!("failed to rename {} to {}", temp_path, path))?;
+    let mut cached_manifest = load_cached_source_manifest(checkout_dir)?;
+    cached_manifest.insert(relpath, request.file.clone());
+    save_cached_source_manifest(checkout_dir, &cached_manifest)?;
     Ok(())
 }
 
@@ -388,53 +393,40 @@ fn normalize_relative_path(path: &str) -> Result<String> {
     Ok(path.to_string())
 }
 
-fn should_preserve_path(path: &str, preserve_roots: &BTreeSet<String>) -> bool {
-    preserve_roots
-        .iter()
-        .any(|root| path == root || path.starts_with(&format!("{root}/")))
+fn cached_source_manifest_path(checkout_dir: &Utf8Path) -> Utf8PathBuf {
+    checkout_dir
+        .join(".vx-bootstrap")
+        .join("source-manifest.postcard")
 }
 
-fn collect_checkout_files(
-    root: &Utf8Path,
-    preserve_roots: &BTreeSet<String>,
-) -> Result<Vec<String>> {
-    let mut files = Vec::new();
-    collect_checkout_files_recursive(root, root, preserve_roots, &mut files)?;
-    files.sort();
-    Ok(files)
-}
-
-fn collect_checkout_files_recursive(
-    root: &Utf8Path,
-    current: &Utf8Path,
-    preserve_roots: &BTreeSet<String>,
-    files: &mut Vec<String>,
-) -> Result<()> {
-    for entry in fs::read_dir(current).wrap_err_with(|| format!("failed to read {}", current))? {
-        let entry = entry.wrap_err_with(|| format!("failed to read entry under {}", current))?;
-        let path = Utf8PathBuf::from_path_buf(entry.path())
-            .map_err(|path| eyre::eyre!("non-utf8 path in checkout: {}", path.display()))?;
-        let relpath = path
-            .strip_prefix(root)
-            .map_err(|error| eyre::eyre!("failed to strip {} from {}: {error}", root, path))?
-            .to_string();
-        if should_preserve_path(&relpath, preserve_roots) {
-            continue;
-        }
-        let metadata =
-            fs::symlink_metadata(&path).wrap_err_with(|| format!("failed to stat {}", path))?;
-        if metadata.file_type().is_symlink() {
-            eyre::bail!(
-                "symlinks are not supported in synced source trees: {}",
-                path
-            );
-        }
-        if metadata.is_dir() {
-            collect_checkout_files_recursive(root, &path, preserve_roots, files)?;
-        } else if metadata.is_file() {
-            files.push(relpath);
-        }
+fn load_cached_source_manifest(
+    checkout_dir: &Utf8Path,
+) -> Result<BTreeMap<String, SourceFileEntry>> {
+    let path = cached_source_manifest_path(checkout_dir);
+    if !path.exists() {
+        return Ok(BTreeMap::new());
     }
+    let bytes = fs::read(&path).wrap_err_with(|| format!("failed to read {}", path))?;
+    let entries = facet_postcard::from_slice::<Vec<SourceFileEntry>>(&bytes)
+        .wrap_err_with(|| format!("failed to decode cached source manifest {}", path))?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| (entry.path.clone(), entry))
+        .collect())
+}
+
+fn save_cached_source_manifest(
+    checkout_dir: &Utf8Path,
+    manifest: &BTreeMap<String, SourceFileEntry>,
+) -> Result<()> {
+    let path = cached_source_manifest_path(checkout_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).wrap_err_with(|| format!("failed to create {}", parent))?;
+    }
+    let entries = manifest.values().cloned().collect::<Vec<_>>();
+    let bytes =
+        facet_postcard::to_vec(&entries).wrap_err("failed to encode cached source manifest")?;
+    fs::write(&path, bytes).wrap_err_with(|| format!("failed to write {}", path))?;
     Ok(())
 }
 
@@ -597,6 +589,30 @@ mod tests {
         fs::write(checkout_dir.join("src/lib.rs"), "old").expect("write src");
         fs::write(checkout_dir.join("stale.txt"), "stale").expect("write stale");
         fs::write(checkout_dir.join("target/keep.txt"), "keep").expect("write target");
+        save_cached_source_manifest(
+            &checkout_dir,
+            &BTreeMap::from([
+                (
+                    "src/lib.rs".to_string(),
+                    SourceFileEntry {
+                        path: "src/lib.rs".to_string(),
+                        blake3_hex: blake3::hash(b"old").to_hex().to_string(),
+                        executable: false,
+                        size: 3,
+                    },
+                ),
+                (
+                    "stale.txt".to_string(),
+                    SourceFileEntry {
+                        path: "stale.txt".to_string(),
+                        blake3_hex: blake3::hash(b"stale").to_hex().to_string(),
+                        executable: false,
+                        size: 5,
+                    },
+                ),
+            ]),
+        )
+        .expect("seed cached manifest");
 
         let request = PlanSourceSyncRequest {
             checkout_dir: checkout_dir.to_string(),
@@ -636,8 +652,12 @@ mod tests {
         fs::create_dir_all(&checkout_dir).expect("checkout dir");
         put_source_file(&PutSourceFileRequest {
             checkout_dir: checkout_dir.to_string(),
-            path: "src/main.rs".to_string(),
-            executable: false,
+            file: SourceFileEntry {
+                path: "src/main.rs".to_string(),
+                blake3_hex: blake3::hash(b"fn main() {}\n").to_hex().to_string(),
+                executable: false,
+                size: 13,
+            },
             contents: b"fn main() {}\n".to_vec(),
         })
         .expect("put source file");

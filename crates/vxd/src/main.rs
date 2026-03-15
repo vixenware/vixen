@@ -1352,11 +1352,10 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
         uploaded_bytes += contents.len();
         let request = PutSourceFileRequest {
             checkout_dir: paths.checkout_dir.clone(),
-            path: missing_path,
-            executable: entry.executable,
+            file: entry.clone(),
             contents,
         };
-        let put_path = request.path.clone();
+        let put_path = request.file.path.clone();
         let put_bytes = request.contents.len();
         trace
             .complete_async(
