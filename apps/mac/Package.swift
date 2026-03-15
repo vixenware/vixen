@@ -41,10 +41,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "vixenfs-mount",
-            path: "xcode/VixenFSMount",
-            linkerSettings: [
-                .linkedFramework("FSKit")
-            ]
+            path: "xcode/VixenFSMount"
         ),
         .testTarget(
             name: "VixenFSTests",

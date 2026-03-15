@@ -1,5 +1,4 @@
 import Darwin
-@preconcurrency import FSKit
 import Foundation
 import os
 
@@ -17,78 +16,17 @@ private func emit(_ message: String) {
 }
 
 enum Command {
-    case mount(Config)
-    case health(json: Bool)
     case appGroupPath
 }
 
 struct Config {
-    static let extensionBundleIdentifier = "eu.bearcove.vixenfs"
     static let appGroupIdentifier = "B2N6FSRTPV.vixenfs"
 
-    let mountPoint: String
-    let scheme: String
-    let fsType: String
-    let preload: Bool
-    let debug: Bool
-    let logFile: String?  // if set, redirect stdout/stderr to this file
-
-    var source: String {
-        var components = URLComponents()
-        components.scheme = scheme
-        components.host = "session"
-        var items: [URLQueryItem] = []
-        if preload {
-            items.append(URLQueryItem(name: "preload", value: "1"))
-        }
-        if debug {
-            items.append(URLQueryItem(name: "debug", value: "1"))
-        }
-        components.queryItems = items.isEmpty ? nil : items
-        if let source = components.string {
-            return source
-        }
-        return "\(scheme)://session"
-    }
-
     static func parse(from args: [String]) throws -> Command {
-        var mountPoint: String?
-        var scheme = "vixen"
-        let fsType = "vixenfs"
-        var preload = false
-        var debug = false
-        var logFile: String?
-        var healthRequested = false
-        var jsonRequested = false
         var appGroupPathRequested = false
-        var mountArgumentsProvided = false
 
-        var index = 0
-        while index < args.count {
-            let arg = args[index]
+        for arg in args {
             switch arg {
-            case "--mount-point":
-                mountArgumentsProvided = true
-                index += 1
-                mountPoint = try valueArg(args, index: index, name: "--mount-point")
-            case "--scheme":
-                mountArgumentsProvided = true
-                index += 1
-                scheme = try valueArg(args, index: index, name: "--scheme")
-            case "--preload":
-                mountArgumentsProvided = true
-                preload = true
-            case "--debug":
-                mountArgumentsProvided = true
-                debug = true
-            case "--log-file":
-                mountArgumentsProvided = true
-                index += 1
-                logFile = try valueArg(args, index: index, name: "--log-file")
-            case "--health":
-                healthRequested = true
-            case "--json":
-                jsonRequested = true
             case "--app-group-path":
                 appGroupPathRequested = true
             case "--help":
@@ -96,217 +34,36 @@ struct Config {
             default:
                 throw MountError.invalidArgument("Unknown argument: \(arg)")
             }
-            index += 1
         }
 
-        if appGroupPathRequested {
-            if mountArgumentsProvided || healthRequested {
-                throw MountError.invalidArgument(
-                    "--app-group-path cannot be combined with other arguments")
-            }
-            return .appGroupPath
+        guard appGroupPathRequested else {
+            throw MountError.invalidArgument("Missing required --app-group-path argument")
         }
 
-        if healthRequested {
-            if mountArgumentsProvided {
-                throw MountError.invalidArgument(
-                    "--health cannot be combined with mount arguments")
-            }
-            return .health(json: jsonRequested)
-        }
-
-        if jsonRequested {
-            throw MountError.invalidArgument("--json can only be used with --health")
-        }
-
-        guard let mountPoint else {
-            throw MountError.invalidArgument("Missing required --mount-point argument")
-        }
-
-        return .mount(
-            Config(
-                mountPoint: mountPoint,
-                scheme: scheme,
-                fsType: fsType,
-                preload: preload,
-                debug: debug,
-                logFile: logFile
-            ))
+        return .appGroupPath
     }
-
-    private static func valueArg(_ args: [String], index: Int, name: String) throws -> String {
-        guard index < args.count else {
-            throw MountError.invalidArgument("\(name) requires a value")
-        }
-        return args[index]
-    }
-
 }
 
 enum MountError: Error, CustomStringConvertible {
     case invalidArgument(String)
-    case mountLaunchFailed(String)
-    case mountCommandFailed(exitCode: Int32, stdout: String, stderr: String)
     case usage
 
     var description: String {
         switch self {
         case .invalidArgument(let message):
             return message
-        case .mountLaunchFailed(let message):
-            return "mount failed to launch: \(message)"
-        case .mountCommandFailed(let exitCode, let stdout, let stderr):
-            return
-                "mount failed: exit=\(exitCode) stdout=\(stdout) stderr=\(stderr)"
         case .usage:
             return """
                 Usage:
-                  vixenfs-mount --health [--json]
                   vixenfs-mount --app-group-path
-                  vixenfs-mount --mount-point <path> [--scheme <scheme>] [--debug] [--log-file <path>]
                 """
         }
     }
 }
 
-/// Mounts the FSKit filesystem and exits with 0.
-///
-/// The mount registers with FSKit which spawns the VixenFS appex as a
-/// separate process. Once the mount syscall succeeds, vixenfs-mount's
-/// job is done — the VFS lives independently in the FSKit extension.
-/// Lifecycle management (unmounting) is handled by vx-reaper.
-final class MountLifecycle {
-    private let config: Config
-
-    init(config: Config) {
-        self.config = config
-    }
-
-    /// Log to both stderr (which may be redirected to a log file) and unified logging.
-    func log(_ message: String) {
-        emit(message)
-    }
-
-    func run() throws {
-        try ensureMountPointExists()
-        try mount()
-        emit("mounted \(config.mountPoint) from \(config.source)")
-    }
-
-    private func ensureMountPointExists() throws {
-        // Skip creating mount directory for /Volumes - diskarbitrationd creates it
-        if config.mountPoint.hasPrefix("/Volumes/") {
-            return
-        }
-
-        var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: config.mountPoint, isDirectory: &isDir) {
-            if !isDir.boolValue {
-                throw MountError.invalidArgument(
-                    "Mount point exists but is not a directory: \(config.mountPoint)")
-            }
-            return
-        }
-        try FileManager.default.createDirectory(
-            atPath: config.mountPoint, withIntermediateDirectories: true)
-    }
-
-    private func mount() throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/sbin/mount")
-        process.arguments = ["-F", "-t", config.fsType, config.source, config.mountPoint]
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        do {
-            try process.run()
-        } catch {
-            throw MountError.mountLaunchFailed(String(describing: error))
-        }
-
-        process.waitUntilExit()
-
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        let stdout =
-            String(data: stdoutData, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let stderr =
-            String(data: stderrData, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-        guard process.terminationStatus == 0 else {
-            throw MountError.mountCommandFailed(
-                exitCode: process.terminationStatus, stdout: stdout, stderr: stderr)
-        }
-    }
-}
-
-private func emitHealthJSON(installed: Bool, enabled: Bool) {
-    fputs(
-        "{\"extensionInstalled\": \(installed ? "true" : "false"), \"extensionEnabled\": \(enabled ? "true" : "false")}\n",
-        stdout
-    )
-}
-
-private func runHealthCheck(json: Bool) -> Never {
-    FSClient.shared.fetchInstalledExtensions { modules, error in
-        if let error {
-            if json {
-                emitHealthJSON(installed: false, enabled: false)
-            }
-            emit("FSKit health check failed: \(error.localizedDescription)")
-            exit(2)
-        }
-
-        guard let modules else {
-            if json {
-                emitHealthJSON(installed: false, enabled: false)
-            }
-            emit("FSKit health check failed: no module list returned")
-            exit(2)
-        }
-
-        let module = modules.first(where: {
-            $0.bundleIdentifier == Config.extensionBundleIdentifier
-        })
-        let installed = module != nil
-        let enabled = module?.isEnabled ?? false
-
-        if json {
-            emitHealthJSON(installed: installed, enabled: enabled)
-        }
-
-        guard installed else {
-            if !json {
-                emit("FSKit module \(Config.extensionBundleIdentifier) is not installed")
-            }
-            exit(2)
-        }
-
-        guard enabled else {
-            if !json {
-                emit("FSKit module \(Config.extensionBundleIdentifier) is installed but disabled")
-            }
-            exit(2)
-        }
-
-        if !json {
-            fputs("ok: FSKit module \(Config.extensionBundleIdentifier) is enabled\n", stdout)
-        }
-        exit(0)
-    }
-    dispatchMain()
-}
-
 do {
     let command = try Config.parse(from: Array(CommandLine.arguments.dropFirst()))
     switch command {
-    case .health(let json):
-        runHealthCheck(json: json)
     case .appGroupPath:
         guard
             let url = FileManager.default.containerURL(
@@ -317,23 +74,6 @@ do {
         }
         fputs(url.path, stdout)
         exit(0)
-    case .mount(let config):
-        if let logFile = config.logFile {
-            let fd = open(logFile, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
-            guard fd >= 0 else {
-                emit("failed to open log file \(logFile): errno \(errno)")
-                exit(2)
-            }
-            dup2(fd, STDOUT_FILENO)
-            dup2(fd, STDERR_FILENO)
-            close(fd)
-            // After dup2 to a file, stderr becomes fully buffered — force line buffering
-            setvbuf(stderr, nil, _IOLBF, 0)
-            setvbuf(stdout, nil, _IOLBF, 0)
-        }
-        let lifecycle = MountLifecycle(config: config)
-        lifecycle.log("starting (mount-point=\(config.mountPoint))")
-        try lifecycle.run()
     }
 } catch let error as MountError {
     emit("\(error.description)")
