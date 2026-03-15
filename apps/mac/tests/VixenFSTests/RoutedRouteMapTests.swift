@@ -3,6 +3,18 @@ import XCTest
 @testable import VixenFS
 
 final class VixenFSTests: XCTestCase {
+    func testSIDSegmentValidationAcceptsHexAndUUID() {
+        XCTAssertTrue(Volume.isValidSidSegment("0123456789abcdef0123456789abcdef"))
+        XCTAssertTrue(Volume.isValidSidSegment("01234567-89ab-cdef-0123-456789abcdef"))
+    }
+
+    func testSIDSegmentValidationRejectsNonSIDPathSegments() {
+        XCTAssertFalse(Volume.isValidSidSegment(""))
+        XCTAssertFalse(Volume.isValidSidSegment(".vixenfs"))
+        XCTAssertFalse(Volume.isValidSidSegment("not-a-sid"))
+        XCTAssertFalse(Volume.isValidSidSegment("0123456789abcdef0123456789abcdeg"))
+    }
+
     func testItemDefaultsBackendItemIDToLocalItemID() {
         let attrs = FSItem.Attributes.fromVfs(
             itemId: 7,

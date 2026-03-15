@@ -140,7 +140,7 @@ final class Volume: FSVolume, @unchecked Sendable {
     private var _routedItemIDs: [String: UInt64] = [:]
     private var _nextRoutedItemID: UInt64 = 0xFFFF_FFFF_FFFC_0000
 
-    /// Root item ID (always 1 in our VFS protocol)
+    /// Local synthetic mount root ID.
     private let rootId: UInt64 = 1
     private static let mutableAttributesTTLNs: UInt64 = 2_000_000_000
 
@@ -198,6 +198,75 @@ final class Volume: FSVolume, @unchecked Sendable {
             createdTime: 0,
             mode: 0o444
         )
+    }
+
+    private func rootAttributes() -> FSItem.Attributes {
+        FSItem.Attributes.fromVfs(
+            itemId: rootId,
+            parentId: rootId,
+            itemType: .directory,
+            size: 0,
+            modifiedTime: 0,
+            createdTime: 0,
+            mode: 0o755
+        )
+    }
+
+    private func sidDirectoryAttributes(localItemID: UInt64) -> FSItem.Attributes {
+        FSItem.Attributes.fromVfs(
+            itemId: localItemID,
+            parentId: rootId,
+            itemType: .directory,
+            size: 0,
+            modifiedTime: 0,
+            createdTime: 0,
+            mode: 0o755
+        )
+    }
+
+    private func makeSIDRootItem(sid: String) -> Item {
+        let localID = localItemID(for: sid, backendItemID: rootId)
+        let attrs = sidDirectoryAttributes(localItemID: localID)
+
+        if let existing = getCachedItem(localID) {
+            existing.updateAttributes(attrs)
+            return existing
+        }
+
+        let item = Item(
+            itemId: localID,
+            name: sid,
+            attributes: attrs,
+            sid: sid,
+            backendItemId: rootId
+        )
+        cacheItem(item)
+        return item
+    }
+
+    static func isValidSidSegment(_ sid: String) -> Bool {
+        if sid.count == 32 {
+            return sid.unicodeScalars.allSatisfy {
+                CharacterSet(charactersIn: "0123456789abcdefABCDEF").contains($0)
+            }
+        }
+        if sid.count == 36 {
+            let chars = Array(sid)
+            let hyphenPositions: Set<Int> = [8, 13, 18, 23]
+            for i in 0..<chars.count {
+                if hyphenPositions.contains(i) {
+                    if chars[i] != "-" {
+                        return false
+                    }
+                    continue
+                }
+                if !chars[i].isHexDigit {
+                    return false
+                }
+            }
+            return true
+        }
+        return false
     }
 
     private let sessionDeathObserverID = UUID()
@@ -371,13 +440,6 @@ final class Volume: FSVolume, @unchecked Sendable {
         }
     }
 
-    private func resolvedSID(from sid: String?) async -> String? {
-        if let sid {
-            return sid
-        }
-        return await VfsConnection.shared.defaultSessionID()
-    }
-
     private func routedBackendItemID(sid: String, backendItemID: UInt64) -> UInt64 {
         let key = "\(sid):\(backendItemID)"
         _routedItemIDLock.lock()
@@ -491,36 +553,14 @@ extension Volume: FSVolume.Operations {
     }
 
     func activate(options: FSTaskOptions) async throws -> FSItem {
-        log.debug("activate - returning root item")
+        log.debug("activate - returning synthetic root item")
         await LifecycleTrace.shared.mark(log, event: "volume.activate.begin")
 
         let rootId = self.rootId
-        let result = try await withMappedClientCall {
-            try await $0.getAttributes(itemId: rootId)
-        }
-
-        if result.error != 0 {
-            try failPOSIX(result.error, details: "itemId=\(rootId)")
-        }
-
-        let rootAttrs = FSItem.Attributes.fromVfs(
-            itemId: result.attrs.itemId,
-            parentId: rootId,
-            itemType: result.attrs.itemType,
-            size: result.attrs.size,
-            modifiedTime: result.attrs.modifiedTime,
-            createdTime: result.attrs.createdTime,
-            mode: result.attrs.mode
-        )
-
-        let root = Item(
-            itemId: rootId,
-            name: "",
-            attributes: rootAttrs,
-            sid: await resolvedSID(from: nil),
-            backendItemId: rootId
-        )
+        let rootAttrs = rootAttributes()
+        let root = Item(itemId: rootId, name: "", attributes: rootAttrs)
         cacheItem(root)
+
         await LifecycleTrace.shared.mark(
             log, event: "volume.activate.done", details: "rootId=\(rootId)")
         return root
@@ -563,6 +603,12 @@ extension Volume: FSVolume.Operations {
                 logOpSuccess(op, details: "itemId=\(item.itemId) source=virtual")
                 return attrs
             }
+            if item.itemId == rootId && item.sid == nil {
+                let attrs = rootAttributes()
+                item.updateAttributes(attrs)
+                logOpSuccess(op, details: "itemId=\(item.itemId) source=synthetic-root")
+                return attrs
+            }
 
             // Avoid serving stale cached attributes when the underlying transport is terminal.
             try await ensureConnectionAvailable(operation: op, sid: item.sid)
@@ -594,7 +640,7 @@ extension Volume: FSVolume.Operations {
             }
 
             let refreshedAttrs = FSItem.Attributes.fromVfs(
-                itemId: result.attrs.itemId,
+                itemId: localItemID(for: item.sid, backendItemID: result.attrs.itemId),
                 parentId: cachedAttrs.parentID.rawValue,
                 itemType: result.attrs.itemType,
                 size: result.attrs.size,
@@ -664,7 +710,7 @@ extension Volume: FSVolume.Operations {
         if attrsResult.error == 0 {
             let cachedAttrs = item.cachedAttributes
             let fsAttrs = FSItem.Attributes.fromVfs(
-                itemId: attrsResult.attrs.itemId,
+                itemId: localItemID(for: item.sid, backendItemID: attrsResult.attrs.itemId),
                 parentId: cachedAttrs.parentID.rawValue,
                 itemType: attrsResult.attrs.itemType,
                 size: attrsResult.attrs.size,
@@ -686,16 +732,26 @@ extension Volume: FSVolume.Operations {
         let nameStr = name.string ?? ""
         log.debug("lookupItem: name=\(nameStr) in dir=\(dirItem.itemId)")
 
-        // Virtual .vixenfs directory under root
-        if dirItem.itemId == rootId && nameStr == Volume.vixenfsDirName {
-            let attrs = vixenfsDirAttributes()
-            if let existing = getCachedItem(Volume.vixenfsDirId) {
-                existing.updateAttributes(attrs)
-                return (existing, existing.name)
+        // Root routes first segment to either extension-local files or a session SID.
+        if dirItem.itemId == rootId {
+            if nameStr == Volume.vixenfsDirName {
+                let attrs = vixenfsDirAttributes()
+                if let existing = getCachedItem(Volume.vixenfsDirId) {
+                    existing.updateAttributes(attrs)
+                    return (existing, existing.name)
+                }
+                let item = Item(
+                    itemId: Volume.vixenfsDirId, name: Volume.vixenfsDirName, attributes: attrs)
+                cacheItem(item)
+                return (item, item.name)
             }
-            let item = Item(
-                itemId: Volume.vixenfsDirId, name: Volume.vixenfsDirName, attributes: attrs)
-            cacheItem(item)
+
+            guard Volume.isValidSidSegment(nameStr) else {
+                throw fs_errorForPOSIXError(POSIXError.ENOENT.rawValue)
+            }
+
+            try await ensureConnectionAvailable(operation: #function, sid: nameStr)
+            let item = makeSIDRootItem(sid: nameStr)
             return (item, item.name)
         }
 
@@ -961,6 +1017,57 @@ extension Volume: FSVolume.Operations {
         log.debug("enumerateDirectory: itemId=\(dirItem.itemId) cookie=\(cookieValue)")
         logOpStart(op, details: "itemId=\(dirItem.itemId) cookie=\(cookieValue)")
         do {
+            // Synthetic mount root: `.vixenfs` plus one directory per live SID.
+            if dirItem.itemId == rootId {
+                if cookieValue == 0 {
+                    let attrs = vixenfsDirAttributes()
+                    if let existing = getCachedItem(Volume.vixenfsDirId) {
+                        existing.updateAttributes(attrs)
+                    } else {
+                        let item = Item(
+                            itemId: Volume.vixenfsDirId,
+                            name: Volume.vixenfsDirName,
+                            attributes: attrs
+                        )
+                        cacheItem(item)
+                    }
+                    let shouldContinue = packer.packEntry(
+                        name: FSFileName(string: Volume.vixenfsDirName),
+                        itemType: .directory,
+                        itemID: attrs.fileID,
+                        nextCookie: FSDirectoryCookie(1),
+                        attributes: attributes != nil ? attrs : nil
+                    )
+                    if !shouldContinue {
+                        logOpSuccess(op, details: "itemId=\(dirItem.itemId) source=synthetic-root")
+                        return FSDirectoryVerifier(0)
+                    }
+                }
+
+                let liveSIDs = await VfsConnection.shared.liveSessionIDs()
+                let startIndex = cookieValue == 0 ? 0 : Int(cookieValue - 1)
+                if startIndex < liveSIDs.count {
+                    for index in startIndex..<liveSIDs.count {
+                        let sid = liveSIDs[index]
+                        let sidItem = makeSIDRootItem(sid: sid)
+                        let sidAttrs = sidItem.cachedAttributes
+                        let shouldContinue = packer.packEntry(
+                            name: FSFileName(string: sid),
+                            itemType: .directory,
+                            itemID: sidAttrs.fileID,
+                            nextCookie: FSDirectoryCookie(UInt64(index + 2)),
+                            attributes: attributes != nil ? sidAttrs : nil
+                        )
+                        if !shouldContinue {
+                            break
+                        }
+                    }
+                }
+
+                logOpSuccess(op, details: "itemId=\(dirItem.itemId) source=synthetic-root")
+                return FSDirectoryVerifier(0)
+            }
+
             // Virtual .vixenfs directory: list virtual files
             if dirItem.itemId == Volume.vixenfsDirId {
                 if cookieValue == 0 {
