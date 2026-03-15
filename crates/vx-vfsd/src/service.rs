@@ -101,8 +101,26 @@ impl VfsdService {
                 .clone()
                 .ok_or_else(|| format!("DirectoryNode {} not found in CAS", dir_hash.to_hex()))?;
 
-            let node = CasNode::from_bytes(&node_data)
-                .map_err(|e| format!("failed to deserialize DirectoryNode: {:?}", e))?;
+            let node = CasNode::from_bytes(&node_data).map_err(|e| {
+                let version = if node_data.len() >= 4 {
+                    Some(u32::from_le_bytes([
+                        node_data[0],
+                        node_data[1],
+                        node_data[2],
+                        node_data[3],
+                    ]))
+                } else {
+                    None
+                };
+                let prefix_len = node_data.len().min(8);
+                let prefix = &node_data[..prefix_len];
+                format!(
+                    "failed to deserialize DirectoryNode {} (len={}, version={version:?}, prefix={prefix:?}): {:?}",
+                    dir_hash.to_hex(),
+                    node_data.len(),
+                    e
+                )
+            })?;
 
             let dir = match node {
                 CasNode::Directory(d) => d,
