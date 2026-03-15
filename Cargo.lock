@@ -3545,6 +3545,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "vx-bootstrap"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "eyre",
+ "facet",
+ "facet-postcard",
+ "tempfile",
+]
+
+[[package]]
 name = "vx-cache"
 version = "0.1.0"
 dependencies = [
