@@ -557,14 +557,6 @@ fn mirror_node<'a>(
             .await
             .map_err(|error| format!("{error:?}"))?
             .ok_or_else(|| format!("node {} not found in source store", hash.to_hex()))?;
-        if let Some(existing) = dest
-            .get_node(hash)
-            .await
-            .map_err(|error| format!("{error:?}"))?
-            && existing == bytes
-        {
-            return Ok(());
-        }
         let node = CasNode::from_bytes(&bytes).map_err(|error| error.to_string())?;
 
         match &node {
@@ -584,6 +576,15 @@ fn mirror_node<'a>(
                 }
             }
             _ => {}
+        }
+
+        if let Some(existing) = dest
+            .get_node(hash)
+            .await
+            .map_err(|error| format!("{error:?}"))?
+            && existing == bytes
+        {
+            return Ok(());
         }
 
         dest.put_node(hash, bytes)
