@@ -24,7 +24,7 @@ VixenFS has three layers:
 ├─────────────────────────────────────────────┤
 │  VixenFS.appex (FSKit extension, Swift)     │
 │  - sandboxed process managed by fskitd      │
-│  - serves /.vixenfs/health.json locally     │
+│  - serves /.vixenfs/status.json locally     │
 │  - forwards all other I/O over roam         │
 ├─────────────────────────────────────────────┤
 │  vx-vfsd (Rust backend, roam connection)    │
@@ -63,7 +63,7 @@ From least to most alarming:
 
 5. **Backend not connected, extension running** — vx-vfsd crashed or was
    killed. The extension stays running on purpose (exiting would cause hangs,
-   see #6), but all I/O returns errors. `health.json` reports
+   see #6), but all I/O returns errors. `status.json` reports
    `connected: false`.
 
 6. **Extension not running, mount still visible** — the extension process
@@ -122,7 +122,7 @@ These never touch the mount path and always return quickly:
 
 ### Sacrificial child process
 
-5. **`/bin/cat $mount/.vixenfs/health.json`** — spawned via
+5. **`/bin/cat $mount/.vixenfs/status.json`** — spawned via
    `tokio::process::Command` with a 1s `tokio::time::timeout`. If it
    returns, we parse the JSON payload. If it hangs, we `kill()` the child
    and know the mount is zombied.
@@ -171,10 +171,10 @@ MOUNT
   Call /sbin/mount -F -t vixenfs <source> <mount_path>
   │
   ▼
-Read /.vixenfs/health.json (via /bin/cat, with retries + timeout)
+Read /.vixenfs/status.json (via /bin/cat, with retries + timeout)
   │
-  ├─ connected: true ──→ SUCCESS
-  ├─ connected: false ──→ FAIL: extension running but backend not connected
+  ├─ parse ok + app_group_path is non-empty ──→ SUCCESS
+  ├─ parse ok + app_group_path missing/empty ──→ FAIL: extension not fully initialized
   ├─ timeout/hang ──→ FAIL: mount is zombied
   ├─ cat failed ──→ FAIL: "sudo killall fskitd fskit_agent"
   │
@@ -247,17 +247,27 @@ pub struct FsKitError {
 }
 ```
 
-## health.json
+## status.json
 
-The VixenFS extension serves `/.vixenfs/health.json` as a synthetic file.
-It never hits the backend — the extension generates it locally. This is the
-only reliable way to distinguish "extension alive, backend dead" from
-"extension dead, mount is zombie".
+The VixenFS extension serves `/.vixenfs/status.json` as a synthetic file.
+It never hits the backend — the extension generates it locally.
+
+`setup()` treats the mount as ready only when this file is readable and
+`app_group_path` is present and non-empty. Other fields (including
+`connected`) are diagnostic and logged.
 
 ```json
-{"connected": true, "backend_pid": 1234, "uptime_secs": 300}
+{
+  "connected": true,
+  "app_group_path": "/Users/test/Library/Group Containers/B2N6FSRTPV.vixenfs",
+  "connected_at": "2026-03-14T08:40:00Z",
+  "uptime_seconds": 300.0
+}
 ```
 
 ```json
-{"connected": false, "disconnected_at": "2026-02-12T14:30:00Z"}
+{
+  "connected": false,
+  "disconnected_at": "2026-03-14T08:45:00Z"
+}
 ```
