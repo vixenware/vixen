@@ -97,7 +97,7 @@ where
 
     // vx_fskit::setup handles: prerequisites, stale mount cleanup, mkdir,
     // /sbin/mount -F -t vixenfs, and health.json verification.
-    let fskit_result = vx_fskit::setup(&sid, &config.mount_path, debug_mode).await;
+    let fskit_result = vx_fskit::setup(&config.mount_path, debug_mode).await;
 
     if let Some(ref error) = fskit_result.error {
         cleanup_session_dir(&sid).await;

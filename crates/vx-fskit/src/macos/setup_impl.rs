@@ -19,7 +19,7 @@ struct MountFailureDiagnosis {
 ///
 /// Checks prerequisites (app installed, codesign, extension registered+enabled),
 /// cleans up broken mounts, mounts, and verifies via health.json.
-pub async fn setup(_sid: &str, mount_path: &Utf8PathBuf, debug: bool) -> FsKitResult {
+pub async fn setup(mount_path: &Utf8PathBuf, debug: bool) -> FsKitResult {
     let mut log = Log::new();
     let candidates = mount_path_candidates(mount_path).await;
 

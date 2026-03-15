@@ -7,7 +7,7 @@ log of everything they did, tried, and observed — even on success. On failure,
 they suggest manual remediation steps.
 
 Callers:
-- **vx-vfsd** calls `setup(sid, mount_path, debug)`
+- **vx-vfsd** calls `setup(mount_path, debug)`
 - **vx-reaper** calls `teardown(mount_path)`
 
 The `vixenfs-mount` Swift helper is only used for querying the app group
