@@ -680,3 +680,35 @@ async fn boot_vfsd(store_addr: &str, mount: &Utf8PathBuf) -> Result<VfsdService>
         Arc::new(store_session_handle),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::select_smoke_sid;
+
+    #[test]
+    fn select_smoke_sid_picks_hex_sid_over_non_sid_entries() {
+        let sid = select_smoke_sid([
+            ".vixenfs",
+            "readme",
+            "00112233445566778899aabbccddeeff",
+            "not-a-sid",
+        ])
+        .expect("must select SID");
+
+        assert_eq!(sid, "00112233445566778899aabbccddeeff");
+    }
+
+    #[test]
+    fn select_smoke_sid_accepts_uuid_format_sid() {
+        let sid = select_smoke_sid([".vixenfs", "123e4567-e89b-12d3-a456-426614174000"])
+            .expect("must select UUID-format SID");
+
+        assert_eq!(sid, "123e4567-e89b-12d3-a456-426614174000");
+    }
+
+    #[test]
+    fn select_smoke_sid_returns_none_without_valid_sid() {
+        let sid = select_smoke_sid([".vixenfs", "tmp", "not-a-sid"]);
+        assert!(sid.is_none());
+    }
+}

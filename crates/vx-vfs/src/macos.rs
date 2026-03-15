@@ -642,7 +642,7 @@ mod tests {
     #[test]
     fn parse_app_group_path_from_status_payload() {
         let path = parse_app_group_path_from_status_json(
-            "{\n  \"connected\": true,\n  \"app_group_path\": \"/Users/test/Library/Group Containers/B2N6FSRTPV.vixenfs\"\n}",
+            "{\n  \"read_count\": 10,\n  \"error_count\": 1,\n  \"requested_bytes\": {\"total\": 100, \"min\": 10, \"max\": 20, \"avg\": 12.5},\n  \"returned_bytes\": {\"total\": 90, \"min\": 9, \"max\": 18, \"avg\": 11.0},\n  \"latency_ns\": {\"total\": 1000, \"min\": 10, \"max\": 20, \"avg\": 15.0},\n  \"connected\": true,\n  \"ever_connected\": true,\n  \"app_group_path\": \"/Users/test/Library/Group Containers/B2N6FSRTPV.vixenfs\",\n  \"connected_at\": null,\n  \"disconnected_at\": null,\n  \"uptime_seconds\": 1.234,\n  \"disconnect_reason\": null\n}",
         )
         .expect("app_group_path should parse");
 
@@ -660,5 +660,15 @@ mod tests {
         .expect_err("missing app_group_path should fail");
 
         assert!(err.contains("app_group_path"));
+    }
+
+    #[test]
+    fn parse_app_group_path_rejects_malformed_json() {
+        let err = parse_app_group_path_from_status_json(
+            "{\n  \"connected\": true,\n  \"app_group_path\": \"/tmp/group\",\n",
+        )
+        .expect_err("malformed JSON should fail");
+
+        assert!(err.contains("failed to parse .vixenfs/status.json"));
     }
 }
