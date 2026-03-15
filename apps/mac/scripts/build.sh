@@ -45,11 +45,6 @@ echo "Re-signing app bundle with '$SIGNING_IDENTITY' (inside-out)..."
 # Sign nested components first (inside-out), each with hardened runtime + timestamp
 # and proper entitlements (without get-task-allow which Xcode adds for debug builds).
 
-# Helper tool
-codesign --force --options runtime --timestamp \
-  --sign "$SIGNING_IDENTITY" \
-  "$APP_BUNDLE_PATH/Contents/Helpers/vixenfs-mount"
-
 # FSKit extension
 codesign --force --options runtime --timestamp \
   --entitlements "$XCODE_DIR/VixenFS/VixenFS.entitlements" \

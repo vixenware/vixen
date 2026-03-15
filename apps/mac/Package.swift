@@ -9,7 +9,6 @@ let package = Package(
     products: [
         .library(name: "VixenApp", targets: ["VixenApp"]),
         .library(name: "VixenFS", targets: ["VixenFS"]),
-        .executable(name: "vixenfs-mount", targets: ["vixenfs-mount"]),
     ],
     dependencies: [
         .package(
@@ -38,10 +37,6 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("FSKit")
             ]
-        ),
-        .executableTarget(
-            name: "vixenfs-mount",
-            path: "xcode/VixenFSMount"
         ),
         .testTarget(
             name: "VixenFSTests",
