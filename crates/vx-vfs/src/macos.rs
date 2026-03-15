@@ -573,7 +573,11 @@ async fn cleanup_session_dir(app_group_root: &Path, sid: &str) {
 /// Resolve the App Group container path from the mounted VixenFS status payload.
 pub async fn resolve_app_group_path(mount_path: &Utf8Path) -> Result<PathBuf, String> {
     let status_json = read_status_json(mount_path).await?;
-    let payload = facet_json::from_str::<vx_fskit::StatusPayload>(&status_json)
+    parse_app_group_path_from_status_json(&status_json)
+}
+
+fn parse_app_group_path_from_status_json(status_json: &str) -> Result<PathBuf, String> {
+    let payload = facet_json::from_str::<vx_fskit::StatusPayload>(status_json)
         .map_err(|e| format!("failed to parse .vixenfs/status.json: {e}"))?;
 
     let path = payload
@@ -628,4 +632,33 @@ async fn poke_sid_mount(mount_path: &Utf8Path, sid: &str) -> Result<(), String> 
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_app_group_path_from_status_json;
+    use std::path::Path;
+
+    #[test]
+    fn parse_app_group_path_from_status_payload() {
+        let path = parse_app_group_path_from_status_json(
+            "{\n  \"connected\": true,\n  \"app_group_path\": \"/Users/test/Library/Group Containers/B2N6FSRTPV.vixenfs\"\n}",
+        )
+        .expect("app_group_path should parse");
+
+        assert_eq!(
+            path,
+            Path::new("/Users/test/Library/Group Containers/B2N6FSRTPV.vixenfs")
+        );
+    }
+
+    #[test]
+    fn parse_app_group_path_rejects_missing_value() {
+        let err = parse_app_group_path_from_status_json(
+            "{\n  \"connected\": false,\n  \"app_group_path\": null\n}",
+        )
+        .expect_err("missing app_group_path should fail");
+
+        assert!(err.contains("app_group_path"));
+    }
 }

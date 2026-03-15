@@ -2,7 +2,7 @@
 
 ![Vixen fox logo](../../art/fox.svg)
 
-`apps/mac` contains the macOS app, FSKit extension, and the App Group path helper used by `vx-vfs`.
+`apps/mac` contains the macOS app and FSKit extension used by `vx-vfs`.
 
 Brand accent color: `#E88602`.
 
@@ -25,7 +25,7 @@ Or manual path:
    - `cd apps/mac/xcode`
    - `xcodegen generate`
 3. Open the generated project in Xcode.
-4. Build the `Vixen` scheme (this also builds `VixenFS` and `vixenfs-mount`).
+4. Build the `Vixen` scheme (this also builds `VixenFS`).
 
 ## Release (local macOS)
 
@@ -74,5 +74,5 @@ The release flow:
 `vx-vfs` expects:
 
 - App path: `/Applications/Vixen.app`
-- App Group helper (`--app-group-path`): `/Applications/Vixen.app/Contents/Helpers/vixenfs-mount`
+- App Group path source: `/.vixenfs/status.json` (`app_group_path`) on the mounted VixenFS volume
 - Extension id visible in `pluginkit`: `eu.bearcove.vixenfs`

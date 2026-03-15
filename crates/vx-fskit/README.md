@@ -10,9 +10,9 @@ Callers:
 - **vx-vfsd** calls `setup(mount_path, debug)`
 - **vx-reaper** calls `teardown(mount_path)`
 
-The `vixenfs-mount` Swift helper is only used for querying the app group
-container path (`--app-group-path`). All mounting, unmounting, health
-checking, and diagnostics live in this crate.
+`setup()` verifies mount readiness from `/.vixenfs/status.json` and requires a
+non-empty `app_group_path` in that payload before returning success. All
+mounting, unmounting, health checking, and diagnostics live in this crate.
 
 ## Architecture
 

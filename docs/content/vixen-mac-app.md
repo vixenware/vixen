@@ -12,7 +12,7 @@ register a File System Extension.
 `Vixen.app` provides:
 
 - The FSKit extension (`VixenFS`)
-- The `vixenfs-mount` helper used for App Group path discovery (`--app-group-path`) by the CLI runtime
+- Synthetic `/.vixenfs/status.json`, used by the CLI runtime for mount health and App Group path discovery (`app_group_path`)
 - Onboarding UI that guides users through enabling the extension in System Settings
 
 ![The Vixen mac app showing settings](/img/vixen-app.png)
