@@ -27,7 +27,7 @@ use ::moire::process::Child;
 use ::moire::sync::SyncMutex;
 use base64::Engine;
 use camino::{Utf8Path, Utf8PathBuf};
-use eyre::Result;
+use eyre::{Result, WrapErr};
 use facet::Facet;
 use figue as args;
 use moire::task::FutureExt;
@@ -42,6 +42,8 @@ use std::net::TcpListener;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use vx_bootstrap::{BootstrapRequest, BootstrapResponse, PrepareSourceBuildRequest};
 use vx_io::boot::{BootDispatcher, BootGate, BootTx};
 use vx_io::net::{Endpoint, Listener};
 use vx_io::spawn::ServiceHandle;
@@ -166,6 +168,7 @@ impl SshBootstrapTargetInfo {
 struct SshBootstrapTargetInfo {
     platform: SshBootstrapTargetPlatform,
     home: String,
+    arch: String,
     windows_bootstrap_root: Option<String>,
 }
 
@@ -433,58 +436,23 @@ where
 }
 
 #[cfg(unix)]
-const SSH_BOOTSTRAP_REMOTE_SCRIPT: &str = r#"set -euo pipefail
-bare_repo_dir="$1"
-commit="$2"
-checkout_dir="$3"
-vx_home="$4"
-store_root="$5"
-store_socket="$6"
-vfsd_socket="$7"
-runner_socket="$8"
+const SSH_BOOTSTRAP_REMOTE_LAUNCH_SCRIPT: &str = r#"set -euo pipefail
+checkout_dir="$1"
+vx_home="$2"
+store_root="$3"
+store_socket="$4"
+vfsd_socket="$5"
+runner_socket="$6"
 
-restore_scrubbed_files() {
-  git -C "$checkout_dir" checkout -- Cargo.lock crates/vx/Cargo.toml crates/vxd/Cargo.toml || true
-}
-
-mkdir -p "$(dirname "$bare_repo_dir")" "$(dirname "$checkout_dir")" "$vx_home" "$store_root"
-if [ ! -f "$bare_repo_dir/HEAD" ]; then
-  rm -rf "$bare_repo_dir"
-  git init --bare "$bare_repo_dir"
-fi
-if [ ! -d "$checkout_dir/.git" ]; then
-  rm -rf "$checkout_dir"
-  git clone "$bare_repo_dir" "$checkout_dir"
-fi
-git -C "$checkout_dir" remote set-url origin "$bare_repo_dir"
-restore_scrubbed_files
-git -C "$checkout_dir" fetch origin "refs/vixen-bootstrap/$commit"
-git -C "$checkout_dir" checkout --detach "$commit"
-python3 - "$checkout_dir" <<'PY'
-import pathlib
-import sys
-
-root = pathlib.Path(sys.argv[1])
-needle = 'tree-sitter-vixen = { path = "/Users/amos/bearcove/tree-sitter-vixen" }\n'
-for rel in ("crates/vx/Cargo.toml", "crates/vxd/Cargo.toml"):
-    path = root / rel
-    if not path.exists():
-        continue
-    text = path.read_text()
-    updated = text.replace(needle, "")
-    if updated != text:
-        path.write_text(updated)
-PY
+mkdir -p "$(dirname "$checkout_dir")" "$vx_home" "$store_root"
 pkill -9 -f "$checkout_dir/target/debug/vx-runner" || true
 pkill -9 -f "$checkout_dir/target/debug/vx-store" || true
 pkill -9 -f "$checkout_dir/target/debug/vx-vfsd" || true
 while pgrep -f "$checkout_dir/target/debug/vx-runner" >/dev/null; do sleep 0.1; done
 while pgrep -f "$checkout_dir/target/debug/vx-store" >/dev/null; do sleep 0.1; done
 while pgrep -f "$checkout_dir/target/debug/vx-vfsd" >/dev/null; do sleep 0.1; done
-cargo build --manifest-path "$checkout_dir/Cargo.toml" -p vx-store -p vx-vfsd -p vx-runner -p landlock-exec
-restore_scrubbed_files
 rm -f "$store_socket" "$vfsd_socket" "$runner_socket"
-trap 'restore_scrubbed_files; jobs -p | xargs -r kill || true' EXIT
+trap 'jobs -p | xargs -r kill || true' EXIT
 "$checkout_dir/target/debug/vx-store" --root "$store_root" --listen "unix:$store_socket" &
 for _ in $(seq 1 200); do
   [ -S "$store_socket" ] && break
@@ -831,6 +799,7 @@ async fn detect_ssh_bootstrap_target(
                 "}; ",
                 "$envInfo = [ordered]@{ ",
                 "  HOME = [Environment]::GetFolderPath('UserProfile'); ",
+                "  ARCH = (Get-VxEnv 'PROCESSOR_ARCHITECTURE'); ",
                 "  CARGO_HOME = (Get-VxEnv 'CARGO_HOME'); ",
                 "  RUSTUP_HOME = (Get-VxEnv 'RUSTUP_HOME'); ",
                 "  TMP = (Get-VxEnv 'TMP'); ",
@@ -855,6 +824,7 @@ async fn detect_ssh_bootstrap_target(
         let rustup_home = json_string("RUSTUP_HOME");
         let tmp = json_string("TMP");
         let temp = json_string("TEMP");
+        let arch = json_string("ARCH").unwrap_or_else(|| "unknown".to_string());
         let home = home.ok_or_else(|| {
             eyre::eyre!("ssh bootstrap target {target} returned an empty Windows home")
         })?;
@@ -868,11 +838,13 @@ async fn detect_ssh_bootstrap_target(
         return Ok(SshBootstrapTargetInfo {
             platform: SshBootstrapTargetPlatform::Windows,
             home,
+            arch,
             windows_bootstrap_root: Some(bootstrap_root),
         });
     }
 
     let home = ssh_control_output_unix(control_path, target, &["printenv", "HOME"]).await?;
+    let arch = ssh_control_output_unix(control_path, target, &["uname", "-m"]).await?;
     if home.is_empty() {
         eyre::bail!("ssh bootstrap target {target} returned an empty HOME");
     }
@@ -880,6 +852,7 @@ async fn detect_ssh_bootstrap_target(
     Ok(SshBootstrapTargetInfo {
         platform: SshBootstrapTargetPlatform::Unix,
         home,
+        arch,
         windows_bootstrap_root: None,
     })
 }
@@ -926,6 +899,213 @@ async fn allocate_windows_ssh_bootstrap_ports(
 #[cfg(unix)]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(unix)]
+async fn write_bootstrap_request_frame<W>(writer: &mut W, request: &BootstrapRequest) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let payload = facet_postcard::to_vec(request)?;
+    writer
+        .write_all(&(payload.len() as u32).to_le_bytes())
+        .await?;
+    writer.write_all(&payload).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn read_bootstrap_response_frame<R>(reader: &mut R) -> Result<Option<BootstrapResponse>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut len_buf = [0_u8; 4];
+    match reader.read_exact(&mut len_buf).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut payload = vec![0_u8; len];
+    reader.read_exact(&mut payload).await?;
+    Ok(Some(facet_postcard::from_slice(&payload)?))
+}
+
+#[cfg(unix)]
+fn unix_bootstrap_target_triple(arch: &str) -> Result<&'static str> {
+    match arch {
+        "aarch64" | "arm64" => Ok("aarch64-unknown-linux-gnu"),
+        "x86_64" | "amd64" => Ok("x86_64-unknown-linux-gnu"),
+        other => eyre::bail!("unsupported unix ssh bootstrap architecture: {other}"),
+    }
+}
+
+#[cfg(unix)]
+fn local_vx_bootstrap_binary_path(repo_root: &Utf8Path, target_triple: &str) -> Utf8PathBuf {
+    repo_root
+        .join("target")
+        .join(target_triple)
+        .join("debug")
+        .join("vx-bootstrap")
+}
+
+#[cfg(unix)]
+async fn ensure_local_unix_vx_bootstrap_binary(
+    repo_root: &Utf8Path,
+    arch: &str,
+) -> Result<Utf8PathBuf> {
+    let target_triple = unix_bootstrap_target_triple(arch)?;
+    let binary_path = local_vx_bootstrap_binary_path(repo_root, target_triple);
+    if binary_path.exists() {
+        return Ok(binary_path);
+    }
+
+    let output = moire::process::Command::new("cargo")
+        .arg("zigbuild")
+        .arg("-p")
+        .arg("vx-bootstrap")
+        .arg("--target")
+        .arg(target_triple)
+        .current_dir(repo_root)
+        .output()
+        .await?;
+    if !output.status.success() {
+        eyre::bail!(
+            "cargo zigbuild for vx-bootstrap ({target_triple}) failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    if !binary_path.exists() {
+        eyre::bail!(
+            "cargo zigbuild for vx-bootstrap completed, but {} was not produced",
+            binary_path
+        );
+    }
+    Ok(binary_path)
+}
+
+#[cfg(unix)]
+fn ssh_bootstrap_unix_loader_command(bootstrap_path: &str, binary_size: usize) -> String {
+    format!(
+        "sh -lc {} sh {} {}",
+        shell_quote(
+            r#"set -euo pipefail
+dest="$1"
+size="$2"
+mkdir -p "$(dirname "$dest")"
+tmp="${dest}.tmp.$$"
+dd of="$tmp" bs=1 count="$size" status=none
+chmod +x "$tmp"
+mv "$tmp" "$dest"
+exec "$dest" --stdio
+"#
+        ),
+        shell_quote(bootstrap_path),
+        shell_quote(&binary_size.to_string()),
+    )
+}
+
+#[cfg(unix)]
+async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
+    control_path: &Utf8Path,
+    target: &str,
+    repo_root: &Utf8Path,
+    target_info: &SshBootstrapTargetInfo,
+    class_label: &str,
+    commit: &str,
+) -> Result<String> {
+    let local_bootstrap =
+        ensure_local_unix_vx_bootstrap_binary(repo_root, &target_info.arch).await?;
+    let bootstrap_bytes = fs::read(local_bootstrap.as_std_path()).wrap_err_with(|| {
+        format!("failed to read local vx-bootstrap binary at {local_bootstrap}")
+    })?;
+    let paths = ssh_bootstrap_paths(&target_info.home, class_label);
+    let remote_bootstrap_path = format!("{}/vx-bootstrap", paths.vx_home);
+    let remote_command =
+        ssh_bootstrap_unix_loader_command(&remote_bootstrap_path, bootstrap_bytes.len());
+
+    let mut command = ssh_control_command(control_path, target);
+    command
+        .arg(remote_command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let mut stdin = child
+        .stdin()
+        .take()
+        .ok_or_else(|| eyre::eyre!("failed to capture ssh bootstrap stdin"))?;
+    let mut stdout = child
+        .stdout()
+        .take()
+        .ok_or_else(|| eyre::eyre!("failed to capture ssh bootstrap stdout"))?;
+
+    stdin.write_all(&bootstrap_bytes).await?;
+    write_bootstrap_request_frame(&mut stdin, &BootstrapRequest::Hello).await?;
+    match read_bootstrap_response_frame(&mut stdout).await? {
+        Some(BootstrapResponse::Hello(_)) => {}
+        Some(BootstrapResponse::Error(error)) => {
+            eyre::bail!(
+                "vx-bootstrap hello failed: {}: {}",
+                error.kind,
+                error.message
+            )
+        }
+        Some(other) => eyre::bail!("unexpected vx-bootstrap hello response: {other:?}"),
+        None => eyre::bail!("vx-bootstrap closed before hello response"),
+    }
+
+    let request = PrepareSourceBuildRequest {
+        bare_repo_dir: paths.bare_repo_dir.clone(),
+        checkout_dir: paths.checkout_dir.clone(),
+        commit: commit.to_string(),
+        fetch_ref: format!("refs/vixen-bootstrap/{commit}"),
+        build_manifest_relpath: "Cargo.toml".to_string(),
+        build_packages: vec![
+            "vx-store".to_string(),
+            "vx-vfsd".to_string(),
+            "vx-runner".to_string(),
+            "landlock-exec".to_string(),
+        ],
+        restore_paths: vec![
+            "Cargo.lock".to_string(),
+            "crates/vx/Cargo.toml".to_string(),
+            "crates/vxd/Cargo.toml".to_string(),
+        ],
+        scrub_files: vec![
+            "crates/vx/Cargo.toml".to_string(),
+            "crates/vxd/Cargo.toml".to_string(),
+        ],
+        scrub_line_contains: vec!["tree-sitter-vixen = ".to_string()],
+    };
+    write_bootstrap_request_frame(&mut stdin, &BootstrapRequest::PrepareSourceBuild(request))
+        .await?;
+    let checkout_dir = match read_bootstrap_response_frame(&mut stdout).await? {
+        Some(BootstrapResponse::PrepareSourceBuild(response)) => response.checkout_dir,
+        Some(BootstrapResponse::Error(error)) => eyre::bail!(
+            "vx-bootstrap prepare_source_build failed: {}: {}",
+            error.kind,
+            error.message
+        ),
+        Some(other) => {
+            eyre::bail!("unexpected vx-bootstrap prepare_source_build response: {other:?}")
+        }
+        None => eyre::bail!("vx-bootstrap closed before prepare_source_build response"),
+    };
+    write_bootstrap_request_frame(&mut stdin, &BootstrapRequest::Shutdown).await?;
+    let _ = read_bootstrap_response_frame(&mut stdout).await?;
+    drop(stdin);
+    let output = child.wait_with_output().await?;
+    if !output.status.success() {
+        eyre::bail!(
+            "vx-bootstrap ssh session failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(checkout_dir)
 }
 
 #[cfg(unix)]
@@ -1219,10 +1399,8 @@ async fn connect_ssh_bootstrap_runner(
                 let vfsd_socket = format!("{}/vfsd-{socket_suffix}.sock", paths.vx_home);
                 let runner_socket = format!("{}/runner-{socket_suffix}.sock", paths.vx_home);
                 let remote_command = format!(
-                    "sh -lc {} sh {} {} {} {} {} {} {} {}",
-                    shell_quote(SSH_BOOTSTRAP_REMOTE_SCRIPT),
-                    shell_quote(&paths.bare_repo_dir),
-                    shell_quote(&commit),
+                    "sh -lc {} sh {} {} {} {} {} {}",
+                    shell_quote(SSH_BOOTSTRAP_REMOTE_LAUNCH_SCRIPT),
                     shell_quote(&paths.checkout_dir),
                     shell_quote(&paths.vx_home),
                     shell_quote(&paths.store_root),
@@ -1306,6 +1484,32 @@ async fn connect_ssh_bootstrap_runner(
         &commit,
     )
     .await?;
+
+    if matches!(target_info.platform, SshBootstrapTargetPlatform::Unix) {
+        emit_ssh_bootstrap_progress(
+            boot_tx,
+            &progress_listener,
+            class_label,
+            format!("building remote Vixen bootstrap checkout on {target}"),
+        )
+        .await;
+        with_ssh_bootstrap_heartbeat(
+            boot_tx,
+            &progress_listener,
+            class_label,
+            &format!("building remote Vixen bootstrap checkout on {target}"),
+            Duration::from_secs(5),
+            prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
+                &control_path,
+                target,
+                &repo_root,
+                &target_info,
+                class_label,
+                &commit,
+            ),
+        )
+        .await?;
+    }
 
     if let Some(paths) = &windows_checkout {
         emit_ssh_bootstrap_progress(

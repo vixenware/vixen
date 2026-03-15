@@ -89,6 +89,35 @@ pub fn read_frame<R: Read>(reader: &mut R) -> Result<Option<BootstrapRequest>> {
     Ok(Some(request))
 }
 
+pub fn read_response_frame<R: Read>(reader: &mut R) -> Result<Option<BootstrapResponse>> {
+    let mut len_buf = [0_u8; 4];
+    match reader.read_exact(&mut len_buf) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error).wrap_err("failed to read bootstrap frame length"),
+    }
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut payload = vec![0_u8; len];
+    reader
+        .read_exact(&mut payload)
+        .wrap_err("failed to read bootstrap frame payload")?;
+    let response =
+        facet_postcard::from_slice(&payload).wrap_err("failed to decode bootstrap response")?;
+    Ok(Some(response))
+}
+
+pub fn write_request_frame<W: Write>(writer: &mut W, request: &BootstrapRequest) -> Result<()> {
+    let payload = facet_postcard::to_vec(request).wrap_err("failed to encode bootstrap request")?;
+    writer
+        .write_all(&(payload.len() as u32).to_le_bytes())
+        .wrap_err("failed to write bootstrap frame length")?;
+    writer
+        .write_all(&payload)
+        .wrap_err("failed to write bootstrap frame payload")?;
+    writer.flush().wrap_err("failed to flush bootstrap frame")?;
+    Ok(())
+}
+
 pub fn write_frame<W: Write>(writer: &mut W, response: &BootstrapResponse) -> Result<()> {
     let payload =
         facet_postcard::to_vec(response).wrap_err("failed to encode bootstrap response")?;

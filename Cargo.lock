@@ -4032,6 +4032,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tree-sitter-vixen",
+ "vx-bootstrap",
  "vx-cache",
  "vx-eval",
  "vx-http",

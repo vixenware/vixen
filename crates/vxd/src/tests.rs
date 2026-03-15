@@ -209,17 +209,26 @@ fn ssh_bootstrap_git_push_url_uses_remote_repo_paths() {
 
 #[cfg(unix)]
 #[test]
-fn ssh_bootstrap_remote_script_exports_vx_home_for_runner() {
-    assert!(crate::SSH_BOOTSTRAP_REMOTE_SCRIPT.contains("export VX_HOME=\"$vx_home\""));
+fn ssh_bootstrap_remote_launch_script_exports_vx_home_for_runner() {
+    assert!(crate::SSH_BOOTSTRAP_REMOTE_LAUNCH_SCRIPT.contains("export VX_HOME=\"$vx_home\""));
+    assert!(crate::SSH_BOOTSTRAP_REMOTE_LAUNCH_SCRIPT.contains("pkill -9 -f"));
     assert!(
-        crate::SSH_BOOTSTRAP_REMOTE_SCRIPT
-            .contains("git -C \"$checkout_dir\" remote set-url origin \"$bare_repo_dir\"")
+        crate::SSH_BOOTSTRAP_REMOTE_LAUNCH_SCRIPT
+            .contains("\"$checkout_dir/target/debug/vx-store\" --root \"$store_root\"")
     );
-    assert!(
-        crate::SSH_BOOTSTRAP_REMOTE_SCRIPT
-            .contains("git -C \"$checkout_dir\" fetch origin \"refs/vixen-bootstrap/$commit\"")
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_bootstrap_target_triple_maps_supported_arches() {
+    assert_eq!(
+        crate::unix_bootstrap_target_triple("aarch64").expect("aarch64 target triple"),
+        "aarch64-unknown-linux-gnu"
     );
-    assert!(crate::SSH_BOOTSTRAP_REMOTE_SCRIPT.contains("tree-sitter-vixen"));
+    assert_eq!(
+        crate::unix_bootstrap_target_triple("x86_64").expect("x86_64 target triple"),
+        "x86_64-unknown-linux-gnu"
+    );
 }
 
 #[cfg(unix)]
