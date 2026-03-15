@@ -241,6 +241,20 @@ fn ssh_bootstrap_windows_command_announces_endpoints() {
 
 #[cfg(unix)]
 #[test]
+fn ssh_bootstrap_windows_checkout_script_fetches_commit_refspec_via_variable() {
+    let script = crate::ssh_bootstrap_windows_prepare_checkout_script(
+        r"X:\vixen\ssh-bootstrap\ssh-toast\repo.git",
+        "abc123",
+        r"X:\vixen\ssh-bootstrap\ssh-toast\repo",
+        r"X:\vixen\ssh-bootstrap\ssh-toast\vx-home",
+        r"X:\vixen\ssh-bootstrap\ssh-toast\vx-home\store-root",
+    );
+    assert!(script.contains("$refspec = 'refs/vixen-bootstrap/' + $commit;"));
+    assert!(script.contains("git -C $checkoutDir fetch origin $refspec;"));
+}
+
+#[cfg(unix)]
+#[test]
 fn ssh_control_master_not_ready_message_includes_log_detail() {
     let message = crate::ssh_control_master_not_ready_message(
         "toast",

@@ -528,16 +528,14 @@ fn ssh_bootstrap_windows_command(checkout_dir: &str, paths: &SshBootstrapWindows
 }
 
 #[cfg(unix)]
-async fn prepare_ssh_bootstrap_windows_checkout(
-    control_path: &Utf8Path,
-    target: &str,
+fn ssh_bootstrap_windows_prepare_checkout_script(
     bare_repo_dir: &str,
     commit: &str,
     checkout_dir: &str,
     vx_home: &str,
     store_root: &str,
-) -> Result<()> {
-    let script = format!(
+) -> String {
+    format!(
         concat!(
             "$ErrorActionPreference = 'Stop'; ",
             "$bareRepoDir = '{bare_repo_dir}'; ",
@@ -559,7 +557,8 @@ async fn prepare_ssh_bootstrap_windows_checkout(
             "if (-not (Test-Path (Join-Path $checkoutDir '.git'))) {{ if (Test-Path $checkoutDir) {{ Remove-Item -Recurse -Force $checkoutDir }}; git clone $bareRepoDir $checkoutDir; if ($LASTEXITCODE -ne 0) {{ throw 'git clone failed' }} }}; ",
             "git -C $checkoutDir remote set-url origin $bareRepoDir; if ($LASTEXITCODE -ne 0) {{ throw 'git remote set-url failed' }}; ",
             "git -C $checkoutDir checkout -- Cargo.lock crates/vx/Cargo.toml crates/vxd/Cargo.toml *> $null; ",
-            "git -C $checkoutDir fetch origin ('refs/vixen-bootstrap/' + $commit); if ($LASTEXITCODE -ne 0) {{ throw 'git fetch failed' }}; ",
+            "$refspec = 'refs/vixen-bootstrap/' + $commit; ",
+            "git -C $checkoutDir fetch origin $refspec; if ($LASTEXITCODE -ne 0) {{ throw 'git fetch failed' }}; ",
             "git -C $checkoutDir checkout --detach $commit; if ($LASTEXITCODE -ne 0) {{ throw 'git checkout --detach failed' }}; ",
             "$manifests = @((Join-Path $checkoutDir 'crates\\vx\\Cargo.toml'), (Join-Path $checkoutDir 'crates\\vxd\\Cargo.toml')); ",
             "foreach ($manifest in $manifests) {{ if (Test-Path $manifest) {{ $lines = Get-Content $manifest; $updated = @($lines | Where-Object {{ $_ -notlike 'tree-sitter-vixen = *' }}); if ($updated.Count -ne $lines.Count) {{ Set-Content -Path $manifest -Value $updated }} }} }}; ",
@@ -572,6 +571,25 @@ async fn prepare_ssh_bootstrap_windows_checkout(
         checkout_dir = powershell_single_quote(checkout_dir),
         vx_home = powershell_single_quote(vx_home),
         store_root = powershell_single_quote(store_root),
+    )
+}
+
+#[cfg(unix)]
+async fn prepare_ssh_bootstrap_windows_checkout(
+    control_path: &Utf8Path,
+    target: &str,
+    bare_repo_dir: &str,
+    commit: &str,
+    checkout_dir: &str,
+    vx_home: &str,
+    store_root: &str,
+) -> Result<()> {
+    let script = ssh_bootstrap_windows_prepare_checkout_script(
+        bare_repo_dir,
+        commit,
+        checkout_dir,
+        vx_home,
+        store_root,
     );
     ssh_control_output_windows(control_path, target, &script).await?;
     Ok(())
