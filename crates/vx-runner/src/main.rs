@@ -743,3 +743,13 @@ fn detect_msvc_environment() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::runner_mount_base;
+
+    #[test]
+    fn runner_mount_base_is_stable_global_path() {
+        assert_eq!(runner_mount_base().as_str(), "/tmp/vx/vfs");
+    }
+}

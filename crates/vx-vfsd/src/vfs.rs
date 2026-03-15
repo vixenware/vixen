@@ -5,8 +5,8 @@
 //!
 //! # Architecture
 //!
-//! The VFS is mounted once at a configured mount base (see `VX_RUNNER_MOUNT`)
-//! and serves multiple action prefixes:
+//! The VFS is mounted once at a stable global mount base (`/tmp/vx/vfs`)
+//! managed by `vx-vfsd`, and serves multiple action prefixes:
 //!
 //! ```text
 //! <mount-base>/                   <- single persistent mount
