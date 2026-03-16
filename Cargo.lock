@@ -3553,6 +3553,8 @@ dependencies = [
  "eyre",
  "facet",
  "facet-postcard",
+ "flate2",
+ "tar",
  "tempfile",
 ]
 

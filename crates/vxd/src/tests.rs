@@ -185,36 +185,12 @@ fn windows_bootstrap_root_falls_back_to_home_cache() {
 
 #[cfg(unix)]
 #[test]
-fn ssh_bootstrap_git_push_url_uses_remote_repo_paths() {
-    let unix_url = crate::ssh_bootstrap_git_push_url(
-        "orb",
-        "/home/amos/.cache/vixen/ssh-bootstrap/ssh-orb/repo.git",
-        &crate::SshBootstrapTargetPlatform::Unix,
-    );
-    assert_eq!(
-        unix_url,
-        "ssh://orb/home/amos/.cache/vixen/ssh-bootstrap/ssh-orb/repo.git"
-    );
-
-    let windows_url = crate::ssh_bootstrap_git_push_url(
-        "toast",
-        r"C:\Users\faste\.cache\vixen\ssh-bootstrap\ssh-toast\repo.git",
-        &crate::SshBootstrapTargetPlatform::Windows,
-    );
-    assert_eq!(
-        windows_url,
-        "ssh://toast/C:/Users/faste/.cache/vixen/ssh-bootstrap/ssh-toast/repo.git"
-    );
-}
-
-#[cfg(unix)]
-#[test]
 fn ssh_bootstrap_remote_launch_script_exports_vx_home_for_runner() {
     assert!(crate::SSH_BOOTSTRAP_REMOTE_LAUNCH_SCRIPT.contains("export VX_HOME=\"$vx_home\""));
     assert!(crate::SSH_BOOTSTRAP_REMOTE_LAUNCH_SCRIPT.contains("pkill -9 -f"));
     assert!(
         crate::SSH_BOOTSTRAP_REMOTE_LAUNCH_SCRIPT
-            .contains("\"$checkout_dir/target/debug/vx-store\" --root \"$store_root\"")
+            .contains("\"$checkout_dir/target/release/vx-store\" --root \"$store_root\"")
     );
 }
 
@@ -228,6 +204,19 @@ fn unix_bootstrap_target_triple_maps_supported_arches() {
     assert_eq!(
         crate::unix_bootstrap_target_triple("x86_64").expect("x86_64 target triple"),
         "x86_64-unknown-linux-gnu"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn windows_bootstrap_target_triple_maps_supported_arches() {
+    assert_eq!(
+        crate::windows_bootstrap_target_triple("x86_64").expect("x86_64 target triple"),
+        "x86_64-pc-windows-msvc"
+    );
+    assert_eq!(
+        crate::windows_bootstrap_target_triple("AMD64").expect("AMD64 target triple"),
+        "x86_64-pc-windows-msvc"
     );
 }
 
@@ -262,36 +251,35 @@ fn ssh_bootstrap_windows_command_announces_endpoints() {
     let script = String::from_utf16(&utf16).expect("utf16 decode");
     assert!(script.contains("vx-bootstrap endpoints"));
     assert!(script.contains("$runnerEndpoint"));
+    assert!(script.contains("target\\release\\vx-store.exe"));
+    assert!(script.contains("target\\release\\vx-runner.exe"));
 }
 
 #[cfg(unix)]
 #[test]
-fn windows_git_ssh_wrapper_rewrites_git_pack_commands_and_passthroughs_ssh_probes() {
-    let temp_dir = tempfile::tempdir().expect("tempdir");
-    let control_path =
-        camino::Utf8PathBuf::from_path_buf(temp_dir.path().join("toast-ctl.sock")).expect("utf8");
-    let wrapper_path =
-        crate::write_windows_git_ssh_wrapper(&control_path).expect("wrapper path should build");
-    let wrapper = std::fs::read_to_string(wrapper_path.as_std_path()).expect("read wrapper");
-
-    assert!(wrapper.contains("if [ \"$#\" -gt 0 ] && [ \"${1#-}\" != \"$1\" ]; then"));
-    assert!(wrapper.contains("git-upload-pack\\ *|git-receive-pack\\ *"));
-    assert!(wrapper.contains("case \"$path\" in"));
-    assert!(wrapper.contains("/?:/*) path=${path#/} ;;"));
-}
-
-#[cfg(unix)]
-#[test]
-fn ssh_bootstrap_windows_checkout_script_fetches_commit_refspec_via_variable() {
-    let script = crate::ssh_bootstrap_windows_prepare_checkout_script(
-        r"X:\vixen\ssh-bootstrap\ssh-toast\repo.git",
-        "abc123",
-        r"X:\vixen\ssh-bootstrap\ssh-toast\repo",
-        r"X:\vixen\ssh-bootstrap\ssh-toast\vx-home",
-        r"X:\vixen\ssh-bootstrap\ssh-toast\vx-home\store-root",
+fn ssh_bootstrap_windows_loader_command_reads_gzip_payload_and_execs_bootstrap() {
+    let command = crate::ssh_bootstrap_windows_loader_command(
+        r"X:\vixen\ssh-bootstrap\ssh-toast\vx-bootstrap.exe",
+        r"X:\vixen\ssh-bootstrap\ssh-toast\vx-bootstrap.exe.gz",
     );
-    assert!(script.contains("$refspec = 'refs/vixen-bootstrap/' + $commit;"));
-    assert!(script.contains("git -C $checkoutDir fetch origin $refspec;"));
+    assert!(command.contains("-EncodedCommand "));
+    let encoded = command
+        .split_once("-EncodedCommand ")
+        .map(|(_, encoded)| encoded)
+        .expect("encoded PowerShell command");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .expect("base64 decode");
+    let utf16 = bytes
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    let script = String::from_utf16(&utf16).expect("utf16 decode");
+    assert!(script.contains("$srcGz = 'X:\\vixen\\ssh-bootstrap\\ssh-toast\\vx-bootstrap.exe.gz'"));
+    assert!(script.contains("Move-Item -Force $srcGz $tmpGz"));
+    assert!(script.contains("vx-bootstrap-loader: decompressing bootstrap executable"));
+    assert!(script.contains("System.IO.Compression.GzipStream"));
+    assert!(script.contains("& $dest --stdio"));
 }
 
 #[cfg(unix)]

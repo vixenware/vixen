@@ -1,15 +1,19 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread::{self, JoinHandle};
 use std::time::UNIX_EPOCH;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use eyre::{Context, Result};
 use facet::Facet;
+use flate2::read::GzDecoder;
+use tar::Archive;
 
 pub const BOOTSTRAP_PROTOCOL_VERSION: u32 = 1;
 
@@ -55,10 +59,19 @@ pub struct PlanSourceSyncResponse {
 }
 
 #[derive(Debug, Clone, Facet)]
-pub struct PutSourceFileRequest {
+pub struct BeginSourceArchiveRequest {
     pub checkout_dir: String,
-    pub file: SourceFileEntry,
-    pub contents: Vec<u8>,
+    pub files: Vec<SourceFileEntry>,
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct SourceArchiveChunkRequest {
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct SourceArchiveAppliedResponse {
+    pub applied_files: u64,
 }
 
 #[derive(Debug, Clone, Facet)]
@@ -92,12 +105,22 @@ pub struct BootstrapError {
 }
 
 #[derive(Debug, Clone, Facet)]
+pub struct BootstrapProgress {
+    pub phase: String,
+    pub message: String,
+    pub current: Option<u64>,
+    pub total: Option<u64>,
+}
+
+#[derive(Debug, Clone, Facet)]
 #[repr(u8)]
 pub enum BootstrapRequest {
     Hello,
     GetCachedSourceManifest(GetCachedSourceManifestRequest),
     PlanSourceSync(PlanSourceSyncRequest),
-    PutSourceFile(PutSourceFileRequest),
+    BeginSourceArchive(BeginSourceArchiveRequest),
+    SourceArchiveChunk(SourceArchiveChunkRequest),
+    FinishSourceArchive,
     BuildSourceTree(BuildSourceTreeRequest),
     LaunchRunner(LaunchRunnerRequest),
     Shutdown,
@@ -106,14 +129,26 @@ pub enum BootstrapRequest {
 #[derive(Debug, Clone, Facet)]
 #[repr(u8)]
 pub enum BootstrapResponse {
+    Progress(BootstrapProgress),
     Hello(HostFacts),
     GetCachedSourceManifest(GetCachedSourceManifestResponse),
     PlanSourceSync(PlanSourceSyncResponse),
-    PutSourceFileAck,
+    BeginSourceArchiveReady,
+    SourceArchiveApplied(SourceArchiveAppliedResponse),
     BuildSourceTree(BuildSourceTreeResponse),
     LaunchRunnerReady,
     ShuttingDown,
     Error(BootstrapError),
+}
+
+struct PendingSourceArchive {
+    sender: mpsc::Sender<Option<Vec<u8>>>,
+    join_handle: JoinHandle<Result<SourceArchiveAppliedResponse, String>>,
+}
+
+#[derive(Default)]
+struct BootstrapServerState {
+    pending_source_archive: Option<PendingSourceArchive>,
 }
 
 pub fn read_frame<R: Read>(reader: &mut R) -> Result<Option<BootstrapRequest>> {
@@ -215,10 +250,10 @@ pub fn serve_stdio() -> Result<()> {
     let stdout = std::io::stdout();
     let mut reader = stdin.lock();
     let mut writer = stdout.lock();
+    let mut state = BootstrapServerState::default();
     while let Some(request) = read_frame(&mut reader)? {
         let should_exit = matches!(request, BootstrapRequest::Shutdown);
-        let response = handle_request(request);
-        write_frame(&mut writer, &response)?;
+        handle_request(&mut writer, &mut state, request)?;
         if should_exit {
             break;
         }
@@ -226,11 +261,15 @@ pub fn serve_stdio() -> Result<()> {
     Ok(())
 }
 
-fn handle_request(request: BootstrapRequest) -> BootstrapResponse {
-    match request {
+fn handle_request<W: Write>(
+    writer: &mut W,
+    state: &mut BootstrapServerState,
+    request: BootstrapRequest,
+) -> Result<()> {
+    let response = match request {
         BootstrapRequest::Hello => BootstrapResponse::Hello(detect_host_facts()),
         BootstrapRequest::GetCachedSourceManifest(request) => {
-            match get_cached_source_manifest(&request) {
+            match get_cached_source_manifest_with_progress(&request, writer) {
                 Ok(response) => BootstrapResponse::GetCachedSourceManifest(response),
                 Err(error) => BootstrapResponse::Error(BootstrapError {
                     kind: "get_cached_source_manifest".to_string(),
@@ -238,33 +277,303 @@ fn handle_request(request: BootstrapRequest) -> BootstrapResponse {
                 }),
             }
         }
-        BootstrapRequest::PlanSourceSync(request) => match plan_source_sync(&request) {
-            Ok(response) => BootstrapResponse::PlanSourceSync(response),
-            Err(error) => BootstrapResponse::Error(BootstrapError {
-                kind: "plan_source_sync".to_string(),
-                message: format!("{error:#}"),
-            }),
-        },
-        BootstrapRequest::PutSourceFile(request) => match put_source_file(&request) {
-            Ok(()) => BootstrapResponse::PutSourceFileAck,
-            Err(error) => BootstrapResponse::Error(BootstrapError {
-                kind: "put_source_file".to_string(),
-                message: format!("{error:#}"),
-            }),
-        },
-        BootstrapRequest::BuildSourceTree(request) => match build_source_tree(&request) {
-            Ok(response) => BootstrapResponse::BuildSourceTree(response),
-            Err(error) => BootstrapResponse::Error(BootstrapError {
-                kind: "build_source_tree".to_string(),
-                message: format!("{error:#}"),
-            }),
-        },
+        BootstrapRequest::PlanSourceSync(request) => {
+            match plan_source_sync_with_progress(&request, writer) {
+                Ok(response) => BootstrapResponse::PlanSourceSync(response),
+                Err(error) => BootstrapResponse::Error(BootstrapError {
+                    kind: "plan_source_sync".to_string(),
+                    message: format!("{error:#}"),
+                }),
+            }
+        }
+        BootstrapRequest::BeginSourceArchive(request) => {
+            match begin_source_archive_with_progress(state, &request, writer) {
+                Ok(()) => BootstrapResponse::BeginSourceArchiveReady,
+                Err(error) => BootstrapResponse::Error(BootstrapError {
+                    kind: "begin_source_archive".to_string(),
+                    message: format!("{error:#}"),
+                }),
+            }
+        }
+        BootstrapRequest::SourceArchiveChunk(request) => {
+            match push_source_archive_chunk(state, request) {
+                Ok(()) => return Ok(()),
+                Err(error) => BootstrapResponse::Error(BootstrapError {
+                    kind: "source_archive_chunk".to_string(),
+                    message: format!("{error:#}"),
+                }),
+            }
+        }
+        BootstrapRequest::FinishSourceArchive => {
+            match finish_source_archive_with_progress(state, writer) {
+                Ok(response) => BootstrapResponse::SourceArchiveApplied(response),
+                Err(error) => BootstrapResponse::Error(BootstrapError {
+                    kind: "finish_source_archive".to_string(),
+                    message: format!("{error:#}"),
+                }),
+            }
+        }
+        BootstrapRequest::BuildSourceTree(request) => {
+            match build_source_tree_with_progress(&request, writer) {
+                Ok(response) => BootstrapResponse::BuildSourceTree(response),
+                Err(error) => BootstrapResponse::Error(BootstrapError {
+                    kind: "build_source_tree".to_string(),
+                    message: format!("{error:#}"),
+                }),
+            }
+        }
         BootstrapRequest::LaunchRunner(_request) => BootstrapResponse::Error(BootstrapError {
             kind: "launch_runner".to_string(),
             message: "launch_runner is not implemented yet".to_string(),
         }),
         BootstrapRequest::Shutdown => BootstrapResponse::ShuttingDown,
+    };
+    write_frame(writer, &response)
+}
+
+struct ChannelChunkReader {
+    receiver: mpsc::Receiver<Option<Vec<u8>>>,
+    current: Cursor<Vec<u8>>,
+    finished: bool,
+}
+
+impl ChannelChunkReader {
+    fn new(receiver: mpsc::Receiver<Option<Vec<u8>>>) -> Self {
+        Self {
+            receiver,
+            current: Cursor::new(Vec::new()),
+            finished: false,
+        }
     }
+}
+
+impl Read for ChannelChunkReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let read = self.current.read(buf)?;
+            if read > 0 {
+                return Ok(read);
+            }
+            if self.finished {
+                return Ok(0);
+            }
+            match self.receiver.recv() {
+                Ok(Some(bytes)) => {
+                    self.current = Cursor::new(bytes);
+                }
+                Ok(None) => {
+                    self.finished = true;
+                }
+                Err(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "source archive stream closed unexpectedly",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn begin_source_archive(
+    state: &mut BootstrapServerState,
+    request: &BeginSourceArchiveRequest,
+) -> Result<()> {
+    if state.pending_source_archive.is_some() {
+        eyre::bail!("source archive upload is already in progress");
+    }
+    let checkout_dir = request.checkout_dir.clone();
+    let files = request.files.clone();
+    let (sender, receiver) = mpsc::channel::<Option<Vec<u8>>>();
+    let join_handle =
+        thread::spawn(move || extract_source_archive_stream(&checkout_dir, files, receiver));
+    state.pending_source_archive = Some(PendingSourceArchive {
+        sender,
+        join_handle,
+    });
+    Ok(())
+}
+
+fn begin_source_archive_with_progress<W: Write>(
+    state: &mut BootstrapServerState,
+    request: &BeginSourceArchiveRequest,
+    writer: &mut W,
+) -> Result<()> {
+    emit_progress(
+        writer,
+        "begin_source_archive",
+        format!(
+            "ready to receive source archive for {} files into {}",
+            request.files.len(),
+            request.checkout_dir
+        ),
+        Some(0),
+        Some(request.files.len() as u64),
+    )?;
+    begin_source_archive(state, request)
+}
+
+fn push_source_archive_chunk(
+    state: &mut BootstrapServerState,
+    request: SourceArchiveChunkRequest,
+) -> Result<()> {
+    let pending = state
+        .pending_source_archive
+        .as_mut()
+        .ok_or_else(|| eyre::eyre!("source archive upload was not started"))?;
+    pending
+        .sender
+        .send(Some(request.bytes))
+        .map_err(|_| eyre::eyre!("source archive receiver exited before upload finished"))?;
+    Ok(())
+}
+
+fn finish_source_archive(state: &mut BootstrapServerState) -> Result<SourceArchiveAppliedResponse> {
+    let pending = state
+        .pending_source_archive
+        .take()
+        .ok_or_else(|| eyre::eyre!("source archive upload was not started"))?;
+    pending
+        .sender
+        .send(None)
+        .map_err(|_| eyre::eyre!("source archive receiver exited before finish"))?;
+    pending
+        .join_handle
+        .join()
+        .map_err(|_| eyre::eyre!("source archive worker panicked"))?
+        .map_err(|message| eyre::eyre!(message))
+}
+
+fn finish_source_archive_with_progress<W: Write>(
+    state: &mut BootstrapServerState,
+    writer: &mut W,
+) -> Result<SourceArchiveAppliedResponse> {
+    emit_progress(
+        writer,
+        "finish_source_archive",
+        "finalizing streamed source archive",
+        None,
+        None,
+    )?;
+    let response = finish_source_archive(state)?;
+    emit_progress(
+        writer,
+        "finish_source_archive",
+        format!(
+            "applied {} files from streamed source archive",
+            response.applied_files
+        ),
+        Some(response.applied_files),
+        Some(response.applied_files),
+    )?;
+    Ok(response)
+}
+
+fn extract_source_archive_stream(
+    checkout_dir: &str,
+    files: Vec<SourceFileEntry>,
+    receiver: mpsc::Receiver<Option<Vec<u8>>>,
+) -> Result<SourceArchiveAppliedResponse, String> {
+    extract_source_archive_stream_inner(checkout_dir, files, receiver)
+        .map_err(|error| format!("{error:#}"))
+}
+
+fn extract_source_archive_stream_inner(
+    checkout_dir: &str,
+    files: Vec<SourceFileEntry>,
+    receiver: mpsc::Receiver<Option<Vec<u8>>>,
+) -> Result<SourceArchiveAppliedResponse> {
+    let checkout_dir = Utf8Path::new(checkout_dir);
+    if let Some(parent) = checkout_dir.parent() {
+        fs::create_dir_all(parent).wrap_err_with(|| format!("failed to create {}", parent))?;
+    }
+    fs::create_dir_all(checkout_dir)
+        .wrap_err_with(|| format!("failed to create {}", checkout_dir))?;
+
+    let files_by_path = files
+        .iter()
+        .map(|entry| normalize_relative_path(&entry.path).map(|path| (path, entry.clone())))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let reader = ChannelChunkReader::new(receiver);
+    let decoder = GzDecoder::new(reader);
+    let mut archive = Archive::new(decoder);
+    let mut extracted_paths = BTreeSet::new();
+
+    for entry in archive
+        .entries()
+        .wrap_err("failed to read source archive entries")?
+    {
+        let mut entry = entry.wrap_err("failed to read source archive entry")?;
+        if entry.header().entry_type().is_dir() {
+            continue;
+        }
+        let path = entry
+            .path()
+            .wrap_err("failed to read source archive entry path")?
+            .into_owned();
+        let path = Utf8PathBuf::from_path_buf(path)
+            .map_err(|path| eyre::eyre!("non-utf8 path in source archive: {}", path.display()))?;
+        let relpath = normalize_relative_path(path.as_str())?;
+        if !files_by_path.contains_key(&relpath) {
+            eyre::bail!("source archive contained unexpected path {relpath}");
+        }
+        let full_path = checkout_dir.join(&relpath);
+        let parent = full_path
+            .parent()
+            .ok_or_else(|| eyre::eyre!("path has no parent: {}", full_path))?;
+        fs::create_dir_all(parent).wrap_err_with(|| format!("failed to create {}", parent))?;
+        entry
+            .unpack_in(checkout_dir)
+            .wrap_err_with(|| format!("failed to unpack {} into {}", relpath, checkout_dir))?;
+        extracted_paths.insert(relpath);
+    }
+
+    let expected_paths = files_by_path.keys().cloned().collect::<BTreeSet<_>>();
+    if extracted_paths != expected_paths {
+        let missing = expected_paths
+            .difference(&extracted_paths)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            eyre::bail!(
+                "source archive did not contain {} expected paths: {}",
+                missing.len(),
+                missing.join(", ")
+            );
+        }
+    }
+
+    let mut cached_manifest = load_cached_source_manifest(checkout_dir)?;
+    for relpath in extracted_paths {
+        let entry = files_by_path
+            .get(&relpath)
+            .ok_or_else(|| eyre::eyre!("missing manifest entry for extracted path {relpath}"))?;
+        let full_path = checkout_dir.join(&relpath);
+        set_file_executable(&full_path, entry.executable)?;
+        cached_manifest.insert(relpath, entry.clone());
+    }
+    save_cached_source_manifest(checkout_dir, &cached_manifest)?;
+    Ok(SourceArchiveAppliedResponse {
+        applied_files: files.len() as u64,
+    })
+}
+
+fn emit_progress<W: Write>(
+    writer: &mut W,
+    phase: &str,
+    message: impl Into<String>,
+    current: Option<u64>,
+    total: Option<u64>,
+) -> Result<()> {
+    write_frame(
+        writer,
+        &BootstrapResponse::Progress(BootstrapProgress {
+            phase: phase.to_string(),
+            message: message.into(),
+            current,
+            total,
+        }),
+    )
 }
 
 pub fn get_cached_source_manifest(
@@ -275,6 +584,31 @@ pub fn get_cached_source_manifest(
         .into_values()
         .collect::<Vec<_>>();
     Ok(GetCachedSourceManifestResponse { files })
+}
+
+fn get_cached_source_manifest_with_progress<W: Write>(
+    request: &GetCachedSourceManifestRequest,
+    writer: &mut W,
+) -> Result<GetCachedSourceManifestResponse> {
+    emit_progress(
+        writer,
+        "get_cached_source_manifest",
+        format!(
+            "loading cached source manifest from {}",
+            request.checkout_dir
+        ),
+        None,
+        None,
+    )?;
+    let response = get_cached_source_manifest(request)?;
+    emit_progress(
+        writer,
+        "get_cached_source_manifest",
+        format!("loaded {} cached source entries", response.files.len()),
+        Some(response.files.len() as u64),
+        Some(response.files.len() as u64),
+    )?;
+    Ok(response)
 }
 
 pub fn plan_source_sync(request: &PlanSourceSyncRequest) -> Result<PlanSourceSyncResponse> {
@@ -350,28 +684,30 @@ pub fn plan_source_sync(request: &PlanSourceSyncRequest) -> Result<PlanSourceSyn
     })
 }
 
-pub fn put_source_file(request: &PutSourceFileRequest) -> Result<()> {
-    let checkout_dir = Utf8Path::new(&request.checkout_dir);
-    let relpath = normalize_relative_path(&request.file.path)?;
-    let path = checkout_dir.join(&relpath);
-    let parent = path
-        .parent()
-        .ok_or_else(|| eyre::eyre!("path has no parent: {}", path))?;
-    fs::create_dir_all(parent).wrap_err_with(|| format!("failed to create {}", parent))?;
-    let temp_path = path.with_extension(format!(
-        "{}.tmp.{}",
-        path.extension().unwrap_or("sync"),
-        std::process::id()
-    ));
-    fs::write(&temp_path, &request.contents)
-        .wrap_err_with(|| format!("failed to write {}", temp_path))?;
-    set_file_executable(&temp_path, request.file.executable)?;
-    fs::rename(&temp_path, &path)
-        .wrap_err_with(|| format!("failed to rename {} to {}", temp_path, path))?;
-    let mut cached_manifest = load_cached_source_manifest(checkout_dir)?;
-    cached_manifest.insert(relpath, request.file.clone());
-    save_cached_source_manifest(checkout_dir, &cached_manifest)?;
-    Ok(())
+fn plan_source_sync_with_progress<W: Write>(
+    request: &PlanSourceSyncRequest,
+    writer: &mut W,
+) -> Result<PlanSourceSyncResponse> {
+    emit_progress(
+        writer,
+        "plan_source_sync",
+        format!("planning source sync for {} files", request.files.len()),
+        Some(0),
+        Some(request.files.len() as u64),
+    )?;
+    let response = plan_source_sync(request)?;
+    emit_progress(
+        writer,
+        "plan_source_sync",
+        format!(
+            "planned source sync: {} missing, {} deleted",
+            response.missing_paths.len(),
+            response.deleted_paths.len()
+        ),
+        Some(request.files.len() as u64),
+        Some(request.files.len() as u64),
+    )?;
+    Ok(response)
 }
 
 pub fn build_source_tree(request: &BuildSourceTreeRequest) -> Result<BuildSourceTreeResponse> {
@@ -408,6 +744,32 @@ pub fn build_source_tree(request: &BuildSourceTreeRequest) -> Result<BuildSource
     Ok(BuildSourceTreeResponse {
         checkout_dir: checkout_dir.to_string(),
     })
+}
+
+fn build_source_tree_with_progress<W: Write>(
+    request: &BuildSourceTreeRequest,
+    writer: &mut W,
+) -> Result<BuildSourceTreeResponse> {
+    emit_progress(
+        writer,
+        "build_source_tree",
+        format!(
+            "building {} packages from {}",
+            request.build_packages.len(),
+            request.checkout_dir
+        ),
+        Some(0),
+        Some(request.build_packages.len() as u64),
+    )?;
+    let response = build_source_tree(request)?;
+    emit_progress(
+        writer,
+        "build_source_tree",
+        format!("cargo build finished for {}", request.checkout_dir),
+        Some(request.build_packages.len() as u64),
+        Some(request.build_packages.len() as u64),
+    )?;
+    Ok(response)
 }
 
 fn normalize_relative_path(path: &str) -> Result<String> {
@@ -640,6 +1002,32 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_progress_frames_roundtrip() {
+        let response = BootstrapResponse::Progress(BootstrapProgress {
+            phase: "plan_source_sync".to_string(),
+            message: "planned source sync".to_string(),
+            current: Some(10),
+            total: Some(12),
+        });
+        let payload = facet_postcard::to_vec(&response).expect("encode response");
+        let mut framed = Vec::new();
+        framed.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        framed.extend_from_slice(&payload);
+        let decoded = read_response_frame(&mut framed.as_slice())
+            .expect("read response frame")
+            .expect("response");
+        match decoded {
+            BootstrapResponse::Progress(decoded) => {
+                assert_eq!(decoded.phase, "plan_source_sync");
+                assert_eq!(decoded.message, "planned source sync");
+                assert_eq!(decoded.current, Some(10));
+                assert_eq!(decoded.total, Some(12));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
     fn plan_source_sync_detects_missing_changed_and_stale_files() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let checkout_dir =
@@ -708,23 +1096,53 @@ mod tests {
     }
 
     #[test]
-    fn put_source_file_writes_contents() {
+    fn streamed_source_archive_writes_contents() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let checkout_dir =
             Utf8PathBuf::from_path_buf(tempdir.path().join("checkout")).expect("utf8");
         fs::create_dir_all(&checkout_dir).expect("checkout dir");
-        put_source_file(&PutSourceFileRequest {
-            checkout_dir: checkout_dir.to_string(),
-            file: SourceFileEntry {
-                path: "src/main.rs".to_string(),
-                blake3_hex: blake3::hash(b"fn main() {}\n").to_hex().to_string(),
-                executable: false,
-                size: 13,
-                modified_unix_millis: Some(123),
+        let file = SourceFileEntry {
+            path: "src/main.rs".to_string(),
+            blake3_hex: blake3::hash(b"fn main() {}\n").to_hex().to_string(),
+            executable: false,
+            size: 13,
+            modified_unix_millis: Some(123),
+        };
+        let mut archive_bytes = Vec::new();
+        {
+            let encoder =
+                flate2::write::GzEncoder::new(&mut archive_bytes, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(13);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "src/main.rs", &b"fn main() {}\n"[..])
+                .expect("append source file");
+            let encoder = builder.into_inner().expect("finish tar");
+            encoder.finish().expect("finish gzip");
+        }
+        let mut state = BootstrapServerState::default();
+        begin_source_archive(
+            &mut state,
+            &BeginSourceArchiveRequest {
+                checkout_dir: checkout_dir.to_string(),
+                files: vec![file.clone()],
             },
-            contents: b"fn main() {}\n".to_vec(),
-        })
-        .expect("put source file");
+        )
+        .expect("begin source archive");
+        for chunk in archive_bytes.chunks(5) {
+            push_source_archive_chunk(
+                &mut state,
+                SourceArchiveChunkRequest {
+                    bytes: chunk.to_vec(),
+                },
+            )
+            .expect("push chunk");
+        }
+        let response = finish_source_archive(&mut state).expect("finish source archive");
+        assert_eq!(response.applied_files, 1);
         assert_eq!(
             fs::read_to_string(checkout_dir.join("src/main.rs")).expect("read file"),
             "fn main() {}\n"

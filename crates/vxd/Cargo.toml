@@ -33,6 +33,7 @@ base64 = "0.22"
 flate2 = "1"
 serde_json = "1"
 sha2 = "0.10"
+tar = "0.4"
 
 vx-store-proto = { workspace = true }
 vx-runner-proto = { workspace = true }

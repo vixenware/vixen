@@ -41,17 +41,20 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{self, Write};
 use std::net::TcpListener;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tar::Builder as TarBuilder;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::mpsc;
 use vx_bootstrap::{
-    BootstrapRequest, BootstrapResponse, BuildSourceTreeRequest, GetCachedSourceManifestRequest,
-    PlanSourceSyncRequest, PutSourceFileRequest, SourceFileEntry, file_modified_unix_millis,
+    BeginSourceArchiveRequest, BootstrapProgress, BootstrapRequest, BootstrapResponse,
+    BuildSourceTreeRequest, GetCachedSourceManifestRequest, PlanSourceSyncRequest,
+    SourceArchiveChunkRequest, SourceFileEntry, file_modified_unix_millis,
 };
 use vx_io::boot::{BootDispatcher, BootGate, BootTx};
 use vx_io::net::{Endpoint, Listener};
@@ -560,22 +563,22 @@ vfsd_socket="$5"
 runner_socket="$6"
 
 mkdir -p "$(dirname "$checkout_dir")" "$vx_home" "$store_root"
-pkill -9 -f "$checkout_dir/target/debug/vx-runner" || true
-pkill -9 -f "$checkout_dir/target/debug/vx-store" || true
-pkill -9 -f "$checkout_dir/target/debug/vx-vfsd" || true
-while pgrep -f "$checkout_dir/target/debug/vx-runner" >/dev/null; do sleep 0.1; done
-while pgrep -f "$checkout_dir/target/debug/vx-store" >/dev/null; do sleep 0.1; done
-while pgrep -f "$checkout_dir/target/debug/vx-vfsd" >/dev/null; do sleep 0.1; done
+pkill -9 -f "$checkout_dir/target/release/vx-runner" || true
+pkill -9 -f "$checkout_dir/target/release/vx-store" || true
+pkill -9 -f "$checkout_dir/target/release/vx-vfsd" || true
+while pgrep -f "$checkout_dir/target/release/vx-runner" >/dev/null; do sleep 0.1; done
+while pgrep -f "$checkout_dir/target/release/vx-store" >/dev/null; do sleep 0.1; done
+while pgrep -f "$checkout_dir/target/release/vx-vfsd" >/dev/null; do sleep 0.1; done
 rm -f "$store_socket" "$vfsd_socket" "$runner_socket"
 trap 'jobs -p | xargs -r kill || true' EXIT
-"$checkout_dir/target/debug/vx-store" --root "$store_root" --listen "unix:$store_socket" &
+"$checkout_dir/target/release/vx-store" --root "$store_root" --listen "unix:$store_socket" &
 for _ in $(seq 1 200); do
   [ -S "$store_socket" ] && break
   sleep 0.1
 done
 [ -S "$store_socket" ] || { echo "vx-store did not create $store_socket" >&2; exit 1; }
 export VX_HOME="$vx_home"
-exec "$checkout_dir/target/debug/vx-runner" \
+exec "$checkout_dir/target/release/vx-runner" \
   --vx-home "$vx_home" \
   --store "unix:$store_socket" \
   --vfsd "unix:$vfsd_socket" \
@@ -601,6 +604,36 @@ fn powershell_command_line(script: &str) -> String {
     let wrapped = format!("$ProgressPreference = 'SilentlyContinue'; {script}");
     let encoded = powershell_encoded_command(&wrapped);
     format!("powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}")
+}
+
+#[cfg(unix)]
+fn ssh_bootstrap_windows_loader_command(bootstrap_path: &str, compressed_path: &str) -> String {
+    let script = format!(
+        concat!(
+            "$ErrorActionPreference = 'Stop'; ",
+            "$dest = '{bootstrap_path}'; ",
+            "$srcGz = '{compressed_path}'; ",
+            "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null; ",
+            "$tmpGz = $dest + '.tmp.' + $PID + '.gz'; ",
+            "$tmpExe = $dest + '.tmp.' + $PID + '.exe'; ",
+            "[Console]::Error.WriteLine('vx-bootstrap-loader: staging gzip payload'); ",
+            "Move-Item -Force $srcGz $tmpGz; ",
+            "[Console]::Error.WriteLine('vx-bootstrap-loader: decompressing bootstrap executable'); ",
+            "$gzipIn = [System.IO.File]::OpenRead($tmpGz); ",
+            "$exeOut = [System.IO.File]::Open($tmpExe, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None); ",
+            "try {{ ",
+            "  $gzip = New-Object System.IO.Compression.GzipStream($gzipIn, [System.IO.Compression.CompressionMode]::Decompress); ",
+            "  try {{ $gzip.CopyTo($exeOut) }} finally {{ $gzip.Dispose() }} ",
+            "}} finally {{ $exeOut.Dispose(); $gzipIn.Dispose() }}; ",
+            "Remove-Item -Force $tmpGz; ",
+            "Move-Item -Force $tmpExe $dest; ",
+            "[Console]::Error.WriteLine('vx-bootstrap-loader: starting bootstrap'); ",
+            "& $dest --stdio"
+        ),
+        bootstrap_path = powershell_single_quote(bootstrap_path),
+        compressed_path = powershell_single_quote(compressed_path),
+    );
+    powershell_command_line(&script)
 }
 
 #[cfg(unix)]
@@ -637,8 +670,8 @@ fn ssh_bootstrap_windows_command(checkout_dir: &str, paths: &SshBootstrapWindows
             "  try {{ $listener.Start() }} finally {{ $listener.Stop() }} ",
             "}}; ",
             "$checkoutDir = '{checkout_dir}'; ",
-            "$storeExe = Join-Path $checkoutDir 'target\\debug\\vx-store.exe'; ",
-            "$runnerExe = Join-Path $checkoutDir 'target\\debug\\vx-runner.exe'; ",
+            "$storeExe = Join-Path $checkoutDir 'target\\release\\vx-store.exe'; ",
+            "$runnerExe = Join-Path $checkoutDir 'target\\release\\vx-runner.exe'; ",
             "$storeProc = Start-Process -FilePath $storeExe -ArgumentList @('--root', $storeRoot, '--listen', $storeEndpoint) -PassThru; ",
             "$storeReady = $false; ",
             "for ($i = 0; $i -lt 200; $i++) {{ ",
@@ -663,88 +696,6 @@ fn ssh_bootstrap_windows_command(checkout_dir: &str, paths: &SshBootstrapWindows
     powershell_command_line(&script)
 }
 
-#[cfg(unix)]
-fn ssh_bootstrap_windows_prepare_checkout_script(
-    bare_repo_dir: &str,
-    commit: &str,
-    checkout_dir: &str,
-    vx_home: &str,
-    store_root: &str,
-) -> String {
-    format!(
-        concat!(
-            "$ErrorActionPreference = 'Stop'; ",
-            "$bareRepoDir = '{bare_repo_dir}'; ",
-            "$commit = '{commit}'; ",
-            "$checkoutDir = '{checkout_dir}'; ",
-            "$vxHome = '{vx_home}'; ",
-            "$storeRoot = '{store_root}'; ",
-            "$existing = Get-Process vx-runner,vx-store,vx-vfsd -ErrorAction SilentlyContinue; ",
-            "if ($existing) {{ ",
-            "  $existing | Stop-Process -Force; ",
-            "  for ($i = 0; $i -lt 200; $i++) {{ ",
-            "    if (-not (Get-Process vx-runner,vx-store,vx-vfsd -ErrorAction SilentlyContinue)) {{ break }}; ",
-            "    Start-Sleep -Milliseconds 100; ",
-            "  }}; ",
-            "  if (Get-Process vx-runner,vx-store,vx-vfsd -ErrorAction SilentlyContinue) {{ throw 'timed out waiting for prior bootstrap processes to exit' }}; ",
-            "}}; ",
-            "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $bareRepoDir), (Split-Path -Parent $checkoutDir), $vxHome, $storeRoot | Out-Null; ",
-            "if (-not (Test-Path (Join-Path $bareRepoDir 'HEAD'))) {{ if (Test-Path $bareRepoDir) {{ Remove-Item -Recurse -Force $bareRepoDir }}; git init --bare $bareRepoDir; if ($LASTEXITCODE -ne 0) {{ throw 'git init --bare failed' }} }}; ",
-            "if (-not (Test-Path (Join-Path $checkoutDir '.git'))) {{ if (Test-Path $checkoutDir) {{ Remove-Item -Recurse -Force $checkoutDir }}; git clone $bareRepoDir $checkoutDir; if ($LASTEXITCODE -ne 0) {{ throw 'git clone failed' }} }}; ",
-            "git -C $checkoutDir remote set-url origin $bareRepoDir; if ($LASTEXITCODE -ne 0) {{ throw 'git remote set-url failed' }}; ",
-            "git -C $checkoutDir checkout -- Cargo.lock crates/vx/Cargo.toml crates/vxd/Cargo.toml *> $null; ",
-            "$refspec = 'refs/vixen-bootstrap/' + $commit; ",
-            "git -C $checkoutDir fetch origin $refspec; if ($LASTEXITCODE -ne 0) {{ throw 'git fetch failed' }}; ",
-            "git -C $checkoutDir checkout --detach $commit; if ($LASTEXITCODE -ne 0) {{ throw 'git checkout --detach failed' }}; ",
-            "$manifests = @((Join-Path $checkoutDir 'crates\\vx\\Cargo.toml'), (Join-Path $checkoutDir 'crates\\vxd\\Cargo.toml')); ",
-            "foreach ($manifest in $manifests) {{ if (Test-Path $manifest) {{ $lines = Get-Content $manifest; $updated = @($lines | Where-Object {{ $_ -notlike 'tree-sitter-vixen = *' }}); if ($updated.Count -ne $lines.Count) {{ Set-Content -Path $manifest -Value $updated }} }} }}; ",
-            "cargo build --manifest-path (Join-Path $checkoutDir 'Cargo.toml') -p vx-store -p vx-vfsd -p vx-runner; if ($LASTEXITCODE -ne 0) {{ throw 'cargo build failed' }}; ",
-            "git -C $checkoutDir checkout -- Cargo.lock crates/vx/Cargo.toml crates/vxd/Cargo.toml *> $null; if ($LASTEXITCODE -ne 0) {{ throw 'git checkout restore failed' }}; ",
-            "Write-Output $checkoutDir"
-        ),
-        bare_repo_dir = powershell_single_quote(bare_repo_dir),
-        commit = powershell_single_quote(commit),
-        checkout_dir = powershell_single_quote(checkout_dir),
-        vx_home = powershell_single_quote(vx_home),
-        store_root = powershell_single_quote(store_root),
-    )
-}
-
-#[cfg(unix)]
-async fn prepare_ssh_bootstrap_windows_checkout(
-    control_path: &Utf8Path,
-    target: &str,
-    bare_repo_dir: &str,
-    commit: &str,
-    checkout_dir: &str,
-    vx_home: &str,
-    store_root: &str,
-) -> Result<()> {
-    let script = ssh_bootstrap_windows_prepare_checkout_script(
-        bare_repo_dir,
-        commit,
-        checkout_dir,
-        vx_home,
-        store_root,
-    );
-    ssh_control_output_windows(control_path, target, &script).await?;
-    Ok(())
-}
-
-async fn command_output(program: &str, args: &[&str]) -> Result<String> {
-    let mut command = moire::process::Command::new(program);
-    command.args(args);
-    let output = command.output().await?;
-    if !output.status.success() {
-        eyre::bail!(
-            "{program} failed with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
 fn resolve_vixen_repo_root() -> Result<Utf8PathBuf> {
     let manifest_dir = Utf8Path::new(VIXEN_REPO_MANIFEST_DIR);
     let repo_root = manifest_dir
@@ -752,29 +703,6 @@ fn resolve_vixen_repo_root() -> Result<Utf8PathBuf> {
         .and_then(Utf8Path::parent)
         .ok_or_else(|| eyre::eyre!("failed to resolve Vixen repo root from {manifest_dir}"))?;
     Ok(repo_root.to_path_buf())
-}
-
-#[cfg(unix)]
-async fn ensure_clean_vixen_repo(repo_root: &Utf8Path) -> Result<()> {
-    let status = command_output(
-        "git",
-        &[
-            "-C",
-            repo_root.as_str(),
-            "status",
-            "--short",
-            "--untracked-files=all",
-        ],
-    )
-    .await?;
-    if status.is_empty() {
-        return Ok(());
-    }
-    eyre::bail!(
-        "ssh bootstrap requires a clean committed Vixen repo at {}; uncommitted changes:\n{}",
-        repo_root,
-        status
-    );
 }
 
 #[cfg(unix)]
@@ -833,6 +761,107 @@ async fn ssh_control_output_windows(
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(unix)]
+fn ssh_scp_windows_dest(target: &str, remote_path: &str) -> String {
+    let normalized = remote_path.replace('\\', "/");
+    format!("{target}:/{normalized}")
+}
+
+#[cfg(unix)]
+fn ssh_scp_unix_dest(target: &str, remote_path: &str) -> String {
+    format!("{target}:{remote_path}")
+}
+
+#[cfg(unix)]
+async fn ssh_control_scp_file(
+    control_path: &Utf8Path,
+    local_path: &Utf8Path,
+    remote_dest: &str,
+) -> Result<()> {
+    let output = moire::process::Command::new("scp")
+        .arg("-o")
+        .arg(format!("ControlPath={control_path}"))
+        .arg("-o")
+        .arg("ControlMaster=no")
+        .arg(local_path.as_std_path())
+        .arg(remote_dest)
+        .output()
+        .await?;
+    if !output.status.success() {
+        eyre::bail!(
+            "scp to {remote_dest} failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_local_bootstrap_archive(stem: &str, compressed_bytes: &[u8]) -> Result<Utf8PathBuf> {
+    let temp_dir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+        .map_err(|path| eyre::eyre!("temporary directory is not utf-8: {}", path.display()))?;
+    let path = temp_dir.join(format!("{stem}-{}.gz", ssh_bootstrap_unique_suffix()));
+    fs::write(path.as_std_path(), compressed_bytes)
+        .wrap_err_with(|| format!("failed to write {}", path))?;
+    Ok(path)
+}
+
+#[cfg(unix)]
+const SOURCE_ARCHIVE_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+
+#[cfg(unix)]
+struct SourceArchiveChunkWriter {
+    sender: mpsc::UnboundedSender<Result<Vec<u8>, String>>,
+    buffer: Vec<u8>,
+}
+
+#[cfg(unix)]
+impl SourceArchiveChunkWriter {
+    fn new(sender: mpsc::UnboundedSender<Result<Vec<u8>, String>>) -> Self {
+        Self {
+            sender,
+            buffer: Vec::with_capacity(SOURCE_ARCHIVE_CHUNK_BYTES),
+        }
+    }
+
+    fn emit_full_chunks(&mut self) -> io::Result<()> {
+        while self.buffer.len() >= SOURCE_ARCHIVE_CHUNK_BYTES {
+            let tail = self.buffer.split_off(SOURCE_ARCHIVE_CHUNK_BYTES);
+            let chunk = std::mem::replace(&mut self.buffer, tail);
+            self.sender.send(Ok(chunk)).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "bootstrap archive receiver dropped",
+                )
+            })?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Write for SourceArchiveChunkWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        self.emit_full_chunks()?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.buffer.is_empty() {
+            let chunk = std::mem::take(&mut self.buffer);
+            self.sender.send(Ok(chunk)).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "bootstrap archive receiver dropped",
+                )
+            })?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -1039,8 +1068,298 @@ where
 }
 
 #[cfg(unix)]
+async fn read_bootstrap_final_response_frame<R>(
+    reader: &mut R,
+    boot_tx: Option<&BootTx>,
+    progress_listener: &Option<Arc<ProgressListenerClient>>,
+    class_label: &str,
+) -> Result<Option<BootstrapResponse>>
+where
+    R: AsyncRead + Unpin,
+{
+    loop {
+        let Some(response) = read_bootstrap_response_frame(reader).await? else {
+            return Ok(None);
+        };
+        match response {
+            BootstrapResponse::Progress(progress) => {
+                handle_bootstrap_progress_event(boot_tx, progress_listener, class_label, progress)
+                    .await;
+            }
+            other => return Ok(Some(other)),
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn handle_bootstrap_progress_event(
+    boot_tx: Option<&BootTx>,
+    progress_listener: &Option<Arc<ProgressListenerClient>>,
+    class_label: &str,
+    progress: BootstrapProgress,
+) {
+    let suffix = match (progress.current, progress.total) {
+        (Some(current), Some(total)) => format!(" ({current}/{total})"),
+        _ => String::new(),
+    };
+    emit_ssh_bootstrap_progress(
+        boot_tx,
+        progress_listener,
+        class_label,
+        format!(
+            "vx-bootstrap {}: {}{}",
+            progress.phase, progress.message, suffix
+        ),
+    )
+    .await;
+}
+
+#[cfg(unix)]
+fn produce_source_archive_chunks(
+    repo_root: Utf8PathBuf,
+    missing_paths: Vec<String>,
+    sender: mpsc::UnboundedSender<Result<Vec<u8>, String>>,
+) -> Result<()> {
+    let sender_for_error = sender.clone();
+    let result = (|| -> Result<()> {
+        let writer = SourceArchiveChunkWriter::new(sender);
+        let encoder = GzEncoder::new(writer, GzipCompression::default());
+        let mut builder = TarBuilder::new(encoder);
+        for relpath in &missing_paths {
+            let source_path = repo_root.join(relpath);
+            builder
+                .append_path_with_name(source_path.as_std_path(), relpath)
+                .wrap_err_with(|| format!("failed to append {} to source archive", source_path))?;
+        }
+        let encoder = builder
+            .into_inner()
+            .wrap_err("failed to finish streamed source tar archive")?;
+        let mut writer = encoder
+            .finish()
+            .wrap_err("failed to finish streamed source gzip archive")?;
+        writer
+            .flush()
+            .wrap_err("failed to flush streamed source archive")?;
+        Ok(())
+    })();
+    if let Err(error) = &result {
+        let _ = sender_for_error.send(Err(format!("{error:#}")));
+    }
+    result
+}
+
+#[cfg(unix)]
+async fn stream_source_archive_over_bootstrap<W, R>(
+    stdin: &mut W,
+    stdout: &mut R,
+    context: SourceArchiveStreamContext<'_>,
+    trace: &mut SshBootstrapChromeTrace,
+) -> Result<(usize, usize)>
+where
+    W: AsyncWrite + Unpin,
+    R: AsyncRead + Unpin,
+{
+    let stream_start = Instant::now();
+    let stream_start_ts = trace.now_micros();
+    if context.missing_paths.is_empty() {
+        trace.instant(
+            "remote_stream_source_archive_summary",
+            serde_json::json!({
+                "uploaded_files": 0,
+                "uploaded_bytes": 0,
+                "uploaded_chunks": 0,
+            }),
+        );
+        return Ok((0, 0));
+    }
+
+    let files = context
+        .missing_paths
+        .iter()
+        .map(|path| {
+            context
+                .local_source_map
+                .get(path)
+                .cloned()
+                .ok_or_else(|| eyre::eyre!("vx-bootstrap requested unknown source file {path}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    trace
+        .complete_async(
+            "remote_begin_source_archive",
+            serde_json::json!({
+                "file_count": files.len(),
+            }),
+            async {
+                write_bootstrap_request_frame(
+                    stdin,
+                    &BootstrapRequest::BeginSourceArchive(BeginSourceArchiveRequest {
+                        checkout_dir: context.checkout_dir.to_string(),
+                        files,
+                    }),
+                )
+                .await?;
+                read_bootstrap_final_response_frame(
+                    stdout,
+                    context.progress.boot_tx,
+                    context.progress.progress_listener,
+                    context.progress.class_label,
+                )
+                .await
+            },
+        )
+        .await?
+        .ok_or_else(|| eyre::eyre!("vx-bootstrap closed before begin_source_archive response"))
+        .and_then(|response| match response {
+            BootstrapResponse::BeginSourceArchiveReady => Ok(()),
+            BootstrapResponse::Error(error) => eyre::bail!(
+                "vx-bootstrap begin_source_archive failed: {}: {}",
+                error.kind,
+                error.message
+            ),
+            other => {
+                eyre::bail!("unexpected vx-bootstrap begin_source_archive response: {other:?}")
+            }
+        })?;
+
+    let (sender, mut receiver) = mpsc::unbounded_channel::<Result<Vec<u8>, String>>();
+    let missing_count = context.missing_paths.len();
+    let repo_root = context.repo_root.to_path_buf();
+    let missing_paths = context.missing_paths.to_vec();
+    let producer = tokio::task::spawn_blocking(move || {
+        produce_source_archive_chunks(repo_root, missing_paths, sender)
+    });
+
+    let mut uploaded_bytes = 0usize;
+    let mut uploaded_chunks = 0usize;
+    while let Some(item) = receiver.recv().await {
+        let chunk = match item {
+            Ok(chunk) => chunk,
+            Err(message) => eyre::bail!("failed to produce source archive stream: {message}"),
+        };
+        uploaded_bytes += chunk.len();
+        uploaded_chunks += 1;
+        write_bootstrap_request_frame(
+            stdin,
+            &BootstrapRequest::SourceArchiveChunk(SourceArchiveChunkRequest { bytes: chunk }),
+        )
+        .await?;
+    }
+    producer
+        .await
+        .map_err(|error| eyre::eyre!("source archive producer task failed: {error}"))??;
+
+    let applied_files = trace
+        .complete_async(
+            "remote_finish_source_archive",
+            serde_json::json!({
+                "uploaded_bytes": uploaded_bytes,
+                "uploaded_chunks": uploaded_chunks,
+            }),
+            async {
+                write_bootstrap_request_frame(stdin, &BootstrapRequest::FinishSourceArchive)
+                    .await?;
+                read_bootstrap_final_response_frame(
+                    stdout,
+                    context.progress.boot_tx,
+                    context.progress.progress_listener,
+                    context.progress.class_label,
+                )
+                .await
+            },
+        )
+        .await?
+        .ok_or_else(|| eyre::eyre!("vx-bootstrap closed before finish_source_archive response"))
+        .and_then(|response| match response {
+            BootstrapResponse::SourceArchiveApplied(response) => Ok(response.applied_files),
+            BootstrapResponse::Error(error) => eyre::bail!(
+                "vx-bootstrap finish_source_archive failed: {}: {}",
+                error.kind,
+                error.message
+            ),
+            other => {
+                eyre::bail!("unexpected vx-bootstrap finish_source_archive response: {other:?}")
+            }
+        })?;
+
+    trace.instant(
+        "remote_stream_source_archive_summary",
+        serde_json::json!({
+            "uploaded_files": applied_files,
+            "uploaded_bytes": uploaded_bytes,
+            "uploaded_chunks": uploaded_chunks,
+        }),
+    );
+    trace.events.push(serde_json::json!({
+        "name": "remote_stream_source_archive",
+        "cat": "bootstrap",
+        "ph": "X",
+        "pid": 1,
+        "tid": 1,
+        "ts": stream_start_ts,
+        "dur": stream_start.elapsed().as_micros() as u64,
+        "args": {
+            "missing_count": missing_count,
+            "uploaded_chunks": uploaded_chunks,
+            "uploaded_bytes": uploaded_bytes,
+        },
+    }));
+
+    Ok((applied_files as usize, uploaded_bytes))
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct SshBootstrapProgressContext<'a> {
+    boot_tx: Option<&'a BootTx>,
+    progress_listener: &'a Option<Arc<ProgressListenerClient>>,
+    class_label: &'a str,
+}
+
+#[cfg(unix)]
+struct SourceArchiveStreamContext<'a> {
+    repo_root: &'a Utf8Path,
+    checkout_dir: &'a str,
+    local_source_map: &'a BTreeMap<String, SourceFileEntry>,
+    missing_paths: &'a [String],
+    progress: SshBootstrapProgressContext<'a>,
+}
+
+#[cfg(unix)]
+fn spawn_bootstrap_stderr_drain(
+    child: &mut moire::process::Child,
+) -> Result<tokio::task::JoinHandle<std::io::Result<Vec<u8>>>> {
+    let mut stderr = child
+        .stderr()
+        .take()
+        .ok_or_else(|| eyre::eyre!("failed to capture ssh bootstrap stderr"))?;
+    Ok(tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).await?;
+        Ok(bytes)
+    }))
+}
+
+#[cfg(unix)]
+async fn finish_bootstrap_child(
+    mut child: moire::process::Child,
+    stderr_task: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
+) -> Result<std::process::Output> {
+    let status = child.wait().await?;
+    let stderr = stderr_task
+        .await
+        .map_err(|error| eyre::eyre!("failed to join ssh bootstrap stderr task: {error}"))??;
+    Ok(std::process::Output {
+        status,
+        stdout: Vec::new(),
+        stderr,
+    })
+}
+
+#[cfg(unix)]
 fn unix_bootstrap_target_triple(arch: &str) -> Result<&'static str> {
-    match arch {
+    match arch.to_ascii_lowercase().as_str() {
         "aarch64" | "arm64" => Ok("aarch64-unknown-linux-gnu"),
         "x86_64" | "amd64" => Ok("x86_64-unknown-linux-gnu"),
         other => eyre::bail!("unsupported unix ssh bootstrap architecture: {other}"),
@@ -1048,12 +1367,24 @@ fn unix_bootstrap_target_triple(arch: &str) -> Result<&'static str> {
 }
 
 #[cfg(unix)]
-fn local_vx_bootstrap_binary_path(repo_root: &Utf8Path, target_triple: &str) -> Utf8PathBuf {
+fn windows_bootstrap_target_triple(arch: &str) -> Result<&'static str> {
+    match arch.to_ascii_lowercase().as_str() {
+        "x86_64" | "amd64" => Ok("x86_64-pc-windows-msvc"),
+        other => eyre::bail!("unsupported windows ssh bootstrap architecture: {other}"),
+    }
+}
+
+#[cfg(unix)]
+fn local_vx_bootstrap_binary_path(
+    repo_root: &Utf8Path,
+    target_triple: &str,
+    binary_name: &str,
+) -> Utf8PathBuf {
     repo_root
         .join("target")
         .join(target_triple)
         .join("release")
-        .join("vx-bootstrap")
+        .join(binary_name)
 }
 
 #[cfg(unix)]
@@ -1062,7 +1393,7 @@ async fn ensure_local_unix_vx_bootstrap_binary(
     arch: &str,
 ) -> Result<Utf8PathBuf> {
     let target_triple = unix_bootstrap_target_triple(arch)?;
-    let binary_path = local_vx_bootstrap_binary_path(repo_root, target_triple);
+    let binary_path = local_vx_bootstrap_binary_path(repo_root, target_triple, "vx-bootstrap");
     let output = moire::process::Command::new("cargo")
         .arg("zigbuild")
         .arg("-p")
@@ -1090,23 +1421,58 @@ async fn ensure_local_unix_vx_bootstrap_binary(
 }
 
 #[cfg(unix)]
-fn ssh_bootstrap_unix_loader_command(bootstrap_path: &str, compressed_size: usize) -> String {
+async fn ensure_local_windows_vx_bootstrap_binary(
+    repo_root: &Utf8Path,
+    arch: &str,
+) -> Result<Utf8PathBuf> {
+    let target_triple = windows_bootstrap_target_triple(arch)?;
+    let binary_path = local_vx_bootstrap_binary_path(repo_root, target_triple, "vx-bootstrap.exe");
+    let output = moire::process::Command::new("cargo")
+        .arg("xwin")
+        .arg("build")
+        .arg("-p")
+        .arg("vx-bootstrap")
+        .arg("--release")
+        .arg("--target")
+        .arg(target_triple)
+        .current_dir(repo_root)
+        .output()
+        .await?;
+    if !output.status.success() {
+        eyre::bail!(
+            "cargo xwin build for vx-bootstrap ({target_triple}) failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    if !binary_path.exists() {
+        eyre::bail!(
+            "cargo xwin build for vx-bootstrap completed, but {} was not produced",
+            binary_path
+        );
+    }
+    Ok(binary_path)
+}
+
+#[cfg(unix)]
+fn ssh_bootstrap_unix_loader_command(bootstrap_path: &str, compressed_path: &str) -> String {
     format!(
         "sh -lc {} sh {} {}",
         shell_quote(
             r#"set -euo pipefail
 dest="$1"
-size="$2"
+src="$2"
 mkdir -p "$(dirname "$dest")"
 tmp="${dest}.tmp.$$"
-head -c "$size" | gzip -dc > "$tmp"
+gzip -dc "$src" > "$tmp"
 chmod +x "$tmp"
 mv "$tmp" "$dest"
+rm -f "$src"
 exec "$dest" --stdio
 "#
         ),
         shell_quote(bootstrap_path),
-        shell_quote(&compressed_size.to_string()),
+        shell_quote(compressed_path),
     )
 }
 
@@ -1220,7 +1586,7 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
     target: &str,
     repo_root: &Utf8Path,
     target_info: &SshBootstrapTargetInfo,
-    class_label: &str,
+    progress: SshBootstrapProgressContext<'_>,
     trace: &mut SshBootstrapChromeTrace,
 ) -> Result<String> {
     let local_bootstrap = trace
@@ -1254,10 +1620,36 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
             Ok(encoder.finish()?)
         },
     )?;
-    let paths = ssh_bootstrap_paths(&target_info.home, class_label);
+    let paths = ssh_bootstrap_paths(&target_info.home, progress.class_label);
     let remote_bootstrap_path = format!("{}/vx-bootstrap", paths.vx_home);
-    let remote_command =
-        ssh_bootstrap_unix_loader_command(&remote_bootstrap_path, compressed_bootstrap_bytes.len());
+    let remote_compressed_bootstrap_path = format!("{}/vx-bootstrap.gz", paths.vx_home);
+    let local_bootstrap_archive = trace.complete(
+        "write_local_vx_bootstrap_archive",
+        serde_json::json!({
+            "compressed_bytes": compressed_bootstrap_bytes.len(),
+        }),
+        || write_local_bootstrap_archive("vx-bootstrap-unix", &compressed_bootstrap_bytes),
+    )?;
+    let upload_result = trace
+        .complete_async(
+            "upload_vx_bootstrap_binary",
+            serde_json::json!({
+                "compressed_bytes": compressed_bootstrap_bytes.len(),
+                "raw_bytes": bootstrap_bytes.len(),
+            }),
+            ssh_control_scp_file(
+                control_path,
+                &local_bootstrap_archive,
+                &ssh_scp_unix_dest(target, &remote_compressed_bootstrap_path),
+            ),
+        )
+        .await;
+    let _ = fs::remove_file(local_bootstrap_archive.as_std_path());
+    upload_result?;
+    let remote_command = ssh_bootstrap_unix_loader_command(
+        &remote_bootstrap_path,
+        &remote_compressed_bootstrap_path,
+    );
 
     let mut command = ssh_control_command(control_path, target);
     command
@@ -1280,21 +1672,18 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
         .stdout()
         .take()
         .ok_or_else(|| eyre::eyre!("failed to capture ssh bootstrap stdout"))?;
+    let stderr_task = spawn_bootstrap_stderr_drain(&mut child)?;
 
-    trace
-        .complete_async(
-            "upload_vx_bootstrap_binary",
-            serde_json::json!({
-                "compressed_bytes": compressed_bootstrap_bytes.len(),
-                "raw_bytes": bootstrap_bytes.len(),
-            }),
-            stdin.write_all(&compressed_bootstrap_bytes),
-        )
-        .await?;
     trace
         .complete_async("bootstrap_hello_roundtrip", serde_json::json!({}), async {
             write_bootstrap_request_frame(&mut stdin, &BootstrapRequest::Hello).await?;
-            read_bootstrap_response_frame(&mut stdout).await
+            read_bootstrap_final_response_frame(
+                &mut stdout,
+                progress.boot_tx,
+                progress.progress_listener,
+                progress.class_label,
+            )
+            .await
         })
         .await?
         .ok_or_else(|| eyre::eyre!("vx-bootstrap closed before hello response"))
@@ -1319,7 +1708,13 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
                     }),
                 )
                 .await?;
-                read_bootstrap_response_frame(&mut stdout).await
+                read_bootstrap_final_response_frame(
+                    &mut stdout,
+                    progress.boot_tx,
+                    progress.progress_listener,
+                    progress.class_label,
+                )
+                .await
             },
         )
         .await?
@@ -1379,7 +1774,13 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
                     &BootstrapRequest::PlanSourceSync(request),
                 )
                 .await?;
-                read_bootstrap_response_frame(&mut stdout).await
+                read_bootstrap_final_response_frame(
+                    &mut stdout,
+                    progress.boot_tx,
+                    progress.progress_listener,
+                    progress.class_label,
+                )
+                .await
             },
         )
         .await?
@@ -1389,7 +1790,7 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
             for deleted in &response.deleted_paths {
                 tracing::debug!(
                     target,
-                    class_label,
+                    class_label = progress.class_label,
                     path = deleted,
                     "vx-bootstrap deleted stale source file"
                 );
@@ -1411,63 +1812,30 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
         other => eyre::bail!("unexpected vx-bootstrap plan_source_sync response: {other:?}"),
     };
 
-    let mut uploaded_files = 0usize;
-    let mut uploaded_bytes = 0usize;
-    for missing_path in missing_paths {
-        let entry = local_source_map.get(&missing_path).ok_or_else(|| {
-            eyre::eyre!("vx-bootstrap requested unknown source file {missing_path}")
-        })?;
-        let contents =
-            fs::read(repo_root.join(&missing_path).as_std_path()).wrap_err_with(|| {
-                format!(
-                    "failed to read local source file {}",
-                    repo_root.join(&missing_path)
-                )
-            })?;
-        uploaded_files += 1;
-        uploaded_bytes += contents.len();
-        let request = PutSourceFileRequest {
-            checkout_dir: paths.checkout_dir.clone(),
-            file: entry.clone(),
-            contents,
-        };
-        let put_path = request.file.path.clone();
-        let put_bytes = request.contents.len();
-        trace
-            .complete_async(
-                "remote_put_source_file",
-                serde_json::json!({
-                    "path": put_path,
-                    "bytes": put_bytes,
-                }),
-                async {
-                    write_bootstrap_request_frame(
-                        &mut stdin,
-                        &BootstrapRequest::PutSourceFile(request),
-                    )
-                    .await?;
-                    read_bootstrap_response_frame(&mut stdout).await
-                },
-            )
-            .await?
-            .ok_or_else(|| eyre::eyre!("vx-bootstrap closed before put_source_file response"))
-            .and_then(|response| match response {
-                BootstrapResponse::PutSourceFileAck => Ok(()),
-                BootstrapResponse::Error(error) => eyre::bail!(
-                    "vx-bootstrap put_source_file failed: {}: {}",
-                    error.kind,
-                    error.message
-                ),
-                other => eyre::bail!("unexpected vx-bootstrap put_source_file response: {other:?}"),
-            })?;
+    let (uploaded_files, uploaded_bytes) = stream_source_archive_over_bootstrap(
+        &mut stdin,
+        &mut stdout,
+        SourceArchiveStreamContext {
+            repo_root,
+            checkout_dir: &paths.checkout_dir,
+            local_source_map: &local_source_map,
+            missing_paths: &missing_paths,
+            progress,
+        },
+        trace,
+    )
+    .await?;
+    if uploaded_files > 0 {
+        emit_ssh_bootstrap_progress(
+            progress.boot_tx,
+            progress.progress_listener,
+            progress.class_label,
+            format!(
+                "vx-bootstrap upload progress: {uploaded_files} files ({uploaded_bytes} bytes)"
+            ),
+        )
+        .await;
     }
-    trace.instant(
-        "remote_put_source_files_summary",
-        serde_json::json!({
-            "uploaded_files": uploaded_files,
-            "uploaded_bytes": uploaded_bytes,
-        }),
-    );
 
     let request = BuildSourceTreeRequest {
         checkout_dir: paths.checkout_dir.clone(),
@@ -1497,7 +1865,13 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
                     &BootstrapRequest::BuildSourceTree(request),
                 )
                 .await?;
-                read_bootstrap_response_frame(&mut stdout).await
+                read_bootstrap_final_response_frame(
+                    &mut stdout,
+                    progress.boot_tx,
+                    progress.progress_listener,
+                    progress.class_label,
+                )
+                .await
             },
         )
         .await?
@@ -1517,7 +1891,13 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
             serde_json::json!({}),
             async {
                 write_bootstrap_request_frame(&mut stdin, &BootstrapRequest::Shutdown).await?;
-                read_bootstrap_response_frame(&mut stdout).await
+                read_bootstrap_final_response_frame(
+                    &mut stdout,
+                    progress.boot_tx,
+                    progress.progress_listener,
+                    progress.class_label,
+                )
+                .await
             },
         )
         .await?;
@@ -1526,7 +1906,346 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
         .complete_async(
             "wait_for_ssh_bootstrap_exit",
             serde_json::json!({}),
-            child.wait_with_output(),
+            finish_bootstrap_child(child, stderr_task),
+        )
+        .await?;
+    if !output.status.success() {
+        eyre::bail!(
+            "vx-bootstrap ssh session failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(checkout_dir)
+}
+
+#[cfg(unix)]
+async fn prepare_ssh_bootstrap_windows_checkout_via_bootstrap(
+    control_path: &Utf8Path,
+    target: &str,
+    repo_root: &Utf8Path,
+    target_info: &SshBootstrapTargetInfo,
+    paths: &SshBootstrapWindowsPaths,
+    progress: SshBootstrapProgressContext<'_>,
+    trace: &mut SshBootstrapChromeTrace,
+) -> Result<String> {
+    let local_bootstrap = trace
+        .complete_async(
+            "local_vx_bootstrap_build",
+            serde_json::json!({
+                "arch": target_info.arch,
+            }),
+            ensure_local_windows_vx_bootstrap_binary(repo_root, &target_info.arch),
+        )
+        .await?;
+    let bootstrap_bytes = trace.complete(
+        "read_local_vx_bootstrap_binary",
+        serde_json::json!({
+            "path": local_bootstrap.as_str(),
+        }),
+        || {
+            fs::read(local_bootstrap.as_std_path()).wrap_err_with(|| {
+                format!("failed to read local vx-bootstrap binary at {local_bootstrap}")
+            })
+        },
+    )?;
+    let compressed_bootstrap_bytes = trace.complete(
+        "compress_local_vx_bootstrap_binary",
+        serde_json::json!({
+            "raw_bytes": bootstrap_bytes.len(),
+        }),
+        || -> Result<Vec<u8>> {
+            let mut encoder = GzEncoder::new(Vec::new(), GzipCompression::default());
+            encoder.write_all(&bootstrap_bytes)?;
+            Ok(encoder.finish()?)
+        },
+    )?;
+    let local_bootstrap_archive = trace.complete(
+        "write_local_vx_bootstrap_archive",
+        serde_json::json!({
+            "compressed_bytes": compressed_bootstrap_bytes.len(),
+        }),
+        || write_local_bootstrap_archive("vx-bootstrap-windows", &compressed_bootstrap_bytes),
+    )?;
+    let remote_bootstrap_path = format!(r"{}\vx-bootstrap.exe", paths.vx_home);
+    let remote_compressed_bootstrap_path = format!(r"{}\vx-bootstrap.exe.gz", paths.vx_home);
+    let upload_result = trace
+        .complete_async(
+            "upload_vx_bootstrap_binary",
+            serde_json::json!({
+                "compressed_bytes": compressed_bootstrap_bytes.len(),
+                "raw_bytes": bootstrap_bytes.len(),
+            }),
+            ssh_control_scp_file(
+                control_path,
+                &local_bootstrap_archive,
+                &ssh_scp_windows_dest(target, &remote_compressed_bootstrap_path),
+            ),
+        )
+        .await;
+    let _ = fs::remove_file(local_bootstrap_archive.as_std_path());
+    upload_result?;
+    let remote_command = ssh_bootstrap_windows_loader_command(
+        &remote_bootstrap_path,
+        &remote_compressed_bootstrap_path,
+    );
+
+    let mut command = ssh_control_command(control_path, target);
+    command
+        .arg(remote_command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = trace.complete(
+        "spawn_ssh_bootstrap_loader",
+        serde_json::json!({
+            "target": target,
+        }),
+        || command.spawn(),
+    )?;
+    let mut stdin = child
+        .stdin()
+        .take()
+        .ok_or_else(|| eyre::eyre!("failed to capture ssh bootstrap stdin"))?;
+    let mut stdout = child
+        .stdout()
+        .take()
+        .ok_or_else(|| eyre::eyre!("failed to capture ssh bootstrap stdout"))?;
+    let stderr_task = spawn_bootstrap_stderr_drain(&mut child)?;
+
+    trace
+        .complete_async("bootstrap_hello_roundtrip", serde_json::json!({}), async {
+            write_bootstrap_request_frame(&mut stdin, &BootstrapRequest::Hello).await?;
+            read_bootstrap_final_response_frame(
+                &mut stdout,
+                progress.boot_tx,
+                progress.progress_listener,
+                progress.class_label,
+            )
+            .await
+        })
+        .await?
+        .ok_or_else(|| eyre::eyre!("vx-bootstrap closed before hello response"))
+        .and_then(|response| match response {
+            BootstrapResponse::Hello(_) => Ok(()),
+            BootstrapResponse::Error(error) => eyre::bail!(
+                "vx-bootstrap hello failed: {}: {}",
+                error.kind,
+                error.message
+            ),
+            other => eyre::bail!("unexpected vx-bootstrap hello response: {other:?}"),
+        })?;
+    let cached_manifest_entries = trace
+        .complete_async(
+            "remote_get_cached_source_manifest",
+            serde_json::json!({}),
+            async {
+                write_bootstrap_request_frame(
+                    &mut stdin,
+                    &BootstrapRequest::GetCachedSourceManifest(GetCachedSourceManifestRequest {
+                        checkout_dir: paths.checkout_dir.clone(),
+                    }),
+                )
+                .await?;
+                read_bootstrap_final_response_frame(
+                    &mut stdout,
+                    progress.boot_tx,
+                    progress.progress_listener,
+                    progress.class_label,
+                )
+                .await
+            },
+        )
+        .await?
+        .ok_or_else(|| {
+            eyre::eyre!("vx-bootstrap closed before get_cached_source_manifest response")
+        })
+        .and_then(|response| match response {
+            BootstrapResponse::GetCachedSourceManifest(response) => Ok(response.files),
+            BootstrapResponse::Error(error) => eyre::bail!(
+                "vx-bootstrap get_cached_source_manifest failed: {}: {}",
+                error.kind,
+                error.message
+            ),
+            other => eyre::bail!(
+                "unexpected vx-bootstrap get_cached_source_manifest response: {other:?}"
+            ),
+        })?;
+    let cached_manifest = cached_manifest_entries
+        .into_iter()
+        .map(|entry| (entry.path.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let (local_source_files, manifest_stats) = trace.complete(
+        "walk_local_source_manifest",
+        serde_json::json!({
+            "repo_root": repo_root.as_str(),
+            "cached_entries": cached_manifest.len(),
+        }),
+        || local_bootstrap_source_files(repo_root, &cached_manifest),
+    )?;
+    trace.instant(
+        "walk_local_source_manifest_summary",
+        serde_json::json!({
+            "reused_count": manifest_stats.reused_count,
+            "hashed_count": manifest_stats.hashed_count,
+        }),
+    );
+    let local_source_map = local_source_files
+        .iter()
+        .cloned()
+        .map(|entry| (entry.path.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+
+    let request = PlanSourceSyncRequest {
+        checkout_dir: paths.checkout_dir.clone(),
+        files: local_source_files,
+    };
+    let plan_file_count = request.files.len();
+    let plan_response = trace
+        .complete_async(
+            "remote_plan_source_sync",
+            serde_json::json!({
+                "file_count": plan_file_count,
+            }),
+            async {
+                write_bootstrap_request_frame(
+                    &mut stdin,
+                    &BootstrapRequest::PlanSourceSync(request),
+                )
+                .await?;
+                read_bootstrap_final_response_frame(
+                    &mut stdout,
+                    progress.boot_tx,
+                    progress.progress_listener,
+                    progress.class_label,
+                )
+                .await
+            },
+        )
+        .await?
+        .ok_or_else(|| eyre::eyre!("vx-bootstrap closed before plan_source_sync response"))?;
+    let missing_paths = match plan_response {
+        BootstrapResponse::PlanSourceSync(response) => {
+            for deleted in &response.deleted_paths {
+                tracing::debug!(
+                    target,
+                    class_label = progress.class_label,
+                    path = deleted,
+                    "vx-bootstrap deleted stale source file"
+                );
+            }
+            trace.instant(
+                "remote_plan_source_sync_summary",
+                serde_json::json!({
+                    "missing_count": response.missing_paths.len(),
+                    "deleted_count": response.deleted_paths.len(),
+                }),
+            );
+            response.missing_paths
+        }
+        BootstrapResponse::Error(error) => eyre::bail!(
+            "vx-bootstrap plan_source_sync failed: {}: {}",
+            error.kind,
+            error.message
+        ),
+        other => eyre::bail!("unexpected vx-bootstrap plan_source_sync response: {other:?}"),
+    };
+
+    let (uploaded_files, uploaded_bytes) = stream_source_archive_over_bootstrap(
+        &mut stdin,
+        &mut stdout,
+        SourceArchiveStreamContext {
+            repo_root,
+            checkout_dir: &paths.checkout_dir,
+            local_source_map: &local_source_map,
+            missing_paths: &missing_paths,
+            progress,
+        },
+        trace,
+    )
+    .await?;
+    if uploaded_files > 0 {
+        emit_ssh_bootstrap_progress(
+            progress.boot_tx,
+            progress.progress_listener,
+            progress.class_label,
+            format!(
+                "vx-bootstrap upload progress: {uploaded_files} files ({uploaded_bytes} bytes)"
+            ),
+        )
+        .await;
+    }
+
+    let request = BuildSourceTreeRequest {
+        checkout_dir: paths.checkout_dir.clone(),
+        build_manifest_relpath: "Cargo.toml".to_string(),
+        build_packages: vec![
+            "vx-store".to_string(),
+            "vx-vfsd".to_string(),
+            "vx-runner".to_string(),
+            "landlock-exec".to_string(),
+        ],
+        scrub_files: vec![
+            "crates/vx/Cargo.toml".to_string(),
+            "crates/vxd/Cargo.toml".to_string(),
+        ],
+        scrub_line_contains: vec!["tree-sitter-vixen = ".to_string()],
+    };
+    let package_count = request.build_packages.len();
+    let checkout_dir = trace
+        .complete_async(
+            "remote_build_source_tree",
+            serde_json::json!({
+                "package_count": package_count,
+            }),
+            async {
+                write_bootstrap_request_frame(
+                    &mut stdin,
+                    &BootstrapRequest::BuildSourceTree(request),
+                )
+                .await?;
+                read_bootstrap_final_response_frame(
+                    &mut stdout,
+                    progress.boot_tx,
+                    progress.progress_listener,
+                    progress.class_label,
+                )
+                .await
+            },
+        )
+        .await?
+        .ok_or_else(|| eyre::eyre!("vx-bootstrap closed before build_source_tree response"))
+        .and_then(|response| match response {
+            BootstrapResponse::BuildSourceTree(response) => Ok(response.checkout_dir),
+            BootstrapResponse::Error(error) => eyre::bail!(
+                "vx-bootstrap build_source_tree failed: {}: {}",
+                error.kind,
+                error.message
+            ),
+            other => eyre::bail!("unexpected vx-bootstrap build_source_tree response: {other:?}"),
+        })?;
+    trace
+        .complete_async(
+            "bootstrap_shutdown_roundtrip",
+            serde_json::json!({}),
+            async {
+                write_bootstrap_request_frame(&mut stdin, &BootstrapRequest::Shutdown).await?;
+                read_bootstrap_final_response_frame(
+                    &mut stdout,
+                    progress.boot_tx,
+                    progress.progress_listener,
+                    progress.class_label,
+                )
+                .await
+            },
+        )
+        .await?;
+    drop(stdin);
+    let output = trace
+        .complete_async(
+            "wait_for_ssh_bootstrap_exit",
+            serde_json::json!({}),
+            finish_bootstrap_child(child, stderr_task),
         )
         .await?;
     if !output.status.success() {
@@ -1545,138 +2264,6 @@ fn ssh_forward_spec(local: &Endpoint, remote: &str) -> Result<String> {
         Endpoint::Local(path) => Ok(format!("{}:{remote}", path.as_str())),
         Endpoint::Tcp { host, port } => Ok(format!("{host}:{port}:{remote}")),
     }
-}
-
-#[cfg(unix)]
-fn ssh_bootstrap_git_push_url(
-    target: &str,
-    bare_repo_dir: &str,
-    platform: &SshBootstrapTargetPlatform,
-) -> String {
-    match platform {
-        SshBootstrapTargetPlatform::Unix => format!("ssh://{target}{bare_repo_dir}"),
-        SshBootstrapTargetPlatform::Windows => {
-            format!("ssh://{target}/{}", bare_repo_dir.replace('\\', "/"))
-        }
-    }
-}
-
-fn write_windows_git_ssh_wrapper(control_path: &Utf8Path) -> Result<Utf8PathBuf> {
-    let wrapper_path = Utf8PathBuf::from(format!("{control_path}.windows-git-ssh.sh"));
-    std::fs::write(
-        &wrapper_path,
-        format!(
-            r#"#!/bin/sh
-set -eu
-if [ "$#" -gt 0 ] && [ "${{1#-}}" != "$1" ]; then
-  exec ssh -S {control_path} -o ControlMaster=no "$@"
-fi
-host=$1
-cmd=${{2-}}
-case "$cmd" in
-  git-upload-pack\ *|git-receive-pack\ *)
-    prog=${{cmd%% *}}
-    path=${{cmd#"$prog "}}
-    case "$path" in
-      \'*\') path=${{path#\'}}; path=${{path%\'}} ;;
-      \"*\") path=${{path#\"}}; path=${{path%\"}} ;;
-    esac
-    case "$path" in
-      /?:/*) path=${{path#/}} ;;
-    esac
-    cmd="$prog \"$path\""
-    ;;
-esac
-exec ssh -S {control_path} -o ControlMaster=no "$host" "$cmd"
-"#,
-            control_path = shell_quote(control_path.as_str()),
-        ),
-    )?;
-    Ok(wrapper_path)
-}
-
-#[cfg(unix)]
-async fn ensure_ssh_bootstrap_bare_repo(
-    control_path: &Utf8Path,
-    target: &str,
-    bare_repo_dir: &str,
-    platform: &SshBootstrapTargetPlatform,
-) -> Result<()> {
-    match platform {
-        SshBootstrapTargetPlatform::Unix => {
-            let bare_repo_parent = Utf8Path::new(bare_repo_dir).parent().ok_or_else(|| {
-                eyre::eyre!("failed to determine bare repo parent for {bare_repo_dir}")
-            })?;
-            ssh_control_output_unix(
-                control_path,
-                target,
-                &[
-                    "sh",
-                    "-lc",
-                    &format!(
-                        "mkdir -p {parent} && if [ ! -f {dir}/HEAD ]; then rm -rf {dir}; git init --bare {dir}; fi",
-                        parent = shell_quote(bare_repo_parent.as_str()),
-                        dir = shell_quote(bare_repo_dir)
-                    ),
-                ],
-            )
-            .await?;
-        }
-        SshBootstrapTargetPlatform::Windows => {
-            let script = format!(
-                "$ErrorActionPreference = 'Stop'; $dir = '{}'; New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dir) | Out-Null; if (-not (Test-Path (Join-Path $dir 'HEAD'))) {{ if (Test-Path $dir) {{ Remove-Item -Recurse -Force $dir }}; git init --bare $dir }}",
-                powershell_single_quote(bare_repo_dir)
-            );
-            ssh_control_output_windows(control_path, target, &script).await?;
-        }
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-async fn push_vixen_repo_over_ssh(
-    repo_root: &Utf8Path,
-    target: &str,
-    control_path: &Utf8Path,
-    bare_repo_dir: &str,
-    platform: &SshBootstrapTargetPlatform,
-    commit: &str,
-) -> Result<()> {
-    let remote_url = ssh_bootstrap_git_push_url(target, bare_repo_dir, platform);
-    let core_ssh_command = match platform {
-        SshBootstrapTargetPlatform::Unix => {
-            format!("ssh -S {control_path} -o ControlMaster=no")
-        }
-        SshBootstrapTargetPlatform::Windows => {
-            let wrapper_path = write_windows_git_ssh_wrapper(control_path)?;
-            format!("sh {}", shell_quote(wrapper_path.as_str()),)
-        }
-    };
-    let mut command = moire::process::Command::new("git");
-    command
-        .arg("-C")
-        .arg(repo_root)
-        .arg("-c")
-        .arg("core.hooksPath=/dev/null")
-        .arg("-c")
-        .arg(format!("core.sshCommand={core_ssh_command}"))
-        .arg("push")
-        .arg("--force")
-        .arg(remote_url)
-        .arg(format!("{commit}:refs/vixen-bootstrap/{commit}"));
-    let output = command.output().await?;
-    if matches!(platform, SshBootstrapTargetPlatform::Windows) {
-        let wrapper_path = Utf8PathBuf::from(format!("{control_path}.windows-git-ssh.sh"));
-        let _ = std::fs::remove_file(wrapper_path.as_std_path());
-    }
-    if !output.status.success() {
-        eyre::bail!(
-            "git push for ssh bootstrap failed with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
 }
 
 async fn connect_endpoint_with_backoff(
@@ -1897,92 +2484,59 @@ async fn connect_ssh_bootstrap_runner(
             format!("preparing local Vixen sources for {target}"),
         )
         .await;
-        if matches!(target_info.platform, SshBootstrapTargetPlatform::Unix) {
-            emit_ssh_bootstrap_progress(
-                boot_tx,
-                &progress_listener,
-                class_label,
-                format!("syncing local Vixen sources to {target}"),
-            )
-            .await;
-            with_ssh_bootstrap_heartbeat(
-                boot_tx,
-                &progress_listener,
-                class_label,
-                &format!("syncing local Vixen sources to {target}"),
-                Duration::from_secs(5),
-                prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
-                    &control_path,
-                    target,
-                    &repo_root,
-                    &target_info,
+        emit_ssh_bootstrap_progress(
+            boot_tx,
+            &progress_listener,
+            class_label,
+            format!("syncing local Vixen sources to {target}"),
+        )
+        .await;
+        let bootstrap_progress = SshBootstrapProgressContext {
+            boot_tx,
+            progress_listener: &progress_listener,
+            class_label,
+        };
+        match (&target_info.platform, windows_checkout.as_ref()) {
+            (SshBootstrapTargetPlatform::Unix, _) => {
+                with_ssh_bootstrap_heartbeat(
+                    boot_tx,
+                    &progress_listener,
                     class_label,
-                    &mut trace,
-                ),
-            )
-            .await?;
-        }
-
-        if let Some(paths) = &windows_checkout {
-            let commit =
-                command_output("git", &["-C", repo_root.as_str(), "rev-parse", "HEAD"]).await?;
-            let bare_repo_dir = ssh_bootstrap_windows_paths(
-                target_info.windows_bootstrap_root(),
-                &target_info.home,
-                class_label,
-                0,
-                0,
-                0,
-            )
-            .bare_repo_dir;
-            ensure_clean_vixen_repo(&repo_root).await?;
-            emit_ssh_bootstrap_progress(
-                boot_tx,
-                &progress_listener,
-                class_label,
-                format!("syncing local Vixen repo to {target}"),
-            )
-            .await;
-            ensure_ssh_bootstrap_bare_repo(
-                &control_path,
-                target,
-                &bare_repo_dir,
-                &target_info.platform,
-            )
-            .await?;
-            push_vixen_repo_over_ssh(
-                &repo_root,
-                target,
-                &control_path,
-                &bare_repo_dir,
-                &target_info.platform,
-                &commit,
-            )
-            .await?;
-            emit_ssh_bootstrap_progress(
-                boot_tx,
-                &progress_listener,
-                class_label,
-                format!("building remote Vixen bootstrap checkout on {target}"),
-            )
-            .await;
-            with_ssh_bootstrap_heartbeat(
-                boot_tx,
-                &progress_listener,
-                class_label,
-                &format!("building remote Vixen bootstrap checkout on {target}"),
-                Duration::from_secs(5),
-                prepare_ssh_bootstrap_windows_checkout(
-                    &control_path,
-                    target,
-                    &paths.bare_repo_dir,
-                    &commit,
-                    &paths.checkout_dir,
-                    &paths.vx_home,
-                    &paths.store_root,
-                ),
-            )
-            .await?;
+                    &format!("syncing local Vixen sources to {target}"),
+                    Duration::from_secs(5),
+                    prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
+                        &control_path,
+                        target,
+                        &repo_root,
+                        &target_info,
+                        bootstrap_progress,
+                        &mut trace,
+                    ),
+                )
+                .await?;
+            }
+            (SshBootstrapTargetPlatform::Windows, Some(paths)) => {
+                with_ssh_bootstrap_heartbeat(
+                    boot_tx,
+                    &progress_listener,
+                    class_label,
+                    &format!("syncing local Vixen sources to {target}"),
+                    Duration::from_secs(5),
+                    prepare_ssh_bootstrap_windows_checkout_via_bootstrap(
+                        &control_path,
+                        target,
+                        &repo_root,
+                        &target_info,
+                        paths,
+                        bootstrap_progress,
+                        &mut trace,
+                    ),
+                )
+                .await?;
+            }
+            (SshBootstrapTargetPlatform::Windows, None) => {
+                eyre::bail!("missing Windows ssh bootstrap checkout paths for {target}");
+            }
         }
 
         let mut command = moire::process::Command::new("ssh");
