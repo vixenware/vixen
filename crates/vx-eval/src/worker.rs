@@ -5189,13 +5189,23 @@ impl Engine {
 
     fn infer_exec_writable_roots(
         &self,
-        _mounts: &[(PathValue, Value)],
+        mounts: &[(PathValue, Value)],
         args: &[ExecArgValue],
         env: &[(String, ExecArgValue)],
     ) -> Vec<PathValue> {
         let mut roots = BTreeSet::new();
+        let mount_paths = mounts
+            .iter()
+            .map(|(path, _)| path.as_str().to_string())
+            .collect::<Vec<_>>();
 
         let mut add_parent_paths = |path: &PathValue| {
+            if mount_paths.iter().any(|mount| {
+                path == &PathValue::new(mount.clone())
+                    || path.as_str().starts_with(&(mount.to_string() + "/"))
+            }) {
+                return;
+            }
             let mut current = path.as_str();
             while let Some((parent, _)) = current.rsplit_once('/') {
                 if parent.is_empty() {

@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 mod integration;
 
@@ -10,6 +11,7 @@ fn main() {
     match args.first().map(|s| s.as_str()) {
         Some("install") => install(),
         Some("bump-roam") => bump_roam(args.get(1).map(|s| s.as_str())),
+        Some("smoke") => smoke(&args[1..]),
         Some("integration") => {
             if let Err(error) = integration::run(&args[1..]) {
                 eprintln!("{error:#}");
@@ -18,12 +20,12 @@ fn main() {
         }
         Some(cmd) => {
             eprintln!("Unknown command: {}", cmd);
-            eprintln!("Available commands: install, bump-roam, integration");
+            eprintln!("Available commands: install, bump-roam, smoke, integration");
             std::process::exit(1);
         }
         None => {
             eprintln!("Usage: cargo xtask <command>");
-            eprintln!("Available commands: install, bump-roam, integration");
+            eprintln!("Available commands: install, bump-roam, smoke, integration");
             std::process::exit(1);
         }
     }
@@ -186,6 +188,54 @@ fn bump_roam(rev: Option<&str>) {
 
         fs::write(path, new_content).expect("Failed to write file");
         println!("Updated {}", path.display());
+    }
+}
+
+fn smoke(raw_args: &[String]) {
+    let (build_file, extra_args) = match raw_args.split_first() {
+        Some((build_file, extra_args)) => (build_file, extra_args),
+        None => {
+            eprintln!("Usage: cargo xtask smoke <build.vx> [-- <extra vx build args>]");
+            std::process::exit(1);
+        }
+    };
+    let extra_args = match extra_args.split_first() {
+        Some((dash_dash, rest)) if dash_dash == "--" => rest,
+        _ => extra_args,
+    };
+
+    let workspace_root = find_workspace_root().expect("Could not find workspace root");
+    let build_status = Command::new("cargo")
+        .arg("build")
+        .current_dir(&workspace_root)
+        .status()
+        .expect("Failed to run cargo build for smoke test");
+    if !build_status.success() {
+        std::process::exit(build_status.code().unwrap_or(1));
+    }
+
+    let vx_home = std::env::var("VX_HOME").unwrap_or_else(|_| {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_millis();
+        std::env::temp_dir()
+            .join(format!("vx-smoke-{millis}-{}", std::process::id()))
+            .display()
+            .to_string()
+    });
+    eprintln!("Using VX_HOME={vx_home}");
+
+    let mut cmd = Command::new(workspace_root.join("target/debug/vx"));
+    cmd.arg("build").arg("--no-tui").arg("-f").arg(build_file);
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    cmd.current_dir(&workspace_root).env("VX_HOME", &vx_home);
+
+    let status = cmd.status().expect("Failed to run vx smoke build");
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
     }
 }
 

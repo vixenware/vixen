@@ -6308,3 +6308,51 @@ fn exec_captures_explicit_create_dirs() {
     assert_eq!(request.writable_roots, vec![PathValue::new("out")]);
     assert_eq!(request.create_dirs, vec![PathValue::new("out/obj")]);
 }
+
+#[test]
+fn exec_infers_writable_roots_only_for_unmounted_paths() {
+    let captured = Arc::new(Mutex::new(None));
+    let sink = Arc::clone(&captured);
+    let engine = engine(indoc! {r#"
+            fn observe(process: Process, tree: Tree) {
+              process.exit_code
+            }
+
+            fn build() {
+              let objs = Tree {
+                @obj: Tree {
+                  @a.o: Blob("object"),
+                },
+              };
+
+              exec(["ar", "rcs", @out/lib.a, ..objs]) where {
+                observer: observe,
+              }
+            }
+        "#})
+    .with_exec_handler(Arc::new(move |request| {
+        *sink.lock().unwrap() = Some(request);
+        Ok(Value::U64(0))
+    }));
+
+    let value = engine.call("build", vec![]).unwrap();
+    assert_eq!(value, Value::U64(0));
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("exec request should be captured");
+    assert_eq!(request.writable_roots, vec![PathValue::new("out")]);
+    assert_eq!(request.mounts.len(), 1);
+    assert_eq!(request.mounts[0].path, PathValue::new(".vx/implicit/0"));
+    assert_eq!(
+        request.args,
+        vec![
+            ExecArgValue::Literal("ar".to_string()),
+            ExecArgValue::Literal("rcs".to_string()),
+            ExecArgValue::Path(PathValue::new("out/lib.a")),
+            ExecArgValue::Path(PathValue::new(".vx/implicit/0/obj/a.o")),
+        ]
+    );
+}
