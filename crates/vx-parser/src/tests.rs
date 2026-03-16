@@ -933,3 +933,98 @@ fn assert_symbol(symbol: &DocumentSymbol, name: &str, kind: SymbolKind) {
 fn assert_has_breadcrumb(crumbs: &[Breadcrumb], kind: SyntaxKind) {
     assert!(crumbs.iter().any(|crumb| crumb.kind == kind));
 }
+
+#[test]
+fn percent_brace_map_literal_parses() {
+    let parse = parse(
+        r#"
+fn demo(x: U64) {
+  %{ "hello" => x, 42 => x + 1 }
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let map = match body.statements().next().expect("map statement") {
+        Stmt::Expr(Expr::Map(node)) => node,
+        stmt => panic!("expected map expr, got {stmt:?}"),
+    };
+    let entries = map.entries().collect::<Vec<_>>();
+    assert_eq!(entries.len(), 2);
+    assert!(matches!(entries[0].key(), Some(Expr::Literal(_))));
+    assert!(matches!(entries[0].value(), Some(Expr::NameRef(_))));
+    assert!(matches!(entries[1].key(), Some(Expr::Literal(_))));
+    assert!(matches!(entries[1].value(), Some(Expr::Binary(_))));
+}
+
+#[test]
+fn empty_percent_brace_map_parses() {
+    let parse = parse(
+        r#"
+fn demo() {
+  %{}
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let kinds = parse
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&SyntaxKind::MAP_EXPR));
+}
+
+#[test]
+fn variable_key_in_map_is_unambiguous() {
+    let parse = parse(
+        r#"
+fn demo(key: String, value: U64) {
+  %{ key => value }
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let file = SourceFile::cast_root(parse.syntax());
+    let function = match file.items().next().expect("function item") {
+        Item::FnDecl(node) => node,
+        item => panic!("expected function decl, got {item:?}"),
+    };
+    let body = function.body().expect("function body");
+    let map = match body.statements().next().expect("map statement") {
+        Stmt::Expr(Expr::Map(node)) => node,
+        stmt => panic!("expected map expr, got {stmt:?}"),
+    };
+    let entries = map.entries().collect::<Vec<_>>();
+    assert_eq!(entries.len(), 1);
+    assert!(matches!(entries[0].key(), Some(Expr::NameRef(_))));
+    assert!(matches!(entries[0].value(), Some(Expr::NameRef(_))));
+}
+
+#[test]
+fn upper_ident_brace_is_always_struct_literal() {
+    let parse = parse(
+        r#"
+fn demo() {
+  Foo { bar: 42 }
+}
+"#,
+    );
+    assert_eq!(parse.errors(), []);
+
+    let kinds = parse
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&SyntaxKind::STRUCT_LITERAL_EXPR));
+    assert!(!kinds.contains(&SyntaxKind::CALL_EXPR));
+}
