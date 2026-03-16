@@ -58,6 +58,7 @@ pub fn evaluate_shipped_observer<'a>(
                 sandbox_tree_value(sandbox_root),
             ],
         )
+        .await
         .map_err(|error| TransportPoisonError::from(&error))?;
 
         commit_value_to_transport(cas, observed).await.map(Some)
@@ -76,6 +77,7 @@ pub fn evaluate_shipped_discover<'a>(
 ) -> BoundaryFuture<'a, TransportValue> {
     Box::pin(async move {
         let discovered = Engine::invoke_shipped_discover(&request.module, &request.probe)
+            .await
             .map_err(|error| TransportPoisonError::from(&error))?;
         commit_value_to_transport(cas, discovered).await
     })

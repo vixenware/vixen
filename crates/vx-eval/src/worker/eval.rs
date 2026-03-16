@@ -127,10 +127,45 @@ impl Engine {
     // r[impl eval.concurrency]
     // r[impl error.propagation]
     pub(super) async fn force_many(&self, values: Vec<Value>) -> Result<Vec<Value>, PoisonError> {
-        let mut forced = Vec::with_capacity(values.len());
+        use tokio::task::JoinSet;
+
+        let mut join_set = JoinSet::new();
+        let engine = self.arc_self();
+        let demand_stack = self.current_demand_stack_ids();
+
+        for (idx, value) in values.into_iter().enumerate() {
+            let engine = Arc::clone(&engine);
+            let stack = demand_stack.clone();
+            join_set.spawn(async move {
+                let result = DEMAND_STACK
+                    .scope(RefCell::new(stack), async {
+                        engine.force_value(value).await
+                    })
+                    .await;
+                (idx, result)
+            });
+        }
+
+        let mut results: Vec<Option<Result<Value, PoisonError>>> =
+            (0..join_set.len()).map(|_| None).collect();
+        while let Some(join_result) = join_set.join_next().await {
+            match join_result {
+                Ok((idx, result)) => {
+                    results[idx] = Some(result);
+                }
+                Err(join_error) => {
+                    if join_error.is_panic() {
+                        std::panic::resume_unwind(join_error.into_panic());
+                    }
+                    return Err(self.internal_error("force_many: task was cancelled"));
+                }
+            }
+        }
+
+        let mut forced = Vec::with_capacity(results.len());
         let mut errors = Vec::new();
-        for value in values {
-            match self.force_value(value).await {
+        for result in results {
+            match result.expect("all tasks should complete") {
                 Ok(value) => forced.push(value),
                 Err(error) => errors.push(error),
             }
@@ -978,7 +1013,7 @@ impl Engine {
             }
             #[cfg(test)]
             NodeJob::Sleep { millis, value } => {
-                thread::sleep(Duration::from_millis(*millis));
+                tokio::time::sleep(Duration::from_millis(*millis)).await;
                 Ok(value.clone())
             }
             #[cfg(test)]
