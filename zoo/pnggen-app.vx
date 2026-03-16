@@ -206,14 +206,14 @@ fn build(workspace: Path, class: ExecutorClass, libpng, zlib) {
     static: rules.CExecutableVariant {
       program: static_program_name,
       run_tree: Tree {
-        @(static_program_name): static_build.file(static_program_name).executable(),
+        @({static_program_name}): static_build.file(static_program_name).executable(),
       },
     },
     shared: rules.CExecutableVariant {
       program: shared_program_name,
       run_tree: [
         Tree {
-          @(shared_program_name): shared_build.file(shared_program_name).executable(),
+          @({shared_program_name}): shared_build.file(shared_program_name).executable(),
         },
         libpng.shared.runtime_tree,
       ].merge(),

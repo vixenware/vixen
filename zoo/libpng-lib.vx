@@ -122,7 +122,7 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
 
   let static_variant = rules.CLibraryVariant {
     link_tree: Tree {
-      @(static_name): static_build.file(static_name),
+      @({static_name}): static_build.file(static_name),
     },
     link_inputs: [static_name],
     runtime_tree: Tree {},
@@ -132,12 +132,12 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
     if tc.os == "windows" (
       rules.CLibraryVariant {
         link_tree: Tree {
-          @(shared_link_name): shared_build.file(shared_link_name),
+          @({shared_link_name}): shared_build.file(shared_link_name),
         },
         link_inputs: [shared_link_name],
         runtime_tree: [
           Tree {
-            @(shared_binary_name): shared_build.file(shared_binary_name),
+            @({shared_binary_name}): shared_build.file(shared_binary_name),
           },
           zlib.shared.runtime_tree,
         ].merge(),
@@ -146,12 +146,12 @@ fn build(workspace: Path, class: ExecutorClass, zlib) {
     ) else (
       rules.CLibraryVariant {
         link_tree: Tree {
-          @(shared_link_name): shared_build.file(shared_binary_name),
+          @({shared_link_name}): shared_build.file(shared_binary_name),
         },
         link_inputs: [shared_link_name],
         runtime_tree: [
           Tree {
-            @(shared_binary_name): shared_build.file(shared_binary_name),
+            @({shared_binary_name}): shared_build.file(shared_binary_name),
           },
           zlib.shared.runtime_tree,
         ].merge(),

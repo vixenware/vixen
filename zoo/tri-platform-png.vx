@@ -35,8 +35,8 @@ fn render_png(class: ExecutorClass, exe) {
     };
 
   Tree {
-    @(static_name): static_blob,
-    @(shared_name): shared_blob,
+    @({static_name}): static_blob,
+    @({shared_name}): shared_blob,
   }
 }
 
