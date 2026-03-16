@@ -20,7 +20,7 @@ use vx_io::spawn::{ServiceBuilder, ServiceHandle};
 use vx_report::ReportStore;
 use vx_store_proto::Blake3Hash;
 use vx_tracing::init_cli_stderr;
-use vxd_proto::{BuildRequest, VxdClient};
+use vxd_proto::{BuildRequest, PsResult, VxdClient};
 
 use crate::types::{CliContext, CliMode, DaemonStrategy};
 use crate::{
@@ -77,6 +77,7 @@ async fn async_main() {
         CliCommand::Start(args) => cx.cmd_start(args).await,
         CliCommand::Ping => cx.cmd_ping().await,
         CliCommand::Kill(args) => cx.cmd_kill(args).await,
+        CliCommand::Ps => cx.cmd_ps().await,
         CliCommand::Clean(args) => cx.cmd_clean(args).await,
         CliCommand::Doctor(_args) => cx.cmd_doctor().await,
         CliCommand::Debug(args) => cx.cmd_debug(args).await,
@@ -602,6 +603,17 @@ impl CliContext {
         Ok(())
     }
 
+    async fn cmd_ps(&mut self) -> Result<()> {
+        self.strat = self.strat.clone().connect_only();
+        let daemon = self.ensure_vxd().await?;
+        let snapshot = daemon
+            .ps()
+            .await
+            .map_err(|e| eyre!("ps RPC failed: {e:?}"))?;
+        print_ps(snapshot);
+        Ok(())
+    }
+
     async fn cmd_kill(&mut self, _args: KillArgs) -> Result<()> {
         use vx_io::boot::BootClient;
         use vx_io::spawn::ServiceBuilder;
@@ -801,6 +813,48 @@ impl CliContext {
             eyre::bail!("`moire` exited with status: {status}");
         }
         Ok(())
+    }
+}
+
+fn print_ps(snapshot: PsResult) {
+    if snapshot.entries.is_empty() {
+        println!("no in-flight activity");
+        return;
+    }
+
+    for entry in snapshot.entries {
+        let executor = entry.executor.unwrap_or_else(|| "-".to_string());
+        let last_message = entry.last_message.unwrap_or_else(|| "-".to_string());
+        println!(
+            "[{}] {} {} age={} idle={} {}",
+            entry.id,
+            entry.kind,
+            executor,
+            format_duration_ms(entry.age_ms),
+            format_duration_ms(entry.idle_ms),
+            entry.label
+        );
+        println!("    last: {last_message}");
+        match (entry.remote_idle_ms, entry.last_remote_message) {
+            (Some(remote_idle_ms), Some(last_remote_message)) => {
+                println!(
+                    "    remote: {} ago: {}",
+                    format_duration_ms(remote_idle_ms),
+                    last_remote_message
+                );
+            }
+            _ => {
+                println!("    remote: -");
+            }
+        }
+    }
+}
+
+fn format_duration_ms(ms: u64) -> String {
+    if ms >= 1_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else {
+        format!("{ms}ms")
     }
 }
 

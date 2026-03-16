@@ -264,6 +264,24 @@ pub struct UnpublishResult {
     pub not_found: u32,
 }
 
+#[derive(Debug, Clone, Facet)]
+pub struct PsEntry {
+    pub id: u64,
+    pub kind: String,
+    pub label: String,
+    pub executor: Option<String>,
+    pub age_ms: u64,
+    pub idle_ms: u64,
+    pub last_message: Option<String>,
+    pub remote_idle_ms: Option<u64>,
+    pub last_remote_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct PsResult {
+    pub entries: Vec<PsEntry>,
+}
+
 /// The daemon service trait
 #[roam::service]
 pub trait Vxd {
@@ -282,6 +300,9 @@ pub trait Vxd {
     /// Remove cache key mappings from the store. Used by `vx clean --cache`
     /// to invalidate specific cache entries without deleting blobs or manifests.
     async fn unpublish_cache_keys(&self, cache_keys: Vec<CacheKey>) -> UnpublishResult;
+
+    /// Snapshot daemon-side in-flight activity.
+    async fn ps(&self) -> PsResult;
 }
 
 /// Progress update for a running action.

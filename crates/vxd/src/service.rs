@@ -7,6 +7,7 @@
 //! 4. Materializing outputs locally
 
 use crate::SpawnTracker;
+use crate::activity::{ActivityHandle, ActivityRegistry};
 use crate::build_failure;
 use crate::db::Database;
 use crate::error::{Result, VxdError};
@@ -62,8 +63,8 @@ use vx_store_proto::{
     TreeManifest,
 };
 use vxd_proto::{
-    ActionType, BuildFailure, BuildRequest, BuildResult, ProgressListenerClient, UnpublishResult,
-    VXD_PROTOCOL_VERSION, Vxd as VxdRpc,
+    ActionType, BuildFailure, BuildRequest, BuildResult, ProgressListenerClient, PsResult,
+    UnpublishResult, VXD_PROTOCOL_VERSION, Vxd as VxdRpc,
 };
 
 mod build_vx_render;
@@ -826,6 +827,9 @@ pub struct VxdService {
     /// Spawn tracker for child services
     spawn_tracker: Arc<SyncMutex<SpawnTracker>>,
 
+    /// Shared daemon-side activity registry used by `vx ps`
+    activity_registry: ActivityRegistry,
+
     /// Progress listener client (for reporting progress to vx CLI)
     progress_listener: Arc<SyncMutex<Option<Arc<ProgressListenerClient>>>>,
 
@@ -843,6 +847,7 @@ pub(crate) struct VxdServiceDeps {
     pub(crate) store: Arc<StoreClient>,
     pub(crate) build_vx_executors: BuildVxExecutors,
     pub(crate) store_handle: Arc<ServiceHandle>,
+    pub(crate) activity_registry: ActivityRegistry,
 }
 
 fn rule_plan_bridge_enabled() -> bool {
@@ -2092,14 +2097,22 @@ pub(crate) async fn run_build_vx_acquire_via_store(
 async fn run_build_vx_exec_via_runner(
     store: &StoreClient,
     executors: &BuildVxExecutors,
+    activity_registry: &ActivityRegistry,
     progress_listener: Option<Arc<ProgressListenerClient>>,
     request: ExecRequest,
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
     let executor_summary = describe_executor_selector(&request.executor);
+    let activity = start_build_vx_activity(
+        activity_registry,
+        "exec",
+        &request.executor,
+        summarize_build_vx_exec_request(&request),
+    );
     let exec_started = Instant::now();
-    emit_build_vx_progress_message(
+    emit_build_vx_progress_activity(
         &progress_listener,
+        &activity,
         format!("resolving build.vx executor {}", executor_summary),
     )
     .await;
@@ -2111,8 +2124,9 @@ async fn run_build_vx_exec_via_runner(
         .store_for(&request.executor, progress_listener.clone())
         .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
-    emit_build_vx_progress_message(
+    emit_build_vx_progress_activity(
         &progress_listener,
+        &activity,
         format!("build.vx executor {} ready", executor_summary),
     )
     .await;
@@ -2141,8 +2155,9 @@ async fn run_build_vx_exec_via_runner(
             .await
             .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
     }
-    emit_build_vx_progress_message(
+    emit_build_vx_progress_activity(
         &progress_listener,
+        &activity,
         format!(
             "build.vx executor {}: prepared exec inputs ({})",
             executor_summary,
@@ -2153,6 +2168,7 @@ async fn run_build_vx_exec_via_runner(
     let (progress, mut progress_rx) = roam::channel::<StoreProgress>();
     let progress_listener_for_exec = progress_listener.clone();
     let executor_summary_for_progress = executor_summary.clone();
+    let activity_for_progress = activity.clone();
     let progress_handle = moire::task::spawn(
         async move {
             while let Ok(Some(update)) = progress_rx.recv().await {
@@ -2160,7 +2176,12 @@ async fn run_build_vx_exec_via_runner(
                     "build.vx executor {}: {}",
                     executor_summary_for_progress, update.message
                 );
-                emit_build_vx_progress_message(&progress_listener_for_exec, message).await;
+                emit_build_vx_remote_progress_activity(
+                    &progress_listener_for_exec,
+                    &activity_for_progress,
+                    message,
+                )
+                .await;
             }
         }
         .named("build_vx_exec_progress_fwd"),
@@ -2221,8 +2242,9 @@ async fn run_build_vx_exec_via_runner(
             exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}"), &demand_chain)
         })?;
     let _ = progress_handle.await;
-    emit_build_vx_progress_message(
+    emit_build_vx_progress_activity(
         &progress_listener,
+        &activity,
         format!(
             "build.vx executor {}: exec returned ({})",
             executor_summary,
@@ -2267,8 +2289,9 @@ async fn run_build_vx_exec_via_runner(
         )
     })?;
     let observer_bridge_started = Instant::now();
-    emit_build_vx_progress_message(
+    emit_build_vx_progress_activity(
         &progress_listener,
+        &activity,
         format!(
             "build.vx executor {}: bridging observer value",
             executor_summary
@@ -2284,8 +2307,9 @@ async fn run_build_vx_exec_via_runner(
             .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?
     };
     tracing::info!(executor = %executor_summary, "build.vx exec finished observer-value bridge");
-    emit_build_vx_progress_message(
+    emit_build_vx_progress_activity(
         &progress_listener,
+        &activity,
         format!(
             "build.vx executor {}: observer value ready ({})",
             executor_summary,
@@ -2297,16 +2321,18 @@ async fn run_build_vx_exec_via_runner(
         exec_bridge_poison(PoisonKind::UserFail, error.to_string(), &demand_chain)
     })?;
     let hydration_started = Instant::now();
-    emit_build_vx_progress_message(
+    emit_build_vx_progress_activity(
         &progress_listener,
+        &activity,
         format!("build.vx executor {}: hydrating result", executor_summary),
     )
     .await;
     tracing::info!(executor = %executor_summary, "build.vx exec starting hydration");
     let value = hydrate_exec_value_from_store(store, value, &demand_chain).await?;
     tracing::info!(executor = %executor_summary, "build.vx exec finished hydration");
-    emit_build_vx_progress_message(
+    emit_build_vx_progress_activity(
         &progress_listener,
+        &activity,
         format!(
             "build.vx executor {}: hydration finished ({})",
             executor_summary,
@@ -2320,14 +2346,22 @@ async fn run_build_vx_exec_via_runner(
 async fn run_build_vx_discover_via_runner(
     store: &StoreClient,
     executors: &BuildVxExecutors,
+    activity_registry: &ActivityRegistry,
     progress_listener: Option<Arc<ProgressListenerClient>>,
     request: EvalDiscoverRequest,
 ) -> std::result::Result<Value, PoisonError> {
     let demand_chain = request.demand_chain.clone();
     let discover_started = Instant::now();
     let executor_summary = describe_executor_selector(&request.executor);
-    emit_build_vx_progress_message(
+    let activity = start_build_vx_activity(
+        activity_registry,
+        "discover",
+        &request.executor,
+        summarize_build_vx_discover_request(&request),
+    );
+    emit_build_vx_progress_activity(
         &progress_listener,
+        &activity,
         format!("resolving build.vx executor {}", executor_summary),
     )
     .await;
@@ -2339,8 +2373,9 @@ async fn run_build_vx_discover_via_runner(
         .store_for(&request.executor, progress_listener.clone())
         .await
         .map_err(|message| exec_bridge_poison(PoisonKind::UserFail, message, &demand_chain))?;
-    emit_build_vx_progress_message(
+    emit_build_vx_progress_activity(
         &progress_listener,
+        &activity,
         format!("build.vx executor {} ready", executor_summary),
     )
     .await;
@@ -2362,8 +2397,9 @@ async fn run_build_vx_discover_via_runner(
         .map_err(|error| {
             exec_bridge_poison(PoisonKind::UserFail, format!("{error:?}"), &demand_chain)
         })?;
-    emit_build_vx_progress_message(
+    emit_build_vx_progress_activity(
         &progress_listener,
+        &activity,
         format!(
             "build.vx executor {}: discover returned ({})",
             executor_summary,
@@ -2403,8 +2439,9 @@ async fn run_build_vx_discover_via_runner(
         exec_bridge_poison(PoisonKind::UserFail, error.to_string(), &demand_chain)
     })?;
     let hydration_started = Instant::now();
-    emit_build_vx_progress_message(
+    emit_build_vx_progress_activity(
         &progress_listener,
+        &activity,
         format!(
             "build.vx executor {}: hydrating discovery result",
             executor_summary
@@ -2412,8 +2449,9 @@ async fn run_build_vx_discover_via_runner(
     )
     .await;
     let value = hydrate_exec_value_from_store(store, value, &demand_chain).await?;
-    emit_build_vx_progress_message(
+    emit_build_vx_progress_activity(
         &progress_listener,
+        &activity,
         format!(
             "build.vx executor {}: discovery hydration finished ({})",
             executor_summary,
@@ -2521,6 +2559,7 @@ pub(crate) fn summarize_build_vx_import_request(request: &EvalImportRequest) -> 
 struct BuildVxRuntime {
     store: Arc<StoreClient>,
     executors: Arc<BuildVxExecutors>,
+    activity_registry: ActivityRegistry,
     workspace_root: Utf8PathBuf,
     progress_listener: Option<Arc<ProgressListenerClient>>,
     module_cache: Arc<SyncMutex<HashMap<Utf8PathBuf, EvalModule>>>,
@@ -2555,6 +2594,39 @@ async fn emit_build_vx_progress_message(
     {
         tracing::warn!("failed to emit build.vx progress message: {error:?}");
     }
+}
+
+fn start_build_vx_activity(
+    registry: &ActivityRegistry,
+    kind: &str,
+    executor: &ExecutorSelector,
+    label: impl Into<String>,
+) -> ActivityHandle {
+    registry.start(
+        kind,
+        label.into(),
+        Some(describe_executor_selector(executor)),
+    )
+}
+
+async fn emit_build_vx_progress_activity(
+    listener: &Option<Arc<ProgressListenerClient>>,
+    activity: &ActivityHandle,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    activity.update(message.clone());
+    emit_build_vx_progress_message(listener, message).await;
+}
+
+async fn emit_build_vx_remote_progress_activity(
+    listener: &Option<Arc<ProgressListenerClient>>,
+    activity: &ActivityHandle,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    activity.update_remote(message.clone());
+    emit_build_vx_progress_message(listener, message).await;
 }
 
 fn format_progress_elapsed(elapsed: std::time::Duration) -> String {
@@ -2626,9 +2698,11 @@ impl BuildVxRuntime {
         let import_runtime = runtime.clone();
         let exec_store = Arc::clone(&self.store);
         let exec_executors = Arc::clone(&self.executors);
+        let exec_activity_registry = self.activity_registry.clone();
         let exec_runtime = runtime.clone();
         let discover_store = Arc::clone(&self.store);
         let discover_executors = Arc::clone(&self.executors);
+        let discover_activity_registry = self.activity_registry.clone();
         let discover_runtime = runtime;
         let progress_listener = self.progress_listener.clone();
         let acquire_listener = progress_listener.clone();
@@ -2697,6 +2771,7 @@ impl BuildVxRuntime {
                     run_build_vx_exec_via_runner(
                         &exec_store,
                         &exec_executors,
+                        &exec_activity_registry,
                         exec_listener.clone(),
                         request,
                     ),
@@ -2712,6 +2787,7 @@ impl BuildVxRuntime {
                     run_build_vx_discover_via_runner(
                         &discover_store,
                         &discover_executors,
+                        &discover_activity_registry,
                         discover_listener.clone(),
                         request,
                     ),
@@ -3298,6 +3374,7 @@ impl VxdService {
             store,
             build_vx_executors,
             store_handle,
+            activity_registry,
         } = deps;
         let db = Database::new();
         let cache_path = vx_home.join("picante.cache");
@@ -3363,6 +3440,7 @@ impl VxdService {
                 AcquiredToolchains { rust: None },
             )),
             spawn_tracker,
+            activity_registry,
             progress_listener: Arc::new(SyncMutex::new("vxd/progress_listener", None)),
             session_id: Arc::new(SyncMutex::new("vxd/session_id", String::new())),
             active_build_cancel: Arc::new(SyncMutex::new("vxd/active_build_cancel", None)),
@@ -3384,6 +3462,7 @@ impl VxdService {
             wal_writer: self.wal_writer.clone(),
             toolchains: self.toolchains.clone(),
             spawn_tracker: self.spawn_tracker.clone(),
+            activity_registry: self.activity_registry.clone(),
             // Per-connection state: fresh for each session
             progress_listener: Arc::new(SyncMutex::new("vxd/progress_listener", None)),
             session_id: Arc::new(SyncMutex::new("vxd/session_id", String::new())),
@@ -3588,6 +3667,7 @@ impl VxdService {
                 let build_runtime = BuildVxRuntime {
                     store: Arc::clone(&self.store),
                     executors: Arc::clone(&self.build_vx_executors),
+                    activity_registry: self.activity_registry.clone(),
                     workspace_root: request.project_path.clone(),
                     progress_listener: self.progress_listener.lock().clone(),
                     module_cache: Arc::new(SyncMutex::new("build_vx_module_cache", HashMap::new())),
@@ -4718,6 +4798,12 @@ impl VxdRpc for VxdService {
         }
 
         UnpublishResult { removed, not_found }
+    }
+
+    async fn ps(&self) -> PsResult {
+        PsResult {
+            entries: self.activity_registry.snapshot(),
+        }
     }
 
     async fn version(&self) -> ServiceVersion {

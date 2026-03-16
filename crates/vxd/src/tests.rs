@@ -1861,6 +1861,7 @@ impl BuildServiceDaemonTestEnv {
                 store: store_client,
                 build_vx_executors,
                 store_handle: Arc::clone(&store_handle),
+                activity_registry: crate::activity::ActivityRegistry::new(),
             },
         )
         .await;

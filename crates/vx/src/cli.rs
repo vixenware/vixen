@@ -36,6 +36,9 @@ pub(crate) enum CliCommand {
     /// Stop the daemon process
     Kill(KillArgs),
 
+    /// Show in-flight daemon activity
+    Ps,
+
     /// Stop the daemon and remove .vx/ directory
     Clean(CleanArgs),
 

@@ -11,6 +11,7 @@
 //! - Materialize final outputs locally (via execd or direct store fetch)
 
 mod action_graph;
+mod activity;
 mod build_failure;
 mod cas_tree;
 mod db;
@@ -64,6 +65,7 @@ use vx_runner_proto::RunnerClient;
 use vx_store_proto::StoreClient;
 use vxd_proto::{ProgressListenerClient, VxdDispatcher};
 
+use crate::activity::{ActivityHandle, ActivityRegistry};
 use crate::service::VxdServiceDeps;
 pub use db::Database;
 pub use inputs::*;
@@ -502,8 +504,12 @@ async fn emit_ssh_bootstrap_progress(
     listener: &Option<Arc<ProgressListenerClient>>,
     class_label: &str,
     message: impl Into<String>,
+    activity: Option<&ActivityHandle>,
 ) {
     let message = message.into();
+    if let Some(activity) = activity {
+        activity.update_remote(message.clone());
+    }
     if let Some(boot_tx) = boot_tx {
         boot_tx.phase(format!(
             "bootstrapping build executor class:{class_label}: {message}"
@@ -526,6 +532,7 @@ async fn with_ssh_bootstrap_heartbeat<F, T>(
     class_label: &str,
     base_message: &str,
     interval: Duration,
+    activity: Option<&ActivityHandle>,
     future: F,
 ) -> Result<T>
 where
@@ -547,6 +554,7 @@ where
                     listener,
                     class_label,
                     format!("{base_message} ({elapsed}s elapsed)"),
+                    activity,
                 )
                 .await;
             }
@@ -1074,6 +1082,7 @@ async fn read_bootstrap_final_response_frame<R>(
     boot_tx: Option<&BootTx>,
     progress_listener: &Option<Arc<ProgressListenerClient>>,
     class_label: &str,
+    activity: Option<&ActivityHandle>,
 ) -> Result<Option<BootstrapResponse>>
 where
     R: AsyncRead + Unpin,
@@ -1084,8 +1093,14 @@ where
         };
         match response {
             BootstrapResponse::Progress(progress) => {
-                handle_bootstrap_progress_event(boot_tx, progress_listener, class_label, progress)
-                    .await;
+                handle_bootstrap_progress_event(
+                    boot_tx,
+                    progress_listener,
+                    class_label,
+                    progress,
+                    activity,
+                )
+                .await;
             }
             other => return Ok(Some(other)),
         }
@@ -1098,6 +1113,7 @@ async fn handle_bootstrap_progress_event(
     progress_listener: &Option<Arc<ProgressListenerClient>>,
     class_label: &str,
     progress: BootstrapProgress,
+    activity: Option<&ActivityHandle>,
 ) {
     let suffix = match (progress.current, progress.total) {
         (Some(current), Some(total)) => format!(" ({current}/{total})"),
@@ -1111,6 +1127,7 @@ async fn handle_bootstrap_progress_event(
             "vx-bootstrap {}: {}{}",
             progress.phase, progress.message, suffix
         ),
+        activity,
     )
     .await;
 }
@@ -1206,6 +1223,7 @@ where
                     context.progress.boot_tx,
                     context.progress.progress_listener,
                     context.progress.class_label,
+                    context.progress.activity,
                 )
                 .await
             },
@@ -1266,6 +1284,7 @@ where
                     context.progress.boot_tx,
                     context.progress.progress_listener,
                     context.progress.class_label,
+                    context.progress.activity,
                 )
                 .await
             },
@@ -1316,6 +1335,7 @@ struct SshBootstrapProgressContext<'a> {
     boot_tx: Option<&'a BootTx>,
     progress_listener: &'a Option<Arc<ProgressListenerClient>>,
     class_label: &'a str,
+    activity: Option<&'a ActivityHandle>,
 }
 
 #[cfg(unix)]
@@ -1740,6 +1760,7 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
                 progress.boot_tx,
                 progress.progress_listener,
                 progress.class_label,
+                progress.activity,
             )
             .await
         })
@@ -1771,6 +1792,7 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
                     progress.boot_tx,
                     progress.progress_listener,
                     progress.class_label,
+                    progress.activity,
                 )
                 .await
             },
@@ -1837,6 +1859,7 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
                     progress.boot_tx,
                     progress.progress_listener,
                     progress.class_label,
+                    progress.activity,
                 )
                 .await
             },
@@ -1891,6 +1914,7 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
             format!(
                 "vx-bootstrap upload progress: {uploaded_files} files ({uploaded_bytes} bytes)"
             ),
+            progress.activity,
         )
         .await;
     }
@@ -1928,6 +1952,7 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
                     progress.boot_tx,
                     progress.progress_listener,
                     progress.class_label,
+                    progress.activity,
                 )
                 .await
             },
@@ -1954,6 +1979,7 @@ async fn prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
                     progress.boot_tx,
                     progress.progress_listener,
                     progress.class_label,
+                    progress.activity,
                 )
                 .await
             },
@@ -2079,6 +2105,7 @@ async fn prepare_ssh_bootstrap_windows_checkout_via_bootstrap(
                 progress.boot_tx,
                 progress.progress_listener,
                 progress.class_label,
+                progress.activity,
             )
             .await
         })
@@ -2110,6 +2137,7 @@ async fn prepare_ssh_bootstrap_windows_checkout_via_bootstrap(
                     progress.boot_tx,
                     progress.progress_listener,
                     progress.class_label,
+                    progress.activity,
                 )
                 .await
             },
@@ -2176,6 +2204,7 @@ async fn prepare_ssh_bootstrap_windows_checkout_via_bootstrap(
                     progress.boot_tx,
                     progress.progress_listener,
                     progress.class_label,
+                    progress.activity,
                 )
                 .await
             },
@@ -2230,6 +2259,7 @@ async fn prepare_ssh_bootstrap_windows_checkout_via_bootstrap(
             format!(
                 "vx-bootstrap upload progress: {uploaded_files} files ({uploaded_bytes} bytes)"
             ),
+            progress.activity,
         )
         .await;
     }
@@ -2267,6 +2297,7 @@ async fn prepare_ssh_bootstrap_windows_checkout_via_bootstrap(
                     progress.boot_tx,
                     progress.progress_listener,
                     progress.class_label,
+                    progress.activity,
                 )
                 .await
             },
@@ -2293,6 +2324,7 @@ async fn prepare_ssh_bootstrap_windows_checkout_via_bootstrap(
                     progress.boot_tx,
                     progress.progress_listener,
                     progress.class_label,
+                    progress.activity,
                 )
                 .await
             },
@@ -2367,6 +2399,7 @@ async fn connect_ssh_bootstrap_runner(
     target: &str,
     boot_tx: Option<&BootTx>,
     progress_listener: Option<Arc<ProgressListenerClient>>,
+    activity: Option<&ActivityHandle>,
 ) -> Result<SshBootstrapConnection> {
     let class_slug = ssh_bootstrap_label_slug(class_label);
     let trace_path = vx_home.join(format!(
@@ -2380,6 +2413,7 @@ async fn connect_ssh_bootstrap_runner(
             &progress_listener,
             class_label,
             format!("checking local Vixen repo for ssh target {target}"),
+            activity,
         )
         .await;
         let repo_root = resolve_vixen_repo_root()?;
@@ -2398,6 +2432,7 @@ async fn connect_ssh_bootstrap_runner(
             &progress_listener,
             class_label,
             format!("opening ssh control connection to {target}"),
+            activity,
         )
         .await;
         let mut master = moire::process::Command::new("ssh");
@@ -2438,6 +2473,7 @@ async fn connect_ssh_bootstrap_runner(
             &progress_listener,
             class_label,
             format!("probing ssh target {target}"),
+            activity,
         )
         .await;
         let target_info = detect_ssh_bootstrap_target(&control_path, target).await?;
@@ -2446,6 +2482,7 @@ async fn connect_ssh_bootstrap_runner(
             &progress_listener,
             class_label,
             format!("detected {} host", target_info.platform.as_tag()),
+            activity,
         )
         .await;
         let mut windows_checkout = None;
@@ -2540,6 +2577,7 @@ async fn connect_ssh_bootstrap_runner(
             &progress_listener,
             class_label,
             format!("preparing local Vixen sources for {target}"),
+            activity,
         )
         .await;
         emit_ssh_bootstrap_progress(
@@ -2547,12 +2585,14 @@ async fn connect_ssh_bootstrap_runner(
             &progress_listener,
             class_label,
             format!("syncing local Vixen sources to {target}"),
+            activity,
         )
         .await;
         let bootstrap_progress = SshBootstrapProgressContext {
             boot_tx,
             progress_listener: &progress_listener,
             class_label,
+            activity,
         };
         match (&target_info.platform, windows_checkout.as_ref()) {
             (SshBootstrapTargetPlatform::Unix, _) => {
@@ -2562,6 +2602,7 @@ async fn connect_ssh_bootstrap_runner(
                     class_label,
                     &format!("syncing local Vixen sources to {target}"),
                     Duration::from_secs(5),
+                    activity,
                     prepare_ssh_bootstrap_unix_checkout_via_bootstrap(
                         &control_path,
                         target,
@@ -2580,6 +2621,7 @@ async fn connect_ssh_bootstrap_runner(
                     class_label,
                     &format!("syncing local Vixen sources to {target}"),
                     Duration::from_secs(5),
+                    activity,
                     prepare_ssh_bootstrap_windows_checkout_via_bootstrap(
                         &control_path,
                         target,
@@ -2623,6 +2665,7 @@ async fn connect_ssh_bootstrap_runner(
             &progress_listener,
             class_label,
             format!("waiting for remote store and runner sockets on {target}"),
+            activity,
         )
         .await;
 
@@ -2671,12 +2714,14 @@ async fn bootstrap_ssh_executor(
     target: &str,
     boot_tx: Option<&BootTx>,
     progress_listener: Option<Arc<ProgressListenerClient>>,
+    activity: Option<&ActivityHandle>,
 ) -> Result<crate::service::SshBootstrapExecutor> {
     emit_ssh_bootstrap_progress(
         boot_tx,
         &progress_listener,
         class_label,
         "starting ssh bootstrap",
+        activity,
     )
     .await;
     let connection = connect_ssh_bootstrap_runner(
@@ -2685,6 +2730,7 @@ async fn bootstrap_ssh_executor(
         target,
         boot_tx,
         progress_listener.clone(),
+        activity,
     )
     .await?;
     let store_handle = Arc::new(connection.store_handle);
@@ -2694,6 +2740,7 @@ async fn bootstrap_ssh_executor(
         &progress_listener,
         class_label,
         "waiting for remote vx-store boot",
+        activity,
     )
     .await;
     let store_virtual = store_handle.boot_and_connect().await?;
@@ -2702,6 +2749,7 @@ async fn bootstrap_ssh_executor(
         &progress_listener,
         class_label,
         "waiting for remote vx-runner boot",
+        activity,
     )
     .await;
     let runner_virtual = runner_handle.boot_and_connect().await?;
@@ -2710,6 +2758,7 @@ async fn bootstrap_ssh_executor(
         &progress_listener,
         class_label,
         "remote executor ready",
+        activity,
     )
     .await;
     Ok(crate::service::SshBootstrapExecutor {
@@ -2801,6 +2850,7 @@ struct ServiceClients {
     store: Arc<StoreClient>,
     build_vx_executors: crate::service::BuildVxExecutors,
     store_handle: Arc<ServiceHandle>,
+    activity_registry: ActivityRegistry,
 }
 
 #[derive(Clone)]
@@ -2925,6 +2975,7 @@ async fn ensure_services(
     let store_virtual = store_handle.boot_and_connect().await?;
 
     let local_store = Arc::new(StoreClient::new(store_virtual));
+    let activity_registry = ActivityRegistry::new();
     boot_tx.phase("preparing local build executor registry");
     let mut build_vx_executors = crate::service::BuildVxExecutors::local_lazy({
         let args = args.clone();
@@ -2946,13 +2997,27 @@ async fn ensure_services(
     #[cfg(unix)]
     {
         let vx_home = args.vx_home.clone();
+        let activity_registry = activity_registry.clone();
         build_vx_executors =
             build_vx_executors.with_ssh_bootstrap_factory(move |class_label, target, listener| {
                 let vx_home = vx_home.clone();
+                let activity_registry = activity_registry.clone();
                 Box::pin(async move {
-                    bootstrap_ssh_executor(&vx_home, &class_label, &target, None, listener)
-                        .await
-                        .map_err(|error| error.to_string())
+                    let activity = activity_registry.start(
+                        "bootstrap",
+                        format!("bootstrap {}", class_label),
+                        Some(format!("class:{class_label}")),
+                    );
+                    bootstrap_ssh_executor(
+                        &vx_home,
+                        &class_label,
+                        &target,
+                        None,
+                        listener,
+                        Some(&activity),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
                 })
             });
     }
@@ -3017,6 +3082,7 @@ async fn ensure_services(
                         target,
                         Some(boot_tx),
                         None,
+                        None,
                     )
                     .await?;
                     build_vx_executors
@@ -3043,6 +3109,7 @@ async fn ensure_services(
         store: local_store,
         build_vx_executors,
         store_handle: Arc::new(store_handle),
+        activity_registry,
     })
 }
 
@@ -3225,6 +3292,7 @@ async fn async_main() -> Result<()> {
                                     store: clients.store,
                                     build_vx_executors: clients.build_vx_executors,
                                     store_handle: clients.store_handle,
+                                    activity_registry: clients.activity_registry,
                                 },
                             )
                             .await,
